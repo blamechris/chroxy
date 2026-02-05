@@ -9,11 +9,13 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, ChatMessage } from '../store/connection';
 
 export function SessionScreen() {
   const [inputText, setInputText] = useState('');
   const scrollViewRef = useRef<ScrollView>(null);
+  const insets = useSafeAreaInsets();
 
   const {
     viewMode,
@@ -91,7 +93,7 @@ export function SessionScreen() {
       )}
 
       {/* Input area */}
-      <View style={styles.inputContainer}>
+      <View style={[styles.inputContainer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
         {viewMode === 'terminal' && (
           <View style={styles.specialKeys}>
             {['Ctrl+C', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].map((key) => (
@@ -114,8 +116,7 @@ export function SessionScreen() {
             placeholderTextColor="#666"
             value={inputText}
             onChangeText={setInputText}
-            onSubmitEditing={handleSend}
-            returnKeyType="send"
+            blurOnSubmit={false}
             autoCapitalize="none"
             autoCorrect={false}
           />
