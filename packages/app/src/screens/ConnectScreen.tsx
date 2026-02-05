@@ -7,7 +7,7 @@ import {
   StyleSheet,
   Alert,
   ScrollView,
-  KeyboardAvoidingView,
+  Keyboard,
   Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -23,7 +23,6 @@ function parseChroxyUrl(raw: string): { wsUrl: string; token: string } | null {
       const token = parsed.searchParams.get('token');
       if (wsUrl && token) return { wsUrl, token };
     }
-    // Also accept raw wss:// URLs (no token embedded)
     if (trimmed.startsWith('wss://')) {
       return { wsUrl: trimmed, token: '' };
     }
@@ -41,6 +40,7 @@ export function ConnectScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const insets = useSafeAreaInsets();
   const scanLock = useRef(false);
+  const scrollRef = useRef<ScrollView>(null);
   const connect = useConnectionStore((state) => state.connect);
 
   const handleConnect = () => {
@@ -54,6 +54,7 @@ export function ConnectScreen() {
       wsUrl = `wss://${wsUrl}`;
     }
 
+    Keyboard.dismiss();
     connect(wsUrl, token.trim());
   };
 
@@ -73,7 +74,6 @@ export function ConnectScreen() {
   };
 
   const handleBarCodeScanned = (result: BarcodeScanningResult) => {
-    // Prevent duplicate scans
     if (scanLock.current) return;
     scanLock.current = true;
 
@@ -88,6 +88,12 @@ export function ConnectScreen() {
         [{ text: 'Try Again', onPress: () => { scanLock.current = false; } }],
       );
     }
+  };
+
+  const scrollToInput = () => {
+    setTimeout(() => {
+      scrollRef.current?.scrollToEnd({ animated: true });
+    }, 300);
   };
 
   if (showScanner) {
@@ -116,68 +122,66 @@ export function ConnectScreen() {
   }
 
   return (
-    <KeyboardAvoidingView
+    <ScrollView
+      ref={scrollRef}
       style={styles.container}
-      behavior="padding"
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+      contentContainerStyle={[styles.scrollContent, { paddingBottom: Math.max(insets.bottom, 24) + 300 }]}
+      keyboardShouldPersistTaps="handled"
     >
-      <ScrollView
-        contentContainerStyle={[styles.scrollContent, { paddingBottom: Math.max(insets.bottom, 24) }]}
-        keyboardShouldPersistTaps="handled"
+      <View style={styles.header}>
+        <Text style={styles.logo}>📡</Text>
+        <Text style={styles.title}>Connect to Chroxy</Text>
+        <Text style={styles.subtitle}>
+          Run 'npx chroxy start' on your Mac, then scan the QR code
+        </Text>
+      </View>
+
+      <TouchableOpacity style={styles.qrButton} onPress={handleScanQR}>
+        <Text style={styles.qrButtonText}>📷 Scan QR Code</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        style={styles.manualToggle}
+        onPress={() => setShowManual(!showManual)}
       >
-        <View style={styles.header}>
-          <Text style={styles.logo}>📡</Text>
-          <Text style={styles.title}>Connect to Chroxy</Text>
-          <Text style={styles.subtitle}>
-            Run 'npx chroxy start' on your Mac, then scan the QR code
-          </Text>
+        <Text style={styles.manualToggleText}>
+          {showManual ? '▼ Hide manual entry' : '▶ Enter manually'}
+        </Text>
+      </TouchableOpacity>
+
+      {showManual && (
+        <View style={styles.manualForm}>
+          <Text style={styles.label}>Server URL</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="your-tunnel.ngrok-free.app"
+            placeholderTextColor="#666"
+            value={url}
+            onChangeText={setUrl}
+            onFocus={scrollToInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+
+          <Text style={styles.label}>API Token</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+            placeholderTextColor="#666"
+            value={token}
+            onChangeText={setToken}
+            onFocus={scrollToInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
+          />
+
+          <TouchableOpacity style={styles.connectButton} onPress={handleConnect}>
+            <Text style={styles.connectButtonText}>Connect</Text>
+          </TouchableOpacity>
         </View>
-
-        <TouchableOpacity style={styles.qrButton} onPress={handleScanQR}>
-          <Text style={styles.qrButtonText}>📷 Scan QR Code</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.manualToggle}
-          onPress={() => setShowManual(!showManual)}
-        >
-          <Text style={styles.manualToggleText}>
-            {showManual ? '▼ Hide manual entry' : '▶ Enter manually'}
-          </Text>
-        </TouchableOpacity>
-
-        {showManual && (
-          <View style={styles.manualForm}>
-            <Text style={styles.label}>Server URL</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="your-tunnel.ngrok-free.app"
-              placeholderTextColor="#666"
-              value={url}
-              onChangeText={setUrl}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-
-            <Text style={styles.label}>API Token</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-              placeholderTextColor="#666"
-              value={token}
-              onChangeText={setToken}
-              autoCapitalize="none"
-              autoCorrect={false}
-              secureTextEntry
-            />
-
-            <TouchableOpacity style={styles.connectButton} onPress={handleConnect}>
-              <Text style={styles.connectButtonText}>Connect</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-      </ScrollView>
-    </KeyboardAvoidingView>
+      )}
+    </ScrollView>
   );
 }
 
