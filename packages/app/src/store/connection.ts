@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { Alert } from 'react-native';
 
 export interface ChatMessage {
   id: string;
@@ -44,34 +45,46 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   terminalBuffer: '',
 
   connect: (url: string, token: string) => {
+    // Close any existing socket first
+    const { socket: existing } = get();
+    if (existing) {
+      existing.onclose = null;
+      existing.onerror = null;
+      existing.onmessage = null;
+      existing.close();
+    }
+    set({ socket: null, isConnected: false });
+
     const socket = new WebSocket(url);
 
     socket.onopen = () => {
-      // Authenticate immediately
       socket.send(JSON.stringify({ type: 'auth', token }));
     };
 
     socket.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
+      let msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch {
+        return;
+      }
 
       switch (msg.type) {
         case 'auth_ok':
           set({ isConnected: true, wsUrl: url, apiToken: token, socket });
-          // Request current view mode
           socket.send(JSON.stringify({ type: 'mode', mode: get().viewMode }));
           break;
 
         case 'auth_fail':
-          console.error('Auth failed:', msg.reason);
           socket.close();
           set({ isConnected: false, socket: null });
+          Alert.alert('Auth Failed', msg.reason || 'Invalid token');
           break;
 
         case 'message':
-          // Parsed chat message
           get().addMessage({
             id: `${msg.timestamp}-${Math.random()}`,
-            type: msg.type,
+            type: msg.messageType || msg.type,
             content: msg.content,
             tool: msg.tool,
             timestamp: msg.timestamp,
@@ -79,13 +92,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
 
         case 'raw':
-          // Raw terminal output
           get().appendTerminalData(msg.data);
           break;
 
         case 'raw_background':
-          // Background raw data (for chat mode, store but don't display prominently)
-          // Could be used for embedded terminal preview
           break;
       }
     };
@@ -94,14 +104,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       set({ isConnected: false, socket: null });
     };
 
-    socket.onerror = (error) => {
-      console.error('WebSocket error:', error);
+    socket.onerror = () => {
+      set({ isConnected: false, socket: null });
+      Alert.alert(
+        'Connection Failed',
+        'Could not reach the Chroxy server. Make sure it\'s running and the URL is correct.',
+      );
     };
   },
 
   disconnect: () => {
     const { socket } = get();
     if (socket) {
+      socket.onclose = null;
       socket.close();
     }
     set({
@@ -130,7 +145,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   appendTerminalData: (data) => {
     set((state) => ({
-      // Keep last 50KB of terminal output
       terminalBuffer: (state.terminalBuffer + data).slice(-50000),
     }));
   },
