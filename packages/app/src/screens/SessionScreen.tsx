@@ -75,8 +75,12 @@ export function SessionScreen() {
     }
   };
 
-  // Bottom padding: when keyboard is up, use keyboard height; otherwise use safe area
-  const bottomPadding = keyboardHeight > 0 ? keyboardHeight : Math.max(insets.bottom, 12);
+  // Bottom padding: when keyboard is up, use keyboard height + buffer for suggestion bar;
+  // otherwise use safe area for Android nav buttons
+  const suggestionBarBuffer = Platform.OS === 'android' ? 48 : 0;
+  const bottomPadding = keyboardHeight > 0
+    ? keyboardHeight + suggestionBarBuffer
+    : Math.max(insets.bottom, 12);
 
   return (
     <View style={styles.container}>
