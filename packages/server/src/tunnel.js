@@ -36,11 +36,45 @@ export class TunnelManager {
     console.log(`  HTTP:      ${this.url}`);
     console.log(`  WebSocket: ${wsUrl}`);
 
+    // Monitor tunnel health
+    this._startHealthCheck(wsUrl);
+
     return { httpUrl: this.url, wsUrl };
+  }
+
+  /** Periodically verify the tunnel is still alive */
+  _startHealthCheck(wsUrl) {
+    this._healthInterval = setInterval(async () => {
+      try {
+        const url = this.url;
+        if (!url) return;
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+
+        const res = await fetch(url, {
+          method: "HEAD",
+          signal: controller.signal,
+          headers: { "ngrok-skip-browser-warning": "1" },
+        });
+        clearTimeout(timeout);
+
+        if (!res.ok && res.status !== 426) {
+          // 426 = Upgrade Required (expected for WS server), that's fine
+          console.log(`[ngrok] Tunnel health check: HTTP ${res.status}`);
+        }
+      } catch (err) {
+        console.error(`[ngrok] Tunnel appears dead: ${err.message}`);
+        console.error(`[ngrok] Restart the server to get a new tunnel.`);
+      }
+    }, 30_000); // check every 30s
   }
 
   /** Stop the tunnel */
   async stop() {
+    if (this._healthInterval) {
+      clearInterval(this._healthInterval);
+    }
     if (this.listener) {
       await ngrok.disconnect();
       this.listener = null;
