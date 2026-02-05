@@ -27,16 +27,34 @@ Run a lightweight daemon on your dev machine. Connect from anywhere via your pho
 - **Privacy-first** — Your machine, your tunnel. No cloud middleman storing your code.
 - **Open source** — MIT licensed. Audit it, fork it, improve it.
 
+## Prerequisites
+
+- **Node.js 22** — `node-pty` does not compile on Node 25. Install via Homebrew:
+  ```bash
+  brew install node@22
+  ```
+  Then run commands with Node 22 on your PATH:
+  ```bash
+  PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
+  ```
+
+- **tmux** — Required for persistent terminal sessions:
+  ```bash
+  brew install tmux
+  ```
+
+- **ngrok account** — Free tier works. Get your auth token at [ngrok.com](https://ngrok.com).
+
 ## Quick Start
 
 ### Server (on your Mac)
 
 ```bash
 # Install and configure
-npx chroxy init
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy init
 
 # Start the server
-npx chroxy start
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 ```
 
 The server prints a QR code. Scan it with the Chroxy app.
