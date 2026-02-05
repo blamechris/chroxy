@@ -6,7 +6,11 @@ import {
   TouchableOpacity,
   StyleSheet,
   Alert,
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import { useConnectionStore } from '../store/connection';
 
@@ -35,6 +39,7 @@ export function ConnectScreen() {
   const [showManual, setShowManual] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
+  const insets = useSafeAreaInsets();
   const scanLock = useRef(false);
   const connect = useConnectionStore((state) => state.connect);
 
@@ -111,67 +116,78 @@ export function ConnectScreen() {
   }
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.logo}>📡</Text>
-        <Text style={styles.title}>Connect to Chroxy</Text>
-        <Text style={styles.subtitle}>
-          Run 'npx chroxy start' on your Mac, then scan the QR code
-        </Text>
-      </View>
-
-      <TouchableOpacity style={styles.qrButton} onPress={handleScanQR}>
-        <Text style={styles.qrButtonText}>📷 Scan QR Code</Text>
-      </TouchableOpacity>
-
-      <TouchableOpacity
-        style={styles.manualToggle}
-        onPress={() => setShowManual(!showManual)}
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior="padding"
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+    >
+      <ScrollView
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: Math.max(insets.bottom, 24) }]}
+        keyboardShouldPersistTaps="handled"
       >
-        <Text style={styles.manualToggleText}>
-          {showManual ? '▼ Hide manual entry' : '▶ Enter manually'}
-        </Text>
-      </TouchableOpacity>
-
-      {showManual && (
-        <View style={styles.manualForm}>
-          <Text style={styles.label}>Server URL</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="your-tunnel.ngrok-free.app"
-            placeholderTextColor="#666"
-            value={url}
-            onChangeText={setUrl}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-
-          <Text style={styles.label}>API Token</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-            placeholderTextColor="#666"
-            value={token}
-            onChangeText={setToken}
-            autoCapitalize="none"
-            autoCorrect={false}
-            secureTextEntry
-          />
-
-          <TouchableOpacity style={styles.connectButton} onPress={handleConnect}>
-            <Text style={styles.connectButtonText}>Connect</Text>
-          </TouchableOpacity>
+        <View style={styles.header}>
+          <Text style={styles.logo}>📡</Text>
+          <Text style={styles.title}>Connect to Chroxy</Text>
+          <Text style={styles.subtitle}>
+            Run 'npx chroxy start' on your Mac, then scan the QR code
+          </Text>
         </View>
-      )}
-    </View>
+
+        <TouchableOpacity style={styles.qrButton} onPress={handleScanQR}>
+          <Text style={styles.qrButtonText}>📷 Scan QR Code</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.manualToggle}
+          onPress={() => setShowManual(!showManual)}
+        >
+          <Text style={styles.manualToggleText}>
+            {showManual ? '▼ Hide manual entry' : '▶ Enter manually'}
+          </Text>
+        </TouchableOpacity>
+
+        {showManual && (
+          <View style={styles.manualForm}>
+            <Text style={styles.label}>Server URL</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="your-tunnel.ngrok-free.app"
+              placeholderTextColor="#666"
+              value={url}
+              onChangeText={setUrl}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+
+            <Text style={styles.label}>API Token</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              placeholderTextColor="#666"
+              value={token}
+              onChangeText={setToken}
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry
+            />
+
+            <TouchableOpacity style={styles.connectButton} onPress={handleConnect}>
+              <Text style={styles.connectButtonText}>Connect</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 24,
     backgroundColor: '#0f0f1a',
+  },
+  scrollContent: {
+    padding: 24,
   },
   header: {
     alignItems: 'center',
