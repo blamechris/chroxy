@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,12 +7,35 @@ import {
   StyleSheet,
   Alert,
 } from 'react-native';
+import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import { useConnectionStore } from '../store/connection';
+
+function parseChroxyUrl(raw: string): { wsUrl: string; token: string } | null {
+  try {
+    let trimmed = raw.trim();
+    if (trimmed.startsWith('chroxy://')) {
+      const parsed = new URL(trimmed.replace('chroxy://', 'https://'));
+      const wsUrl = `wss://${parsed.host}`;
+      const token = parsed.searchParams.get('token');
+      if (wsUrl && token) return { wsUrl, token };
+    }
+    // Also accept raw wss:// URLs (no token embedded)
+    if (trimmed.startsWith('wss://')) {
+      return { wsUrl: trimmed, token: '' };
+    }
+  } catch {
+    // Invalid URL
+  }
+  return null;
+}
 
 export function ConnectScreen() {
   const [url, setUrl] = useState('');
   const [token, setToken] = useState('');
   const [showManual, setShowManual] = useState(false);
+  const [showScanner, setShowScanner] = useState(false);
+  const [permission, requestPermission] = useCameraPermissions();
+  const scanLock = useRef(false);
   const connect = useConnectionStore((state) => state.connect);
 
   const handleConnect = () => {
@@ -21,27 +44,71 @@ export function ConnectScreen() {
       return;
     }
 
-    // Normalize URL
     let wsUrl = url.trim();
-    if (wsUrl.startsWith('chroxy://')) {
-      // Parse chroxy:// URL format
-      const parsed = new URL(wsUrl.replace('chroxy://', 'https://'));
-      wsUrl = `wss://${parsed.host}`;
-      const urlToken = parsed.searchParams.get('token');
-      if (urlToken && !token) {
-        setToken(urlToken);
-      }
-    } else if (!wsUrl.startsWith('wss://') && !wsUrl.startsWith('ws://')) {
+    if (!wsUrl.startsWith('wss://') && !wsUrl.startsWith('ws://')) {
       wsUrl = `wss://${wsUrl}`;
     }
 
     connect(wsUrl, token.trim());
   };
 
-  const handleScanQR = () => {
-    // TODO: Implement QR scanning with expo-camera
-    Alert.alert('Coming Soon', 'QR scanning will be implemented next!');
+  const handleScanQR = async () => {
+    if (!permission?.granted) {
+      const result = await requestPermission();
+      if (!result.granted) {
+        Alert.alert(
+          'Camera Permission',
+          'Camera access is needed to scan QR codes. Enable it in Settings.',
+        );
+        return;
+      }
+    }
+    scanLock.current = false;
+    setShowScanner(true);
   };
+
+  const handleBarCodeScanned = (result: BarcodeScanningResult) => {
+    // Prevent duplicate scans
+    if (scanLock.current) return;
+    scanLock.current = true;
+
+    const parsed = parseChroxyUrl(result.data);
+    if (parsed && parsed.token) {
+      setShowScanner(false);
+      connect(parsed.wsUrl, parsed.token);
+    } else {
+      Alert.alert(
+        'Invalid QR Code',
+        'This doesn\'t look like a Chroxy connection code. Make sure you\'re scanning the QR from "npx chroxy start".',
+        [{ text: 'Try Again', onPress: () => { scanLock.current = false; } }],
+      );
+    }
+  };
+
+  if (showScanner) {
+    return (
+      <View style={styles.scannerContainer}>
+        <CameraView
+          style={styles.camera}
+          facing="back"
+          barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+          onBarcodeScanned={handleBarCodeScanned}
+        />
+        <View style={styles.scannerOverlay}>
+          <View style={styles.scannerFrame} />
+          <Text style={styles.scannerHint}>
+            Point at the QR code from your terminal
+          </Text>
+        </View>
+        <TouchableOpacity
+          style={styles.cancelButton}
+          onPress={() => setShowScanner(false)}
+        >
+          <Text style={styles.cancelButtonText}>Cancel</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -176,6 +243,48 @@ const styles = StyleSheet.create({
   connectButtonText: {
     color: '#fff',
     fontSize: 18,
+    fontWeight: '600',
+  },
+  // Scanner styles
+  scannerContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  camera: {
+    flex: 1,
+  },
+  scannerOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  scannerFrame: {
+    width: 250,
+    height: 250,
+    borderWidth: 2,
+    borderColor: '#4a9eff',
+    borderRadius: 16,
+    backgroundColor: 'transparent',
+  },
+  scannerHint: {
+    color: '#fff',
+    fontSize: 16,
+    marginTop: 24,
+    textAlign: 'center',
+    paddingHorizontal: 40,
+  },
+  cancelButton: {
+    position: 'absolute',
+    bottom: 60,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    paddingVertical: 14,
+    paddingHorizontal: 40,
+    borderRadius: 12,
+  },
+  cancelButtonText: {
+    color: '#fff',
+    fontSize: 16,
     fontWeight: '600',
   },
 });
