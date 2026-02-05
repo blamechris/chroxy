@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "Chroxy",
+    "slug": "chroxy",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0f0f1a"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.blamechris.chroxy"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0f0f1a"
+      },
+      "package": "com.blamechris.chroxy"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "scheme": "chroxy",
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Chroxy to scan QR codes"
+        }
+      ]
+    ]
+  }
+}

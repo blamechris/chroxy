@@ -1,0 +1,26 @@
+{
+  "name": "chroxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remote terminal for Claude Code from your phone",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "server": "npm run start -w @chroxy/server",
+    "server:dev": "npm run dev -w @chroxy/server",
+    "app": "npm run start -w @chroxy/app",
+    "app:ios": "npm run ios -w @chroxy/app",
+    "app:android": "npm run android -w @chroxy/app"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blamechris/chroxy.git"
+  },
+  "author": "Chris <blamechris>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/blamechris/chroxy/issues"
+  },
+  "homepage": "https://github.com/blamechris/chroxy#readme"
+}
