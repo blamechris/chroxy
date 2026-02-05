@@ -1,5 +1,9 @@
 import { create } from 'zustand';
 import { Alert } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
+
+const STORAGE_KEY_URL = 'chroxy_last_url';
+const STORAGE_KEY_TOKEN = 'chroxy_last_token';
 
 export interface ChatMessage {
   id: string;
@@ -9,12 +13,20 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+interface SavedConnection {
+  url: string;
+  token: string;
+}
+
 interface ConnectionState {
   // Connection
   isConnected: boolean;
   wsUrl: string | null;
   apiToken: string | null;
   socket: WebSocket | null;
+
+  // Saved connection for quick reconnect
+  savedConnection: SavedConnection | null;
 
   // View mode
   viewMode: 'chat' | 'terminal';
@@ -28,6 +40,8 @@ interface ConnectionState {
   // Actions
   connect: (url: string, token: string) => void;
   disconnect: () => void;
+  loadSavedConnection: () => Promise<void>;
+  clearSavedConnection: () => Promise<void>;
   setViewMode: (mode: 'chat' | 'terminal') => void;
   addMessage: (message: ChatMessage) => void;
   appendTerminalData: (data: string) => void;
@@ -35,14 +49,56 @@ interface ConnectionState {
   resize: (cols: number, rows: number) => void;
 }
 
+async function saveConnection(url: string, token: string) {
+  try {
+    await SecureStore.setItemAsync(STORAGE_KEY_URL, url);
+    await SecureStore.setItemAsync(STORAGE_KEY_TOKEN, token);
+  } catch {
+    // Storage not available (e.g. Expo Go limitations)
+  }
+}
+
+async function loadConnection(): Promise<SavedConnection | null> {
+  try {
+    const url = await SecureStore.getItemAsync(STORAGE_KEY_URL);
+    const token = await SecureStore.getItemAsync(STORAGE_KEY_TOKEN);
+    if (url && token) return { url, token };
+  } catch {
+    // Storage not available
+  }
+  return null;
+}
+
+async function clearConnection() {
+  try {
+    await SecureStore.deleteItemAsync(STORAGE_KEY_URL);
+    await SecureStore.deleteItemAsync(STORAGE_KEY_TOKEN);
+  } catch {
+    // Storage not available
+  }
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   isConnected: false,
   wsUrl: null,
   apiToken: null,
   socket: null,
+  savedConnection: null,
   viewMode: 'chat',
   messages: [],
   terminalBuffer: '',
+
+  loadSavedConnection: async () => {
+    const saved = await loadConnection();
+    if (saved) {
+      set({ savedConnection: saved });
+    }
+  },
+
+  clearSavedConnection: async () => {
+    await clearConnection();
+    set({ savedConnection: null });
+  },
 
   connect: (url: string, token: string) => {
     // Close any existing socket first
@@ -55,7 +111,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     set({ socket: null, isConnected: false });
 
-    // ngrok free tier serves an interstitial page — this header bypasses it
     const socket = new WebSocket(url, undefined, {
       headers: { 'ngrok-skip-browser-warning': '1' },
     } as any);
@@ -76,6 +131,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         case 'auth_ok':
           set({ isConnected: true, wsUrl: url, apiToken: token, socket });
           socket.send(JSON.stringify({ type: 'mode', mode: get().viewMode }));
+          // Save for quick reconnect
+          saveConnection(url, token);
+          set({ savedConnection: { url, token } });
           break;
 
         case 'auth_fail':
@@ -130,6 +188,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       messages: [],
       terminalBuffer: '',
     });
+    // Keep savedConnection — don't clear it on disconnect
   },
 
   setViewMode: (mode) => {

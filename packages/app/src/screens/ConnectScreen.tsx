@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,7 +8,6 @@ import {
   Alert,
   ScrollView,
   Keyboard,
-  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
@@ -32,6 +31,11 @@ function parseChroxyUrl(raw: string): { wsUrl: string; token: string } | null {
   return null;
 }
 
+function formatUrl(url: string): string {
+  // Show a friendly version: "10.0.0.71:8765" or "abc.ngrok-free.dev"
+  return url.replace(/^wss?:\/\//, '');
+}
+
 export function ConnectScreen() {
   const [url, setUrl] = useState('');
   const [token, setToken] = useState('');
@@ -41,7 +45,15 @@ export function ConnectScreen() {
   const insets = useSafeAreaInsets();
   const scanLock = useRef(false);
   const scrollRef = useRef<ScrollView>(null);
+
   const connect = useConnectionStore((state) => state.connect);
+  const savedConnection = useConnectionStore((state) => state.savedConnection);
+  const loadSavedConnection = useConnectionStore((state) => state.loadSavedConnection);
+  const clearSavedConnection = useConnectionStore((state) => state.clearSavedConnection);
+
+  useEffect(() => {
+    loadSavedConnection();
+  }, []);
 
   const handleConnect = () => {
     if (!url || !token) {
@@ -56,6 +68,12 @@ export function ConnectScreen() {
 
     Keyboard.dismiss();
     connect(wsUrl, token.trim());
+  };
+
+  const handleReconnect = () => {
+    if (savedConnection) {
+      connect(savedConnection.url, savedConnection.token);
+    }
   };
 
   const handleScanQR = async () => {
@@ -136,6 +154,19 @@ export function ConnectScreen() {
         </Text>
       </View>
 
+      {/* Quick reconnect */}
+      {savedConnection && (
+        <View style={styles.savedSection}>
+          <TouchableOpacity style={styles.reconnectButton} onPress={handleReconnect}>
+            <Text style={styles.reconnectButtonText}>Reconnect</Text>
+            <Text style={styles.reconnectUrl}>{formatUrl(savedConnection.url)}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.forgetButton} onPress={clearSavedConnection}>
+            <Text style={styles.forgetButtonText}>Forget</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       <TouchableOpacity style={styles.qrButton} onPress={handleScanQR}>
         <Text style={styles.qrButtonText}>📷 Scan QR Code</Text>
       </TouchableOpacity>
@@ -154,7 +185,7 @@ export function ConnectScreen() {
           <Text style={styles.label}>Server URL</Text>
           <TextInput
             style={styles.input}
-            placeholder="your-tunnel.ngrok-free.app"
+            placeholder="ws://10.0.0.71:8765"
             placeholderTextColor="#666"
             value={url}
             onChangeText={setUrl}
@@ -214,6 +245,40 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 22,
   },
+  // Saved connection / reconnect
+  savedSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 24,
+    gap: 12,
+  },
+  reconnectButton: {
+    flex: 1,
+    backgroundColor: '#22c55e',
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  reconnectButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  reconnectUrl: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  forgetButton: {
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+  },
+  forgetButtonText: {
+    color: '#ff4a4a',
+    fontSize: 14,
+  },
+  // QR and manual
   qrButton: {
     backgroundColor: '#4a9eff',
     paddingVertical: 16,
