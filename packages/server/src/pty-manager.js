@@ -22,8 +22,8 @@ export class PtyManager extends EventEmitter {
    */
   async start() {
     const tmuxCmd = await this._hasTmuxSession()
-      ? ["tmux", "attach-session", "-t", this.sessionName]
-      : ["tmux", "new-session", "-s", this.sessionName];
+      ? ["/opt/homebrew/bin/tmux", "attach-session", "-t", this.sessionName]
+      : ["/opt/homebrew/bin/tmux", "new-session", "-s", this.sessionName];
 
     this.ptyProcess = pty.spawn(tmuxCmd[0], tmuxCmd.slice(1), {
       name: "xterm-256color",
