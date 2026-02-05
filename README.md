@@ -59,6 +59,20 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
 The server prints a QR code. Scan it with the Chroxy app.
 
+### Local WiFi (same network)
+
+If your phone and Mac are on the same WiFi, you can skip ngrok entirely and connect directly:
+
+1. Find your Mac's local IP:
+   ```bash
+   ipconfig getifaddr en0
+   ```
+2. In the Chroxy app, tap **"Enter manually"** and enter:
+   - URL: `ws://YOUR_MAC_IP:8765` (e.g. `ws://10.0.0.71:8765`)
+   - Token: your API token from `~/.chroxy/config.json`
+
+This avoids ngrok completely — lower latency, no tunnel issues.
+
 ### App (on your phone)
 
 Download from [TestFlight](#) (iOS) or [Play Store](#) (Android).

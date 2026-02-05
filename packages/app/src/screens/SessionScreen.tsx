@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -6,16 +6,40 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  KeyboardAvoidingView,
   Platform,
+  Keyboard,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, ChatMessage } from '../store/connection';
+
+function useKeyboardHeight() {
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      setKeyboardHeight(e.endCoordinates.height);
+    });
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setKeyboardHeight(0);
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  return keyboardHeight;
+}
 
 export function SessionScreen() {
   const [inputText, setInputText] = useState('');
   const scrollViewRef = useRef<ScrollView>(null);
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
 
   const {
     viewMode,
@@ -28,13 +52,11 @@ export function SessionScreen() {
 
   const handleSend = () => {
     if (!inputText.trim()) return;
-    // Send input + Enter key
     sendInput(inputText + '\n');
     setInputText('');
   };
 
   const handleKeyPress = (key: string) => {
-    // Send special keys (for terminal mode)
     const keyMap: Record<string, string> = {
       'Enter': '\r',
       'Tab': '\t',
@@ -53,12 +75,11 @@ export function SessionScreen() {
     }
   };
 
+  // Bottom padding: when keyboard is up, use keyboard height; otherwise use safe area
+  const bottomPadding = keyboardHeight > 0 ? keyboardHeight : Math.max(insets.bottom, 12);
+
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior="padding"
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-    >
+    <View style={styles.container}>
       {/* View mode toggle */}
       <View style={styles.modeToggle}>
         <TouchableOpacity
@@ -94,7 +115,7 @@ export function SessionScreen() {
       )}
 
       {/* Input area */}
-      <View style={[styles.inputContainer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+      <View style={[styles.inputContainer, { paddingBottom: bottomPadding }]}>
         {viewMode === 'terminal' && (
           <View style={styles.specialKeys}>
             {['Ctrl+C', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].map((key) => (
@@ -126,7 +147,7 @@ export function SessionScreen() {
           </TouchableOpacity>
         </View>
       </View>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
