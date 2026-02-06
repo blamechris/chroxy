@@ -374,7 +374,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'available_models':
           if (Array.isArray(msg.models)) {
-            set({ availableModels: msg.models });
+            const cleaned = msg.models.filter(
+              (m: unknown): m is string => typeof m === 'string' && m.trim().length > 0,
+            );
+            set({ availableModels: cleaned });
           }
           break;
 
