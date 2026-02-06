@@ -101,6 +101,12 @@ Brief overview of changes and their purpose.
 #### Nitpicks (Optional)
 - Minor style/formatting notes
 
+### Deferred Items (Follow-Up Issues)
+
+| Suggestion | Issue | Rationale for deferral |
+|------------|-------|------------------------|
+| ... | #XX | ... |
+
 ### Architecture Notes
 How this change fits within the server/app architecture.
 
@@ -125,12 +131,51 @@ EOF
 )"
 ```
 
-### 5. Report to User
+### 5. Create Follow-Up Issues for Deferred Items
+
+For any suggestion or nit that is **valid but out of scope** for the current PR, create a tracked GitHub issue so it doesn't get lost:
+
+```bash
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+
+ISSUE_URL=$(gh issue create \
+  --title "Short descriptive title" \
+  --label "enhancement" \
+  --label "from-review" \
+  --body "$(cat <<'EOF'
+## Context
+
+Identified during review of PR #${PR_NUM}.
+
+## Description
+
+What needs to be done and why.
+
+## Original Review Comment
+
+> Quote the review finding here
+
+## Acceptance Criteria
+
+- [ ] Criterion 1
+- [ ] Criterion 2
+EOF
+)"
+```
+
+**When to create issues vs. just noting in the review:**
+- **Create issue**: Valid suggestion that should be done eventually but would expand PR scope
+- **Just note**: Pure style preference, trivial nit, or "nice to have" with no clear action
+
+Include created issue URLs in the review summary table.
+
+### 6. Report to User
 
 Output:
 - Review verdict
 - Critical issues count
 - Suggestions count
+- Follow-up issues created (with URLs)
 - Link to posted review
 
 ## Agent Persona
