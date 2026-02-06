@@ -35,6 +35,12 @@ function useKeyboardHeight() {
   return keyboardHeight;
 }
 
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M tokens`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k tokens`;
+  return `${tokens} tokens`;
+}
+
 export function SessionScreen() {
   const [inputText, setInputText] = useState('');
   const scrollViewRef = useRef<ScrollView>(null);
@@ -56,6 +62,9 @@ export function SessionScreen() {
     serverMode,
     streamingMessageId,
     isReconnecting,
+    activeModel,
+    contextUsage,
+    setModel,
   } = useConnectionStore();
 
   const isCliMode = serverMode === 'cli';
@@ -156,6 +165,32 @@ export function SessionScreen() {
           <Text style={styles.disconnectButtonText}>✕</Text>
         </TouchableOpacity>
       </View>
+
+      {/* Status bar: model selector + context usage */}
+      {isCliMode && (
+        <View style={styles.statusBar}>
+          <View style={styles.modelSelector}>
+            {['haiku', 'sonnet', 'opus'].map((m) => (
+              <TouchableOpacity
+                key={m}
+                style={[styles.modelChip, activeModel === m && styles.modelChipActive]}
+                onPress={() => setModel(m)}
+              >
+                <Text style={[styles.modelChipText, activeModel === m && styles.modelChipTextActive]}>
+                  {m}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {contextUsage && (
+            <View style={styles.contextInfo}>
+              <Text style={styles.contextText}>
+                {formatTokenCount(contextUsage.inputTokens + contextUsage.outputTokens)}
+              </Text>
+            </View>
+          )}
+        </View>
+      )}
 
       {/* Reconnecting banner */}
       {isReconnecting && (
@@ -383,6 +418,47 @@ const styles = StyleSheet.create({
   disconnectButtonText: {
     color: '#ff4a4a',
     fontSize: 16,
+  },
+  statusBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#1a1a2e',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2a2a4e',
+  },
+  modelSelector: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  modelChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#2a2a4e',
+  },
+  modelChipActive: {
+    backgroundColor: '#4a9eff33',
+    borderWidth: 1,
+    borderColor: '#4a9eff66',
+  },
+  modelChipText: {
+    color: '#666',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  modelChipTextActive: {
+    color: '#4a9eff',
+  },
+  contextInfo: {
+    paddingHorizontal: 8,
+  },
+  contextText: {
+    color: '#888',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   reconnectingBanner: {
     backgroundColor: '#f59e0b33',

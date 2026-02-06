@@ -88,7 +88,12 @@ export class CliSession extends EventEmitter {
     const child = spawn('claude', args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        CI: '1',
+        CLAUDE_HEADLESS: '1',
+        CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
+      },
     })
 
     this._child = child
@@ -285,6 +290,12 @@ export class CliSession extends EventEmitter {
       this._stderrRL.close()
       this._stderrRL = null
     }
+  }
+
+  /** Change the model used for subsequent messages */
+  setModel(model) {
+    this.model = model || null
+    console.log(`[cli-session] Model set to: ${this.model || 'default'}`)
   }
 
   /** Interrupt the current message (send SIGINT to child process) */

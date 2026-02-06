@@ -47,3 +47,6 @@ coverage/
 # Misc
 .cache/
 tmp/
+
+# Local docs (never commit)
+ROADMAP.local.md
