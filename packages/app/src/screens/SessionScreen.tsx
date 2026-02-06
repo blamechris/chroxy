@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,7 +8,10 @@ import {
   ScrollView,
   Platform,
   Keyboard,
+  Share,
+  Alert,
 } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, ChatMessage } from '../store/connection';
 
@@ -63,11 +66,50 @@ export function SessionScreen() {
     streamingMessageId,
     isReconnecting,
     activeModel,
+    availableModels,
     contextUsage,
     setModel,
   } = useConnectionStore();
 
   const isCliMode = serverMode === 'cli';
+
+  // Multi-select state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const isSelecting = selectedIds.size > 0;
+
+  const toggleSelection = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+  }, []);
+
+  const handleCopy = useCallback(() => {
+    const selected = messages.filter((m) => selectedIds.has(m.id));
+    const text = selected.map((m) => {
+      const label = m.type === 'user_input' ? 'You' : m.type === 'tool_use' ? `Tool: ${m.tool}` : 'Claude';
+      return `[${label}] ${m.content?.trim() || ''}`;
+    }).join('\n\n');
+    Clipboard.setStringAsync(text);
+    Alert.alert('Copied', `${selected.length} message${selected.length > 1 ? 's' : ''} copied to clipboard`);
+    clearSelection();
+  }, [messages, selectedIds, clearSelection]);
+
+  const handleExport = useCallback(() => {
+    const selected = messages.filter((m) => selectedIds.has(m.id));
+    const json = JSON.stringify(selected, null, 2);
+    Share.share({ message: json });
+    clearSelection();
+  }, [messages, selectedIds, clearSelection]);
 
   const handleSend = () => {
     if (!inputText.trim() || streamingMessageId) return;
@@ -141,36 +183,53 @@ export function SessionScreen() {
 
   return (
     <View style={styles.container}>
-      {/* View mode toggle */}
-      <View style={styles.modeToggle}>
-        <TouchableOpacity
-          style={[styles.modeButton, viewMode === 'chat' && styles.modeButtonActive]}
-          onPress={() => setViewMode('chat')}
-        >
-          <Text style={[styles.modeButtonText, viewMode === 'chat' && styles.modeButtonTextActive]}>
-            Chat
-          </Text>
-        </TouchableOpacity>
-        {!isCliMode && (
+      {/* Selection bar or view mode toggle */}
+      {isSelecting ? (
+        <View style={styles.selectionBar}>
+          <Text style={styles.selectionCount}>{selectedIds.size} selected</Text>
+          <View style={styles.selectionActions}>
+            <TouchableOpacity style={styles.selectionButton} onPress={handleCopy}>
+              <Text style={styles.selectionButtonText}>Copy</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.selectionButton} onPress={handleExport}>
+              <Text style={styles.selectionButtonText}>Export</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.selectionCancelButton} onPress={clearSelection}>
+              <Text style={styles.selectionCancelText}>{'\u2715'}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : (
+        <View style={styles.modeToggle}>
           <TouchableOpacity
-            style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
-            onPress={() => setViewMode('terminal')}
+            style={[styles.modeButton, viewMode === 'chat' && styles.modeButtonActive]}
+            onPress={() => setViewMode('chat')}
           >
-            <Text style={[styles.modeButtonText, viewMode === 'terminal' && styles.modeButtonTextActive]}>
-              Terminal
+            <Text style={[styles.modeButtonText, viewMode === 'chat' && styles.modeButtonTextActive]}>
+              Chat
             </Text>
           </TouchableOpacity>
-        )}
-        <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
-          <Text style={styles.disconnectButtonText}>✕</Text>
-        </TouchableOpacity>
-      </View>
+          {!isCliMode && (
+            <TouchableOpacity
+              style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
+              onPress={() => setViewMode('terminal')}
+            >
+              <Text style={[styles.modeButtonText, viewMode === 'terminal' && styles.modeButtonTextActive]}>
+                Terminal
+              </Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
+            <Text style={styles.disconnectButtonText}>{'\u2715'}</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* Status bar: model selector + context usage */}
-      {isCliMode && (
+      {isCliMode && availableModels.length > 0 && (
         <View style={styles.statusBar}>
           <View style={styles.modelSelector}>
-            {['haiku', 'sonnet', 'opus'].map((m) => (
+            {availableModels.map((m) => (
               <TouchableOpacity
                 key={m}
                 style={[styles.modelChip, activeModel === m && styles.modelChipActive]}
@@ -201,7 +260,7 @@ export function SessionScreen() {
 
       {/* Content area */}
       {viewMode === 'chat' ? (
-        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} isCliMode={isCliMode} />
+        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} isCliMode={isCliMode} selectedIds={selectedIds} isSelecting={isSelecting} onToggleSelection={toggleSelection} />
       ) : (
         <TerminalView
           content={terminalBuffer}
@@ -267,12 +326,18 @@ function ChatView({
   claudeReady,
   onSelectOption,
   isCliMode,
+  selectedIds,
+  isSelecting,
+  onToggleSelection,
 }: {
   messages: ChatMessage[];
   scrollViewRef: React.RefObject<ScrollView>;
   claudeReady: boolean;
   onSelectOption: (value: string) => void;
   isCliMode: boolean;
+  selectedIds: Set<string>;
+  isSelecting: boolean;
+  onToggleSelection: (id: string) => void;
 }) {
   return (
     <ScrollView
@@ -293,15 +358,74 @@ function ChatView({
         </View>
       ) : (
         messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} onSelectOption={onSelectOption} />
+          <MessageBubble
+            key={msg.id}
+            message={msg}
+            onSelectOption={onSelectOption}
+            isSelected={selectedIds.has(msg.id)}
+            isSelecting={isSelecting}
+            onLongPress={() => onToggleSelection(msg.id)}
+            onPress={() => onToggleSelection(msg.id)}
+          />
         ))
       )}
     </ScrollView>
   );
 }
 
+// Collapsible tool use bubble
+function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: {
+  message: ChatMessage;
+  isSelected: boolean;
+  isSelecting: boolean;
+  onLongPress: () => void;
+  onPress: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const content = message.content?.trim();
+
+  // Hide empty tool messages
+  if (!content) return null;
+
+  const handlePress = () => {
+    if (isSelecting) {
+      onPress();
+    } else {
+      setExpanded((prev) => !prev);
+    }
+  };
+
+  const preview = content.length > 60 ? content.slice(0, 60) + '...' : content;
+
+  return (
+    <TouchableOpacity
+      activeOpacity={0.7}
+      onPress={handlePress}
+      onLongPress={onLongPress}
+      style={[styles.toolBubble, isSelected && styles.selectedBubble]}
+    >
+      <View style={styles.toolHeader}>
+        <Text style={styles.toolChevron}>{expanded ? '\u25BE' : '\u25B8'}</Text>
+        <Text style={styles.senderLabelTool}>Tool: {message.tool}</Text>
+      </View>
+      {expanded ? (
+        <Text selectable style={styles.toolContentExpanded}>{content}</Text>
+      ) : (
+        <Text style={styles.toolContentCollapsed} numberOfLines={1}>{preview}</Text>
+      )}
+    </TouchableOpacity>
+  );
+}
+
 // Single message bubble
-function MessageBubble({ message, onSelectOption }: { message: ChatMessage; onSelectOption?: (value: string) => void }) {
+function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress }: {
+  message: ChatMessage;
+  onSelectOption?: (value: string) => void;
+  isSelected: boolean;
+  isSelecting: boolean;
+  onLongPress: () => void;
+  onPress: () => void;
+}) {
   const isUser = message.type === 'user_input';
   const isTool = message.type === 'tool_use';
   const isThinking = message.type === 'thinking';
@@ -315,10 +439,27 @@ function MessageBubble({ message, onSelectOption }: { message: ChatMessage; onSe
     );
   }
 
+  if (isTool) {
+    return (
+      <ToolBubble
+        message={message}
+        isSelected={isSelected}
+        isSelecting={isSelecting}
+        onLongPress={onLongPress}
+        onPress={onPress}
+      />
+    );
+  }
+
   return (
-    <View style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble]}>
+    <TouchableOpacity
+      activeOpacity={0.7}
+      onPress={isSelecting ? onPress : undefined}
+      onLongPress={onLongPress}
+      style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isSelected && styles.selectedBubble]}
+    >
       <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : styles.senderLabelClaude}>
-        {isUser ? 'You' : isTool ? `Tool: ${message.tool}` : isPrompt ? 'Action Required' : 'Claude'}
+        {isUser ? 'You' : isPrompt ? 'Action Required' : 'Claude'}
       </Text>
       <Text selectable style={[styles.messageText, isUser && styles.userMessageText]}>
         {message.content?.trim()}
@@ -336,7 +477,7 @@ function MessageBubble({ message, onSelectOption }: { message: ChatMessage; onSe
           ))}
         </View>
       )}
-    </View>
+    </TouchableOpacity>
   );
 }
 
@@ -416,6 +557,47 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   disconnectButtonText: {
+    color: '#ff4a4a',
+    fontSize: 16,
+  },
+  selectionBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 8,
+    paddingHorizontal: 16,
+    backgroundColor: '#1a1a2e',
+    borderBottomWidth: 1,
+    borderBottomColor: '#4a9eff44',
+  },
+  selectionCount: {
+    color: '#4a9eff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  selectionActions: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+  },
+  selectionButton: {
+    backgroundColor: '#4a9eff22',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#4a9eff44',
+  },
+  selectionButtonText: {
+    color: '#4a9eff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  selectionCancelButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  selectionCancelText: {
     color: '#ff4a4a',
     fontSize: 16,
   },
@@ -555,6 +737,47 @@ const styles = StyleSheet.create({
     color: '#f59e0b',
     fontSize: 14,
     fontWeight: '600',
+  },
+  selectedBubble: {
+    borderColor: '#4a9eff',
+    borderWidth: 2,
+  },
+  toolBubble: {
+    backgroundColor: '#16162a',
+    padding: 8,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    marginBottom: 8,
+    maxWidth: '85%',
+    borderWidth: 1,
+    borderColor: '#2a2a4e',
+  },
+  toolHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  toolChevron: {
+    color: '#888',
+    fontSize: 10,
+  },
+  senderLabelTool: {
+    color: '#a78bfa',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  toolContentCollapsed: {
+    color: '#888',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 2,
+  },
+  toolContentExpanded: {
+    color: '#ccc',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 6,
+    lineHeight: 18,
   },
   messageText: {
     color: '#e0e0e0',

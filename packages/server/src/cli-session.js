@@ -42,6 +42,7 @@ export class CliSession extends EventEmitter {
     this._respawnCount = 0
     this._respawnTimer = null
     this._resultTimeout = null
+    this._interruptTimer = null
   }
 
   get sessionId() {
@@ -377,6 +378,10 @@ export class CliSession extends EventEmitter {
       clearTimeout(this._resultTimeout)
       this._resultTimeout = null
     }
+    if (this._interruptTimer) {
+      clearTimeout(this._interruptTimer)
+      this._interruptTimer = null
+    }
   }
 
   /** Clean up readline interfaces */
@@ -417,6 +422,11 @@ export class CliSession extends EventEmitter {
     this._processReady = false
     this._sessionId = null
 
+    if (this._interruptTimer) {
+      clearTimeout(this._interruptTimer)
+      this._interruptTimer = null
+    }
+
     if (this._respawnTimer) {
       clearTimeout(this._respawnTimer)
       this._respawnTimer = null
@@ -452,7 +462,8 @@ export class CliSession extends EventEmitter {
 
     // Safety: if still busy after 5s, force-clear state.
     // Claude should either emit a result (process survives) or die (close handler respawns).
-    setTimeout(() => {
+    this._interruptTimer = setTimeout(() => {
+      this._interruptTimer = null
       if (this._isBusy) {
         console.warn('[cli-session] Interrupt safety timeout — force-clearing busy state')
         const messageId = this._currentMessageId
@@ -476,6 +487,11 @@ export class CliSession extends EventEmitter {
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
       this._resultTimeout = null
+    }
+
+    if (this._interruptTimer) {
+      clearTimeout(this._interruptTimer)
+      this._interruptTimer = null
     }
 
     this._cleanupReadlines()
