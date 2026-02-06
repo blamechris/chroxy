@@ -88,8 +88,13 @@ export class WsServer {
     if (!client.authenticated) {
       if (msg.type === "auth" && msg.token === this.apiToken) {
         client.authenticated = true;
+        client.authTime = Date.now();
         this._send(ws, { type: "auth_ok" });
         this._send(ws, { type: "status", connected: true });
+        // Tell client if Claude Code is already ready
+        if (this.outputParser.claudeReady) {
+          this._send(ws, { type: "claude_ready" });
+        }
         console.log(`[ws] Client ${client.id} authenticated`);
       } else {
         this._send(ws, { type: "auth_fail", reason: "invalid_token" });
@@ -101,6 +106,9 @@ export class WsServer {
     switch (msg.type) {
       case "input":
         // Forward keystrokes to the PTY
+        if (msg.data && msg.data !== "\r" && msg.data !== "\n") {
+          console.log(`[ws] Input from ${client.id}: "${msg.data.replace(/[\r\n]/g, '\\n').slice(0, 80)}"`);
+        }
         this.ptyManager.write(msg.data);
         break;
 
@@ -130,11 +138,18 @@ export class WsServer {
       );
     });
 
-    // Parsed messages -> chat view clients
+    // Parsed messages -> chat view clients (only messages after client connected)
     this.outputParser.on("message", (message) => {
       this._broadcast(
-        { type: "message", ...message },
-        (client) => client.mode === "chat"
+        {
+          type: "message",
+          messageType: message.type,
+          content: message.content,
+          tool: message.tool,
+          options: message.options,
+          timestamp: message.timestamp,
+        },
+        (client) => client.mode === "chat" && message.timestamp > (client.authTime || 0)
       );
     });
 
@@ -145,6 +160,11 @@ export class WsServer {
         { type: "raw_background", data },
         (client) => client.mode === "chat"
       );
+    });
+
+    // Claude Code ready signal -> all clients
+    this.outputParser.on("claude_ready", () => {
+      this._broadcast({ type: "claude_ready" });
     });
   }
 

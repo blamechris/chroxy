@@ -64,10 +64,13 @@ export class TunnelManager {
           console.log(`[ngrok] Tunnel health check: HTTP ${res.status}`);
         }
       } catch (err) {
-        console.error(`[ngrok] Tunnel appears dead: ${err.message}`);
-        console.error(`[ngrok] Restart the server to get a new tunnel.`);
+        if (!this._deadLogged) {
+          console.error(`[ngrok] Tunnel appears dead: ${err.message}`);
+          console.error(`[ngrok] Restart the server to get a new tunnel.`);
+          this._deadLogged = true;
+        }
       }
-    }, 30_000); // check every 30s
+    }, 60_000); // check every 60s
   }
 
   /** Stop the tunnel */

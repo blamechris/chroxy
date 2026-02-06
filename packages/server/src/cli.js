@@ -114,6 +114,7 @@ program
   .command("start")
   .description("Start the Chroxy server")
   .option("-c, --config <path>", "Path to config file", CONFIG_FILE)
+  .option("-r, --resume", "Resume an existing Claude Code session instead of starting fresh")
   .action(async (options) => {
     // Load config
     if (!existsSync(options.config)) {
@@ -122,6 +123,7 @@ program
     }
 
     const config = JSON.parse(readFileSync(options.config, "utf-8"));
+    config.resume = !!options.resume;
 
     // Set environment variables for the server
     process.env.NGROK_AUTHTOKEN = config.ngrokAuthToken;

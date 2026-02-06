@@ -11,19 +11,35 @@ export class PtyManager extends EventEmitter {
     super();
     this.sessionName = config.sessionName || "claude-code";
     this.shellCmd = config.shell || process.env.SHELL || "/bin/zsh";
+    this.resume = config.resume || false;
     this.ptyProcess = null;
     this.cols = config.cols || 120;
     this.rows = config.rows || 40;
   }
 
   /**
-   * Start or attach to a tmux session.
-   * If the session exists, attaches. Otherwise creates a new one.
+   * Start a tmux session with Claude Code.
+   *
+   * Default: kills any existing session and starts fresh.
+   * With resume=true: attaches to an existing session if one exists.
    */
   async start() {
-    const tmuxCmd = await this._hasTmuxSession()
-      ? ["/opt/homebrew/bin/tmux", "attach-session", "-t", this.sessionName]
-      : ["/opt/homebrew/bin/tmux", "new-session", "-s", this.sessionName];
+    const hasSession = this._hasTmuxSession();
+
+    if (hasSession && !this.resume) {
+      // Fresh start — kill the old session so there's no scrollback
+      console.log(`[pty] Killing old tmux session: ${this.sessionName}`);
+      try {
+        execSync(`/opt/homebrew/bin/tmux kill-session -t ${this.sessionName} 2>/dev/null`);
+      } catch {
+        // Session may have died already
+      }
+    }
+
+    const shouldCreate = !this._hasTmuxSession();
+    const tmuxCmd = shouldCreate
+      ? ["/opt/homebrew/bin/tmux", "new-session", "-s", this.sessionName]
+      : ["/opt/homebrew/bin/tmux", "attach-session", "-t", this.sessionName];
 
     this.ptyProcess = pty.spawn(tmuxCmd[0], tmuxCmd.slice(1), {
       name: "xterm-256color",
@@ -33,7 +49,6 @@ export class PtyManager extends EventEmitter {
       env: {
         ...process.env,
         TERM: "xterm-256color",
-        // Ensure Claude Code gets proper color support
         FORCE_COLOR: "1",
         COLORTERM: "truecolor",
       },
@@ -49,7 +64,17 @@ export class PtyManager extends EventEmitter {
       this.ptyProcess = null;
     });
 
-    console.log(`[pty] Attached to tmux session: ${this.sessionName}`);
+    if (shouldCreate) {
+      // Fresh session — launch Claude Code after a short delay for shell init
+      console.log(`[pty] Created new tmux session: ${this.sessionName}`);
+      setTimeout(() => {
+        this.write("claude\r");
+        console.log(`[pty] Launched Claude Code`);
+      }, 500);
+    } else {
+      console.log(`[pty] Resumed tmux session: ${this.sessionName}`);
+    }
+
     return this;
   }
 

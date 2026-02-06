@@ -22,5 +22,8 @@
   "bugs": {
     "url": "https://github.com/blamechris/chroxy/issues"
   },
-  "homepage": "https://github.com/blamechris/chroxy#readme"
+  "homepage": "https://github.com/blamechris/chroxy#readme",
+  "dependencies": {
+    "expo-secure-store": "~15.0.8"
+  }
 }

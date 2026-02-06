@@ -33,6 +33,7 @@ export async function startServer(config) {
   const ptyManager = new PtyManager({
     sessionName: config.tmuxSession || process.env.TMUX_SESSION || "claude-code",
     shell: config.shell || process.env.SHELL_CMD,
+    resume: config.resume || false,
   });
 
   // 2. Set up the output parser pipeline
@@ -41,6 +42,20 @@ export async function startServer(config) {
   // Wire PTY output into the parser
   ptyManager.on("data", (data) => {
     outputParser.feed(data);
+
+    // Auto-accept the trust dialog ("Do you trust this folder?")
+    // The user running chroxy in a folder IS their trust signal.
+    if (!outputParser.claudeReady) {
+      const clean = data.replace(
+        // eslint-disable-next-line no-control-regex
+        /\x1b\[[0-9;?]*[A-Za-z~]|\x1b\][^\x07]*\x07?|\x1b[()#][A-Z0-2]|\x1b[A-Za-z]|\x9b[0-9;?]*[A-Za-z~]/g,
+        ""
+      );
+      if (/trust\s*this\s*folder/i.test(clean) || /Yes.*trust/i.test(clean)) {
+        console.log(`[server] Auto-accepting trust dialog`);
+        setTimeout(() => ptyManager.write("\r"), 300);
+      }
+    }
   });
 
   ptyManager.on("exit", ({ exitCode }) => {

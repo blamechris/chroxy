@@ -126,11 +126,13 @@ npm run app:ios
 - [x] Output parser for Claude Code patterns
 - [x] WebSocket protocol with auth
 - [x] ngrok tunnel integration
-- [ ] CLI with `init` and `start` commands
-- [ ] QR code generation for easy app pairing
-- [ ] React Native app shell
+- [x] CLI with `init` and `start` commands
+- [x] QR code generation for easy app pairing
+- [x] React Native app with QR scanning
+- [x] Chat view with parsed messages
+- [x] Terminal view (plain text)
+- [x] One-tap reconnect with saved credentials
 - [ ] Terminal view with xterm.js
-- [ ] Chat view with parsed messages
 - [ ] Scrollback buffer on reconnect
 - [ ] TestFlight / Play Store release
 - [ ] Tailscale support as ngrok alternative

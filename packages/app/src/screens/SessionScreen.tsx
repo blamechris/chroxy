@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -48,12 +48,37 @@ export function SessionScreen() {
     terminalBuffer,
     sendInput,
     disconnect,
+    clearTerminalBuffer,
+    addMessage,
+    inputSettings,
+    claudeReady,
   } = useConnectionStore();
 
   const handleSend = () => {
     if (!inputText.trim()) return;
-    sendInput(inputText + '\n');
+    const text = inputText.trim();
     setInputText('');
+
+    if (viewMode === 'chat') {
+      // Show user message instantly in chat — no need to wait for PTY echo
+      addMessage({
+        id: `${Date.now()}-${Math.random()}`,
+        type: 'user_input',
+        content: text,
+        timestamp: Date.now(),
+      });
+      // Show thinking indicator until response arrives
+      addMessage({
+        id: 'thinking',
+        type: 'thinking',
+        content: '',
+        timestamp: Date.now(),
+      });
+    }
+
+    sendInput(text);
+    // Send Enter separately — Claude Code's TUI needs text and CR as separate writes
+    setTimeout(() => sendInput('\r'), 50);
   };
 
   const handleKeyPress = (key: string) => {
@@ -74,6 +99,17 @@ export function SessionScreen() {
       sendInput(keyMap[key]);
     }
   };
+
+  // Handle tapping a prompt option (sends the value to PTY)
+  const handleSelectOption = (value: string) => {
+    sendInput(value);
+    setTimeout(() => sendInput('\r'), 50);
+  };
+
+  // Check if Enter key should send based on current mode and settings
+  const enterToSend = viewMode === 'chat'
+    ? inputSettings.chatEnterToSend
+    : inputSettings.terminalEnterToSend;
 
   // Bottom padding: when keyboard is up, use keyboard height + buffer for suggestion bar;
   // otherwise use safe area for Android nav buttons
@@ -109,7 +145,7 @@ export function SessionScreen() {
 
       {/* Content area */}
       {viewMode === 'chat' ? (
-        <ChatView messages={messages} scrollViewRef={scrollViewRef} />
+        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} />
       ) : (
         <TerminalView
           content={terminalBuffer}
@@ -122,7 +158,7 @@ export function SessionScreen() {
       <View style={[styles.inputContainer, { paddingBottom: bottomPadding }]}>
         {viewMode === 'terminal' && (
           <View style={styles.specialKeys}>
-            {['Ctrl+C', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].map((key) => (
+            {['Enter', 'Ctrl+C', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].map((key) => (
               <TouchableOpacity
                 key={key}
                 style={styles.specialKey}
@@ -133,15 +169,22 @@ export function SessionScreen() {
                 </Text>
               </TouchableOpacity>
             ))}
+            <TouchableOpacity
+              style={styles.specialKey}
+              onPress={clearTerminalBuffer}
+            >
+              <Text style={styles.specialKeyText}>Clear</Text>
+            </TouchableOpacity>
           </View>
         )}
         <View style={styles.inputRow}>
           <TextInput
             style={styles.input}
-            placeholder={viewMode === 'chat' ? 'Message Claude...' : 'Type command...'}
+            placeholder={!claudeReady ? 'Starting Claude Code...' : viewMode === 'chat' ? 'Message Claude...' : 'Type command...'}
             placeholderTextColor="#666"
             value={inputText}
             onChangeText={setInputText}
+            onSubmitEditing={enterToSend ? handleSend : undefined}
             blurOnSubmit={false}
             autoCapitalize="none"
             autoCorrect={false}
@@ -159,9 +202,13 @@ export function SessionScreen() {
 function ChatView({
   messages,
   scrollViewRef,
+  claudeReady,
+  onSelectOption,
 }: {
   messages: ChatMessage[];
   scrollViewRef: React.RefObject<ScrollView>;
+  claudeReady: boolean;
+  onSelectOption: (value: string) => void;
 }) {
   return (
     <ScrollView
@@ -173,12 +220,14 @@ function ChatView({
       {messages.length === 0 ? (
         <View style={styles.emptyState}>
           <Text style={styles.emptyStateText}>
-            Connected! Waiting for messages...
+            {claudeReady
+              ? 'Claude Code is ready. Send a message!'
+              : 'Starting Claude Code...'}
           </Text>
         </View>
       ) : (
         messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} />
+          <MessageBubble key={msg.id} message={msg} onSelectOption={onSelectOption} />
         ))
       )}
     </ScrollView>
@@ -186,20 +235,61 @@ function ChatView({
 }
 
 // Single message bubble
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBubble({ message, onSelectOption }: { message: ChatMessage; onSelectOption?: (value: string) => void }) {
   const isUser = message.type === 'user_input';
   const isTool = message.type === 'tool_use';
+  const isThinking = message.type === 'thinking';
+  const isPrompt = message.type === 'prompt';
+
+  if (isThinking) {
+    return (
+      <View style={styles.thinkingBubble}>
+        <Text style={styles.thinkingText}>Thinking...</Text>
+      </View>
+    );
+  }
 
   return (
-    <View style={[styles.messageBubble, isUser && styles.userBubble]}>
-      {isTool && (
-        <View style={styles.toolBadge}>
-          <Text style={styles.toolBadgeText}>🔧 {message.tool}</Text>
+    <View style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble]}>
+      <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : styles.senderLabelClaude}>
+        {isUser ? 'You' : isTool ? `Tool: ${message.tool}` : isPrompt ? 'Action Required' : 'Claude'}
+      </Text>
+      <Text selectable style={[styles.messageText, isUser && styles.userMessageText]}>
+        {message.content?.trim()}
+      </Text>
+      {isPrompt && message.options && (
+        <View style={styles.promptOptions}>
+          {message.options.map((opt, i) => (
+            <TouchableOpacity
+              key={i}
+              style={styles.promptOptionButton}
+              onPress={() => onSelectOption?.(opt.value)}
+            >
+              <Text style={styles.promptOptionText}>{opt.label}</Text>
+            </TouchableOpacity>
+          ))}
         </View>
       )}
-      <Text style={styles.messageText}>{message.content}</Text>
     </View>
   );
+}
+
+/**
+ * Process raw terminal buffer for plain-text display.
+ * Handles \r\n line endings and standalone \r (carriage return)
+ * which overwrites the current line in a real terminal.
+ */
+function processTerminalBuffer(buffer: string): string {
+  // Normalize \r\n to \n first
+  let text = buffer.replace(/\r\n/g, '\n');
+  // For each line, keep only content after the last \r (simulates CR overwrite)
+  return text
+    .split('\n')
+    .map((line) => {
+      const lastCR = line.lastIndexOf('\r');
+      return lastCR >= 0 ? line.substring(lastCR + 1) : line;
+    })
+    .join('\n');
 }
 
 // Terminal view component
@@ -212,6 +302,8 @@ function TerminalView({
   scrollViewRef: React.RefObject<ScrollView>;
   onKeyPress: (key: string) => void;
 }) {
+  const processed = useMemo(() => processTerminalBuffer(content), [content]);
+
   return (
     <ScrollView
       ref={scrollViewRef}
@@ -219,7 +311,7 @@ function TerminalView({
       contentContainerStyle={styles.terminalContent}
       onContentSizeChange={() => scrollViewRef.current?.scrollToEnd()}
     >
-      <Text style={styles.terminalText}>{content || 'Connected. Terminal output will appear here...'}</Text>
+      <Text style={styles.terminalText}>{processed || 'Connected. Terminal output will appear here...'}</Text>
     </ScrollView>
   );
 }
@@ -293,23 +385,66 @@ const styles = StyleSheet.create({
     borderColor: '#4a9eff44',
     borderWidth: 1,
   },
-  toolBadge: {
-    backgroundColor: '#22c55e22',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 4,
-    alignSelf: 'flex-start',
+  thinkingBubble: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
     marginBottom: 8,
   },
-  toolBadgeText: {
+  thinkingText: {
+    color: '#666',
+    fontSize: 13,
+    fontStyle: 'italic',
+  },
+  senderLabelUser: {
+    color: '#4a9eff',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  senderLabelClaude: {
     color: '#22c55e',
     fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  senderLabelPrompt: {
+    color: '#f59e0b',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  promptBubble: {
+    backgroundColor: '#f59e0b11',
+    borderColor: '#f59e0b44',
+    borderWidth: 1,
+    maxWidth: '95%',
+  },
+  promptOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
+  },
+  promptOptionButton: {
+    backgroundColor: '#f59e0b33',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+  },
+  promptOptionText: {
+    color: '#f59e0b',
+    fontSize: 14,
     fontWeight: '600',
   },
   messageText: {
     color: '#e0e0e0',
     fontSize: 15,
     lineHeight: 22,
+  },
+  userMessageText: {
+    color: '#fff',
   },
 
   // Terminal styles

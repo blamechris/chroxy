@@ -32,7 +32,7 @@ function parseChroxyUrl(raw: string): { wsUrl: string; token: string } | null {
 }
 
 function formatUrl(url: string): string {
-  // Show a friendly version: "10.0.0.71:8765" or "abc.ngrok-free.dev"
+  // Show a friendly version: "192.168.1.5:8765" or "abc.ngrok-free.dev"
   return url.replace(/^wss?:\/\//, '');
 }
 
@@ -185,7 +185,7 @@ export function ConnectScreen() {
           <Text style={styles.label}>Server URL</Text>
           <TextInput
             style={styles.input}
-            placeholder="ws://10.0.0.71:8765"
+            placeholder="ws://your-mac-ip:8765"
             placeholderTextColor="#666"
             value={url}
             onChangeText={setUrl}
