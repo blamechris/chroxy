@@ -2,6 +2,11 @@ import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { v4 as uuidv4 } from "uuid";
 
+// All model identifiers accepted by set_model. Includes both short names
+// (displayed to users) and full model IDs (for forward compatibility with
+// third-party clients). The available_models message advertises only short
+// names so the mobile app renders clean labels. See #19 for planned
+// structured {id, label} model objects.
 const ALLOWED_MODELS = [
   "claude-sonnet-4-20250514",
   "claude-haiku-235-20250421",
@@ -9,7 +14,8 @@ const ALLOWED_MODELS = [
   "sonnet", "haiku", "opus",
 ];
 
-// Short names shown to clients for model selection
+// Short names advertised to clients for model selection UI.
+// Intentionally a subset of ALLOWED_MODELS — see comment above.
 const MODEL_SHORT_NAMES = ["haiku", "sonnet", "opus"];
 
 /**
