@@ -27,19 +27,54 @@ Run a lightweight daemon on your dev machine. Connect from anywhere via your pho
 - **Privacy-first** — Your machine, your tunnel. No cloud middleman storing your code.
 - **Open source** — MIT licensed. Audit it, fork it, improve it.
 
+## Prerequisites
+
+- **Node.js 22** — `node-pty` does not compile on Node 25. Install via Homebrew:
+  ```bash
+  brew install node@22
+  ```
+  Then run commands with Node 22 on your PATH:
+  ```bash
+  PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
+  ```
+
+- **tmux** — Required for persistent terminal sessions:
+  ```bash
+  brew install tmux
+  ```
+
+- **cloudflared** — Cloudflare's tunnel client. No account needed:
+  ```bash
+  brew install cloudflared
+  ```
+
 ## Quick Start
 
 ### Server (on your Mac)
 
 ```bash
 # Install and configure
-npx chroxy init
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy init
 
 # Start the server
-npx chroxy start
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 ```
 
 The server prints a QR code. Scan it with the Chroxy app.
+
+### Local WiFi (same network)
+
+If your phone and Mac are on the same WiFi, you can connect directly without the tunnel:
+
+1. Find your Mac's local IP:
+   ```bash
+   ipconfig getifaddr en0
+   ```
+2. In the Chroxy app, tap **"Enter manually"** and enter:
+   - URL: `ws://YOUR_MAC_IP:8765` (e.g. `ws://192.168.1.100:8765`)
+   - Token: your API token from `~/.chroxy/config.json`
+
+This skips the Cloudflare tunnel — lower latency, fully local.
 
 ### App (on your phone)
 
@@ -57,7 +92,7 @@ npm run ios   # or npm run android
 1. **Server** spawns (or attaches to) a tmux session running Claude Code
 2. **Output parser** converts terminal output into structured messages
 3. **WebSocket server** streams both raw and parsed output to connected clients
-4. **ngrok tunnel** provides secure remote access without port forwarding
+4. **Cloudflare tunnel** provides secure remote access without port forwarding
 5. **Mobile app** renders the dual-view UI and sends your input back
 
 ## Project Structure
@@ -73,35 +108,40 @@ chroxy/
 
 ## Development
 
+You need **two terminals** during development:
+
 ```bash
 # Clone the repo
 git clone https://github.com/blamechris/chroxy.git
 cd chroxy
-
-# Install all dependencies
 npm install
 
-# Run the server in dev mode
-npm run server:dev
+# Terminal 1: Start the Chroxy server
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
-# Run the app (in another terminal)
-npm run app:ios
+# Terminal 2: Start the Expo dev server (for hot-reload to phone/simulator)
+cd packages/app
+npx expo start
 ```
+
+The Expo dev server is only needed during development — it hot-reloads the app to Expo Go on your phone or the iOS/Android simulator. Once the app is built as a standalone binary, users only need `npx chroxy start`.
 
 ## Roadmap
 
 - [x] Core server daemon with PTY management
 - [x] Output parser for Claude Code patterns
 - [x] WebSocket protocol with auth
-- [x] ngrok tunnel integration
-- [ ] CLI with `init` and `start` commands
-- [ ] QR code generation for easy app pairing
-- [ ] React Native app shell
+- [x] Cloudflare tunnel integration
+- [x] CLI with `init` and `start` commands
+- [x] QR code generation for easy app pairing
+- [x] React Native app with QR scanning
+- [x] Chat view with parsed messages
+- [x] Terminal view (plain text)
+- [x] One-tap reconnect with saved credentials
 - [ ] Terminal view with xterm.js
-- [ ] Chat view with parsed messages
 - [ ] Scrollback buffer on reconnect
 - [ ] TestFlight / Play Store release
-- [ ] Tailscale support as ngrok alternative
+- [ ] Tailscale support as tunnel alternative
 - [ ] Session recording and replay
 
 ## Contributing

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -6,14 +6,40 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  KeyboardAvoidingView,
   Platform,
+  Keyboard,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, ChatMessage } from '../store/connection';
+
+function useKeyboardHeight() {
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      setKeyboardHeight(e.endCoordinates.height);
+    });
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setKeyboardHeight(0);
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  return keyboardHeight;
+}
 
 export function SessionScreen() {
   const [inputText, setInputText] = useState('');
   const scrollViewRef = useRef<ScrollView>(null);
+  const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
 
   const {
     viewMode,
@@ -21,18 +47,50 @@ export function SessionScreen() {
     messages,
     terminalBuffer,
     sendInput,
+    sendInterrupt,
     disconnect,
+    clearTerminalBuffer,
+    addMessage,
+    inputSettings,
+    claudeReady,
+    serverMode,
+    streamingMessageId,
+    isReconnecting,
   } = useConnectionStore();
 
+  const isCliMode = serverMode === 'cli';
+
   const handleSend = () => {
-    if (!inputText.trim()) return;
-    // Send input + Enter key
-    sendInput(inputText + '\n');
+    if (!inputText.trim() || streamingMessageId) return;
+    const text = inputText.trim();
     setInputText('');
+
+    if (viewMode === 'chat') {
+      // Show user message instantly in chat
+      addMessage({
+        id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: 'user_input',
+        content: text,
+        timestamp: Date.now(),
+      });
+      // Show thinking indicator until response arrives
+      addMessage({
+        id: 'thinking',
+        type: 'thinking',
+        content: '',
+        timestamp: Date.now(),
+      });
+    }
+
+    sendInput(text);
+    // In terminal mode, send Enter separately — Claude Code's TUI needs text and CR as separate writes
+    // In CLI mode, the server handles the full message directly
+    if (!isCliMode) {
+      setTimeout(() => sendInput('\r'), 50);
+    }
   };
 
   const handleKeyPress = (key: string) => {
-    // Send special keys (for terminal mode)
     const keyMap: Record<string, string> = {
       'Enter': '\r',
       'Tab': '\t',
@@ -51,11 +109,29 @@ export function SessionScreen() {
     }
   };
 
+  // Handle tapping a prompt option
+  const handleSelectOption = (value: string) => {
+    sendInput(value);
+    // In PTY mode, send Enter separately — the TUI needs text and CR as separate writes
+    if (!isCliMode) {
+      setTimeout(() => sendInput('\r'), 50);
+    }
+  };
+
+  // Check if Enter key should send based on current mode and settings
+  const enterToSend = viewMode === 'chat'
+    ? inputSettings.chatEnterToSend
+    : inputSettings.terminalEnterToSend;
+
+  // Bottom padding: when keyboard is up, use keyboard height + buffer for suggestion bar;
+  // otherwise use safe area for Android nav buttons
+  const suggestionBarBuffer = Platform.OS === 'android' ? 48 : 0;
+  const bottomPadding = keyboardHeight > 0
+    ? keyboardHeight + suggestionBarBuffer
+    : Math.max(insets.bottom, 12);
+
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
+    <View style={styles.container}>
       {/* View mode toggle */}
       <View style={styles.modeToggle}>
         <TouchableOpacity
@@ -63,25 +139,34 @@ export function SessionScreen() {
           onPress={() => setViewMode('chat')}
         >
           <Text style={[styles.modeButtonText, viewMode === 'chat' && styles.modeButtonTextActive]}>
-            💬 Chat
+            Chat
           </Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
-          onPress={() => setViewMode('terminal')}
-        >
-          <Text style={[styles.modeButtonText, viewMode === 'terminal' && styles.modeButtonTextActive]}>
-            🖥️ Terminal
-          </Text>
-        </TouchableOpacity>
+        {!isCliMode && (
+          <TouchableOpacity
+            style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
+            onPress={() => setViewMode('terminal')}
+          >
+            <Text style={[styles.modeButtonText, viewMode === 'terminal' && styles.modeButtonTextActive]}>
+              Terminal
+            </Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
           <Text style={styles.disconnectButtonText}>✕</Text>
         </TouchableOpacity>
       </View>
 
+      {/* Reconnecting banner */}
+      {isReconnecting && (
+        <View style={styles.reconnectingBanner}>
+          <Text style={styles.reconnectingText}>Reconnecting...</Text>
+        </View>
+      )}
+
       {/* Content area */}
       {viewMode === 'chat' ? (
-        <ChatView messages={messages} scrollViewRef={scrollViewRef} />
+        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} isCliMode={isCliMode} />
       ) : (
         <TerminalView
           content={terminalBuffer}
@@ -91,10 +176,10 @@ export function SessionScreen() {
       )}
 
       {/* Input area */}
-      <View style={styles.inputContainer}>
-        {viewMode === 'terminal' && (
+      <View style={[styles.inputContainer, { paddingBottom: bottomPadding }]}>
+        {viewMode === 'terminal' && !isCliMode && (
           <View style={styles.specialKeys}>
-            {['Ctrl+C', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].map((key) => (
+            {['Enter', 'Ctrl+C', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].map((key) => (
               <TouchableOpacity
                 key={key}
                 style={styles.specialKey}
@@ -105,26 +190,38 @@ export function SessionScreen() {
                 </Text>
               </TouchableOpacity>
             ))}
+            <TouchableOpacity
+              style={styles.specialKey}
+              onPress={clearTerminalBuffer}
+            >
+              <Text style={styles.specialKeyText}>Clear</Text>
+            </TouchableOpacity>
           </View>
         )}
         <View style={styles.inputRow}>
           <TextInput
             style={styles.input}
-            placeholder={viewMode === 'chat' ? 'Message Claude...' : 'Type command...'}
+            placeholder={!claudeReady ? 'Connecting to Claude...' : 'Message Claude...'}
             placeholderTextColor="#666"
             value={inputText}
             onChangeText={setInputText}
-            onSubmitEditing={handleSend}
-            returnKeyType="send"
+            onSubmitEditing={enterToSend && !streamingMessageId ? handleSend : undefined}
+            blurOnSubmit={false}
             autoCapitalize="none"
             autoCorrect={false}
           />
-          <TouchableOpacity style={styles.sendButton} onPress={handleSend}>
-            <Text style={styles.sendButtonText}>↑</Text>
-          </TouchableOpacity>
+          {streamingMessageId ? (
+            <TouchableOpacity style={styles.interruptButton} onPress={sendInterrupt}>
+              <Text style={styles.interruptButtonText}>■</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity style={styles.sendButton} onPress={handleSend}>
+              <Text style={styles.sendButtonText}>↑</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -132,9 +229,15 @@ export function SessionScreen() {
 function ChatView({
   messages,
   scrollViewRef,
+  claudeReady,
+  onSelectOption,
+  isCliMode,
 }: {
   messages: ChatMessage[];
   scrollViewRef: React.RefObject<ScrollView>;
+  claudeReady: boolean;
+  onSelectOption: (value: string) => void;
+  isCliMode: boolean;
 }) {
   return (
     <ScrollView
@@ -146,12 +249,16 @@ function ChatView({
       {messages.length === 0 ? (
         <View style={styles.emptyState}>
           <Text style={styles.emptyStateText}>
-            Connected! Waiting for messages...
+            {claudeReady
+              ? 'Connected. Send a message to Claude!'
+              : isCliMode
+                ? 'Connecting...'
+                : 'Starting Claude Code...'}
           </Text>
         </View>
       ) : (
         messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} />
+          <MessageBubble key={msg.id} message={msg} onSelectOption={onSelectOption} />
         ))
       )}
     </ScrollView>
@@ -159,20 +266,61 @@ function ChatView({
 }
 
 // Single message bubble
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBubble({ message, onSelectOption }: { message: ChatMessage; onSelectOption?: (value: string) => void }) {
   const isUser = message.type === 'user_input';
   const isTool = message.type === 'tool_use';
+  const isThinking = message.type === 'thinking';
+  const isPrompt = message.type === 'prompt';
+
+  if (isThinking) {
+    return (
+      <View style={styles.thinkingBubble}>
+        <Text style={styles.thinkingText}>Thinking...</Text>
+      </View>
+    );
+  }
 
   return (
-    <View style={[styles.messageBubble, isUser && styles.userBubble]}>
-      {isTool && (
-        <View style={styles.toolBadge}>
-          <Text style={styles.toolBadgeText}>🔧 {message.tool}</Text>
+    <View style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble]}>
+      <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : styles.senderLabelClaude}>
+        {isUser ? 'You' : isTool ? `Tool: ${message.tool}` : isPrompt ? 'Action Required' : 'Claude'}
+      </Text>
+      <Text selectable style={[styles.messageText, isUser && styles.userMessageText]}>
+        {message.content?.trim()}
+      </Text>
+      {isPrompt && message.options && (
+        <View style={styles.promptOptions}>
+          {message.options.map((opt, i) => (
+            <TouchableOpacity
+              key={i}
+              style={styles.promptOptionButton}
+              onPress={() => onSelectOption?.(opt.value)}
+            >
+              <Text style={styles.promptOptionText}>{opt.label}</Text>
+            </TouchableOpacity>
+          ))}
         </View>
       )}
-      <Text style={styles.messageText}>{message.content}</Text>
     </View>
   );
+}
+
+/**
+ * Process raw terminal buffer for plain-text display.
+ * Handles \r\n line endings and standalone \r (carriage return)
+ * which overwrites the current line in a real terminal.
+ */
+function processTerminalBuffer(buffer: string): string {
+  // Normalize \r\n to \n first
+  let text = buffer.replace(/\r\n/g, '\n');
+  // For each line, keep only content after the last \r (simulates CR overwrite)
+  return text
+    .split('\n')
+    .map((line) => {
+      const lastCR = line.lastIndexOf('\r');
+      return lastCR >= 0 ? line.substring(lastCR + 1) : line;
+    })
+    .join('\n');
 }
 
 // Terminal view component
@@ -185,6 +333,8 @@ function TerminalView({
   scrollViewRef: React.RefObject<ScrollView>;
   onKeyPress: (key: string) => void;
 }) {
+  const processed = useMemo(() => processTerminalBuffer(content), [content]);
+
   return (
     <ScrollView
       ref={scrollViewRef}
@@ -192,7 +342,7 @@ function TerminalView({
       contentContainerStyle={styles.terminalContent}
       onContentSizeChange={() => scrollViewRef.current?.scrollToEnd()}
     >
-      <Text style={styles.terminalText}>{content || 'Connected. Terminal output will appear here...'}</Text>
+      <Text style={styles.terminalText}>{processed || 'Connected. Terminal output will appear here...'}</Text>
     </ScrollView>
   );
 }
@@ -234,6 +384,16 @@ const styles = StyleSheet.create({
     color: '#ff4a4a',
     fontSize: 16,
   },
+  reconnectingBanner: {
+    backgroundColor: '#f59e0b33',
+    paddingVertical: 6,
+    alignItems: 'center',
+  },
+  reconnectingText: {
+    color: '#f59e0b',
+    fontSize: 13,
+    fontWeight: '600',
+  },
 
   // Chat styles
   chatContainer: {
@@ -266,23 +426,66 @@ const styles = StyleSheet.create({
     borderColor: '#4a9eff44',
     borderWidth: 1,
   },
-  toolBadge: {
-    backgroundColor: '#22c55e22',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 4,
-    alignSelf: 'flex-start',
+  thinkingBubble: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
     marginBottom: 8,
   },
-  toolBadgeText: {
+  thinkingText: {
+    color: '#666',
+    fontSize: 13,
+    fontStyle: 'italic',
+  },
+  senderLabelUser: {
+    color: '#4a9eff',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  senderLabelClaude: {
     color: '#22c55e',
     fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  senderLabelPrompt: {
+    color: '#f59e0b',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  promptBubble: {
+    backgroundColor: '#f59e0b11',
+    borderColor: '#f59e0b44',
+    borderWidth: 1,
+    maxWidth: '95%',
+  },
+  promptOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
+  },
+  promptOptionButton: {
+    backgroundColor: '#f59e0b33',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+  },
+  promptOptionText: {
+    color: '#f59e0b',
+    fontSize: 14,
     fontWeight: '600',
   },
   messageText: {
     color: '#e0e0e0',
     fontSize: 15,
     lineHeight: 22,
+  },
+  userMessageText: {
+    color: '#fff',
   },
 
   // Terminal styles
@@ -348,6 +551,19 @@ const styles = StyleSheet.create({
   sendButtonText: {
     color: '#fff',
     fontSize: 20,
+    fontWeight: 'bold',
+  },
+  interruptButton: {
+    backgroundColor: '#ff4a4a',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  interruptButtonText: {
+    color: '#fff',
+    fontSize: 16,
     fontWeight: 'bold',
   },
 });

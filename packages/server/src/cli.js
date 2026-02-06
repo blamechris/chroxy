@@ -60,37 +60,20 @@ program
     // Gather configuration
     console.log("We need a few things to get started:\n");
 
-    // ngrok token
-    console.log("1. ngrok auth token");
-    console.log("   Get yours at: https://dashboard.ngrok.com/get-started/your-authtoken");
-    const ngrokToken = await prompt("   Enter token: ");
-
-    if (!ngrokToken) {
-      console.error("\n❌ ngrok token is required");
-      process.exit(1);
-    }
-
-    // Optional: fixed domain
-    console.log("\n2. Fixed ngrok domain (optional, for paid plans)");
-    console.log("   Leave blank for a random URL each time");
-    const ngrokDomain = await prompt("   Domain: ");
-
     // Generate API token
     const apiToken = randomUUID();
 
     // Port
-    console.log("\n3. Local WebSocket port");
+    console.log("1. Local WebSocket port");
     const portInput = await prompt("   Port (default 8765): ");
     const port = parseInt(portInput, 10) || 8765;
 
-    // tmux session name
-    console.log("\n4. tmux session name");
+    // tmux session name (only used with --terminal flag)
+    console.log("\n2. tmux session name (only for --terminal mode)");
     const sessionName = (await prompt("   Session (default 'claude-code'): ")) || "claude-code";
 
     // Build config
     const config = {
-      ngrokAuthToken: ngrokToken,
-      ngrokDomain: ngrokDomain || null,
       apiToken,
       port,
       tmuxSession: sessionName,
@@ -109,11 +92,19 @@ program
 
 /**
  * chroxy start — Launch the server
+ *
+ * Default: CLI headless mode (claude -p, no tmux/PTY needed)
+ * --terminal: Legacy PTY/tmux mode (requires node-pty + tmux)
  */
 program
   .command("start")
   .description("Start the Chroxy server")
   .option("-c, --config <path>", "Path to config file", CONFIG_FILE)
+  .option("-t, --terminal", "Use PTY/tmux mode instead of CLI headless mode")
+  .option("-r, --resume", "Resume an existing Claude Code session instead of starting fresh")
+  .option("--cwd <path>", "Working directory for Claude (CLI mode)")
+  .option("--model <model>", "Model to use (CLI mode)")
+  .option("--allowed-tools <tools>", "Comma-separated tools to auto-approve (CLI mode)")
   .action(async (options) => {
     // Load config
     if (!existsSync(options.config)) {
@@ -122,18 +113,28 @@ program
     }
 
     const config = JSON.parse(readFileSync(options.config, "utf-8"));
+    config.resume = !!options.resume;
 
     // Set environment variables for the server
-    process.env.NGROK_AUTHTOKEN = config.ngrokAuthToken;
-    process.env.NGROK_DOMAIN = config.ngrokDomain || "";
     process.env.API_TOKEN = config.apiToken;
     process.env.PORT = String(config.port);
     process.env.TMUX_SESSION = config.tmuxSession;
     process.env.SHELL_CMD = config.shell;
 
-    // Import and run the server
-    const { startServer } = await import("./server.js");
-    await startServer(config);
+    if (options.terminal) {
+      // Legacy PTY/tmux mode
+      const { startServer } = await import("./server.js");
+      await startServer(config);
+    } else {
+      // Default: CLI headless mode
+      if (options.cwd) config.cwd = options.cwd;
+      if (options.model) config.model = options.model;
+      if (options.allowedTools) {
+        config.allowedTools = options.allowedTools.split(",").map((t) => t.trim());
+      }
+      const { startCliServer } = await import("./server-cli.js");
+      await startCliServer(config);
+    }
   });
 
 /**
@@ -154,7 +155,7 @@ program
     console.log(`   Config file: ${CONFIG_FILE}`);
     console.log(`   Port: ${config.port}`);
     console.log(`   tmux session: ${config.tmuxSession}`);
-    console.log(`   ngrok domain: ${config.ngrokDomain || "(random)"}`);
+    console.log(`   Tunnel: Cloudflare (automatic)`);
     console.log(`   API token: ${config.apiToken.slice(0, 8)}...`);
     console.log("");
   });
