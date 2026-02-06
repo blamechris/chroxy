@@ -144,10 +144,11 @@ export class WsServer {
         // In CLI mode, immediately signal ready (no startup delay)
         if (this.cliSession) {
           this._send(ws, { type: "claude_ready" });
-          // Tell client which model is active
-          if (this.cliSession.model) {
-            this._send(ws, { type: "model_changed", model: this.cliSession.model });
-          }
+          // Tell client which model is active (may be null/default)
+          this._send(ws, {
+            type: "model_changed",
+            model: this.cliSession.model ?? null,
+          });
         }
 
         console.log(`[ws] Client ${client.id} authenticated`);
@@ -182,14 +183,26 @@ export class WsServer {
         this.cliSession.interrupt();
         break;
 
-      case "set_model":
-        if (msg.model) {
+      case "set_model": {
+        const ALLOWED_MODELS = [
+          "claude-sonnet-4-20250514",
+          "claude-haiku-235-20250421",
+          "claude-opus-4-20250514",
+          "sonnet", "haiku", "opus",
+        ];
+        if (
+          typeof msg.model === "string" &&
+          ALLOWED_MODELS.includes(msg.model)
+        ) {
           console.log(`[ws] Model change from ${client.id}: ${msg.model}`);
           this.cliSession.setModel(msg.model);
           // Broadcast model change to all authenticated clients
           this._broadcast({ type: "model_changed", model: msg.model });
+        } else {
+          console.warn(`[ws] Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`);
         }
         break;
+      }
 
       case "mode":
         if (msg.mode === "terminal" || msg.mode === "chat") {

@@ -294,7 +294,24 @@ export class CliSession extends EventEmitter {
 
   /** Change the model used for subsequent messages */
   setModel(model) {
-    this.model = model || null
+    // Reject model changes while a message is in-flight
+    if (this._isRunning) {
+      console.warn('[cli-session] Ignoring model change while message is in-flight')
+      return
+    }
+
+    const newModel = model || null
+    const changed = newModel !== this.model
+
+    this.model = newModel
+
+    // If the model changed, clear the session so the next message
+    // starts a fresh conversation with the new model
+    if (changed && this._sessionId) {
+      console.log('[cli-session] Model changed; clearing existing session')
+      this._sessionId = null
+    }
+
     console.log(`[cli-session] Model set to: ${this.model || 'default'}`)
   }
 

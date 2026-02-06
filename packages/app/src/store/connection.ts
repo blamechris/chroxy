@@ -352,16 +352,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
 
         case 'result':
-          if (msg.usage) {
-            set({
-              contextUsage: {
-                inputTokens: msg.usage.input_tokens || 0,
-                outputTokens: msg.usage.output_tokens || 0,
-                cacheCreation: msg.usage.cache_creation_input_tokens || 0,
-                cacheRead: msg.usage.cache_read_input_tokens || 0,
-              },
-            });
-          }
+          set({
+            contextUsage: msg.usage
+              ? {
+                  inputTokens: msg.usage.input_tokens || 0,
+                  outputTokens: msg.usage.output_tokens || 0,
+                  cacheCreation: msg.usage.cache_creation_input_tokens || 0,
+                  cacheRead: msg.usage.cache_read_input_tokens || 0,
+                }
+              : null,
+          });
           break;
 
         case 'model_changed':
