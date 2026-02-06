@@ -17,6 +17,7 @@ import { v4 as uuidv4 } from "uuid";
  *   { type: "resize",    cols: 120, rows: 40 }       — resize PTY (PTY mode only)
  *   { type: "mode",      mode: "terminal"|"chat" }   — switch view mode
  *   { type: "interrupt" }                             — interrupt current operation
+ *   { type: "set_model", model: "..." }              — change Claude model (CLI mode)
  *
  * Server -> Client:
  *   { type: "auth_ok" }                               — auth succeeded
@@ -31,6 +32,7 @@ import { v4 as uuidv4 } from "uuid";
  *   { type: "result",       ... }                     — query stats (CLI mode)
  *   { type: "status",       connected: true }         — connection status
  *   { type: "claude_ready" }                          — Claude Code ready for input
+ *   { type: "model_changed", model: "..." }          — active model updated (CLI mode)
  */
 export class WsServer {
   constructor({ port, apiToken, ptyManager, outputParser, cliSession }) {
@@ -139,9 +141,15 @@ export class WsServer {
           this._send(ws, { type: "claude_ready" });
         }
 
-        // In CLI mode, immediately signal ready (no startup delay)
+        // In CLI mode, gate on actual process readiness (may be respawning)
         if (this.cliSession) {
-          this._send(ws, { type: "claude_ready" });
+          if (this.cliSession.isReady) {
+            this._send(ws, { type: "claude_ready" });
+          }
+          this._send(ws, {
+            type: "model_changed",
+            model: this.cliSession.model ?? null,
+          });
         }
 
         console.log(`[ws] Client ${client.id} authenticated`);
@@ -175,6 +183,27 @@ export class WsServer {
         console.log(`[ws] Interrupt from ${client.id}`);
         this.cliSession.interrupt();
         break;
+
+      case "set_model": {
+        const ALLOWED_MODELS = [
+          "claude-sonnet-4-20250514",
+          "claude-haiku-235-20250421",
+          "claude-opus-4-20250514",
+          "sonnet", "haiku", "opus",
+        ];
+        if (
+          typeof msg.model === "string" &&
+          ALLOWED_MODELS.includes(msg.model)
+        ) {
+          console.log(`[ws] Model change from ${client.id}: ${msg.model}`);
+          this.cliSession.setModel(msg.model);
+          // Broadcast model change to all authenticated clients
+          this._broadcast({ type: "model_changed", model: msg.model });
+        } else {
+          console.warn(`[ws] Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`);
+        }
+        break;
+      }
 
       case "mode":
         if (msg.mode === "terminal" || msg.mode === "chat") {
@@ -216,6 +245,15 @@ export class WsServer {
 
   /** Wire up CLI session events to broadcast to clients */
   _setupCliForwarding() {
+    // Notify clients when Claude process is ready (initial start or respawn)
+    this.cliSession.on("ready", () => {
+      this._broadcast({ type: "claude_ready" });
+      this._broadcast({
+        type: "model_changed",
+        model: this.cliSession.model ?? null,
+      });
+    });
+
     // Buffer stream deltas to reduce WS message volume (50ms batch window).
     // This prevents flooding mobile clients over cellular/tunnel connections.
     const deltaBuffer = new Map(); // messageId -> accumulated text

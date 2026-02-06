@@ -28,6 +28,13 @@ interface SavedConnection {
   token: string;
 }
 
+interface ContextUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreation: number;
+  cacheRead: number;
+}
+
 interface InputSettings {
   chatEnterToSend: boolean;
   terminalEnterToSend: boolean;
@@ -53,6 +60,12 @@ interface ConnectionState {
   // Currently streaming message ID (CLI mode)
   streamingMessageId: string | null;
 
+  // Active model (CLI mode)
+  activeModel: string | null;
+
+  // Context window usage from last result
+  contextUsage: ContextUsage | null;
+
   // View mode
   viewMode: 'chat' | 'terminal';
 
@@ -77,6 +90,7 @@ interface ConnectionState {
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   sendInput: (input: string) => void;
   sendInterrupt: () => void;
+  setModel: (model: string) => void;
   resize: (cols: number, rows: number) => void;
 }
 
@@ -148,6 +162,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   serverMode: null,
   claudeReady: false,
   streamingMessageId: null,
+  activeModel: null,
+  contextUsage: null,
   inputSettings: {
     chatEnterToSend: true,
     terminalEnterToSend: false,
@@ -336,7 +352,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
 
         case 'result':
-          // Query complete — could display cost info in future
+          set({
+            contextUsage: msg.usage
+              ? {
+                  inputTokens: msg.usage.input_tokens || 0,
+                  outputTokens: msg.usage.output_tokens || 0,
+                  cacheCreation: msg.usage.cache_creation_input_tokens || 0,
+                  cacheRead: msg.usage.cache_read_input_tokens || 0,
+                }
+              : null,
+          });
+          break;
+
+        case 'model_changed':
+          set({ activeModel: (typeof msg.model === 'string' && msg.model.trim()) ? msg.model.trim() : null });
           break;
 
         case 'raw':
@@ -413,6 +442,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverMode: null,
       claudeReady: false,
       streamingMessageId: null,
+      activeModel: null,
+      contextUsage: null,
       messages: [],
       terminalBuffer: '',
     });
@@ -464,6 +495,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'interrupt' }));
+    }
+  },
+
+  setModel: (model: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'set_model', model }));
     }
   },
 
