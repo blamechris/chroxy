@@ -141,10 +141,11 @@ export class WsServer {
           this._send(ws, { type: "claude_ready" });
         }
 
-        // In CLI mode, immediately signal ready (no startup delay)
+        // In CLI mode, gate on actual process readiness (may be respawning)
         if (this.cliSession) {
-          this._send(ws, { type: "claude_ready" });
-          // Tell client which model is active (may be null/default)
+          if (this.cliSession.isReady) {
+            this._send(ws, { type: "claude_ready" });
+          }
           this._send(ws, {
             type: "model_changed",
             model: this.cliSession.model ?? null,
@@ -244,6 +245,15 @@ export class WsServer {
 
   /** Wire up CLI session events to broadcast to clients */
   _setupCliForwarding() {
+    // Notify clients when Claude process is ready (initial start or respawn)
+    this.cliSession.on("ready", () => {
+      this._broadcast({ type: "claude_ready" });
+      this._broadcast({
+        type: "model_changed",
+        model: this.cliSession.model ?? null,
+      });
+    });
+
     // Buffer stream deltas to reduce WS message volume (50ms batch window).
     // This prevents flooding mobile clients over cellular/tunnel connections.
     const deltaBuffer = new Map(); // messageId -> accumulated text

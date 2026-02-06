@@ -3,10 +3,12 @@ import { EventEmitter } from 'events'
 import { createInterface } from 'readline'
 
 /**
- * Manages a Claude Code CLI session using headless mode (`claude -p`).
+ * Manages a persistent Claude Code CLI session using headless mode.
  *
- * Each user message spawns a new `claude -p` process with `--output-format stream-json`.
- * Subsequent messages reuse the session via `--resume <sessionId>`.
+ * A single `claude -p --input-format stream-json --output-format stream-json`
+ * process stays alive for the lifetime of the session. Messages are sent as
+ * NDJSON on stdin; "message complete" is signaled by a `result` event on
+ * stdout (not process exit).
  *
  * Events emitted:
  *   ready        { sessionId, model, tools }
@@ -26,45 +28,47 @@ export class CliSession extends EventEmitter {
     this.model = model || null
     this._sessionId = null
     this._child = null
-    this._isRunning = false
     this._destroying = false
     this._messageCounter = 0
     this._rl = null
     this._stderrRL = null
+
+    // Persistent-process state
+    this._isBusy = false
+    this._processReady = false
+    this._currentMessageId = null
+    this._currentCtx = null
+    this._pendingMessage = null
+    this._respawnCount = 0
+    this._respawnTimer = null
+    this._resultTimeout = null
   }
 
   get sessionId() {
     return this._sessionId
   }
 
+  /** Backward compat: returns true when processing a message */
   get isRunning() {
-    return this._isRunning
+    return this._isBusy
+  }
+
+  /** True when process is alive and ready to accept a message */
+  get isReady() {
+    return this._processReady && !this._isBusy
   }
 
   /**
-   * Send a message to Claude. Spawns a `claude -p` process, streams events,
-   * and resolves when the process exits.
+   * Start the persistent Claude process. Call once after construction.
    */
-  sendMessage(prompt) {
-    if (this._isRunning) {
-      this.emit('error', { message: 'Already processing a message' })
-      return
-    }
-
-    this._isRunning = true
-    this._messageCounter++
-    const messageId = `msg-${this._messageCounter}`
-
+  start() {
     const args = [
-      '-p', prompt,
+      '-p',
+      '--input-format', 'stream-json',
       '--output-format', 'stream-json',
       '--verbose',
       '--include-partial-messages',
     ]
-
-    if (this._sessionId) {
-      args.push('--resume', this._sessionId)
-    }
 
     if (this.model) {
       args.push('--model', this.model)
@@ -74,39 +78,35 @@ export class CliSession extends EventEmitter {
       args.push('--allowedTools', this.allowedTools.join(','))
     }
 
-    const resumeId = this._sessionId
-    console.log(`[cli-session] Spawning: claude -p "${prompt.slice(0, 60)}"${resumeId ? ` --resume ${resumeId}` : ''}`)
-
-    this._spawnProcess(args, prompt, messageId, resumeId)
+    console.log(`[cli-session] Starting persistent process (model: ${this.model || 'default'})`)
+    this._spawnPersistentProcess(args)
   }
 
-  /** Spawn the claude process and wire up event handlers */
-  _spawnProcess(args, prompt, messageId, resumeId) {
-    // Clean up previous readline interfaces (e.g. on resume-failed retry)
+  /**
+   * Spawn the persistent claude process and wire up event handlers.
+   */
+  _spawnPersistentProcess(args) {
     this._cleanupReadlines()
+    this._processReady = false
 
     const child = spawn('claude', args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        // Suppress interactive prompts and enable headless output behavior
         CI: '1',
         CLAUDE_HEADLESS: '1',
-        // Create file snapshots at each tool use for checkpoint/rewind support
         CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
       },
     })
 
     this._child = child
 
-    // Close stdin — claude -p takes prompt via args, not stdin
-    child.stdin.end()
+    // Do NOT close stdin — we write messages to it
 
     // Read stdout line by line — each line is a JSON object
     const rl = createInterface({ input: child.stdout })
     this._rl = rl
-    const ctx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null }
 
     rl.on('line', (line) => {
       if (!line.trim()) return
@@ -118,10 +118,10 @@ export class CliSession extends EventEmitter {
         return
       }
 
-      this._handleEvent(data, messageId, ctx)
+      this._handleEvent(data)
     })
 
-    // Log stderr for debugging (Claude CLI may print warnings there)
+    // Log stderr for debugging
     const stderrRL = createInterface({ input: child.stderr })
     this._stderrRL = stderrRL
     stderrRL.on('line', (line) => {
@@ -132,52 +132,128 @@ export class CliSession extends EventEmitter {
 
     child.on('error', (err) => {
       this._cleanupReadlines()
-      this._isRunning = false
+      this._processReady = false
       this._child = null
       this.emit('error', { message: `Failed to spawn claude: ${err.message}` })
+      this._scheduleRespawn()
     })
 
     child.on('close', (code) => {
       this._cleanupReadlines()
-      this._isRunning = false
+      this._processReady = false
       this._child = null
 
-      // If destroying, skip all post-close logic
       if (this._destroying) return
 
-      // Safety net: if stream was still open (abnormal termination before
-      // 'result' event), close it. Normally stream_end is emitted from
-      // the 'result' handler.
-      if (ctx.hasStreamStarted) {
-        this.emit('stream_end', { messageId })
+      // Safety net: if we were mid-message, close the stream
+      if (this._isBusy && this._currentMessageId) {
+        if (this._currentCtx?.hasStreamStarted) {
+          this.emit('stream_end', { messageId: this._currentMessageId })
+        }
+        this._clearMessageState()
       }
 
-      // If resume failed (exit code 1), retry without --resume
-      if (code === 1 && resumeId) {
-        console.log(`[cli-session] Resume failed for session ${resumeId}, starting fresh`)
-        this._sessionId = null
-        this._isRunning = true
-        const freshArgs = args.filter((a, i) => {
-          if (a === '--resume') return false
-          if (i > 0 && args[i - 1] === '--resume') return false
-          return true
-        })
-        this._spawnProcess(freshArgs, prompt, messageId, null)
-        return
-      }
-
-      if (code !== 0 && code !== null) {
-        console.log(`[cli-session] Process exited with code ${code}`)
-      }
+      console.log(`[cli-session] Process exited (code ${code}), scheduling respawn`)
+      this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
+      this._scheduleRespawn()
     })
+
+    // stdin is writable immediately — process is ready for NDJSON messages.
+    // system.init arrives with the first response, not at startup.
+    this._processReady = true
+    console.log('[cli-session] Process started, ready for messages')
+    this.emit('ready', { sessionId: null, model: this.model, tools: [] })
+
+    // Dequeue any message that arrived during respawn
+    if (this._pendingMessage) {
+      const pending = this._pendingMessage
+      this._pendingMessage = null
+      console.log('[cli-session] Dequeuing pending message')
+      this.sendMessage(pending)
+    }
   }
 
-  /** Handle a single parsed JSON event from Claude CLI stdout */
-  _handleEvent(data, messageId, ctx) {
+  /**
+   * Schedule a respawn with exponential backoff.
+   * Backoff: 1s, 2s, 4s, 8s, 15s (max). Cap at 5 retries then stop.
+   */
+  _scheduleRespawn() {
+    if (this._destroying) return
+
+    this._respawnCount++
+    if (this._respawnCount > 5) {
+      console.error('[cli-session] Max respawn attempts reached (5), giving up')
+      this.emit('error', { message: 'Claude process failed to stay alive after 5 attempts' })
+      return
+    }
+
+    const delays = [1000, 2000, 4000, 8000, 15000]
+    const delay = delays[Math.min(this._respawnCount - 1, delays.length - 1)]
+    console.log(`[cli-session] Respawning in ${delay}ms (attempt ${this._respawnCount}/5)`)
+
+    this._respawnTimer = setTimeout(() => {
+      this._respawnTimer = null
+      if (!this._destroying) {
+        this.start()
+      }
+    }, delay)
+  }
+
+  /**
+   * Send a message to Claude via stdin NDJSON.
+   */
+  sendMessage(prompt) {
+    if (this._isBusy) {
+      this.emit('error', { message: 'Already processing a message' })
+      return
+    }
+
+    if (!this._processReady) {
+      console.log('[cli-session] Process not ready, queuing message')
+      this._pendingMessage = prompt
+      return
+    }
+
+    this._isBusy = true
+    this._messageCounter++
+    this._currentMessageId = `msg-${this._messageCounter}`
+    this._currentCtx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null }
+
+    const ndjson = JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: prompt }],
+      },
+    })
+
+    console.log(`[cli-session] Sending message ${this._currentMessageId}: "${prompt.slice(0, 60)}"`)
+    this._child.stdin.write(ndjson + '\n')
+
+    // Safety timeout: force-clear if result never arrives (5 min)
+    this._resultTimeout = setTimeout(() => {
+      if (this._isBusy) {
+        console.warn('[cli-session] Result timeout (5 min) — force-clearing busy state')
+        const messageId = this._currentMessageId
+        if (this._currentCtx?.hasStreamStarted) {
+          this.emit('stream_end', { messageId })
+        }
+        this._clearMessageState()
+        this.emit('error', { message: 'Response timed out after 5 minutes' })
+      }
+    }, 300_000)
+  }
+
+  /**
+   * Handle a single parsed JSON event from Claude CLI stdout.
+   * Uses instance state (_currentMessageId, _currentCtx) instead of params.
+   */
+  _handleEvent(data) {
     switch (data.type) {
       case 'system': {
         if (data.subtype === 'init') {
           this._sessionId = data.session_id
+          this._respawnCount = 0
           console.log(`[cli-session] Session initialized: ${data.session_id}`)
           this.emit('ready', {
             sessionId: data.session_id,
@@ -192,13 +268,16 @@ export class CliSession extends EventEmitter {
         const event = data.event
         if (!event) break
 
+        const messageId = this._currentMessageId
+        const ctx = this._currentCtx
+        if (!messageId || !ctx) break
+
         switch (event.type) {
           case 'content_block_start': {
             const blockType = event.content_block?.type
             ctx.currentContentBlockType = blockType
 
             if (blockType === 'text') {
-              // Only emit stream_start once per message (handles multi-block responses)
               if (!ctx.hasStreamStarted) {
                 ctx.hasStreamStarted = true
                 this.emit('stream_start', { messageId })
@@ -229,9 +308,7 @@ export class CliSession extends EventEmitter {
           }
 
           case 'content_block_stop': {
-            // Don't emit stream_end here — wait for 'result' event or process close.
-            // This prevents multiple stream_end emissions for multi-block responses.
-            ctx.currentContentBlockType = null
+            if (ctx) ctx.currentContentBlockType = null
             break
           }
         }
@@ -239,11 +316,11 @@ export class CliSession extends EventEmitter {
       }
 
       case 'assistant': {
-        // Complete assistant message — only emit for content not already streamed
+        const ctx = this._currentCtx
         const content = data.message?.content
         if (Array.isArray(content)) {
           for (const block of content) {
-            if (block.type === 'text' && !ctx.didStreamText) {
+            if (block.type === 'text' && (!ctx || !ctx.didStreamText)) {
               this.emit('message', {
                 type: 'response',
                 content: block.text,
@@ -266,19 +343,39 @@ export class CliSession extends EventEmitter {
         if (data.session_id) {
           this._sessionId = data.session_id
         }
+
+        const messageId = this._currentMessageId
+        const ctx = this._currentCtx
+
         // Close any open stream before emitting result
-        if (ctx.hasStreamStarted) {
+        if (ctx?.hasStreamStarted) {
           this.emit('stream_end', { messageId })
-          ctx.hasStreamStarted = false
         }
+
         this.emit('result', {
           sessionId: data.session_id,
           cost: data.total_cost_usd,
           duration: data.duration_ms,
           usage: data.usage,
         })
+
+        // Message complete — ready for next message
+        this._clearMessageState()
         break
       }
+    }
+  }
+
+  /**
+   * Clear per-message state, marking us as ready for the next message.
+   */
+  _clearMessageState() {
+    this._isBusy = false
+    this._currentMessageId = null
+    this._currentCtx = null
+    if (this._resultTimeout) {
+      clearTimeout(this._resultTimeout)
+      this._resultTimeout = null
     }
   }
 
@@ -294,46 +391,111 @@ export class CliSession extends EventEmitter {
     }
   }
 
-  /** Change the model used for subsequent messages */
+  /**
+   * Change the model used for subsequent messages.
+   * Kills the current process and respawns with the new model (new session).
+   */
   setModel(model) {
-    // Reject model changes while a message is in-flight
-    if (this._isRunning) {
+    if (this._isBusy) {
       console.warn('[cli-session] Ignoring model change while message is in-flight')
       return
     }
 
     const newModel = model || null
     const changed = newModel !== this.model
-
     this.model = newModel
 
-    // If the model changed, clear the session so the next message
-    // starts a fresh conversation with the new model
-    if (changed && this._sessionId) {
-      console.log('[cli-session] Model changed; clearing existing session')
-      this._sessionId = null
+    if (!changed) {
+      console.log(`[cli-session] Model unchanged: ${this.model || 'default'}`)
+      return
     }
 
-    console.log(`[cli-session] Model set to: ${this.model || 'default'}`)
+    console.log(`[cli-session] Model changed to ${this.model || 'default'}, restarting process`)
+
+    // Suppress auto-respawn while we kill the old process
+    this._destroying = true
+    this._processReady = false
+    this._sessionId = null
+
+    if (this._respawnTimer) {
+      clearTimeout(this._respawnTimer)
+      this._respawnTimer = null
+    }
+
+    this._cleanupReadlines()
+
+    if (this._child) {
+      // Start the new process only after the old one is fully dead.
+      // The close handler from _spawnPersistentProcess sees _destroying=true
+      // and returns early. Our handler then starts the new process.
+      const oldChild = this._child
+      this._child = null
+      oldChild.on('close', () => {
+        this._destroying = false
+        this._respawnCount = 0
+        this.start()
+      })
+      oldChild.kill('SIGTERM')
+    } else {
+      this._destroying = false
+      this._respawnCount = 0
+      this.start()
+    }
   }
 
   /** Interrupt the current message (send SIGINT to child process) */
   interrupt() {
-    if (this._child) {
-      console.log('[cli-session] Sending SIGINT to claude process')
-      this._child.kill('SIGINT')
-    }
+    if (!this._child) return
+
+    console.log('[cli-session] Sending SIGINT to claude process')
+    this._child.kill('SIGINT')
+
+    // Safety: if still busy after 5s, force-clear state.
+    // Claude should either emit a result (process survives) or die (close handler respawns).
+    setTimeout(() => {
+      if (this._isBusy) {
+        console.warn('[cli-session] Interrupt safety timeout — force-clearing busy state')
+        const messageId = this._currentMessageId
+        if (this._currentCtx?.hasStreamStarted) {
+          this.emit('stream_end', { messageId })
+        }
+        this._clearMessageState()
+      }
+    }, 5000)
   }
 
   /** Clean up resources */
   destroy() {
     this._destroying = true
+
+    if (this._respawnTimer) {
+      clearTimeout(this._respawnTimer)
+      this._respawnTimer = null
+    }
+
+    if (this._resultTimeout) {
+      clearTimeout(this._resultTimeout)
+      this._resultTimeout = null
+    }
+
     this._cleanupReadlines()
+
     if (this._child) {
-      this._child.kill('SIGTERM')
+      // Close stdin for clean exit
+      try { this._child.stdin.end() } catch {}
+
+      // Force-kill after 3s if still alive
+      const child = this._child
+      const forceKillTimer = setTimeout(() => {
+        try { child.kill('SIGKILL') } catch {}
+      }, 3000)
+
+      child.on('close', () => clearTimeout(forceKillTimer))
       this._child = null
     }
-    this._isRunning = false
+
+    this._isBusy = false
+    this._processReady = false
     this.removeAllListeners()
   }
 }

@@ -24,12 +24,13 @@ export async function startCliServer(config) {
   console.log('╚════════════════════════════════════════╝')
   console.log('')
 
-  // 1. Create the CLI session manager
+  // 1. Create and start the CLI session (persistent process)
   const cliSession = new CliSession({
     cwd: config.cwd || process.cwd(),
     allowedTools: config.allowedTools || [],
     model: config.model || null,
   })
+  cliSession.start()
 
   // Log events for debugging
   cliSession.on('ready', ({ sessionId, model }) => {
