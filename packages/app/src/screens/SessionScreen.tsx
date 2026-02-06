@@ -392,17 +392,28 @@ function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: 
   onPress: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const longPressedRef = useRef(false);
   const content = message.content?.trim();
 
   // Hide empty tool messages
   if (!content) return null;
 
   const handlePress = () => {
+    // Suppress onPress that fires after a long-press gesture
+    if (longPressedRef.current) {
+      longPressedRef.current = false;
+      return;
+    }
     if (isSelecting) {
       onPress();
     } else {
       setExpanded((prev) => !prev);
     }
+  };
+
+  const handleLongPress = () => {
+    longPressedRef.current = true;
+    onLongPress();
   };
 
   const preview = content.length > 60 ? content.slice(0, 60) + '...' : content;
@@ -411,7 +422,7 @@ function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: 
     <TouchableOpacity
       activeOpacity={0.7}
       onPress={handlePress}
-      onLongPress={onLongPress}
+      onLongPress={handleLongPress}
       style={[styles.toolBubble, isSelected && styles.selectedBubble]}
     >
       <View style={styles.toolHeader}>
@@ -465,7 +476,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
     <TouchableOpacity
       activeOpacity={0.7}
       onPress={isSelecting ? onPress : undefined}
-      onLongPress={onLongPress}
+      onLongPress={isSelecting ? undefined : onLongPress}
       style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isSelected && styles.selectedBubble]}
     >
       <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : styles.senderLabelClaude}>
