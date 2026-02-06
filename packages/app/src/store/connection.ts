@@ -139,9 +139,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     set({ socket: null, isConnected: false });
 
-    const socket = new WebSocket(url, undefined, {
-      headers: { 'ngrok-skip-browser-warning': '1' },
-    } as any);
+    const socket = new WebSocket(url);
 
     socket.onopen = () => {
       socket.send(JSON.stringify({ type: 'auth', token }));

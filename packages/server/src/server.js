@@ -11,15 +11,10 @@ import qrcode from "qrcode-terminal";
 export async function startServer(config) {
   const PORT = config.port || parseInt(process.env.PORT || "8765", 10);
   const API_TOKEN = config.apiToken || process.env.API_TOKEN;
-  const NGROK_AUTHTOKEN = config.ngrokAuthToken || process.env.NGROK_AUTHTOKEN;
 
   // Validate required config
   if (!API_TOKEN) {
     console.error("[!] No API token configured. Run 'npx chroxy init'");
-    process.exit(1);
-  }
-  if (!NGROK_AUTHTOKEN) {
-    console.error("[!] No ngrok token configured. Run 'npx chroxy init'");
     process.exit(1);
   }
 
@@ -73,12 +68,8 @@ export async function startServer(config) {
   });
   wsServer.start();
 
-  // 4. Start the ngrok tunnel
-  const tunnel = new TunnelManager({
-    port: PORT,
-    authToken: NGROK_AUTHTOKEN,
-    domain: config.ngrokDomain || process.env.NGROK_DOMAIN,
-  });
+  // 4. Start the Cloudflare tunnel
+  const tunnel = new TunnelManager({ port: PORT });
 
   const { wsUrl } = await tunnel.start();
 

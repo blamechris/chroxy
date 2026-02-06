@@ -43,7 +43,10 @@ Run a lightweight daemon on your dev machine. Connect from anywhere via your pho
   brew install tmux
   ```
 
-- **ngrok account** — Free tier works. Get your auth token at [ngrok.com](https://ngrok.com).
+- **cloudflared** — Cloudflare's tunnel client. No account needed:
+  ```bash
+  brew install cloudflared
+  ```
 
 ## Quick Start
 
