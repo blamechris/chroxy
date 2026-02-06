@@ -68,8 +68,8 @@ program
     const portInput = await prompt("   Port (default 8765): ");
     const port = parseInt(portInput, 10) || 8765;
 
-    // tmux session name
-    console.log("\n2. tmux session name");
+    // tmux session name (only used with --terminal flag)
+    console.log("\n2. tmux session name (only for --terminal mode)");
     const sessionName = (await prompt("   Session (default 'claude-code'): ")) || "claude-code";
 
     // Build config

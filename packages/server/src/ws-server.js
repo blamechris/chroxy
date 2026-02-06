@@ -48,12 +48,9 @@ export class WsServer {
   start() {
     // Create HTTP server that handles health checks and WebSocket upgrades
     this.httpServer = createServer((req, res) => {
-      // Health check endpoint — Cloudflare and the app can verify connectivity
-      if (req.method === "GET") {
-        res.writeHead(200, {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*",
-        });
+      // Health check endpoint — Cloudflare and the app verify connectivity via GET /
+      if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: "ok", mode: this.serverMode }));
         return;
       }
@@ -219,16 +216,40 @@ export class WsServer {
 
   /** Wire up CLI session events to broadcast to clients */
   _setupCliForwarding() {
+    // Buffer stream deltas to reduce WS message volume (50ms batch window).
+    // This prevents flooding mobile clients over cellular/tunnel connections.
+    const deltaBuffer = new Map(); // messageId -> accumulated text
+    let deltaFlushTimer = null;
+    const flushDeltas = () => {
+      deltaFlushTimer = null;
+      for (const [messageId, delta] of deltaBuffer) {
+        this._broadcast({ type: "stream_delta", messageId, delta });
+      }
+      deltaBuffer.clear();
+    };
+
     this.cliSession.on("stream_start", ({ messageId }) => {
       console.log(`[ws] Broadcasting stream_start: ${messageId}`);
       this._broadcast({ type: "stream_start", messageId });
     });
 
     this.cliSession.on("stream_delta", ({ messageId, delta }) => {
-      this._broadcast({ type: "stream_delta", messageId, delta });
+      const existing = deltaBuffer.get(messageId) || "";
+      deltaBuffer.set(messageId, existing + delta);
+      if (!deltaFlushTimer) {
+        deltaFlushTimer = setTimeout(flushDeltas, 50);
+      }
     });
 
     this.cliSession.on("stream_end", ({ messageId }) => {
+      // Flush remaining deltas before sending stream_end
+      if (deltaBuffer.size > 0) {
+        if (deltaFlushTimer) {
+          clearTimeout(deltaFlushTimer);
+          deltaFlushTimer = null;
+        }
+        flushDeltas();
+      }
       console.log(`[ws] Broadcasting stream_end: ${messageId}`);
       this._broadcast({ type: "stream_end", messageId });
     });

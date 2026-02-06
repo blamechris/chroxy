@@ -61,14 +61,14 @@ export function SessionScreen() {
   const isCliMode = serverMode === 'cli';
 
   const handleSend = () => {
-    if (!inputText.trim()) return;
+    if (!inputText.trim() || streamingMessageId) return;
     const text = inputText.trim();
     setInputText('');
 
     if (viewMode === 'chat') {
       // Show user message instantly in chat
       addMessage({
-        id: `${Date.now()}-${Math.random()}`,
+        id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         type: 'user_input',
         content: text,
         timestamp: Date.now(),
@@ -109,10 +109,13 @@ export function SessionScreen() {
     }
   };
 
-  // Handle tapping a prompt option (sends the value to PTY)
+  // Handle tapping a prompt option
   const handleSelectOption = (value: string) => {
     sendInput(value);
-    setTimeout(() => sendInput('\r'), 50);
+    // In PTY mode, send Enter separately — the TUI needs text and CR as separate writes
+    if (!isCliMode) {
+      setTimeout(() => sendInput('\r'), 50);
+    }
   };
 
   // Check if Enter key should send based on current mode and settings
@@ -202,7 +205,7 @@ export function SessionScreen() {
             placeholderTextColor="#666"
             value={inputText}
             onChangeText={setInputText}
-            onSubmitEditing={enterToSend ? handleSend : undefined}
+            onSubmitEditing={enterToSend && !streamingMessageId ? handleSend : undefined}
             blurOnSubmit={false}
             autoCapitalize="none"
             autoCorrect={false}

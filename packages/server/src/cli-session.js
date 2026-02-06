@@ -27,7 +27,10 @@ export class CliSession extends EventEmitter {
     this._sessionId = null
     this._child = null
     this._isRunning = false
+    this._destroying = false
     this._messageCounter = 0
+    this._rl = null
+    this._stderrRL = null
   }
 
   get sessionId() {
@@ -79,6 +82,9 @@ export class CliSession extends EventEmitter {
 
   /** Spawn the claude process and wire up event handlers */
   _spawnProcess(args, prompt, messageId, resumeId) {
+    // Clean up previous readline interfaces (e.g. on resume-failed retry)
+    this._cleanupReadlines()
+
     const child = spawn('claude', args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -92,9 +98,8 @@ export class CliSession extends EventEmitter {
 
     // Read stdout line by line — each line is a JSON object
     const rl = createInterface({ input: child.stdout })
-    let hasStreamStarted = false
-    let didStreamText = false
-    let currentContentBlockType = null
+    this._rl = rl
+    const ctx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null }
 
     rl.on('line', (line) => {
       if (!line.trim()) return
@@ -103,22 +108,15 @@ export class CliSession extends EventEmitter {
       try {
         data = JSON.parse(line)
       } catch {
-        // Not JSON — could be stderr leak or debug output
         return
       }
 
-      this._handleEvent(data, messageId, {
-        get hasStreamStarted() { return hasStreamStarted },
-        set hasStreamStarted(v) { hasStreamStarted = v },
-        get didStreamText() { return didStreamText },
-        set didStreamText(v) { didStreamText = v },
-        get currentContentBlockType() { return currentContentBlockType },
-        set currentContentBlockType(v) { currentContentBlockType = v },
-      })
+      this._handleEvent(data, messageId, ctx)
     })
 
     // Log stderr for debugging (Claude CLI may print warnings there)
     const stderrRL = createInterface({ input: child.stderr })
+    this._stderrRL = stderrRL
     stderrRL.on('line', (line) => {
       if (line.trim()) {
         console.log(`[cli-session] stderr: ${line}`)
@@ -126,17 +124,24 @@ export class CliSession extends EventEmitter {
     })
 
     child.on('error', (err) => {
+      this._cleanupReadlines()
       this._isRunning = false
       this._child = null
       this.emit('error', { message: `Failed to spawn claude: ${err.message}` })
     })
 
     child.on('close', (code) => {
+      this._cleanupReadlines()
       this._isRunning = false
       this._child = null
 
-      // If stream was open, close it
-      if (hasStreamStarted) {
+      // If destroying, skip all post-close logic
+      if (this._destroying) return
+
+      // Safety net: if stream was still open (abnormal termination before
+      // 'result' event), close it. Normally stream_end is emitted from
+      // the 'result' handler.
+      if (ctx.hasStreamStarted) {
         this.emit('stream_end', { messageId })
       }
 
@@ -186,6 +191,7 @@ export class CliSession extends EventEmitter {
             ctx.currentContentBlockType = blockType
 
             if (blockType === 'text') {
+              // Only emit stream_start once per message (handles multi-block responses)
               if (!ctx.hasStreamStarted) {
                 ctx.hasStreamStarted = true
                 this.emit('stream_start', { messageId })
@@ -211,17 +217,13 @@ export class CliSession extends EventEmitter {
               }
               ctx.didStreamText = true
               this.emit('stream_delta', { messageId, delta: delta.text })
-            } else if (delta.type === 'input_json_delta' && ctx.currentContentBlockType === 'tool_use') {
-              // Tool input streaming — we could emit partial tool input if needed
             }
             break
           }
 
           case 'content_block_stop': {
-            if (ctx.currentContentBlockType === 'text' && ctx.hasStreamStarted) {
-              this.emit('stream_end', { messageId })
-              ctx.hasStreamStarted = false
-            }
+            // Don't emit stream_end here — wait for 'result' event or process close.
+            // This prevents multiple stream_end emissions for multi-block responses.
             ctx.currentContentBlockType = null
             break
           }
@@ -235,7 +237,6 @@ export class CliSession extends EventEmitter {
         if (Array.isArray(content)) {
           for (const block of content) {
             if (block.type === 'text' && !ctx.didStreamText) {
-              // Text wasn't streamed — emit as a complete message
               this.emit('message', {
                 type: 'response',
                 content: block.text,
@@ -258,6 +259,11 @@ export class CliSession extends EventEmitter {
         if (data.session_id) {
           this._sessionId = data.session_id
         }
+        // Close any open stream before emitting result
+        if (ctx.hasStreamStarted) {
+          this.emit('stream_end', { messageId })
+          ctx.hasStreamStarted = false
+        }
         this.emit('result', {
           sessionId: data.session_id,
           cost: data.total_cost_usd,
@@ -266,6 +272,18 @@ export class CliSession extends EventEmitter {
         })
         break
       }
+    }
+  }
+
+  /** Clean up readline interfaces */
+  _cleanupReadlines() {
+    if (this._rl) {
+      this._rl.close()
+      this._rl = null
+    }
+    if (this._stderrRL) {
+      this._stderrRL.close()
+      this._stderrRL = null
     }
   }
 
@@ -279,6 +297,8 @@ export class CliSession extends EventEmitter {
 
   /** Clean up resources */
   destroy() {
+    this._destroying = true
+    this._cleanupReadlines()
     if (this._child) {
       this._child.kill('SIGTERM')
       this._child = null

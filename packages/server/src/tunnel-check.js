@@ -4,6 +4,7 @@
  */
 export async function waitForTunnel(httpUrl, { maxAttempts = 10, interval = 2000 } = {}) {
   console.log('[tunnel] Verifying tunnel is routable...')
+  const startTime = Date.now()
 
   for (let i = 0; i < maxAttempts; i++) {
     try {
@@ -13,7 +14,7 @@ export async function waitForTunnel(httpUrl, { maxAttempts = 10, interval = 2000
       clearTimeout(timeout)
 
       if (res.ok) {
-        console.log(`[tunnel] Tunnel verified (took ${i * interval / 1000}s)`)
+        console.log(`[tunnel] Tunnel verified (took ${((Date.now() - startTime) / 1000).toFixed(1)}s)`)
         return
       }
     } catch {

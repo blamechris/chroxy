@@ -111,8 +111,33 @@ async function clearConnection() {
 
 // Monotonically increasing counter to cancel stale retry chains
 let connectionAttemptId = 0;
-// Flag to distinguish user-initiated disconnect from unexpected close
-let userDisconnected = false;
+// Tracks which attempt was user-disconnected (replaces boolean flag to avoid
+// stale-socket race: disconnect → reconnect → old socket onclose fires)
+let disconnectedAttemptId = -1;
+
+// Monotonic message ID counter (avoids Math.random() collisions)
+let messageIdCounter = 0;
+function nextMessageId(prefix = 'msg'): string {
+  return `${prefix}-${++messageIdCounter}-${Date.now()}`;
+}
+
+// Delta batching: accumulate stream deltas and flush to state periodically
+// to reduce re-renders (dozens of deltas/sec → one state update per 100ms)
+const pendingDeltas = new Map<string, string>();
+let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushPendingDeltas() {
+  deltaFlushTimer = null;
+  if (pendingDeltas.size === 0) return;
+  const updates = new Map(pendingDeltas);
+  pendingDeltas.clear();
+  useConnectionStore.setState((state) => ({
+    messages: state.messages.map((m) => {
+      const delta = updates.get(m.id);
+      return delta ? { ...m, content: m.content + delta } : m;
+    }),
+  }));
+}
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   isConnected: false,
@@ -152,7 +177,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // New top-level connect call (not a retry) — bump attempt ID to cancel any pending retries
     if (_retryCount === 0) {
       connectionAttemptId++;
-      userDisconnected = false;
     }
     const myAttemptId = connectionAttemptId;
 
@@ -241,6 +265,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'server_mode':
           set({ serverMode: msg.mode });
+          // Force chat view in CLI mode (no terminal available)
+          if (msg.mode === 'cli' && get().viewMode === 'terminal') {
+            set({ viewMode: 'chat' });
+          }
           break;
 
         case 'message': {
@@ -248,7 +276,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // Skip server-echoed user_input — we already show it instantly client-side
           if (msgType === 'user_input') break;
           get().addMessage({
-            id: `${msg.timestamp}-${Math.random()}`,
+            id: nextMessageId(msgType),
             type: msgType,
             content: msg.content,
             tool: msg.tool,
@@ -259,36 +287,47 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }
 
         case 'stream_start': {
-          console.log('[ws] stream_start:', msg.messageId);
           const streamId = msg.messageId;
-          set((state) => ({
-            streamingMessageId: streamId,
-            messages: [
-              ...state.messages.filter((m) => m.id !== 'thinking'),
-              { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
-            ],
-          }));
+          set((state) => {
+            // If message with this streamId already exists (multi-block response),
+            // just update streamingMessageId without creating a duplicate
+            if (state.messages.some((m) => m.id === streamId)) {
+              return { streamingMessageId: streamId };
+            }
+            return {
+              streamingMessageId: streamId,
+              messages: [
+                ...state.messages.filter((m) => m.id !== 'thinking'),
+                { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
+              ],
+            };
+          });
           break;
         }
 
         case 'stream_delta': {
+          // Batch deltas — accumulate and flush to state periodically
           const deltaId = msg.messageId;
-          set((state) => ({
-            messages: state.messages.map((m) =>
-              m.id === deltaId ? { ...m, content: m.content + msg.delta } : m,
-            ),
-          }));
+          const existing = pendingDeltas.get(deltaId) || '';
+          pendingDeltas.set(deltaId, existing + msg.delta);
+          if (!deltaFlushTimer) {
+            deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
+          }
           break;
         }
 
         case 'stream_end':
-          console.log('[ws] stream_end:', msg.messageId);
+          // Flush any buffered deltas immediately before clearing streaming state
+          if (deltaFlushTimer) {
+            clearTimeout(deltaFlushTimer);
+          }
+          flushPendingDeltas();
           set({ streamingMessageId: null });
           break;
 
         case 'tool_start':
           get().addMessage({
-            id: `tool-${msg.messageId}-${Date.now()}`,
+            id: nextMessageId('tool'),
             type: 'tool_use',
             content: msg.input ? JSON.stringify(msg.input) : '',
             tool: msg.tool,
@@ -316,29 +355,31 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     };
 
     socket.onclose = () => {
+      // Stale socket from a previous connection attempt — ignore
+      if (myAttemptId !== connectionAttemptId) return;
+
       const wasConnected = get().isConnected;
       set({ isConnected: false, socket: null });
 
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
-      if (wasConnected && !userDisconnected) {
+      if (wasConnected && disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] Connection lost, auto-reconnecting...');
         set({ isReconnecting: true });
         setTimeout(() => {
-          if (userDisconnected) return;
+          if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
         }, 1500);
       }
     };
 
     socket.onerror = () => {
-      // WebSocket failed after health check passed — likely a transient issue
-      const wasConnected = get().isConnected;
-      set({ isConnected: false, socket: null });
-
+      // Stale socket from a previous connection attempt — ignore
       if (myAttemptId !== connectionAttemptId) return;
 
-      // Auto-reconnect on unexpected WS error (same as onclose logic)
-      if (!userDisconnected) {
+      set({ isConnected: false, socket: null });
+
+      // Auto-reconnect on unexpected WS error
+      if (disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] WebSocket error, reconnecting...');
         set({ isReconnecting: true });
         setTimeout(() => {
@@ -351,12 +392,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   disconnect: () => {
-    userDisconnected = true;
+    disconnectedAttemptId = connectionAttemptId;
     const { socket } = get();
     if (socket) {
       socket.onclose = null;
       socket.close();
     }
+    // Flush and clear any pending delta buffer
+    if (deltaFlushTimer) {
+      clearTimeout(deltaFlushTimer);
+      deltaFlushTimer = null;
+    }
+    pendingDeltas.clear();
     set({
       isConnected: false,
       isReconnecting: false,
