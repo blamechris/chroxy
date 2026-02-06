@@ -64,6 +64,8 @@ export class OutputParser extends EventEmitter {
 
   /** Check if a line is noise that should be skipped */
   _isNoise(trimmed) {
+    // Very short non-marker lines (1-2 chars) are usually fragments
+    if (trimmed.length <= 2 && !/^[❯⏺]/.test(trimmed)) return true;
     // Divider lines (all dashes, or dashes with a few other chars)
     if (/^[━─╌]{3,}/.test(trimmed)) return true;
     // Lines that are mostly dashes with some text mixed in
@@ -88,15 +90,34 @@ export class OutputParser extends EventEmitter {
     if (/^[╭╮╰╯│┌┐└┘├┤┬┴┼\s]+$/.test(trimmed)) return true;
     // Welcome screen fragments (box content without ⏺ prefix)
     if (/^│.*│$/.test(trimmed)) return true;
+    // Welcome banner block elements (ASCII art logo) — with or without trailing text
+    if (/^[▐▛▜▌▝▘█░▒▓]/.test(trimmed)) return true;
+    // Claude Code version/model lines from welcome banner
+    if (/Claude\s*Code\s*v\d/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
+    if (/(?:Opus|Sonnet|Haiku)\s+\d/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
+    if (/Claude\s*(?:Max|Pro|Free)/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
     // Try "edit..." placeholder prompt
     if (/^Try "/.test(trimmed)) return true;
     // Percentage/compact lines
     if (/\d+\.\d+%/.test(trimmed) && !/^⏺/.test(trimmed)) return true;
+    // "start of a new conversation" banner text
+    if (/^start\s*of\s*a\s*new/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
+    if (/^new\s*conversation/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
+    // Tool block end boundaries (╰───) that leak when not in TOOL_USE state
+    if (/^[╰└]─{2,}/.test(trimmed)) return true;
+    // Tool status lines: "Bash(cmd)   ⎿ Running…"
+    if (/⎿\s*(Running|Completed|Done|Failed)/i.test(trimmed)) return true;
+    // Status bar fragments with scroll arrows
+    if (/[↓↑]\s*$/.test(trimmed) && trimmed.length < 20) return true;
+    // Path-only lines from welcome banner (not inside a response)
+    if (/^\/Users\/\w+$/.test(trimmed)) return true;
     return false;
   }
 
   /** Check if a line is a Claude Code spinner/thinking indicator */
   _isThinking(trimmed) {
+    // Bare spinner characters (single or groups, with optional spaces)
+    if (/^[✻✶✳✽✢·•⏺]+$/.test(trimmed)) return true;
     // Spinner characters followed by ANY word (Claude uses creative verbs)
     if (/^[✻✶✳✽✢]\s*\w/i.test(trimmed)) return true;
     if (/^[·•]\s*\w.*…/i.test(trimmed)) return true;
@@ -106,6 +127,8 @@ export class OutputParser extends EventEmitter {
     if (/^[✻✶✳✽✢·•↑↓\d\s]{3,}$/.test(trimmed)) return true;
     // Braille spinners
     if (/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(trimmed)) return true;
+    // Standalone spinner verb text (from animation frames after ANSI stripping)
+    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing)/i.test(trimmed) && trimmed.length < 30) return true;
     return false;
   }
 
@@ -309,9 +332,10 @@ export class OutputParser extends EventEmitter {
         this.currentMessage = null;
         return;
       }
-      // Deduplicate — tmux redraws cause the same content to be re-parsed
-      // Use a 10-second window so the same response to a new prompt still goes through
-      const key = `${this.currentMessage.type}:${this.currentMessage.content.trim()}`;
+      // Deduplicate — tmux redraws cause the same content to be re-parsed.
+      // Normalize by stripping ALL whitespace so garbled redraws (lost/extra spaces)
+      // still match the original emission.
+      const key = `${this.currentMessage.type}:${this.currentMessage.content.replace(/\s/g, "")}`;
       const now = Date.now();
       const lastEmit = this._recentEmissions.get(key);
       if (!lastEmit || now - lastEmit > 10000) {
@@ -334,12 +358,28 @@ export class OutputParser extends EventEmitter {
    *  so that tmux screen redraws produce parseable lines instead of
    *  concatenating everything into one giant buffer line. */
   _stripAnsi(str) {
-    // First pass: replace cursor positioning (CUP) with newlines
+    // First pass: smart cursor positioning (CUP) replacement.
+    // CUP format: \x1b[row;colH or \x1b[rowH (col defaults to 1)
+    // Column 1 = start of a new screen row → insert \n
+    // Column > 1 = mid-line positioning → insert space (preserves word spacing)
     str = str.replace(
       // eslint-disable-next-line no-control-regex
-      /\x1b\[[0-9;?]*H/g,
-      "\n"
+      /\x1b\[(\d*);?(\d*)H/g,
+      (_match, _row, col) => {
+        const c = col ? parseInt(col, 10) : 1;
+        return c <= 1 ? "\n" : " ";
+      }
     );
+    // Handle cursor forward (CUF \x1b[nC) — tmux uses this for spacing between
+    // styled segments during screen redraws. Without this, words run together.
+    // Also handle CHA (cursor to absolute column \x1b[nG).
+    // eslint-disable-next-line no-control-regex
+    str = str.replace(/\x1b\[\d*C/g, " ");
+    // eslint-disable-next-line no-control-regex
+    str = str.replace(/\x1b\[(\d*)G/g, (_match, col) => {
+      const c = col ? parseInt(col, 10) : 1;
+      return c <= 1 ? "\n" : " ";
+    });
     // Also treat \r as a line boundary (tmux uses \r for carriage returns)
     str = str.replace(/\r/g, "\n");
     // Second pass: strip all remaining ANSI sequences

@@ -47,12 +47,18 @@ export function SessionScreen() {
     messages,
     terminalBuffer,
     sendInput,
+    sendInterrupt,
     disconnect,
     clearTerminalBuffer,
     addMessage,
     inputSettings,
     claudeReady,
+    serverMode,
+    streamingMessageId,
+    isReconnecting,
   } = useConnectionStore();
+
+  const isCliMode = serverMode === 'cli';
 
   const handleSend = () => {
     if (!inputText.trim()) return;
@@ -60,7 +66,7 @@ export function SessionScreen() {
     setInputText('');
 
     if (viewMode === 'chat') {
-      // Show user message instantly in chat — no need to wait for PTY echo
+      // Show user message instantly in chat
       addMessage({
         id: `${Date.now()}-${Math.random()}`,
         type: 'user_input',
@@ -77,8 +83,11 @@ export function SessionScreen() {
     }
 
     sendInput(text);
-    // Send Enter separately — Claude Code's TUI needs text and CR as separate writes
-    setTimeout(() => sendInput('\r'), 50);
+    // In terminal mode, send Enter separately — Claude Code's TUI needs text and CR as separate writes
+    // In CLI mode, the server handles the full message directly
+    if (!isCliMode) {
+      setTimeout(() => sendInput('\r'), 50);
+    }
   };
 
   const handleKeyPress = (key: string) => {
@@ -127,25 +136,34 @@ export function SessionScreen() {
           onPress={() => setViewMode('chat')}
         >
           <Text style={[styles.modeButtonText, viewMode === 'chat' && styles.modeButtonTextActive]}>
-            💬 Chat
+            Chat
           </Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
-          onPress={() => setViewMode('terminal')}
-        >
-          <Text style={[styles.modeButtonText, viewMode === 'terminal' && styles.modeButtonTextActive]}>
-            🖥️ Terminal
-          </Text>
-        </TouchableOpacity>
+        {!isCliMode && (
+          <TouchableOpacity
+            style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
+            onPress={() => setViewMode('terminal')}
+          >
+            <Text style={[styles.modeButtonText, viewMode === 'terminal' && styles.modeButtonTextActive]}>
+              Terminal
+            </Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
           <Text style={styles.disconnectButtonText}>✕</Text>
         </TouchableOpacity>
       </View>
 
+      {/* Reconnecting banner */}
+      {isReconnecting && (
+        <View style={styles.reconnectingBanner}>
+          <Text style={styles.reconnectingText}>Reconnecting...</Text>
+        </View>
+      )}
+
       {/* Content area */}
       {viewMode === 'chat' ? (
-        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} />
+        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} isCliMode={isCliMode} />
       ) : (
         <TerminalView
           content={terminalBuffer}
@@ -156,7 +174,7 @@ export function SessionScreen() {
 
       {/* Input area */}
       <View style={[styles.inputContainer, { paddingBottom: bottomPadding }]}>
-        {viewMode === 'terminal' && (
+        {viewMode === 'terminal' && !isCliMode && (
           <View style={styles.specialKeys}>
             {['Enter', 'Ctrl+C', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].map((key) => (
               <TouchableOpacity
@@ -180,7 +198,7 @@ export function SessionScreen() {
         <View style={styles.inputRow}>
           <TextInput
             style={styles.input}
-            placeholder={!claudeReady ? 'Starting Claude Code...' : viewMode === 'chat' ? 'Message Claude...' : 'Type command...'}
+            placeholder={!claudeReady ? 'Connecting to Claude...' : 'Message Claude...'}
             placeholderTextColor="#666"
             value={inputText}
             onChangeText={setInputText}
@@ -189,9 +207,15 @@ export function SessionScreen() {
             autoCapitalize="none"
             autoCorrect={false}
           />
-          <TouchableOpacity style={styles.sendButton} onPress={handleSend}>
-            <Text style={styles.sendButtonText}>↑</Text>
-          </TouchableOpacity>
+          {streamingMessageId ? (
+            <TouchableOpacity style={styles.interruptButton} onPress={sendInterrupt}>
+              <Text style={styles.interruptButtonText}>■</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity style={styles.sendButton} onPress={handleSend}>
+              <Text style={styles.sendButtonText}>↑</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
     </View>
@@ -204,11 +228,13 @@ function ChatView({
   scrollViewRef,
   claudeReady,
   onSelectOption,
+  isCliMode,
 }: {
   messages: ChatMessage[];
   scrollViewRef: React.RefObject<ScrollView>;
   claudeReady: boolean;
   onSelectOption: (value: string) => void;
+  isCliMode: boolean;
 }) {
   return (
     <ScrollView
@@ -221,8 +247,10 @@ function ChatView({
         <View style={styles.emptyState}>
           <Text style={styles.emptyStateText}>
             {claudeReady
-              ? 'Claude Code is ready. Send a message!'
-              : 'Starting Claude Code...'}
+              ? 'Connected. Send a message to Claude!'
+              : isCliMode
+                ? 'Connecting...'
+                : 'Starting Claude Code...'}
           </Text>
         </View>
       ) : (
@@ -352,6 +380,16 @@ const styles = StyleSheet.create({
   disconnectButtonText: {
     color: '#ff4a4a',
     fontSize: 16,
+  },
+  reconnectingBanner: {
+    backgroundColor: '#f59e0b33',
+    paddingVertical: 6,
+    alignItems: 'center',
+  },
+  reconnectingText: {
+    color: '#f59e0b',
+    fontSize: 13,
+    fontWeight: '600',
   },
 
   // Chat styles
@@ -510,6 +548,19 @@ const styles = StyleSheet.create({
   sendButtonText: {
     color: '#fff',
     fontSize: 20,
+    fontWeight: 'bold',
+  },
+  interruptButton: {
+    backgroundColor: '#ff4a4a',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  interruptButtonText: {
+    color: '#fff',
+    fontSize: 16,
     fontWeight: 'bold',
   },
 });

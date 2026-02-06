@@ -2,6 +2,7 @@ import { PtyManager } from "./pty-manager.js";
 import { OutputParser } from "./output-parser.js";
 import { WsServer } from "./ws-server.js";
 import { TunnelManager } from "./tunnel.js";
+import { waitForTunnel } from "./tunnel-check.js";
 import qrcode from "qrcode-terminal";
 
 /**
@@ -35,18 +36,21 @@ export async function startServer(config) {
   const outputParser = new OutputParser();
 
   // Wire PTY output into the parser
+  let trustAccepted = false;
   ptyManager.on("data", (data) => {
     outputParser.feed(data);
 
     // Auto-accept the trust dialog ("Do you trust this folder?")
     // The user running chroxy in a folder IS their trust signal.
-    if (!outputParser.claudeReady) {
-      const clean = data.replace(
-        // eslint-disable-next-line no-control-regex
-        /\x1b\[[0-9;?]*[A-Za-z~]|\x1b\][^\x07]*\x07?|\x1b[()#][A-Z0-2]|\x1b[A-Za-z]|\x9b[0-9;?]*[A-Za-z~]/g,
-        ""
-      );
-      if (/trust\s*this\s*folder/i.test(clean) || /Yes.*trust/i.test(clean)) {
+    // Must fire regardless of claudeReady state — the dialog can appear at any time.
+    const clean = data.replace(
+      // eslint-disable-next-line no-control-regex
+      /\x1b\[[0-9;?]*[A-Za-z~]|\x1b\][^\x07]*\x07?|\x1b[()#][A-Z0-2]|\x1b[A-Za-z]|\x9b[0-9;?]*[A-Za-z~]/g,
+      ""
+    );
+    if (/trust\s*this\s*folder/i.test(clean) || /Yes.*trust/i.test(clean)) {
+      if (!trustAccepted) {
+        trustAccepted = true;
         console.log(`[server] Auto-accepting trust dialog`);
         setTimeout(() => ptyManager.write("\r"), 300);
       }
@@ -71,9 +75,12 @@ export async function startServer(config) {
   // 4. Start the Cloudflare tunnel
   const tunnel = new TunnelManager({ port: PORT });
 
-  const { wsUrl } = await tunnel.start();
+  const { wsUrl, httpUrl } = await tunnel.start();
 
-  // 5. Start the PTY (do this last so tunnel is ready)
+  // 5. Wait for tunnel to be fully routable (DNS propagation)
+  await waitForTunnel(httpUrl);
+
+  // 6. Start the PTY (do this last so tunnel is ready)
   await ptyManager.start();
 
   // Generate connection info for the app

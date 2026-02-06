@@ -92,12 +92,19 @@ program
 
 /**
  * chroxy start — Launch the server
+ *
+ * Default: CLI headless mode (claude -p, no tmux/PTY needed)
+ * --terminal: Legacy PTY/tmux mode (requires node-pty + tmux)
  */
 program
   .command("start")
   .description("Start the Chroxy server")
   .option("-c, --config <path>", "Path to config file", CONFIG_FILE)
+  .option("-t, --terminal", "Use PTY/tmux mode instead of CLI headless mode")
   .option("-r, --resume", "Resume an existing Claude Code session instead of starting fresh")
+  .option("--cwd <path>", "Working directory for Claude (CLI mode)")
+  .option("--model <model>", "Model to use (CLI mode)")
+  .option("--allowed-tools <tools>", "Comma-separated tools to auto-approve (CLI mode)")
   .action(async (options) => {
     // Load config
     if (!existsSync(options.config)) {
@@ -114,9 +121,20 @@ program
     process.env.TMUX_SESSION = config.tmuxSession;
     process.env.SHELL_CMD = config.shell;
 
-    // Import and run the server
-    const { startServer } = await import("./server.js");
-    await startServer(config);
+    if (options.terminal) {
+      // Legacy PTY/tmux mode
+      const { startServer } = await import("./server.js");
+      await startServer(config);
+    } else {
+      // Default: CLI headless mode
+      if (options.cwd) config.cwd = options.cwd;
+      if (options.model) config.model = options.model;
+      if (options.allowedTools) {
+        config.allowedTools = options.allowedTools.split(",").map((t) => t.trim());
+      }
+      const { startCliServer } = await import("./server-cli.js");
+      await startCliServer(config);
+    }
   });
 
 /**
