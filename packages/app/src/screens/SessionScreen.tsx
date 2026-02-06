@@ -17,8 +17,8 @@ import { useConnectionStore, ChatMessage } from '../store/connection';
 
 // Named Unicode constants for readability
 const ICON_CLOSE = '\u2715';       // Multiplication X
-const ICON_CHEVRON_RIGHT = ICON_CHEVRON_RIGHT; // Right-pointing triangle
-const ICON_CHEVRON_DOWN = ICON_CHEVRON_DOWN;  // Down-pointing triangle
+const ICON_CHEVRON_RIGHT = '\u25B8'; // Right-pointing triangle
+const ICON_CHEVRON_DOWN = '\u25BE';  // Down-pointing triangle
 
 function useKeyboardHeight() {
   const [keyboardHeight, setKeyboardHeight] = useState(0);
