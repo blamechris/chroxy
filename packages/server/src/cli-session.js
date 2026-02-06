@@ -90,8 +90,10 @@ export class CliSession extends EventEmitter {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        // Suppress interactive prompts and enable headless output behavior
         CI: '1',
         CLAUDE_HEADLESS: '1',
+        // Create file snapshots at each tool use for checkpoint/rewind support
         CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
       },
     })

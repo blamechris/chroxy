@@ -365,7 +365,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
 
         case 'model_changed':
-          set({ activeModel: msg.model || null });
+          set({ activeModel: (typeof msg.model === 'string' && msg.model.trim()) ? msg.model.trim() : null });
           break;
 
         case 'raw':

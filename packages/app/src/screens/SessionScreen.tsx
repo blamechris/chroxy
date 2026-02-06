@@ -177,7 +177,7 @@ export function SessionScreen() {
                 onPress={() => setModel(m)}
               >
                 <Text style={[styles.modelChipText, activeModel === m && styles.modelChipTextActive]}>
-                  {m}
+                  {m.charAt(0).toUpperCase() + m.slice(1)}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -435,13 +435,14 @@ const styles = StyleSheet.create({
   },
   modelChip: {
     paddingHorizontal: 10,
-    paddingVertical: 4,
+    paddingVertical: 10,
     borderRadius: 12,
     backgroundColor: '#2a2a4e',
+    borderWidth: 1,
+    borderColor: 'transparent',
   },
   modelChipActive: {
     backgroundColor: '#4a9eff33',
-    borderWidth: 1,
     borderColor: '#4a9eff66',
   },
   modelChipText: {
