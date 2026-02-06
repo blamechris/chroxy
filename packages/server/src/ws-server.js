@@ -2,6 +2,22 @@ import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { v4 as uuidv4 } from "uuid";
 
+// All model identifiers accepted by set_model. Includes both short names
+// (displayed to users) and full model IDs (for forward compatibility with
+// third-party clients). The available_models message advertises only short
+// names so the mobile app renders clean labels. See #19 for planned
+// structured {id, label} model objects.
+const ALLOWED_MODELS = [
+  "claude-sonnet-4-20250514",
+  "claude-haiku-235-20250421",
+  "claude-opus-4-20250514",
+  "sonnet", "haiku", "opus",
+];
+
+// Short names advertised to clients for model selection UI.
+// Intentionally a subset of ALLOWED_MODELS — see comment above.
+const MODEL_SHORT_NAMES = ["haiku", "sonnet", "opus"];
+
 /**
  * WebSocket server that bridges the phone client to the backend.
  *
@@ -33,6 +49,7 @@ import { v4 as uuidv4 } from "uuid";
  *   { type: "status",       connected: true }         — connection status
  *   { type: "claude_ready" }                          — Claude Code ready for input
  *   { type: "model_changed", model: "..." }          — active model updated (CLI mode)
+ *   { type: "available_models", models: [...] }       — models the server accepts (CLI mode)
  */
 export class WsServer {
   constructor({ port, apiToken, ptyManager, outputParser, cliSession }) {
@@ -150,6 +167,10 @@ export class WsServer {
             type: "model_changed",
             model: this.cliSession.model ?? null,
           });
+          this._send(ws, {
+            type: "available_models",
+            models: MODEL_SHORT_NAMES,
+          });
         }
 
         console.log(`[ws] Client ${client.id} authenticated`);
@@ -185,12 +206,6 @@ export class WsServer {
         break;
 
       case "set_model": {
-        const ALLOWED_MODELS = [
-          "claude-sonnet-4-20250514",
-          "claude-haiku-235-20250421",
-          "claude-opus-4-20250514",
-          "sonnet", "haiku", "opus",
-        ];
         if (
           typeof msg.model === "string" &&
           ALLOWED_MODELS.includes(msg.model)

@@ -63,6 +63,9 @@ interface ConnectionState {
   // Active model (CLI mode)
   activeModel: string | null;
 
+  // Available models from server (CLI mode)
+  availableModels: string[];
+
   // Context window usage from last result
   contextUsage: ContextUsage | null;
 
@@ -163,6 +166,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
+  availableModels: [],
   contextUsage: null,
   inputSettings: {
     chatEnterToSend: true,
@@ -368,6 +372,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           set({ activeModel: (typeof msg.model === 'string' && msg.model.trim()) ? msg.model.trim() : null });
           break;
 
+        case 'available_models':
+          if (Array.isArray(msg.models)) {
+            const cleaned = msg.models.filter(
+              (m: unknown): m is string => typeof m === 'string' && m.trim().length > 0,
+            );
+            set({ availableModels: cleaned });
+          }
+          break;
+
         case 'raw':
           get().appendTerminalData(msg.data);
           break;
@@ -443,6 +456,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       claudeReady: false,
       streamingMessageId: null,
       activeModel: null,
+      availableModels: [],
       contextUsage: null,
       messages: [],
       terminalBuffer: '',
