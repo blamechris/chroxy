@@ -462,6 +462,11 @@ export class CliSession extends EventEmitter {
 
     // Safety: if still busy after 5s, force-clear state.
     // Claude should either emit a result (process survives) or die (close handler respawns).
+    // Clear any existing timer first to avoid orphaned timers on rapid interrupts.
+    if (this._interruptTimer) {
+      clearTimeout(this._interruptTimer)
+      this._interruptTimer = null
+    }
     this._interruptTimer = setTimeout(() => {
       this._interruptTimer = null
       if (this._isBusy) {
