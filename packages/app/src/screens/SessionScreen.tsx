@@ -15,6 +15,11 @@ import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, ChatMessage } from '../store/connection';
 
+// Named Unicode constants for readability
+const ICON_CLOSE = '\u2715';       // Multiplication X
+const ICON_CHEVRON_RIGHT = ICON_CHEVRON_RIGHT; // Right-pointing triangle
+const ICON_CHEVRON_DOWN = ICON_CHEVRON_DOWN;  // Down-pointing triangle
+
 function useKeyboardHeight() {
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
@@ -205,7 +210,7 @@ export function SessionScreen() {
               <Text style={styles.selectionButtonText}>Export</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.selectionCancelButton} onPress={clearSelection}>
-              <Text style={styles.selectionCancelText}>{'\u2715'}</Text>
+              <Text style={styles.selectionCancelText}>{ICON_CLOSE}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -230,7 +235,7 @@ export function SessionScreen() {
             </TouchableOpacity>
           )}
           <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
-            <Text style={styles.disconnectButtonText}>{'\u2715'}</Text>
+            <Text style={styles.disconnectButtonText}>{ICON_CLOSE}</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -426,7 +431,7 @@ function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: 
       style={[styles.toolBubble, isSelected && styles.selectedBubble]}
     >
       <View style={styles.toolHeader}>
-        <Text style={styles.toolChevron}>{expanded ? '\u25BE' : '\u25B8'}</Text>
+        <Text style={styles.toolChevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
         <Text style={styles.senderLabelTool}>Tool: {message.tool}</Text>
       </View>
       {expanded ? (
@@ -615,8 +620,8 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   selectionCancelButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
   },
   selectionCancelText: {
     color: '#ff4a4a',
@@ -637,7 +642,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   modelChip: {
-    paddingHorizontal: 10,
+    paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 12,
     backgroundColor: '#2a2a4e',
