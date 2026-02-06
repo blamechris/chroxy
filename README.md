@@ -64,17 +64,17 @@ The server prints a QR code. Scan it with the Chroxy app.
 
 ### Local WiFi (same network)
 
-If your phone and Mac are on the same WiFi, you can skip ngrok entirely and connect directly:
+If your phone and Mac are on the same WiFi, you can connect directly without the tunnel:
 
 1. Find your Mac's local IP:
    ```bash
    ipconfig getifaddr en0
    ```
 2. In the Chroxy app, tap **"Enter manually"** and enter:
-   - URL: `ws://YOUR_MAC_IP:8765` (e.g. `ws://10.0.0.71:8765`)
+   - URL: `ws://YOUR_MAC_IP:8765` (e.g. `ws://192.168.1.100:8765`)
    - Token: your API token from `~/.chroxy/config.json`
 
-This avoids ngrok completely — lower latency, no tunnel issues.
+This skips the Cloudflare tunnel — lower latency, fully local.
 
 ### App (on your phone)
 
@@ -92,7 +92,7 @@ npm run ios   # or npm run android
 1. **Server** spawns (or attaches to) a tmux session running Claude Code
 2. **Output parser** converts terminal output into structured messages
 3. **WebSocket server** streams both raw and parsed output to connected clients
-4. **ngrok tunnel** provides secure remote access without port forwarding
+4. **Cloudflare tunnel** provides secure remote access without port forwarding
 5. **Mobile app** renders the dual-view UI and sends your input back
 
 ## Project Structure
@@ -108,27 +108,30 @@ chroxy/
 
 ## Development
 
+You need **two terminals** during development:
+
 ```bash
 # Clone the repo
 git clone https://github.com/blamechris/chroxy.git
 cd chroxy
-
-# Install all dependencies
 npm install
 
-# Run the server in dev mode
-npm run server:dev
+# Terminal 1: Start the Chroxy server
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
-# Run the app (in another terminal)
-npm run app:ios
+# Terminal 2: Start the Expo dev server (for hot-reload to phone/simulator)
+cd packages/app
+npx expo start
 ```
+
+The Expo dev server is only needed during development — it hot-reloads the app to Expo Go on your phone or the iOS/Android simulator. Once the app is built as a standalone binary, users only need `npx chroxy start`.
 
 ## Roadmap
 
 - [x] Core server daemon with PTY management
 - [x] Output parser for Claude Code patterns
 - [x] WebSocket protocol with auth
-- [x] ngrok tunnel integration
+- [x] Cloudflare tunnel integration
 - [x] CLI with `init` and `start` commands
 - [x] QR code generation for easy app pairing
 - [x] React Native app with QR scanning
@@ -138,7 +141,7 @@ npm run app:ios
 - [ ] Terminal view with xterm.js
 - [ ] Scrollback buffer on reconnect
 - [ ] TestFlight / Play Store release
-- [ ] Tailscale support as ngrok alternative
+- [ ] Tailscale support as tunnel alternative
 - [ ] Session recording and replay
 
 ## Contributing
