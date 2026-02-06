@@ -107,13 +107,13 @@ type(scope): Short summary in present tense
 
 ### PR Workflow
 
-**CRITICAL: NEVER commit directly to master.** Always use feature branches and PRs.
+**CRITICAL: NEVER commit directly to main.** Always use feature branches and PRs.
 
-1. Create feature branch from `master`
+1. Create feature branch from `main`
 2. Develop and test
 3. Push and create PR
 4. Get user confirmation before merging
-5. Squash merge to master
+5. Squash merge to main
 
 **NEVER auto-merge.** Always present a summary and wait for explicit user confirmation.
 
