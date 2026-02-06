@@ -93,22 +93,32 @@ export function SessionScreen() {
     setSelectedIds(new Set());
   }, []);
 
-  const handleCopy = useCallback(() => {
+  const handleCopy = useCallback(async () => {
     const selected = messages.filter((m) => selectedIds.has(m.id));
     const text = selected.map((m) => {
       const label = m.type === 'user_input' ? 'You' : m.type === 'tool_use' ? `Tool: ${m.tool}` : 'Claude';
       return `[${label}] ${m.content?.trim() || ''}`;
     }).join('\n\n');
-    Clipboard.setStringAsync(text);
-    Alert.alert('Copied', `${selected.length} message${selected.length > 1 ? 's' : ''} copied to clipboard`);
-    clearSelection();
+    try {
+      await Clipboard.setStringAsync(text);
+      Alert.alert('Copied', `${selected.length} message${selected.length > 1 ? 's' : ''} copied to clipboard`);
+      clearSelection();
+    } catch (error) {
+      console.error('Failed to copy messages to clipboard', error);
+      Alert.alert('Copy failed', 'Unable to copy messages to clipboard. Please try again.');
+    }
   }, [messages, selectedIds, clearSelection]);
 
-  const handleExport = useCallback(() => {
+  const handleExport = useCallback(async () => {
     const selected = messages.filter((m) => selectedIds.has(m.id));
     const json = JSON.stringify(selected, null, 2);
-    Share.share({ message: json });
-    clearSelection();
+    try {
+      await Share.share({ message: json });
+      clearSelection();
+    } catch (error) {
+      console.error('Failed to export messages', error);
+      Alert.alert('Export failed', 'Unable to share messages. Please try again.');
+    }
   }, [messages, selectedIds, clearSelection]);
 
   const handleSend = () => {
