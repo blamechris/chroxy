@@ -40,6 +40,12 @@ interface InputSettings {
   terminalEnterToSend: boolean;
 }
 
+export interface ModelInfo {
+  id: string;
+  label: string;
+  fullId: string;
+}
+
 interface ConnectionState {
   // Connection
   isConnected: boolean;
@@ -64,7 +70,7 @@ interface ConnectionState {
   activeModel: string | null;
 
   // Available models from server (CLI mode)
-  availableModels: string[];
+  availableModels: ModelInfo[];
 
   // Context window usage from last result
   contextUsage: ContextUsage | null;
@@ -375,7 +381,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         case 'available_models':
           if (Array.isArray(msg.models)) {
             const cleaned = msg.models.filter(
-              (m: unknown): m is string => typeof m === 'string' && m.trim().length > 0,
+              (m: unknown): m is ModelInfo =>
+                typeof m === 'object' && m !== null &&
+                typeof (m as ModelInfo).id === 'string' &&
+                typeof (m as ModelInfo).label === 'string',
             );
             set({ availableModels: cleaned });
           }
