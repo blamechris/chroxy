@@ -4,6 +4,7 @@ export const MODELS = [
   { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-235-20250421' },
   { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-20250514' },
   { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-20250514' },
+  { id: 'opus46', label: 'Opus 4.6', fullId: 'claude-opus-4-6' },
 ]
 
 // Accept both short ids and full model IDs in set_model

@@ -11,9 +11,10 @@ import qrcode from 'qrcode-terminal'
  */
 export async function startCliServer(config) {
   const PORT = config.port || parseInt(process.env.PORT || '8765', 10)
-  const API_TOKEN = config.apiToken || process.env.API_TOKEN
+  const NO_AUTH = !!config.noAuth
+  const API_TOKEN = NO_AUTH ? null : (config.apiToken || process.env.API_TOKEN)
 
-  if (!API_TOKEN) {
+  if (!NO_AUTH && !API_TOKEN) {
     console.error('[!] No API token configured. Run \'npx chroxy init\' first.')
     process.exit(1)
   }
@@ -24,12 +25,19 @@ export async function startCliServer(config) {
   console.log('╚════════════════════════════════════════╝')
   console.log('')
 
+  if (NO_AUTH) {
+    console.log('⚠  WARNING: Running without authentication (--no-auth)')
+    console.log('⚠  Server bound to localhost only. Do NOT expose to network.')
+    console.log('')
+  }
+
   // 1. Create and start the CLI session (persistent process)
   const cliSession = new CliSession({
     cwd: config.cwd || process.cwd(),
     allowedTools: config.allowedTools || [],
     model: config.model || null,
     port: PORT,
+    apiToken: API_TOKEN,
   })
   cliSession.start()
 
@@ -53,25 +61,34 @@ export async function startCliServer(config) {
     port: PORT,
     apiToken: API_TOKEN,
     cliSession,
+    authRequired: !NO_AUTH,
   })
-  wsServer.start()
+  // Bind to localhost-only when auth is disabled
+  wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
 
-  // 3. Start the Cloudflare tunnel
-  const tunnel = new TunnelManager({ port: PORT })
-  const { wsUrl, httpUrl } = await tunnel.start()
+  let tunnel = null
+  if (!NO_AUTH) {
+    // 3. Start the Cloudflare tunnel
+    tunnel = new TunnelManager({ port: PORT })
+    const { wsUrl, httpUrl } = await tunnel.start()
 
-  // 4. Wait for tunnel to be fully routable (DNS propagation)
-  await waitForTunnel(httpUrl)
+    // 4. Wait for tunnel to be fully routable (DNS propagation)
+    await waitForTunnel(httpUrl)
 
-  // 5. Generate connection info
-  const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
+    // 5. Generate connection info
+    const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
 
-  console.log('\n[✓] Server ready! (CLI headless mode)\n')
-  console.log('📱 Scan this QR code with the Chroxy app:\n')
-  qrcode.generate(connectionUrl, { small: true })
-  console.log(`\nOr connect manually:`)
-  console.log(`   URL:   ${wsUrl}`)
-  console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+    console.log('\n[✓] Server ready! (CLI headless mode)\n')
+    console.log('📱 Scan this QR code with the Chroxy app:\n')
+    qrcode.generate(connectionUrl, { small: true })
+    console.log(`\nOr connect manually:`)
+    console.log(`   URL:   ${wsUrl}`)
+    console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+  } else {
+    console.log(`[✓] Server ready! (CLI headless mode, no auth)\n`)
+    console.log(`   Connect: ws://localhost:${PORT}`)
+  }
+
   console.log('\nPress Ctrl+C to stop.\n')
 
   // Graceful shutdown
@@ -79,7 +96,7 @@ export async function startCliServer(config) {
     console.log(`\n[${signal}] Shutting down...`)
     cliSession.destroy()
     wsServer.close()
-    await tunnel.stop()
+    if (tunnel) await tunnel.stop()
     process.exit(0)
   }
 

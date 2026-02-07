@@ -79,6 +79,8 @@ export function SessionScreen() {
     activeModel,
     availableModels,
     contextUsage,
+    lastResultCost,
+    lastResultDuration,
     setModel,
     sendPermissionResponse,
   } = useConnectionStore();
@@ -266,13 +268,19 @@ export function SessionScreen() {
               );
             })}
           </View>
-          {contextUsage && (
-            <View style={styles.contextInfo}>
+          <View style={styles.contextInfo}>
+            {lastResultCost != null && (
               <Text style={styles.contextText}>
-                {formatTokenCount(contextUsage.inputTokens + contextUsage.outputTokens)}
+                ${lastResultCost.toFixed(4)}
+                {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
               </Text>
-            </View>
-          )}
+            )}
+            {contextUsage && (
+              <Text style={styles.contextText}>
+                {lastResultCost != null ? ' \u00B7 ' : ''}{formatTokenCount(contextUsage.inputTokens + contextUsage.outputTokens)}
+              </Text>
+            )}
+          </View>
         </View>
       )}
 

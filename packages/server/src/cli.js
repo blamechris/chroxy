@@ -105,6 +105,7 @@ program
   .option("--cwd <path>", "Working directory for Claude (CLI mode)")
   .option("--model <model>", "Model to use (CLI mode)")
   .option("--allowed-tools <tools>", "Comma-separated tools to auto-approve (CLI mode)")
+  .option("--no-auth", "Skip API token requirement (local testing only, disables tunnel)")
   .action(async (options) => {
     // Load config
     if (!existsSync(options.config)) {
@@ -122,7 +123,11 @@ program
     process.env.SHELL_CMD = config.shell;
 
     if (options.terminal) {
-      // Legacy PTY/tmux mode
+      // Legacy PTY/tmux mode — --no-auth is not supported
+      if (options.auth === false) {
+        console.error("❌ --no-auth is only supported in CLI headless mode (remove --terminal).");
+        process.exit(1);
+      }
       const { startServer } = await import("./server.js");
       await startServer(config);
     } else {
@@ -132,6 +137,7 @@ program
       if (options.allowedTools) {
         config.allowedTools = options.allowedTools.split(",").map((t) => t.trim());
       }
+      if (options.auth === false) config.noAuth = true;
       const { startCliServer } = await import("./server-cli.js");
       await startCliServer(config);
     }
