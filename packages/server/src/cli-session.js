@@ -1,7 +1,14 @@
 import { spawn } from 'child_process'
 import { EventEmitter } from 'events'
 import { createInterface } from 'readline'
+import { readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { resolve, dirname } from 'path'
+import { fileURLToPath } from 'url'
+import { homedir } from 'os'
 import { resolveModelId } from './models.js'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
 
 /**
  * Manages a persistent Claude Code CLI session using headless mode.
@@ -22,11 +29,12 @@ import { resolveModelId } from './models.js'
  *   error        { message }
  */
 export class CliSession extends EventEmitter {
-  constructor({ cwd, allowedTools, model } = {}) {
+  constructor({ cwd, allowedTools, model, port } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.allowedTools = allowedTools || []
     this.model = model || null
+    this._port = port || null
     this._sessionId = null
     this._child = null
     this._destroying = false
@@ -64,6 +72,11 @@ export class CliSession extends EventEmitter {
    * Start the persistent Claude process. Call once after construction.
    */
   start() {
+    // Register permission hook before starting the process (only once, not on respawn)
+    if (this._port && this._respawnCount === 0) {
+      this._registerPermissionHook()
+    }
+
     const args = [
       '-p',
       '--input-format', 'stream-json',
@@ -99,6 +112,7 @@ export class CliSession extends EventEmitter {
         CI: '1',
         CLAUDE_HEADLESS: '1',
         CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
+        ...(this._port ? { CHROXY_PORT: String(this._port) } : {}),
       },
     })
 
@@ -481,9 +495,86 @@ export class CliSession extends EventEmitter {
     }, 5000)
   }
 
+  /**
+   * Register the Chroxy permission hook in ~/.claude/settings.json.
+   * Adds a PreToolUse hook that forwards all tool requests to our HTTP endpoint.
+   */
+  _registerPermissionHook() {
+    try {
+      const hookScript = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
+      const settingsPath = resolve(homedir(), '.claude', 'settings.json')
+
+      let settings = {}
+      try {
+        settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+      } catch {
+        // File doesn't exist or is corrupt — start fresh
+        mkdirSync(resolve(homedir(), '.claude'), { recursive: true })
+      }
+
+      if (!settings.hooks) settings.hooks = {}
+      if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = []
+
+      // Remove any existing Chroxy hook entry
+      settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
+        (entry) => !entry._chroxy
+      )
+
+      // Add our hook
+      settings.hooks.PreToolUse.push({
+        _chroxy: true,
+        matcher: '',  // empty string matches all tools
+        hooks: [
+          {
+            type: 'command',
+            command: hookScript,
+            timeout: 300,
+          },
+        ],
+      })
+
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+      console.log('[cli-session] Registered permission hook in ~/.claude/settings.json')
+    } catch (err) {
+      console.error(`[cli-session] Failed to register permission hook: ${err.message}`)
+    }
+  }
+
+  /**
+   * Remove the Chroxy permission hook from ~/.claude/settings.json.
+   */
+  _unregisterPermissionHook() {
+    try {
+      const settingsPath = resolve(homedir(), '.claude', 'settings.json')
+      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+
+      if (settings.hooks?.PreToolUse) {
+        settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
+          (entry) => !entry._chroxy
+        )
+        // Clean up empty arrays
+        if (settings.hooks.PreToolUse.length === 0) {
+          delete settings.hooks.PreToolUse
+        }
+        if (Object.keys(settings.hooks).length === 0) {
+          delete settings.hooks
+        }
+        writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+        console.log('[cli-session] Unregistered permission hook from ~/.claude/settings.json')
+      }
+    } catch (err) {
+      console.error(`[cli-session] Failed to unregister permission hook: ${err.message}`)
+    }
+  }
+
   /** Clean up resources */
   destroy() {
     this._destroying = true
+
+    // Remove permission hook from settings
+    if (this._port) {
+      this._unregisterPermissionHook()
+    }
 
     if (this._respawnTimer) {
       clearTimeout(this._respawnTimer)

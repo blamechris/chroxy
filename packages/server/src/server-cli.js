@@ -29,6 +29,7 @@ export async function startCliServer(config) {
     cwd: config.cwd || process.cwd(),
     allowedTools: config.allowedTools || [],
     model: config.model || null,
+    port: PORT,
   })
   cliSession.start()
 

@@ -21,6 +21,7 @@ export interface ChatMessage {
   content: string;
   tool?: string;
   options?: { label: string; value: string }[];
+  requestId?: string;
   timestamp: number;
 }
 
@@ -100,6 +101,7 @@ interface ConnectionState {
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   sendInput: (input: string) => void;
   sendInterrupt: () => void;
+  sendPermissionResponse: (requestId: string, decision: string) => void;
   setModel: (model: string) => void;
   resize: (cols: number, rows: number) => void;
 }
@@ -430,6 +432,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // Buffer raw data even in chat mode so terminal tab is always up to date
           get().appendTerminalData(msg.data);
           break;
+
+        case 'permission_request':
+          get().addMessage({
+            id: nextMessageId('perm'),
+            type: 'prompt',
+            content: `${msg.tool}: ${msg.description}`,
+            requestId: msg.requestId,
+            options: [
+              { label: 'Allow', value: 'allow' },
+              { label: 'Deny', value: 'deny' },
+              { label: 'Always Allow', value: 'allowAlways' },
+            ],
+            timestamp: Date.now(),
+          });
+          break;
       }
     };
 
@@ -549,6 +566,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'interrupt' }));
+    }
+  },
+
+  sendPermissionResponse: (requestId: string, decision: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'permission_response', requestId, decision }));
     }
   },
 
