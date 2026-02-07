@@ -80,6 +80,7 @@ export function SessionScreen() {
     availableModels,
     contextUsage,
     setModel,
+    sendPermissionResponse,
   } = useConnectionStore();
 
   const isCliMode = serverMode === 'cli';
@@ -138,20 +139,15 @@ export function SessionScreen() {
     setInputText('');
 
     if (viewMode === 'chat') {
-      // Show user message instantly in chat
-      addMessage({
-        id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        type: 'user_input',
-        content: text,
-        timestamp: Date.now(),
-      });
-      // Show thinking indicator until response arrives
-      addMessage({
-        id: 'thinking',
-        type: 'thinking',
-        content: '',
-        timestamp: Date.now(),
-      });
+      // Add user message + thinking indicator in a single atomic state update
+      // to prevent React state batching from dropping the user message (#4)
+      useConnectionStore.setState((state) => ({
+        messages: [
+          ...state.messages.filter((m) => m.id !== 'thinking'),
+          { id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, type: 'user_input' as const, content: text, timestamp: Date.now() },
+          { id: 'thinking', type: 'thinking' as const, content: '', timestamp: Date.now() },
+        ],
+      }));
     }
 
     sendInput(text);
@@ -182,7 +178,12 @@ export function SessionScreen() {
   };
 
   // Handle tapping a prompt option
-  const handleSelectOption = (value: string) => {
+  const handleSelectOption = (value: string, requestId?: string) => {
+    if (requestId) {
+      // Permission prompt — send structured response back to server
+      sendPermissionResponse(requestId, value);
+      return;
+    }
     sendInput(value);
     // In PTY mode, send Enter separately — the TUI needs text and CR as separate writes
     if (!isCliMode) {
@@ -372,7 +373,7 @@ function ChatView({
   messages: ChatMessage[];
   scrollViewRef: React.RefObject<ScrollView>;
   claudeReady: boolean;
-  onSelectOption: (value: string) => void;
+  onSelectOption: (value: string, requestId?: string) => void;
   isCliMode: boolean;
   selectedIds: Set<string>;
   isSelecting: boolean;
@@ -471,7 +472,7 @@ function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: 
 // Single message bubble
 function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress }: {
   message: ChatMessage;
-  onSelectOption?: (value: string) => void;
+  onSelectOption?: (value: string, requestId?: string) => void;
   isSelected: boolean;
   isSelecting: boolean;
   onLongPress: () => void;
@@ -522,7 +523,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
             <TouchableOpacity
               key={i}
               style={styles.promptOptionButton}
-              onPress={() => onSelectOption?.(opt.value)}
+              onPress={() => onSelectOption?.(opt.value, message.requestId)}
             >
               <Text style={styles.promptOptionText}>{opt.label}</Text>
             </TouchableOpacity>
