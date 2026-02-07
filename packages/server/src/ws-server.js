@@ -113,14 +113,16 @@ export class WsServer {
         console.log(`[ws] Client ${clientId} auto-authenticated (--no-auth)`)
       }
 
-      // Auto-disconnect if not authenticated within 10s
-      const authTimeout = setTimeout(() => {
-        const client = this.clients.get(ws)
-        if (client && !client.authenticated) {
-          this._send(ws, { type: 'auth_fail', reason: 'timeout' })
-          ws.close()
-        }
-      }, 10_000)
+      // Auto-disconnect if not authenticated within 10s (skip when auth is disabled)
+      const authTimeout = this.authRequired
+        ? setTimeout(() => {
+            const client = this.clients.get(ws)
+            if (client && !client.authenticated) {
+              this._send(ws, { type: 'auth_fail', reason: 'timeout' })
+              ws.close()
+            }
+          }, 10_000)
+        : null
 
       ws.on('message', (raw) => {
         let msg
