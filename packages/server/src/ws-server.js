@@ -1,17 +1,7 @@
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { v4 as uuidv4 } from "uuid";
-
-// Single source of truth for supported models. Each entry has a short id
-// (used in set_model messages), a display label, and the full Claude model ID.
-const MODELS = [
-  { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-235-20250421' },
-  { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-20250514' },
-  { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-20250514' },
-];
-
-// Accept both short ids and full model IDs in set_model
-const ALLOWED_MODEL_IDS = new Set(MODELS.flatMap(m => [m.id, m.fullId]));
+import { MODELS, ALLOWED_MODEL_IDS } from "./models.js";
 
 /**
  * WebSocket server that bridges the phone client to the backend.

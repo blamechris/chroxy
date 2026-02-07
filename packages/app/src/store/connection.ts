@@ -4,6 +4,7 @@ import * as SecureStore from 'expo-secure-store';
 
 const STORAGE_KEY_URL = 'chroxy_last_url';
 const STORAGE_KEY_TOKEN = 'chroxy_last_token';
+const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
 /** Strip ANSI escape codes for plain text display */
 function stripAnsi(str: string): string {
@@ -187,6 +188,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const saved = await loadConnection();
     if (saved) {
       set({ savedConnection: saved });
+    }
+    // Load persisted input settings
+    try {
+      const raw = await SecureStore.getItemAsync(STORAGE_KEY_INPUT_SETTINGS);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed.chatEnterToSend === 'boolean' || typeof parsed.terminalEnterToSend === 'boolean') {
+          set((state) => ({ inputSettings: { ...state.inputSettings, ...parsed } }));
+        }
+      }
+    } catch {
+      // Storage not available or corrupt — use defaults
     }
   },
 
@@ -502,9 +515,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   updateInputSettings: (settings) => {
-    set((state) => ({
-      inputSettings: { ...state.inputSettings, ...settings },
-    }));
+    set((state) => {
+      const updated = { ...state.inputSettings, ...settings };
+      // Persist to storage (fire-and-forget)
+      SecureStore.setItemAsync(STORAGE_KEY_INPUT_SETTINGS, JSON.stringify(updated)).catch(() => {});
+      return { inputSettings: updated };
+    });
   },
 
   sendInput: (input) => {

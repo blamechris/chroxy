@@ -316,6 +316,7 @@ export function SessionScreen() {
         <View style={styles.inputRow}>
           <TouchableOpacity
             style={styles.enterModeToggle}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             onPress={() => {
               const key = viewMode === 'chat' ? 'chatEnterToSend' : 'terminalEnterToSend';
               updateInputSettings({ [key]: !inputSettings[key] });
@@ -329,6 +330,8 @@ export function SessionScreen() {
             placeholderTextColor="#666"
             value={inputText}
             onChangeText={setInputText}
+            // When enterToSend is true, multiline is false and onSubmitEditing fires on Enter.
+            // When enterToSend is false, multiline is true so onSubmitEditing never fires.
             onSubmitEditing={enterToSend && !streamingMessageId ? handleSend : undefined}
             blurOnSubmit={false}
             multiline={!enterToSend}

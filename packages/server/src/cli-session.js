@@ -1,6 +1,7 @@
 import { spawn } from 'child_process'
 import { EventEmitter } from 'events'
 import { createInterface } from 'readline'
+import { resolveModelId } from './models.js'
 
 /**
  * Manages a persistent Claude Code CLI session using headless mode.
@@ -406,7 +407,7 @@ export class CliSession extends EventEmitter {
       return
     }
 
-    const newModel = model || null
+    const newModel = model ? resolveModelId(model) : null
     const changed = newModel !== this.model
     this.model = newModel
 
