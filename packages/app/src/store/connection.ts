@@ -423,7 +423,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
                 }
                 return null;
               })
-              .filter((m): m is ModelInfo => m !== null);
+              .filter((m: ModelInfo | null): m is ModelInfo => m !== null);
             set({ availableModels: cleaned });
           }
           break;
