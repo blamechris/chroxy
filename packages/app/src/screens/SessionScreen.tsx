@@ -379,7 +379,7 @@ function ChatView({
   onToggleSelection,
 }: {
   messages: ChatMessage[];
-  scrollViewRef: React.RefObject<ScrollView>;
+  scrollViewRef: React.RefObject<ScrollView | null>;
   claudeReady: boolean;
   onSelectOption: (value: string, requestId?: string) => void;
   isCliMode: boolean;
@@ -567,7 +567,7 @@ function TerminalView({
   onKeyPress,
 }: {
   content: string;
-  scrollViewRef: React.RefObject<ScrollView>;
+  scrollViewRef: React.RefObject<ScrollView | null>;
   onKeyPress: (key: string) => void;
 }) {
   const processed = useMemo(() => processTerminalBuffer(content), [content]);
