@@ -250,17 +250,20 @@ export function SessionScreen() {
       {isCliMode && availableModels.length > 0 && (
         <View style={styles.statusBar}>
           <View style={styles.modelSelector}>
-            {availableModels.map((m) => (
-              <TouchableOpacity
-                key={m.id}
-                style={[styles.modelChip, activeModel === m.id && styles.modelChipActive]}
-                onPress={() => setModel(m.id)}
-              >
-                <Text style={[styles.modelChipText, activeModel === m.id && styles.modelChipTextActive]}>
-                  {m.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
+            {availableModels.map((m) => {
+              const isActive = activeModel === m.id || activeModel === m.fullId;
+              return (
+                <TouchableOpacity
+                  key={m.id}
+                  style={[styles.modelChip, isActive && styles.modelChipActive]}
+                  onPress={() => setModel(m.id)}
+                >
+                  <Text style={[styles.modelChipText, isActive && styles.modelChipTextActive]}>
+                    {m.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
           {contextUsage && (
             <View style={styles.contextInfo}>
@@ -317,6 +320,8 @@ export function SessionScreen() {
           <TouchableOpacity
             style={styles.enterModeToggle}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel={enterToSend ? 'Enter key sends message. Tap to switch to newline mode.' : 'Enter key inserts newline. Tap to switch to send mode.'}
             onPress={() => {
               const key = viewMode === 'chat' ? 'chatEnterToSend' : 'terminalEnterToSend';
               updateInputSettings({ [key]: !inputSettings[key] });

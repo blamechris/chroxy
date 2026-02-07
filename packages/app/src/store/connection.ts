@@ -393,12 +393,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'available_models':
           if (Array.isArray(msg.models)) {
-            const cleaned = msg.models.filter(
-              (m: unknown): m is ModelInfo =>
-                typeof m === 'object' && m !== null &&
-                typeof (m as ModelInfo).id === 'string' &&
-                typeof (m as ModelInfo).label === 'string',
-            );
+            const cleaned = msg.models
+              .map((m: unknown): ModelInfo | null => {
+                // Accept structured {id, label, fullId} objects
+                if (typeof m === 'object' && m !== null) {
+                  const { id, label, fullId } = m as ModelInfo;
+                  if (
+                    typeof id === 'string' && id.trim() !== '' &&
+                    typeof label === 'string' && label.trim() !== '' &&
+                    typeof fullId === 'string' && fullId.trim() !== ''
+                  ) {
+                    return { id, label, fullId };
+                  }
+                }
+                // Accept legacy string format for backward compatibility
+                if (typeof m === 'string' && m.trim().length > 0) {
+                  const s = m.trim();
+                  return { id: s, label: s.charAt(0).toUpperCase() + s.slice(1), fullId: s };
+                }
+                return null;
+              })
+              .filter((m): m is ModelInfo => m !== null);
             set({ availableModels: cleaned });
           }
           break;
