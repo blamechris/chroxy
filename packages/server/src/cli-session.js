@@ -29,12 +29,14 @@ const __dirname = dirname(__filename)
  *   error        { message }
  */
 export class CliSession extends EventEmitter {
-  constructor({ cwd, allowedTools, model, port } = {}) {
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.allowedTools = allowedTools || []
     this.model = model || null
+    this.permissionMode = permissionMode || 'approve'
     this._port = port || null
+    this._apiToken = apiToken || null
     this._sessionId = null
     this._child = null
     this._destroying = false
@@ -89,11 +91,17 @@ export class CliSession extends EventEmitter {
       args.push('--model', this.model)
     }
 
+    if (this.permissionMode === 'auto') {
+      args.push('--permission-mode', 'bypassPermissions')
+    } else if (this.permissionMode === 'plan') {
+      args.push('--permission-mode', 'plan')
+    }
+
     if (this.allowedTools.length > 0) {
       args.push('--allowedTools', this.allowedTools.join(','))
     }
 
-    console.log(`[cli-session] Starting persistent process (model: ${this.model || 'default'})`)
+    console.log(`[cli-session] Starting persistent process (model: ${this.model || 'default'}, permission: ${this.permissionMode})`)
     this._spawnPersistentProcess(args)
   }
 
@@ -113,6 +121,8 @@ export class CliSession extends EventEmitter {
         CLAUDE_HEADLESS: '1',
         CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
         ...(this._port ? { CHROXY_PORT: String(this._port) } : {}),
+        ...(this._apiToken ? { CHROXY_TOKEN: this._apiToken } : {}),
+        CHROXY_PERMISSION_MODE: this.permissionMode,
       },
     })
 
@@ -468,6 +478,63 @@ export class CliSession extends EventEmitter {
     }
   }
 
+  /**
+   * Change the permission mode for subsequent messages.
+   * Kills the current process and respawns with the new mode (new session).
+   */
+  setPermissionMode(mode) {
+    const VALID_MODES = ['approve', 'auto', 'plan']
+    if (!VALID_MODES.includes(mode)) {
+      console.warn(`[cli-session] Ignoring invalid permission mode: ${mode}`)
+      return
+    }
+
+    if (this._isBusy) {
+      console.warn('[cli-session] Ignoring permission mode change while message is in-flight')
+      return
+    }
+
+    if (mode === this.permissionMode) {
+      console.log(`[cli-session] Permission mode unchanged: ${this.permissionMode}`)
+      return
+    }
+
+    console.log(`[cli-session] Permission mode changed to ${mode}, restarting process`)
+    this.permissionMode = mode
+
+    // Same kill-and-respawn pattern as setModel()
+    this._destroying = true
+    this._processReady = false
+    this._sessionId = null
+
+    if (this._interruptTimer) {
+      clearTimeout(this._interruptTimer)
+      this._interruptTimer = null
+    }
+
+    if (this._respawnTimer) {
+      clearTimeout(this._respawnTimer)
+      this._respawnTimer = null
+    }
+
+    this._cleanupReadlines()
+
+    if (this._child) {
+      const oldChild = this._child
+      this._child = null
+      oldChild.on('close', () => {
+        this._destroying = false
+        this._respawnCount = 0
+        this.start()
+      })
+      oldChild.kill('SIGTERM')
+    } else {
+      this._destroying = false
+      this._respawnCount = 0
+      this.start()
+    }
+  }
+
   /** Interrupt the current message (send SIGINT to child process) */
   interrupt() {
     if (!this._child) return
@@ -507,9 +574,16 @@ export class CliSession extends EventEmitter {
       let settings = {}
       try {
         settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
-      } catch {
-        // File doesn't exist or is corrupt — start fresh
-        mkdirSync(resolve(homedir(), '.claude'), { recursive: true })
+      } catch (err) {
+        if (err.code === 'ENOENT') {
+          // File doesn't exist — start fresh
+          mkdirSync(resolve(homedir(), '.claude'), { recursive: true })
+        } else {
+          // File exists but contains invalid JSON — bail out to avoid data loss
+          console.error(`[cli-session] Cannot parse ${settingsPath}: ${err.message}`)
+          console.error('[cli-session] Skipping hook registration to avoid overwriting corrupt settings')
+          return
+        }
       }
 
       if (!settings.hooks) settings.hooks = {}
@@ -520,7 +594,9 @@ export class CliSession extends EventEmitter {
         (entry) => !entry._chroxy
       )
 
-      // Add our hook
+      // Add our hook — script reads CHROXY_PORT and CHROXY_TOKEN from env vars
+      // (inherited by the spawned Claude process). Non-Chroxy sessions don't
+      // have these vars, so the hook falls through to normal permission prompts.
       settings.hooks.PreToolUse.push({
         _chroxy: true,
         matcher: '',  // empty string matches all tools

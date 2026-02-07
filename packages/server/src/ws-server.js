@@ -3,6 +3,13 @@ import { WebSocketServer } from "ws";
 import { v4 as uuidv4 } from "uuid";
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from "./models.js";
 
+const PERMISSION_MODES = [
+  { id: "approve", label: "Approve" },
+  { id: "auto", label: "Auto" },
+  { id: "plan", label: "Plan" },
+];
+const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id));
+
 /**
  * WebSocket server that bridges the phone client to the backend.
  *
@@ -19,6 +26,7 @@ import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from "./models.js";
  *   { type: "mode",      mode: "terminal"|"chat" }   — switch view mode
  *   { type: "interrupt" }                             — interrupt current operation
  *   { type: "set_model", model: "..." }              — change Claude model (CLI mode)
+ *   { type: "set_permission_mode", mode: "..." }     — change permission mode (CLI mode)
  *   { type: "permission_response", requestId, decision } — respond to permission prompt
  *
  * Server -> Client:
@@ -37,6 +45,8 @@ import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from "./models.js";
  *   { type: "model_changed", model: "..." }          — active model updated (CLI mode)
  *   { type: "available_models", models: [{id,label,fullId},...] } — models the server accepts (CLI mode)
  *   { type: "permission_request", requestId, tool, description } — permission prompt from hook
+ *   { type: "permission_mode_changed", mode: "..." } — active permission mode updated (CLI mode)
+ *   { type: "available_permission_modes", modes: [{id,label},...] } — permission modes the server accepts
  */
 export class WsServer {
   constructor({ port, apiToken, ptyManager, outputParser, cliSession }) {
@@ -168,6 +178,14 @@ export class WsServer {
             type: "available_models",
             models: MODELS,
           });
+          this._send(ws, {
+            type: "permission_mode_changed",
+            mode: this.cliSession.permissionMode || "approve",
+          });
+          this._send(ws, {
+            type: "available_permission_modes",
+            modes: PERMISSION_MODES,
+          });
         }
 
         console.log(`[ws] Client ${client.id} authenticated`);
@@ -213,6 +231,20 @@ export class WsServer {
           this._broadcast({ type: "model_changed", model: toShortModelId(msg.model) });
         } else {
           console.warn(`[ws] Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`);
+        }
+        break;
+      }
+
+      case "set_permission_mode": {
+        if (
+          typeof msg.mode === "string" &&
+          ALLOWED_PERMISSION_MODE_IDS.has(msg.mode)
+        ) {
+          console.log(`[ws] Permission mode change from ${client.id}: ${msg.mode}`);
+          this.cliSession.setPermissionMode(msg.mode);
+          this._broadcast({ type: "permission_mode_changed", mode: msg.mode });
+        } else {
+          console.warn(`[ws] Rejected invalid permission mode from ${client.id}: ${JSON.stringify(msg.mode)}`);
         }
         break;
       }
@@ -271,6 +303,10 @@ export class WsServer {
       this._broadcast({
         type: "model_changed",
         model: this.cliSession.model ? toShortModelId(this.cliSession.model) : null,
+      });
+      this._broadcast({
+        type: "permission_mode_changed",
+        mode: this.cliSession.permissionMode || "approve",
       });
     });
 
@@ -382,9 +418,34 @@ export class WsServer {
 
   /** Handle POST /permission from the hook script */
   _handlePermissionRequest(req, res) {
+    // Validate Bearer token — reject unauthenticated requests
+    const authHeader = req.headers["authorization"] || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!token || token !== this.apiToken) {
+      console.warn(`[ws] Rejected unauthenticated POST /permission`);
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+
+    // Enforce body size limit (64KB) to prevent memory exhaustion
+    const MAX_BODY = 65536;
     let body = "";
-    req.on("data", (chunk) => { body += chunk; });
+    let oversized = false;
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > MAX_BODY) {
+        oversized = true;
+        req.destroy();
+      }
+    });
     req.on("end", () => {
+      if (oversized) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ decision: "deny" }));
+        return;
+      }
+
       let hookData;
       try {
         hookData = JSON.parse(body);
@@ -416,18 +477,39 @@ export class WsServer {
         description,
       });
 
+      // Track whether the HTTP connection has been closed (client disconnect / abort)
+      let closed = false;
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        this._pendingPermissions.delete(requestId);
+      };
+
+      const onClose = () => {
+        if (closed) return;
+        closed = true;
+        console.log(`[ws] Permission ${requestId} connection closed by client`);
+        cleanup();
+      };
+
+      req.on("aborted", onClose);
+      res.on("close", onClose);
+
       // Hold the HTTP response open until the app responds or timeout
       const timer = setTimeout(() => {
+        if (closed) return;
+        closed = true;
         console.log(`[ws] Permission ${requestId} timed out, auto-denying`);
-        this._pendingPermissions.delete(requestId);
+        cleanup();
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ decision: "deny" }));
       }, 300_000); // 5 minutes
 
       this._pendingPermissions.set(requestId, {
         resolve: (decision) => {
-          clearTimeout(timer);
-          this._pendingPermissions.delete(requestId);
+          if (closed) return;
+          closed = true;
+          cleanup();
           console.log(`[ws] Permission ${requestId} resolved: ${decision}`);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ decision }));
