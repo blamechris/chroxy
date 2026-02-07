@@ -77,6 +77,10 @@ interface ConnectionState {
   // Context window usage from last result
   contextUsage: ContextUsage | null;
 
+  // Cost/duration from last result
+  lastResultCost: number | null;
+  lastResultDuration: number | null;
+
   // View mode
   viewMode: 'chat' | 'terminal';
 
@@ -177,6 +181,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   activeModel: null,
   availableModels: [],
   contextUsage: null,
+  lastResultCost: null,
+  lastResultDuration: null,
   inputSettings: {
     chatEnterToSend: true,
     terminalEnterToSend: false,
@@ -386,6 +392,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
                   cacheRead: msg.usage.cache_read_input_tokens || 0,
                 }
               : null,
+            lastResultCost: typeof msg.cost === 'number' ? msg.cost : null,
+            lastResultDuration: typeof msg.duration === 'number' ? msg.duration : null,
           });
           break;
 
@@ -512,6 +520,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       activeModel: null,
       availableModels: [],
       contextUsage: null,
+      lastResultCost: null,
+      lastResultDuration: null,
       messages: [],
       terminalBuffer: '',
     });

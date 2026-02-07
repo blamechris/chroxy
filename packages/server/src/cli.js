@@ -105,6 +105,7 @@ program
   .option("--cwd <path>", "Working directory for Claude (CLI mode)")
   .option("--model <model>", "Model to use (CLI mode)")
   .option("--allowed-tools <tools>", "Comma-separated tools to auto-approve (CLI mode)")
+  .option("--no-auth", "Skip API token requirement (local testing only, disables tunnel)")
   .action(async (options) => {
     // Load config
     if (!existsSync(options.config)) {
@@ -132,6 +133,7 @@ program
       if (options.allowedTools) {
         config.allowedTools = options.allowedTools.split(",").map((t) => t.trim());
       }
+      if (options.auth === false) config.noAuth = true;
       const { startCliServer } = await import("./server-cli.js");
       await startCliServer(config);
     }

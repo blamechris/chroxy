@@ -55,15 +55,21 @@ export function ConnectScreen() {
     loadSavedConnection();
   }, []);
 
-  const handleConnect = () => {
-    if (!url || !token) {
-      Alert.alert('Missing Info', 'Please enter both URL and token');
-      return;
-    }
+  const isLocalUrl = (u: string) => {
+    const lower = u.toLowerCase();
+    return lower.startsWith('ws://localhost') || lower.startsWith('ws://127.0.0.1');
+  };
 
-    let wsUrl = url.trim();
+  const handleConnect = () => {
+    let wsUrl = url.trim() || 'ws://localhost:8765';
     if (!wsUrl.startsWith('wss://') && !wsUrl.startsWith('ws://')) {
       wsUrl = `wss://${wsUrl}`;
+    }
+
+    // Token is optional for localhost connections (--no-auth mode)
+    if (!token && !isLocalUrl(wsUrl)) {
+      Alert.alert('Missing Token', 'API token is required for remote connections');
+      return;
     }
 
     Keyboard.dismiss();
@@ -185,7 +191,7 @@ export function ConnectScreen() {
           <Text style={styles.label}>Server URL</Text>
           <TextInput
             style={styles.input}
-            placeholder="ws://your-mac-ip:8765"
+            placeholder="ws://localhost:8765 (default)"
             placeholderTextColor="#666"
             value={url}
             onChangeText={setUrl}
@@ -194,7 +200,9 @@ export function ConnectScreen() {
             autoCorrect={false}
           />
 
-          <Text style={styles.label}>API Token</Text>
+          <Text style={styles.label}>
+            API Token{isLocalUrl(url.trim() || 'ws://localhost:8765') ? ' (optional for localhost)' : ''}
+          </Text>
           <TextInput
             style={styles.input}
             placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
