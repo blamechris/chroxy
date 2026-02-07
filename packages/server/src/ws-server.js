@@ -1,22 +1,7 @@
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { v4 as uuidv4 } from "uuid";
-
-// All model identifiers accepted by set_model. Includes both short names
-// (displayed to users) and full model IDs (for forward compatibility with
-// third-party clients). The available_models message advertises only short
-// names so the mobile app renders clean labels. See #19 for planned
-// structured {id, label} model objects.
-const ALLOWED_MODELS = [
-  "claude-sonnet-4-20250514",
-  "claude-haiku-235-20250421",
-  "claude-opus-4-20250514",
-  "sonnet", "haiku", "opus",
-];
-
-// Short names advertised to clients for model selection UI.
-// Intentionally a subset of ALLOWED_MODELS — see comment above.
-const MODEL_SHORT_NAMES = ["haiku", "sonnet", "opus"];
+import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from "./models.js";
 
 /**
  * WebSocket server that bridges the phone client to the backend.
@@ -49,7 +34,7 @@ const MODEL_SHORT_NAMES = ["haiku", "sonnet", "opus"];
  *   { type: "status",       connected: true }         — connection status
  *   { type: "claude_ready" }                          — Claude Code ready for input
  *   { type: "model_changed", model: "..." }          — active model updated (CLI mode)
- *   { type: "available_models", models: [...] }       — models the server accepts (CLI mode)
+ *   { type: "available_models", models: [{id,label,fullId},...] } — models the server accepts (CLI mode)
  */
 export class WsServer {
   constructor({ port, apiToken, ptyManager, outputParser, cliSession }) {
@@ -165,11 +150,11 @@ export class WsServer {
           }
           this._send(ws, {
             type: "model_changed",
-            model: this.cliSession.model ?? null,
+            model: this.cliSession.model ? toShortModelId(this.cliSession.model) : null,
           });
           this._send(ws, {
             type: "available_models",
-            models: MODEL_SHORT_NAMES,
+            models: MODELS,
           });
         }
 
@@ -208,12 +193,12 @@ export class WsServer {
       case "set_model": {
         if (
           typeof msg.model === "string" &&
-          ALLOWED_MODELS.includes(msg.model)
+          ALLOWED_MODEL_IDS.has(msg.model)
         ) {
           console.log(`[ws] Model change from ${client.id}: ${msg.model}`);
           this.cliSession.setModel(msg.model);
           // Broadcast model change to all authenticated clients
-          this._broadcast({ type: "model_changed", model: msg.model });
+          this._broadcast({ type: "model_changed", model: toShortModelId(msg.model) });
         } else {
           console.warn(`[ws] Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`);
         }
@@ -265,7 +250,7 @@ export class WsServer {
       this._broadcast({ type: "claude_ready" });
       this._broadcast({
         type: "model_changed",
-        model: this.cliSession.model ?? null,
+        model: this.cliSession.model ? toShortModelId(this.cliSession.model) : null,
       });
     });
 

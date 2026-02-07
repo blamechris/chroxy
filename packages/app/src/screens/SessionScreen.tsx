@@ -10,6 +10,8 @@ import {
   Keyboard,
   Share,
   Alert,
+  LayoutAnimation,
+  UIManager,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -19,6 +21,9 @@ import { useConnectionStore, ChatMessage } from '../store/connection';
 const ICON_CLOSE = '\u2715';       // Multiplication X
 const ICON_CHEVRON_RIGHT = '\u25B8'; // Right-pointing triangle
 const ICON_CHEVRON_DOWN = '\u25BE';  // Down-pointing triangle
+
+// Enable LayoutAnimation on Android
+UIManager.setLayoutAnimationEnabledExperimental?.(true);
 
 function useKeyboardHeight() {
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -66,6 +71,7 @@ export function SessionScreen() {
     clearTerminalBuffer,
     addMessage,
     inputSettings,
+    updateInputSettings,
     claudeReady,
     serverMode,
     streamingMessageId,
@@ -244,17 +250,20 @@ export function SessionScreen() {
       {isCliMode && availableModels.length > 0 && (
         <View style={styles.statusBar}>
           <View style={styles.modelSelector}>
-            {availableModels.map((m) => (
-              <TouchableOpacity
-                key={m}
-                style={[styles.modelChip, activeModel === m && styles.modelChipActive]}
-                onPress={() => setModel(m)}
-              >
-                <Text style={[styles.modelChipText, activeModel === m && styles.modelChipTextActive]}>
-                  {m.charAt(0).toUpperCase() + m.slice(1)}
-                </Text>
-              </TouchableOpacity>
-            ))}
+            {availableModels.map((m) => {
+              const isActive = activeModel === m.id || activeModel === m.fullId;
+              return (
+                <TouchableOpacity
+                  key={m.id}
+                  style={[styles.modelChip, isActive && styles.modelChipActive]}
+                  onPress={() => setModel(m.id)}
+                >
+                  <Text style={[styles.modelChipText, isActive && styles.modelChipTextActive]}>
+                    {m.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
           {contextUsage && (
             <View style={styles.contextInfo}>
@@ -308,14 +317,29 @@ export function SessionScreen() {
           </View>
         )}
         <View style={styles.inputRow}>
+          <TouchableOpacity
+            style={styles.enterModeToggle}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel={enterToSend ? 'Enter key sends message. Tap to switch to newline mode.' : 'Enter key inserts newline. Tap to switch to send mode.'}
+            onPress={() => {
+              const key = viewMode === 'chat' ? 'chatEnterToSend' : 'terminalEnterToSend';
+              updateInputSettings({ [key]: !inputSettings[key] });
+            }}
+          >
+            <Text style={styles.enterModeText}>{enterToSend ? '\u21B5' : '\u00B6'}</Text>
+          </TouchableOpacity>
           <TextInput
-            style={styles.input}
+            style={[styles.input, !enterToSend && styles.inputMultiline]}
             placeholder={!claudeReady ? 'Connecting to Claude...' : 'Message Claude...'}
             placeholderTextColor="#666"
             value={inputText}
             onChangeText={setInputText}
+            // When enterToSend is true, multiline is false and onSubmitEditing fires on Enter.
+            // When enterToSend is false, multiline is true so onSubmitEditing never fires.
             onSubmitEditing={enterToSend && !streamingMessageId ? handleSend : undefined}
             blurOnSubmit={false}
+            multiline={!enterToSend}
             autoCapitalize="none"
             autoCorrect={false}
           />
@@ -412,6 +436,7 @@ function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: 
     if (isSelecting) {
       onPress();
     } else {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded((prev) => !prev);
     }
   };
@@ -456,6 +481,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   const isTool = message.type === 'tool_use';
   const isThinking = message.type === 'thinking';
   const isPrompt = message.type === 'prompt';
+  const isError = message.type === 'error';
 
   if (isThinking) {
     return (
@@ -482,12 +508,12 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
       activeOpacity={0.7}
       onPress={isSelecting ? onPress : undefined}
       onLongPress={isSelecting ? undefined : onLongPress}
-      style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isSelected && styles.selectedBubble]}
+      style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isError && styles.errorBubble, isSelected && styles.selectedBubble]}
     >
-      <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : styles.senderLabelClaude}>
-        {isUser ? 'You' : isPrompt ? 'Action Required' : 'Claude'}
+      <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : isError ? styles.senderLabelError : styles.senderLabelClaude}>
+        {isUser ? 'You' : isPrompt ? 'Action Required' : isError ? 'Error' : 'Claude'}
       </Text>
-      <Text selectable style={[styles.messageText, isUser && styles.userMessageText]}>
+      <Text selectable style={[styles.messageText, isUser && styles.userMessageText, isError && styles.errorMessageText]}>
         {message.content?.trim()}
       </Text>
       {isPrompt && message.options && (
@@ -764,6 +790,20 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
+  errorBubble: {
+    backgroundColor: '#ff4a4a11',
+    borderColor: '#ff4a4a44',
+    borderWidth: 1,
+  },
+  senderLabelError: {
+    color: '#ff4a4a',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  errorMessageText: {
+    color: '#e8a0a0',
+  },
   selectedBubble: {
     borderColor: '#4a9eff',
     borderWidth: 2,
@@ -856,6 +896,17 @@ const styles = StyleSheet.create({
     padding: 12,
     paddingTop: 4,
     gap: 8,
+    alignItems: 'center',
+  },
+  enterModeToggle: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  enterModeText: {
+    color: '#555',
+    fontSize: 16,
   },
   input: {
     flex: 1,
@@ -865,6 +916,9 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     color: '#fff',
     fontSize: 16,
+  },
+  inputMultiline: {
+    maxHeight: 100,
   },
   sendButton: {
     backgroundColor: '#4a9eff',

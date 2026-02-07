@@ -4,6 +4,7 @@ import * as SecureStore from 'expo-secure-store';
 
 const STORAGE_KEY_URL = 'chroxy_last_url';
 const STORAGE_KEY_TOKEN = 'chroxy_last_token';
+const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
 /** Strip ANSI escape codes for plain text display */
 function stripAnsi(str: string): string {
@@ -40,6 +41,12 @@ interface InputSettings {
   terminalEnterToSend: boolean;
 }
 
+export interface ModelInfo {
+  id: string;
+  label: string;
+  fullId: string;
+}
+
 interface ConnectionState {
   // Connection
   isConnected: boolean;
@@ -64,7 +71,7 @@ interface ConnectionState {
   activeModel: string | null;
 
   // Available models from server (CLI mode)
-  availableModels: string[];
+  availableModels: ModelInfo[];
 
   // Context window usage from last result
   contextUsage: ContextUsage | null;
@@ -181,6 +188,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const saved = await loadConnection();
     if (saved) {
       set({ savedConnection: saved });
+    }
+    // Load persisted input settings
+    try {
+      const raw = await SecureStore.getItemAsync(STORAGE_KEY_INPUT_SETTINGS);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed.chatEnterToSend === 'boolean' || typeof parsed.terminalEnterToSend === 'boolean') {
+          set((state) => ({ inputSettings: { ...state.inputSettings, ...parsed } }));
+        }
+      }
+    } catch {
+      // Storage not available or corrupt — use defaults
     }
   },
 
@@ -374,9 +393,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'available_models':
           if (Array.isArray(msg.models)) {
-            const cleaned = msg.models.filter(
-              (m: unknown): m is string => typeof m === 'string' && m.trim().length > 0,
-            );
+            const cleaned = msg.models
+              .map((m: unknown): ModelInfo | null => {
+                // Accept structured {id, label, fullId} objects
+                if (typeof m === 'object' && m !== null) {
+                  const { id, label, fullId } = m as ModelInfo;
+                  if (
+                    typeof id === 'string' && id.trim() !== '' &&
+                    typeof label === 'string' && label.trim() !== '' &&
+                    typeof fullId === 'string' && fullId.trim() !== ''
+                  ) {
+                    return { id, label, fullId };
+                  }
+                }
+                // Accept legacy string format for backward compatibility
+                if (typeof m === 'string' && m.trim().length > 0) {
+                  const s = m.trim();
+                  return { id: s, label: s.charAt(0).toUpperCase() + s.slice(1), fullId: s };
+                }
+                return null;
+              })
+              .filter((m): m is ModelInfo => m !== null);
             set({ availableModels: cleaned });
           }
           break;
@@ -493,9 +530,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   updateInputSettings: (settings) => {
-    set((state) => ({
-      inputSettings: { ...state.inputSettings, ...settings },
-    }));
+    set((state) => {
+      const updated = { ...state.inputSettings, ...settings };
+      // Persist to storage (fire-and-forget)
+      SecureStore.setItemAsync(STORAGE_KEY_INPUT_SETTINGS, JSON.stringify(updated)).catch(() => {});
+      return { inputSettings: updated };
+    });
   },
 
   sendInput: (input) => {
