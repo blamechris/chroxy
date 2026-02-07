@@ -78,10 +78,13 @@ export function SessionScreen() {
     isReconnecting,
     activeModel,
     availableModels,
+    permissionMode,
+    availablePermissionModes,
     contextUsage,
     lastResultCost,
     lastResultDuration,
     setModel,
+    setPermissionMode,
     sendPermissionResponse,
   } = useConnectionStore();
 
@@ -249,7 +252,7 @@ export function SessionScreen() {
         </View>
       )}
 
-      {/* Status bar: model selector + context usage */}
+      {/* Status bar: model selector + permission mode + context usage */}
       {isCliMode && availableModels.length > 0 && (
         <View style={styles.statusBar}>
           <View style={styles.modelSelector}>
@@ -281,6 +284,26 @@ export function SessionScreen() {
               </Text>
             )}
           </View>
+        </View>
+      )}
+
+      {/* Permission mode selector */}
+      {isCliMode && availablePermissionModes.length > 0 && (
+        <View style={styles.permissionBar}>
+          {availablePermissionModes.map((m) => {
+            const isActive = permissionMode === m.id;
+            return (
+              <TouchableOpacity
+                key={m.id}
+                style={[styles.modelChip, isActive && styles.modelChipActive]}
+                onPress={() => setPermissionMode(m.id)}
+              >
+                <Text style={[styles.modelChipText, isActive && styles.modelChipTextActive]}>
+                  {m.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
       )}
 
@@ -379,7 +402,7 @@ function ChatView({
   onToggleSelection,
 }: {
   messages: ChatMessage[];
-  scrollViewRef: React.RefObject<ScrollView>;
+  scrollViewRef: React.RefObject<ScrollView | null>;
   claudeReady: boolean;
   onSelectOption: (value: string, requestId?: string) => void;
   isCliMode: boolean;
@@ -567,7 +590,7 @@ function TerminalView({
   onKeyPress,
 }: {
   content: string;
-  scrollViewRef: React.RefObject<ScrollView>;
+  scrollViewRef: React.RefObject<ScrollView | null>;
   onKeyPress: (key: string) => void;
 }) {
   const processed = useMemo(() => processTerminalBuffer(content), [content]);
@@ -666,6 +689,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#1a1a2e',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2a2a4e',
+  },
+  permissionBar: {
+    flexDirection: 'row',
+    gap: 6,
     paddingHorizontal: 8,
     paddingVertical: 4,
     backgroundColor: '#1a1a2e',

@@ -74,6 +74,12 @@ interface ConnectionState {
   // Available models from server (CLI mode)
   availableModels: ModelInfo[];
 
+  // Active permission mode (CLI mode)
+  permissionMode: string | null;
+
+  // Available permission modes from server (CLI mode)
+  availablePermissionModes: { id: string; label: string }[];
+
   // Context window usage from last result
   contextUsage: ContextUsage | null;
 
@@ -107,6 +113,7 @@ interface ConnectionState {
   sendInterrupt: () => void;
   sendPermissionResponse: (requestId: string, decision: string) => void;
   setModel: (model: string) => void;
+  setPermissionMode: (mode: string) => void;
   resize: (cols: number, rows: number) => void;
 }
 
@@ -180,6 +187,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   streamingMessageId: null,
   activeModel: null,
   availableModels: [],
+  permissionMode: null,
+  availablePermissionModes: [],
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -423,8 +432,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
                 }
                 return null;
               })
-              .filter((m): m is ModelInfo => m !== null);
+              .filter((m: ModelInfo | null): m is ModelInfo => m !== null);
             set({ availableModels: cleaned });
+          }
+          break;
+
+        case 'permission_mode_changed':
+          set({ permissionMode: (typeof msg.mode === 'string' && msg.mode.trim()) ? msg.mode.trim() : null });
+          break;
+
+        case 'available_permission_modes':
+          if (Array.isArray(msg.modes)) {
+            const cleaned = (msg.modes as unknown[])
+              .filter((m): m is { id: string; label: string } =>
+                typeof m === 'object' && m !== null &&
+                typeof (m as { id: unknown }).id === 'string' &&
+                typeof (m as { label: unknown }).label === 'string'
+              );
+            set({ availablePermissionModes: cleaned });
           }
           break;
 
@@ -519,6 +544,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       streamingMessageId: null,
       activeModel: null,
       availableModels: [],
+      permissionMode: null,
+      availablePermissionModes: [],
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,
@@ -590,6 +617,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'set_model', model }));
+    }
+  },
+
+  setPermissionMode: (mode: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'set_permission_mode', mode }));
     }
   },
 
