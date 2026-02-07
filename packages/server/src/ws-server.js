@@ -1,6 +1,7 @@
 import { createServer } from 'http'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
+import { statSync } from 'fs'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 
 const PERMISSION_MODES = [
@@ -13,21 +14,29 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
 /**
  * WebSocket server that bridges the phone client to the backend.
  *
- * Supports two modes:
+ * Supports three modes:
+ *   - Multi-session (sessionManager): multiple concurrent CliSession instances
+ *   - Single CLI (cliSession): headless `claude -p` with structured JSON (legacy)
  *   - PTY mode (ptyManager + outputParser): existing tmux/PTY behavior
- *   - CLI mode (cliSession): headless `claude -p` with structured JSON
  *
  * Protocol (JSON messages over WebSocket):
  *
  * Client -> Server:
  *   { type: 'auth',      token: '...' }              — authenticate
- *   { type: 'input',     data: '...' }               — send text (keystrokes in PTY, message in CLI)
+ *   { type: 'input',     data: '...' }               — send text to active session
  *   { type: 'resize',    cols: 120, rows: 40 }       — resize PTY (PTY mode only)
  *   { type: 'mode',      mode: 'terminal'|'chat' }   — switch view mode
- *   { type: 'interrupt' }                             — interrupt current operation
- *   { type: 'set_model', model: '...' }              — change Claude model (CLI mode)
- *   { type: 'set_permission_mode', mode: '...' }     — change permission mode (CLI mode)
+ *   { type: 'interrupt' }                             — interrupt active session
+ *   { type: 'set_model', model: '...' }              — change model on active session
+ *   { type: 'set_permission_mode', mode: '...' }     — change permission mode on active session
  *   { type: 'permission_response', requestId, decision } — respond to permission prompt
+ *   { type: 'list_sessions' }                         — request session list
+ *   { type: 'switch_session', sessionId }             — switch to a different session
+ *   { type: 'create_session', name?, cwd? }           — create a new session
+ *   { type: 'destroy_session', sessionId }            — destroy a session
+ *   { type: 'rename_session', sessionId, name }       — rename a session
+ *   { type: 'discover_sessions' }                     — scan for host tmux sessions
+ *   { type: 'attach_session', tmuxSession, name? }    — attach to a tmux session
  *
  * Server -> Client:
  *   { type: 'auth_ok' }                               — auth succeeded
@@ -35,33 +44,51 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'server_mode',  mode: 'cli'|'terminal' }  — which backend mode is active
  *   { type: 'raw',          data: '...' }             — raw PTY output (terminal view)
  *   { type: 'message',      ... }                     — parsed chat message
- *   { type: 'stream_start', messageId: '...' }        — beginning of streaming response (CLI mode)
- *   { type: 'stream_delta', messageId, delta }         — token-by-token text (CLI mode)
- *   { type: 'stream_end',   messageId: '...' }        — streaming response complete (CLI mode)
- *   { type: 'tool_start',   messageId, tool, input }   — tool invocation (CLI mode)
- *   { type: 'result',       ... }                     — query stats (CLI mode)
+ *   { type: 'stream_start', messageId: '...' }        — beginning of streaming response
+ *   { type: 'stream_delta', messageId, delta }         — token-by-token text
+ *   { type: 'stream_end',   messageId: '...' }        — streaming response complete
+ *   { type: 'tool_start',   messageId, tool, input }   — tool invocation
+ *   { type: 'result',       ... }                     — query stats
  *   { type: 'status',       connected: true }         — connection status
  *   { type: 'claude_ready' }                          — Claude Code ready for input
- *   { type: 'model_changed', model: '...' }          — active model updated (CLI mode)
- *   { type: 'available_models', models: [{id,label,fullId},...] } — models the server accepts (CLI mode)
- *   { type: 'permission_request', requestId, tool, description } — permission prompt from hook
- *   { type: 'permission_mode_changed', mode: '...' } — active permission mode updated (CLI mode)
- *   { type: 'available_permission_modes', modes: [{id,label},...] } — permission modes the server accepts
+ *   { type: 'model_changed', model: '...' }          — active model updated
+ *   { type: 'available_models', models: [...] }       — models the server accepts
+ *   { type: 'permission_request', requestId, tool, description } — permission prompt
+ *   { type: 'permission_mode_changed', mode: '...' } — permission mode updated
+ *   { type: 'available_permission_modes', modes: [...] } — permission modes
+ *   { type: 'session_list', sessions: [...] }         — all sessions
+ *   { type: 'session_switched', sessionId, name, cwd } — switched active session
+ *   { type: 'session_created', sessionId, name }      — new session created
+ *   { type: 'session_destroyed', sessionId }          — session removed
+ *   { type: 'session_error', message }                — session operation error
+ *   { type: 'discovered_sessions', tmux: [...] }     — host tmux session scan results
  */
 export class WsServer {
-  constructor({ port, apiToken, ptyManager, outputParser, cliSession, authRequired = true }) {
+  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true }) {
     this.port = port
     this.apiToken = apiToken
     this.ptyManager = ptyManager || null
     this.outputParser = outputParser || null
-    this.cliSession = cliSession || null
-    this.serverMode = this.cliSession ? 'cli' : 'terminal'
     this.authRequired = authRequired
-    this.clients = new Map() // ws -> { id, authenticated, mode }
+    this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive }
     this.httpServer = null
     this.wss = null
+    this._pingInterval = null
     this._pendingPermissions = new Map() // requestId -> { resolve, timer }
     this._permissionCounter = 0
+
+    // Multi-session support: prefer sessionManager, fall back to single cliSession
+    this.sessionManager = sessionManager || null
+    this.defaultSessionId = defaultSessionId || null
+
+    // Legacy single-session mode: wrap cliSession in a minimal shim
+    if (!sessionManager && cliSession) {
+      this.cliSession = cliSession
+    } else {
+      this.cliSession = null
+    }
+
+    this.serverMode = (this.sessionManager || this.cliSession) ? 'cli' : 'terminal'
   }
 
   start(host) {
@@ -100,6 +127,14 @@ export class WsServer {
         id: clientId,
         authenticated: false,
         mode: 'chat', // default to chat view
+        activeSessionId: null,
+        isAlive: true,
+      })
+
+      // Track pong responses for keepalive detection
+      ws.on('pong', () => {
+        const client = this.clients.get(ws)
+        if (client) client.isAlive = true
       })
 
       console.log(`[ws] Client ${clientId} connected (awaiting auth)`)
@@ -149,21 +184,61 @@ export class WsServer {
     this.httpServer.listen(this.port, host)
 
     // Wire up event forwarding based on mode
-    if (this.cliSession) {
+    if (this.sessionManager) {
+      this._setupSessionForwarding()
+    } else if (this.cliSession) {
       this._setupCliForwarding()
     } else {
       this._setupPtyForwarding()
     }
 
+    // Ping all authenticated clients every 30s to keep connections alive through
+    // Cloudflare/mobile OS idle timeouts. Terminate unresponsive clients.
+    this._pingInterval = setInterval(() => {
+      for (const [ws, client] of this.clients) {
+        if (!client.authenticated) continue
+        if (!client.isAlive) {
+          console.log(`[ws] Client ${client.id} unresponsive, terminating`)
+          ws.terminate()
+          continue
+        }
+        client.isAlive = false
+        ws.ping()
+      }
+    }, 30_000)
+
     console.log(`[ws] Server listening on ${host || '0.0.0.0'}:${this.port} (${this.serverMode} mode)`)
   }
 
-  /** Send post-auth info (server mode, readiness, models, etc.) */
+  /** Send post-auth info (server mode, readiness, models, sessions, etc.) */
   _sendPostAuthInfo(ws) {
+    const client = this.clients.get(ws)
+
     this._send(ws, { type: 'auth_ok' })
     this._send(ws, { type: 'server_mode', mode: this.serverMode })
     this._send(ws, { type: 'status', connected: true })
 
+    // Multi-session mode
+    if (this.sessionManager) {
+      const activeId = this.defaultSessionId
+      client.activeSessionId = activeId
+
+      // Send session list
+      this._send(ws, { type: 'session_list', sessions: this.sessionManager.listSessions() })
+
+      // Send session_switched for the default session
+      const entry = this.sessionManager.getSession(activeId)
+      if (entry) {
+        this._send(ws, { type: 'session_switched', sessionId: activeId, name: entry.name, cwd: entry.cwd })
+        this._sendSessionInfo(ws, activeId)
+      }
+
+      this._send(ws, { type: 'available_models', models: MODELS })
+      this._send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
+      return
+    }
+
+    // Legacy single-session mode
     // In PTY mode, tell client if Claude Code is already ready
     if (this.outputParser && this.outputParser.claudeReady) {
       this._send(ws, { type: 'claude_ready' })
@@ -193,6 +268,25 @@ export class WsServer {
     }
   }
 
+  /** Send session-specific info (model, permission, ready status) to a client */
+  _sendSessionInfo(ws, sessionId) {
+    const entry = this.sessionManager?.getSession(sessionId)
+    if (!entry) return
+    const session = entry.session
+
+    if (session.isReady) {
+      this._send(ws, { type: 'claude_ready' })
+    }
+    this._send(ws, {
+      type: 'model_changed',
+      model: session.model ? toShortModelId(session.model) : null,
+    })
+    this._send(ws, {
+      type: 'permission_mode_changed',
+      mode: session.permissionMode || 'approve',
+    })
+  }
+
   /** Route incoming client messages */
   _handleMessage(ws, msg) {
     const client = this.clients.get(ws)
@@ -216,14 +310,236 @@ export class WsServer {
     if (msg.type === 'auth') return
 
     // Route based on server mode
-    if (this.cliSession) {
+    if (this.sessionManager) {
+      this._handleSessionMessage(ws, client, msg)
+    } else if (this.cliSession) {
       this._handleCliMessage(ws, client, msg)
     } else {
       this._handlePtyMessage(ws, client, msg)
     }
   }
 
-  /** Handle messages in CLI mode */
+  /** Handle messages in multi-session mode */
+  _handleSessionMessage(ws, client, msg) {
+    switch (msg.type) {
+      case 'input': {
+        const text = msg.data
+        if (!text || !text.trim()) break
+        const entry = this.sessionManager.getSession(client.activeSessionId)
+        if (!entry) {
+          this._send(ws, { type: 'session_error', message: 'No active session' })
+          break
+        }
+        console.log(`[ws] Message from ${client.id} to session ${client.activeSessionId}: "${text.slice(0, 80)}"`)
+        entry.session.sendMessage(text.trim())
+        break
+      }
+
+      case 'interrupt': {
+        const entry = this.sessionManager.getSession(client.activeSessionId)
+        if (entry) {
+          console.log(`[ws] Interrupt from ${client.id} to session ${client.activeSessionId}`)
+          entry.session.interrupt()
+        }
+        break
+      }
+
+      case 'set_model': {
+        if (
+          typeof msg.model === 'string' &&
+          ALLOWED_MODEL_IDS.has(msg.model)
+        ) {
+          const entry = this.sessionManager.getSession(client.activeSessionId)
+          if (entry) {
+            console.log(`[ws] Model change from ${client.id} on session ${client.activeSessionId}: ${msg.model}`)
+            entry.session.setModel(msg.model)
+            // Broadcast to clients on this session
+            this._broadcastToSession(client.activeSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+          }
+        } else {
+          console.warn(`[ws] Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
+        }
+        break
+      }
+
+      case 'set_permission_mode': {
+        if (
+          typeof msg.mode === 'string' &&
+          ALLOWED_PERMISSION_MODE_IDS.has(msg.mode)
+        ) {
+          const entry = this.sessionManager.getSession(client.activeSessionId)
+          if (entry) {
+            console.log(`[ws] Permission mode change from ${client.id} on session ${client.activeSessionId}: ${msg.mode}`)
+            entry.session.setPermissionMode(msg.mode)
+            this._broadcastToSession(client.activeSessionId, { type: 'permission_mode_changed', mode: msg.mode })
+          }
+        } else {
+          console.warn(`[ws] Rejected invalid permission mode from ${client.id}: ${JSON.stringify(msg.mode)}`)
+        }
+        break
+      }
+
+      case 'permission_response': {
+        const { requestId, decision } = msg
+        if (requestId && decision) {
+          this._resolvePermission(requestId, decision)
+        }
+        break
+      }
+
+      case 'list_sessions':
+        this._send(ws, { type: 'session_list', sessions: this.sessionManager.listSessions() })
+        break
+
+      case 'switch_session': {
+        const targetId = msg.sessionId
+        const entry = this.sessionManager.getSession(targetId)
+        if (!entry) {
+          this._send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+          break
+        }
+        client.activeSessionId = targetId
+        console.log(`[ws] Client ${client.id} switched to session ${targetId}`)
+        this._send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd })
+        this._sendSessionInfo(ws, targetId)
+        break
+      }
+
+      case 'create_session': {
+        const name = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : undefined
+        const cwd = (typeof msg.cwd === 'string' && msg.cwd.trim()) ? msg.cwd.trim() : undefined
+
+        // Validate cwd if provided
+        if (cwd) {
+          try {
+            const stat = statSync(cwd)
+            if (!stat.isDirectory()) {
+              this._send(ws, { type: 'session_error', message: `Not a directory: ${cwd}` })
+              break
+            }
+          } catch (err) {
+            this._send(ws, { type: 'session_error', message: `Directory does not exist: ${cwd}` })
+            break
+          }
+        }
+
+        try {
+          const sessionId = this.sessionManager.createSession({ name, cwd })
+          // Auto-switch the creating client to the new session
+          client.activeSessionId = sessionId
+          const entry = this.sessionManager.getSession(sessionId)
+          this._send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd })
+          this._sendSessionInfo(ws, sessionId)
+          // Broadcast updated session list to all clients
+          this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
+        } catch (err) {
+          this._send(ws, { type: 'session_error', message: err.message })
+        }
+        break
+      }
+
+      case 'destroy_session': {
+        const targetId = msg.sessionId
+        if (!this.sessionManager.getSession(targetId)) {
+          this._send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+          break
+        }
+
+        // Prevent destroying the last session
+        if (this.sessionManager.listSessions().length <= 1) {
+          this._send(ws, { type: 'session_error', message: 'Cannot destroy the last session' })
+          break
+        }
+
+        this.sessionManager.destroySession(targetId)
+
+        // Auto-switch orphaned clients to the first remaining session
+        const firstId = this.sessionManager.firstSessionId
+        for (const [clientWs, c] of this.clients) {
+          if (c.authenticated && c.activeSessionId === targetId) {
+            c.activeSessionId = firstId
+            const entry = this.sessionManager.getSession(firstId)
+            if (entry) {
+              this._send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd })
+              this._sendSessionInfo(clientWs, firstId)
+            }
+          }
+        }
+
+        // Broadcast updated session list
+        this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
+        break
+      }
+
+      case 'rename_session': {
+        const targetId = msg.sessionId
+        const newName = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : null
+        if (!newName) {
+          this._send(ws, { type: 'session_error', message: 'Name is required' })
+          break
+        }
+        if (this.sessionManager.renameSession(targetId, newName)) {
+          this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
+        } else {
+          this._send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+        }
+        break
+      }
+
+      case 'discover_sessions': {
+        try {
+          const tmuxSessions = this.sessionManager.discoverSessions()
+          this._send(ws, { type: 'discovered_sessions', tmux: tmuxSessions })
+        } catch (err) {
+          this._send(ws, { type: 'session_error', message: err.message })
+        }
+        break
+      }
+
+      case 'attach_session': {
+        const tmuxSession = typeof msg.tmuxSession === 'string' ? msg.tmuxSession.trim() : null
+        if (!tmuxSession) {
+          this._send(ws, { type: 'session_error', message: 'tmuxSession is required' })
+          break
+        }
+
+        try {
+          const name = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : undefined
+          const sessionId = this.sessionManager.attachSession({ tmuxSession, name })
+          // Auto-switch the attaching client to the new session
+          client.activeSessionId = sessionId
+          const entry = this.sessionManager.getSession(sessionId)
+          this._send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd })
+          this._sendSessionInfo(ws, sessionId)
+          // Broadcast updated session list to all clients
+          this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
+        } catch (err) {
+          this._send(ws, { type: 'session_error', message: err.message })
+        }
+        break
+      }
+
+      case 'resize': {
+        // Forward resize to PTY sessions
+        const entry = this.sessionManager.getSession(client.activeSessionId)
+        if (entry && entry.type === 'pty' && entry.session.resize) {
+          entry.session.resize(msg.cols, msg.rows)
+        }
+        break
+      }
+
+      case 'mode':
+        if (msg.mode === 'terminal' || msg.mode === 'chat') {
+          client.mode = msg.mode
+        }
+        break
+
+      default:
+        console.log(`[ws] Unknown message type: ${msg.type}`)
+    }
+  }
+
+  /** Handle messages in legacy single CLI mode */
   _handleCliMessage(ws, client, msg) {
     switch (msg.type) {
       case 'input': {
@@ -314,7 +630,117 @@ export class WsServer {
     }
   }
 
-  /** Wire up CLI session events to broadcast to clients */
+  /** Wire up SessionManager events to broadcast to clients (multi-session) */
+  _setupSessionForwarding() {
+    // Buffer stream deltas to reduce WS message volume (50ms batch window).
+    // Keyed by sessionId:messageId composite to handle concurrent session streams.
+    const deltaBuffer = new Map() // `${sessionId}:${messageId}` -> accumulated text
+    let deltaFlushTimer = null
+    const flushDeltas = () => {
+      deltaFlushTimer = null
+      for (const [key, delta] of deltaBuffer) {
+        const [sessionId, messageId] = key.split(':', 2)
+        this._broadcastToSession(sessionId, { type: 'stream_delta', messageId, delta })
+      }
+      deltaBuffer.clear()
+    }
+
+    this.sessionManager.on('session_event', ({ sessionId, event, data }) => {
+      switch (event) {
+        case 'ready': {
+          const entry = this.sessionManager.getSession(sessionId)
+          this._broadcastToSession(sessionId, { type: 'claude_ready' })
+          if (entry) {
+            this._broadcastToSession(sessionId, {
+              type: 'model_changed',
+              model: entry.session.model ? toShortModelId(entry.session.model) : null,
+            })
+            this._broadcastToSession(sessionId, {
+              type: 'permission_mode_changed',
+              mode: entry.session.permissionMode || 'approve',
+            })
+          }
+          break
+        }
+
+        case 'stream_start':
+          console.log(`[ws] Broadcasting stream_start: ${data.messageId} (session ${sessionId})`)
+          this._broadcastToSession(sessionId, { type: 'stream_start', messageId: data.messageId })
+          break
+
+        case 'stream_delta': {
+          const key = `${sessionId}:${data.messageId}`
+          const existing = deltaBuffer.get(key) || ''
+          deltaBuffer.set(key, existing + data.delta)
+          if (!deltaFlushTimer) {
+            deltaFlushTimer = setTimeout(flushDeltas, 50)
+          }
+          break
+        }
+
+        case 'stream_end':
+          // Flush remaining deltas for this session before sending stream_end
+          if (deltaBuffer.size > 0) {
+            const prefix = `${sessionId}:`
+            let hadDeltas = false
+            for (const [key, delta] of deltaBuffer) {
+              if (key.startsWith(prefix)) {
+                const messageId = key.slice(prefix.length)
+                this._broadcastToSession(sessionId, { type: 'stream_delta', messageId, delta })
+                deltaBuffer.delete(key)
+                hadDeltas = true
+              }
+            }
+            // If we flushed everything and the timer is pending, cancel it
+            if (deltaBuffer.size === 0 && deltaFlushTimer) {
+              clearTimeout(deltaFlushTimer)
+              deltaFlushTimer = null
+            }
+          }
+          console.log(`[ws] Broadcasting stream_end: ${data.messageId} (session ${sessionId})`)
+          this._broadcastToSession(sessionId, { type: 'stream_end', messageId: data.messageId })
+          break
+
+        case 'message':
+          this._broadcastToSession(sessionId, {
+            type: 'message',
+            messageType: data.type,
+            content: data.content,
+            tool: data.tool,
+            timestamp: data.timestamp,
+          })
+          break
+
+        case 'tool_start':
+          this._broadcastToSession(sessionId, { type: 'tool_start', messageId: data.messageId, tool: data.tool, input: data.input })
+          break
+
+        case 'result':
+          this._broadcastToSession(sessionId, { type: 'result', cost: data.cost, duration: data.duration, usage: data.usage, sessionId: data.sessionId })
+          // Broadcast updated session list (isBusy may have changed)
+          this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
+          break
+
+        case 'raw':
+          // Forward raw PTY data to terminal-mode clients on this session
+          this._broadcastToSession(sessionId, { type: 'raw', data }, (client) => client.mode === 'terminal')
+          // Also send as raw_background to chat-mode clients (keeps terminal buffer current)
+          this._broadcastToSession(sessionId, { type: 'raw_background', data }, (client) => client.mode === 'chat')
+          break
+
+        case 'error':
+          this._broadcastToSession(sessionId, {
+            type: 'message',
+            messageType: 'error',
+            content: data.message,
+            timestamp: Date.now(),
+          })
+          break
+      }
+    })
+  }
+
+  /** Wire up CLI session events to broadcast to clients (legacy single-session) */
   _setupCliForwarding() {
     // Notify clients when Claude process is ready (initial start or respawn)
     this.cliSession.on('ready', () => {
@@ -559,6 +985,15 @@ export class WsServer {
     }
   }
 
+  /** Broadcast a message only to clients whose activeSessionId matches */
+  _broadcastToSession(sessionId, message, filter = () => true) {
+    for (const [ws, client] of this.clients) {
+      if (client.authenticated && client.activeSessionId === sessionId && filter(client) && ws.readyState === 1) {
+        this._send(ws, message)
+      }
+    }
+  }
+
   /** Send JSON to a single client */
   _send(ws, message) {
     try {
@@ -570,6 +1005,11 @@ export class WsServer {
 
   /** Graceful shutdown */
   close() {
+    if (this._pingInterval) {
+      clearInterval(this._pingInterval)
+      this._pingInterval = null
+    }
+
     // Auto-deny any pending permission requests
     for (const [, pending] of this._pendingPermissions) {
       clearTimeout(pending.timer)

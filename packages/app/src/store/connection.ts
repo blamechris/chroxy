@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Alert } from 'react-native';
+import { Alert, AppState } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 
 const STORAGE_KEY_URL = 'chroxy_last_url';
@@ -48,6 +48,48 @@ export interface ModelInfo {
   fullId: string;
 }
 
+export interface SessionInfo {
+  sessionId: string;
+  name: string;
+  cwd: string;
+  type: 'cli' | 'pty';
+  hasTerminal: boolean;
+  model: string | null;
+  permissionMode: string | null;
+  isBusy: boolean;
+  createdAt: number;
+}
+
+export interface DiscoveredSession {
+  sessionName: string;
+  cwd: string;
+  pid: number;
+}
+
+export interface SessionState {
+  messages: ChatMessage[];
+  streamingMessageId: string | null;
+  claudeReady: boolean;
+  activeModel: string | null;
+  permissionMode: string | null;
+  contextUsage: ContextUsage | null;
+  lastResultCost: number | null;
+  lastResultDuration: number | null;
+}
+
+function createEmptySessionState(): SessionState {
+  return {
+    messages: [],
+    streamingMessageId: null,
+    claudeReady: false,
+    activeModel: null,
+    permissionMode: null,
+    contextUsage: null,
+    lastResultCost: null,
+    lastResultDuration: null,
+  };
+}
+
 interface ConnectionState {
   // Connection
   isConnected: boolean;
@@ -62,39 +104,35 @@ interface ConnectionState {
   // Server mode: 'cli' (headless) or 'terminal' (PTY/tmux)
   serverMode: 'cli' | 'terminal' | null;
 
-  // Whether Claude Code is ready for input
+  // Multi-session state
+  sessions: SessionInfo[];
+  activeSessionId: string | null;
+  sessionStates: Record<string, SessionState>;
+
+  // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
-
-  // Currently streaming message ID (CLI mode)
   streamingMessageId: string | null;
-
-  // Active model (CLI mode)
   activeModel: string | null;
+  permissionMode: string | null;
+  contextUsage: ContextUsage | null;
+  lastResultCost: number | null;
+  lastResultDuration: number | null;
+  messages: ChatMessage[];
 
   // Available models from server (CLI mode)
   availableModels: ModelInfo[];
 
-  // Active permission mode (CLI mode)
-  permissionMode: string | null;
-
   // Available permission modes from server (CLI mode)
   availablePermissionModes: { id: string; label: string }[];
 
-  // Context window usage from last result
-  contextUsage: ContextUsage | null;
-
-  // Cost/duration from last result
-  lastResultCost: number | null;
-  lastResultDuration: number | null;
+  // Discovered host tmux sessions (from discover_sessions)
+  discoveredSessions: DiscoveredSession[] | null;
 
   // View mode
   viewMode: 'chat' | 'terminal';
 
   // Input settings
   inputSettings: InputSettings;
-
-  // Chat messages (parsed output)
-  messages: ChatMessage[];
 
   // Raw terminal output buffer
   terminalBuffer: string;
@@ -115,6 +153,17 @@ interface ConnectionState {
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
   resize: (cols: number, rows: number) => void;
+
+  // Session actions
+  switchSession: (sessionId: string) => void;
+  createSession: (name: string, cwd?: string) => void;
+  destroySession: (sessionId: string) => void;
+  renameSession: (sessionId: string, name: string) => void;
+  discoverSessions: () => void;
+  attachSession: (tmuxSession: string, name?: string) => void;
+
+  // Convenience accessor
+  getActiveSessionState: () => SessionState;
 }
 
 async function saveConnection(url: string, token: string) {
@@ -168,12 +217,60 @@ function flushPendingDeltas() {
   if (pendingDeltas.size === 0) return;
   const updates = new Map(pendingDeltas);
   pendingDeltas.clear();
-  useConnectionStore.setState((state) => ({
-    messages: state.messages.map((m) => {
+
+  const state = useConnectionStore.getState();
+  const activeId = state.activeSessionId;
+
+  if (activeId && state.sessionStates[activeId]) {
+    // Multi-session mode: update session-specific messages
+    const sessionState = state.sessionStates[activeId];
+    const updatedMessages = sessionState.messages.map((m) => {
       const delta = updates.get(m.id);
       return delta ? { ...m, content: m.content + delta } : m;
-    }),
-  }));
+    });
+    useConnectionStore.setState({
+      sessionStates: {
+        ...state.sessionStates,
+        [activeId]: { ...sessionState, messages: updatedMessages },
+      },
+      // Also update flat messages for backward compat reads
+      messages: updatedMessages,
+    });
+  } else {
+    // Legacy flat mode
+    useConnectionStore.setState((s) => ({
+      messages: s.messages.map((m) => {
+        const delta = updates.get(m.id);
+        return delta ? { ...m, content: m.content + delta } : m;
+      }),
+    }));
+  }
+}
+
+/** Helper to update the active session's state and sync to flat state */
+function updateActiveSession(updater: (session: SessionState) => Partial<SessionState>) {
+  const state = useConnectionStore.getState();
+  const activeId = state.activeSessionId;
+
+  if (activeId && state.sessionStates[activeId]) {
+    const current = state.sessionStates[activeId];
+    const patch = updater(current);
+    const updated = { ...current, ...patch };
+    const newSessionStates = { ...state.sessionStates, [activeId]: updated };
+
+    // Sync relevant fields to flat state for backward compat reads
+    const flatPatch: Record<string, unknown> = { sessionStates: newSessionStates };
+    if ('messages' in patch) flatPatch.messages = patch.messages;
+    if ('streamingMessageId' in patch) flatPatch.streamingMessageId = patch.streamingMessageId;
+    if ('claudeReady' in patch) flatPatch.claudeReady = patch.claudeReady;
+    if ('activeModel' in patch) flatPatch.activeModel = patch.activeModel;
+    if ('permissionMode' in patch) flatPatch.permissionMode = patch.permissionMode;
+    if ('contextUsage' in patch) flatPatch.contextUsage = patch.contextUsage;
+    if ('lastResultCost' in patch) flatPatch.lastResultCost = patch.lastResultCost;
+    if ('lastResultDuration' in patch) flatPatch.lastResultDuration = patch.lastResultDuration;
+
+    useConnectionStore.setState(flatPatch);
+  }
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
@@ -183,12 +280,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   apiToken: null,
   socket: null,
   serverMode: null,
+  sessions: [],
+  activeSessionId: null,
+  sessionStates: {},
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
   availableModels: [],
   permissionMode: null,
   availablePermissionModes: [],
+  discoveredSessions: null,
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -200,6 +301,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   viewMode: 'chat',
   messages: [],
   terminalBuffer: '',
+
+  getActiveSessionState: () => {
+    const { activeSessionId, sessionStates } = get();
+    if (activeSessionId && sessionStates[activeSessionId]) {
+      return sessionStates[activeSessionId];
+    }
+    // Fallback: construct from flat state
+    return {
+      messages: get().messages,
+      streamingMessageId: get().streamingMessageId,
+      claudeReady: get().claudeReady,
+      activeModel: get().activeModel,
+      permissionMode: get().permissionMode,
+      contextUsage: get().contextUsage,
+      lastResultCost: get().lastResultCost,
+      lastResultDuration: get().lastResultDuration,
+    };
+  },
 
   loadSavedConnection: async () => {
     const saved = await loadConnection();
@@ -305,7 +424,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           if (isReconnect) {
             set({ isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: null, streamingMessageId: null });
           } else {
-            set({ isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: null, streamingMessageId: null, messages: [], terminalBuffer: '' });
+            set({ isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: null, streamingMessageId: null, messages: [], terminalBuffer: '', sessions: [], activeSessionId: null, sessionStates: {} });
           }
           socket.send(JSON.stringify({ type: 'mode', mode: get().viewMode }));
           // Save for quick reconnect
@@ -327,37 +446,108 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           }
           break;
 
+        // --- Multi-session messages ---
+
+        case 'session_list':
+          if (Array.isArray(msg.sessions)) {
+            set({ sessions: msg.sessions });
+          }
+          break;
+
+        case 'session_switched': {
+          const sessionId = msg.sessionId;
+          set((state) => {
+            // Initialize session state if it doesn't exist
+            const sessionStates = { ...state.sessionStates };
+            if (!sessionStates[sessionId]) {
+              sessionStates[sessionId] = createEmptySessionState();
+            }
+            const ss = sessionStates[sessionId];
+            return {
+              activeSessionId: sessionId,
+              sessionStates,
+              // Sync flat state from the switched-to session
+              messages: ss.messages,
+              streamingMessageId: ss.streamingMessageId,
+              claudeReady: ss.claudeReady,
+              activeModel: ss.activeModel,
+              permissionMode: ss.permissionMode,
+              contextUsage: ss.contextUsage,
+              lastResultCost: ss.lastResultCost,
+              lastResultDuration: ss.lastResultDuration,
+            };
+          });
+          break;
+        }
+
+        case 'session_error':
+          Alert.alert('Session Error', msg.message || 'Unknown error');
+          break;
+
+        case 'discovered_sessions':
+          if (Array.isArray(msg.tmux)) {
+            set({ discoveredSessions: msg.tmux });
+          }
+          break;
+
+        // --- Existing message handlers (now session-aware) ---
+
         case 'message': {
           const msgType = msg.messageType || msg.type;
           // Skip server-echoed user_input — we already show it instantly client-side
           if (msgType === 'user_input') break;
-          get().addMessage({
+          const newMsg: ChatMessage = {
             id: nextMessageId(msgType),
             type: msgType,
             content: msg.content,
             tool: msg.tool,
             options: msg.options,
             timestamp: msg.timestamp,
-          });
+          };
+          const activeId = get().activeSessionId;
+          if (activeId && get().sessionStates[activeId]) {
+            updateActiveSession((ss) => ({
+              messages: [
+                ...ss.messages.filter((m) => m.id !== 'thinking' || newMsg.id === 'thinking'),
+                newMsg,
+              ],
+            }));
+          } else {
+            get().addMessage(newMsg);
+          }
           break;
         }
 
         case 'stream_start': {
           const streamId = msg.messageId;
-          set((state) => {
-            // If message with this streamId already exists (multi-block response),
-            // just update streamingMessageId without creating a duplicate
-            if (state.messages.some((m) => m.id === streamId)) {
-              return { streamingMessageId: streamId };
-            }
-            return {
-              streamingMessageId: streamId,
-              messages: [
-                ...state.messages.filter((m) => m.id !== 'thinking'),
-                { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
-              ],
-            };
-          });
+          const activeId = get().activeSessionId;
+          if (activeId && get().sessionStates[activeId]) {
+            updateActiveSession((ss) => {
+              if (ss.messages.some((m) => m.id === streamId)) {
+                return { streamingMessageId: streamId };
+              }
+              return {
+                streamingMessageId: streamId,
+                messages: [
+                  ...ss.messages.filter((m) => m.id !== 'thinking'),
+                  { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
+                ],
+              };
+            });
+          } else {
+            set((state) => {
+              if (state.messages.some((m) => m.id === streamId)) {
+                return { streamingMessageId: streamId };
+              }
+              return {
+                streamingMessageId: streamId,
+                messages: [
+                  ...state.messages.filter((m) => m.id !== 'thinking'),
+                  { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
+                ],
+              };
+            });
+          }
           break;
         }
 
@@ -378,21 +568,37 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             clearTimeout(deltaFlushTimer);
           }
           flushPendingDeltas();
-          set({ streamingMessageId: null });
+          {
+            const activeId = get().activeSessionId;
+            if (activeId && get().sessionStates[activeId]) {
+              updateActiveSession(() => ({ streamingMessageId: null }));
+            } else {
+              set({ streamingMessageId: null });
+            }
+          }
           break;
 
-        case 'tool_start':
-          get().addMessage({
+        case 'tool_start': {
+          const toolMsg: ChatMessage = {
             id: nextMessageId('tool'),
             type: 'tool_use',
             content: msg.input ? JSON.stringify(msg.input) : '',
             tool: msg.tool,
             timestamp: Date.now(),
-          });
+          };
+          const activeId = get().activeSessionId;
+          if (activeId && get().sessionStates[activeId]) {
+            updateActiveSession((ss) => ({
+              messages: [...ss.messages, toolMsg],
+            }));
+          } else {
+            get().addMessage(toolMsg);
+          }
           break;
+        }
 
-        case 'result':
-          set({
+        case 'result': {
+          const resultPatch = {
             contextUsage: msg.usage
               ? {
                   inputTokens: msg.usage.input_tokens || 0,
@@ -403,12 +609,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               : null,
             lastResultCost: typeof msg.cost === 'number' ? msg.cost : null,
             lastResultDuration: typeof msg.duration === 'number' ? msg.duration : null,
-          });
+          };
+          const activeId = get().activeSessionId;
+          if (activeId && get().sessionStates[activeId]) {
+            updateActiveSession(() => resultPatch);
+          } else {
+            set(resultPatch);
+          }
           break;
+        }
 
-        case 'model_changed':
-          set({ activeModel: (typeof msg.model === 'string' && msg.model.trim()) ? msg.model.trim() : null });
+        case 'model_changed': {
+          const model = (typeof msg.model === 'string' && msg.model.trim()) ? msg.model.trim() : null;
+          const activeId = get().activeSessionId;
+          if (activeId && get().sessionStates[activeId]) {
+            updateActiveSession(() => ({ activeModel: model }));
+          } else {
+            set({ activeModel: model });
+          }
           break;
+        }
 
         case 'available_models':
           if (Array.isArray(msg.models)) {
@@ -437,9 +657,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           }
           break;
 
-        case 'permission_mode_changed':
-          set({ permissionMode: (typeof msg.mode === 'string' && msg.mode.trim()) ? msg.mode.trim() : null });
+        case 'permission_mode_changed': {
+          const mode = (typeof msg.mode === 'string' && msg.mode.trim()) ? msg.mode.trim() : null;
+          const activeId = get().activeSessionId;
+          if (activeId && get().sessionStates[activeId]) {
+            updateActiveSession(() => ({ permissionMode: mode }));
+          } else {
+            set({ permissionMode: mode });
+          }
           break;
+        }
 
         case 'available_permission_modes':
           if (Array.isArray(msg.modes)) {
@@ -457,17 +684,23 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           get().appendTerminalData(msg.data);
           break;
 
-        case 'claude_ready':
-          set({ claudeReady: true });
+        case 'claude_ready': {
+          const activeId = get().activeSessionId;
+          if (activeId && get().sessionStates[activeId]) {
+            updateActiveSession(() => ({ claudeReady: true }));
+          } else {
+            set({ claudeReady: true });
+          }
           break;
+        }
 
         case 'raw_background':
           // Buffer raw data even in chat mode so terminal tab is always up to date
           get().appendTerminalData(msg.data);
           break;
 
-        case 'permission_request':
-          get().addMessage({
+        case 'permission_request': {
+          const permMsg: ChatMessage = {
             id: nextMessageId('perm'),
             type: 'prompt',
             content: `${msg.tool}: ${msg.description}`,
@@ -478,8 +711,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               { label: 'Always Allow', value: 'allowAlways' },
             ],
             timestamp: Date.now(),
-          });
+          };
+          const activeId = get().activeSessionId;
+          if (activeId && get().sessionStates[activeId]) {
+            updateActiveSession((ss) => ({
+              messages: [...ss.messages, permMsg],
+            }));
+          } else {
+            get().addMessage(permMsg);
+          }
           break;
+        }
       }
     };
 
@@ -546,11 +788,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       availableModels: [],
       permissionMode: null,
       availablePermissionModes: [],
+      discoveredSessions: null,
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,
       messages: [],
       terminalBuffer: '',
+      sessions: [],
+      activeSessionId: null,
+      sessionStates: {},
     });
     // Keep savedConnection — don't clear it on disconnect
   },
@@ -633,4 +879,87 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       socket.send(JSON.stringify({ type: 'resize', cols, rows }));
     }
   },
+
+  // Session actions
+
+  switchSession: (sessionId: string) => {
+    const { socket, activeSessionId, sessionStates } = get();
+
+    // Save current session state is already in sessionStates (it's always synced)
+    // Just update activeSessionId locally and send WS message
+    if (sessionId === activeSessionId) return;
+
+    // Optimistically switch to cached state
+    const cached = sessionStates[sessionId];
+    if (cached) {
+      set({
+        activeSessionId: sessionId,
+        messages: cached.messages,
+        streamingMessageId: cached.streamingMessageId,
+        claudeReady: cached.claudeReady,
+        activeModel: cached.activeModel,
+        permissionMode: cached.permissionMode,
+        contextUsage: cached.contextUsage,
+        lastResultCost: cached.lastResultCost,
+        lastResultDuration: cached.lastResultDuration,
+      });
+    }
+
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'switch_session', sessionId }));
+    }
+  },
+
+  createSession: (name: string, cwd?: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const msg: Record<string, string> = { type: 'create_session' };
+      if (name) msg.name = name;
+      if (cwd) msg.cwd = cwd;
+      socket.send(JSON.stringify(msg));
+    }
+  },
+
+  destroySession: (sessionId: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'destroy_session', sessionId }));
+    }
+  },
+
+  renameSession: (sessionId: string, name: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'rename_session', sessionId, name }));
+    }
+  },
+
+  discoverSessions: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ discoveredSessions: null }); // clear stale results
+      socket.send(JSON.stringify({ type: 'discover_sessions' }));
+    }
+  },
+
+  attachSession: (tmuxSession: string, name?: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const msg: Record<string, string> = { type: 'attach_session', tmuxSession };
+      if (name) msg.name = name;
+      socket.send(JSON.stringify(msg));
+    }
+  },
 }));
+
+// Reconnect on app resume from background — detects stale sockets that
+// Cloudflare or the mobile OS silently closed while the app was suspended.
+AppState.addEventListener('change', (nextState) => {
+  if (nextState === 'active') {
+    const { socket, isConnected, wsUrl, apiToken } = useConnectionStore.getState();
+    if (isConnected && socket && socket.readyState !== WebSocket.OPEN) {
+      console.log('[ws] App resumed, socket stale — reconnecting');
+      useConnectionStore.getState().connect(wsUrl!, apiToken!);
+    }
+  }
+});

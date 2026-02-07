@@ -1,4 +1,4 @@
-import { CliSession } from './cli-session.js'
+import { SessionManager } from './session-manager.js'
 import { WsServer } from './ws-server.js'
 import { TunnelManager } from './tunnel.js'
 import { waitForTunnel } from './tunnel-check.js'
@@ -31,36 +31,43 @@ export async function startCliServer(config) {
     console.log('')
   }
 
-  // 1. Create and start the CLI session (persistent process)
-  const cliSession = new CliSession({
-    cwd: config.cwd || process.cwd(),
-    allowedTools: config.allowedTools || [],
-    model: config.model || null,
+  // 1. Create session manager and default session
+  const sessionManager = new SessionManager({
+    maxSessions: 5,
     port: PORT,
     apiToken: API_TOKEN,
+    defaultCwd: config.cwd || process.cwd(),
+    defaultModel: config.model || null,
+    defaultPermissionMode: 'approve',
   })
-  cliSession.start()
+
+  const defaultSessionId = sessionManager.createSession({ name: 'Default' })
 
   // Log events for debugging
-  cliSession.on('ready', ({ sessionId, model }) => {
-    console.log(`[cli] Session ready: ${sessionId} (model: ${model})`)
-  })
-
-  cliSession.on('error', ({ message }) => {
-    console.error(`[cli] Error: ${message}`)
-  })
-
-  cliSession.on('result', ({ cost, duration }) => {
-    if (cost != null) {
-      console.log(`[cli] Query complete: $${cost.toFixed(4)} in ${duration}ms`)
+  sessionManager.on('session_event', ({ sessionId, event, data }) => {
+    if (event === 'ready') {
+      console.log(`[cli] Session ${sessionId} ready: ${data.sessionId} (model: ${data.model})`)
+    } else if (event === 'error') {
+      console.error(`[cli] Session ${sessionId} error: ${data.message}`)
+    } else if (event === 'result' && data.cost != null) {
+      console.log(`[cli] Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
     }
+  })
+
+  sessionManager.on('session_created', ({ sessionId, name, cwd }) => {
+    console.log(`[cli] Session created: ${sessionId} (${name}) in ${cwd}`)
+  })
+
+  sessionManager.on('session_destroyed', ({ sessionId }) => {
+    console.log(`[cli] Session destroyed: ${sessionId}`)
   })
 
   // 2. Start the WebSocket server
   const wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
-    cliSession,
+    sessionManager,
+    defaultSessionId,
     authRequired: !NO_AUTH,
   })
   // Bind to localhost-only when auth is disabled
@@ -94,7 +101,7 @@ export async function startCliServer(config) {
   // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`\n[${signal}] Shutting down...`)
-    cliSession.destroy()
+    sessionManager.destroyAll()
     wsServer.close()
     if (tunnel) await tunnel.stop()
     process.exit(0)

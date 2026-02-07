@@ -16,6 +16,8 @@ import {
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, ChatMessage } from '../store/connection';
+import { SessionPicker } from '../components/SessionPicker';
+import { CreateSessionModal } from '../components/CreateSessionModal';
 
 // Named Unicode constants for readability
 const ICON_CLOSE = '\u2715';       // Multiplication X
@@ -88,7 +90,14 @@ export function SessionScreen() {
     sendPermissionResponse,
   } = useConnectionStore();
 
+  const sessions = useConnectionStore((s) => s.sessions);
+  const activeSessionId = useConnectionStore((s) => s.activeSessionId);
   const isCliMode = serverMode === 'cli';
+  const [showCreateModal, setShowCreateModal] = useState(false);
+
+  // Determine if the active session has a terminal (PTY sessions do, CLI sessions don't)
+  const activeSession = sessions.find((s) => s.sessionId === activeSessionId);
+  const hasTerminal = !isCliMode || (activeSession?.hasTerminal ?? false);
 
   // Multi-select state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -210,6 +219,11 @@ export function SessionScreen() {
 
   return (
     <View style={styles.container}>
+      {/* Session picker (CLI mode with multi-session support) */}
+      {isCliMode && sessions.length > 0 && (
+        <SessionPicker onCreatePress={() => setShowCreateModal(true)} />
+      )}
+
       {/* Selection bar or view mode toggle */}
       {isSelecting ? (
         <View style={styles.selectionBar}>
@@ -236,7 +250,7 @@ export function SessionScreen() {
               Chat
             </Text>
           </TouchableOpacity>
-          {!isCliMode && (
+          {hasTerminal && (
             <TouchableOpacity
               style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
               onPress={() => setViewMode('terminal')}
@@ -327,7 +341,7 @@ export function SessionScreen() {
 
       {/* Input area */}
       <View style={[styles.inputContainer, { paddingBottom: bottomPadding }]}>
-        {viewMode === 'terminal' && !isCliMode && (
+        {viewMode === 'terminal' && hasTerminal && (
           <View style={styles.specialKeys}>
             {['Enter', 'Ctrl+C', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].map((key) => (
               <TouchableOpacity
@@ -386,6 +400,12 @@ export function SessionScreen() {
           )}
         </View>
       </View>
+
+      {/* Create session modal */}
+      <CreateSessionModal
+        visible={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+      />
     </View>
   );
 }
