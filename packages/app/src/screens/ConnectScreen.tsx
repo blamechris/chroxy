@@ -57,7 +57,8 @@ export function ConnectScreen() {
 
   const isLocalUrl = (u: string) => {
     const lower = u.toLowerCase();
-    return lower.startsWith('ws://localhost') || lower.startsWith('ws://127.0.0.1');
+    return lower.startsWith('ws://localhost') || lower.startsWith('ws://127.0.0.1')
+      || lower.startsWith('wss://localhost') || lower.startsWith('wss://127.0.0.1');
   };
 
   const handleConnect = () => {
@@ -67,13 +68,14 @@ export function ConnectScreen() {
     }
 
     // Token is optional for localhost connections (--no-auth mode)
-    if (!token && !isLocalUrl(wsUrl)) {
+    const trimmedToken = token.trim();
+    if (!trimmedToken && !isLocalUrl(wsUrl)) {
       Alert.alert('Missing Token', 'API token is required for remote connections');
       return;
     }
 
     Keyboard.dismiss();
-    connect(wsUrl, token.trim());
+    connect(wsUrl, trimmedToken);
   };
 
   const handleReconnect = () => {

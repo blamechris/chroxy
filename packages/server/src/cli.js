@@ -123,7 +123,11 @@ program
     process.env.SHELL_CMD = config.shell;
 
     if (options.terminal) {
-      // Legacy PTY/tmux mode
+      // Legacy PTY/tmux mode — --no-auth is not supported
+      if (options.auth === false) {
+        console.error("❌ --no-auth is only supported in CLI headless mode (remove --terminal).");
+        process.exit(1);
+      }
       const { startServer } = await import("./server.js");
       await startServer(config);
     } else {

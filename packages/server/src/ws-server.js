@@ -210,6 +210,9 @@ export class WsServer {
       return
     }
 
+    // Ignore duplicate auth messages from already-authenticated clients (e.g. auto-auth mode)
+    if (msg.type === 'auth') return
+
     // Route based on server mode
     if (this.cliSession) {
       this._handleCliMessage(ws, client, msg)
