@@ -20,7 +20,7 @@ const State = {
 };
 
 export class OutputParser extends EventEmitter {
-  constructor() {
+  constructor({ assumeReady = false } = {}) {
     super();
     this.state = State.IDLE;
     this.buffer = "";
@@ -28,10 +28,11 @@ export class OutputParser extends EventEmitter {
     this._flushTimer = null;
     this._recentEmissions = new Map(); // key -> timestamp
     // Skip initial scrollback burst — only start emitting messages after 5s
-    this._startTime = Date.now();
-    this._ready = false;
+    // When assumeReady=true (e.g. attaching to an existing session), skip the grace period
+    this._startTime = assumeReady ? 0 : Date.now();
+    this._ready = assumeReady;
     // Track whether Claude Code is ready (has shown the ❯ prompt)
-    this.claudeReady = false;
+    this.claudeReady = assumeReady;
     // Pending interactive prompt being accumulated
     this._pendingPrompt = null;
     this._promptFlushTimer = null;

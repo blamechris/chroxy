@@ -53,17 +53,22 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
         {
           text: 'Rename',
           onPress: () => {
-            Alert.prompt(
-              'Rename Session',
-              'Enter a new name:',
-              (name) => {
-                if (name && name.trim()) {
-                  renameSession(session.sessionId, name.trim());
-                }
-              },
-              'plain-text',
-              session.name,
-            );
+            // Alert.prompt is iOS-only; guard for Android
+            if (typeof Alert.prompt === 'function') {
+              Alert.prompt(
+                'Rename Session',
+                'Enter a new name:',
+                (name) => {
+                  if (name && name.trim()) {
+                    renameSession(session.sessionId, name.trim());
+                  }
+                },
+                'plain-text',
+                session.name,
+              );
+            } else {
+              Alert.alert('Rename', 'Session renaming is not available on this platform.');
+            }
           },
         },
         {

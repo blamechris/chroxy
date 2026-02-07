@@ -954,12 +954,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
 // Reconnect on app resume from background — detects stale sockets that
 // Cloudflare or the mobile OS silently closed while the app was suspended.
-AppState.addEventListener('change', (nextState) => {
-  if (nextState === 'active') {
-    const { socket, isConnected, wsUrl, apiToken } = useConnectionStore.getState();
-    if (isConnected && socket && socket.readyState !== WebSocket.OPEN) {
-      console.log('[ws] App resumed, socket stale — reconnecting');
-      useConnectionStore.getState().connect(wsUrl!, apiToken!);
+// Singleton guard prevents duplicate listeners on Fast Refresh in development.
+let _appStateListenerRegistered = false;
+if (!_appStateListenerRegistered) {
+  _appStateListenerRegistered = true;
+  AppState.addEventListener('change', (nextState) => {
+    if (nextState === 'active') {
+      const { socket, isConnected, wsUrl, apiToken } = useConnectionStore.getState();
+      if (isConnected && socket && socket.readyState !== WebSocket.OPEN) {
+        console.log('[ws] App resumed, socket stale — reconnecting');
+        useConnectionStore.getState().connect(wsUrl!, apiToken!);
+      }
     }
-  }
-});
+  });
+}

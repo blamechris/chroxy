@@ -53,14 +53,16 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const handleDiscover = () => {
     setIsDiscovering(true);
     discoverSessions();
+    // Safety timeout: clear loading state if no response arrives (e.g. session_error, disconnect)
+    setTimeout(() => setIsDiscovering(false), 10_000);
   };
 
   // Clear discovering state when results arrive
   useEffect(() => {
-    if (discoveredSessions !== null && isDiscovering) {
+    if (discoveredSessions !== null) {
       setIsDiscovering(false);
     }
-  }, [discoveredSessions, isDiscovering]);
+  }, [discoveredSessions]);
 
   const handleAttach = (session: DiscoveredSession) => {
     attachSession(session.sessionName);

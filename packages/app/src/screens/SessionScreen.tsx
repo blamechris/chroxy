@@ -165,9 +165,9 @@ export function SessionScreen() {
     }
 
     sendInput(text);
-    // In terminal mode, send Enter separately — Claude Code's TUI needs text and CR as separate writes
-    // In CLI mode, the server handles the full message directly
-    if (!isCliMode) {
+    // PTY sessions: send Enter separately — Claude Code's TUI needs text and CR as separate writes
+    // CLI sessions: the server handles the full message directly
+    if (hasTerminal) {
       setTimeout(() => sendInput('\r'), 50);
     }
   };
@@ -199,8 +199,8 @@ export function SessionScreen() {
       return;
     }
     sendInput(value);
-    // In PTY mode, send Enter separately — the TUI needs text and CR as separate writes
-    if (!isCliMode) {
+    // PTY sessions: send Enter separately — the TUI needs text and CR as separate writes
+    if (hasTerminal) {
       setTimeout(() => sendInput('\r'), 50);
     }
   };

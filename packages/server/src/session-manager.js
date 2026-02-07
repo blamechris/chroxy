@@ -6,13 +6,16 @@ import { PtySession } from './pty-session.js'
 import { discoverTmuxSessions } from './session-discovery.js'
 
 /**
- * Manages the lifecycle of multiple CliSession instances.
+ * Manages the lifecycle of multiple sessions (CliSession and PtySession).
  *
- * Each session wraps a separate `claude -p` process with independent
- * settings (model, permission mode, working directory).
+ * Two session types:
+ *   - 'cli': headless `claude -p` process (CliSession) — chat only
+ *   - 'pty': tmux attachment (PtySession) — terminal + chat views
  *
  * Events emitted:
- *   session_event     { sessionId, event, data }   — proxied from each CliSession
+ *   session_event     { sessionId, event, data }   — proxied from each session
+ *     CLI events: ready, stream_start, stream_delta, stream_end, message, tool_start, result, error
+ *     PTY events: ready, message, error, raw
  *   session_created   { sessionId, name, cwd }
  *   session_destroyed { sessionId }
  *   session_updated   { sessionId, name }

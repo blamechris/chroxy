@@ -53,11 +53,8 @@ export class PtySession extends EventEmitter {
       rows: this._rows,
     })
 
-    this._outputParser = new OutputParser()
-    // For attached sessions, skip the 5s grace period — the session is already running
-    this._outputParser._startTime = 0
-    this._outputParser._ready = true
-    this._outputParser.claudeReady = true
+    // For attached sessions, skip the 5s grace period — Claude is already running
+    this._outputParser = new OutputParser({ assumeReady: true })
 
     // Wire PTY data through parser
     this._ptyManager.on('data', (data) => {
@@ -106,9 +103,17 @@ export class PtySession extends EventEmitter {
     this.emit('ready', {})
   }
 
+  /** Send a chat-style message (adds \r for submission) */
   sendMessage(text) {
     if (this._ptyManager) {
       this._ptyManager.write(text + '\r')
+    }
+  }
+
+  /** Write raw input to the PTY (keystrokes, escape sequences, etc.) */
+  writeRaw(data) {
+    if (this._ptyManager) {
+      this._ptyManager.write(data)
     }
   }
 

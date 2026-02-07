@@ -197,13 +197,14 @@ export class WsServer {
     this._pingInterval = setInterval(() => {
       for (const [ws, client] of this.clients) {
         if (!client.authenticated) continue
+        if (ws.readyState !== 1) continue
         if (!client.isAlive) {
           console.log(`[ws] Client ${client.id} unresponsive, terminating`)
-          ws.terminate()
+          try { ws.terminate() } catch {}
           continue
         }
         client.isAlive = false
-        ws.ping()
+        try { ws.ping() } catch {}
       }
     }, 30_000)
 
@@ -220,14 +221,19 @@ export class WsServer {
 
     // Multi-session mode
     if (this.sessionManager) {
-      const activeId = this.defaultSessionId
-      client.activeSessionId = activeId
-
       // Send session list
       this._send(ws, { type: 'session_list', sessions: this.sessionManager.listSessions() })
 
-      // Send session_switched for the default session
-      const entry = this.sessionManager.getSession(activeId)
+      // Resolve active session: prefer defaultSessionId, fall back to first available
+      let activeId = this.defaultSessionId
+      let entry = activeId ? this.sessionManager.getSession(activeId) : null
+      if (!entry) {
+        activeId = this.sessionManager.firstSessionId
+        entry = activeId ? this.sessionManager.getSession(activeId) : null
+      }
+
+      client.activeSessionId = activeId
+
       if (entry) {
         this._send(ws, { type: 'session_switched', sessionId: activeId, name: entry.name, cwd: entry.cwd })
         this._sendSessionInfo(ws, activeId)
@@ -324,14 +330,25 @@ export class WsServer {
     switch (msg.type) {
       case 'input': {
         const text = msg.data
-        if (!text || !text.trim()) break
         const entry = this.sessionManager.getSession(client.activeSessionId)
         if (!entry) {
           this._send(ws, { type: 'session_error', message: 'No active session' })
           break
         }
-        console.log(`[ws] Message from ${client.id} to session ${client.activeSessionId}: "${text.slice(0, 80)}"`)
-        entry.session.sendMessage(text.trim())
+
+        // PTY sessions: forward raw input without trimming (keystrokes, \r, escape sequences)
+        if (entry.type === 'pty') {
+          if (typeof text !== 'string') break
+          if (text && text !== '\r' && text !== '\n') {
+            console.log(`[ws] PTY input from ${client.id} to session ${client.activeSessionId}: "${text.replace(/[\r\n]/g, '\\n').slice(0, 80)}"`)
+          }
+          entry.session.writeRaw(text)
+        } else {
+          // CLI sessions: trim and drop empty input
+          if (!text || !text.trim()) break
+          console.log(`[ws] Message from ${client.id} to session ${client.activeSessionId}: "${text.slice(0, 80)}"`)
+          entry.session.sendMessage(text.trim())
+        }
         break
       }
 
@@ -500,6 +517,11 @@ export class WsServer {
         const tmuxSession = typeof msg.tmuxSession === 'string' ? msg.tmuxSession.trim() : null
         if (!tmuxSession) {
           this._send(ws, { type: 'session_error', message: 'tmuxSession is required' })
+          break
+        }
+        // Validate session name to prevent shell injection (PtyManager uses execSync with session names)
+        if (!/^[a-zA-Z0-9_.-]+$/.test(tmuxSession)) {
+          this._send(ws, { type: 'session_error', message: 'Invalid tmux session name' })
           break
         }
 
@@ -682,13 +704,11 @@ export class WsServer {
           // Flush remaining deltas for this session before sending stream_end
           if (deltaBuffer.size > 0) {
             const prefix = `${sessionId}:`
-            let hadDeltas = false
             for (const [key, delta] of deltaBuffer) {
               if (key.startsWith(prefix)) {
                 const messageId = key.slice(prefix.length)
                 this._broadcastToSession(sessionId, { type: 'stream_delta', messageId, delta })
                 deltaBuffer.delete(key)
-                hadDeltas = true
               }
             }
             // If we flushed everything and the timer is pending, cancel it
