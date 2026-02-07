@@ -201,6 +201,7 @@ node packages/server/src/test-client.js wss://your-url
 | `packages/app/src/screens/ConnectScreen.tsx` | Connection setup UI |
 | `packages/app/src/screens/SessionScreen.tsx` | Main session UI |
 | `packages/app/src/store/connection.ts` | Zustand state store |
+| `docs/qa-log.md` | QA audit log with coverage matrix |
 | `CLAUDE.md` | This file |
 
 ---
