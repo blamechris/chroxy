@@ -1,7 +1,7 @@
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { v4 as uuidv4 } from "uuid";
-import { MODELS, ALLOWED_MODEL_IDS } from "./models.js";
+import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from "./models.js";
 
 /**
  * WebSocket server that bridges the phone client to the backend.
@@ -150,7 +150,7 @@ export class WsServer {
           }
           this._send(ws, {
             type: "model_changed",
-            model: this.cliSession.model ?? null,
+            model: this.cliSession.model ? toShortModelId(this.cliSession.model) : null,
           });
           this._send(ws, {
             type: "available_models",
@@ -198,7 +198,7 @@ export class WsServer {
           console.log(`[ws] Model change from ${client.id}: ${msg.model}`);
           this.cliSession.setModel(msg.model);
           // Broadcast model change to all authenticated clients
-          this._broadcast({ type: "model_changed", model: msg.model });
+          this._broadcast({ type: "model_changed", model: toShortModelId(msg.model) });
         } else {
           console.warn(`[ws] Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`);
         }
@@ -250,7 +250,7 @@ export class WsServer {
       this._broadcast({ type: "claude_ready" });
       this._broadcast({
         type: "model_changed",
-        model: this.cliSession.model ?? null,
+        model: this.cliSession.model ? toShortModelId(this.cliSession.model) : null,
       });
     });
 

@@ -9,16 +9,23 @@ export const MODELS = [
 // Accept both short ids and full model IDs in set_model
 export const ALLOWED_MODEL_IDS = new Set(MODELS.flatMap(m => [m.id, m.fullId]))
 
-// Lookup table: short id -> full model ID
-const MODEL_ID_MAP = new Map(MODELS.flatMap(m => [
-  [m.id, m.fullId],
-  [m.fullId, m.fullId],
-]))
+// Lookup tables for bidirectional resolution
+const TO_FULL_ID = new Map(MODELS.flatMap(m => [[m.id, m.fullId], [m.fullId, m.fullId]]))
+const TO_SHORT_ID = new Map(MODELS.flatMap(m => [[m.fullId, m.id], [m.id, m.id]]))
 
 /**
  * Resolve a model identifier (short or full) to its canonical full model ID.
  * Returns the input unchanged if not recognized.
  */
 export function resolveModelId(model) {
-  return MODEL_ID_MAP.get(model) || model
+  return TO_FULL_ID.get(model) || model
+}
+
+/**
+ * Resolve a model identifier (short or full) to its short id.
+ * Used for broadcasting to clients (app compares against short ids).
+ * Returns the input unchanged if not recognized.
+ */
+export function toShortModelId(model) {
+  return TO_SHORT_ID.get(model) || model
 }
