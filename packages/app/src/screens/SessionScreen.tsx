@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage, ModelInfo, ClaudeStatus } from '../store/connection';
+import { useConnectionStore, ChatMessage, ModelInfo, ClaudeStatus, ServerError } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 
@@ -423,6 +423,9 @@ export function SessionScreen() {
     sendPermissionResponse,
   } = useConnectionStore();
 
+  const serverErrors = useConnectionStore((s) => s.serverErrors);
+  const dismissServerError = useConnectionStore((s) => s.dismissServerError);
+
   const sessions = useConnectionStore((s) => s.sessions);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
   const isCliMode = serverMode === 'cli';
@@ -642,6 +645,37 @@ export function SessionScreen() {
           <Text style={styles.reconnectingText}>Reconnecting...</Text>
         </View>
       )}
+
+      {/* Server error banners */}
+      {serverErrors.map((err) => (
+        <View
+          key={err.id}
+          style={[
+            styles.reconnectingBanner,
+            err.recoverable ? styles.warningBanner : styles.errorBanner,
+          ]}
+        >
+          <View style={styles.errorBannerContent}>
+            <Text
+              style={[
+                styles.reconnectingText,
+                err.recoverable ? styles.warningBannerText : styles.errorBannerText,
+              ]}
+              numberOfLines={2}
+            >
+              {err.message}
+            </Text>
+            <TouchableOpacity
+              onPress={() => dismissServerError(err.id)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={err.recoverable ? styles.warningBannerText : styles.errorBannerText}>
+                {ICON_CLOSE}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ))}
 
       {/* Content area */}
       {viewMode === 'chat' ? (
@@ -1422,6 +1456,29 @@ const styles = StyleSheet.create({
   reconnectingText: {
     color: '#f59e0b',
     fontSize: 13,
+    fontWeight: '600',
+  },
+  warningBanner: {
+    backgroundColor: '#f59e0b22',
+  },
+  errorBanner: {
+    backgroundColor: '#ff4a4a22',
+  },
+  errorBannerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    width: '100%',
+  },
+  warningBannerText: {
+    color: '#f59e0b',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  errorBannerText: {
+    color: '#ff4a4a',
+    fontSize: 12,
     fontWeight: '600',
   },
 

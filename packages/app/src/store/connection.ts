@@ -91,6 +91,14 @@ export interface SessionState {
   lastResultDuration: number | null;
 }
 
+export interface ServerError {
+  id: string;
+  category: 'tunnel' | 'session' | 'permission' | 'general';
+  message: string;
+  recoverable: boolean;
+  timestamp: number;
+}
+
 function createEmptySessionState(): SessionState {
   return {
     messages: [],
@@ -149,6 +157,9 @@ interface ConnectionState {
   // Claude Code status bar metadata (PTY mode)
   claudeStatus: ClaudeStatus | null;
 
+  // Server errors forwarded over WebSocket (last 10)
+  serverErrors: ServerError[];
+
   // View mode
   viewMode: 'chat' | 'terminal';
 
@@ -184,6 +195,9 @@ interface ConnectionState {
   discoverSessions: () => void;
   attachSession: (tmuxSession: string, name?: string) => void;
   forgetSession: () => void;
+
+  // Server error actions
+  dismissServerError: (id: string) => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;
@@ -371,6 +385,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   availablePermissionModes: [],
   discoveredSessions: null,
   claudeStatus: null,
+  serverErrors: [],
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -855,6 +870,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           }
           break;
         }
+
+        case 'server_error': {
+          const serverError: ServerError = {
+            id: nextMessageId('err'),
+            category: msg.category || 'general',
+            message: msg.message || 'Unknown server error',
+            recoverable: msg.recoverable !== false,
+            timestamp: Date.now(),
+          };
+          set((state) => ({
+            serverErrors: [...state.serverErrors, serverError].slice(-10),
+          }));
+          // Show an alert for non-recoverable errors
+          if (!serverError.recoverable) {
+            Alert.alert('Server Error', serverError.message);
+          }
+          break;
+        }
       }
     };
 
@@ -928,6 +961,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       availablePermissionModes: [],
       discoveredSessions: null,
       claudeStatus: null,
+      serverErrors: [],
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,
@@ -1129,6 +1163,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (name) msg.name = name;
       socket.send(JSON.stringify(msg));
     }
+  },
+
+  dismissServerError: (id: string) => {
+    set((state) => ({
+      serverErrors: state.serverErrors.filter((e) => e.id !== id),
+    }));
   },
 }));
 
