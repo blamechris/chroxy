@@ -227,8 +227,10 @@ export class OutputParser extends EventEmitter {
         /⎿/.test(trimmed) && trimmed.length < 60 &&
         !/^(Read|Write|Edit|Bash|Search|Glob|Grep|TodoRead|TodoWrite|Task|Skill|WebFetch|WebSearch|NotebookEdit)\(/.test(trimmed)) return true
     // Git diff summaries: "1 file +3 -0" / "N files changed"
-    if (/\d+\s*files?\s*[+(changed)]/i.test(trimmed) && trimmed.length < 50
-        && !/^⏺/.test(trimmed)) return true
+    if ((/^\d+\s+files?\s+changed\b/i.test(trimmed) ||
+         /^\d+\s+files?\s+\+\d+\s+-\d+\b/i.test(trimmed)) &&
+        trimmed.length < 50 &&
+        !/^⏺/.test(trimmed)) return true
     // Standalone "tokens" / "tokens)"
     if (/^tokens\)?$/i.test(trimmed)) return true
     // CUP-split compact status: "l compact 100653 tokens"
