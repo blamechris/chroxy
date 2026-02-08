@@ -65,7 +65,9 @@ export class OutputParser extends EventEmitter {
           this._flushTimer = null;
         }
         this.currentMessage = null;
-        this._recentEmissions.clear();
+        // Don't clear _recentEmissions — entries self-expire via TTL.
+        // Clearing here wipes dedup history right when "real" data starts,
+        // allowing stale scrollback content to re-emit as duplicates.
         console.log("[parser] Scrollback suppression ended (500ms quiet)");
       }, 500);
     }
@@ -185,6 +187,8 @@ export class OutputParser extends EventEmitter {
     if (/^\[Pasted text #\d+/.test(trimmed)) return true
     // "Baked for Nm Ns" / completion timing lines
     if (/^Baked\s+for\s+\d/i.test(trimmed)) return true
+    // "Conversation compacted" notification from Claude Code context compaction
+    if (/conversation\s+compacted/i.test(trimmed)) return true
     return false;
   }
 
