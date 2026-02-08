@@ -32,7 +32,7 @@ function parseChroxyUrl(raw: string): { wsUrl: string; token: string } | null {
 }
 
 function formatUrl(url: string): string {
-  // Show a friendly version: "192.168.1.5:8765" or "abc.ngrok-free.dev"
+  // Show a friendly version: "192.168.1.5:8765" or "abc.trycloudflare.com"
   return url.replace(/^wss?:\/\//, '');
 }
 

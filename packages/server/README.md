@@ -18,7 +18,7 @@ The server will print a QR code. Scan it with the Chroxy app.
 
 | Command | Description |
 |---------|-------------|
-| `chroxy init` | Interactive setup — prompts for ngrok token, generates API token |
+| `chroxy init` | Interactive setup — generates API token |
 | `chroxy start` | Start the server, display QR code |
 | `chroxy config` | Show current configuration |
 
@@ -45,7 +45,7 @@ npm run dev
 ┌───────────────┐ ┌───────────┐ ┌───────────────┐
 │  pty-manager  │ │ ws-server │ │    tunnel     │
 │               │ │           │ │               │
-│ Spawns tmux,  │ │ WebSocket │ │ ngrok tunnel  │
+│ Spawns tmux,  │ │ WebSocket │ │ cloudflared   │
 │ handles PTY   │ │ + auth    │ │ management    │
 └───────┬───────┘ └─────┬─────┘ └───────────────┘
         │               │
@@ -86,5 +86,5 @@ tmux pipe-pane -o -t test 'cat >> ~/claude-output.log'
 npm run dev
 
 # Test with the CLI client
-node src/test-client.js wss://your-url.ngrok-free.app
+node src/test-client.js wss://your-cloudflare-url
 ```
