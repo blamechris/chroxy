@@ -291,6 +291,7 @@ export function SessionScreen() {
     disconnect,
     clearTerminalBuffer,
     addMessage,
+    addUserMessage,
     inputSettings,
     updateInputSettings,
     claudeReady,
@@ -390,15 +391,8 @@ export function SessionScreen() {
     setInputText('');
 
     if (viewMode === 'chat') {
-      // Add user message + thinking indicator in a single atomic state update
-      // to prevent React state batching from dropping the user message (#4)
-      useConnectionStore.setState((state) => ({
-        messages: [
-          ...state.messages.filter((m) => m.id !== 'thinking'),
-          { id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, type: 'user_input' as const, content: text, timestamp: Date.now() },
-          { id: 'thinking', type: 'thinking' as const, content: '', timestamp: Date.now() },
-        ],
-      }));
+      // Add user message + thinking indicator with session-aware state update
+      addUserMessage(text);
     }
 
     sendInput(text);

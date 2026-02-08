@@ -156,6 +156,7 @@ interface ConnectionState {
   clearSavedConnection: () => Promise<void>;
   setViewMode: (mode: 'chat' | 'terminal') => void;
   addMessage: (message: ChatMessage) => void;
+  addUserMessage: (text: string) => void;
   appendTerminalData: (data: string) => void;
   clearTerminalBuffer: () => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
@@ -906,6 +907,45 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         message,
       ],
     }));
+  },
+
+
+  addUserMessage: (text) => {
+    const userMsg: ChatMessage = {
+      id: nextMessageId('user'),
+      type: 'user_input',
+      content: text,
+      timestamp: Date.now(),
+    };
+    const thinkingMsg: ChatMessage = {
+      id: 'thinking',
+      type: 'thinking',
+      content: '',
+      timestamp: Date.now(),
+    };
+
+    set((state) => {
+      const activeId = state.activeSessionId;
+      const filteredMessages = state.messages.filter((m) => m.id !== 'thinking');
+      const newMessages = [...filteredMessages, userMsg, thinkingMsg];
+
+      if (activeId && state.sessionStates[activeId]) {
+        // Session mode: update both session state and flat state
+        const sessionState = state.sessionStates[activeId];
+        const sessionFiltered = sessionState.messages.filter((m) => m.id !== 'thinking');
+        const sessionMessages = [...sessionFiltered, userMsg, thinkingMsg];
+        return {
+          messages: newMessages,
+          sessionStates: {
+            ...state.sessionStates,
+            [activeId]: { ...sessionState, messages: sessionMessages },
+          },
+        };
+      } else {
+        // Legacy flat mode (PTY or single-session)
+        return { messages: newMessages };
+      }
+    });
   },
 
   appendTerminalData: (data) => {
