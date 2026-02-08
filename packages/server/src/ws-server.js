@@ -676,8 +676,10 @@ export class WsServer {
         if (msg.data && msg.data !== '\r' && msg.data !== '\n') {
           console.log(`[ws] Input from ${client.id}: "${msg.data.replace(/[\r\n]/g, '\\n').slice(0, 80)}"`)
         }
-        if (this.outputParser) this.outputParser.expectEcho(msg.data)
-        this.ptyManager.write(msg.data)
+        if (typeof msg.data === 'string') {
+          if (this.outputParser) this.outputParser.expectEcho(msg.data)
+          this.ptyManager.write(msg.data)
+        }
         break
 
       case 'resize':
