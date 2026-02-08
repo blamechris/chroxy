@@ -1450,7 +1450,7 @@ describe('Echo suppression', () => {
     parser.expectEcho('hello world')
     parser.feed('hello world\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 50))
     assert.equal(messages.length, 0, 'Echoed input should be suppressed')
   })
 
@@ -1462,7 +1462,7 @@ describe('Echo suppression', () => {
     parser.feed('hello world\n')
     parser.feed('hello world\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 50))
     assert.equal(messages.length, 0, 'Both occurrences should be suppressed within TTL')
   })
 
@@ -1476,7 +1476,7 @@ describe('Echo suppression', () => {
 
     parser.feed('old echo\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 1600))
     assert.equal(messages.length, 1, 'Expired echo should not suppress')
   })
 
@@ -1490,7 +1490,7 @@ describe('Echo suppression', () => {
     parser.feed('hello the first thing is the format\n')
     parser.feed('could still be cleaned up a bit\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 50))
     assert.equal(messages.length, 0, 'Wrapped echo fragments should be suppressed')
   })
 
@@ -1502,7 +1502,7 @@ describe('Echo suppression', () => {
     parser.feed('⏺ Starting response\n')
     parser.feed('some text\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 1600))
     assert.ok(messages.length >= 1)
     const content = messages.map(m => m.content).join('')
     assert.ok(content.includes('some text'), 'Content in RESPONSE state should not be suppressed')
@@ -1523,7 +1523,7 @@ describe('Echo suppression', () => {
     parser.expectEcho('hello   world')
     parser.feed('hello world\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 50))
     assert.equal(messages.length, 0, 'Should match with normalized whitespace')
   })
 
@@ -1536,9 +1536,8 @@ describe('Echo suppression', () => {
     assert.equal(parser._pendingEchos.length, 0)
   })
 
-  it('suppresses echo for bare \\r input (enter key)', async () => {
+  it('suppresses echo for bare \\r input (enter key)', () => {
     const parser = createParser()
-    const messages = collectEvents(parser, 'message')
 
     // \r alone normalizes to empty — should be ignored, not crash
     parser.expectEcho('\r')
@@ -1721,7 +1720,7 @@ describe('Status bar extraction', () => {
 
     parser.feed('$77.79 | Opus 4.6 | msgs:375 | 76.1K (38.1%) | 61.9% til compact\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 50))
 
     assert.equal(statusEvents.length, 1, 'Should emit status_update')
     assert.equal(messages.length, 0, 'Should not emit as a message')
@@ -1746,7 +1745,7 @@ describe('Smoke test #3 — end-to-end echo + noise', () => {
     parser.expectEcho('fix the bug')
     parser.feed('fix the bug\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 50))
 
     const responses = messages.filter(m => m.type === 'response')
     assert.equal(responses.length, 0, 'Echo should not produce a response bubble')
@@ -1761,7 +1760,7 @@ describe('Smoke test #3 — end-to-end echo + noise', () => {
     parser.feed('fix the bug\n')
     parser.feed('⏺ I found the issue in auth.js and fixed it.\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 1600))
 
     assert.equal(messages.length, 1)
     assert.equal(messages[0].type, 'response')
@@ -1787,7 +1786,7 @@ describe('Smoke test #3 — end-to-end echo + noise', () => {
       parser.feed(line + '\n')
     }
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 50))
 
     assert.equal(messages.length, 0,
       `Expected no messages but got ${messages.length}: ${messages.map(m => JSON.stringify(m.content.trim().slice(0, 50))).join(', ')}`)
@@ -1799,7 +1798,7 @@ describe('Smoke test #3 — end-to-end echo + noise', () => {
 
     parser.feed('⏺ I ran compact on the database to free up tokens. Then I did merge main.\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 1600))
 
     assert.ok(messages.length >= 1)
     const content = messages[0].content
