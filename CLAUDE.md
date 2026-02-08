@@ -6,7 +6,7 @@ Essential development notes for working with Claude on Chroxy.
 
 **Chroxy** is a remote terminal app for Claude Code. Run a lightweight daemon on your dev machine, connect from your phone via a secure tunnel. Get both a full terminal view and a clean chat-like UI that parses Claude Code's output into readable messages.
 
-**Tech Stack:** Node.js (server), React Native/Expo (mobile app), WebSocket over ngrok tunnel
+**Tech Stack:** Node.js (server), React Native/Expo (mobile app), WebSocket over Cloudflare tunnel
 
 **Architecture:** Monorepo with npm workspaces
 
@@ -20,7 +20,7 @@ chroxy/
 ```
 
 **Current Status (v0.1.0):**
-- Server works: PTY management, output parsing, WebSocket protocol, ngrok tunnel, CLI
+- Server works: PTY management, output parsing, WebSocket protocol, Cloudflare tunnel, CLI
 - App is a shell: navigation, connection screen, session screen with chat/terminal views
 - Priority: QR scanning, connection flow testing, output parser tuning
 
@@ -145,12 +145,12 @@ type(scope): Short summary in present tense
 | WsServer | `src/ws-server.js` | WebSocket protocol with auth |
 | PtyManager | `src/pty-manager.js` | tmux session management |
 | OutputParser | `src/output-parser.js` | Claude Code output → structured messages |
-| TunnelManager | `src/tunnel.js` | ngrok tunnel lifecycle |
+| TunnelManager | `src/tunnel.js` | Cloudflare tunnel lifecycle |
 
 ### Data Flow
 
 ```
-[Mobile App] ←WebSocket→ [ngrok] ←→ [WsServer]
+[Mobile App] ←WebSocket→ [Cloudflare] ←→ [WsServer]
                                         ↕
                               [PtyManager] → [OutputParser]
                                    ↕              ↕
@@ -195,7 +195,7 @@ node packages/server/src/test-client.js wss://your-url
 | `packages/server/src/output-parser.js` | Claude Code output parser (needs tuning) |
 | `packages/server/src/ws-server.js` | WebSocket protocol |
 | `packages/server/src/pty-manager.js` | PTY/tmux management |
-| `packages/server/src/tunnel.js` | ngrok tunnel |
+| `packages/server/src/tunnel.js` | Cloudflare tunnel |
 | `packages/server/src/cli.js` | CLI commands |
 | `packages/app/src/App.tsx` | App root with navigation |
 | `packages/app/src/screens/ConnectScreen.tsx` | Connection setup UI |

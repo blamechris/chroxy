@@ -19,7 +19,7 @@ Thanks for your interest in contributing! This document covers how to get starte
    ```bash
    cd packages/server
    cp .env.example .env
-   # Edit .env with your ngrok token and generate an API token
+   # Edit .env and generate an API token
    npm run dev
    ```
 
@@ -65,7 +65,6 @@ Thanks for your interest in contributing! This document covers how to get starte
 
 ### Larger Projects
 - Proper xterm.js integration for terminal view
-- Tailscale support as ngrok alternative
 - Session recording and replay
 
 ## Questions?

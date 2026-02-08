@@ -1,6 +1,6 @@
 /**
  * Quick test client — connect to the server from your terminal.
- * Usage: node src/test-client.js wss://your-ngrok-url.ngrok-free.app
+ * Usage: node src/test-client.js wss://your-cloudflare-url
  *
  * This lets you validate the server works before building the mobile app.
  */
