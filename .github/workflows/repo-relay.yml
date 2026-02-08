@@ -1,0 +1,29 @@
+name: Repo Relay
+
+on:
+  pull_request:
+    types: [opened, closed, reopened, synchronize, edited, ready_for_review, converted_to_draft]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  issue_comment:
+    types: [created, edited, deleted]
+  issues:
+    types: [opened, closed, reopened, labeled, unlabeled, edited]
+  release:
+    types: [published, created, edited, deleted]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    # Skip bots (prevent cascades) and fork PRs (no secrets access)
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - uses: blamechris/repo-relay@v1
+        with:
+          discord_bot_token: ${{ secrets.DISCORD_BOT_TOKEN }}
+          channel_prs: ${{ secrets.DISCORD_CHANNEL_PRS }}
+          channel_issues: ${{ secrets.DISCORD_CHANNEL_ISSUES || secrets.DISCORD_CHANNEL_PRS }}
+          channel_releases: ${{ secrets.DISCORD_CHANNEL_RELEASES || secrets.DISCORD_CHANNEL_PRS }}
