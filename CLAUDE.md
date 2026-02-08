@@ -14,15 +14,15 @@ Essential development notes for working with Claude on Chroxy.
 chroxy/
 ├── packages/
 │   ├── server/     # Node.js daemon + CLI (ES modules, no TypeScript)
-│   └── app/        # React Native mobile app (TypeScript, Expo 52)
+│   └── app/        # React Native mobile app (TypeScript, Expo 54)
 ├── docs/           # Setup guides, architecture
 └── scripts/        # Install helpers
 ```
 
 **Current Status (v0.1.0):**
-- Server works: PTY management, output parsing, WebSocket protocol, Cloudflare tunnel, CLI
-- App is a shell: navigation, connection screen, session screen with chat/terminal views
-- Priority: QR scanning, connection flow testing, output parser tuning
+- Server works: CLI headless mode (default), PTY/tmux mode, WebSocket protocol, Cloudflare tunnel, session management, model switching
+- App works: QR code scanning, connection flow with health checks and retries, markdown rendering, dual-view chat/terminal
+- Priority: xterm.js integration, output parser tuning, push notifications
 
 ## Critical Dev Notes
 
@@ -36,12 +36,20 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
 Or prefix any npm/node commands with the Node 22 path when running the server.
 
-### tmux Dependency
+### tmux Dependency (PTY mode only)
 
-tmux must be installed. The server spawns/attaches to tmux sessions for persistent Claude Code instances.
+tmux is only required when using `--terminal` flag (PTY mode). The default CLI headless mode does not require tmux.
 
 ```bash
 brew install tmux
+```
+
+### Cloudflare Tunnel Dependency
+
+The server uses Cloudflare Quick Tunnel for secure remote access. Install cloudflared:
+
+```bash
+brew install cloudflared
 ```
 
 ## Session Start Protocol
@@ -136,31 +144,64 @@ type(scope): Short summary in present tense
 
 ## Architecture
 
+### Server Modes
+
+Chroxy server operates in two modes:
+
+**CLI Headless Mode (default):**
+- Uses `server-cli.js` + `cli-session.js`
+- Wraps `claude -p --input-format stream-json --output-format stream-json`
+- No tmux or node-pty required
+- Maintains conversation state internally via persistent process (does not use `--resume` flag)
+- Processes streaming JSON events
+
+**PTY/tmux Mode (opt-in with `--terminal`):**
+- Uses `server.js` + `pty-manager.js` + `output-parser.js`
+- Spawns tmux session running Claude Code
+- Requires node-pty and tmux
+- Parses raw terminal output with ANSI handling
+
 ### Server Components
 
 | Component | File | Purpose |
 |-----------|------|---------|
 | CLI | `src/cli.js` | `init`, `start`, `config` commands |
-| Server | `src/server.js` | Orchestrates all components |
+| ServerCLI | `src/server-cli.js` | CLI mode orchestrator |
+| CliSession | `src/cli-session.js` | Claude Code headless executor |
+| Server | `src/server.js` | PTY mode orchestrator |
 | WsServer | `src/ws-server.js` | WebSocket protocol with auth |
-| PtyManager | `src/pty-manager.js` | tmux session management |
-| OutputParser | `src/output-parser.js` | Claude Code output → structured messages |
+| PtyManager | `src/pty-manager.js` | tmux session management (PTY mode) |
+| OutputParser | `src/output-parser.js` | Terminal output parser (PTY mode) |
 | TunnelManager | `src/tunnel.js` | Cloudflare tunnel lifecycle |
+| SessionManager | `src/session-manager.js` | Session discovery and management |
+| Models | `src/models.js` | Model switching utilities |
 
 ### Data Flow
 
+**CLI Headless Mode:**
 ```
 [Mobile App] ←WebSocket→ [Cloudflare] ←→ [WsServer]
-                                        ↕
-                              [PtyManager] → [OutputParser]
-                                   ↕              ↕
-                              [tmux/Claude]   [Parsed Messages]
+                                            ↕
+                                      [CliSession]
+                                            ↕
+                              [claude -p --output-format stream-json]
+                                            ↕
+                                    [Streaming JSON Events]
+```
+
+**PTY/tmux Mode:**
+```
+[Mobile App] ←WebSocket→ [Cloudflare] ←→ [WsServer]
+                                            ↕
+                                  [PtyManager] → [OutputParser]
+                                       ↕              ↕
+                                  [tmux/Claude]   [Parsed Messages]
 ```
 
 ### WebSocket Protocol
 
-Client → Server: `auth`, `input`, `resize`, `mode`
-Server → Client: `auth_ok`, `auth_fail`, `raw`, `message`, `status`
+Client → Server: `auth`, `input`, `resize`, `mode`, `interrupt`, `set_model`, `set_permission_mode`, `permission_response`, `list_sessions`, `switch_session`, `create_session`, `destroy_session`, `rename_session`, `discover_sessions`, `attach_session`
+Server → Client: `auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `stream_delta`, `stream_end`, `raw`, `message`, `status`, `model_changed`, `status_update`, `available_models`, `permission_request`, `permission_mode_changed`, `available_permission_modes`, `session_list`, `session_switched`, `session_created`, `session_destroyed`, `session_error`, `discovered_sessions`, `history_replay_start`, `history_replay_end`, `raw_background`, `claude_ready`, `tool_start`, `result`
 
 ### App Screens
 
@@ -176,12 +217,24 @@ Key state: `isConnected`, `wsUrl`, `apiToken`, `viewMode`, `messages[]`, `termin
 ## Dev Commands
 
 ```bash
+# From project root:
+
 # Server (use Node 22!)
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run server:dev
 
-# App
+# App (iOS)
 npm run app:ios
+
+# App (Android)
 npm run app:android
+
+# Or from individual packages:
+
+# Server (packages/server/)
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dev
+
+# App (packages/app/)
+npx expo start
 
 # Test client (validate server without mobile app)
 node packages/server/src/test-client.js wss://your-url
@@ -191,20 +244,28 @@ node packages/server/src/test-client.js wss://your-url
 
 | File | Purpose |
 |------|---------|
-| `packages/server/src/server.js` | Main server orchestration |
-| `packages/server/src/output-parser.js` | Claude Code output parser (needs tuning) |
-| `packages/server/src/ws-server.js` | WebSocket protocol |
+| `packages/server/src/cli.js` | CLI commands (init, start, config) |
+| `packages/server/src/index.js` | Entry point, mode selector |
+| `packages/server/src/server-cli.js` | CLI mode orchestrator |
+| `packages/server/src/cli-session.js` | Claude Code headless executor |
+| `packages/server/src/server.js` | PTY mode orchestrator |
 | `packages/server/src/pty-manager.js` | PTY/tmux management |
-| `packages/server/src/tunnel.js` | Cloudflare tunnel |
-| `packages/server/src/cli.js` | CLI commands |
+| `packages/server/src/output-parser.js` | Terminal output parser |
+| `packages/server/src/ws-server.js` | WebSocket protocol with auth |
+| `packages/server/src/tunnel.js` | Cloudflare tunnel manager |
+| `packages/server/src/tunnel-check.js` | Tunnel health verification |
+| `packages/server/src/session-manager.js` | Session lifecycle management |
+| `packages/server/src/session-discovery.js` | Session discovery utilities |
+| `packages/server/src/pty-session.js` | PTY session state + I/O handling |
+| `packages/server/src/models.js` | Model switching utilities |
 | `packages/app/src/App.tsx` | App root with navigation |
-| `packages/app/src/screens/ConnectScreen.tsx` | Connection setup UI |
-| `packages/app/src/screens/SessionScreen.tsx` | Main session UI |
+| `packages/app/src/screens/ConnectScreen.tsx` | QR scan + manual connection UI |
+| `packages/app/src/screens/SessionScreen.tsx` | Chat + terminal dual-view UI |
 | `packages/app/src/store/connection.ts` | Zustand state store |
 | `docs/qa-log.md` | QA audit log with coverage matrix |
 | `CLAUDE.md` | This file |
 
 ---
 
-*Last Updated: 2026-02-05*
+*Last Updated: 2026-02-07*
 *Version: 0.1.0*

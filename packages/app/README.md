@@ -44,17 +44,17 @@ src/
 │   └── SessionScreen    # Chat + Terminal views
 ├── components/          # Reusable UI components
 ├── hooks/               # Custom hooks
-├── store/
-│   └── connection.ts    # Zustand store for app state
-└── utils/               # Helper functions
+└── store/
+    └── connection.ts    # Zustand store for app state
 ```
 
 ## TODO
 
-- [ ] Implement QR code scanning with expo-camera
+- [x] Implement QR code scanning with expo-camera
+- [x] Implement markdown rendering for chat messages
+- [x] Connection persistence (save last server)
 - [ ] Add xterm.js WebView for proper terminal emulation
-- [ ] Implement markdown rendering for chat messages
-- [ ] Add syntax highlighting for code/diffs
-- [ ] Connection persistence (save last server)
+- [ ] Add syntax highlighting for code blocks in chat
 - [ ] Push notifications for long-running tasks
 - [ ] Haptic feedback
+- [ ] Session history and search
