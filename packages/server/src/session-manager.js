@@ -30,6 +30,9 @@ export class SessionManager extends EventEmitter {
     this._defaultModel = defaultModel || null
     this._defaultPermissionMode = defaultPermissionMode || 'approve'
     this._sessions = new Map() // sessionId -> { session: CliSession|PtySession, type: 'cli'|'pty', name, cwd, createdAt, tmuxSession? }
+    this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
+    this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
+    this._maxHistory = 100
   }
 
   /**
@@ -136,6 +139,13 @@ export class SessionManager extends EventEmitter {
     if (!entry) return false
     entry.session.destroy()
     this._sessions.delete(sessionId)
+    this._messageHistory.delete(sessionId)
+    // Clean up any pending streams for this session
+    for (const key of this._pendingStreams.keys()) {
+      if (key.startsWith(`${sessionId}:`)) {
+        this._pendingStreams.delete(key)
+      }
+    }
     this.emit('session_destroyed', { sessionId })
     return true
   }
@@ -221,6 +231,100 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Get message history for a session.
+   * @returns {Array<{ type, ...data }>}
+   */
+  getHistory(sessionId) {
+    return this._messageHistory.get(sessionId) || []
+  }
+
+  /**
+   * Record an event into the session's message history ring buffer.
+   */
+  _recordHistory(sessionId, event, data) {
+    if (!this._messageHistory.has(sessionId)) {
+      this._messageHistory.set(sessionId, [])
+    }
+    const history = this._messageHistory.get(sessionId)
+
+    switch (event) {
+      case 'stream_start': {
+        // Start accumulating deltas for this stream
+        const key = `${sessionId}:${data.messageId}`
+        this._pendingStreams.set(key, '')
+        break
+      }
+
+      case 'stream_delta': {
+        const key = `${sessionId}:${data.messageId}`
+        const existing = this._pendingStreams.get(key)
+        if (existing !== undefined) {
+          this._pendingStreams.set(key, existing + data.delta)
+        }
+        break
+      }
+
+      case 'stream_end': {
+        // Reconstruct complete message from accumulated deltas
+        const key = `${sessionId}:${data.messageId}`
+        const content = this._pendingStreams.get(key) || ''
+        this._pendingStreams.delete(key)
+        if (content) {
+          this._pushHistory(history, {
+            type: 'message',
+            messageType: 'response',
+            content,
+            messageId: data.messageId,
+            timestamp: Date.now(),
+          })
+        }
+        break
+      }
+
+      case 'message':
+        this._pushHistory(history, {
+          type: 'message',
+          messageType: data.type,
+          content: data.content,
+          tool: data.tool,
+          options: data.options,
+          timestamp: data.timestamp,
+        })
+        break
+
+      case 'tool_start':
+        this._pushHistory(history, {
+          type: 'tool_start',
+          messageId: data.messageId,
+          tool: data.tool,
+          input: data.input,
+          timestamp: Date.now(),
+        })
+        break
+
+      case 'result':
+        this._pushHistory(history, {
+          type: 'result',
+          cost: data.cost,
+          duration: data.duration,
+          usage: data.usage,
+          timestamp: Date.now(),
+        })
+        break
+    }
+  }
+
+  /**
+   * Push an entry to the history array, trimming to max size.
+   */
+  _pushHistory(history, entry) {
+    history.push(entry)
+    while (history.length > this._maxHistory) {
+      history.shift()
+    }
+  }
+
+  /**
    * Wire session events to unified session_event emission.
    * Handles both CliSession and PtySession events.
    */
@@ -228,11 +332,12 @@ export class SessionManager extends EventEmitter {
     const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'result', 'error']
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
+        this._recordHistory(sessionId, event, data)
         this.emit('session_event', { sessionId, event, data })
       })
     }
 
-    // PtySession emits 'raw' for terminal view — forward it
+    // PtySession emits 'raw' for terminal view — forward it (not recorded in history)
     session.on('raw', (data) => {
       this.emit('session_event', { sessionId, event: 'raw', data })
     })

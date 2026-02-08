@@ -237,6 +237,7 @@ export class WsServer {
       if (entry) {
         this._send(ws, { type: 'session_switched', sessionId: activeId, name: entry.name, cwd: entry.cwd })
         this._sendSessionInfo(ws, activeId)
+        this._replayHistory(ws, activeId)
       }
 
       this._send(ws, { type: 'available_models', models: MODELS })
@@ -272,6 +273,34 @@ export class WsServer {
         modes: PERMISSION_MODES,
       })
     }
+  }
+
+  /** Replay message history for a session to a single client.
+   *  Only replays the last conversation turn (last Claude response + result +
+   *  any in-progress work) to avoid flooding the app with old tool calls.
+   */
+  _replayHistory(ws, sessionId) {
+    if (!this.sessionManager) return
+    const fullHistory = this.sessionManager.getHistory(sessionId)
+    if (fullHistory.length === 0) return
+
+    // Find the last response message and replay from there to the end.
+    // This gives: last Claude response + result + any in-progress messages.
+    let startIdx = 0
+    for (let i = fullHistory.length - 1; i >= 0; i--) {
+      if (fullHistory[i].type === 'message' && fullHistory[i].messageType === 'response') {
+        startIdx = i
+        break
+      }
+    }
+
+    const history = fullHistory.slice(startIdx)
+
+    this._send(ws, { type: 'history_replay_start', sessionId })
+    for (const entry of history) {
+      this._send(ws, entry)
+    }
+    this._send(ws, { type: 'history_replay_end', sessionId })
   }
 
   /** Send session-specific info (model, permission, ready status) to a client */
@@ -419,6 +448,7 @@ export class WsServer {
         console.log(`[ws] Client ${client.id} switched to session ${targetId}`)
         this._send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd })
         this._sendSessionInfo(ws, targetId)
+        this._replayHistory(ws, targetId)
         break
       }
 
@@ -727,6 +757,7 @@ export class WsServer {
             messageType: data.type,
             content: data.content,
             tool: data.tool,
+            options: data.options,
             timestamp: data.timestamp,
           })
           break

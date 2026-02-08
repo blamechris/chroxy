@@ -53,8 +53,9 @@ export class PtySession extends EventEmitter {
       rows: this._rows,
     })
 
-    // For attached sessions, skip the 5s grace period — Claude is already running
-    this._outputParser = new OutputParser({ assumeReady: true })
+    // For attached sessions, skip the 5s grace period — Claude is already running.
+    // Suppress scrollback burst to avoid flooding chat with stale messages.
+    this._outputParser = new OutputParser({ assumeReady: true, suppressScrollback: true })
 
     // Wire PTY data through parser
     this._ptyManager.on('data', (data) => {

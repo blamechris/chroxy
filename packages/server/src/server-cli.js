@@ -6,8 +6,8 @@ import qrcode from 'qrcode-terminal'
 
 /**
  * Start the Chroxy server in CLI headless mode.
- * Uses `claude -p --output-format stream-json` instead of PTY/tmux.
- * No tmux or node-pty dependency required.
+ * Auto-discovers tmux sessions running Claude on startup.
+ * Falls back to a default CLI session if none found.
  */
 export async function startCliServer(config) {
   const PORT = config.port || parseInt(process.env.PORT || '8765', 10)
@@ -31,7 +31,7 @@ export async function startCliServer(config) {
     console.log('')
   }
 
-  // 1. Create session manager and default session
+  // 1. Create session manager
   const sessionManager = new SessionManager({
     maxSessions: 5,
     port: PORT,
@@ -41,7 +41,20 @@ export async function startCliServer(config) {
     defaultPermissionMode: 'approve',
   })
 
-  const defaultSessionId = sessionManager.createSession({ name: 'Default' })
+  // 2. Auto-discover tmux sessions running Claude
+  let defaultSessionId
+  const discovered = sessionManager.discoverSessions()
+  if (discovered.length > 0) {
+    console.log(`[cli] Found ${discovered.length} tmux session(s) running Claude`)
+    for (const tmux of discovered) {
+      const sid = sessionManager.attachSession({ tmuxSession: tmux.sessionName, name: tmux.sessionName })
+      if (!defaultSessionId) defaultSessionId = sid
+      console.log(`[cli] Attached to tmux session: ${tmux.sessionName}`)
+    }
+  } else {
+    console.log('[cli] No tmux sessions found, creating default CLI session')
+    defaultSessionId = sessionManager.createSession({ name: 'Default' })
+  }
 
   // Log events for debugging
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
@@ -62,7 +75,7 @@ export async function startCliServer(config) {
     console.log(`[cli] Session destroyed: ${sessionId}`)
   })
 
-  // 2. Start the WebSocket server
+  // 3. Start the WebSocket server
   const wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
@@ -75,14 +88,14 @@ export async function startCliServer(config) {
 
   let tunnel = null
   if (!NO_AUTH) {
-    // 3. Start the Cloudflare tunnel
+    // 4. Start the Cloudflare tunnel
     tunnel = new TunnelManager({ port: PORT })
     const { wsUrl, httpUrl } = await tunnel.start()
 
-    // 4. Wait for tunnel to be fully routable (DNS propagation)
+    // 5. Wait for tunnel to be fully routable (DNS propagation)
     await waitForTunnel(httpUrl)
 
-    // 5. Generate connection info
+    // 6. Generate connection info
     const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
 
     console.log('\n[✓] Server ready! (CLI headless mode)\n')

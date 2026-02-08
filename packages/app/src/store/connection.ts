@@ -161,6 +161,7 @@ interface ConnectionState {
   renameSession: (sessionId: string, name: string) => void;
   discoverSessions: () => void;
   attachSession: (tmuxSession: string, name?: string) => void;
+  forgetSession: () => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;
@@ -206,6 +207,10 @@ let messageIdCounter = 0;
 function nextMessageId(prefix = 'msg'): string {
   return `${prefix}-${++messageIdCounter}-${Date.now()}`;
 }
+
+// Flag: currently receiving history replay from server — skip adding messages
+// if local state already has them (prevents duplicates on reconnect)
+let _receivingHistoryReplay = false;
 
 // Delta batching: accumulate stream deltas and flush to state periodically
 // to reduce re-renders (dozens of deltas/sec → one state update per 100ms)
@@ -347,6 +352,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connect: (url: string, token: string, _retryCount = 0) => {
     const MAX_RETRIES = 5;
     const RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000];
+
+    // Detect if connecting to a different server — clear old session data
+    const currentUrl = get().wsUrl;
+    if (_retryCount === 0 && currentUrl !== null && currentUrl !== url) {
+      get().forgetSession();
+    }
+
     const isReconnect = get().wsUrl === url && get().messages.length > 0;
 
     // New top-level connect call (not a retry) — bump attempt ID to cancel any pending retries
@@ -490,12 +502,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           }
           break;
 
+        // --- History replay ---
+
+        case 'history_replay_start':
+          _receivingHistoryReplay = true;
+          break;
+
+        case 'history_replay_end':
+          _receivingHistoryReplay = false;
+          break;
+
         // --- Existing message handlers (now session-aware) ---
 
         case 'message': {
           const msgType = msg.messageType || msg.type;
           // Skip server-echoed user_input — we already show it instantly client-side
           if (msgType === 'user_input') break;
+          // During history replay, skip if app already has messages (reconnect with preserved state)
+          if (_receivingHistoryReplay && get().messages.length > 0) break;
           const newMsg: ChatMessage = {
             id: nextMessageId(msgType),
             type: msgType,
@@ -579,10 +603,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
 
         case 'tool_start': {
+          // During history replay, skip if app already has messages
+          if (_receivingHistoryReplay && get().messages.length > 0) break;
           const toolMsg: ChatMessage = {
             id: nextMessageId('tool'),
             type: 'tool_use',
-            content: msg.input ? JSON.stringify(msg.input) : '',
+            content: msg.tool || '',
             tool: msg.tool,
             timestamp: Date.now(),
           };
@@ -775,12 +801,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       deltaFlushTimer = null;
     }
     pendingDeltas.clear();
+    // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
+    // so reconnect to the same server can show previous chat history.
+    // Only clear connection-level state.
     set({
       isConnected: false,
       isReconnecting: false,
       socket: null,
-      wsUrl: null,
-      apiToken: null,
       serverMode: null,
       claudeReady: false,
       streamingMessageId: null,
@@ -792,13 +819,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,
+    });
+    // Keep wsUrl, apiToken, messages, terminalBuffer, sessions, sessionStates, savedConnection
+  },
+
+  forgetSession: () => {
+    set({
       messages: [],
       terminalBuffer: '',
       sessions: [],
       activeSessionId: null,
       sessionStates: {},
+      wsUrl: null,
+      apiToken: null,
     });
-    // Keep savedConnection — don't clear it on disconnect
   },
 
   setViewMode: (mode) => {
