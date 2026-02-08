@@ -31,8 +31,8 @@ Thanks for your interest in contributing! This document covers how to get starte
 
 ## Project Structure
 
-- `packages/server` — Node.js daemon that manages tmux/PTY and exposes WebSocket API
-- `packages/app` — React Native app with chat and terminal views
+- `packages/server` — Node.js daemon with dual modes (CLI headless default, PTY/tmux opt-in) that exposes WebSocket API
+- `packages/app` — React Native app with QR scanning, chat view with markdown rendering, and terminal view
 - `docs/` — Architecture docs and guides
 - `scripts/` — Helper scripts
 
@@ -47,9 +47,11 @@ Thanks for your interest in contributing! This document covers how to get starte
 ## Code Style
 
 - **TypeScript** for the app, **JavaScript (ES modules)** for the server
-- No semicolons (we use Prettier defaults)
+- No semicolons, single quotes for strings
 - Meaningful variable names over comments
 - Keep functions small and focused
+- App state management: Zustand store
+- Server: EventEmitter pattern for component communication
 
 ## Areas to Contribute
 
@@ -57,14 +59,16 @@ Thanks for your interest in contributing! This document covers how to get starte
 - Improve output parser patterns (`packages/server/src/output-parser.js`)
 - Add more special key buttons to terminal view
 - UI polish and animations
+- Syntax highlighting for code blocks in chat
 
 ### Medium
-- Implement QR code scanning
-- Add markdown rendering for chat messages
-- Syntax highlighting for diffs
+- Enhanced markdown rendering features
+- Better error handling and recovery
+- Session history and search
 
 ### Larger Projects
-- Proper xterm.js integration for terminal view
+- Proper xterm.js integration for terminal view (replace plain text display)
+- Push notifications for long-running tasks
 - Session recording and replay
 
 ## Questions?
