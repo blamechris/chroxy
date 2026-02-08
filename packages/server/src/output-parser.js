@@ -20,12 +20,13 @@ const State = {
 };
 
 export class OutputParser extends EventEmitter {
-  constructor({ assumeReady = false, suppressScrollback = false } = {}) {
+  constructor({ assumeReady = false, suppressScrollback = false, flushDelay = 1500 } = {}) {
     super();
     this.state = State.IDLE;
     this.buffer = "";
     this.currentMessage = null;
     this._flushTimer = null;
+    this._flushDelay = flushDelay;
     this._recentEmissions = new Map(); // key -> timestamp
     // Skip initial scrollback burst — only start emitting messages after 5s
     // When assumeReady=true (e.g. attaching to an existing session), skip the grace period
@@ -516,7 +517,7 @@ export class OutputParser extends EventEmitter {
     this._flushTimer = setTimeout(() => {
       this._flushTimer = null
       this._finishCurrentMessage()
-    }, 1500)
+    }, this._flushDelay)
   }
 
   /** Emit and reset the current accumulated message */

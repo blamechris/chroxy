@@ -4,7 +4,7 @@ import { OutputParser } from '../src/output-parser.js'
 
 /** Create a parser with startup gates bypassed for testing */
 function createParser() {
-  const parser = new OutputParser()
+  const parser = new OutputParser({ flushDelay: 100 })
   parser._ready = true
   parser.claudeReady = true
   parser._startTime = 0
@@ -189,7 +189,7 @@ describe('OutputParser state machine', () => {
     parser.feed('⏺ response text\n')
 
     // Wait for flush timer (1500ms) + buffer
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.ok(messages.length >= 1, 'Should have emitted at least one message')
     assert.equal(messages[0].type, 'response')
@@ -266,7 +266,7 @@ describe('OutputParser state machine', () => {
   })
 
   it('emits claude_ready when ❯ prompt is seen after grace period', () => {
-    const parser = new OutputParser()
+    const parser = new OutputParser({ flushDelay: 100 })
     parser._ready = true
     parser._startTime = 0
     // claudeReady starts false
@@ -280,14 +280,14 @@ describe('OutputParser state machine', () => {
   })
 
   it('suppresses messages before claudeReady', async () => {
-    const parser = new OutputParser()
+    const parser = new OutputParser({ flushDelay: 100 })
     parser._ready = true
     parser._startTime = 0
     // claudeReady stays false
     const messages = collectEvents(parser, 'message')
 
     parser.feed('⏺ should be suppressed\n')
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.equal(messages.length, 0, 'Should suppress messages before claudeReady')
   })
@@ -298,7 +298,7 @@ describe('OutputParser state machine', () => {
 
     parser.feed('⏺ first line\nsecond line\nthird line\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.ok(messages.length >= 1)
     assert.ok(messages[0].content.includes('first line'))
@@ -313,7 +313,7 @@ describe('OutputParser state machine', () => {
     parser.feed('thinking\n')
     parser.feed('⏺ actual response\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.ok(messages.length >= 1)
     assert.equal(messages[0].type, 'response')
@@ -335,7 +335,7 @@ describe('OutputParser state machine', () => {
 
     parser.feed('some content without marker\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.ok(messages.length >= 1)
     assert.equal(messages[0].type, 'response')
@@ -348,7 +348,7 @@ describe('OutputParser state machine', () => {
     parser.feed('⏺ first part\n')
     parser.feed('⏺ second part\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.ok(messages.length >= 1)
     assert.ok(messages[0].content.includes('first part'))
@@ -372,7 +372,7 @@ describe('OutputParser state machine', () => {
   })
 
   it('does not set claudeReady before _ready gate', () => {
-    const parser = new OutputParser()
+    const parser = new OutputParser({ flushDelay: 100 })
     // _ready is false by default
     parser._startTime = 0
 
@@ -580,7 +580,7 @@ describe('OutputParser._detectPrompt', () => {
   })
 
   it('suppresses prompts before claudeReady', async () => {
-    const parser = new OutputParser()
+    const parser = new OutputParser({ flushDelay: 100 })
     parser._ready = true
     parser._startTime = 0
     // claudeReady stays false
@@ -616,7 +616,7 @@ describe('OutputParser._detectPrompt', () => {
 
 describe('OutputParser._finishCurrentMessage edge cases', () => {
   it('skips messages in first 5 seconds', () => {
-    const parser = new OutputParser()
+    const parser = new OutputParser({ flushDelay: 100 })
     // _ready is false, _startTime is recent
     parser.claudeReady = true
 
@@ -630,7 +630,7 @@ describe('OutputParser._finishCurrentMessage edge cases', () => {
   })
 
   it('sets _ready after grace period', () => {
-    const parser = new OutputParser()
+    const parser = new OutputParser({ flushDelay: 100 })
     parser._startTime = 0  // far in the past
     parser.claudeReady = true
 
@@ -674,7 +674,7 @@ describe('OutputParser._finishCurrentMessage edge cases', () => {
 describe('OutputParser scrollback suppression', () => {
   /** Create a parser with scrollback suppression enabled and gates bypassed */
   function createSuppressedParser() {
-    const parser = new OutputParser({ assumeReady: true, suppressScrollback: true })
+    const parser = new OutputParser({ assumeReady: true, suppressScrollback: true, flushDelay: 100 })
     return parser
   }
 
@@ -772,7 +772,7 @@ describe('OutputParser scrollback suppression', () => {
     // After suppression: feed the SAME content (scrollback replay duplicate)
     parser.feed('⏺ I fixed the bug in auth.js\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     // The dedup map should prevent the duplicate from being emitted
     // because the first feed added it to the map (even though message was suppressed)
@@ -959,7 +959,7 @@ describe('OutputParser end-to-end PTY noise filtering', () => {
     }
 
     // Wait for any flush timers
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.equal(messages.length, 0, `Expected no messages but got ${messages.length}: ${messages.map(m => JSON.stringify(m.content)).join(', ')}`)
   })
@@ -976,7 +976,7 @@ describe('OutputParser end-to-end PTY noise filtering', () => {
     // Then real response
     parser.feed('⏺ I have fixed the bug in the authentication module.\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.ok(messages.length >= 1, 'Should emit at least one message')
     assert.equal(messages[0].type, 'response')
@@ -1201,7 +1201,7 @@ describe('QA Test Run #2 — end-to-end noise suppression', () => {
       parser.feed(line + '\n')
     }
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.equal(messages.length, 0,
       `Expected no messages but got ${messages.length}: ${messages.map(m => JSON.stringify(m.content.trim().slice(0, 50))).join(', ')}`)
@@ -1220,7 +1220,7 @@ describe('QA Test Run #2 — end-to-end noise suppression', () => {
     // Real response
     parser.feed('⏺ I see the problem. When you switch to a session, _replayHistory sends the entire history buffer.\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.ok(messages.length >= 1, 'Should emit the real response')
     assert.equal(messages[0].type, 'response')
@@ -1339,7 +1339,7 @@ describe('False positive guards — RESPONSE state preservation', () => {
     parser.feed('42\n')
     parser.feed('That is the final answer.\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.ok(messages.length >= 1, 'Should emit the response')
     const content = messages.map(m => m.content).join('')
@@ -1351,7 +1351,7 @@ describe('False positive guards — RESPONSE state preservation', () => {
     parser.feed('However...\n')
     parser.feed('the root cause was different.\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     const content = messages.map(m => m.content).join('')
     assert.ok(content.includes('However'), '"However..." should not be eaten by thinking filter')
@@ -1362,7 +1362,7 @@ describe('False positive guards — RESPONSE state preservation', () => {
     parser.feed('Meanwhile...\n')
     parser.feed('the client was connecting.\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     const content = messages.map(m => m.content).join('')
     assert.ok(content.includes('Meanwhile'), '"Meanwhile..." should not be eaten')
@@ -1373,7 +1373,7 @@ describe('False positive guards — RESPONSE state preservation', () => {
     parser.feed('Reading...\n')
     parser.feed('the file contents show the issue.\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     const content = messages.map(m => m.content).join('')
     assert.ok(content.includes('Reading'), '"Reading..." should not be eaten during RESPONSE')
@@ -1419,7 +1419,7 @@ describe('Recursive amplification — end-to-end', () => {
     parser.feed('[ws] Broadcasting to 1 clients\n')
     parser.feed('[tunnel] Health check passed\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.equal(messages.length, 0, 'Server log lines should be completely suppressed')
   })
@@ -1432,7 +1432,7 @@ describe('Recursive amplification — end-to-end', () => {
     parser.feed('Scan this QR code to connect:\n')
     parser.feed('█▀▀▀▀▀█ ▀▀█ ▀█▀ █▀▀▀▀▀█\n')
 
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.equal(messages.length, 0, 'Server output fragments should be completely suppressed')
   })
@@ -1476,7 +1476,7 @@ describe('Echo suppression', () => {
 
     parser.feed('old echo\n')
 
-    await new Promise(r => setTimeout(r, 1600))
+    await new Promise(r => setTimeout(r, 200))
     assert.equal(messages.length, 1, 'Expired echo should not suppress')
   })
 
@@ -1502,7 +1502,7 @@ describe('Echo suppression', () => {
     parser.feed('⏺ Starting response\n')
     parser.feed('some text\n')
 
-    await new Promise(r => setTimeout(r, 1600))
+    await new Promise(r => setTimeout(r, 200))
     assert.ok(messages.length >= 1)
     const content = messages.map(m => m.content).join('')
     assert.ok(content.includes('some text'), 'Content in RESPONSE state should not be suppressed')
@@ -1760,7 +1760,7 @@ describe('Smoke test #3 — end-to-end echo + noise', () => {
     parser.feed('fix the bug\n')
     parser.feed('⏺ I found the issue in auth.js and fixed it.\n')
 
-    await new Promise(r => setTimeout(r, 1600))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.equal(messages.length, 1)
     assert.equal(messages[0].type, 'response')
@@ -1798,7 +1798,7 @@ describe('Smoke test #3 — end-to-end echo + noise', () => {
 
     parser.feed('⏺ I ran compact on the database to free up tokens. Then I did merge main.\n')
 
-    await new Promise(r => setTimeout(r, 1600))
+    await new Promise(r => setTimeout(r, 200))
 
     assert.ok(messages.length >= 1)
     const content = messages[0].content
