@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage, ModelInfo } from '../store/connection';
+import { useConnectionStore, ChatMessage, ModelInfo, ClaudeStatus } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 
@@ -634,7 +634,7 @@ function SettingsBar({
   lastResultCost: number | null;
   lastResultDuration: number | null;
   contextUsage: { inputTokens: number; outputTokens: number; cacheCreation: number; cacheRead: number } | null;
-  claudeStatus: { cost: number; model: string; messageCount: number; contextTokens: string; contextPercent: number; compactPercent: number | null } | null;
+  claudeStatus: ClaudeStatus | null;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
 }) {
