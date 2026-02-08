@@ -87,10 +87,12 @@ export async function startCliServer(config) {
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
 
   let tunnel = null
+  let currentWsUrl = null
   if (!NO_AUTH) {
     // 4. Start the Cloudflare tunnel
     tunnel = new TunnelManager({ port: PORT })
     const { wsUrl, httpUrl } = await tunnel.start()
+    currentWsUrl = wsUrl
 
     // 5. Wait for tunnel to be fully routable (DNS propagation)
     await waitForTunnel(httpUrl)
@@ -112,7 +114,7 @@ export async function startCliServer(config) {
     })
 
     tunnel.on('tunnel_recovering', ({ attempt, delayMs }) => {
-      console.log(`[!] Attempting tunnel recovery ${attempt}/3 (waiting ${delayMs}ms)...`)
+      console.log(`[!] Attempting tunnel recovery (attempt ${attempt}, waiting ${delayMs}ms)...`)
     })
 
     tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
@@ -121,15 +123,20 @@ export async function startCliServer(config) {
       // Re-verify the new tunnel URL
       await waitForTunnel(newHttpUrl)
 
-      // Display new QR code if URL changed
-      const newConnectionUrl = `chroxy://${newWsUrl.replace('wss://', '')}?token=${API_TOKEN}`
-      console.log('\n[✓] New tunnel URL established:\n')
-      console.log('📱 Scan this QR code with the Chroxy app:\n')
-      qrcode.generate(newConnectionUrl, { small: true })
-      console.log(`\nOr connect manually:`)
-      console.log(`   URL:   ${newWsUrl}`)
-      console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
-      console.log('')
+      // Only display new QR code if URL actually changed
+      if (newWsUrl !== currentWsUrl) {
+        currentWsUrl = newWsUrl
+        const newConnectionUrl = `chroxy://${newWsUrl.replace('wss://', '')}?token=${API_TOKEN}`
+        console.log('\n[✓] New tunnel URL established:\n')
+        console.log('📱 Scan this QR code with the Chroxy app:\n')
+        qrcode.generate(newConnectionUrl, { small: true })
+        console.log(`\nOr connect manually:`)
+        console.log(`   URL:   ${newWsUrl}`)
+        console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+        console.log('')
+      } else {
+        console.log(`[✓] Tunnel URL unchanged: ${newWsUrl}`)
+      }
     })
 
     tunnel.on('tunnel_failed', ({ message, lastExitCode, lastSignal }) => {

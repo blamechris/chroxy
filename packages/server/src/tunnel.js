@@ -71,7 +71,9 @@ export class TunnelManager extends EventEmitter {
           reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`));
         } else {
           // Tunnel was running and now it crashed
-          this._handleUnexpectedExit(code, signal);
+          void this._handleUnexpectedExit(code, signal).catch((err) => {
+            console.error("[tunnel] Error while handling unexpected cloudflared exit:", err);
+          });
         }
         this.process = null;
         this.url = null;
@@ -98,34 +100,55 @@ export class TunnelManager extends EventEmitter {
     // Unexpected exit - attempt recovery
     const exitReason = signal ? `signal ${signal}` : `code ${code}`;
     console.log(`[tunnel] cloudflared exited unexpectedly (${exitReason})`);
-    this.emit('tunnel_lost', { code, signal });
+    this.emit("tunnel_lost", { code, signal });
 
-    if (this.recoveryAttempt >= this.maxRecoveryAttempts) {
-      console.error(`[tunnel] Recovery failed after ${this.maxRecoveryAttempts} attempts`);
-      this.emit('tunnel_failed', {
+    // Perform recovery attempts with backoff until success or max attempts reached
+    while (this.recoveryAttempt < this.maxRecoveryAttempts && !this.intentionalShutdown) {
+      const backoff = this.recoveryBackoffs[this.recoveryAttempt];
+      this.recoveryAttempt++;
+
+      console.log(
+        `[tunnel] Attempting recovery ${this.recoveryAttempt}/${this.maxRecoveryAttempts} in ${backoff}ms...`
+      );
+      this.emit("tunnel_recovering", {
+        attempt: this.recoveryAttempt,
+        delayMs: backoff,
+      });
+
+      await new Promise((r) => setTimeout(r, backoff));
+
+      if (this.intentionalShutdown) {
+        // Stop trying if a shutdown was requested during backoff
+        return;
+      }
+
+      try {
+        const { httpUrl, wsUrl } = await this._startTunnel();
+        console.log(`[tunnel] Recovery successful`);
+        this.emit("tunnel_recovered", {
+          httpUrl,
+          wsUrl,
+          attempt: this.recoveryAttempt,
+        });
+        this.recoveryAttempt = 0; // Reset on success
+        return;
+      } catch (err) {
+        console.error(
+          `[tunnel] Recovery attempt ${this.recoveryAttempt} failed: ${err.message}`
+        );
+        // Loop will continue if we still have remaining attempts
+      }
+    }
+
+    if (!this.intentionalShutdown && this.recoveryAttempt >= this.maxRecoveryAttempts) {
+      console.error(
+        `[tunnel] Recovery failed after ${this.maxRecoveryAttempts} attempts`
+      );
+      this.emit("tunnel_failed", {
         message: `Tunnel recovery failed after ${this.maxRecoveryAttempts} attempts`,
         lastExitCode: code,
         lastSignal: signal,
       });
-      return;
-    }
-
-    const backoff = this.recoveryBackoffs[this.recoveryAttempt];
-    this.recoveryAttempt++;
-
-    console.log(`[tunnel] Attempting recovery ${this.recoveryAttempt}/${this.maxRecoveryAttempts} in ${backoff}ms...`);
-    this.emit('tunnel_recovering', { attempt: this.recoveryAttempt, delayMs: backoff });
-
-    await new Promise((r) => setTimeout(r, backoff));
-
-    try {
-      const { httpUrl, wsUrl} = await this._startTunnel();
-      console.log(`[tunnel] Recovery successful`);
-      this.emit('tunnel_recovered', { httpUrl, wsUrl, attempt: this.recoveryAttempt });
-      this.recoveryAttempt = 0; // Reset on success
-    } catch (err) {
-      console.error(`[tunnel] Recovery attempt ${this.recoveryAttempt} failed: ${err.message}`);
-      // The close handler will be called again, triggering another recovery attempt
     }
   }
 

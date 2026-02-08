@@ -222,7 +222,34 @@ export class WsServer {
   _sendPostAuthInfo(ws) {
     const client = this.clients.get(ws)
 
-    this._send(ws, { type: 'auth_ok' })
+    // Get initial session info for auth_ok payload
+    let sessionInfo = {}
+    if (this.sessionManager) {
+      // Multi-session mode: include first/default session's cwd
+      let activeId = this.defaultSessionId
+      let entry = activeId ? this.sessionManager.getSession(activeId) : null
+      if (!entry) {
+        activeId = this.sessionManager.firstSessionId
+        entry = activeId ? this.sessionManager.getSession(activeId) : null
+      }
+      if (entry) {
+        sessionInfo.cwd = entry.cwd
+      }
+    } else if (this.cliSession) {
+      // Legacy single CLI mode
+      sessionInfo.cwd = this.cliSession.cwd
+    }
+    // PTY mode: no session manager, no cliSession — cwd will be process.cwd() or unknown
+    if (!sessionInfo.cwd) {
+      sessionInfo.cwd = process.cwd()
+    }
+
+    this._send(ws, {
+      type: 'auth_ok',
+      serverMode: this.serverMode,
+      serverVersion: '0.1.0',
+      cwd: sessionInfo.cwd,
+    })
     this._send(ws, { type: 'server_mode', mode: this.serverMode })
     this._send(ws, { type: 'status', connected: true })
 
