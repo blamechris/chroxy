@@ -1,8 +1,15 @@
 import { createServer } from 'http'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
-import { statSync } from 'fs'
+import { statSync, readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
+const SERVER_VERSION = packageJson.version
 
 const PERMISSION_MODES = [
   { id: 'approve', label: 'Approve' },
@@ -239,15 +246,15 @@ export class WsServer {
       // Legacy single CLI mode
       sessionInfo.cwd = this.cliSession.cwd
     }
-    // PTY mode: no session manager, no cliSession — cwd will be process.cwd() or unknown
+    // PTY mode: no session manager, no cliSession — cwd is unknown; prefer null to avoid a misleading value
     if (!sessionInfo.cwd) {
-      sessionInfo.cwd = process.cwd()
+      sessionInfo.cwd = null
     }
 
     this._send(ws, {
       type: 'auth_ok',
       serverMode: this.serverMode,
-      serverVersion: '0.1.0',
+      serverVersion: SERVER_VERSION,
       cwd: sessionInfo.cwd,
     })
     this._send(ws, { type: 'server_mode', mode: this.serverMode })

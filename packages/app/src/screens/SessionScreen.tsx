@@ -758,9 +758,15 @@ function SettingsBar({
   setPermissionMode: (mode: string) => void;
 }) {
   // Truncate working directory path for collapsed view
-  const truncatedCwd = sessionCwd
-    ? sessionCwd.replace(/^\/Users\/[^/]+/, '~').slice(-30)
-    : null;
+  let truncatedCwd: string | null = null;
+  if (sessionCwd) {
+    // Replace common home-directory prefixes with "~" for macOS, Linux, and Windows
+    const homeShortened = sessionCwd.replace(
+      /^(?:\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)/,
+      '~'
+    );
+    truncatedCwd = homeShortened.length > 30 ? homeShortened.slice(-30) : homeShortened;
+  }
 
   // Build collapsed summary: "~/Projects/chroxy · cli · Opus · $0.02"
   const summaryParts: string[] = [];
