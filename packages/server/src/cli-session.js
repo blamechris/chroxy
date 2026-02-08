@@ -579,8 +579,9 @@ export class CliSession extends EventEmitter {
           mkdirSync(resolve(homedir(), '.claude'), { recursive: true })
         } else {
           // File exists but contains invalid JSON — bail out to avoid data loss
-          console.error(`[cli-session] Cannot parse ${settingsPath}: ${err.message}`)
-          console.error('[cli-session] Skipping hook registration to avoid overwriting corrupt settings')
+          const errMsg = `Cannot parse ${settingsPath}: ${err.message}. Skipping hook registration to avoid overwriting corrupt settings. Permissions will not work until this file is fixed.`
+          console.error(`[cli-session] ${errMsg}`)
+          this.emit('error', { message: errMsg })
           return
         }
       }
@@ -611,7 +612,9 @@ export class CliSession extends EventEmitter {
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
       console.log('[cli-session] Registered permission hook in ~/.claude/settings.json')
     } catch (err) {
-      console.error(`[cli-session] Failed to register permission hook: ${err.message}`)
+      const errMsg = `Failed to register permission hook: ${err.message}. Permissions will not work.`
+      console.error(`[cli-session] ${errMsg}`)
+      this.emit('error', { message: errMsg })
     }
   }
 
