@@ -1184,3 +1184,213 @@ describe('QA Test Run #2 — end-to-end noise suppression', () => {
     assert.ok(messages[0].content.includes('_replayHistory'))
   })
 })
+
+describe('Server log line noise filter', () => {
+  let parser
+
+  beforeEach(() => {
+    parser = createParser()
+  })
+
+  it('filters [parser] log lines', () => {
+    assert.ok(parser._isNoise('[parser] Emitting response: "Hello"'))
+  })
+
+  it('filters [ws] log lines', () => {
+    assert.ok(parser._isNoise('[ws] Client connected'))
+  })
+
+  it('filters [cli] log lines', () => {
+    assert.ok(parser._isNoise('[cli] Starting server on port 3000'))
+  })
+
+  it('filters [tunnel] log lines', () => {
+    assert.ok(parser._isNoise('[tunnel] Cloudflare tunnel URL: https://foo.trycloudflare.com'))
+  })
+
+  it('filters [pty] log lines', () => {
+    assert.ok(parser._isNoise('[pty] Session attached'))
+  })
+
+  it('filters [pty-session] log lines', () => {
+    assert.ok(parser._isNoise('[pty-session] Auto-accepting trust dialog (my-session)'))
+  })
+
+  it('filters [SIGINT] log lines', () => {
+    assert.ok(parser._isNoise('[SIGINT] Caught interrupt, shutting down'))
+  })
+
+  it('filters "Press Ctrl+C to stop" server output', () => {
+    assert.ok(parser._isNoise('Press Ctrl+C to stop'))
+  })
+
+  it('filters "Or connect manually:" server output', () => {
+    assert.ok(parser._isNoise('Or connect manually:'))
+  })
+
+  it('filters URL server output', () => {
+    assert.ok(parser._isNoise('URL:   wss://abc-123.trycloudflare.com'))
+  })
+
+  it('filters Token server output', () => {
+    assert.ok(parser._isNoise('Token: abc123def456'))
+  })
+
+  it('filters "Scan this QR code" server output', () => {
+    assert.ok(parser._isNoise('Scan this QR code to connect:'))
+  })
+
+  it('filters QR code block characters', () => {
+    assert.ok(parser._isNoise('▄▀█▀▄ ▄▀█▀▄ ▄▀█▀▄'))
+    assert.ok(parser._isNoise('█▀▀▀▀▀█ ▀▀█ ▀█▀ █▀▀▀▀▀█'))
+  })
+
+  it('does not filter normal bracketed content', () => {
+    // [TODO] or [Note] are not server log prefixes
+    assert.ok(!parser._isNoise('[TODO] Fix this later'))
+    assert.ok(!parser._isNoise('[Note] Important detail'))
+  })
+
+  it('does not filter lines that just contain "parser" etc.', () => {
+    assert.ok(!parser._isNoise('The parser needs fixing'))
+    assert.ok(!parser._isNoise('ws connection established'))
+  })
+})
+
+describe('Prompt detector option cap', () => {
+  let parser
+
+  beforeEach(() => {
+    parser = createParser()
+  })
+
+  it('caps at 10 options and sets overflow sentinel', () => {
+    // Simulate numbered scrollback lines (test output)
+    for (let i = 1; i <= 12; i++) {
+      parser._detectPrompt(`${i}. ok - test case ${i}`)
+    }
+    // After 10+ options, _pendingPrompt should be an overflow sentinel
+    assert.ok(parser._pendingPrompt !== null, 'Should have overflow sentinel')
+    assert.ok(parser._pendingPrompt.overflow, 'Should be marked as overflow')
+    assert.ok(!parser._pendingPrompt.options, 'Should not have options array')
+  })
+
+  it('allows normal prompts under 10 options', () => {
+    parser._detectPrompt('1. Yes, trust this folder')
+    parser._detectPrompt('2. No, exit')
+    assert.ok(parser._pendingPrompt !== null)
+    assert.equal(parser._pendingPrompt.options.length, 2)
+  })
+})
+
+describe('False positive guards — RESPONSE state preservation', () => {
+  let parser, messages
+
+  beforeEach(() => {
+    parser = createParser()
+    messages = collectEvents(parser, 'message')
+  })
+
+  it('preserves numeric content "42" during RESPONSE state', async () => {
+    parser.feed('⏺ The answer to the question is:\n')
+    parser.feed('42\n')
+    parser.feed('That is the final answer.\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    assert.ok(messages.length >= 1, 'Should emit the response')
+    const content = messages.map(m => m.content).join('')
+    assert.ok(content.includes('42'), '"42" should not be filtered during RESPONSE')
+  })
+
+  it('preserves "However..." during RESPONSE state', async () => {
+    parser.feed('⏺ Let me explain the issue.\n')
+    parser.feed('However...\n')
+    parser.feed('the root cause was different.\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    const content = messages.map(m => m.content).join('')
+    assert.ok(content.includes('However'), '"However..." should not be eaten by thinking filter')
+  })
+
+  it('preserves "Meanwhile..." during RESPONSE state', async () => {
+    parser.feed('⏺ The server started.\n')
+    parser.feed('Meanwhile...\n')
+    parser.feed('the client was connecting.\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    const content = messages.map(m => m.content).join('')
+    assert.ok(content.includes('Meanwhile'), '"Meanwhile..." should not be eaten')
+  })
+
+  it('preserves "Reading..." during RESPONSE state', async () => {
+    parser.feed('⏺ I will help with that.\n')
+    parser.feed('Reading...\n')
+    parser.feed('the file contents show the issue.\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    const content = messages.map(m => m.content).join('')
+    assert.ok(content.includes('Reading'), '"Reading..." should not be eaten during RESPONSE')
+  })
+
+  it('still filters "Imagining…" outside of RESPONSE state', () => {
+    // Not in RESPONSE state — should be filtered as thinking
+    assert.ok(parser._isThinking('Imagining…'))
+    assert.ok(parser._isThinking('Actualizing… 39'))
+    assert.ok(parser._isThinking('Reading…'))
+  })
+
+  it('still filters numeric fragments outside of RESPONSE state', () => {
+    // Not in RESPONSE state — should be filtered as noise
+    assert.ok(parser._isNoise('7 0 -0'))
+    assert.ok(parser._isNoise('8 187 -3'))
+    assert.ok(parser._isNoise('42'))
+  })
+
+  it('preserves numeric content during RESPONSE but filters outside', () => {
+    // Set parser to RESPONSE state manually
+    parser.feed('⏺ The answer is:\n')
+    // Now parser.state should be RESPONSE
+
+    // These should NOT be filtered during RESPONSE
+    assert.ok(!parser._isNoise('42'), '"42" should pass during RESPONSE')
+    assert.ok(!parser._isNoise('100'), '"100" should pass during RESPONSE')
+  })
+})
+
+describe('Recursive amplification — end-to-end', () => {
+  let parser, messages
+
+  beforeEach(() => {
+    parser = createParser()
+    messages = collectEvents(parser, 'message')
+  })
+
+  it('suppresses server log lines from tmux scrollback', async () => {
+    // Simulate what happens when tmux scrollback contains server logs
+    parser.feed('[parser] Emitting response: "Hello world"\n')
+    parser.feed('[parser] Emitting response: "[parser] Emitting response: "z g""\n')
+    parser.feed('[ws] Broadcasting to 1 clients\n')
+    parser.feed('[tunnel] Health check passed\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    assert.equal(messages.length, 0, 'Server log lines should be completely suppressed')
+  })
+
+  it('suppresses server output fragments from scrollback', async () => {
+    parser.feed('Press Ctrl+C to stop the server\n')
+    parser.feed('Or connect manually:\n')
+    parser.feed('URL:   wss://abc-xyz.trycloudflare.com\n')
+    parser.feed('Token: abcdef123456\n')
+    parser.feed('Scan this QR code to connect:\n')
+    parser.feed('█▀▀▀▀▀█ ▀▀█ ▀█▀ █▀▀▀▀▀█\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    assert.equal(messages.length, 0, 'Server output fragments should be completely suppressed')
+  })
+})
