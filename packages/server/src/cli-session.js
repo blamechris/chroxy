@@ -464,11 +464,34 @@ export class CliSession extends EventEmitter {
       // and returns early. Our handler then starts the new process.
       const oldChild = this._child
       this._child = null
-      oldChild.on('close', () => {
+
+      let didClose = false
+      const respawn = () => {
+        if (didClose) return
+        didClose = true
         this._destroying = false
         this._respawnCount = 0
         this.start()
+      }
+
+      oldChild.on('close', () => {
+        clearTimeout(forceKillTimer)
+        respawn()
       })
+
+      // Force-kill after 10s if process doesn't exit cleanly
+      const forceKillTimer = setTimeout(() => {
+        if (!didClose) {
+          console.warn('[cli-session] Process did not exit after 10s, force-killing with SIGKILL')
+          try {
+            oldChild.kill('SIGKILL')
+          } catch (err) {
+            // Process may already be gone, that's fine
+          }
+          respawn()
+        }
+      }, 10000)
+
       oldChild.kill('SIGTERM')
     } else {
       this._destroying = false
@@ -521,11 +544,34 @@ export class CliSession extends EventEmitter {
     if (this._child) {
       const oldChild = this._child
       this._child = null
-      oldChild.on('close', () => {
+
+      let didClose = false
+      const respawn = () => {
+        if (didClose) return
+        didClose = true
         this._destroying = false
         this._respawnCount = 0
         this.start()
+      }
+
+      oldChild.on('close', () => {
+        clearTimeout(forceKillTimer)
+        respawn()
       })
+
+      // Force-kill after 10s if process doesn't exit cleanly
+      const forceKillTimer = setTimeout(() => {
+        if (!didClose) {
+          console.warn('[cli-session] Process did not exit after 10s, force-killing with SIGKILL')
+          try {
+            oldChild.kill('SIGKILL')
+          } catch (err) {
+            // Process may already be gone, that's fine
+          }
+          respawn()
+        }
+      }, 10000)
+
       oldChild.kill('SIGTERM')
     } else {
       this._destroying = false
@@ -579,8 +625,9 @@ export class CliSession extends EventEmitter {
           mkdirSync(resolve(homedir(), '.claude'), { recursive: true })
         } else {
           // File exists but contains invalid JSON — bail out to avoid data loss
-          console.error(`[cli-session] Cannot parse ${settingsPath}: ${err.message}`)
-          console.error('[cli-session] Skipping hook registration to avoid overwriting corrupt settings')
+          const errMsg = `Cannot parse ${settingsPath}: ${err.message}. Skipping hook registration to avoid overwriting corrupt settings. Permissions will not work until this file is fixed.`
+          console.error(`[cli-session] ${errMsg}`)
+          this.emit('error', { message: errMsg })
           return
         }
       }
@@ -611,7 +658,9 @@ export class CliSession extends EventEmitter {
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
       console.log('[cli-session] Registered permission hook in ~/.claude/settings.json')
     } catch (err) {
-      console.error(`[cli-session] Failed to register permission hook: ${err.message}`)
+      const errMsg = `Failed to register permission hook: ${err.message}. Permissions will not work.`
+      console.error(`[cli-session] ${errMsg}`)
+      this.emit('error', { message: errMsg })
     }
   }
 
