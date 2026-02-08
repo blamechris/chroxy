@@ -577,7 +577,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           if (activeId && get().sessionStates[activeId]) {
             updateActiveSession((ss) => ({
               messages: [
-                ...filterThinking(ss.messages),
+                ...ss.messages.filter((m) => m.id !== 'thinking' || newMsg.id === 'thinking'),
                 newMsg,
               ],
             }));
@@ -916,7 +916,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set((state) => ({
       // Remove thinking placeholder when a real message arrives from the server
       messages: [
-        ...filterThinking(state.messages),
+        ...state.messages.filter((m) => m.id !== 'thinking' || message.id === 'thinking'),
         message,
       ],
     }));
