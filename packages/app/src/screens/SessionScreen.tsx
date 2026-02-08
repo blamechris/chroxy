@@ -720,6 +720,7 @@ function SettingsBar({
                         key={m.id}
                         style={[settingsBarStyles.chip, isActive && settingsBarStyles.chipActive]}
                         onPress={() => setModel(m.id)}
+                        activeOpacity={0.7}
                       >
                         <Text style={[settingsBarStyles.chipText, isActive && settingsBarStyles.chipTextActive]}>
                           {m.label}
@@ -738,6 +739,7 @@ function SettingsBar({
                         key={m.id}
                         style={[settingsBarStyles.chip, isActive && settingsBarStyles.chipActive]}
                         onPress={() => setPermissionMode(m.id)}
+                        activeOpacity={0.7}
                       >
                         <Text style={[settingsBarStyles.chipText, isActive && settingsBarStyles.chipTextActive]}>
                           {m.label}
@@ -781,6 +783,7 @@ const settingsBarStyles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 14,
     paddingVertical: 6,
+    minHeight: 44,
   },
   summaryText: {
     flex: 1,
@@ -810,6 +813,9 @@ const settingsBarStyles = StyleSheet.create({
     backgroundColor: '#2a2a4e',
     borderWidth: 1,
     borderColor: 'transparent',
+    minHeight: 44,
+    minWidth: 44,
+    justifyContent: 'center',
   },
   chipActive: {
     backgroundColor: '#4a9eff33',
