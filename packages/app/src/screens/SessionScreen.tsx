@@ -35,11 +35,13 @@ type ContentBlock =
 /** Split content into alternating text and fenced code blocks.
  *  Code fences must start at the beginning of a line — triple backticks
  *  inside prose (e.g. "Code blocks (```)") are NOT treated as fences. */
-function splitContentBlocks(content: string): ContentBlock[] {
+function splitContentBlocks(rawContent: string): ContentBlock[] {
+  // Normalize CRLF → LF so fence regex works on all line endings
+  const content = rawContent.replace(/\r\n/g, '\n');
   const blocks: ContentBlock[] = [];
   // Require ``` at line start (or string start), followed by optional language + newline.
-  // Closing ``` must also be at line start, or we accept end-of-string for streaming.
-  const regex = /(?:^|\n)```(\w*)\n([\s\S]*?)(?:\n```(?:\s*\n|$)|$)/g;
+  // Closing fence uses lookahead so the \n isn't consumed — allows consecutive code blocks.
+  const regex = /(?:^|\n)```(\w*)\n([\s\S]*?)(?:\n```(?=\s*\n|$)|$)/g;
   let lastIndex = 0;
   let match;
 
