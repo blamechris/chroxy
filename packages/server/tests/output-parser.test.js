@@ -940,3 +940,247 @@ describe('OutputParser end-to-end PTY noise filtering', () => {
     assert.ok(messages[0].content.includes('fixed the bug'))
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────
+// QA Test Run #2: exact junk lines from server logs (2026-02-07)
+// Tests every pattern category that was leaking through the old filters
+// ─────────────────────────────────────────────────────────────────────
+describe('QA Test Run #2 — noise filter regressions', () => {
+  let parser
+
+  beforeEach(() => {
+    parser = createParser()
+  })
+
+  // --- Category 1: Missing spinner verbs (Imagining, Baked) ---
+  it('filters "Imagining…" as thinking', () => {
+    assert.equal(parser._isThinking('Imagining…'), true)
+  })
+
+  it('filters "Imagining… 39" (spinner + scroll count)', () => {
+    assert.equal(parser._isThinking('Imagining… 39'), true)
+  })
+
+  it('filters "Imagining… 51" (spinner + count)', () => {
+    assert.equal(parser._isThinking('Imagining… 51'), true)
+  })
+
+  it('filters "Imagining… ↑ 64 3542" (spinner + scroll position)', () => {
+    assert.equal(parser._isThinking('Imagining… ↑ 64 3542'), true)
+  })
+
+  it('filters "Baked for 6m 29s" as noise', () => {
+    assert.equal(parser._isNoise('Baked for 6m 29s'), true)
+  })
+
+  // --- Category 2: CUP-split status fragments (single-char tokens) ---
+  it('filters "c a" (CUP fragment)', () => {
+    assert.equal(parser._isNoise('c a'), true)
+  })
+
+  it('filters "z g" (CUP fragment)', () => {
+    assert.equal(parser._isNoise('z g'), true)
+  })
+
+  it('filters "i n" (CUP fragment)', () => {
+    assert.equal(parser._isNoise('i n'), true)
+  })
+
+  it('filters "A u" (CUP fragment)', () => {
+    assert.equal(parser._isNoise('A u'), true)
+  })
+
+  it('filters "t l" (CUP fragment)', () => {
+    assert.equal(parser._isNoise('t l'), true)
+  })
+
+  it('filters "i …" (CUP fragment with ellipsis)', () => {
+    assert.equal(parser._isNoise('i …'), true)
+  })
+
+  it('filters "· c a 9" (CUP fragment with dot)', () => {
+    assert.equal(parser._isNoise('· c a 9'), true)
+  })
+
+  it('filters "A u 7" (CUP fragment with number)', () => {
+    assert.equal(parser._isNoise('A u 7'), true)
+  })
+
+  it('filters "A u 8 0" (CUP fragment multi-digit)', () => {
+    assert.equal(parser._isNoise('A u 8 0'), true)
+  })
+
+  // --- Category 3: Spinner char lines not broadly caught ---
+  it('filters "✶ … 5" (spinner + ellipsis + number)', () => {
+    assert.equal(parser._isThinking('✶ … 5'), true)
+  })
+
+  it('filters "✻ …" (spinner + ellipsis)', () => {
+    assert.equal(parser._isThinking('✻ …'), true)
+  })
+
+  it('filters "✢  · thinking)" (spinner + garbled status)', () => {
+    assert.equal(parser._isThinking('✢  · thinking)'), true)
+  })
+
+  it('filters "✳ …" (spinner char + ellipsis)', () => {
+    assert.equal(parser._isThinking('✳ …'), true)
+  })
+
+  // --- Category 4: tmux status bar with pane title ---
+  it('filters tmux status with pane title (non-anchored)', () => {
+    assert.equal(parser._isNoise('[dev] 0:2.1.37*                                                                     "⠐ App UI Debugg'), true)
+  })
+
+  it('filters quoted braille pane title', () => {
+    assert.equal(parser._isNoise('"⠐ App UI Debugging..."'), true)
+  })
+
+  it('filters quoted spinner pane title', () => {
+    assert.equal(parser._isNoise('"✳ Restart Testing"'), true)
+  })
+
+  // --- Category 5: Numeric-only fragments ---
+  it('filters "7 0 -0" (numeric fragment)', () => {
+    assert.equal(parser._isNoise('7 0 -0'), true)
+  })
+
+  it('filters "8 187 -3" (numeric fragment)', () => {
+    assert.equal(parser._isNoise('8 187 -3'), true)
+  })
+
+  it('filters "2 9 )" (numeric with paren)', () => {
+    assert.equal(parser._isNoise('2 9 )'), true)
+  })
+
+  // --- Category 6: General capitalized verb pattern ---
+  it('filters "Conjuring…" (unknown future verb)', () => {
+    assert.equal(parser._isThinking('Conjuring…'), true)
+  })
+
+  it('filters "Manifesting… 42" (unknown verb + count)', () => {
+    assert.equal(parser._isThinking('Manifesting… 42'), true)
+  })
+
+  it('filters "Synthesizing..." (three dots)', () => {
+    assert.equal(parser._isThinking('Synthesizing...'), true)
+  })
+
+  // --- Category 7: Middle dot with status indicators ---
+  it('filters "· 9 thinking" (dot + number + thinking)', () => {
+    assert.equal(parser._isThinking('· 9 thinking'), true)
+  })
+
+  it('filters "· thinking" (dot + thinking)', () => {
+    assert.equal(parser._isThinking('· thinking'), true)
+  })
+
+  it('filters "· … thinking" (dot + ellipsis + thinking)', () => {
+    assert.equal(parser._isThinking('· … thinking'), true)
+  })
+
+  // --- Category 8: [Pasted text] markers ---
+  it('filters "[Pasted text #5 +6 lines]" as noise', () => {
+    assert.equal(parser._isNoise('[Pasted text #5 +6 lines]'), true)
+  })
+
+  it('filters "[Pasted text #6 +9 lines]" as noise', () => {
+    assert.equal(parser._isNoise('[Pasted text #6 +9 lines]'), true)
+  })
+
+  // --- Category 9: Actualizing/status line accumulation ---
+  it('filters "Actualizing… 2" (verb + number)', () => {
+    assert.equal(parser._isThinking('Actualizing… 2'), true)
+  })
+
+  it('filters "Actualizing… 3" (verb + number)', () => {
+    assert.equal(parser._isThinking('Actualizing… 3'), true)
+  })
+
+  // --- Legitimate content must NOT be filtered ---
+  it('preserves "I see the problem. When you switch..." (real response)', () => {
+    const text = 'I see the problem. When you switch to a session, _replayHistory sends the entire history buffer'
+    assert.equal(parser._isNoise(text), false)
+    assert.equal(parser._isThinking(text), false)
+  })
+
+  it('preserves "The history trimming should fix the main issue." (real response)', () => {
+    const text = 'The history trimming should fix the main issue. The server was replaying up to 100 entries'
+    assert.equal(parser._isNoise(text), false)
+    assert.equal(parser._isThinking(text), false)
+  })
+
+  it('preserves "Step 1: Fix duplicate tool messages" (real response)', () => {
+    const text = 'Step 1: Fix duplicate tool messages in cli-session.js'
+    assert.equal(parser._isNoise(text), false)
+    assert.equal(parser._isThinking(text), false)
+  })
+
+  it('preserves "Here\'s a quick test checklist" (real response)', () => {
+    const text = "Here's a quick test checklist to run through:"
+    assert.equal(parser._isNoise(text), false)
+    assert.equal(parser._isThinking(text), false)
+  })
+
+  it('preserves "Now, about the orange prompt issue" (real response)', () => {
+    const text = 'Now, about the orange prompt issue — the old history still has duplicate messages'
+    assert.equal(parser._isNoise(text), false)
+    assert.equal(parser._isThinking(text), false)
+  })
+})
+
+describe('QA Test Run #2 — end-to-end noise suppression', () => {
+  it('suppresses all junk from exact log patterns', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    // Exact lines from the QA test run #2 server logs
+    const junkLines = [
+      'Imagining… 39',
+      'Imagining… 51',
+      'Imagining…',
+      'Actualizing… 2',
+      'Actualizing…',
+      'Baked for 6m 29s',
+      '✶ … 5',
+      '✢  · thinking)',
+      '[Pasted text #5 +6 lines]',
+      '7 0 -0',
+      '8 187 -3',
+      'c a',
+      'z g',
+      'A u 7',
+      '· c a 9',
+      '4 thinking',
+      '· thinking',
+    ]
+    for (const line of junkLines) {
+      parser.feed(line + '\n')
+    }
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    assert.equal(messages.length, 0,
+      `Expected no messages but got ${messages.length}: ${messages.map(m => JSON.stringify(m.content.trim().slice(0, 50))).join(', ')}`)
+  })
+
+  it('real response survives after QA junk barrage', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    // Junk before
+    parser.feed('Imagining… 39\n')
+    parser.feed('✶ … 5\n')
+    parser.feed('c a\n')
+    parser.feed('A u 7\n')
+
+    // Real response
+    parser.feed('⏺ I see the problem. When you switch to a session, _replayHistory sends the entire history buffer.\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    assert.ok(messages.length >= 1, 'Should emit the real response')
+    assert.equal(messages[0].type, 'response')
+    assert.ok(messages[0].content.includes('_replayHistory'))
+  })
+})

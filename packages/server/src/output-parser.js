@@ -93,6 +93,17 @@ export class OutputParser extends EventEmitter {
     // Skip this filter during RESPONSE state to preserve legitimate short content like "OK", "Yes."
     if (this.state !== State.RESPONSE &&
         trimmed.length <= 5 && !/^[❯⏺]/.test(trimmed) && /^[a-zA-Z\d\s.·…]+$/.test(trimmed)) return true;
+    // CUP-split status fragments: short lines where every token is a single character.
+    // These are cursor-positioning artifacts from terminal screen redraws.
+    // Examples: "c a", "z g", "i n", "A u", "· c a 9", "i … thinking"
+    // State-independent — these are never legitimate content in any state.
+    if (trimmed.length < 20) {
+      const tokens = trimmed.split(/\s+/)
+      if (tokens.length >= 2 && tokens.every(t => t.length <= 1)) return true
+    }
+    // Numeric-only fragments with optional punctuation (CUP artifacts, line counters)
+    // Examples: "7 0 -0", "8 187 -3", "2 9 )"
+    if (/^[\d\s.()+-]+$/.test(trimmed) && trimmed.length < 20) return true
     // Divider lines (all dashes, or dashes with a few other chars)
     if (/^[━─╌]{3,}/.test(trimmed)) return true;
     // Lines that are mostly dashes with some text mixed in
@@ -100,6 +111,11 @@ export class OutputParser extends EventEmitter {
     // tmux status bar — any session name in brackets followed by window:pane
     if (/^\[[\w-]+\]\s*\d+:/.test(trimmed)) return true;
     if (/\[claude-co/.test(trimmed)) return true;
+    // tmux status bar (non-anchored) — CUP joining may prepend content before [session]
+    // Pattern: [name] N:window_name with multiple trailing spaces (tmux pads with spaces)
+    if (/\[[\w-]+\]\s+\d+:[\w.-]+[*#!\-]?\s{2,}/.test(trimmed)) return true
+    // Quoted pane titles from tmux status bar (braille/spinner char inside quotes)
+    if (/^"[\u2800-\u28FF✻✶✳✽✢·•⏺]/.test(trimmed)) return true
     if (/^"\*?\s*Claude\s*Code"/.test(trimmed)) return true;
     if (/^"Christophers-/.test(trimmed)) return true;
     if (/^\*\s*Claude\s*Code/.test(trimmed)) return true;
@@ -151,6 +167,10 @@ export class OutputParser extends EventEmitter {
     if (/^\/Users\/\w+$/.test(trimmed)) return true;
     // PTY Scrollback marker
     if (/PTY\s*Scrollback/i.test(trimmed)) return true;
+    // [Pasted text #N] markers from Claude Code paste handling
+    if (/^\[Pasted text #\d+/.test(trimmed)) return true
+    // "Baked for Nm Ns" / completion timing lines
+    if (/^Baked\s+for\s+\d/i.test(trimmed)) return true
     return false;
   }
 
@@ -158,28 +178,34 @@ export class OutputParser extends EventEmitter {
   _isThinking(trimmed) {
     // Bare spinner characters (single or groups, with optional spaces)
     if (/^[✻✶✳✽✢·•⏺]+$/.test(trimmed)) return true;
-    // Spinner characters followed by ANY word (Claude uses creative verbs)
-    if (/^[✻✶✳✽✢]\s*\w/i.test(trimmed)) return true;
+    // Any short line starting with spinner characters — these are exclusively
+    // used for Claude Code's thinking/working animation, never in response text.
+    if (/^[✻✶✳✽✢]/.test(trimmed) && trimmed.length < 40) return true;
     if (/^[·•]\s*\w.*…/i.test(trimmed)) return true;
+    // Middle dot/bullet followed by status indicators (numbers, ellipsis, arrows, "thinking")
+    // but NOT followed by uppercase letter (which would be a bullet-point list item)
+    if (/^[·•]\s*(?:\d|…|thinking|tokens|↑|↓)/i.test(trimmed) && trimmed.length < 40) return true;
     // Bare spinner with timing info
     if (/^[✻✶✳✽✢⏺·•]\s*.*\(\d+s\s*·\s*[↓↑]/.test(trimmed)) return true;
-    // Mixed spinner character sequences (animation frames)
-    if (/^[✻✶✳✽✢·•↑↓\d\s]{3,}$/.test(trimmed)) return true;
+    // Mixed spinner character sequences (animation frames) — includes … (U+2026)
+    if (/^[✻✶✳✽✢·•↑↓…\d\s]{3,}$/.test(trimmed)) return true;
     // Braille spinners — full braille block (U+2800–U+28FF)
     if (/^[\u2800-\u28FF]/.test(trimmed)) return true;
     // Standalone spinner verb text (from animation frames after ANSI stripping).
     // Must be JUST the verb (optionally with ellipsis) — not followed by real content.
     // Length < 20 prevents false positives on "Writing tests for the parser module" etc.
-    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|waiting)(…|\.\.\.)?$/i.test(trimmed) && trimmed.length < 20) return true;
+    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|imagining|waiting)(…|\.\.\.)?$/i.test(trimmed) && trimmed.length < 20) return true;
     // "N thinking" — thinking counter fragment (e.g. "42 thinking", "7 thinking")
     if (/^\d+\s*thinking/i.test(trimmed)) return true;
     // Lines ending with "thinking" or "thinking)" — status bar fragments like "c a thinking"
     if (/thinking\)?$/i.test(trimmed) && trimmed.length < 60) return true;
     // "thought for Ns)" — past tense thinking indicator
     if (/thought\s+for\s+\d/i.test(trimmed)) return true;
-    // Known spinner verb with "…" — e.g. "Actualizing…", "Waiting…", "Downloading…"
-    // Restricted to known verbs to avoid catching legitimate ellipsis content.
-    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|waiting|downloading|compiling|installing|building|connecting|loading)…/i.test(trimmed) && trimmed.length < 30) return true;
+    // Known spinner verb with "…" or "..." — e.g. "Actualizing…", "Imagining… 39"
+    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|imagining|waiting|downloading|compiling|installing|building|connecting|loading)(…|\.\.\.)/i.test(trimmed) && trimmed.length < 30) return true;
+    // General: any capitalized word ending in … or ... followed by optional trailing noise
+    // (numbers, arrows, spaces). Future-proofs against new creative spinner verbs.
+    if (/^[A-Z][a-z]+(…|\.\.\.)\s*[\d↑↓\s]*$/.test(trimmed) && trimmed.length < 40) return true;
     return false;
   }
 
