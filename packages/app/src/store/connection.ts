@@ -217,6 +217,23 @@ let disconnectedAttemptId = -1;
 // Track the last successfully connected URL to detect reconnects reliably
 let lastConnectedUrl: string | null = null;
 
+/**
+ * Message ID Convention
+ *
+ * Message IDs are used to uniquely identify and track messages in the chat history.
+ * The format is: `{prefix}-{counter}-{timestamp}` except for special cases.
+ *
+ * ID Prefix Types:
+ * - 'thinking'      — Ephemeral thinking placeholder (singleton, no counter/timestamp, filtered from display)
+ * - 'user-{N}-{T}'  — User-sent messages (N=counter, T=timestamp)
+ * - '{type}-{N}-{T}' — Server-forwarded messages where type is the messageType (response, error, etc.)
+ * - 'tool-{N}-{T}'  — Tool use messages
+ * - 'perm-{N}-{T}'  — Permission request prompts from Claude Code (tool permission dialogs)
+ *
+ * Note: The counter ensures uniqueness, and the timestamp provides ordering context.
+ * All message types except 'thinking' are generated via nextMessageId(prefix).
+ */
+
 // Monotonic message ID counter (avoids Math.random() collisions)
 let messageIdCounter = 0;
 function nextMessageId(prefix = 'msg'): string {
