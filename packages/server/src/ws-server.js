@@ -374,6 +374,7 @@ export class WsServer {
           if (text && text !== '\r' && text !== '\n') {
             console.log(`[ws] PTY input from ${client.id} to session ${client.activeSessionId}: "${text.replace(/[\r\n]/g, '\\n').slice(0, 80)}"`)
           }
+          entry.session.expectEcho?.(text)
           entry.session.writeRaw(text)
         } else {
           // CLI sessions: trim and drop empty input
@@ -675,6 +676,7 @@ export class WsServer {
         if (msg.data && msg.data !== '\r' && msg.data !== '\n') {
           console.log(`[ws] Input from ${client.id}: "${msg.data.replace(/[\r\n]/g, '\\n').slice(0, 80)}"`)
         }
+        if (this.outputParser) this.outputParser.expectEcho(msg.data)
         this.ptyManager.write(msg.data)
         break
 
@@ -789,6 +791,11 @@ export class WsServer {
           this._broadcastToSession(sessionId, { type: 'raw', data }, (client) => client.mode === 'terminal')
           // Also send as raw_background to chat-mode clients (keeps terminal buffer current)
           this._broadcastToSession(sessionId, { type: 'raw_background', data }, (client) => client.mode === 'chat')
+          break
+
+        case 'status_update':
+          console.log(`[ws] Broadcasting status_update: $${data.cost} | ${data.model} | msgs:${data.messageCount} | ${data.contextTokens} (${data.contextPercent}%)`)
+          this._broadcastToSession(sessionId, { type: 'status_update', ...data })
           break
 
         case 'error':
@@ -921,6 +928,12 @@ export class WsServer {
     // Claude Code ready signal -> all clients
     this.outputParser.on('claude_ready', () => {
       this._broadcast({ type: 'claude_ready' })
+    })
+
+    // Status bar metadata -> all clients
+    this.outputParser.on('status_update', (status) => {
+      console.log(`[ws] Broadcasting status_update: $${status.cost} | ${status.model} | msgs:${status.messageCount} | ${status.contextTokens} (${status.contextPercent}%)`)
+      this._broadcast({ type: 'status_update', ...status })
     })
   }
 

@@ -341,5 +341,10 @@ export class SessionManager extends EventEmitter {
     session.on('raw', (data) => {
       this.emit('session_event', { sessionId, event: 'raw', data })
     })
+
+    // PtySession emits 'status_update' for Claude Code status bar metadata (not recorded in history)
+    session.on('status_update', (data) => {
+      this.emit('session_event', { sessionId, event: 'status_update', data })
+    })
   }
 }

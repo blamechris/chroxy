@@ -322,6 +322,9 @@ export function SessionScreen() {
   // Multi-select state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const isSelecting = selectedIds.size > 0;
+  // Ref so onContentSizeChange always reads the latest value (avoids stale closure)
+  const isSelectingRef = useRef(false);
+  isSelectingRef.current = isSelecting;
 
   const toggleSelection = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -339,12 +342,26 @@ export function SessionScreen() {
     setSelectedIds(new Set());
   }, []);
 
+  const selectAll = useCallback(() => {
+    setSelectedIds(new Set(messages.map((m) => m.id)));
+  }, [messages]);
+
+  const formatTranscript = useCallback((selected: ChatMessage[]) => {
+    return selected
+      .filter((m) => m.type !== 'thinking')
+      .map((m) => {
+        const label = m.type === 'user_input' ? 'You'
+          : m.type === 'tool_use' ? `Tool: ${m.tool || 'unknown'}`
+          : m.type === 'error' ? 'Error'
+          : m.type === 'prompt' ? 'Prompt'
+          : 'Claude';
+        return `[${label}] ${m.content?.trim() || ''}`;
+      }).join('\n\n');
+  }, []);
+
   const handleCopy = useCallback(async () => {
     const selected = messages.filter((m) => selectedIds.has(m.id));
-    const text = selected.map((m) => {
-      const label = m.type === 'user_input' ? 'You' : m.type === 'tool_use' ? `Tool: ${m.tool}` : 'Claude';
-      return `[${label}] ${m.content?.trim() || ''}`;
-    }).join('\n\n');
+    const text = formatTranscript(selected);
     try {
       await Clipboard.setStringAsync(text);
       Alert.alert('Copied', `${selected.length} message${selected.length > 1 ? 's' : ''} copied to clipboard`);
@@ -353,19 +370,19 @@ export function SessionScreen() {
       console.error('Failed to copy messages to clipboard', error);
       Alert.alert('Copy failed', 'Unable to copy messages to clipboard. Please try again.');
     }
-  }, [messages, selectedIds, clearSelection]);
+  }, [messages, selectedIds, clearSelection, formatTranscript]);
 
   const handleExport = useCallback(async () => {
     const selected = messages.filter((m) => selectedIds.has(m.id));
-    const json = JSON.stringify(selected, null, 2);
+    const text = formatTranscript(selected);
     try {
-      await Share.share({ message: json });
+      await Share.share({ message: text });
       clearSelection();
     } catch (error) {
-      console.error('Failed to export messages', error);
-      Alert.alert('Export failed', 'Unable to share messages. Please try again.');
+      console.error('Failed to share messages', error);
+      Alert.alert('Share failed', 'Unable to share messages. Please try again.');
     }
-  }, [messages, selectedIds, clearSelection]);
+  }, [messages, selectedIds, clearSelection, formatTranscript]);
 
   const handleSend = () => {
     if (!inputText.trim() || streamingMessageId) return;
@@ -449,11 +466,14 @@ export function SessionScreen() {
         <View style={styles.selectionBar}>
           <Text style={styles.selectionCount}>{selectedIds.size} selected</Text>
           <View style={styles.selectionActions}>
+            <TouchableOpacity style={styles.selectionButton} onPress={selectAll}>
+              <Text style={styles.selectionButtonText}>All</Text>
+            </TouchableOpacity>
             <TouchableOpacity style={styles.selectionButton} onPress={handleCopy}>
               <Text style={styles.selectionButtonText}>Copy</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.selectionButton} onPress={handleExport}>
-              <Text style={styles.selectionButtonText}>Export</Text>
+              <Text style={styles.selectionButtonText}>Share</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.selectionCancelButton} onPress={clearSelection}>
               <Text style={styles.selectionCancelText}>{ICON_CLOSE}</Text>
@@ -515,7 +535,7 @@ export function SessionScreen() {
 
       {/* Content area */}
       {viewMode === 'chat' ? (
-        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} isCliMode={isCliMode} selectedIds={selectedIds} isSelecting={isSelecting} onToggleSelection={toggleSelection} streamingMessageId={streamingMessageId} />
+        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} isCliMode={isCliMode} selectedIds={selectedIds} isSelecting={isSelecting} isSelectingRef={isSelectingRef} onToggleSelection={toggleSelection} streamingMessageId={streamingMessageId} />
       ) : (
         <TerminalView
           content={terminalBuffer}
@@ -890,6 +910,7 @@ function ChatView({
   isCliMode,
   selectedIds,
   isSelecting,
+  isSelectingRef,
   onToggleSelection,
   streamingMessageId,
 }: {
@@ -900,6 +921,7 @@ function ChatView({
   isCliMode: boolean;
   selectedIds: Set<string>;
   isSelecting: boolean;
+  isSelectingRef: React.MutableRefObject<boolean>;
   onToggleSelection: (id: string) => void;
   streamingMessageId: string | null;
 }) {
@@ -913,7 +935,9 @@ function ChatView({
       ref={scrollViewRef}
       style={styles.chatContainer}
       contentContainerStyle={styles.chatContent}
-      onContentSizeChange={() => scrollViewRef.current?.scrollToEnd()}
+      onContentSizeChange={() => {
+        if (!isSelectingRef.current) scrollViewRef.current?.scrollToEnd();
+      }}
       keyboardDismissMode="on-drag"
       keyboardShouldPersistTaps="handled"
     >
