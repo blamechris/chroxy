@@ -254,7 +254,9 @@ node packages/server/src/test-client.js wss://your-url
 | `packages/server/src/ws-server.js` | WebSocket protocol with auth |
 | `packages/server/src/tunnel.js` | Cloudflare tunnel manager |
 | `packages/server/src/tunnel-check.js` | Tunnel health verification |
-| `packages/server/src/session-manager.js` | Session discovery |
+| `packages/server/src/session-manager.js` | Session lifecycle management |
+| `packages/server/src/session-discovery.js` | Session discovery utilities |
+| `packages/server/src/pty-session.js` | PTY session state + I/O handling |
 | `packages/server/src/models.js` | Model switching utilities |
 | `packages/app/src/App.tsx` | App root with navigation |
 | `packages/app/src/screens/ConnectScreen.tsx` | QR scan + manual connection UI |

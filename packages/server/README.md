@@ -25,9 +25,12 @@ The server will print a QR code. Scan it with the Chroxy app.
 | `chroxy init` | Interactive setup — generates API token and config file |
 | `chroxy start` | Start server in CLI headless mode (default) |
 | `chroxy start --terminal` | Start server in PTY/tmux mode |
-| `chroxy start --no-auth` | Start without authentication (dev only) |
-| `chroxy start --cwd /path` | Set working directory |
-| `chroxy start --model opus` | Use specific Claude model |
+| `chroxy start --no-auth` | Start without authentication in CLI mode only; binds to localhost and disables Cloudflare tunnel (development only) |
+| `chroxy start --config /path` | Use a specific config file instead of the default |
+| `chroxy start --resume` | Resume the previous session where supported (reuses prior working directory/context) |
+| `chroxy start --cwd /path` | Set working directory (CLI mode) |
+| `chroxy start --model opus` | Use a specific Claude model (CLI mode) |
+| `chroxy start --allowed-tools tool1,tool2` | Restrict which tools are exposed to clients (CLI mode, comma-separated list) |
 | `chroxy config` | Show current configuration |
 
 ## Manual Setup
@@ -109,7 +112,7 @@ To capture sample output for PTY mode analysis:
 
 ```bash
 # Start server in PTY mode
-chroxy start --terminal
+npx chroxy start --terminal
 
 # In another terminal, capture the raw output
 tmux pipe-pane -o -t claude-code 'cat >> ~/claude-output.log'
