@@ -412,7 +412,10 @@ export class OutputParser extends EventEmitter {
     }
 
     // Detect interactive prompts (permission requests, selections)
-    this._detectPrompt(trimmed);
+    // Only during IDLE/THINKING — numbered lists in RESPONSE state are legitimate content
+    if (this.state === State.IDLE || this.state === State.THINKING) {
+      this._detectPrompt(trimmed)
+    }
 
     // Tool use block start: ╭─── Read(src/file.js) ───
     // Also detect compact format: Read(src/file.js) or Bash(cmd) ⎿ output
@@ -509,11 +512,11 @@ export class OutputParser extends EventEmitter {
 
   /** Set a timer to flush accumulated message if no new state transition */
   _resetFlush() {
-    if (this._flushTimer) clearTimeout(this._flushTimer);
+    if (this._flushTimer) clearTimeout(this._flushTimer)
     this._flushTimer = setTimeout(() => {
-      this._flushTimer = null;
-      this._finishCurrentMessage();
-    }, 1500);
+      this._flushTimer = null
+      this._finishCurrentMessage()
+    }, 1500)
   }
 
   /** Emit and reset the current accumulated message */
