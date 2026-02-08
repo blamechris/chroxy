@@ -339,6 +339,10 @@ export function SessionScreen() {
     setSelectedIds(new Set());
   }, []);
 
+  const selectAll = useCallback(() => {
+    setSelectedIds(new Set(messages.map((m) => m.id)));
+  }, [messages]);
+
   const handleCopy = useCallback(async () => {
     const selected = messages.filter((m) => selectedIds.has(m.id));
     const text = selected.map((m) => {
@@ -357,9 +361,12 @@ export function SessionScreen() {
 
   const handleExport = useCallback(async () => {
     const selected = messages.filter((m) => selectedIds.has(m.id));
-    const json = JSON.stringify(selected, null, 2);
+    const text = selected.map((m) => {
+      const label = m.type === 'user_input' ? 'You' : m.type === 'tool_use' ? `Tool: ${m.tool}` : m.type === 'error' ? 'Error' : 'Claude';
+      return `[${label}] ${m.content?.trim() || ''}`;
+    }).join('\n\n');
     try {
-      await Share.share({ message: json });
+      await Share.share({ message: text });
       clearSelection();
     } catch (error) {
       console.error('Failed to export messages', error);
@@ -449,11 +456,14 @@ export function SessionScreen() {
         <View style={styles.selectionBar}>
           <Text style={styles.selectionCount}>{selectedIds.size} selected</Text>
           <View style={styles.selectionActions}>
+            <TouchableOpacity style={styles.selectionButton} onPress={selectAll}>
+              <Text style={styles.selectionButtonText}>All</Text>
+            </TouchableOpacity>
             <TouchableOpacity style={styles.selectionButton} onPress={handleCopy}>
               <Text style={styles.selectionButtonText}>Copy</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.selectionButton} onPress={handleExport}>
-              <Text style={styles.selectionButtonText}>Export</Text>
+              <Text style={styles.selectionButtonText}>Share</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.selectionCancelButton} onPress={clearSelection}>
               <Text style={styles.selectionCancelText}>{ICON_CLOSE}</Text>
@@ -913,7 +923,9 @@ function ChatView({
       ref={scrollViewRef}
       style={styles.chatContainer}
       contentContainerStyle={styles.chatContent}
-      onContentSizeChange={() => scrollViewRef.current?.scrollToEnd()}
+      onContentSizeChange={() => {
+        if (!isSelecting) scrollViewRef.current?.scrollToEnd();
+      }}
       keyboardDismissMode="on-drag"
       keyboardShouldPersistTaps="handled"
     >
