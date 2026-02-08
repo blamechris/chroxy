@@ -15,6 +15,11 @@ function stripAnsi(str: string): string {
   );
 }
 
+/** Filter out thinking placeholder messages */
+function filterThinking(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((m) => m.id !== 'thinking');
+}
+
 export interface ChatMessage {
   id: string;
   type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error';
@@ -593,7 +598,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               return {
                 streamingMessageId: streamId,
                 messages: [
-                  ...ss.messages.filter((m) => m.id !== 'thinking'),
+                  ...filterThinking(ss.messages),
                   { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
                 ],
               };
@@ -606,7 +611,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               return {
                 streamingMessageId: streamId,
                 messages: [
-                  ...state.messages.filter((m) => m.id !== 'thinking'),
+                  ...filterThinking(state.messages),
                   { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
                 ],
               };
@@ -936,12 +941,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (activeId && get().sessionStates[activeId]) {
       // Session mode: use updateActiveSession helper for consistent sync logic
       updateActiveSession((ss) => ({
-        messages: [...ss.messages.filter((m) => m.id !== 'thinking'), userMsg, thinkingMsg],
+        messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
       }));
     } else {
       // No active session: update flat state only (PTY mode, CLI mode pre-session, or legacy)
       set((state) => ({
-        messages: [...state.messages.filter((m) => m.id !== 'thinking'), userMsg, thinkingMsg],
+        messages: [...filterThinking(state.messages), userMsg, thinkingMsg],
       }));
     }
   },
