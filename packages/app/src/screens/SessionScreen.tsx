@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage, ModelInfo, ClaudeStatus } from '../store/connection';
+import { useConnectionStore, ChatMessage, ModelInfo } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 
@@ -63,12 +63,29 @@ function splitContentBlocks(rawContent: string): ContentBlock[] {
   return blocks;
 }
 
+/** Safe URL opener with scheme validation and error handling */
+function openURL(url: string) {
+  // Strip trailing punctuation that shouldn't be part of the URL
+  const cleanUrl = url.replace(/[.,;!?)\]]+$/, '');
+
+  // Only allow http/https schemes
+  if (!/^https?:\/\//i.test(cleanUrl)) {
+    console.warn('Invalid URL scheme:', cleanUrl);
+    return;
+  }
+
+  void Linking.openURL(cleanUrl).catch((err) => {
+    console.error('Failed to open URL:', cleanUrl, err);
+  });
+}
+
 /** Render inline markdown: **bold**, `code`, and links within a line */
 function renderInline(text: string, keyBase: string): React.ReactNode[] {
   const parts: React.ReactNode[] = [];
   // Combined regex: bold, inline code, markdown links, or URLs
   // Order matters: match markdown links before bare URLs to avoid breaking [text](url)
-  const regex = /(\*\*(.+?)\*\*|`([^`\n]+)`|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<>]+))/g;
+  // URL regex captures trailing punctuation separately to handle "Visit https://example.com."
+  const regex = /(\*\*(.+?)\*\*|`([^`\n]+)`|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<>]+?)([.,;!?)\]]*(?:\s|$)))/g;
   let lastIdx = 0;
   let key = 0;
   let m;
@@ -89,23 +106,28 @@ function renderInline(text: string, keyBase: string): React.ReactNode[] {
         <Text
           key={`${keyBase}-l${key++}`}
           style={md.link}
-          onPress={() => Linking.openURL(url)}
+          onPress={() => openURL(url)}
         >
           {linkText}
         </Text>
       );
     } else if (m[6]) {
-      // Bare URL
+      // Bare URL (m[6] is URL without trailing punctuation, m[7] is trailing punctuation)
       const url = m[6];
+      const trailing = m[7] || '';
       parts.push(
         <Text
           key={`${keyBase}-u${key++}`}
           style={md.link}
-          onPress={() => Linking.openURL(url)}
+          onPress={() => openURL(url)}
         >
           {url}
         </Text>
       );
+      // Add trailing punctuation as plain text
+      if (trailing.trim()) {
+        parts.push(trailing);
+      }
     }
     lastIdx = m.index + m[0].length;
   }
@@ -126,11 +148,13 @@ function FormattedTextBlock({ text, keyBase }: { text: string; keyBase: string }
 
     const lines = para.split('\n');
     const elements: React.ReactNode[] = [];
+    // Track if we have any View children (HR/blockquote), which require View wrapper instead of Text
+    let hasViewChildren = false;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const lk = `${keyBase}-P${p}-L${i}`;
-      if (i > 0) elements.push('\n');
+      if (i > 0 && !hasViewChildren) elements.push('\n');
 
       if (!line.trim()) continue;
 
@@ -145,12 +169,14 @@ function FormattedTextBlock({ text, keyBase }: { text: string; keyBase: string }
 
       // Horizontal rule: ---, ***, or ___
       if (line.match(/^[-*_]{3,}$/)) {
+        hasViewChildren = true;
         elements.push(<View key={lk} style={md.horizontalRule} />);
         continue;
       }
 
       // Blockquote: > text (group consecutive lines)
       if (line.match(/^>\s?/)) {
+        hasViewChildren = true;
         // Collect all consecutive blockquote lines
         const quoteLines: string[] = [];
         let j = i;
@@ -159,8 +185,8 @@ function FormattedTextBlock({ text, keyBase }: { text: string; keyBase: string }
           j++;
         }
         // Render the blockquote as a styled View
-        const quoteContent = quoteLines.map((qLine, qIdx) => 
-          <Text key={`${lk}-q${qIdx}`} style={styles.messageText}>{renderInline(qLine, `${lk}-q${qIdx}`)}</Text>
+        const quoteContent = quoteLines.map((qLine, qIdx) =>
+          <Text key={`${lk}-q${qIdx}`} selectable style={styles.messageText}>{renderInline(qLine, `${lk}-q${qIdx}`)}</Text>
         );
         elements.push(
           <View key={lk} style={md.blockquote}>
@@ -194,15 +220,27 @@ function FormattedTextBlock({ text, keyBase }: { text: string; keyBase: string }
       }
 
       // Regular line with inline formatting
-      elements.push(...renderInline(line, lk));
+      const inlineElements = renderInline(line, lk);
+      if (inlineElements.length > 0) {
+        elements.push(<Text key={lk} selectable style={styles.messageText}>{inlineElements}</Text>);
+      }
     }
 
     if (elements.length > 0) {
-      paraElements.push(
-        <Text key={`${keyBase}-P${p}`} selectable style={styles.messageText}>
-          {elements}
-        </Text>
-      );
+      // Use View wrapper when we have View children (HR/blockquote), Text wrapper otherwise
+      if (hasViewChildren) {
+        paraElements.push(
+          <View key={`${keyBase}-P${p}`}>
+            {elements}
+          </View>
+        );
+      } else {
+        paraElements.push(
+          <Text key={`${keyBase}-P${p}`} selectable style={styles.messageText}>
+            {elements}
+          </Text>
+        );
+      }
     }
   }
 

@@ -471,7 +471,7 @@ describe('WsServer with authRequired: true (default behavior)', () => {
     assert.notEqual(ws.readyState, WebSocket.OPEN, 'Connection should be closed')
   })
 
-  it('times out if no auth sent within 10 seconds', async () => {
+  it('tracks unauthenticated client', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
       port,
@@ -483,7 +483,7 @@ describe('WsServer with authRequired: true (default behavior)', () => {
 
     await new Promise(r => setTimeout(r, 100))
 
-    const ws = new WebSocket(`ws://localhost:${port}`)
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
     const messages = []
 
     ws.on('message', (data) => {
@@ -492,13 +492,11 @@ describe('WsServer with authRequired: true (default behavior)', () => {
       } catch {}
     })
 
-    await new Promise((resolve) => {
+    await new Promise((resolve, reject) => {
       ws.on('open', resolve)
+      ws.on('error', reject)
+      setTimeout(() => reject(new Error('Connection timeout')), 2000)
     })
-
-    // Don't send auth, wait for timeout (reduced to 500ms for test speed)
-    // Note: The actual timeout is 10s, but we'll verify the mechanism works
-    // by checking that the client map entry exists and has authenticated: false
 
     // Verify client is tracked but not authenticated
     assert.equal(server.clients.size, 1, 'Client should be tracked')
