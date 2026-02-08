@@ -1884,8 +1884,7 @@ describe('CLI chrome noise filter', () => {
 describe('prompt detection state gating (issue #91, #103)', () => {
   it('does not detect numbered lists as prompts during RESPONSE state', async () => {
     const parser = new OutputParser({ assumeReady: true, flushDelay: 10 })
-    const messages = []
-    parser.on('message', m => messages.push(m))
+    const messages = collectEvents(parser, 'message')
 
     // Enter RESPONSE state by feeding a response marker
     parser.feed('⏺ Here is my response:\n')
@@ -1893,8 +1892,8 @@ describe('prompt detection state gating (issue #91, #103)', () => {
     parser.feed('2. Second item in the list\n')
     parser.feed('3. Third item in the list\n')
 
-    // Wait for flush
-    await new Promise(r => setTimeout(r, 100))
+    // Wait for prompt flush window (500ms) + buffer to catch any false-positive prompts
+    await new Promise(r => setTimeout(r, 700))
 
     // Should only have response messages, NO prompt messages
     const promptMessages = messages.filter(m => m.type === 'prompt')
@@ -1927,8 +1926,7 @@ describe('prompt detection state gating (issue #91, #103)', () => {
 
   it('still detects ❯ prompts correctly in IDLE state', async () => {
     const parser = new OutputParser({ assumeReady: true, flushDelay: 10 })
-    const messages = []
-    parser.on('message', m => messages.push(m))
+    const messages = collectEvents(parser, 'message')
 
     // Parser starts in IDLE state
     assert.equal(parser.state, 'idle')
@@ -1941,5 +1939,26 @@ describe('prompt detection state gating (issue #91, #103)', () => {
     // Should emit user_input type (the ❯ prompt is handled differently from numbered prompts)
     const userInputs = messages.filter(m => m.type === 'user_input')
     assert.equal(userInputs.length, 1, 'Should detect and emit ❯ prompt in IDLE state')
+  })
+
+  it('detects numbered prompts in IDLE state', async () => {
+    const parser = new OutputParser({ assumeReady: true, flushDelay: 10 })
+    const messages = collectEvents(parser, 'message')
+
+    // Parser starts in IDLE state
+    assert.equal(parser.state, 'idle')
+
+    // Feed numbered option lines via _detectPrompt (simulating prompt detection logic)
+    parser._detectPrompt('1. Allow this action')
+    parser._detectPrompt('2. Deny this action')
+
+    // Wait for prompt flush window
+    await new Promise(r => setTimeout(r, 700))
+
+    // Should emit a prompt message with options
+    const promptMessages = messages.filter(m => m.type === 'prompt')
+    assert.equal(promptMessages.length, 1, 'Should detect numbered prompts in IDLE state')
+    assert.ok(promptMessages[0].options, 'Prompt should have options array')
+    assert.equal(promptMessages[0].options.length, 2, 'Should have 2 options')
   })
 })
