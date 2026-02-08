@@ -271,7 +271,7 @@ export function SessionScreen() {
               </Text>
             </TouchableOpacity>
           )}
-          {isCliMode && availableModels.length > 0 && (
+          {isCliMode && availableModels.length > 0 && !activeSession?.hasTerminal && (
             <TouchableOpacity style={styles.settingsButton} onPress={() => setShowSettings(true)}>
               <Text style={styles.settingsButtonText}>{ICON_GEAR}</Text>
             </TouchableOpacity>

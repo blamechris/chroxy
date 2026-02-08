@@ -172,14 +172,14 @@ describe('OutputParser._isThinking', () => {
 })
 
 describe('OutputParser state machine', () => {
-  it('emits user_input for prompt lines', (_, done) => {
+  it('emits user_input for prompt lines', async () => {
     const parser = createParser()
-    parser.on('message', (msg) => {
-      assert.equal(msg.type, 'user_input')
-      assert.equal(msg.content, 'hello\n')
-      done()
+    const msg = await new Promise((resolve) => {
+      parser.on('message', resolve)
+      parser.feed('❯ hello\n')
     })
-    parser.feed('❯ hello\n')
+    assert.equal(msg.type, 'user_input')
+    assert.equal(msg.content, 'hello\n')
   })
 
   it('emits response for ⏺ lines after flush', async () => {

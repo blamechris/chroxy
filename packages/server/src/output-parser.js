@@ -89,8 +89,10 @@ export class OutputParser extends EventEmitter {
   /** Check if a line is noise that should be skipped */
   _isNoise(trimmed) {
     // Very short non-marker lines (≤5 chars) that are just letters/digits/spaces
-    // are terminal redraw artifacts (e.g. "z g", "c 9", "i n", "A u")
-    if (trimmed.length <= 5 && !/^[❯⏺]/.test(trimmed) && /^[a-zA-Z\d\s.·…]+$/.test(trimmed)) return true;
+    // are terminal redraw artifacts (e.g. "z g", "c 9", "i n", "A u").
+    // Skip this filter during RESPONSE state to preserve legitimate short content like "OK", "Yes."
+    if (this.state !== State.RESPONSE &&
+        trimmed.length <= 5 && !/^[❯⏺]/.test(trimmed) && /^[a-zA-Z\d\s.·…]+$/.test(trimmed)) return true;
     // Divider lines (all dashes, or dashes with a few other chars)
     if (/^[━─╌]{3,}/.test(trimmed)) return true;
     // Lines that are mostly dashes with some text mixed in

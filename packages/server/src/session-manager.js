@@ -110,7 +110,7 @@ export class SessionManager extends EventEmitter {
         type: entry.type,
         hasTerminal: entry.type === 'pty',
         model: entry.session.model || null,
-        permissionMode: entry.session.permissionMode || 'approve',
+        permissionMode: entry.type === 'pty' ? null : (entry.session.permissionMode || 'approve'),
         isBusy: entry.session.isRunning,
         createdAt: entry.createdAt,
       })

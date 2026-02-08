@@ -400,10 +400,14 @@ export class WsServer {
         ) {
           const entry = this.sessionManager.getSession(client.activeSessionId)
           if (entry) {
-            console.log(`[ws] Model change from ${client.id} on session ${client.activeSessionId}: ${msg.model}`)
-            entry.session.setModel(msg.model)
-            // Broadcast to clients on this session
-            this._broadcastToSession(client.activeSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+            if (entry.type === 'pty') {
+              console.warn(`[ws] Rejected model change on PTY session ${client.activeSessionId} from ${client.id}`)
+              this._send(ws, { type: 'session_error', message: 'Cannot change model on PTY sessions' })
+            } else {
+              console.log(`[ws] Model change from ${client.id} on session ${client.activeSessionId}: ${msg.model}`)
+              entry.session.setModel(msg.model)
+              this._broadcastToSession(client.activeSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+            }
           }
         } else {
           console.warn(`[ws] Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
@@ -418,9 +422,14 @@ export class WsServer {
         ) {
           const entry = this.sessionManager.getSession(client.activeSessionId)
           if (entry) {
-            console.log(`[ws] Permission mode change from ${client.id} on session ${client.activeSessionId}: ${msg.mode}`)
-            entry.session.setPermissionMode(msg.mode)
-            this._broadcastToSession(client.activeSessionId, { type: 'permission_mode_changed', mode: msg.mode })
+            if (entry.type === 'pty') {
+              console.warn(`[ws] Rejected permission mode change on PTY session ${client.activeSessionId} from ${client.id}`)
+              this._send(ws, { type: 'session_error', message: 'Cannot change permission mode on PTY sessions' })
+            } else {
+              console.log(`[ws] Permission mode change from ${client.id} on session ${client.activeSessionId}: ${msg.mode}`)
+              entry.session.setPermissionMode(msg.mode)
+              this._broadcastToSession(client.activeSessionId, { type: 'permission_mode_changed', mode: msg.mode })
+            }
           }
         } else {
           console.warn(`[ws] Rejected invalid permission mode from ${client.id}: ${JSON.stringify(msg.mode)}`)
