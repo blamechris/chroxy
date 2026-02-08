@@ -10,7 +10,6 @@ import {
   Keyboard,
   Share,
   Alert,
-  Modal,
   LayoutAnimation,
   UIManager,
 } from 'react-native';
@@ -24,8 +23,6 @@ import { CreateSessionModal } from '../components/CreateSessionModal';
 const ICON_CLOSE = '\u2715';       // Multiplication X
 const ICON_CHEVRON_RIGHT = '\u25B8'; // Right-pointing triangle
 const ICON_CHEVRON_DOWN = '\u25BE';  // Down-pointing triangle
-const ICON_GEAR = '\u2699';         // Gear/settings
-
 // ===== Lightweight Markdown Renderer =====
 
 type ContentBlock =
@@ -193,7 +190,10 @@ const md = StyleSheet.create({
   inlineCode: {
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     backgroundColor: '#2a2a4e',
+    color: '#c4a5ff',
     fontSize: 13,
+    paddingHorizontal: 3,
+    borderRadius: 3,
   },
   h1: {
     fontSize: 17,
@@ -313,7 +313,7 @@ export function SessionScreen() {
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
   const isCliMode = serverMode === 'cli';
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  const [settingsExpanded, setSettingsExpanded] = useState(false);
 
   // Determine if the active session has a terminal (PTY sessions do, CLI sessions don't)
   const activeSession = sessions.find((s) => s.sessionId === activeSessionId);
@@ -480,31 +480,31 @@ export function SessionScreen() {
               </Text>
             </TouchableOpacity>
           )}
-          {isCliMode && availableModels.length > 0 && !activeSession?.hasTerminal && (
-            <TouchableOpacity style={styles.settingsButton} onPress={() => setShowSettings(true)}>
-              <Text style={styles.settingsButtonText}>{ICON_GEAR}</Text>
-            </TouchableOpacity>
-          )}
           <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
             <Text style={styles.disconnectButtonText}>{ICON_CLOSE}</Text>
           </TouchableOpacity>
         </View>
       )}
 
-      {/* Settings modal */}
-      <SettingsModal
-        visible={showSettings}
-        onClose={() => setShowSettings(false)}
-        activeModel={activeModel}
-        availableModels={availableModels}
-        permissionMode={permissionMode}
-        availablePermissionModes={availablePermissionModes}
-        lastResultCost={lastResultCost}
-        lastResultDuration={lastResultDuration}
-        contextUsage={contextUsage}
-        setModel={setModel}
-        setPermissionMode={setPermissionMode}
-      />
+      {/* Collapsible settings bar (CLI mode only, when model/permission data is available) */}
+      {isCliMode && !activeSession?.hasTerminal && (availableModels.length > 0 || lastResultCost != null || contextUsage) && (
+        <SettingsBar
+          expanded={settingsExpanded}
+          onToggle={() => {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            setSettingsExpanded((prev) => !prev);
+          }}
+          activeModel={activeModel}
+          availableModels={availableModels}
+          permissionMode={permissionMode}
+          availablePermissionModes={availablePermissionModes}
+          lastResultCost={lastResultCost}
+          lastResultDuration={lastResultDuration}
+          contextUsage={contextUsage}
+          setModel={setModel}
+          setPermissionMode={setPermissionMode}
+        />
+      )}
 
       {/* Reconnecting banner */}
       {isReconnecting && (
@@ -595,10 +595,10 @@ export function SessionScreen() {
   );
 }
 
-// Settings modal — model, permission mode, context info
-function SettingsModal({
-  visible,
-  onClose,
+// Collapsible inline settings bar — replaces the old settings modal
+function SettingsBar({
+  expanded,
+  onToggle,
   activeModel,
   availableModels,
   permissionMode,
@@ -609,8 +609,8 @@ function SettingsModal({
   setModel,
   setPermissionMode,
 }: {
-  visible: boolean;
-  onClose: () => void;
+  expanded: boolean;
+  onToggle: () => void;
   activeModel: string | null;
   availableModels: ModelInfo[];
   permissionMode: string | null;
@@ -621,73 +621,156 @@ function SettingsModal({
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
 }) {
+  // Build collapsed summary: "Opus · Approve · $0.02 · 12.3k"
+  const summaryParts: string[] = [];
+  if (activeModel) {
+    const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
+    summaryParts.push(modelInfo?.label || activeModel);
+  }
+  if (permissionMode) {
+    const permInfo = availablePermissionModes.find((m) => m.id === permissionMode);
+    summaryParts.push(permInfo?.label || permissionMode);
+  }
+  if (lastResultCost != null) {
+    summaryParts.push(`$${lastResultCost.toFixed(2)}`);
+  }
+  if (contextUsage) {
+    const total = contextUsage.inputTokens + contextUsage.outputTokens;
+    if (total >= 1_000_000) summaryParts.push(`${(total / 1_000_000).toFixed(1)}M`);
+    else if (total >= 1_000) summaryParts.push(`${(total / 1_000).toFixed(1)}k`);
+    else summaryParts.push(`${total}`);
+  }
+
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={onClose}>
-        <TouchableOpacity activeOpacity={1} onPress={() => {}} style={styles.settingsSheet}>
-          <Text style={styles.settingsSectionLabel}>Model</Text>
-          <View style={styles.modelSelector}>
-            {availableModels.map((m) => {
-              const isActive = activeModel === m.id || activeModel === m.fullId;
-              return (
-                <TouchableOpacity
-                  key={m.id}
-                  style={[styles.modelChip, isActive && styles.modelChipActive]}
-                  onPress={() => setModel(m.id)}
-                >
-                  <Text style={[styles.modelChipText, isActive && styles.modelChipTextActive]}>
-                    {m.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
-          {availablePermissionModes.length > 0 && (
-            <>
-              <Text style={styles.settingsSectionLabel}>Permission Mode</Text>
-              <View style={styles.settingsPermRow}>
-                {availablePermissionModes.map((m) => {
-                  const isActive = permissionMode === m.id;
-                  return (
-                    <TouchableOpacity
-                      key={m.id}
-                      style={[styles.modelChip, isActive && styles.modelChipActive]}
-                      onPress={() => setPermissionMode(m.id)}
-                    >
-                      <Text style={[styles.modelChipText, isActive && styles.modelChipTextActive]}>
-                        {m.label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            </>
-          )}
-
-          {(lastResultCost != null || contextUsage) && (
-            <>
-              <Text style={styles.settingsSectionLabel}>Context</Text>
-              <View style={styles.contextInfo}>
-                {lastResultCost != null && (
-                  <Text style={styles.contextText}>
-                    Cost: ${lastResultCost.toFixed(4)}
-                    {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
-                  </Text>
-                )}
-                {contextUsage && (
-                  <Text style={styles.contextText}>
-                    Tokens: {formatTokenCount(contextUsage.inputTokens + contextUsage.outputTokens)}
-                  </Text>
-                )}
-              </View>
-            </>
-          )}
-        </TouchableOpacity>
+    <View style={settingsBarStyles.container}>
+      <TouchableOpacity onPress={onToggle} style={settingsBarStyles.summaryRow} activeOpacity={0.7}>
+        <Text style={settingsBarStyles.summaryText} numberOfLines={1}>
+          {summaryParts.join(' \u00B7 ') || 'Settings'}
+        </Text>
+        <Text style={settingsBarStyles.chevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
       </TouchableOpacity>
-    </Modal>
+      {expanded && (
+        <View style={settingsBarStyles.expandedContent}>
+          {availableModels.length > 0 && (
+            <View style={settingsBarStyles.chipRow}>
+              {availableModels.map((m) => {
+                const isActive = activeModel === m.id || activeModel === m.fullId;
+                return (
+                  <TouchableOpacity
+                    key={m.id}
+                    style={[settingsBarStyles.chip, isActive && settingsBarStyles.chipActive]}
+                    onPress={() => setModel(m.id)}
+                  >
+                    <Text style={[settingsBarStyles.chipText, isActive && settingsBarStyles.chipTextActive]}>
+                      {m.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
+          {availablePermissionModes.length > 0 && (
+            <View style={settingsBarStyles.chipRow}>
+              {availablePermissionModes.map((m) => {
+                const isActive = permissionMode === m.id;
+                return (
+                  <TouchableOpacity
+                    key={m.id}
+                    style={[settingsBarStyles.chip, isActive && settingsBarStyles.chipActive]}
+                    onPress={() => setPermissionMode(m.id)}
+                  >
+                    <Text style={[settingsBarStyles.chipText, isActive && settingsBarStyles.chipTextActive]}>
+                      {m.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
+          {(lastResultCost != null || contextUsage) && (
+            <View style={settingsBarStyles.contextRow}>
+              {lastResultCost != null && (
+                <Text style={settingsBarStyles.contextText}>
+                  ${lastResultCost.toFixed(4)}
+                  {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
+                </Text>
+              )}
+              {contextUsage && (
+                <Text style={settingsBarStyles.contextText}>
+                  {formatTokenCount(contextUsage.inputTokens + contextUsage.outputTokens)}
+                </Text>
+              )}
+            </View>
+          )}
+        </View>
+      )}
+    </View>
   );
 }
+
+const settingsBarStyles = StyleSheet.create({
+  container: {
+    backgroundColor: '#1a1a2e',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2a2a4e',
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+  },
+  summaryText: {
+    flex: 1,
+    color: '#888',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  chevron: {
+    color: '#666',
+    fontSize: 10,
+    marginLeft: 8,
+  },
+  expandedContent: {
+    paddingHorizontal: 14,
+    paddingBottom: 10,
+    gap: 8,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: '#2a2a4e',
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  chipActive: {
+    backgroundColor: '#4a9eff33',
+    borderColor: '#4a9eff66',
+  },
+  chipText: {
+    color: '#666',
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  chipTextActive: {
+    color: '#4a9eff',
+  },
+  contextRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  contextText: {
+    color: '#888',
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+});
 
 // Display group types for message grouping
 type DisplayGroup =
@@ -1121,77 +1204,6 @@ const styles = StyleSheet.create({
   selectionCancelText: {
     color: '#ff4a4a',
     fontSize: 16,
-  },
-  settingsButton: {
-    paddingHorizontal: 14,
-    justifyContent: 'center',
-  },
-  settingsButtonText: {
-    color: '#888',
-    fontSize: 18,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'flex-start',
-    paddingTop: 100,
-    alignItems: 'center',
-  },
-  settingsSheet: {
-    backgroundColor: '#1a1a2e',
-    borderRadius: 16,
-    padding: 20,
-    width: '85%',
-    maxWidth: 360,
-    borderWidth: 1,
-    borderColor: '#2a2a4e',
-  },
-  settingsSectionLabel: {
-    color: '#666',
-    fontSize: 11,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginBottom: 8,
-    marginTop: 4,
-  },
-  settingsPermRow: {
-    flexDirection: 'row',
-    gap: 6,
-    marginBottom: 12,
-  },
-  modelSelector: {
-    flexDirection: 'row',
-    gap: 6,
-    marginBottom: 12,
-  },
-  modelChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 12,
-    backgroundColor: '#2a2a4e',
-    borderWidth: 1,
-    borderColor: 'transparent',
-  },
-  modelChipActive: {
-    backgroundColor: '#4a9eff33',
-    borderColor: '#4a9eff66',
-  },
-  modelChipText: {
-    color: '#666',
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  modelChipTextActive: {
-    color: '#4a9eff',
-  },
-  contextInfo: {
-    paddingHorizontal: 8,
-  },
-  contextText: {
-    color: '#888',
-    fontSize: 11,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   reconnectingBanner: {
     backgroundColor: '#f59e0b33',
