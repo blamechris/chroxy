@@ -58,6 +58,18 @@ brew install cloudflared
 1. `cat CLAUDE.md` - Read this file
 2. `git status && git log --oneline -5` - Check current state
 3. Review any open PRs: `gh pr list`
+4. Check for skill template updates: `~/Projects/skill-templates/sync.sh chroxy`
+
+### Skill Templates
+
+Reusable skill templates (check-pr, agent-review, etc.) are maintained in the private repo `blamechris/skill-templates`. When the sync script reports drift, review the generic template and customization notes, then update local skills as needed.
+
+```
+~/Projects/skill-templates/
+├── generic/           # Gold standard templates
+├── customizations/    # Per-repo adaptation notes (chroxy.md)
+└── sync.sh           # Drift detection
+```
 
 ## Git Workflow
 
