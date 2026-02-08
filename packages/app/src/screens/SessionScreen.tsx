@@ -26,6 +26,186 @@ const ICON_CHEVRON_RIGHT = '\u25B8'; // Right-pointing triangle
 const ICON_CHEVRON_DOWN = '\u25BE';  // Down-pointing triangle
 const ICON_GEAR = '\u2699';         // Gear/settings
 
+// ===== Lightweight Markdown Renderer =====
+
+type ContentBlock =
+  | { kind: 'code'; lang: string; content: string }
+  | { kind: 'text'; content: string };
+
+/** Split content into alternating text and fenced code blocks */
+function splitContentBlocks(content: string): ContentBlock[] {
+  const blocks: ContentBlock[] = [];
+  // Match ``` optionally followed by a language, then content, then closing ``` or end
+  const regex = /```(\w*)\n?([\s\S]*?)(?:```|$)/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = regex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      const text = content.slice(lastIndex, match.index).trim();
+      if (text) blocks.push({ kind: 'text', content: text });
+    }
+    const code = match[2].trimEnd();
+    if (code) blocks.push({ kind: 'code', lang: match[1] || '', content: code });
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < content.length) {
+    const text = content.slice(lastIndex).trim();
+    if (text) blocks.push({ kind: 'text', content: text });
+  }
+
+  return blocks;
+}
+
+/** Render inline markdown: **bold** and `code` within a line */
+function renderInline(text: string, keyBase: string): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  const regex = /(\*\*(.+?)\*\*|`([^`\n]+)`)/g;
+  let lastIdx = 0;
+  let key = 0;
+  let m;
+
+  while ((m = regex.exec(text)) !== null) {
+    if (m.index > lastIdx) parts.push(text.slice(lastIdx, m.index));
+    if (m[2]) {
+      parts.push(<Text key={`${keyBase}-b${key++}`} style={md.bold}>{m[2]}</Text>);
+    } else if (m[3]) {
+      parts.push(<Text key={`${keyBase}-c${key++}`} style={md.inlineCode}>{m[3]}</Text>);
+    }
+    lastIdx = m.index + m[0].length;
+  }
+  if (lastIdx < text.length) parts.push(text.slice(lastIdx));
+  return parts;
+}
+
+/** Render a text block with headers, lists, bold, and inline code */
+function FormattedTextBlock({ text, keyBase }: { text: string; keyBase: string }) {
+  const lines = text.split('\n');
+  const elements: React.ReactNode[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lk = `${keyBase}-L${i}`;
+    if (i > 0) elements.push('\n');
+
+    // Empty line → just the newline separator above
+    if (!line.trim()) continue;
+
+    // Header: # ## ###
+    const hm = line.match(/^(#{1,3})\s+(.+)/);
+    if (hm) {
+      const lvl = hm[1].length;
+      const hStyle = lvl === 1 ? md.h1 : lvl === 2 ? md.h2 : md.h3;
+      elements.push(<Text key={lk} style={hStyle}>{renderInline(hm[2], lk)}</Text>);
+      continue;
+    }
+
+    // Unordered list: - or *
+    const ulm = line.match(/^(\s*)[-*]\s+(.+)/);
+    if (ulm) {
+      elements.push(<Text key={lk}>{'  \u2022 '}{renderInline(ulm[2], lk)}</Text>);
+      continue;
+    }
+
+    // Ordered list: 1. 2. etc
+    const olm = line.match(/^(\s*)(\d+)\.\s+(.+)/);
+    if (olm) {
+      elements.push(<Text key={lk}>{'  '}{olm[2]}{'. '}{renderInline(olm[3], lk)}</Text>);
+      continue;
+    }
+
+    // Regular line with inline formatting
+    elements.push(...renderInline(line, lk));
+  }
+
+  return (
+    <Text selectable style={styles.messageText}>
+      {elements}
+    </Text>
+  );
+}
+
+/** Formatted response — renders Claude's markdown as styled blocks */
+function FormattedResponse({ content }: { content: string }) {
+  const blocks = useMemo(() => splitContentBlocks(content.trim()), [content]);
+
+  if (blocks.length === 0) return null;
+
+  // Single text block (no code blocks) → avoid extra View wrapper
+  if (blocks.length === 1 && blocks[0].kind === 'text') {
+    return <FormattedTextBlock text={blocks[0].content} keyBase="b0" />;
+  }
+
+  return (
+    <View style={md.container}>
+      {blocks.map((block, i) => {
+        if (block.kind === 'code') {
+          return (
+            <View key={`b${i}`} style={md.codeBlock}>
+              {block.lang ? <Text style={md.codeLang}>{block.lang}</Text> : null}
+              <Text selectable style={md.codeText}>{block.content}</Text>
+            </View>
+          );
+        }
+        return <FormattedTextBlock key={`b${i}`} text={block.content} keyBase={`b${i}`} />;
+      })}
+    </View>
+  );
+}
+
+const md = StyleSheet.create({
+  container: {
+    gap: 6,
+  },
+  bold: {
+    fontWeight: '700',
+  },
+  inlineCode: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    backgroundColor: '#2a2a4e',
+    fontSize: 13,
+  },
+  h1: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#f0f0f0',
+    lineHeight: 24,
+  },
+  h2: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#e8e8e8',
+    lineHeight: 22,
+  },
+  h3: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#e0e0e0',
+    lineHeight: 22,
+  },
+  codeBlock: {
+    backgroundColor: '#0a0a18',
+    borderRadius: 8,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#2a2a4e',
+  },
+  codeLang: {
+    color: '#666',
+    fontSize: 10,
+    marginBottom: 4,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    textTransform: 'uppercase',
+  },
+  codeText: {
+    color: '#a0d0ff',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+});
+
 // Enable LayoutAnimation on Android
 UIManager.setLayoutAnimationEnabledExperimental?.(true);
 
@@ -768,9 +948,13 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
       <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : isError ? styles.senderLabelError : styles.senderLabelClaude}>
         {isUser ? 'You' : isPrompt ? 'Action Required' : isError ? 'Error' : 'Claude'}
       </Text>
-      <Text selectable style={[styles.messageText, isUser && styles.userMessageText, isError && styles.errorMessageText]}>
-        {message.content?.trim()}
-      </Text>
+      {!isUser && !isPrompt && !isError ? (
+        <FormattedResponse content={message.content?.trim() || ''} />
+      ) : (
+        <Text selectable style={[styles.messageText, isUser && styles.userMessageText, isError && styles.errorMessageText]}>
+          {message.content?.trim()}
+        </Text>
+      )}
       {isPrompt && message.options && (
         <View style={styles.promptOptions}>
           {message.options.map((opt, i) => (
