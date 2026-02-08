@@ -395,7 +395,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     // Robust reconnect detection: check if we've successfully connected to this URL before
     // This is more reliable than checking messages.length which may have been cleared
-    const isReconnect = lastConnectedUrl === url && _retryCount === 0;
+    const isReconnect = lastConnectedUrl === url;
 
     // New top-level connect call (not a retry) — bump attempt ID to cancel any pending retries
     if (_retryCount === 0) {
