@@ -65,7 +65,9 @@ export class OutputParser extends EventEmitter {
           this._flushTimer = null;
         }
         this.currentMessage = null;
-        this._recentEmissions.clear();
+        // Don't clear _recentEmissions — entries self-expire via TTL.
+        // Clearing here wipes dedup history right when "real" data starts,
+        // allowing stale scrollback content to re-emit as duplicates.
         console.log("[parser] Scrollback suppression ended (500ms quiet)");
       }, 500);
     }
@@ -88,18 +90,48 @@ export class OutputParser extends EventEmitter {
 
   /** Check if a line is noise that should be skipped */
   _isNoise(trimmed) {
+    // Server log lines — when tmux scrollback includes chroxy server output,
+    // the parser would re-parse its own logs creating recursive amplification.
+    // Must be checked FIRST before any other pattern to prevent feedback loops.
+    if (/^\[(?:parser|ws|cli|tunnel|pty|pty-session|SIGINT)\]\s/.test(trimmed)) return true
+    // Server output fragments that leak from tmux scrollback
+    if (/^Press Ctrl\+C to stop/i.test(trimmed)) return true
+    if (/^Or connect manually:/i.test(trimmed)) return true
+    if (/^URL:\s+wss?:\/\//i.test(trimmed)) return true
+    if (/^Token:\s+\w+/i.test(trimmed)) return true
+    if (/^Scan this QR code/i.test(trimmed)) return true
+    // QR code block characters
+    if (/^[▄▀█\s]+$/.test(trimmed) && trimmed.length > 10) return true
     // Very short non-marker lines (≤5 chars) that are just letters/digits/spaces
     // are terminal redraw artifacts (e.g. "z g", "c 9", "i n", "A u").
     // Skip this filter during RESPONSE state to preserve legitimate short content like "OK", "Yes."
     if (this.state !== State.RESPONSE &&
         trimmed.length <= 5 && !/^[❯⏺]/.test(trimmed) && /^[a-zA-Z\d\s.·…]+$/.test(trimmed)) return true;
+    // CUP-split status fragments: short lines where every token is a single character.
+    // These are cursor-positioning artifacts from terminal screen redraws.
+    // Examples: "c a", "z g", "i n", "A u", "· c a 9"
+    // State-independent — these are never legitimate content in any state.
+    if (trimmed.length < 20) {
+      const tokens = trimmed.split(/\s+/)
+      if (tokens.length >= 2 && tokens.every(t => t.length <= 1)) return true
+    }
+    // Numeric-only fragments with optional punctuation (CUP artifacts, line counters)
+    // Examples: "7 0 -0", "8 187 -3", "2 9 )"
+    // Skip during RESPONSE state — "42" or "100" can be legitimate response content.
+    if (this.state !== State.RESPONSE &&
+        /^[\d\s.()+-]+$/.test(trimmed) && trimmed.length < 20) return true
     // Divider lines (all dashes, or dashes with a few other chars)
     if (/^[━─╌]{3,}/.test(trimmed)) return true;
-    // Lines that are mostly dashes with some text mixed in
-    if (/^[─━n\d]+$/.test(trimmed)) return true;
+    // Lines that are mostly dashes with some text mixed in (require at least one dash)
+    if (/[─━]/.test(trimmed) && /^[─━n\d]+$/.test(trimmed)) return true;
     // tmux status bar — any session name in brackets followed by window:pane
     if (/^\[[\w-]+\]\s*\d+:/.test(trimmed)) return true;
     if (/\[claude-co/.test(trimmed)) return true;
+    // tmux status bar (non-anchored) — CUP joining may prepend content before [session]
+    // Pattern: [name] N:window_name with multiple trailing spaces (tmux pads with spaces)
+    if (/\[[\w-]+\]\s+\d+:[\w.-]+[*#!\-]?\s{2,}/.test(trimmed)) return true
+    // Quoted pane titles from tmux status bar (braille/spinner char inside quotes)
+    if (/^"[\u2800-\u28FF✻✶✳✽✢·•⏺]/.test(trimmed)) return true
     if (/^"\*?\s*Claude\s*Code"/.test(trimmed)) return true;
     if (/^"Christophers-/.test(trimmed)) return true;
     if (/^\*\s*Claude\s*Code/.test(trimmed)) return true;
@@ -151,6 +183,12 @@ export class OutputParser extends EventEmitter {
     if (/^\/Users\/\w+$/.test(trimmed)) return true;
     // PTY Scrollback marker
     if (/PTY\s*Scrollback/i.test(trimmed)) return true;
+    // [Pasted text #N] markers from Claude Code paste handling
+    if (/^\[Pasted text #\d+/.test(trimmed)) return true
+    // "Baked for Nm Ns" / completion timing lines
+    if (/^Baked\s+for\s+\d/i.test(trimmed)) return true
+    // "Conversation compacted" notification from Claude Code context compaction
+    if (/conversation\s+compacted/i.test(trimmed)) return true
     return false;
   }
 
@@ -158,28 +196,40 @@ export class OutputParser extends EventEmitter {
   _isThinking(trimmed) {
     // Bare spinner characters (single or groups, with optional spaces)
     if (/^[✻✶✳✽✢·•⏺]+$/.test(trimmed)) return true;
-    // Spinner characters followed by ANY word (Claude uses creative verbs)
-    if (/^[✻✶✳✽✢]\s*\w/i.test(trimmed)) return true;
+    // Any short line starting with spinner characters — these are exclusively
+    // used for Claude Code's thinking/working animation, never in response text.
+    if (/^[✻✶✳✽✢]/.test(trimmed) && trimmed.length < 40) return true;
     if (/^[·•]\s*\w.*…/i.test(trimmed)) return true;
+    // Middle dot/bullet followed by status indicators (numbers, ellipsis, arrows, "thinking")
+    // but NOT followed by uppercase letter (which would be a bullet-point list item)
+    if (/^[·•]\s*(?:\d|…|thinking|tokens|↑|↓)/i.test(trimmed) && trimmed.length < 40) return true;
     // Bare spinner with timing info
     if (/^[✻✶✳✽✢⏺·•]\s*.*\(\d+s\s*·\s*[↓↑]/.test(trimmed)) return true;
-    // Mixed spinner character sequences (animation frames)
-    if (/^[✻✶✳✽✢·•↑↓\d\s]{3,}$/.test(trimmed)) return true;
+    // Mixed spinner character sequences (animation frames) — includes … (U+2026)
+    if (/^[✻✶✳✽✢·•↑↓…\d\s]{3,}$/.test(trimmed)) return true;
     // Braille spinners — full braille block (U+2800–U+28FF)
     if (/^[\u2800-\u28FF]/.test(trimmed)) return true;
     // Standalone spinner verb text (from animation frames after ANSI stripping).
     // Must be JUST the verb (optionally with ellipsis) — not followed by real content.
     // Length < 20 prevents false positives on "Writing tests for the parser module" etc.
-    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|waiting)(…|\.\.\.)?$/i.test(trimmed) && trimmed.length < 20) return true;
+    // Skip during RESPONSE state — "Reading..." can appear as sentence fragment in responses.
+    if (this.state !== State.RESPONSE &&
+        /^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|imagining|waiting)(…|\.\.\.)?$/i.test(trimmed) && trimmed.length < 20) return true;
     // "N thinking" — thinking counter fragment (e.g. "42 thinking", "7 thinking")
     if (/^\d+\s*thinking/i.test(trimmed)) return true;
     // Lines ending with "thinking" or "thinking)" — status bar fragments like "c a thinking"
     if (/thinking\)?$/i.test(trimmed) && trimmed.length < 60) return true;
     // "thought for Ns)" — past tense thinking indicator
     if (/thought\s+for\s+\d/i.test(trimmed)) return true;
-    // Known spinner verb with "…" — e.g. "Actualizing…", "Waiting…", "Downloading…"
-    // Restricted to known verbs to avoid catching legitimate ellipsis content.
-    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|waiting|downloading|compiling|installing|building|connecting|loading)…/i.test(trimmed) && trimmed.length < 30) return true;
+    // Known spinner verb with "…" or "..." — e.g. "Actualizing…", "Imagining… 39"
+    // Skip during RESPONSE state — "Reading..." or "Writing..." can appear in response text.
+    if (this.state !== State.RESPONSE &&
+        /^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|imagining|waiting|downloading|compiling|installing|building|connecting|loading)(…|\.\.\.)/i.test(trimmed) && trimmed.length < 30) return true;
+    // General: any capitalized word ending in … or ... followed by optional trailing noise
+    // (numbers, arrows, spaces). Future-proofs against new creative spinner verbs.
+    // Skip during RESPONSE state — "However...", "Meanwhile..." are real response content.
+    if (this.state !== State.RESPONSE &&
+        /^[A-Z][a-z]+(…|\.\.\.)\s*[\d↑↓\s]*$/.test(trimmed) && trimmed.length < 40) return true;
     return false;
   }
 
@@ -190,10 +240,22 @@ export class OutputParser extends EventEmitter {
    */
   _detectPrompt(trimmed) {
     // Numbered option: "1. Yes, I trust this folder" / "2. No, exit"
+    // Cap at 10 options — Claude Code prompts never have more than ~5.
+    // Scrollback replay of numbered test output (ok 1, ok 2, ...) can
+    // generate hundreds of false positives without this guard.
     const optMatch = trimmed.match(/^(\d+)\.\s*(.+)/);
     if (optMatch) {
+      // Overflow sentinel — once we've seen too many options, ignore all
+      // subsequent numbered lines until the prompt state resets naturally.
+      if (this._pendingPrompt && this._pendingPrompt.overflow) return;
       if (!this._pendingPrompt) {
         this._pendingPrompt = { options: [], timestamp: Date.now() };
+      }
+      if (this._pendingPrompt.options.length >= 10) {
+        // Too many options — this is scrollback noise, not a real prompt.
+        // Set overflow sentinel to block further accumulation.
+        this._pendingPrompt = { overflow: true };
+        return;
       }
       this._pendingPrompt.options.push({
         label: optMatch[2].trim(),
@@ -225,7 +287,7 @@ export class OutputParser extends EventEmitter {
     if (this._promptFlushTimer) clearTimeout(this._promptFlushTimer);
     this._promptFlushTimer = setTimeout(() => {
       this._promptFlushTimer = null;
-      if (this._pendingPrompt && this._pendingPrompt.options.length > 0) {
+      if (this._pendingPrompt && this._pendingPrompt.options && this._pendingPrompt.options.length > 0) {
         // Don't emit startup prompts (trust dialog etc.) — server auto-handles those
         if (!this.claudeReady) {
           console.log(`[parser] Suppressing startup prompt (${this._pendingPrompt.options.length} options)`);
