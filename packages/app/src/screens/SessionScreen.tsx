@@ -32,17 +32,24 @@ type ContentBlock =
   | { kind: 'code'; lang: string; content: string }
   | { kind: 'text'; content: string };
 
-/** Split content into alternating text and fenced code blocks */
-function splitContentBlocks(content: string): ContentBlock[] {
+/** Split content into alternating text and fenced code blocks.
+ *  Code fences must start at the beginning of a line — triple backticks
+ *  inside prose (e.g. "Code blocks (```)") are NOT treated as fences. */
+function splitContentBlocks(rawContent: string): ContentBlock[] {
+  // Normalize CRLF → LF so fence regex works on all line endings
+  const content = rawContent.replace(/\r\n/g, '\n');
   const blocks: ContentBlock[] = [];
-  // Match ``` optionally followed by a language, then content, then closing ``` or end
-  const regex = /```(\w*)\n?([\s\S]*?)(?:```|$)/g;
+  // Require ``` at line start (or string start), followed by optional language + newline.
+  // Closing fence uses lookahead so the \n isn't consumed — allows consecutive code blocks.
+  const regex = /(?:^|\n)```(\w*)\n([\s\S]*?)(?:\n```(?=\s*\n|$)|$)/g;
   let lastIndex = 0;
   let match;
 
   while ((match = regex.exec(content)) !== null) {
-    if (match.index > lastIndex) {
-      const text = content.slice(lastIndex, match.index).trim();
+    // Adjust: if we matched a leading \n, the fence starts 1 char into the match
+    const fenceStart = content[match.index] === '\n' ? match.index + 1 : match.index;
+    if (fenceStart > lastIndex) {
+      const text = content.slice(lastIndex, fenceStart).trim();
       if (text) blocks.push({ kind: 'text', content: text });
     }
     const code = match[2].trimEnd();
@@ -79,51 +86,75 @@ function renderInline(text: string, keyBase: string): React.ReactNode[] {
   return parts;
 }
 
-/** Render a text block with headers, lists, bold, and inline code */
+/** Render a text block with headers, lists, bold, and inline code.
+ *  Splits on blank lines into separate paragraphs with visible spacing. */
 function FormattedTextBlock({ text, keyBase }: { text: string; keyBase: string }) {
-  const lines = text.split('\n');
-  const elements: React.ReactNode[] = [];
+  // Split into paragraphs on blank lines for visual spacing
+  const paragraphs = text.split(/\n{2,}/);
+  const paraElements: React.ReactNode[] = [];
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const lk = `${keyBase}-L${i}`;
-    if (i > 0) elements.push('\n');
+  for (let p = 0; p < paragraphs.length; p++) {
+    const para = paragraphs[p].trim();
+    if (!para) continue;
 
-    // Empty line → just the newline separator above
-    if (!line.trim()) continue;
+    const lines = para.split('\n');
+    const elements: React.ReactNode[] = [];
 
-    // Header: # ## ###
-    const hm = line.match(/^(#{1,3})\s+(.+)/);
-    if (hm) {
-      const lvl = hm[1].length;
-      const hStyle = lvl === 1 ? md.h1 : lvl === 2 ? md.h2 : md.h3;
-      elements.push(<Text key={lk} style={hStyle}>{renderInline(hm[2], lk)}</Text>);
-      continue;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const lk = `${keyBase}-P${p}-L${i}`;
+      if (i > 0) elements.push('\n');
+
+      if (!line.trim()) continue;
+
+      // Header: # ## ###
+      const hm = line.match(/^(#{1,3})\s+(.+)/);
+      if (hm) {
+        const lvl = hm[1].length;
+        const hStyle = lvl === 1 ? md.h1 : lvl === 2 ? md.h2 : md.h3;
+        elements.push(<Text key={lk} style={hStyle}>{renderInline(hm[2], lk)}</Text>);
+        continue;
+      }
+
+      // Task list: - [x] or - [ ]
+      const tlm = line.match(/^(\s*)[-*]\s+\[([ xX])\]\s+(.+)/);
+      if (tlm) {
+        const checked = tlm[2].toLowerCase() === 'x';
+        elements.push(<Text key={lk}>{checked ? '  \u2611 ' : '  \u2610 '}{renderInline(tlm[3], lk)}</Text>);
+        continue;
+      }
+
+      // Unordered list: - or *
+      const ulm = line.match(/^(\s*)[-*]\s+(.+)/);
+      if (ulm) {
+        elements.push(<Text key={lk}>{'  \u2022 '}{renderInline(ulm[2], lk)}</Text>);
+        continue;
+      }
+
+      // Ordered list: 1. 2. etc
+      const olm = line.match(/^(\s*)(\d+)\.\s+(.+)/);
+      if (olm) {
+        elements.push(<Text key={lk}>{'  '}{olm[2]}{'. '}{renderInline(olm[3], lk)}</Text>);
+        continue;
+      }
+
+      // Regular line with inline formatting
+      elements.push(...renderInline(line, lk));
     }
 
-    // Unordered list: - or *
-    const ulm = line.match(/^(\s*)[-*]\s+(.+)/);
-    if (ulm) {
-      elements.push(<Text key={lk}>{'  \u2022 '}{renderInline(ulm[2], lk)}</Text>);
-      continue;
+    if (elements.length > 0) {
+      paraElements.push(
+        <Text key={`${keyBase}-P${p}`} selectable style={styles.messageText}>
+          {elements}
+        </Text>
+      );
     }
-
-    // Ordered list: 1. 2. etc
-    const olm = line.match(/^(\s*)(\d+)\.\s+(.+)/);
-    if (olm) {
-      elements.push(<Text key={lk}>{'  '}{olm[2]}{'. '}{renderInline(olm[3], lk)}</Text>);
-      continue;
-    }
-
-    // Regular line with inline formatting
-    elements.push(...renderInline(line, lk));
   }
 
-  return (
-    <Text selectable style={styles.messageText}>
-      {elements}
-    </Text>
-  );
+  // Single paragraph — no wrapper needed
+  if (paraElements.length <= 1) return <>{paraElements}</>;
+
+  return <View style={md.paragraphs}>{paraElements}</View>;
 }
 
 /** Formatted response — renders Claude's markdown as styled blocks */
@@ -131,11 +162,6 @@ function FormattedResponse({ content }: { content: string }) {
   const blocks = useMemo(() => splitContentBlocks(content.trim()), [content]);
 
   if (blocks.length === 0) return null;
-
-  // Single text block (no code blocks) → avoid extra View wrapper
-  if (blocks.length === 1 && blocks[0].kind === 'text') {
-    return <FormattedTextBlock text={blocks[0].content} keyBase="b0" />;
-  }
 
   return (
     <View style={md.container}>
@@ -156,7 +182,10 @@ function FormattedResponse({ content }: { content: string }) {
 
 const md = StyleSheet.create({
   container: {
-    gap: 6,
+    gap: 8,
+  },
+  paragraphs: {
+    gap: 10,
   },
   bold: {
     fontWeight: '700',
