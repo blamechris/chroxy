@@ -1,0 +1,179 @@
+import React from 'react';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+
+// -- Props --
+
+export interface InputBarProps {
+  inputText: string;
+  onChangeText: (text: string) => void;
+  onSend: () => void;
+  onInterrupt: () => void;
+  onKeyPress: (key: string) => void;
+  onClearTerminal: () => void;
+  enterToSend: boolean;
+  onToggleEnterMode: () => void;
+  isStreaming: boolean;
+  claudeReady: boolean;
+  viewMode: 'chat' | 'terminal';
+  hasTerminal: boolean;
+  bottomPadding: number;
+}
+
+// -- Component --
+
+export function InputBar({
+  inputText,
+  onChangeText,
+  onSend,
+  onInterrupt,
+  onKeyPress,
+  onClearTerminal,
+  enterToSend,
+  onToggleEnterMode,
+  isStreaming,
+  claudeReady,
+  viewMode,
+  hasTerminal,
+  bottomPadding,
+}: InputBarProps) {
+  return (
+    <View style={[styles.inputContainer, { paddingBottom: bottomPadding }]}>
+      {viewMode === 'terminal' && hasTerminal && (
+        <View style={styles.specialKeys}>
+          {['Enter', 'Ctrl+C', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].map((key) => (
+            <TouchableOpacity
+              key={key}
+              style={styles.specialKey}
+              onPress={() => onKeyPress(key)}
+            >
+              <Text style={styles.specialKeyText}>
+                {key.replace('Arrow', '').replace('Ctrl+', '^')}
+              </Text>
+            </TouchableOpacity>
+          ))}
+          <TouchableOpacity
+            style={styles.specialKey}
+            onPress={onClearTerminal}
+          >
+            <Text style={styles.specialKeyText}>Clear</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+      <View style={styles.inputRow}>
+        <TouchableOpacity
+          style={styles.enterModeToggle}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          accessibilityRole="button"
+          accessibilityLabel={enterToSend ? 'Enter key sends message. Tap to switch to newline mode.' : 'Enter key inserts newline. Tap to switch to send mode.'}
+          onPress={onToggleEnterMode}
+        >
+          <Text style={styles.enterModeText}>{enterToSend ? '\u21B5' : '\u00B6'}</Text>
+        </TouchableOpacity>
+        <TextInput
+          style={[styles.input, !enterToSend && styles.inputMultiline]}
+          placeholder={!claudeReady ? 'Connecting to Claude...' : 'Message Claude...'}
+          placeholderTextColor="#666"
+          value={inputText}
+          onChangeText={onChangeText}
+          // When enterToSend is true, multiline is false and onSubmitEditing fires on Enter.
+          // When enterToSend is false, multiline is true so onSubmitEditing never fires.
+          onSubmitEditing={enterToSend && !isStreaming ? onSend : undefined}
+          blurOnSubmit={false}
+          multiline={!enterToSend}
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        {isStreaming ? (
+          <TouchableOpacity style={styles.interruptButton} onPress={onInterrupt}>
+            <Text style={styles.interruptButtonText}>{'\u25A0'}</Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity style={styles.sendButton} onPress={onSend}>
+            <Text style={styles.sendButtonText}>{'\u2191'}</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    </View>
+  );
+}
+
+// -- Styles --
+
+const styles = StyleSheet.create({
+  inputContainer: {
+    borderTopWidth: 1,
+    borderTopColor: '#2a2a4e',
+    backgroundColor: '#1a1a2e',
+  },
+  specialKeys: {
+    flexDirection: 'row',
+    padding: 8,
+    gap: 8,
+  },
+  specialKey: {
+    backgroundColor: '#2a2a4e',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 4,
+  },
+  specialKeyText: {
+    color: '#888',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  inputRow: {
+    flexDirection: 'row',
+    padding: 12,
+    paddingTop: 4,
+    gap: 8,
+    alignItems: 'center',
+  },
+  enterModeToggle: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  enterModeText: {
+    color: '#555',
+    fontSize: 16,
+  },
+  input: {
+    flex: 1,
+    backgroundColor: '#0f0f1a',
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    color: '#fff',
+    fontSize: 16,
+  },
+  inputMultiline: {
+    maxHeight: 100,
+  },
+  sendButton: {
+    backgroundColor: '#4a9eff',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sendButtonText: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: 'bold',
+  },
+  interruptButton: {
+    backgroundColor: '#ff4a4a',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  interruptButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+});
