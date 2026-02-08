@@ -515,7 +515,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // Track this URL as successfully connected
           lastConnectedUrl = url;
           // Extract server context from auth_ok
-          const authServerMode = typeof msg.serverMode === 'string' ? msg.serverMode : null;
+          const authServerMode =
+            msg.serverMode === 'cli' || msg.serverMode === 'terminal' ? msg.serverMode : null;
           const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
           const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
           // On reconnect, preserve messages and terminal buffer
@@ -945,6 +946,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionStates: {},
       wsUrl: null,
       apiToken: null,
+      serverMode: null,
+      sessionCwd: null,
+      serverVersion: null,
     });
   },
 

@@ -119,6 +119,9 @@ describe('WsServer with authRequired: false', () => {
     // Should receive auth_ok automatically
     const authOk = messages.find(m => m.type === 'auth_ok')
     assert.ok(authOk, 'Should receive auth_ok without sending auth')
+    assert.equal(authOk.serverMode, 'cli', 'auth_ok should include serverMode')
+    assert.equal(typeof authOk.serverVersion, 'string', 'auth_ok should include serverVersion')
+    assert.ok(authOk.cwd === null || typeof authOk.cwd === 'string', 'auth_ok should include cwd (string or null)')
 
     // Should also receive server_mode and status
     const serverMode = messages.find(m => m.type === 'server_mode')
@@ -426,6 +429,9 @@ describe('WsServer with authRequired: true (default behavior)', () => {
     // Now should receive auth_ok
     const authOkMsg = await waitForMessage(messages, 'auth_ok', 2000)
     assert.ok(authOkMsg, 'Should receive auth_ok after valid auth')
+    assert.equal(authOkMsg.serverMode, 'cli', 'auth_ok should include serverMode')
+    assert.equal(typeof authOkMsg.serverVersion, 'string', 'auth_ok should include serverVersion')
+    assert.ok(authOkMsg.cwd === null || typeof authOkMsg.cwd === 'string', 'auth_ok should include cwd (string or null)')
 
     ws.close()
   })
