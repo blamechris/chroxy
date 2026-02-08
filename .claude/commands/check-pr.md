@@ -35,13 +35,16 @@ gh api repos/${REPO}/pulls/${PR_NUM}/comments --jq '[.[] | select(.in_reply_to_i
 
 Only process root comments (where `in_reply_to_id` is null) that do NOT appear in the replied-to list. This prevents duplicate work when re-running `/check-pr`.
 
-### 3. Process EVERY Unreplied Comment
+### 3. Process EVERY Unreplied Comment — ONE AT A TIME
 
-For each review comment (Copilot or human) that has NOT been replied to, you MUST:
+For each review comment (Copilot or human) that has NOT been replied to, you MUST do ALL of these steps **before moving to the next comment**:
 
 1. Read the comment carefully
 2. Evaluate if it's actionable
-3. Take action AND post a reply
+3. Take action (fix code, or create issue)
+4. **Post the inline reply via `gh api ... /replies` IMMEDIATELY** — do NOT batch replies
+
+**CRITICAL: The inline reply (`gh api ... /comments/${COMMENT_ID}/replies`) is the PRIMARY output of this skill.** The summary comment is secondary. If you only post a summary without inline replies, the skill has FAILED — conversation threads will remain unresolved and block merging.
 
 **Default stance: FIX IT NOW** - Only defer if the suggestion is a false positive or requires scope expansion (tracked via follow-up issue).
 
@@ -144,7 +147,25 @@ Created ${ISSUE_URL} to track this.
 git push
 ```
 
-### 5. Post Summary Comment
+### 5. Verify All Inline Replies Were Posted
+
+**This step is MANDATORY. Do NOT skip it.**
+
+```bash
+# Count root comments (not replies) from reviewers
+ROOT_COUNT=$(gh api repos/${REPO}/pulls/${PR_NUM}/comments \
+  --jq '[.[] | select(.in_reply_to_id == null)] | length')
+
+# Count unique root comments that have at least one reply
+REPLIED_COUNT=$(gh api repos/${REPO}/pulls/${PR_NUM}/comments \
+  --jq '[.[] | select(.in_reply_to_id != null) | .in_reply_to_id] | unique | length')
+
+echo "Root comments: ${ROOT_COUNT}, Replied: ${REPLIED_COUNT}"
+```
+
+If `REPLIED_COUNT < ROOT_COUNT`, you have UNREPLIED comments. Go back to step 3 and post the missing inline replies BEFORE proceeding. **Do NOT post the summary comment until every thread has a reply.**
+
+### 6. Post Summary Comment
 
 After addressing ALL comments, post a summary on the PR. Every row MUST have a commit hash, issue URL, or brief justification in the Commit/Issue column.
 
@@ -166,7 +187,7 @@ EOF
 )"
 ```
 
-### 6. Report to User
+### 7. Report to User
 
 Output a final summary:
 - Total comments processed
@@ -177,11 +198,13 @@ Output a final summary:
 
 ## Critical Rules
 
-1. **EVERY comment gets a reply** — No silent dismissals
-2. **Fix first, defer second** — Default is to fix the issue
-3. **Be specific** — ALWAYS show before/after code diffs in fix replies
-4. **Link commits** — EVERY fix reply MUST include its commit hash
-5. **ALWAYS create issues for deferred items** — NEVER say "good idea" without a GitHub issue URL. If it's valid and you're not fixing it now, create the issue. No exceptions.
-6. **No attribution** — Follow Zero Attribution Policy (no Co-Authored-By, no "Generated with Claude", no AI mentions anywhere)
-7. **No editing comments** — Reply inline to comments, never edit them
-8. **Idempotent** — Skip comments that already have replies (check in_reply_to_id)
+1. **EVERY comment gets an INLINE reply** — No silent dismissals. The `gh api .../replies` call is the MOST IMPORTANT output. A summary comment WITHOUT inline replies is a FAILURE.
+2. **Reply IMMEDIATELY after each comment** — Process one comment at a time: read → fix/defer → post inline reply → next. Do NOT batch all fixes and try to reply later.
+3. **Verify before summarizing** — Run the verification step (step 5) and confirm all threads have replies BEFORE posting the summary comment. If any are missing, go back and post them.
+4. **Fix first, defer second** — Default is to fix the issue
+5. **Be specific** — ALWAYS show before/after code diffs in fix replies
+6. **Link commits** — EVERY fix reply MUST include its commit hash
+7. **ALWAYS create issues for deferred items** — NEVER say "good idea" without a GitHub issue URL. If it's valid and you're not fixing it now, create the issue. No exceptions.
+8. **No attribution** — Follow Zero Attribution Policy (no Co-Authored-By, no "Generated with Claude", no AI mentions anywhere)
+9. **No editing comments** — Reply inline to comments, never edit them
+10. **Idempotent** — Skip comments that already have replies (check in_reply_to_id)
