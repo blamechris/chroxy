@@ -190,7 +190,10 @@ const md = StyleSheet.create({
   inlineCode: {
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     backgroundColor: '#2a2a4e',
+    color: '#c4a5ff',
     fontSize: 13,
+    paddingHorizontal: 3,
+    borderRadius: 3,
   },
   h1: {
     fontSize: 17,
