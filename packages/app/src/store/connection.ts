@@ -924,28 +924,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       timestamp: Date.now(),
     };
 
-    set((state) => {
-      const activeId = state.activeSessionId;
-      const filteredMessages = state.messages.filter((m) => m.id !== 'thinking');
-      const newMessages = [...filteredMessages, userMsg, thinkingMsg];
-
-      if (activeId && state.sessionStates[activeId]) {
-        // Session mode: update both session state and flat state
-        const sessionState = state.sessionStates[activeId];
-        const sessionFiltered = sessionState.messages.filter((m) => m.id !== 'thinking');
-        const sessionMessages = [...sessionFiltered, userMsg, thinkingMsg];
-        return {
-          messages: newMessages,
-          sessionStates: {
-            ...state.sessionStates,
-            [activeId]: { ...sessionState, messages: sessionMessages },
-          },
-        };
-      } else {
-        // Legacy flat mode (PTY or single-session)
-        return { messages: newMessages };
-      }
-    });
+    const activeId = get().activeSessionId;
+    if (activeId && get().sessionStates[activeId]) {
+      // Session mode: use updateActiveSession helper for consistent sync logic
+      updateActiveSession((ss) => ({
+        messages: [...ss.messages.filter((m) => m.id !== 'thinking'), userMsg, thinkingMsg],
+      }));
+    } else {
+      // No active session: update flat state only (PTY mode, CLI mode pre-session, or legacy)
+      set((state) => ({
+        messages: [...state.messages.filter((m) => m.id !== 'thinking'), userMsg, thinkingMsg],
+      }));
+    }
   },
 
   appendTerminalData: (data) => {

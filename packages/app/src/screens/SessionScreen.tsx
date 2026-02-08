@@ -290,7 +290,6 @@ export function SessionScreen() {
     sendInterrupt,
     disconnect,
     clearTerminalBuffer,
-    addMessage,
     addUserMessage,
     inputSettings,
     updateInputSettings,
