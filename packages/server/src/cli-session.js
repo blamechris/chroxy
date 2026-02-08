@@ -342,24 +342,23 @@ export class CliSession extends EventEmitter {
       }
 
       case 'assistant': {
+        // The assistant event fires repeatedly with --include-partial-messages.
+        // Text is only emitted here as a fallback for non-streamed responses.
+        // If streaming has started (hasStreamStarted), text arrives via deltas —
+        // emitting it here too would create duplicate/fragmented response bubbles.
         const ctx = this._currentCtx
         const content = data.message?.content
         if (Array.isArray(content)) {
           for (const block of content) {
-            if (block.type === 'text' && (!ctx || !ctx.didStreamText)) {
+            if (block.type === 'text' && (!ctx || (!ctx.didStreamText && !ctx.hasStreamStarted))) {
               this.emit('message', {
                 type: 'response',
                 content: block.text,
                 timestamp: Date.now(),
               })
-            } else if (block.type === 'tool_use') {
-              this.emit('message', {
-                type: 'tool_use',
-                content: JSON.stringify(block.input, null, 2),
-                tool: block.name,
-                timestamp: Date.now(),
-              })
             }
+            // tool_use blocks are handled by content_block_start → tool_start event;
+            // emitting them here too would create duplicate tool messages in the app
           }
         }
         break

@@ -10,17 +10,21 @@ import {
   Keyboard,
   Share,
   Alert,
+  Modal,
   LayoutAnimation,
   UIManager,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage } from '../store/connection';
+import { useConnectionStore, ChatMessage, ModelInfo } from '../store/connection';
+import { SessionPicker } from '../components/SessionPicker';
+import { CreateSessionModal } from '../components/CreateSessionModal';
 
 // Named Unicode constants for readability
 const ICON_CLOSE = '\u2715';       // Multiplication X
 const ICON_CHEVRON_RIGHT = '\u25B8'; // Right-pointing triangle
 const ICON_CHEVRON_DOWN = '\u25BE';  // Down-pointing triangle
+const ICON_GEAR = '\u2699';         // Gear/settings
 
 // Enable LayoutAnimation on Android
 UIManager.setLayoutAnimationEnabledExperimental?.(true);
@@ -29,19 +33,27 @@ function useKeyboardHeight() {
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   useEffect(() => {
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const subs: { remove: () => void }[] = [];
 
-    const showSub = Keyboard.addListener(showEvent, (e) => {
+    // Show: prefer will (iOS) for smooth animation, did (Android) for reliability
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    subs.push(Keyboard.addListener(showEvent, (e) => {
       setKeyboardHeight(e.endCoordinates.height);
-    });
-    const hideSub = Keyboard.addListener(hideEvent, () => {
+    }));
+
+    // Hide: listen to BOTH will and did on all platforms as a safety net.
+    // On some Android/Expo Go configs, keyboardDidHide doesn't fire reliably
+    // (e.g. back-button dismiss, swipe gesture). Listening to both ensures
+    // at least one fires. Duplicate zero-sets are harmless (React dedupes).
+    subs.push(Keyboard.addListener('keyboardWillHide', () => {
       setKeyboardHeight(0);
-    });
+    }));
+    subs.push(Keyboard.addListener('keyboardDidHide', () => {
+      setKeyboardHeight(0);
+    }));
 
     return () => {
-      showSub.remove();
-      hideSub.remove();
+      for (const sub of subs) sub.remove();
     };
   }, []);
 
@@ -88,7 +100,15 @@ export function SessionScreen() {
     sendPermissionResponse,
   } = useConnectionStore();
 
+  const sessions = useConnectionStore((s) => s.sessions);
+  const activeSessionId = useConnectionStore((s) => s.activeSessionId);
   const isCliMode = serverMode === 'cli';
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+
+  // Determine if the active session has a terminal (PTY sessions do, CLI sessions don't)
+  const activeSession = sessions.find((s) => s.sessionId === activeSessionId);
+  const hasTerminal = !isCliMode || (activeSession?.hasTerminal ?? false);
 
   // Multi-select state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -156,9 +176,9 @@ export function SessionScreen() {
     }
 
     sendInput(text);
-    // In terminal mode, send Enter separately — Claude Code's TUI needs text and CR as separate writes
-    // In CLI mode, the server handles the full message directly
-    if (!isCliMode) {
+    // PTY sessions: send Enter separately — Claude Code's TUI needs text and CR as separate writes
+    // CLI sessions: the server handles the full message directly
+    if (hasTerminal) {
       setTimeout(() => sendInput('\r'), 50);
     }
   };
@@ -190,8 +210,8 @@ export function SessionScreen() {
       return;
     }
     sendInput(value);
-    // In PTY mode, send Enter separately — the TUI needs text and CR as separate writes
-    if (!isCliMode) {
+    // PTY sessions: send Enter separately — the TUI needs text and CR as separate writes
+    if (hasTerminal) {
       setTimeout(() => sendInput('\r'), 50);
     }
   };
@@ -210,6 +230,11 @@ export function SessionScreen() {
 
   return (
     <View style={styles.container}>
+      {/* Session picker (CLI mode with multi-session support) */}
+      {isCliMode && sessions.length > 0 && (
+        <SessionPicker onCreatePress={() => setShowCreateModal(true)} />
+      )}
+
       {/* Selection bar or view mode toggle */}
       {isSelecting ? (
         <View style={styles.selectionBar}>
@@ -236,7 +261,7 @@ export function SessionScreen() {
               Chat
             </Text>
           </TouchableOpacity>
-          {!isCliMode && (
+          {hasTerminal && (
             <TouchableOpacity
               style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
               onPress={() => setViewMode('terminal')}
@@ -246,66 +271,31 @@ export function SessionScreen() {
               </Text>
             </TouchableOpacity>
           )}
+          {isCliMode && availableModels.length > 0 && !activeSession?.hasTerminal && (
+            <TouchableOpacity style={styles.settingsButton} onPress={() => setShowSettings(true)}>
+              <Text style={styles.settingsButtonText}>{ICON_GEAR}</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
             <Text style={styles.disconnectButtonText}>{ICON_CLOSE}</Text>
           </TouchableOpacity>
         </View>
       )}
 
-      {/* Status bar: model selector + permission mode + context usage */}
-      {isCliMode && availableModels.length > 0 && (
-        <View style={styles.statusBar}>
-          <View style={styles.modelSelector}>
-            {availableModels.map((m) => {
-              const isActive = activeModel === m.id || activeModel === m.fullId;
-              return (
-                <TouchableOpacity
-                  key={m.id}
-                  style={[styles.modelChip, isActive && styles.modelChipActive]}
-                  onPress={() => setModel(m.id)}
-                >
-                  <Text style={[styles.modelChipText, isActive && styles.modelChipTextActive]}>
-                    {m.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-          <View style={styles.contextInfo}>
-            {lastResultCost != null && (
-              <Text style={styles.contextText}>
-                ${lastResultCost.toFixed(4)}
-                {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
-              </Text>
-            )}
-            {contextUsage && (
-              <Text style={styles.contextText}>
-                {lastResultCost != null ? ' \u00B7 ' : ''}{formatTokenCount(contextUsage.inputTokens + contextUsage.outputTokens)}
-              </Text>
-            )}
-          </View>
-        </View>
-      )}
-
-      {/* Permission mode selector */}
-      {isCliMode && availablePermissionModes.length > 0 && (
-        <View style={styles.permissionBar}>
-          {availablePermissionModes.map((m) => {
-            const isActive = permissionMode === m.id;
-            return (
-              <TouchableOpacity
-                key={m.id}
-                style={[styles.modelChip, isActive && styles.modelChipActive]}
-                onPress={() => setPermissionMode(m.id)}
-              >
-                <Text style={[styles.modelChipText, isActive && styles.modelChipTextActive]}>
-                  {m.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      )}
+      {/* Settings modal */}
+      <SettingsModal
+        visible={showSettings}
+        onClose={() => setShowSettings(false)}
+        activeModel={activeModel}
+        availableModels={availableModels}
+        permissionMode={permissionMode}
+        availablePermissionModes={availablePermissionModes}
+        lastResultCost={lastResultCost}
+        lastResultDuration={lastResultDuration}
+        contextUsage={contextUsage}
+        setModel={setModel}
+        setPermissionMode={setPermissionMode}
+      />
 
       {/* Reconnecting banner */}
       {isReconnecting && (
@@ -316,7 +306,7 @@ export function SessionScreen() {
 
       {/* Content area */}
       {viewMode === 'chat' ? (
-        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} isCliMode={isCliMode} selectedIds={selectedIds} isSelecting={isSelecting} onToggleSelection={toggleSelection} />
+        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} isCliMode={isCliMode} selectedIds={selectedIds} isSelecting={isSelecting} onToggleSelection={toggleSelection} streamingMessageId={streamingMessageId} />
       ) : (
         <TerminalView
           content={terminalBuffer}
@@ -327,7 +317,7 @@ export function SessionScreen() {
 
       {/* Input area */}
       <View style={[styles.inputContainer, { paddingBottom: bottomPadding }]}>
-        {viewMode === 'terminal' && !isCliMode && (
+        {viewMode === 'terminal' && hasTerminal && (
           <View style={styles.specialKeys}>
             {['Enter', 'Ctrl+C', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].map((key) => (
               <TouchableOpacity
@@ -386,7 +376,216 @@ export function SessionScreen() {
           )}
         </View>
       </View>
+
+      {/* Create session modal */}
+      <CreateSessionModal
+        visible={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+      />
     </View>
+  );
+}
+
+// Settings modal — model, permission mode, context info
+function SettingsModal({
+  visible,
+  onClose,
+  activeModel,
+  availableModels,
+  permissionMode,
+  availablePermissionModes,
+  lastResultCost,
+  lastResultDuration,
+  contextUsage,
+  setModel,
+  setPermissionMode,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  activeModel: string | null;
+  availableModels: ModelInfo[];
+  permissionMode: string | null;
+  availablePermissionModes: { id: string; label: string }[];
+  lastResultCost: number | null;
+  lastResultDuration: number | null;
+  contextUsage: { inputTokens: number; outputTokens: number; cacheCreation: number; cacheRead: number } | null;
+  setModel: (model: string) => void;
+  setPermissionMode: (mode: string) => void;
+}) {
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={onClose}>
+        <TouchableOpacity activeOpacity={1} onPress={() => {}} style={styles.settingsSheet}>
+          <Text style={styles.settingsSectionLabel}>Model</Text>
+          <View style={styles.modelSelector}>
+            {availableModels.map((m) => {
+              const isActive = activeModel === m.id || activeModel === m.fullId;
+              return (
+                <TouchableOpacity
+                  key={m.id}
+                  style={[styles.modelChip, isActive && styles.modelChipActive]}
+                  onPress={() => setModel(m.id)}
+                >
+                  <Text style={[styles.modelChipText, isActive && styles.modelChipTextActive]}>
+                    {m.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {availablePermissionModes.length > 0 && (
+            <>
+              <Text style={styles.settingsSectionLabel}>Permission Mode</Text>
+              <View style={styles.settingsPermRow}>
+                {availablePermissionModes.map((m) => {
+                  const isActive = permissionMode === m.id;
+                  return (
+                    <TouchableOpacity
+                      key={m.id}
+                      style={[styles.modelChip, isActive && styles.modelChipActive]}
+                      onPress={() => setPermissionMode(m.id)}
+                    >
+                      <Text style={[styles.modelChipText, isActive && styles.modelChipTextActive]}>
+                        {m.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </>
+          )}
+
+          {(lastResultCost != null || contextUsage) && (
+            <>
+              <Text style={styles.settingsSectionLabel}>Context</Text>
+              <View style={styles.contextInfo}>
+                {lastResultCost != null && (
+                  <Text style={styles.contextText}>
+                    Cost: ${lastResultCost.toFixed(4)}
+                    {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
+                  </Text>
+                )}
+                {contextUsage && (
+                  <Text style={styles.contextText}>
+                    Tokens: {formatTokenCount(contextUsage.inputTokens + contextUsage.outputTokens)}
+                  </Text>
+                )}
+              </View>
+            </>
+          )}
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Modal>
+  );
+}
+
+// Display group types for message grouping
+type DisplayGroup =
+  | { type: 'single'; message: ChatMessage }
+  | { type: 'activity'; messages: ChatMessage[]; isActive: boolean; key: string };
+
+/** Group consecutive tool_use and thinking messages into ActivityGroups */
+function groupMessages(messages: ChatMessage[], streamingMessageId: string | null): DisplayGroup[] {
+  const groups: DisplayGroup[] = [];
+  let activityBuf: ChatMessage[] = [];
+
+  const flushActivity = () => {
+    if (activityBuf.length > 0) {
+      const lastMsg = activityBuf[activityBuf.length - 1];
+      const isLastMessage = lastMsg === messages[messages.length - 1];
+      const isActive = isLastMessage && streamingMessageId !== null;
+      groups.push({
+        type: 'activity',
+        messages: [...activityBuf],
+        isActive,
+        key: `activity-${activityBuf[0].id}`,
+      });
+      activityBuf = [];
+    }
+  };
+
+  for (const msg of messages) {
+    if (msg.type === 'tool_use' || msg.type === 'thinking') {
+      activityBuf.push(msg);
+    } else {
+      flushActivity();
+      groups.push({ type: 'single', message: msg });
+    }
+  }
+  flushActivity();
+
+  return groups;
+}
+
+// Activity group component — groups consecutive tool/thinking messages
+function ActivityGroup({
+  messages: groupMessages,
+  isActive,
+  isSelecting,
+  selectedIds,
+  onToggleSelection,
+}: {
+  messages: ChatMessage[];
+  isActive: boolean;
+  isSelecting: boolean;
+  selectedIds: Set<string>;
+  onToggleSelection: (id: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const toolCount = groupMessages.filter((m) => m.type === 'tool_use').length;
+
+  const handlePress = () => {
+    if (isSelecting) return;
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setExpanded((prev) => !prev);
+  };
+
+  // Auto-collapse when activity completes
+  const wasActiveRef = useRef(isActive);
+  useEffect(() => {
+    if (wasActiveRef.current && !isActive) {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setExpanded(false);
+    }
+    wasActiveRef.current = isActive;
+  }, [isActive]);
+
+  const summary = isActive
+    ? `Working... (${toolCount} tool${toolCount !== 1 ? 's' : ''})`
+    : `${toolCount} tool${toolCount !== 1 ? 's' : ''} used`;
+
+  return (
+    <TouchableOpacity
+      activeOpacity={0.7}
+      onPress={handlePress}
+      style={styles.activityGroup}
+    >
+      <View style={styles.activityHeader}>
+        {isActive && <View style={styles.activityPulse} />}
+        <Text style={styles.activitySummary}>{summary}</Text>
+        <Text style={styles.activityChevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
+      </View>
+      {expanded && (
+        <ScrollView style={styles.activityList} nestedScrollEnabled>
+          {groupMessages.map((msg) => (
+            <TouchableOpacity
+              key={msg.id}
+              activeOpacity={0.7}
+              onLongPress={isSelecting ? undefined : () => onToggleSelection(msg.id)}
+              onPress={isSelecting ? () => onToggleSelection(msg.id) : undefined}
+              style={[styles.activityEntry, selectedIds.has(msg.id) && styles.selectedBubble]}
+            >
+              <Text style={styles.activityEntryIcon}>{ICON_CHEVRON_RIGHT}</Text>
+              <Text style={styles.activityEntryTool}>{msg.tool || 'Thinking'}</Text>
+              <Text style={styles.activityEntryPreview} numberOfLines={1}>
+                {(msg.content || '').slice(0, 40)}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      )}
+    </TouchableOpacity>
   );
 }
 
@@ -400,6 +599,7 @@ function ChatView({
   selectedIds,
   isSelecting,
   onToggleSelection,
+  streamingMessageId,
 }: {
   messages: ChatMessage[];
   scrollViewRef: React.RefObject<ScrollView | null>;
@@ -409,13 +609,21 @@ function ChatView({
   selectedIds: Set<string>;
   isSelecting: boolean;
   onToggleSelection: (id: string) => void;
+  streamingMessageId: string | null;
 }) {
+  const displayGroups = useMemo(
+    () => groupMessages(messages, streamingMessageId),
+    [messages, streamingMessageId],
+  );
+
   return (
     <ScrollView
       ref={scrollViewRef}
       style={styles.chatContainer}
       contentContainerStyle={styles.chatContent}
       onContentSizeChange={() => scrollViewRef.current?.scrollToEnd()}
+      keyboardDismissMode="on-drag"
+      keyboardShouldPersistTaps="handled"
     >
       {messages.length === 0 ? (
         <View style={styles.emptyState}>
@@ -428,17 +636,32 @@ function ChatView({
           </Text>
         </View>
       ) : (
-        messages.map((msg) => (
-          <MessageBubble
-            key={msg.id}
-            message={msg}
-            onSelectOption={onSelectOption}
-            isSelected={selectedIds.has(msg.id)}
-            isSelecting={isSelecting}
-            onLongPress={() => onToggleSelection(msg.id)}
-            onPress={() => onToggleSelection(msg.id)}
-          />
-        ))
+        displayGroups.map((group) => {
+          if (group.type === 'activity') {
+            return (
+              <ActivityGroup
+                key={group.key}
+                messages={group.messages}
+                isActive={group.isActive}
+                isSelecting={isSelecting}
+                selectedIds={selectedIds}
+                onToggleSelection={onToggleSelection}
+              />
+            );
+          }
+          const msg = group.message;
+          return (
+            <MessageBubble
+              key={msg.id}
+              message={msg}
+              onSelectOption={onSelectOption}
+              isSelected={selectedIds.has(msg.id)}
+              isSelecting={isSelecting}
+              onLongPress={() => onToggleSelection(msg.id)}
+              onPress={() => onToggleSelection(msg.id)}
+            />
+          );
+        })
       )}
     </ScrollView>
   );
@@ -600,6 +823,7 @@ function TerminalView({
       ref={scrollViewRef}
       style={styles.terminalContainer}
       contentContainerStyle={styles.terminalContent}
+      keyboardDismissMode="on-drag"
       onContentSizeChange={() => scrollViewRef.current?.scrollToEnd()}
     >
       <Text style={styles.terminalText}>{processed || 'Connected. Terminal output will appear here...'}</Text>
@@ -685,28 +909,48 @@ const styles = StyleSheet.create({
     color: '#ff4a4a',
     fontSize: 16,
   },
-  statusBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    backgroundColor: '#1a1a2e',
-    borderBottomWidth: 1,
-    borderBottomColor: '#2a2a4e',
+  settingsButton: {
+    paddingHorizontal: 14,
+    justifyContent: 'center',
   },
-  permissionBar: {
+  settingsButtonText: {
+    color: '#888',
+    fontSize: 18,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'flex-start',
+    paddingTop: 100,
+    alignItems: 'center',
+  },
+  settingsSheet: {
+    backgroundColor: '#1a1a2e',
+    borderRadius: 16,
+    padding: 20,
+    width: '85%',
+    maxWidth: 360,
+    borderWidth: 1,
+    borderColor: '#2a2a4e',
+  },
+  settingsSectionLabel: {
+    color: '#666',
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    marginBottom: 8,
+    marginTop: 4,
+  },
+  settingsPermRow: {
     flexDirection: 'row',
     gap: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    backgroundColor: '#1a1a2e',
-    borderBottomWidth: 1,
-    borderBottomColor: '#2a2a4e',
+    marginBottom: 12,
   },
   modelSelector: {
     flexDirection: 'row',
     gap: 6,
+    marginBottom: 12,
   },
   modelChip: {
     paddingHorizontal: 14,
@@ -848,6 +1092,63 @@ const styles = StyleSheet.create({
   selectedBubble: {
     borderColor: '#4a9eff',
     borderWidth: 2,
+  },
+  activityGroup: {
+    backgroundColor: '#16162a',
+    padding: 10,
+    borderRadius: 10,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#2a2a4e',
+    maxWidth: '90%',
+  },
+  activityHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  activityPulse: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#4a9eff',
+    opacity: 0.8,
+  },
+  activitySummary: {
+    flex: 1,
+    color: '#a78bfa',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  activityChevron: {
+    color: '#888',
+    fontSize: 10,
+  },
+  activityList: {
+    marginTop: 8,
+    maxHeight: 200,
+  },
+  activityEntry: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 3,
+  },
+  activityEntryIcon: {
+    color: '#666',
+    fontSize: 8,
+  },
+  activityEntryTool: {
+    color: '#a78bfa',
+    fontSize: 11,
+    fontWeight: '500',
+    minWidth: 40,
+  },
+  activityEntryPreview: {
+    flex: 1,
+    color: '#888',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   toolBubble: {
     backgroundColor: '#16162a',

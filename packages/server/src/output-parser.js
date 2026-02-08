@@ -20,7 +20,7 @@ const State = {
 };
 
 export class OutputParser extends EventEmitter {
-  constructor() {
+  constructor({ assumeReady = false, suppressScrollback = false } = {}) {
     super();
     this.state = State.IDLE;
     this.buffer = "";
@@ -28,13 +28,19 @@ export class OutputParser extends EventEmitter {
     this._flushTimer = null;
     this._recentEmissions = new Map(); // key -> timestamp
     // Skip initial scrollback burst — only start emitting messages after 5s
-    this._startTime = Date.now();
-    this._ready = false;
+    // When assumeReady=true (e.g. attaching to an existing session), skip the grace period
+    this._startTime = assumeReady ? 0 : Date.now();
+    this._ready = assumeReady;
     // Track whether Claude Code is ready (has shown the ❯ prompt)
-    this.claudeReady = false;
+    this.claudeReady = assumeReady;
     // Pending interactive prompt being accumulated
     this._pendingPrompt = null;
     this._promptFlushTimer = null;
+    // Scrollback suppression: when attaching to an existing tmux session,
+    // suppress message emissions until the initial data burst finishes
+    // (detected by 500ms of silence on feed()). Raw events still emit.
+    this._suppressingScrollback = suppressScrollback;
+    this._scrollbackQuietTimer = null;
   }
 
   /**
@@ -45,6 +51,24 @@ export class OutputParser extends EventEmitter {
   feed(rawData) {
     // Emit raw data immediately for terminal view
     this.emit("raw", rawData);
+
+    // Scrollback suppression: reset quiet timer on each data chunk.
+    // When 500ms pass with no new data, scrollback burst is over.
+    if (this._suppressingScrollback) {
+      if (this._scrollbackQuietTimer) clearTimeout(this._scrollbackQuietTimer);
+      this._scrollbackQuietTimer = setTimeout(() => {
+        this._scrollbackQuietTimer = null;
+        this._suppressingScrollback = false;
+        // Discard any message accumulated during the burst
+        if (this._flushTimer) {
+          clearTimeout(this._flushTimer);
+          this._flushTimer = null;
+        }
+        this.currentMessage = null;
+        this._recentEmissions.clear();
+        console.log("[parser] Scrollback suppression ended (500ms quiet)");
+      }, 500);
+    }
 
     // Accumulate raw data into buffer, THEN strip ANSI from the whole buffer.
     // This handles ANSI sequences that get split across PTY data chunks
@@ -64,25 +88,39 @@ export class OutputParser extends EventEmitter {
 
   /** Check if a line is noise that should be skipped */
   _isNoise(trimmed) {
-    // Very short non-marker lines (1-2 chars) are usually fragments
-    if (trimmed.length <= 2 && !/^[❯⏺]/.test(trimmed)) return true;
+    // Very short non-marker lines (≤5 chars) that are just letters/digits/spaces
+    // are terminal redraw artifacts (e.g. "z g", "c 9", "i n", "A u").
+    // Skip this filter during RESPONSE state to preserve legitimate short content like "OK", "Yes."
+    if (this.state !== State.RESPONSE &&
+        trimmed.length <= 5 && !/^[❯⏺]/.test(trimmed) && /^[a-zA-Z\d\s.·…]+$/.test(trimmed)) return true;
     // Divider lines (all dashes, or dashes with a few other chars)
     if (/^[━─╌]{3,}/.test(trimmed)) return true;
     // Lines that are mostly dashes with some text mixed in
     if (/^[─━n\d]+$/.test(trimmed)) return true;
-    // tmux status bar
+    // tmux status bar — any session name in brackets followed by window:pane
+    if (/^\[[\w-]+\]\s*\d+:/.test(trimmed)) return true;
     if (/\[claude-co/.test(trimmed)) return true;
     if (/^"\*?\s*Claude\s*Code"/.test(trimmed)) return true;
     if (/^"Christophers-/.test(trimmed)) return true;
     if (/^\*\s*Claude\s*Code/.test(trimmed)) return true;
     // Token/cost/version lines
-    if (/^\$[\d.]+\s*\|/.test(trimmed)) return true;
+    if (/^\$[\d.]+(\s*\||$)/.test(trimmed)) return true;
     if (/tokens?\s*current:/i.test(trimmed)) return true;
     if (/latest:\s*[\d.]+/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
     if (/current:\s*[\d.]+/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
     if (/til compact/i.test(trimmed)) return true;
     if (/^\d+\s*tokens?$/i.test(trimmed)) return true;
     if (/\d+tokens/i.test(trimmed)) return true;
+    // Token counts with closing paren — status line fragments like "775 tokens)"
+    if (/^\d+\.?\d*k?\s*tokens?\)?$/i.test(trimmed)) return true;
+    // Timing/token status lines: "10s · ↓ 150 tokens · thinking)" etc.
+    if (/\d+s\s*·\s*[↓↑]?\s*\d/.test(trimmed) && /tokens/i.test(trimmed)) return true;
+    // "thought for Ns)" timing fragments
+    if (/thought\s+for\s+\d+s\)/i.test(trimmed)) return true;
+    // "(No content)" marker from Claude Code UI
+    if (/^\(No content\)/i.test(trimmed)) return true;
+    // Bare version numbers
+    if (/^\d+\.\d+\.\d+$/.test(trimmed)) return true;
     // ctrl+g / ide hints
     if (/^ctrl\+g/i.test(trimmed)) return true;
     if (/\/ide\s+for/i.test(trimmed)) return true;
@@ -108,9 +146,11 @@ export class OutputParser extends EventEmitter {
     // Tool status lines: "Bash(cmd)   ⎿ Running…"
     if (/⎿\s*(Running|Completed|Done|Failed)/i.test(trimmed)) return true;
     // Status bar fragments with scroll arrows
-    if (/[↓↑]\s*$/.test(trimmed) && trimmed.length < 20) return true;
+    if (/[↓↑]\s*\d*$/.test(trimmed) && trimmed.length < 25) return true;
     // Path-only lines from welcome banner (not inside a response)
     if (/^\/Users\/\w+$/.test(trimmed)) return true;
+    // PTY Scrollback marker
+    if (/PTY\s*Scrollback/i.test(trimmed)) return true;
     return false;
   }
 
@@ -125,10 +165,21 @@ export class OutputParser extends EventEmitter {
     if (/^[✻✶✳✽✢⏺·•]\s*.*\(\d+s\s*·\s*[↓↑]/.test(trimmed)) return true;
     // Mixed spinner character sequences (animation frames)
     if (/^[✻✶✳✽✢·•↑↓\d\s]{3,}$/.test(trimmed)) return true;
-    // Braille spinners
-    if (/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(trimmed)) return true;
-    // Standalone spinner verb text (from animation frames after ANSI stripping)
-    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing)/i.test(trimmed) && trimmed.length < 30) return true;
+    // Braille spinners — full braille block (U+2800–U+28FF)
+    if (/^[\u2800-\u28FF]/.test(trimmed)) return true;
+    // Standalone spinner verb text (from animation frames after ANSI stripping).
+    // Must be JUST the verb (optionally with ellipsis) — not followed by real content.
+    // Length < 20 prevents false positives on "Writing tests for the parser module" etc.
+    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|waiting)(…|\.\.\.)?$/i.test(trimmed) && trimmed.length < 20) return true;
+    // "N thinking" — thinking counter fragment (e.g. "42 thinking", "7 thinking")
+    if (/^\d+\s*thinking/i.test(trimmed)) return true;
+    // Lines ending with "thinking" or "thinking)" — status bar fragments like "c a thinking"
+    if (/thinking\)?$/i.test(trimmed) && trimmed.length < 60) return true;
+    // "thought for Ns)" — past tense thinking indicator
+    if (/thought\s+for\s+\d/i.test(trimmed)) return true;
+    // Known spinner verb with "…" — e.g. "Actualizing…", "Waiting…", "Downloading…"
+    // Restricted to known verbs to avoid catching legitimate ellipsis content.
+    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|waiting|downloading|compiling|installing|building|connecting|loading)…/i.test(trimmed) && trimmed.length < 30) return true;
     return false;
   }
 
@@ -317,6 +368,11 @@ export class OutputParser extends EventEmitter {
       this._flushTimer = null;
     }
     if (this.currentMessage && this.currentMessage.content?.trim()) {
+      // Scrollback suppression: discard messages during initial burst
+      if (this._suppressingScrollback) {
+        this.currentMessage = null;
+        return;
+      }
       // Skip messages from initial scrollback burst (first 5 seconds)
       if (!this._ready) {
         if (Date.now() - this._startTime < 5000) {

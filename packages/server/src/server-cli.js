@@ -1,4 +1,4 @@
-import { CliSession } from './cli-session.js'
+import { SessionManager } from './session-manager.js'
 import { WsServer } from './ws-server.js'
 import { TunnelManager } from './tunnel.js'
 import { waitForTunnel } from './tunnel-check.js'
@@ -6,8 +6,8 @@ import qrcode from 'qrcode-terminal'
 
 /**
  * Start the Chroxy server in CLI headless mode.
- * Uses `claude -p --output-format stream-json` instead of PTY/tmux.
- * No tmux or node-pty dependency required.
+ * Auto-discovers tmux sessions running Claude on startup.
+ * Falls back to a default CLI session if none found.
  */
 export async function startCliServer(config) {
   const PORT = config.port || parseInt(process.env.PORT || '8765', 10)
@@ -31,36 +31,56 @@ export async function startCliServer(config) {
     console.log('')
   }
 
-  // 1. Create and start the CLI session (persistent process)
-  const cliSession = new CliSession({
-    cwd: config.cwd || process.cwd(),
-    allowedTools: config.allowedTools || [],
-    model: config.model || null,
+  // 1. Create session manager
+  const sessionManager = new SessionManager({
+    maxSessions: 5,
     port: PORT,
     apiToken: API_TOKEN,
+    defaultCwd: config.cwd || process.cwd(),
+    defaultModel: config.model || null,
+    defaultPermissionMode: 'approve',
   })
-  cliSession.start()
+
+  // 2. Auto-discover tmux sessions running Claude
+  let defaultSessionId
+  const discovered = sessionManager.discoverSessions()
+  if (discovered.length > 0) {
+    console.log(`[cli] Found ${discovered.length} tmux session(s) running Claude`)
+    for (const tmux of discovered) {
+      const sid = sessionManager.attachSession({ tmuxSession: tmux.sessionName, name: tmux.sessionName })
+      if (!defaultSessionId) defaultSessionId = sid
+      console.log(`[cli] Attached to tmux session: ${tmux.sessionName}`)
+    }
+  } else {
+    console.log('[cli] No tmux sessions found, creating default CLI session')
+    defaultSessionId = sessionManager.createSession({ name: 'Default' })
+  }
 
   // Log events for debugging
-  cliSession.on('ready', ({ sessionId, model }) => {
-    console.log(`[cli] Session ready: ${sessionId} (model: ${model})`)
-  })
-
-  cliSession.on('error', ({ message }) => {
-    console.error(`[cli] Error: ${message}`)
-  })
-
-  cliSession.on('result', ({ cost, duration }) => {
-    if (cost != null) {
-      console.log(`[cli] Query complete: $${cost.toFixed(4)} in ${duration}ms`)
+  sessionManager.on('session_event', ({ sessionId, event, data }) => {
+    if (event === 'ready') {
+      console.log(`[cli] Session ${sessionId} ready: ${data.sessionId} (model: ${data.model})`)
+    } else if (event === 'error') {
+      console.error(`[cli] Session ${sessionId} error: ${data.message}`)
+    } else if (event === 'result' && data.cost != null) {
+      console.log(`[cli] Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
     }
   })
 
-  // 2. Start the WebSocket server
+  sessionManager.on('session_created', ({ sessionId, name, cwd }) => {
+    console.log(`[cli] Session created: ${sessionId} (${name}) in ${cwd}`)
+  })
+
+  sessionManager.on('session_destroyed', ({ sessionId }) => {
+    console.log(`[cli] Session destroyed: ${sessionId}`)
+  })
+
+  // 3. Start the WebSocket server
   const wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
-    cliSession,
+    sessionManager,
+    defaultSessionId,
     authRequired: !NO_AUTH,
   })
   // Bind to localhost-only when auth is disabled
@@ -68,14 +88,14 @@ export async function startCliServer(config) {
 
   let tunnel = null
   if (!NO_AUTH) {
-    // 3. Start the Cloudflare tunnel
+    // 4. Start the Cloudflare tunnel
     tunnel = new TunnelManager({ port: PORT })
     const { wsUrl, httpUrl } = await tunnel.start()
 
-    // 4. Wait for tunnel to be fully routable (DNS propagation)
+    // 5. Wait for tunnel to be fully routable (DNS propagation)
     await waitForTunnel(httpUrl)
 
-    // 5. Generate connection info
+    // 6. Generate connection info
     const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
 
     console.log('\n[✓] Server ready! (CLI headless mode)\n')
@@ -94,7 +114,7 @@ export async function startCliServer(config) {
   // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`\n[${signal}] Shutting down...`)
-    cliSession.destroy()
+    sessionManager.destroyAll()
     wsServer.close()
     if (tunnel) await tunnel.stop()
     process.exit(0)
