@@ -516,7 +516,7 @@ export class OutputParser extends EventEmitter {
     this._flushTimer = setTimeout(() => {
       this._flushTimer = null
       this._finishCurrentMessage()
-    }, this._flushDelay)
+    }, 1500)
   }
 
   /** Emit and reset the current accumulated message */
