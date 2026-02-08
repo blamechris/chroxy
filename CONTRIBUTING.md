@@ -47,7 +47,7 @@ Thanks for your interest in contributing! This document covers how to get starte
 ## Code Style
 
 - **TypeScript** for the app, **JavaScript (ES modules)** for the server
-- Server: plain JavaScript ES modules; match the existing style in each file (legacy PTY/tmux modules often use semicolons/double quotes, newer CLI/multi-session code tends toward no semicolons/single quotes)
+- Server: no semicolons, single quotes, plain JavaScript ES modules
 - App: TypeScript strict, functional components, Zustand for state
 - Meaningful variable names over comments
 - Keep functions small and focused
