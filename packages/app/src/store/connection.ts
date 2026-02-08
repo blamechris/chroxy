@@ -432,6 +432,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       switch (msg.type) {
         case 'auth_ok':
+          // Reset replay flag — fresh auth means clean slate
+          _receivingHistoryReplay = false;
           // On reconnect, preserve messages and terminal buffer
           if (isReconnect) {
             set({ isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: null, streamingMessageId: null });
@@ -608,7 +610,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           const toolMsg: ChatMessage = {
             id: nextMessageId('tool'),
             type: 'tool_use',
-            content: msg.tool || '',
+            content: msg.input ? JSON.stringify(msg.input) : msg.tool || '',
             tool: msg.tool,
             timestamp: Date.now(),
           };
@@ -795,6 +797,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       socket.onclose = null;
       socket.close();
     }
+    // Reset replay flag in case disconnect happened mid-replay
+    _receivingHistoryReplay = false;
     // Flush and clear any pending delta buffer
     if (deltaFlushTimer) {
       clearTimeout(deltaFlushTimer);

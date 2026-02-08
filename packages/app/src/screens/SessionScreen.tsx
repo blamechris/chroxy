@@ -415,7 +415,7 @@ function SettingsModal({
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={onClose}>
-        <View style={styles.settingsSheet}>
+        <TouchableOpacity activeOpacity={1} onPress={() => {}} style={styles.settingsSheet}>
           <Text style={styles.settingsSectionLabel}>Model</Text>
           <View style={styles.modelSelector}>
             {availableModels.map((m) => {
@@ -474,7 +474,7 @@ function SettingsModal({
               </View>
             </>
           )}
-        </View>
+        </TouchableOpacity>
       </TouchableOpacity>
     </Modal>
   );

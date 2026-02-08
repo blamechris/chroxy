@@ -165,16 +165,19 @@ export class OutputParser extends EventEmitter {
     if (/^[✻✶✳✽✢·•↑↓\d\s]{3,}$/.test(trimmed)) return true;
     // Braille spinners — full braille block (U+2800–U+28FF)
     if (/^[\u2800-\u28FF]/.test(trimmed)) return true;
-    // Standalone spinner verb text (from animation frames after ANSI stripping)
-    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|waiting)/i.test(trimmed) && trimmed.length < 40) return true;
+    // Standalone spinner verb text (from animation frames after ANSI stripping).
+    // Must be JUST the verb (optionally with ellipsis) — not followed by real content.
+    // Length < 20 prevents false positives on "Writing tests for the parser module" etc.
+    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|waiting)(…|\.\.\.)?$/i.test(trimmed) && trimmed.length < 20) return true;
     // "N thinking" — thinking counter fragment (e.g. "42 thinking", "7 thinking")
     if (/^\d+\s*thinking/i.test(trimmed)) return true;
     // Lines ending with "thinking" or "thinking)" — status bar fragments like "c a thinking"
     if (/thinking\)?$/i.test(trimmed) && trimmed.length < 60) return true;
     // "thought for Ns)" — past tense thinking indicator
     if (/thought\s+for\s+\d/i.test(trimmed)) return true;
-    // Spinner verb with "…" — e.g. "Actualizing… 3", "Waiting…"
-    if (/^[\w]+…/i.test(trimmed) && trimmed.length < 30) return true;
+    // Known spinner verb with "…" — e.g. "Actualizing…", "Waiting…", "Downloading…"
+    // Restricted to known verbs to avoid catching legitimate ellipsis content.
+    if (/^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|waiting|downloading|compiling|installing|building|connecting|loading)…/i.test(trimmed) && trimmed.length < 30) return true;
     return false;
   }
 

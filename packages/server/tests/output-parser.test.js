@@ -145,14 +145,25 @@ describe('OutputParser._isThinking', () => {
     assert.equal(parser._isThinking('⠋'), true)
   })
 
-  it('detects standalone spinner verbs under 30 chars', () => {
+  it('detects standalone spinner verbs (bare or with ellipsis)', () => {
     assert.equal(parser._isThinking('thinking'), true)
     assert.equal(parser._isThinking('reading'), true)
     assert.equal(parser._isThinking('analyzing'), true)
+    assert.equal(parser._isThinking('reading…'), true)
+    assert.equal(parser._isThinking('writing...'), true)
   })
 
   it('does not treat long text starting with spinner verb as thinking', () => {
     assert.equal(parser._isThinking('thinking about architecture and design patterns'), false)
+  })
+
+  it('does not treat spinner verb + real content as thinking', () => {
+    assert.equal(parser._isThinking('Writing tests for the parser module'), false)
+    assert.equal(parser._isThinking('Working directory: /Users/test'), false)
+    assert.equal(parser._isThinking('Reading from file at /path/to'), false)
+    assert.equal(parser._isThinking('Editing the configuration file'), false)
+    assert.equal(parser._isThinking('Analyzing the error log output'), false)
+    assert.equal(parser._isThinking('Searching for pattern in code'), false)
   })
 
   it('does not treat regular text as thinking', () => {
