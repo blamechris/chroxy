@@ -37,6 +37,15 @@ interface ContextUsage {
   cacheRead: number;
 }
 
+interface ClaudeStatus {
+  cost: number;
+  model: string;
+  messageCount: number;
+  contextTokens: string;
+  contextPercent: number;
+  compactPercent: number | null;
+}
+
 interface InputSettings {
   chatEnterToSend: boolean;
   terminalEnterToSend: boolean;
@@ -127,6 +136,9 @@ interface ConnectionState {
 
   // Discovered host tmux sessions (from discover_sessions)
   discoveredSessions: DiscoveredSession[] | null;
+
+  // Claude Code status bar metadata (PTY mode)
+  claudeStatus: ClaudeStatus | null;
 
   // View mode
   viewMode: 'chat' | 'terminal';
@@ -313,6 +325,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   permissionMode: null,
   availablePermissionModes: [],
   discoveredSessions: null,
+  claudeStatus: null,
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -732,6 +745,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           }
           break;
 
+        case 'status_update':
+          set({
+            claudeStatus: {
+              cost: msg.cost,
+              model: msg.model,
+              messageCount: msg.messageCount,
+              contextTokens: msg.contextTokens,
+              contextPercent: msg.contextPercent,
+              compactPercent: msg.compactPercent ?? null,
+            },
+          });
+          break;
+
         case 'raw':
           get().appendTerminalData(msg.data);
           break;
@@ -844,6 +870,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       permissionMode: null,
       availablePermissionModes: [],
       discoveredSessions: null,
+      claudeStatus: null,
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,

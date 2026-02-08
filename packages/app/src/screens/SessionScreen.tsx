@@ -322,6 +322,9 @@ export function SessionScreen() {
   // Multi-select state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const isSelecting = selectedIds.size > 0;
+  // Ref so onContentSizeChange always reads the latest value (avoids stale closure)
+  const isSelectingRef = useRef(false);
+  isSelectingRef.current = isSelecting;
 
   const toggleSelection = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -525,7 +528,7 @@ export function SessionScreen() {
 
       {/* Content area */}
       {viewMode === 'chat' ? (
-        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} isCliMode={isCliMode} selectedIds={selectedIds} isSelecting={isSelecting} onToggleSelection={toggleSelection} streamingMessageId={streamingMessageId} />
+        <ChatView messages={messages} scrollViewRef={scrollViewRef} claudeReady={claudeReady} onSelectOption={handleSelectOption} isCliMode={isCliMode} selectedIds={selectedIds} isSelecting={isSelecting} isSelectingRef={isSelectingRef} onToggleSelection={toggleSelection} streamingMessageId={streamingMessageId} />
       ) : (
         <TerminalView
           content={terminalBuffer}
@@ -900,6 +903,7 @@ function ChatView({
   isCliMode,
   selectedIds,
   isSelecting,
+  isSelectingRef,
   onToggleSelection,
   streamingMessageId,
 }: {
@@ -910,6 +914,7 @@ function ChatView({
   isCliMode: boolean;
   selectedIds: Set<string>;
   isSelecting: boolean;
+  isSelectingRef: React.MutableRefObject<boolean>;
   onToggleSelection: (id: string) => void;
   streamingMessageId: string | null;
 }) {
@@ -924,7 +929,7 @@ function ChatView({
       style={styles.chatContainer}
       contentContainerStyle={styles.chatContent}
       onContentSizeChange={() => {
-        if (!isSelecting) scrollViewRef.current?.scrollToEnd();
+        if (!isSelectingRef.current) scrollViewRef.current?.scrollToEnd();
       }}
       keyboardDismissMode="on-drag"
       keyboardShouldPersistTaps="handled"

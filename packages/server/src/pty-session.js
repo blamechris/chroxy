@@ -90,6 +90,11 @@ export class PtySession extends EventEmitter {
       this.emit('message', message)
     })
 
+    // Forward status bar metadata
+    this._outputParser.on('status_update', (status) => {
+      this.emit('status_update', status)
+    })
+
     this._outputParser.on('claude_ready', () => {
       this._isReady = true
       this.emit('ready', {})
@@ -125,6 +130,13 @@ export class PtySession extends EventEmitter {
   writeRaw(data) {
     if (this._ptyManager) {
       this._ptyManager.write(data)
+    }
+  }
+
+  /** Register text expected to echo back from the PTY */
+  expectEcho(text) {
+    if (this._outputParser) {
+      this._outputParser.expectEcho(text)
     }
   }
 

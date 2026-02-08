@@ -1437,3 +1437,442 @@ describe('Recursive amplification — end-to-end', () => {
     assert.equal(messages.length, 0, 'Server output fragments should be completely suppressed')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke Test #3 Fixes
+// ─────────────────────────────────────────────────────────────────────
+
+describe('Echo suppression', () => {
+  it('suppresses echoed user input in IDLE state', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    parser.expectEcho('hello world')
+    parser.feed('hello world\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+    assert.equal(messages.length, 0, 'Echoed input should be suppressed')
+  })
+
+  it('suppresses all fragments until TTL expires (not one-shot)', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    parser.expectEcho('hello world')
+    parser.feed('hello world\n')
+    parser.feed('hello world\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+    assert.equal(messages.length, 0, 'Both occurrences should be suppressed within TTL')
+  })
+
+  it('expires after 5 seconds', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    parser.expectEcho('old echo')
+    // Manually expire it
+    parser._pendingEchos[0].expires = Date.now() - 1
+
+    parser.feed('old echo\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+    assert.equal(messages.length, 1, 'Expired echo should not suppress')
+  })
+
+  it('suppresses wrapped echo fragments via substring containment', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    // Simulate user sending a long message
+    parser.expectEcho('hello the first thing is the format could still be cleaned up a bit')
+    // PTY wraps at ~120 cols, so fragments arrive as substrings
+    parser.feed('hello the first thing is the format\n')
+    parser.feed('could still be cleaned up a bit\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+    assert.equal(messages.length, 0, 'Wrapped echo fragments should be suppressed')
+  })
+
+  it('does not suppress during RESPONSE state', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    parser.expectEcho('some text')
+    parser.feed('⏺ Starting response\n')
+    parser.feed('some text\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+    assert.ok(messages.length >= 1)
+    const content = messages.map(m => m.content).join('')
+    assert.ok(content.includes('some text'), 'Content in RESPONSE state should not be suppressed')
+  })
+
+  it('stores multi-line echo as single normalized blob', () => {
+    const parser = createParser()
+
+    parser.expectEcho('line one\nline two\nline three')
+    assert.equal(parser._pendingEchos.length, 1)
+    assert.equal(parser._pendingEchos[0].blob, 'line one line two line three')
+  })
+
+  it('normalizes whitespace for matching', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    parser.expectEcho('hello   world')
+    parser.feed('hello world\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+    assert.equal(messages.length, 0, 'Should match with normalized whitespace')
+  })
+
+  it('ignores empty/whitespace-only echo text', () => {
+    const parser = createParser()
+
+    parser.expectEcho('')
+    parser.expectEcho('   ')
+    parser.expectEcho('\r\n')
+    assert.equal(parser._pendingEchos.length, 0)
+  })
+
+  it('suppresses echo for bare \\r input (enter key)', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    // \r alone normalizes to empty — should be ignored, not crash
+    parser.expectEcho('\r')
+    assert.equal(parser._pendingEchos.length, 0)
+  })
+})
+
+describe('Noise filter — smoke test #3 patterns', () => {
+  let parser
+
+  beforeEach(() => {
+    parser = createParser()
+  })
+
+  it('filters tool result summary "⎿ Read 15 lines"', () => {
+    assert.ok(parser._isNoise('⎿ Read 15 lines'))
+  })
+
+  it('filters tool result summary "⎿ Added 3 lines"', () => {
+    assert.ok(parser._isNoise('⎿ Added 3 lines'))
+  })
+
+  it('filters tool result summary "⎿ Wrote 42 bytes"', () => {
+    assert.ok(parser._isNoise('⎿ Wrote 42 bytes'))
+  })
+
+  it('filters short ⎿ chrome lines outside TOOL_USE', () => {
+    assert.ok(parser._isNoise('⎿ output'))
+  })
+
+  it('preserves ⎿ lines during RESPONSE state', () => {
+    parser.state = 'response'
+    assert.ok(!parser._isNoise('⎿ some content'))
+  })
+
+  it('filters git diff summary "1 file +3 -0"', () => {
+    assert.ok(parser._isNoise('1 file +3 -0'))
+  })
+
+  it('filters "3 files changed"', () => {
+    assert.ok(parser._isNoise('3 files changed'))
+  })
+
+  it('preserves ⏺-prefixed diff-like lines', () => {
+    assert.ok(!parser._isNoise('⏺ 2 files changed in the last commit'))
+  })
+
+  it('filters standalone "tokens"', () => {
+    assert.ok(parser._isNoise('tokens'))
+  })
+
+  it('filters standalone "tokens)"', () => {
+    assert.ok(parser._isNoise('tokens)'))
+  })
+
+  it('filters "l compact 100653 tokens"', () => {
+    assert.ok(parser._isNoise('l compact 100653 tokens'))
+  })
+
+  it('filters "msgs:375"', () => {
+    assert.ok(parser._isNoise('msgs:375'))
+  })
+
+  it('filters "msg: 42"', () => {
+    assert.ok(parser._isNoise('msg: 42'))
+  })
+
+  it('filters "tsc: The TypeScript compiler"', () => {
+    assert.ok(parser._isNoise('tsc: The TypeScript Compiler'))
+  })
+
+  it('filters "merge main" autosuggest outside RESPONSE', () => {
+    assert.ok(parser._isNoise('merge main'))
+  })
+
+  it('filters "commit -m fix" autosuggest outside RESPONSE', () => {
+    assert.ok(parser._isNoise('commit -m fix'))
+  })
+
+  it('preserves "merge main" during RESPONSE', () => {
+    parser.state = 'response'
+    assert.ok(!parser._isNoise('merge main'))
+  })
+
+  it('preserves long git command text', () => {
+    assert.ok(!parser._isNoise('merge the feature branch into main and resolve any conflicts that arise from the changes'))
+  })
+})
+
+describe('Thinking filter — smoke test #3 patterns', () => {
+  let parser
+
+  beforeEach(() => {
+    parser = createParser()
+  })
+
+  it('detects "Wait Unravelling…" multi-word spinner', () => {
+    assert.ok(parser._isThinking('Wait Unravelling…'))
+  })
+
+  it('detects "Just Thinking..." multi-word spinner', () => {
+    assert.ok(parser._isThinking('Just Thinking...'))
+  })
+
+  it('does not treat multi-word spinner as thinking during RESPONSE', () => {
+    parser.state = 'response'
+    assert.ok(!parser._isThinking('Wait Unravelling…'))
+  })
+
+  it('detects line ending with "… ↑ 42"', () => {
+    assert.ok(parser._isThinking('Imagining… ↑ 42'))
+  })
+
+  it('detects line ending with "... ↓ 5"', () => {
+    assert.ok(parser._isThinking('Processing... ↓ 5'))
+  })
+
+  it('detects new spinner verbs', () => {
+    assert.ok(parser._isThinking('unravelling'))
+    assert.ok(parser._isThinking('fetching'))
+    assert.ok(parser._isThinking('preparing'))
+    assert.ok(parser._isThinking('generating'))
+    assert.ok(parser._isThinking('resolving'))
+    assert.ok(parser._isThinking('updating'))
+    assert.ok(parser._isThinking('parsing'))
+    assert.ok(parser._isThinking('cogitating'))
+  })
+
+  it('detects new spinner verbs with ellipsis', () => {
+    assert.ok(parser._isThinking('Fetching…'))
+    assert.ok(parser._isThinking('Preparing...'))
+    assert.ok(parser._isThinking('Generating… 5'))
+  })
+})
+
+describe('Status bar extraction', () => {
+  it('parses full status line with compact percentage', () => {
+    const parser = createParser()
+    const events = collectEvents(parser, 'status_update')
+
+    const result = parser._extractStatusBar('$77.79 | Opus 4.6 | msgs:375 | 76.1K (38.1%) | 61.9% til compact')
+    assert.ok(result, 'Should return true for valid status line')
+    assert.equal(events.length, 1)
+    assert.equal(events[0].cost, 77.79)
+    assert.equal(events[0].model, 'Opus 4.6')
+    assert.equal(events[0].messageCount, 375)
+    assert.equal(events[0].contextTokens, '76.1K')
+    assert.equal(events[0].contextPercent, 38.1)
+    assert.equal(events[0].compactPercent, 61.9)
+  })
+
+  it('parses status line without compact percentage', () => {
+    const parser = createParser()
+    const events = collectEvents(parser, 'status_update')
+
+    const result = parser._extractStatusBar('$0.50 | Sonnet 4 | msgs:12 | 5.2K (2.5%)')
+    assert.ok(result)
+    assert.equal(events[0].cost, 0.5)
+    assert.equal(events[0].model, 'Sonnet 4')
+    assert.equal(events[0].messageCount, 12)
+    assert.equal(events[0].contextTokens, '5.2K')
+    assert.equal(events[0].contextPercent, 2.5)
+    assert.equal(events[0].compactPercent, null)
+  })
+
+  it('returns false for non-status lines', () => {
+    const parser = createParser()
+    const events = collectEvents(parser, 'status_update')
+
+    assert.ok(!parser._extractStatusBar('Hello world'))
+    assert.ok(!parser._extractStatusBar('$0.50'))
+    assert.ok(!parser._extractStatusBar('I used $5.00 today'))
+    assert.equal(events.length, 0)
+  })
+
+  it('is called before _isNoise in _processLine', async () => {
+    const parser = createParser()
+    const statusEvents = collectEvents(parser, 'status_update')
+    const messages = collectEvents(parser, 'message')
+
+    parser.feed('$77.79 | Opus 4.6 | msgs:375 | 76.1K (38.1%) | 61.9% til compact\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    assert.equal(statusEvents.length, 1, 'Should emit status_update')
+    assert.equal(messages.length, 0, 'Should not emit as a message')
+  })
+
+  it('handles integer cost', () => {
+    const parser = createParser()
+    const events = collectEvents(parser, 'status_update')
+
+    parser._extractStatusBar('$5 | Haiku 4 | msgs:1 | 1K (0.5%)')
+    assert.equal(events.length, 1)
+    assert.equal(events[0].cost, 5)
+  })
+})
+
+describe('Smoke test #3 — end-to-end echo + noise', () => {
+  it('user input echo does not appear as response bubble', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    // Simulate app sending "fix the bug" + PTY echoing it
+    parser.expectEcho('fix the bug')
+    parser.feed('fix the bug\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    const responses = messages.filter(m => m.type === 'response')
+    assert.equal(responses.length, 0, 'Echo should not produce a response bubble')
+  })
+
+  it('real Claude response passes through after echo suppression', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    // Simulate: user types, echo suppressed, then Claude responds
+    parser.expectEcho('fix the bug')
+    parser.feed('fix the bug\n')
+    parser.feed('⏺ I found the issue in auth.js and fixed it.\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    assert.equal(messages.length, 1)
+    assert.equal(messages[0].type, 'response')
+    assert.ok(messages[0].content.includes('auth.js'))
+  })
+
+  it('smoke test #3 leaked lines are all suppressed', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    const leakedLines = [
+      '⎿ Read 15 lines',
+      '⎿ Added 3 lines',
+      '1 file +3 -0',
+      'tokens',
+      'l compact 100653 tokens',
+      'msgs:375',
+      'merge main',
+      'commit -m "fix"',
+      '$77.79 | Opus 4.6 | msgs:375 | 76.1K (38.1%) | 61.9% til compact',
+    ]
+    for (const line of leakedLines) {
+      parser.feed(line + '\n')
+    }
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    assert.equal(messages.length, 0,
+      `Expected no messages but got ${messages.length}: ${messages.map(m => JSON.stringify(m.content.trim().slice(0, 50))).join(', ')}`)
+  })
+
+  it('content with "compact", "tokens", "merge" renders in RESPONSE', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    parser.feed('⏺ I ran compact on the database to free up tokens. Then I did merge main.\n')
+
+    await new Promise(r => setTimeout(r, 2000))
+
+    assert.ok(messages.length >= 1)
+    const content = messages[0].content
+    assert.ok(content.includes('compact'), '"compact" should appear in response')
+    assert.ok(content.includes('tokens'), '"tokens" should appear in response')
+    assert.ok(content.includes('merge'), '"merge" should appear in response')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke Test #4 Fixes
+// ─────────────────────────────────────────────────────────────────────
+
+describe('CUP fragment filter — multi-digit number tokens', () => {
+  let parser
+
+  beforeEach(() => {
+    parser = createParser()
+  })
+
+  it('filters "h g 88" (single-char + multi-digit number)', () => {
+    assert.ok(parser._isNoise('h g 88'))
+  })
+
+  it('filters "c n 38" (single-char + multi-digit number)', () => {
+    assert.ok(parser._isNoise('c n 38'))
+  })
+
+  it('filters "H c 88" (single-char + multi-digit number)', () => {
+    assert.ok(parser._isNoise('H c 88'))
+  })
+
+  it('filters "a 123" (single-char + 3-digit number)', () => {
+    assert.ok(parser._isNoise('a 123'))
+  })
+
+  it('does not filter "word 88" (multi-char token + number)', () => {
+    assert.ok(!parser._isNoise('word 88'))
+  })
+
+  it('does not filter long lines with numbers', () => {
+    assert.ok(!parser._isNoise('The answer is 88 tokens'))
+  })
+})
+
+describe('CLI chrome noise filter', () => {
+  let parser
+
+  beforeEach(() => {
+    parser = createParser()
+  })
+
+  it('filters "Press up to edit queued messages"', () => {
+    assert.ok(parser._isNoise('Press up to edit queued messages'))
+  })
+
+  it('filters "Press enter to send"', () => {
+    assert.ok(parser._isNoise('Press enter to send'))
+  })
+
+  it('filters "Press escape to cancel"', () => {
+    assert.ok(parser._isNoise('Press escape to cancel'))
+  })
+
+  it('filters "Press ctrl+c to interrupt"', () => {
+    assert.ok(parser._isNoise('Press ctrl+c to interrupt'))
+  })
+
+  it('preserves long lines starting with "Press"', () => {
+    assert.ok(!parser._isNoise('Press the button on the left side of the dashboard to navigate to the settings panel for configuration'))
+  })
+
+  it('preserves "Press" in response context', () => {
+    assert.ok(!parser._isNoise('Press coverage improved from 40% to 80%'))
+  })
+})

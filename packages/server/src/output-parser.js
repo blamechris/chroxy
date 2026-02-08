@@ -36,11 +36,39 @@ export class OutputParser extends EventEmitter {
     // Pending interactive prompt being accumulated
     this._pendingPrompt = null;
     this._promptFlushTimer = null;
+    // Echo suppression: lines expected from PTY echo of user input
+    this._pendingEchos = [];
     // Scrollback suppression: when attaching to an existing tmux session,
     // suppress message emissions until the initial data burst finishes
     // (detected by 500ms of silence on feed()). Raw events still emit.
     this._suppressingScrollback = suppressScrollback;
     this._scrollbackQuietTimer = null;
+  }
+
+  /**
+   * Register text expected to echo back from the PTY.
+   * Stores as a single whitespace-normalized blob with 5s TTL.
+   * tmux wraps long input at ~120 cols, so the echo arrives as
+   * multiple fragments — substring containment catches them all.
+   */
+  expectEcho(text) {
+    const normalized = text.replace(/\r/g, '').replace(/\s+/g, ' ').trim()
+    if (!normalized) return
+    this._pendingEchos.push({ blob: normalized, expires: Date.now() + 5000 })
+  }
+
+  /**
+   * Check if a trimmed line is a substring of a pending echo blob.
+   * Does NOT consume on match — let TTL expire naturally, since
+   * one echo produces multiple fragments from tmux line wrapping.
+   */
+  _matchAndConsumeEcho(trimmed) {
+    const now = Date.now()
+    // Prune expired entries
+    this._pendingEchos = this._pendingEchos.filter(e => e.expires > now)
+    const normalized = trimmed.replace(/\s+/g, ' ')
+    if (!normalized) return false
+    return this._pendingEchos.some(e => e.blob.includes(normalized))
   }
 
   /**
@@ -96,6 +124,8 @@ export class OutputParser extends EventEmitter {
     if (/^\[(?:parser|ws|cli|tunnel|pty|pty-session|SIGINT)\]\s/.test(trimmed)) return true
     // Server output fragments that leak from tmux scrollback
     if (/^Press Ctrl\+C to stop/i.test(trimmed)) return true
+    // CLI chrome: "Press up to edit queued messages", "Press enter to send", etc.
+    if (/^Press\s+(up|enter|escape|ctrl)/i.test(trimmed) && trimmed.length < 60) return true
     if (/^Or connect manually:/i.test(trimmed)) return true
     if (/^URL:\s+wss?:\/\//i.test(trimmed)) return true
     if (/^Token:\s+\w+/i.test(trimmed)) return true
@@ -113,7 +143,7 @@ export class OutputParser extends EventEmitter {
     // State-independent — these are never legitimate content in any state.
     if (trimmed.length < 20) {
       const tokens = trimmed.split(/\s+/)
-      if (tokens.length >= 2 && tokens.every(t => t.length <= 1)) return true
+      if (tokens.length >= 2 && tokens.every(t => t.length <= 1 || /^\d{1,3}$/.test(t))) return true
     }
     // Numeric-only fragments with optional punctuation (CUP artifacts, line counters)
     // Examples: "7 0 -0", "8 187 -3", "2 9 )"
@@ -189,6 +219,28 @@ export class OutputParser extends EventEmitter {
     if (/^Baked\s+for\s+\d/i.test(trimmed)) return true
     // "Conversation compacted" notification from Claude Code context compaction
     if (/conversation\s+compacted/i.test(trimmed)) return true
+    // Tool result summaries: "⎿ Read 15 lines" / "⎿ Added 3 lines"
+    if (/⎿\s*\w+\s+\d+\s*(lines?|chars?|bytes?)/i.test(trimmed)) return true
+    // General ⎿ lines outside TOOL_USE/RESPONSE (tool chrome)
+    // Skip if line starts with a tool name (compact tool format like "Bash(cmd) ⎿ output")
+    if (this.state !== State.TOOL_USE && this.state !== State.RESPONSE &&
+        /⎿/.test(trimmed) && trimmed.length < 60 &&
+        !/^(Read|Write|Edit|Bash|Search|Glob|Grep|TodoRead|TodoWrite|Task|Skill|WebFetch|WebSearch|NotebookEdit)\(/.test(trimmed)) return true
+    // Git diff summaries: "1 file +3 -0" / "N files changed"
+    if (/\d+\s*files?\s*[+(changed)]/i.test(trimmed) && trimmed.length < 50
+        && !/^⏺/.test(trimmed)) return true
+    // Standalone "tokens" / "tokens)"
+    if (/^tokens\)?$/i.test(trimmed)) return true
+    // CUP-split compact status: "l compact 100653 tokens"
+    if (/compact\s+\d+\s*tokens/i.test(trimmed)) return true
+    // Message count: "msgs:375"
+    if (/msgs?:\s*\d+/i.test(trimmed)) return true
+    // tsc output leakage
+    if (/tsc:\s*The\s*TypeScript/i.test(trimmed)) return true
+    // Autosuggest ghost text: short imperative git commands (not in RESPONSE)
+    if (this.state !== State.RESPONSE &&
+        /^(merge|commit|push|pull|rebase|checkout)\s/i.test(trimmed)
+        && trimmed.length < 30) return true
     return false;
   }
 
@@ -214,7 +266,7 @@ export class OutputParser extends EventEmitter {
     // Length < 20 prevents false positives on "Writing tests for the parser module" etc.
     // Skip during RESPONSE state — "Reading..." can appear as sentence fragment in responses.
     if (this.state !== State.RESPONSE &&
-        /^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|imagining|waiting)(…|\.\.\.)?$/i.test(trimmed) && trimmed.length < 20) return true;
+        /^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|imagining|waiting|unravelling|fetching|preparing|generating|resolving|updating|parsing|cogitating)(…|\.\.\.)?$/i.test(trimmed) && trimmed.length < 20) return true;
     // "N thinking" — thinking counter fragment (e.g. "42 thinking", "7 thinking")
     if (/^\d+\s*thinking/i.test(trimmed)) return true;
     // Lines ending with "thinking" or "thinking)" — status bar fragments like "c a thinking"
@@ -224,13 +276,41 @@ export class OutputParser extends EventEmitter {
     // Known spinner verb with "…" or "..." — e.g. "Actualizing…", "Imagining… 39"
     // Skip during RESPONSE state — "Reading..." or "Writing..." can appear in response text.
     if (this.state !== State.RESPONSE &&
-        /^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|imagining|waiting|downloading|compiling|installing|building|connecting|loading)(…|\.\.\.)/i.test(trimmed) && trimmed.length < 30) return true;
+        /^(thinking|swirling|reasoning|pondering|processing|analyzing|considering|working|reading|writing|searching|editing|actualizing|imagining|waiting|downloading|compiling|installing|building|connecting|loading|unravelling|fetching|preparing|generating|resolving|updating|parsing|cogitating)(…|\.\.\.)/i.test(trimmed) && trimmed.length < 30) return true;
     // General: any capitalized word ending in … or ... followed by optional trailing noise
     // (numbers, arrows, spaces). Future-proofs against new creative spinner verbs.
     // Skip during RESPONSE state — "However...", "Meanwhile..." are real response content.
     if (this.state !== State.RESPONSE &&
         /^[A-Z][a-z]+(…|\.\.\.)\s*[\d↑↓\s]*$/.test(trimmed) && trimmed.length < 40) return true;
+    // Multi-word spinner: "Wait Unravelling…" / "Just Thinking..."
+    if (this.state !== State.RESPONSE &&
+        /^[A-Z][a-z]+\s+[A-Z][a-z]+(…|\.\.\.)\s*[\d↑↓\s]*$/.test(trimmed)
+        && trimmed.length < 50) return true;
+    // Line ending with ellipsis + scroll indicators
+    if (this.state !== State.RESPONSE &&
+        /(…|\.\.\.)\s*[↑↓]\s*[\d\s]*$/.test(trimmed)
+        && trimmed.length < 50) return true;
     return false;
+  }
+
+  /**
+   * Extract Claude Code status bar line and emit as structured metadata.
+   * Format: "$77.79 | Opus 4.6 | msgs:375 | 76.1K (38.1%) | 61.9% til compact"
+   */
+  _extractStatusBar(trimmed) {
+    const match = trimmed.match(
+      /^\$(\d+\.?\d*)\s*\|\s*(.+?)\s*\|\s*msgs?:(\d+)\s*\|\s*([\d.]+[KkMm]?)\s*\(([\d.]+)%\)(?:\s*\|\s*([\d.]+)%\s*til\s*compact)?/
+    )
+    if (!match) return false
+    this.emit('status_update', {
+      cost: parseFloat(match[1]),
+      model: match[2],
+      messageCount: parseInt(match[3], 10),
+      contextTokens: match[4],
+      contextPercent: parseFloat(match[5]),
+      compactPercent: match[6] ? parseFloat(match[6]) : null,
+    })
+    return true
   }
 
   /**
@@ -313,6 +393,9 @@ export class OutputParser extends EventEmitter {
   _processLine(line) {
     const trimmed = line.trim();
     if (!trimmed) return;
+
+    // Extract status bar (before noise filtering — status lines are also matched by noise)
+    if (this._extractStatusBar(trimmed)) return;
 
     // Skip noise
     if (this._isNoise(trimmed)) return;
@@ -409,6 +492,8 @@ export class OutputParser extends EventEmitter {
       this.currentMessage.content += trimmed + "\n";
       this._resetFlush();
     } else if (this.state === State.IDLE || this.state === State.THINKING) {
+      // Suppress echoed user input from PTY
+      if (this._matchAndConsumeEcho(trimmed)) return;
       // New response content
       this.state = State.RESPONSE;
       this.currentMessage = {
