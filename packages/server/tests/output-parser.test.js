@@ -1875,3 +1875,90 @@ describe('CLI chrome noise filter', () => {
     assert.ok(!parser._isNoise('Press coverage improved from 40% to 80%'))
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────
+// Prompt detection state gating (issue #91, #103)
+// Regression test for numbered-list false positives during RESPONSE state
+// ─────────────────────────────────────────────────────────────────────
+
+describe('prompt detection state gating (issue #91, #103)', () => {
+  it('does not detect numbered lists as prompts during RESPONSE state', async () => {
+    const parser = new OutputParser({ assumeReady: true, flushDelay: 10 })
+    const messages = collectEvents(parser, 'message')
+
+    // Enter RESPONSE state by feeding a response marker
+    parser.feed('⏺ Here is my response:\n')
+    parser.feed('1. First item in the list\n')
+    parser.feed('2. Second item in the list\n')
+    parser.feed('3. Third item in the list\n')
+
+    // Wait for prompt flush window (500ms) + buffer to catch any false-positive prompts
+    await new Promise(r => setTimeout(r, 700))
+
+    // Should only have response messages, NO prompt messages
+    const promptMessages = messages.filter(m => m.type === 'prompt')
+    assert.equal(promptMessages.length, 0, 'Should not emit prompt messages for numbered lists in RESPONSE state')
+
+    // Should have emitted the response with the numbered list content
+    const responseMessages = messages.filter(m => m.type === 'response')
+    assert.ok(responseMessages.length >= 1, 'Should emit response message')
+    const content = responseMessages.map(m => m.content).join('')
+    assert.ok(content.includes('First item'), 'Should include numbered list content')
+    assert.ok(content.includes('Second item'), 'Should include numbered list content')
+  })
+
+  it('does not set _pendingPrompt for numbered lists during RESPONSE state', () => {
+    const parser = new OutputParser({ assumeReady: true, flushDelay: 10 })
+
+    // Enter RESPONSE state
+    parser.feed('⏺ Here is a list:\n')
+
+    // Verify state is RESPONSE
+    assert.equal(parser.state, 'response')
+
+    // Feed numbered lines — _processLine should skip _detectPrompt entirely
+    parser.feed('1. First option\n')
+    parser.feed('2. Second option\n')
+
+    // _pendingPrompt should remain null because _detectPrompt never ran
+    assert.equal(parser._pendingPrompt, null, '_pendingPrompt should stay null during RESPONSE state')
+  })
+
+  it('still detects ❯ prompts correctly in IDLE state', async () => {
+    const parser = new OutputParser({ assumeReady: true, flushDelay: 10 })
+    const messages = collectEvents(parser, 'message')
+
+    // Parser starts in IDLE state
+    assert.equal(parser.state, 'idle')
+
+    // Feed a prompt character to verify prompt detection works in IDLE
+    parser.feed('❯ user input here\n')
+
+    await new Promise(r => setTimeout(r, 50))
+
+    // Should emit user_input type (the ❯ prompt is handled differently from numbered prompts)
+    const userInputs = messages.filter(m => m.type === 'user_input')
+    assert.equal(userInputs.length, 1, 'Should detect and emit ❯ prompt in IDLE state')
+  })
+
+  it('detects numbered prompts in IDLE state', async () => {
+    const parser = new OutputParser({ assumeReady: true, flushDelay: 10 })
+    const messages = collectEvents(parser, 'message')
+
+    // Parser starts in IDLE state
+    assert.equal(parser.state, 'idle')
+
+    // Feed numbered option lines via _detectPrompt (simulating prompt detection logic)
+    parser._detectPrompt('1. Allow this action')
+    parser._detectPrompt('2. Deny this action')
+
+    // Wait for prompt flush window
+    await new Promise(r => setTimeout(r, 700))
+
+    // Should emit a prompt message with options
+    const promptMessages = messages.filter(m => m.type === 'prompt')
+    assert.equal(promptMessages.length, 1, 'Should detect numbered prompts in IDLE state')
+    assert.ok(promptMessages[0].options, 'Prompt should have options array')
+    assert.equal(promptMessages[0].options.length, 2, 'Should have 2 options')
+  })
+})
