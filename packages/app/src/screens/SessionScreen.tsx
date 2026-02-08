@@ -346,12 +346,22 @@ export function SessionScreen() {
     setSelectedIds(new Set(messages.map((m) => m.id)));
   }, [messages]);
 
+  const formatTranscript = useCallback((selected: ChatMessage[]) => {
+    return selected
+      .filter((m) => m.type !== 'thinking')
+      .map((m) => {
+        const label = m.type === 'user_input' ? 'You'
+          : m.type === 'tool_use' ? `Tool: ${m.tool || 'unknown'}`
+          : m.type === 'error' ? 'Error'
+          : m.type === 'prompt' ? 'Prompt'
+          : 'Claude';
+        return `[${label}] ${m.content?.trim() || ''}`;
+      }).join('\n\n');
+  }, []);
+
   const handleCopy = useCallback(async () => {
     const selected = messages.filter((m) => selectedIds.has(m.id));
-    const text = selected.map((m) => {
-      const label = m.type === 'user_input' ? 'You' : m.type === 'tool_use' ? `Tool: ${m.tool}` : 'Claude';
-      return `[${label}] ${m.content?.trim() || ''}`;
-    }).join('\n\n');
+    const text = formatTranscript(selected);
     try {
       await Clipboard.setStringAsync(text);
       Alert.alert('Copied', `${selected.length} message${selected.length > 1 ? 's' : ''} copied to clipboard`);
@@ -360,22 +370,19 @@ export function SessionScreen() {
       console.error('Failed to copy messages to clipboard', error);
       Alert.alert('Copy failed', 'Unable to copy messages to clipboard. Please try again.');
     }
-  }, [messages, selectedIds, clearSelection]);
+  }, [messages, selectedIds, clearSelection, formatTranscript]);
 
   const handleExport = useCallback(async () => {
     const selected = messages.filter((m) => selectedIds.has(m.id));
-    const text = selected.map((m) => {
-      const label = m.type === 'user_input' ? 'You' : m.type === 'tool_use' ? `Tool: ${m.tool}` : m.type === 'error' ? 'Error' : 'Claude';
-      return `[${label}] ${m.content?.trim() || ''}`;
-    }).join('\n\n');
+    const text = formatTranscript(selected);
     try {
       await Share.share({ message: text });
       clearSelection();
     } catch (error) {
-      console.error('Failed to export messages', error);
-      Alert.alert('Export failed', 'Unable to share messages. Please try again.');
+      console.error('Failed to share messages', error);
+      Alert.alert('Share failed', 'Unable to share messages. Please try again.');
     }
-  }, [messages, selectedIds, clearSelection]);
+  }, [messages, selectedIds, clearSelection, formatTranscript]);
 
   const handleSend = () => {
     if (!inputText.trim() || streamingMessageId) return;
