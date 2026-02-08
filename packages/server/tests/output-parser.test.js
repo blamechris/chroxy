@@ -1536,9 +1536,8 @@ describe('Echo suppression', () => {
     assert.equal(parser._pendingEchos.length, 0)
   })
 
-  it('suppresses echo for bare \\r input (enter key)', async () => {
+  it('suppresses echo for bare \\r input (enter key)', () => {
     const parser = createParser()
-    const messages = collectEvents(parser, 'message')
 
     // \r alone normalizes to empty — should be ignored, not crash
     parser.expectEcho('\r')
