@@ -501,7 +501,7 @@ export function SessionScreen() {
       )}
 
       {/* Collapsible settings bar (CLI mode or PTY mode with status data) */}
-      {((isCliMode && !activeSession?.hasTerminal && (availableModels.length > 0 || lastResultCost != null || contextUsage)) || (!isCliMode && claudeStatus)) && (
+      {((isCliMode && !activeSession?.hasTerminal && (availableModels.length > 0 || lastResultCost != null || contextUsage)) || (activeSession?.hasTerminal && claudeStatus)) && (
         <SettingsBar
           expanded={settingsExpanded}
           onToggle={() => {
@@ -646,8 +646,12 @@ function SettingsBar({
     if (claudeStatus.model) {
       summaryParts.push(claudeStatus.model);
     }
-    summaryParts.push(`$${claudeStatus.cost.toFixed(2)}`);
-    summaryParts.push(claudeStatus.contextTokens);
+    if (typeof claudeStatus.cost === 'number') {
+      summaryParts.push(`$${claudeStatus.cost.toFixed(2)}`);
+    }
+    if (claudeStatus.contextTokens) {
+      summaryParts.push(claudeStatus.contextTokens);
+    }
   } else {
     // CLI mode: use existing fields
     if (activeModel) {
@@ -682,13 +686,23 @@ function SettingsBar({
           {claudeStatus ? (
             // PTY mode: display claudeStatus data
             <View style={settingsBarStyles.contextRow}>
-              <Text style={settingsBarStyles.contextText}>
-                {claudeStatus.model} \u00B7 ${claudeStatus.cost.toFixed(4)}
-              </Text>
-              <Text style={settingsBarStyles.contextText}>
-                {claudeStatus.contextTokens} ({claudeStatus.contextPercent}%)
-              </Text>
-              {claudeStatus.messageCount > 0 && (
+              {(claudeStatus.model || typeof claudeStatus.cost === 'number') && (
+                <Text style={settingsBarStyles.contextText}>
+                  {claudeStatus.model || 'Unknown'}
+                  {typeof claudeStatus.cost === 'number' && ` \u00B7 $${claudeStatus.cost.toFixed(4)}`}
+                </Text>
+              )}
+              {claudeStatus.contextTokens && typeof claudeStatus.contextPercent === 'number' && (
+                <Text style={settingsBarStyles.contextText}>
+                  {claudeStatus.contextTokens} ({claudeStatus.contextPercent}%)
+                </Text>
+              )}
+              {typeof claudeStatus.compactPercent === 'number' && (
+                <Text style={settingsBarStyles.contextText}>
+                  {claudeStatus.compactPercent}% til compact
+                </Text>
+              )}
+              {typeof claudeStatus.messageCount === 'number' && claudeStatus.messageCount > 0 && (
                 <Text style={settingsBarStyles.contextText}>
                   {claudeStatus.messageCount} msg{claudeStatus.messageCount !== 1 ? 's' : ''}
                 </Text>
