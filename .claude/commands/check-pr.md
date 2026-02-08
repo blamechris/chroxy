@@ -22,9 +22,6 @@ gh api repos/${REPO}/pulls/${PR_NUM}/comments
 
 # Fetch all reviews
 gh api repos/${REPO}/pulls/${PR_NUM}/reviews
-
-# Fetch issue-level comments (to check if previous check-pr already ran)
-gh api repos/${REPO}/issues/${PR_NUM}/comments
 ```
 
 ### 2. Skip Already-Replied Comments
@@ -46,7 +43,7 @@ For each review comment (Copilot or human) that has NOT been replied to, you MUS
 2. Evaluate if it's actionable
 3. Take action AND post a reply
 
-**Default stance: FIX IT NOW** - Only defer if truly a false positive.
+**Default stance: FIX IT NOW** - Only defer if the suggestion is a false positive or requires scope expansion (tracked via follow-up issue).
 
 **CRITICAL: There are ONLY THREE valid outcomes for each comment. Every comment MUST result in one of these:**
 
@@ -65,7 +62,9 @@ For each review comment (Copilot or human) that has NOT been replied to, you MUS
 ```bash
 gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
   --method POST \
-  -f body="Fixed in \`${COMMIT_SHA}\`
+  -f body="**FIX**
+
+Fixed in \`${COMMIT_SHA}\`
 
 **Change:** Brief description of fix
 
@@ -84,7 +83,7 @@ Only use this if the suggestion is factually incorrect. Reply inline:
 ```bash
 gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
   --method POST \
-  -f body="**Not an issue**
+  -f body="**FALSE POSITIVE**
 
 **Reason:** Clear explanation of why this is correct
 
@@ -132,7 +131,7 @@ EOF
 # 2. Reply inline referencing the issue — MUST include the issue URL
 gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
   --method POST \
-  -f body="**Tracked for follow-up**
+  -f body="**FOLLOW-UP ISSUE**
 
 Created ${ISSUE_URL} to track this.
 
@@ -147,7 +146,7 @@ git push
 
 ### 5. Post Summary Comment
 
-After addressing ALL comments, post a summary on the PR. Every row MUST have a commit hash or issue URL in the Commit/Issue column — no empty cells, no "N/A" for deferred items.
+After addressing ALL comments, post a summary on the PR. Every row MUST have a commit hash, issue URL, or brief justification in the Commit/Issue column.
 
 ```bash
 gh pr comment ${PR_NUM} --body "$(cat <<'EOF'
