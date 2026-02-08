@@ -304,6 +304,7 @@ export function SessionScreen() {
     contextUsage,
     lastResultCost,
     lastResultDuration,
+    claudeStatus,
     setModel,
     setPermissionMode,
     sendPermissionResponse,
@@ -499,8 +500,8 @@ export function SessionScreen() {
         </View>
       )}
 
-      {/* Collapsible settings bar (CLI mode only, when model/permission data is available) */}
-      {isCliMode && !activeSession?.hasTerminal && (availableModels.length > 0 || lastResultCost != null || contextUsage) && (
+      {/* Collapsible settings bar (CLI mode or PTY mode with status data) */}
+      {((isCliMode && !activeSession?.hasTerminal && (availableModels.length > 0 || lastResultCost != null || contextUsage)) || (!isCliMode && claudeStatus)) && (
         <SettingsBar
           expanded={settingsExpanded}
           onToggle={() => {
@@ -514,6 +515,7 @@ export function SessionScreen() {
           lastResultCost={lastResultCost}
           lastResultDuration={lastResultDuration}
           contextUsage={contextUsage}
+          claudeStatus={claudeStatus}
           setModel={setModel}
           setPermissionMode={setPermissionMode}
         />
@@ -619,6 +621,7 @@ function SettingsBar({
   lastResultCost,
   lastResultDuration,
   contextUsage,
+  claudeStatus,
   setModel,
   setPermissionMode,
 }: {
@@ -631,27 +634,39 @@ function SettingsBar({
   lastResultCost: number | null;
   lastResultDuration: number | null;
   contextUsage: { inputTokens: number; outputTokens: number; cacheCreation: number; cacheRead: number } | null;
+  claudeStatus: { cost: number; model: string; messageCount: number; contextTokens: string; contextPercent: number; compactPercent: number | null } | null;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
 }) {
   // Build collapsed summary: "Opus · Approve · $0.02 · 12.3k"
   const summaryParts: string[] = [];
-  if (activeModel) {
-    const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
-    summaryParts.push(modelInfo?.label || activeModel);
-  }
-  if (permissionMode) {
-    const permInfo = availablePermissionModes.find((m) => m.id === permissionMode);
-    summaryParts.push(permInfo?.label || permissionMode);
-  }
-  if (lastResultCost != null) {
-    summaryParts.push(`$${lastResultCost.toFixed(2)}`);
-  }
-  if (contextUsage) {
-    const total = contextUsage.inputTokens + contextUsage.outputTokens;
-    if (total >= 1_000_000) summaryParts.push(`${(total / 1_000_000).toFixed(1)}M`);
-    else if (total >= 1_000) summaryParts.push(`${(total / 1_000).toFixed(1)}k`);
-    else summaryParts.push(`${total}`);
+
+  // PTY mode: use claudeStatus if available
+  if (claudeStatus) {
+    if (claudeStatus.model) {
+      summaryParts.push(claudeStatus.model);
+    }
+    summaryParts.push(`$${claudeStatus.cost.toFixed(2)}`);
+    summaryParts.push(claudeStatus.contextTokens);
+  } else {
+    // CLI mode: use existing fields
+    if (activeModel) {
+      const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
+      summaryParts.push(modelInfo?.label || activeModel);
+    }
+    if (permissionMode) {
+      const permInfo = availablePermissionModes.find((m) => m.id === permissionMode);
+      summaryParts.push(permInfo?.label || permissionMode);
+    }
+    if (lastResultCost != null) {
+      summaryParts.push(`$${lastResultCost.toFixed(2)}`);
+    }
+    if (contextUsage) {
+      const total = contextUsage.inputTokens + contextUsage.outputTokens;
+      if (total >= 1_000_000) summaryParts.push(`${(total / 1_000_000).toFixed(1)}M`);
+      else if (total >= 1_000) summaryParts.push(`${(total / 1_000).toFixed(1)}k`);
+      else summaryParts.push(`${total}`);
+    }
   }
 
   return (
@@ -664,56 +679,76 @@ function SettingsBar({
       </TouchableOpacity>
       {expanded && (
         <View style={settingsBarStyles.expandedContent}>
-          {availableModels.length > 0 && (
-            <View style={settingsBarStyles.chipRow}>
-              {availableModels.map((m) => {
-                const isActive = activeModel === m.id || activeModel === m.fullId;
-                return (
-                  <TouchableOpacity
-                    key={m.id}
-                    style={[settingsBarStyles.chip, isActive && settingsBarStyles.chipActive]}
-                    onPress={() => setModel(m.id)}
-                  >
-                    <Text style={[settingsBarStyles.chipText, isActive && settingsBarStyles.chipTextActive]}>
-                      {m.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          )}
-          {availablePermissionModes.length > 0 && (
-            <View style={settingsBarStyles.chipRow}>
-              {availablePermissionModes.map((m) => {
-                const isActive = permissionMode === m.id;
-                return (
-                  <TouchableOpacity
-                    key={m.id}
-                    style={[settingsBarStyles.chip, isActive && settingsBarStyles.chipActive]}
-                    onPress={() => setPermissionMode(m.id)}
-                  >
-                    <Text style={[settingsBarStyles.chipText, isActive && settingsBarStyles.chipTextActive]}>
-                      {m.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          )}
-          {(lastResultCost != null || contextUsage) && (
+          {claudeStatus ? (
+            // PTY mode: display claudeStatus data
             <View style={settingsBarStyles.contextRow}>
-              {lastResultCost != null && (
+              <Text style={settingsBarStyles.contextText}>
+                {claudeStatus.model} \u00B7 ${claudeStatus.cost.toFixed(4)}
+              </Text>
+              <Text style={settingsBarStyles.contextText}>
+                {claudeStatus.contextTokens} ({claudeStatus.contextPercent}%)
+              </Text>
+              {claudeStatus.messageCount > 0 && (
                 <Text style={settingsBarStyles.contextText}>
-                  ${lastResultCost.toFixed(4)}
-                  {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
-                </Text>
-              )}
-              {contextUsage && (
-                <Text style={settingsBarStyles.contextText}>
-                  {formatTokenCount(contextUsage.inputTokens + contextUsage.outputTokens)}
+                  {claudeStatus.messageCount} msg{claudeStatus.messageCount !== 1 ? 's' : ''}
                 </Text>
               )}
             </View>
+          ) : (
+            // CLI mode: display existing fields
+            <>
+              {availableModels.length > 0 && (
+                <View style={settingsBarStyles.chipRow}>
+                  {availableModels.map((m) => {
+                    const isActive = activeModel === m.id || activeModel === m.fullId;
+                    return (
+                      <TouchableOpacity
+                        key={m.id}
+                        style={[settingsBarStyles.chip, isActive && settingsBarStyles.chipActive]}
+                        onPress={() => setModel(m.id)}
+                      >
+                        <Text style={[settingsBarStyles.chipText, isActive && settingsBarStyles.chipTextActive]}>
+                          {m.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
+              {availablePermissionModes.length > 0 && (
+                <View style={settingsBarStyles.chipRow}>
+                  {availablePermissionModes.map((m) => {
+                    const isActive = permissionMode === m.id;
+                    return (
+                      <TouchableOpacity
+                        key={m.id}
+                        style={[settingsBarStyles.chip, isActive && settingsBarStyles.chipActive]}
+                        onPress={() => setPermissionMode(m.id)}
+                      >
+                        <Text style={[settingsBarStyles.chipText, isActive && settingsBarStyles.chipTextActive]}>
+                          {m.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
+              {(lastResultCost != null || contextUsage) && (
+                <View style={settingsBarStyles.contextRow}>
+                  {lastResultCost != null && (
+                    <Text style={settingsBarStyles.contextText}>
+                      ${lastResultCost.toFixed(4)}
+                      {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
+                    </Text>
+                  )}
+                  {contextUsage && (
+                    <Text style={settingsBarStyles.contextText}>
+                      {formatTokenCount(contextUsage.inputTokens + contextUsage.outputTokens)}
+                    </Text>
+                  )}
+                </View>
+              )}
+            </>
           )}
         </View>
       )}
