@@ -1,20 +1,34 @@
 import { spawn } from "child_process";
+import { EventEmitter } from "events";
 
 /**
  * Manages a Cloudflare Quick Tunnel.
  * Spawns `cloudflared tunnel` as a child process and parses
  * the assigned URL from its stderr output.
  * No account or configuration required.
+ *
+ * Auto-recovers on unexpected cloudflared crash with exponential backoff.
  */
-export class TunnelManager {
+export class TunnelManager extends EventEmitter {
   constructor({ port }) {
+    super();
     this.port = port;
     this.process = null;
     this.url = null;
+    this.intentionalShutdown = false;
+    this.recoveryAttempt = 0;
+    this.maxRecoveryAttempts = 3;
+    this.recoveryBackoffs = [3000, 6000, 12000]; // ms
   }
 
   /** Start the Cloudflare tunnel and return the public URL */
   async start() {
+    this.intentionalShutdown = false;
+    this.recoveryAttempt = 0;
+    return this._startTunnel();
+  }
+
+  async _startTunnel() {
     return new Promise((resolve, reject) => {
       const proc = spawn("cloudflared", [
         "tunnel", "--url", `http://localhost:${this.port}`, "--no-autoupdate",
@@ -52,11 +66,14 @@ export class TunnelManager {
         }
       });
 
-      proc.on("close", (code) => {
+      proc.on("close", (code, signal) => {
         if (!resolved) {
           reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`));
         } else {
-          console.log(`[tunnel] cloudflared exited with code ${code}`);
+          // Tunnel was running and now it crashed
+          void this._handleUnexpectedExit(code, signal).catch((err) => {
+            console.error("[tunnel] Error while handling unexpected cloudflared exit:", err);
+          });
         }
         this.process = null;
         this.url = null;
@@ -73,9 +90,72 @@ export class TunnelManager {
     });
   }
 
+  async _handleUnexpectedExit(code, signal) {
+    // Don't attempt recovery if this was an intentional shutdown
+    if (this.intentionalShutdown) {
+      console.log(`[tunnel] cloudflared exited cleanly (code ${code})`);
+      return;
+    }
+
+    // Unexpected exit - attempt recovery
+    const exitReason = signal ? `signal ${signal}` : `code ${code}`;
+    console.log(`[tunnel] cloudflared exited unexpectedly (${exitReason})`);
+    this.emit("tunnel_lost", { code, signal });
+
+    // Perform recovery attempts with backoff until success or max attempts reached
+    while (this.recoveryAttempt < this.maxRecoveryAttempts && !this.intentionalShutdown) {
+      const backoff = this.recoveryBackoffs[this.recoveryAttempt];
+      this.recoveryAttempt++;
+
+      console.log(
+        `[tunnel] Attempting recovery ${this.recoveryAttempt}/${this.maxRecoveryAttempts} in ${backoff}ms...`
+      );
+      this.emit("tunnel_recovering", {
+        attempt: this.recoveryAttempt,
+        delayMs: backoff,
+      });
+
+      await new Promise((r) => setTimeout(r, backoff));
+
+      if (this.intentionalShutdown) {
+        // Stop trying if a shutdown was requested during backoff
+        return;
+      }
+
+      try {
+        const { httpUrl, wsUrl } = await this._startTunnel();
+        console.log(`[tunnel] Recovery successful`);
+        this.emit("tunnel_recovered", {
+          httpUrl,
+          wsUrl,
+          attempt: this.recoveryAttempt,
+        });
+        this.recoveryAttempt = 0; // Reset on success
+        return;
+      } catch (err) {
+        console.error(
+          `[tunnel] Recovery attempt ${this.recoveryAttempt} failed: ${err.message}`
+        );
+        // Loop will continue if we still have remaining attempts
+      }
+    }
+
+    if (!this.intentionalShutdown && this.recoveryAttempt >= this.maxRecoveryAttempts) {
+      console.error(
+        `[tunnel] Recovery failed after ${this.maxRecoveryAttempts} attempts`
+      );
+      this.emit("tunnel_failed", {
+        message: `Tunnel recovery failed after ${this.maxRecoveryAttempts} attempts`,
+        lastExitCode: code,
+        lastSignal: signal,
+      });
+    }
+  }
+
   /** Stop the tunnel */
   async stop() {
     if (this.process) {
+      this.intentionalShutdown = true;
       this.process.kill();
       this.process = null;
       this.url = null;

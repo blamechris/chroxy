@@ -407,6 +407,7 @@ export function SessionScreen() {
     updateInputSettings,
     claudeReady,
     serverMode,
+    sessionCwd,
     streamingMessageId,
     isReconnecting,
     activeModel,
@@ -628,6 +629,8 @@ export function SessionScreen() {
           lastResultDuration={lastResultDuration}
           contextUsage={contextUsage}
           claudeStatus={claudeStatus}
+          sessionCwd={sessionCwd}
+          serverMode={serverMode}
           setModel={setModel}
           setPermissionMode={setPermissionMode}
         />
@@ -734,6 +737,8 @@ function SettingsBar({
   lastResultDuration,
   contextUsage,
   claudeStatus,
+  sessionCwd,
+  serverMode,
   setModel,
   setPermissionMode,
 }: {
@@ -747,11 +752,25 @@ function SettingsBar({
   lastResultDuration: number | null;
   contextUsage: { inputTokens: number; outputTokens: number; cacheCreation: number; cacheRead: number } | null;
   claudeStatus: ClaudeStatus | null;
+  sessionCwd: string | null;
+  serverMode: 'cli' | 'terminal' | null;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
 }) {
-  // Build collapsed summary: "Opus · Approve · $0.02 · 12.3k"
+  // Truncate working directory path for collapsed view
+  const truncatedCwd = sessionCwd
+    ? sessionCwd.replace(/^\/Users\/[^/]+/, '~').slice(-30)
+    : null;
+
+  // Build collapsed summary: "~/Projects/chroxy · cli · Opus · $0.02"
   const summaryParts: string[] = [];
+
+  if (truncatedCwd) {
+    summaryParts.push(truncatedCwd);
+  }
+  if (serverMode) {
+    summaryParts.push(serverMode);
+  }
 
   // PTY mode: use claudeStatus if available
   if (claudeStatus) {

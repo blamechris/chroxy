@@ -118,6 +118,10 @@ interface ConnectionState {
   // Server mode: 'cli' (headless) or 'terminal' (PTY/tmux)
   serverMode: 'cli' | 'terminal' | null;
 
+  // Server context (from auth_ok)
+  sessionCwd: string | null;
+  serverVersion: string | null;
+
   // Multi-session state
   sessions: SessionInfo[];
   activeSessionId: string | null;
@@ -354,6 +358,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   apiToken: null,
   socket: null,
   serverMode: null,
+  sessionCwd: null,
+  serverVersion: null,
   sessions: [],
   activeSessionId: null,
   sessionStates: {},
@@ -503,22 +509,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }
 
       switch (msg.type) {
-        case 'auth_ok':
+        case 'auth_ok': {
           // Reset replay flag — fresh auth means clean slate
           _receivingHistoryReplay = false;
           // Track this URL as successfully connected
           lastConnectedUrl = url;
+          // Extract server context from auth_ok
+          const authServerMode = typeof msg.serverMode === 'string' ? msg.serverMode : null;
+          const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
+          const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
           // On reconnect, preserve messages and terminal buffer
           if (isReconnect) {
-            set({ isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: null, streamingMessageId: null });
+            set({ isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: authServerMode, sessionCwd: authSessionCwd, serverVersion: authServerVersion, streamingMessageId: null });
           } else {
-            set({ isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: null, streamingMessageId: null, messages: [], terminalBuffer: '', sessions: [], activeSessionId: null, sessionStates: {} });
+            set({ isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: authServerMode, sessionCwd: authSessionCwd, serverVersion: authServerVersion, streamingMessageId: null, messages: [], terminalBuffer: '', sessions: [], activeSessionId: null, sessionStates: {} });
           }
           socket.send(JSON.stringify({ type: 'mode', mode: get().viewMode }));
           // Save for quick reconnect
           saveConnection(url, token);
           set({ savedConnection: { url, token } });
           break;
+        }
 
         case 'auth_fail':
           socket.close();
@@ -906,6 +917,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       isReconnecting: false,
       socket: null,
       serverMode: null,
+      sessionCwd: null,
+      serverVersion: null,
       claudeReady: false,
       streamingMessageId: null,
       activeModel: null,
