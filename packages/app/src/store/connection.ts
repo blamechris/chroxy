@@ -221,17 +221,31 @@ let lastConnectedUrl: string | null = null;
  * Message ID Convention
  *
  * Message IDs are used to uniquely identify and track messages in the chat history.
- * The format is: `{prefix}-{counter}-{timestamp}` except for special cases.
+ * The default format produced by nextMessageId is: `{prefix}-{counter}-{timestamp}`.
  *
- * ID Prefix Types:
- * - 'thinking'      — Ephemeral thinking placeholder (singleton, no counter/timestamp, filtered from display)
- * - 'user-{N}-{T}'  — User-sent messages (N=counter, T=timestamp)
- * - '{type}-{N}-{T}' — Server-forwarded messages where type is the messageType (response, error, etc.)
- * - 'tool-{N}-{T}'  — Tool use messages
- * - 'perm-{N}-{T}'  — Permission request prompts from Claude Code (tool permission dialogs)
+ * Prefixes used with nextMessageId:
+ * - 'user'        — User-sent messages
+ * - messageType   — Server-forwarded messages where the prefix is the messageType
+ *                    (e.g. 'response', 'error', 'prompt', etc.)
+ * - 'tool'        — Tool use messages
+ * - 'perm'        — Permission request prompts from Claude Code (tool permission dialogs)
+ * - 'msg'         — Generic messages (default when no prefix is provided)
  *
- * Note: The counter ensures uniqueness, and the timestamp provides ordering context.
- * All message types except 'thinking' are generated via nextMessageId(prefix).
+ * Special IDs (not produced by nextMessageId):
+ * - 'thinking'    — Ephemeral thinking placeholder (singleton, no counter/timestamp; not
+ *                    persisted/filtered from transcript export, but rendered in the chat UI)
+ *
+ * Note on ID assignment:
+ * - Most locally-created and non-streaming messages use nextMessageId(prefix).
+ * - Messages that already include a server-assigned ID (e.g., streaming events such as
+ *   `stream_start`/`stream_delta`, or history replay messages) keep that server-provided
+ *   messageId instead of generating a new one.
+ *
+ * Example ID formats:
+ * - 'user-1-1700000000000'
+ * - 'response-2-1700000001000'
+ * - 'tool-3-1700000002000'
+ * - 'perm-4-1700000003000'
  */
 
 // Monotonic message ID counter (avoids Math.random() collisions)
