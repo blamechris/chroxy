@@ -268,14 +268,20 @@ export class OutputParser extends EventEmitter {
     this._detectPrompt(trimmed);
 
     // Tool use block start: ╭─── Read(src/file.js) ───
-    if (/^[╭┌]─+\s*(Read|Write|Edit|Bash|Search|Glob|Grep|TodoRead|TodoWrite|Task|Skill|WebFetch|WebSearch)/m.test(trimmed)) {
+    // Also detect compact format: Read(src/file.js) or Bash(cmd) ⎿ output
+    const toolNames = 'Read|Write|Edit|Bash|Search|Glob|Grep|TodoRead|TodoWrite|Task|Skill|WebFetch|WebSearch|NotebookEdit';
+    const toolBoxMatch = trimmed.match(new RegExp(`^[╭┌]─+\\s*(${toolNames})`));
+    const toolCompactMatch = !toolBoxMatch && trimmed.match(new RegExp(`^(${toolNames})\\(`));
+    if (toolBoxMatch || toolCompactMatch) {
       this._finishCurrentMessage();
-      const match = trimmed.match(/^[╭┌]─+\s*(\w+)/);
+      const tool = toolBoxMatch ? toolBoxMatch[1] : toolCompactMatch[1];
       this.state = State.TOOL_USE;
       this.currentMessage = {
         type: "tool_use",
-        tool: match ? match[1] : "unknown",
-        content: "",
+        tool: tool || "unknown",
+        // Compact format has the full invocation on one line — use it as content.
+        // Box-drawing format accumulates content from subsequent lines.
+        content: toolCompactMatch ? trimmed + "\n" : "",
         timestamp: Date.now(),
       };
       this._resetFlush();

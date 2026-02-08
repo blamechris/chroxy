@@ -213,6 +213,35 @@ describe('OutputParser state machine', () => {
     assert.equal(toolMsg.tool, 'Read')
   })
 
+  it('emits tool_use for compact tool format (ToolName(args))', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    parser.feed('Bash(git checkout main && git pull) ⎿ Already up to date.\n')
+    parser.feed('❯\n')
+
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.ok(messages.length >= 1, 'Should emit tool_use message')
+    const toolMsg = messages.find(m => m.type === 'tool_use')
+    assert.ok(toolMsg, 'Should have a tool_use message')
+    assert.equal(toolMsg.tool, 'Bash')
+  })
+
+  it('emits tool_use for compact Read(file) format', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    parser.feed('Read(src/auth.js)\n')
+    parser.feed('❯\n')
+
+    await new Promise(r => setTimeout(r, 100))
+
+    const toolMsg = messages.find(m => m.type === 'tool_use')
+    assert.ok(toolMsg, 'Should have a tool_use message')
+    assert.equal(toolMsg.tool, 'Read')
+  })
+
   it('deduplicates same content within 10s', async () => {
     const parser = createParser()
     const messages = collectEvents(parser, 'message')
