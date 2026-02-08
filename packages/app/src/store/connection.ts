@@ -213,6 +213,8 @@ let connectionAttemptId = 0;
 // Tracks which attempt was user-disconnected (replaces boolean flag to avoid
 // stale-socket race: disconnect → reconnect → old socket onclose fires)
 let disconnectedAttemptId = -1;
+// Track the last successfully connected URL to detect reconnects reliably
+let lastConnectedUrl: string | null = null;
 
 // Monotonic message ID counter (avoids Math.random() collisions)
 let messageIdCounter = 0;
@@ -390,7 +392,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       get().forgetSession();
     }
 
-    const isReconnect = get().wsUrl === url && get().messages.length > 0;
+    // Robust reconnect detection: check if we've successfully connected to this URL before
+    // This is more reliable than checking messages.length which may have been cleared
+    const isReconnect = lastConnectedUrl === url && _retryCount === 0;
 
     // New top-level connect call (not a retry) — bump attempt ID to cancel any pending retries
     if (_retryCount === 0) {
@@ -465,6 +469,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         case 'auth_ok':
           // Reset replay flag — fresh auth means clean slate
           _receivingHistoryReplay = false;
+          // Track this URL as successfully connected
+          lastConnectedUrl = url;
           // On reconnect, preserve messages and terminal buffer
           if (isReconnect) {
             set({ isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: null, streamingMessageId: null });
@@ -879,6 +885,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   forgetSession: () => {
+    // Clear last connected URL so next connect is treated as fresh
+    lastConnectedUrl = null;
     set({
       messages: [],
       terminalBuffer: '',
