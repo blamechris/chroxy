@@ -42,7 +42,7 @@ interface ContextUsage {
   cacheRead: number;
 }
 
-interface ClaudeStatus {
+export interface ClaudeStatus {
   cost: number;
   model: string;
   messageCount: number;

@@ -12,10 +12,11 @@ import {
   Alert,
   LayoutAnimation,
   UIManager,
+  Linking,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage, ModelInfo } from '../store/connection';
+import { useConnectionStore, ChatMessage, ModelInfo, ClaudeStatus } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 
@@ -62,10 +63,12 @@ function splitContentBlocks(rawContent: string): ContentBlock[] {
   return blocks;
 }
 
-/** Render inline markdown: **bold** and `code` within a line */
+/** Render inline markdown: **bold**, `code`, and links within a line */
 function renderInline(text: string, keyBase: string): React.ReactNode[] {
   const parts: React.ReactNode[] = [];
-  const regex = /(\*\*(.+?)\*\*|`([^`\n]+)`)/g;
+  // Combined regex: bold, inline code, markdown links, or URLs
+  // Order matters: match markdown links before bare URLs to avoid breaking [text](url)
+  const regex = /(\*\*(.+?)\*\*|`([^`\n]+)`|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<>]+))/g;
   let lastIdx = 0;
   let key = 0;
   let m;
@@ -73,9 +76,36 @@ function renderInline(text: string, keyBase: string): React.ReactNode[] {
   while ((m = regex.exec(text)) !== null) {
     if (m.index > lastIdx) parts.push(text.slice(lastIdx, m.index));
     if (m[2]) {
+      // Bold **text**
       parts.push(<Text key={`${keyBase}-b${key++}`} style={md.bold}>{m[2]}</Text>);
     } else if (m[3]) {
+      // Inline code `text`
       parts.push(<Text key={`${keyBase}-c${key++}`} style={md.inlineCode}>{m[3]}</Text>);
+    } else if (m[4] && m[5]) {
+      // Markdown link [text](url)
+      const linkText = m[4];
+      const url = m[5];
+      parts.push(
+        <Text
+          key={`${keyBase}-l${key++}`}
+          style={md.link}
+          onPress={() => Linking.openURL(url)}
+        >
+          {linkText}
+        </Text>
+      );
+    } else if (m[6]) {
+      // Bare URL
+      const url = m[6];
+      parts.push(
+        <Text
+          key={`${keyBase}-u${key++}`}
+          style={md.link}
+          onPress={() => Linking.openURL(url)}
+        >
+          {url}
+        </Text>
+      );
     }
     lastIdx = m.index + m[0].length;
   }
@@ -110,6 +140,34 @@ function FormattedTextBlock({ text, keyBase }: { text: string; keyBase: string }
         const lvl = hm[1].length;
         const hStyle = lvl === 1 ? md.h1 : lvl === 2 ? md.h2 : md.h3;
         elements.push(<Text key={lk} style={hStyle}>{renderInline(hm[2], lk)}</Text>);
+        continue;
+      }
+
+      // Horizontal rule: ---, ***, or ___
+      if (line.match(/^[-*_]{3,}$/)) {
+        elements.push(<View key={lk} style={md.horizontalRule} />);
+        continue;
+      }
+
+      // Blockquote: > text (group consecutive lines)
+      if (line.match(/^>\s?/)) {
+        // Collect all consecutive blockquote lines
+        const quoteLines: string[] = [];
+        let j = i;
+        while (j < lines.length && lines[j].match(/^>\s?/)) {
+          quoteLines.push(lines[j].replace(/^>\s?/, ''));
+          j++;
+        }
+        // Render the blockquote as a styled View
+        const quoteContent = quoteLines.map((qLine, qIdx) => 
+          <Text key={`${lk}-q${qIdx}`} style={styles.messageText}>{renderInline(qLine, `${lk}-q${qIdx}`)}</Text>
+        );
+        elements.push(
+          <View key={lk} style={md.blockquote}>
+            {quoteContent}
+          </View>
+        );
+        i = j - 1; // Skip processed lines
         continue;
       }
 
@@ -232,6 +290,22 @@ const md = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontSize: 12,
     lineHeight: 18,
+  },
+  link: {
+    color: '#4a9eff',
+    textDecorationLine: 'underline',
+  },
+  blockquote: {
+    borderLeftWidth: 3,
+    borderLeftColor: '#4a9eff40',
+    paddingLeft: 12,
+    marginVertical: 4,
+    opacity: 0.9,
+  },
+  horizontalRule: {
+    height: 1,
+    backgroundColor: '#2a2a4e',
+    marginVertical: 8,
   },
 });
 
