@@ -104,6 +104,39 @@ export async function startCliServer(config) {
     console.log(`\nOr connect manually:`)
     console.log(`   URL:   ${wsUrl}`)
     console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+
+    // 7. Wire up tunnel lifecycle events
+    tunnel.on('tunnel_lost', ({ code, signal }) => {
+      const exitReason = signal ? `signal ${signal}` : `code ${code}`
+      console.log(`\n[!] Tunnel lost (${exitReason})`)
+    })
+
+    tunnel.on('tunnel_recovering', ({ attempt, delayMs }) => {
+      console.log(`[!] Attempting tunnel recovery ${attempt}/3 (waiting ${delayMs}ms)...`)
+    })
+
+    tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
+      console.log(`[✓] Tunnel recovered after ${attempt} attempt(s)`)
+
+      // Re-verify the new tunnel URL
+      await waitForTunnel(newHttpUrl)
+
+      // Display new QR code if URL changed
+      const newConnectionUrl = `chroxy://${newWsUrl.replace('wss://', '')}?token=${API_TOKEN}`
+      console.log('\n[✓] New tunnel URL established:\n')
+      console.log('📱 Scan this QR code with the Chroxy app:\n')
+      qrcode.generate(newConnectionUrl, { small: true })
+      console.log(`\nOr connect manually:`)
+      console.log(`   URL:   ${newWsUrl}`)
+      console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+      console.log('')
+    })
+
+    tunnel.on('tunnel_failed', ({ message, lastExitCode, lastSignal }) => {
+      console.error(`\n[!] ${message}`)
+      console.error(`[!] Last exit: code=${lastExitCode} signal=${lastSignal}`)
+      console.error(`[!] Server will continue on localhost only. Remote connections will not work.`)
+    })
   } else {
     console.log(`[✓] Server ready! (CLI headless mode, no auth)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)
