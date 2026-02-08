@@ -71,7 +71,11 @@ export class PtySession extends EventEmitter {
         if (!this._trustAccepted) {
           this._trustAccepted = true
           console.log(`[pty-session] Auto-accepting trust dialog (${this.tmuxSession})`)
-          setTimeout(() => this._ptyManager.write('\r'), 300)
+          setTimeout(() => {
+            if (this._ptyManager) {
+              this._ptyManager.write('\r')
+            }
+          }, 300)
         }
       }
     })

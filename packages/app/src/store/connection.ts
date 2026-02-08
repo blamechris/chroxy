@@ -213,8 +213,10 @@ function nextMessageId(prefix = 'msg'): string {
 let _receivingHistoryReplay = false;
 
 // Delta batching: accumulate stream deltas and flush to state periodically
-// to reduce re-renders (dozens of deltas/sec → one state update per 100ms)
-const pendingDeltas = new Map<string, string>();
+// to reduce re-renders (dozens of deltas/sec → one state update per 100ms).
+// Keyed by sessionId so deltas are flushed to the correct session even if
+// the user switches sessions during the 100ms batching window.
+const pendingDeltas = new Map<string, { sessionId: string | null; delta: string }>();
 let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 function flushPendingDeltas() {
@@ -224,31 +226,47 @@ function flushPendingDeltas() {
   pendingDeltas.clear();
 
   const state = useConnectionStore.getState();
-  const activeId = state.activeSessionId;
 
-  if (activeId && state.sessionStates[activeId]) {
-    // Multi-session mode: update session-specific messages
-    const sessionState = state.sessionStates[activeId];
-    const updatedMessages = sessionState.messages.map((m) => {
-      const delta = updates.get(m.id);
-      return delta ? { ...m, content: m.content + delta } : m;
-    });
-    useConnectionStore.setState({
-      sessionStates: {
-        ...state.sessionStates,
-        [activeId]: { ...sessionState, messages: updatedMessages },
-      },
-      // Also update flat messages for backward compat reads
-      messages: updatedMessages,
-    });
-  } else {
-    // Legacy flat mode
-    useConnectionStore.setState((s) => ({
-      messages: s.messages.map((m) => {
-        const delta = updates.get(m.id);
-        return delta ? { ...m, content: m.content + delta } : m;
-      }),
-    }));
+  // Group deltas by session
+  const bySession = new Map<string | null, Map<string, string>>();
+  for (const [msgId, { sessionId, delta }] of updates) {
+    if (!bySession.has(sessionId)) bySession.set(sessionId, new Map());
+    bySession.get(sessionId)!.set(msgId, delta);
+  }
+
+  let newSessionStates = { ...state.sessionStates };
+  let flatUpdated = false;
+
+  for (const [sessionId, deltas] of bySession) {
+    if (sessionId && newSessionStates[sessionId]) {
+      const sessionState = newSessionStates[sessionId];
+      const updatedMessages = sessionState.messages.map((m) => {
+        const d = deltas.get(m.id);
+        return d ? { ...m, content: m.content + d } : m;
+      });
+      newSessionStates = {
+        ...newSessionStates,
+        [sessionId]: { ...sessionState, messages: updatedMessages },
+      };
+      // Sync flat messages if this is the active session
+      if (sessionId === state.activeSessionId) {
+        useConnectionStore.setState({ sessionStates: newSessionStates, messages: updatedMessages });
+        flatUpdated = true;
+      }
+    } else {
+      // Legacy flat mode or no session
+      useConnectionStore.setState((s) => ({
+        messages: s.messages.map((m) => {
+          const d = deltas.get(m.id);
+          return d ? { ...m, content: m.content + d } : m;
+        }),
+      }));
+      flatUpdated = true;
+    }
+  }
+
+  if (!flatUpdated) {
+    useConnectionStore.setState({ sessionStates: newSessionStates });
   }
 }
 
@@ -578,10 +596,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }
 
         case 'stream_delta': {
-          // Batch deltas — accumulate and flush to state periodically
+          // Batch deltas — accumulate and flush to state periodically.
+          // Capture activeSessionId now so deltas flush to the correct session
+          // even if the user switches sessions during the 100ms batching window.
           const deltaId = msg.messageId;
-          const existing = pendingDeltas.get(deltaId) || '';
-          pendingDeltas.set(deltaId, existing + msg.delta);
+          const existingDelta = pendingDeltas.get(deltaId);
+          const capturedSessionId = get().activeSessionId;
+          pendingDeltas.set(deltaId, {
+            sessionId: capturedSessionId,
+            delta: (existingDelta?.delta || '') + msg.delta,
+          });
           if (!deltaFlushTimer) {
             deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
           }
@@ -993,16 +1017,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 // Reconnect on app resume from background — detects stale sockets that
 // Cloudflare or the mobile OS silently closed while the app was suspended.
 // Singleton guard prevents duplicate listeners on Fast Refresh in development.
-let _appStateListenerRegistered = false;
-if (!_appStateListenerRegistered) {
-  _appStateListenerRegistered = true;
-  AppState.addEventListener('change', (nextState) => {
-    if (nextState === 'active') {
-      const { socket, isConnected, wsUrl, apiToken } = useConnectionStore.getState();
-      if (isConnected && socket && socket.readyState !== WebSocket.OPEN) {
-        console.log('[ws] App resumed, socket stale — reconnecting');
-        useConnectionStore.getState().connect(wsUrl!, apiToken!);
-      }
+AppState.addEventListener('change', (nextState) => {
+  if (nextState === 'active') {
+    const { socket, isConnected, wsUrl, apiToken } = useConnectionStore.getState();
+    if (isConnected && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
+      console.log('[ws] App resumed, socket stale — reconnecting');
+      useConnectionStore.getState().connect(wsUrl, apiToken);
     }
-  });
-}
+  }
+});

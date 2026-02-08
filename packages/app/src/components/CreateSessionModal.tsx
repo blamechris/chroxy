@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -50,19 +50,37 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
     onClose();
   };
 
+  const discoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const handleDiscover = () => {
+    // Clear any prior timeout (e.g. user tapped Scan multiple times)
+    if (discoverTimeoutRef.current) clearTimeout(discoverTimeoutRef.current);
     setIsDiscovering(true);
     discoverSessions();
     // Safety timeout: clear loading state if no response arrives (e.g. session_error, disconnect)
-    setTimeout(() => setIsDiscovering(false), 10_000);
+    discoverTimeoutRef.current = setTimeout(() => {
+      discoverTimeoutRef.current = null;
+      setIsDiscovering(false);
+    }, 10_000);
   };
 
   // Clear discovering state when results arrive
   useEffect(() => {
     if (discoveredSessions !== null) {
       setIsDiscovering(false);
+      if (discoverTimeoutRef.current) {
+        clearTimeout(discoverTimeoutRef.current);
+        discoverTimeoutRef.current = null;
+      }
     }
   }, [discoveredSessions]);
+
+  // Clear timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (discoverTimeoutRef.current) clearTimeout(discoverTimeoutRef.current);
+    };
+  }, []);
 
   const handleAttach = (session: DiscoveredSession) => {
     attachSession(session.sessionName);
