@@ -47,7 +47,8 @@ Thanks for your interest in contributing! This document covers how to get starte
 ## Code Style
 
 - **TypeScript** for the app, **JavaScript (ES modules)** for the server
-- No semicolons, single quotes for strings
+- Server uses semicolons and double quotes (existing codebase style)
+- App uses no semicolons, Prettier defaults
 - Meaningful variable names over comments
 - Keep functions small and focused
 - App state management: Zustand store

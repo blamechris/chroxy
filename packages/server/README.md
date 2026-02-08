@@ -3,7 +3,7 @@
 Node.js daemon that bridges your phone to Claude Code via WebSocket over Cloudflare tunnel.
 
 **Two modes:**
-- **CLI headless (default)**: Wraps `claude -p --output-format stream-json`, no tmux needed
+- **CLI headless (default)**: Wraps `claude -p --input-format stream-json --output-format stream-json`, no tmux needed
 - **PTY/tmux (opt-in with `--terminal`)**: Spawns tmux session for raw terminal access
 
 ## Quick Start
@@ -112,7 +112,7 @@ To capture sample output for PTY mode analysis:
 chroxy start --terminal
 
 # In another terminal, capture the raw output
-tmux pipe-pane -o -t chroxy 'cat >> ~/claude-output.log'
+tmux pipe-pane -o -t claude-code 'cat >> ~/claude-output.log'
 
 # Run claude code, do some work, then analyze the log
 ```
