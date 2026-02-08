@@ -94,6 +94,10 @@ export class WsServer {
     this.serverMode = (this.sessionManager || this.cliSession) ? 'cli' : 'terminal'
   }
 
+  _formatStatusLog(status) {
+    return `[ws] Broadcasting status_update: $${status.cost} | ${status.model} | msgs:${status.messageCount} | ${status.contextTokens} (${status.contextPercent}%)`
+  }
+
   start(host) {
     // Create HTTP server that handles health checks, permission hooks, and WebSocket upgrades
     this.httpServer = createServer((req, res) => {
@@ -796,7 +800,7 @@ export class WsServer {
           break
 
         case 'status_update':
-          console.log(`[ws] Broadcasting status_update: $${data.cost} | ${data.model} | msgs:${data.messageCount} | ${data.contextTokens} (${data.contextPercent}%)`)
+          console.log(this._formatStatusLog(data))
           this._broadcastToSession(sessionId, { type: 'status_update', ...data })
           break
 
@@ -934,7 +938,7 @@ export class WsServer {
 
     // Status bar metadata -> all clients
     this.outputParser.on('status_update', (status) => {
-      console.log(`[ws] Broadcasting status_update: $${status.cost} | ${status.model} | msgs:${status.messageCount} | ${status.contextTokens} (${status.contextPercent}%)`)
+      console.log(this._formatStatusLog(status))
       this._broadcast({ type: 'status_update', ...status })
     })
   }
