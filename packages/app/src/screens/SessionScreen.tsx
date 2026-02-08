@@ -815,6 +815,7 @@ const settingsBarStyles = StyleSheet.create({
     borderColor: 'transparent',
     minHeight: 44,
     minWidth: 44,
+    justifyContent: 'center',
   },
   chipActive: {
     backgroundColor: '#4a9eff33',
