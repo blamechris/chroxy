@@ -259,6 +259,7 @@ export class SessionManager extends EventEmitter {
    */
   async attachSession({ tmuxSession, name, cols, rows }) {
     if (this._sessions.size >= this.maxSessions) {
+      console.error(`[session-manager] Cannot attach session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
     }
 
