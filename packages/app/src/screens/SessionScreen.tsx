@@ -334,7 +334,6 @@ export function SessionScreen() {
         <TerminalView
           content={terminalBuffer}
           scrollViewRef={scrollViewRef}
-          onKeyPress={handleKeyPress}
         />
       )}
 
@@ -344,7 +343,6 @@ export function SessionScreen() {
         onChangeText={setInputText}
         onSend={handleSend}
         onInterrupt={sendInterrupt}
-        onKeyPress={handleKeyPress}
         onClearTerminal={clearTerminalBuffer}
         enterToSend={enterToSend}
         onToggleEnterMode={() => {

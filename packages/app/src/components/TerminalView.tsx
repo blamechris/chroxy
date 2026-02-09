@@ -6,7 +6,6 @@ import { View, Text, ScrollView, StyleSheet, Platform } from 'react-native';
 export interface TerminalViewProps {
   content: string;
   scrollViewRef: React.RefObject<ScrollView | null>;
-  onKeyPress: (key: string) => void;
 }
 
 // -- Helpers --
