@@ -76,6 +76,7 @@ export class CliSession extends EventEmitter {
 
     // Persistent-process state
     this._isBusy = false
+    this._waitingForAnswer = false
     this._processReady = false
     this._currentMessageId = null
     this._currentCtx = null
@@ -378,7 +379,9 @@ export class CliSession extends EventEmitter {
               ctx.didStreamText = true
               this.emit('stream_delta', { messageId, delta: delta.text })
             } else if (delta.type === 'input_json_delta' && ctx.currentContentBlockType === 'tool_use') {
-              ctx.toolInputChunks += delta.partial_json
+              if (typeof delta.partial_json === 'string') {
+                ctx.toolInputChunks += delta.partial_json
+              }
             }
             break
           }
@@ -388,6 +391,7 @@ export class CliSession extends EventEmitter {
               try {
                 const input = JSON.parse(ctx.toolInputChunks)
                 console.log(`[cli-session] AskUserQuestion detected (${ctx.currentToolUseId})`)
+                this._waitingForAnswer = true
                 this.emit('user_question', {
                   toolUseId: ctx.currentToolUseId,
                   questions: input.questions,
@@ -465,6 +469,7 @@ export class CliSession extends EventEmitter {
    */
   _clearMessageState() {
     this._isBusy = false
+    this._waitingForAnswer = false
     this._currentMessageId = null
     this._currentCtx = null
     if (this._resultTimeout) {
@@ -655,7 +660,8 @@ export class CliSession extends EventEmitter {
    * the _isBusy check and write directly.
    */
   respondToQuestion(text) {
-    if (!this._child) return
+    if (!this._child || !this._waitingForAnswer) return
+    this._waitingForAnswer = false
     const ndjson = JSON.stringify({
       type: 'user',
       message: {

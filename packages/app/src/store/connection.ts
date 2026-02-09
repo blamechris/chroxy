@@ -975,16 +975,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           const questions = msg.questions;
           if (!Array.isArray(questions) || questions.length === 0) break;
           const q = questions[0];
+          if (!q || typeof q !== 'object' || typeof q.question !== 'string') break;
           const questionMsg: ChatMessage = {
             id: nextMessageId('question'),
             type: 'prompt',
-            content: q.question || 'Question from Claude',
+            content: q.question,
             toolUseId: msg.toolUseId,
             options: Array.isArray(q.options)
-              ? q.options.map((o: { label: string; description?: string }) => ({
-                  label: o.label,
-                  value: o.label,
-                }))
+              ? q.options
+                  .filter((o: unknown): o is { label: string } => !!o && typeof o === 'object' && typeof (o as Record<string, unknown>).label === 'string')
+                  .map((o: { label: string }) => ({
+                    label: o.label,
+                    value: o.label,
+                  }))
               : [],
             timestamp: Date.now(),
           };
