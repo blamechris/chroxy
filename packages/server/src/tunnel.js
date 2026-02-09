@@ -113,6 +113,9 @@ export class TunnelManager extends EventEmitter {
     console.log(`[tunnel] cloudflared exited unexpectedly (${exitReason})`);
     this.emit("tunnel_lost", { code, signal });
 
+    // Store old URL to detect changes after recovery
+    const oldUrl = this.url;
+
     // Perform recovery attempts with backoff until success or max attempts reached
     while (this.recoveryAttempt < this.maxRecoveryAttempts && !this.intentionalShutdown) {
       const backoff = this.recoveryBackoffs[this.recoveryAttempt];
@@ -142,6 +145,16 @@ export class TunnelManager extends EventEmitter {
           attempt: this.recoveryAttempt,
         });
         this.recoveryAttempt = 0; // Reset on success
+
+        // Check if URL changed during recovery
+        if (oldUrl && httpUrl !== oldUrl) {
+          console.log(`[tunnel] URL changed from ${oldUrl} to ${httpUrl}`);
+          this.emit("tunnel_url_changed", {
+            oldUrl,
+            newUrl: httpUrl,
+          });
+        }
+
         return;
       } catch (err) {
         console.error(
