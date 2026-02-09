@@ -72,7 +72,7 @@ function groupMessages(messages: ChatMessage[], streamingMessageId: string | nul
 // -- Activity group component --
 
 function ActivityGroup({
-  messages: groupMessages,
+  messages: activityMessages,
   isActive,
   isSelecting,
   selectedIds,
@@ -85,7 +85,7 @@ function ActivityGroup({
   onToggleSelection: (id: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const toolCount = groupMessages.filter((m) => m.type === 'tool_use').length;
+  const toolCount = activityMessages.filter((m) => m.type === 'tool_use').length;
 
   const handlePress = () => {
     if (isSelecting) return;
@@ -120,7 +120,7 @@ function ActivityGroup({
       </View>
       {expanded && (
         <ScrollView style={styles.activityList} nestedScrollEnabled>
-          {groupMessages.map((msg) => (
+          {activityMessages.map((msg) => (
             <TouchableOpacity
               key={msg.id}
               activeOpacity={0.7}
