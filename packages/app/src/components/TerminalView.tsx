@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { View, Text, ScrollView, StyleSheet, Platform } from 'react-native';
+import { Text, ScrollView, StyleSheet, Platform } from 'react-native';
 
 // -- Props --
 
