@@ -157,19 +157,44 @@ export class PtyManager extends EventEmitter {
         return;
       }
 
-      // Check pane status (pane_dead flag)
-      const output = execSync(`tmux list-panes -t ${this.sessionName} -F '#{pane_dead}' 2>/dev/null`, {
-        encoding: 'utf-8',
-      }).trim();
+      // Check pane status (pane_dead flag) to catch dead panes
+      const paneDeadOutput = execSync(
+        `tmux list-panes -t ${this.sessionName} -F '#{pane_dead}' 2>/dev/null`,
+        { encoding: 'utf-8' }
+      ).trim();
 
       // If any pane reports '1', it's dead
-      const panes = output.split('\n');
+      const panes = paneDeadOutput.split('\n');
       const deadPanes = panes.filter((status) => status === '1');
 
       if (deadPanes.length > 0) {
-        console.log(`[pty] Health check failed: ${deadPanes.length} dead pane(s) in session '${this.sessionName}'`);
+        console.log(
+          `[pty] Health check failed: ${deadPanes.length} dead pane(s) in session '${this.sessionName}'`
+        );
         this._stopHealthCheck();
         this.emit('crashed', { reason: 'pane_dead' });
+        return;
+      }
+
+      // Additionally, verify that a Claude process/command is still running in the session.
+      // We use tmux's pane_current_command to see what each pane is currently running.
+      const currentCmdOutput = execSync(
+        `tmux list-panes -t ${this.sessionName} -F '#{pane_current_command}' 2>/dev/null`,
+        { encoding: 'utf-8' }
+      ).trim();
+
+      const paneCommands = currentCmdOutput === '' ? [] : currentCmdOutput.split('\n');
+      // Consider Claude "present" if any pane's current command string contains "claude".
+      const hasClaudeProcess = paneCommands.some((cmd) =>
+        typeof cmd === 'string' && cmd.toLowerCase().includes('claude')
+      );
+
+      if (!hasClaudeProcess) {
+        console.log(
+          `[pty] Health check failed: no Claude process found in tmux session '${this.sessionName}'`
+        );
+        this._stopHealthCheck();
+        this.emit('crashed', { reason: 'claude_process_not_found' });
         return;
       }
     } catch (err) {
