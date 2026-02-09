@@ -559,6 +559,169 @@ describe('WsServer.broadcastError', () => {
   })
 })
 
+describe('WsServer.broadcastStatus', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('broadcasts server_status to authenticated clients', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect and auto-authenticate
+    const { ws, messages } = await createClient(port, true)
+
+    // Clear initial messages (auth_ok, server_mode, status, etc.)
+    messages.length = 0
+
+    // Broadcast a status message
+    server.broadcastStatus('Tunnel recovered successfully')
+
+    // Wait for the message
+    const statusMsg = await waitForMessage(messages, 'server_status', 1000)
+    assert.ok(statusMsg, 'Should receive server_status message')
+    assert.equal(statusMsg.type, 'server_status')
+    assert.equal(statusMsg.message, 'Tunnel recovered successfully')
+
+    ws.close()
+  })
+
+  it('broadcasts multiple server_status messages', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+    messages.length = 0
+
+    // Broadcast multiple status messages
+    server.broadcastStatus('First recovery attempt')
+    server.broadcastStatus('Second recovery attempt')
+
+    // Wait until both server_status messages have been received
+    await withTimeout(
+      (async () => {
+        while (messages.filter(m => m.type === 'server_status').length < 2) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      1000,
+      'Timed out waiting for 2 server_status messages'
+    )
+
+    const statusMsgs = messages.filter(m => m.type === 'server_status')
+    assert.equal(statusMsgs.length, 2, 'Should receive both status messages')
+    assert.equal(statusMsgs[0].message, 'First recovery attempt')
+    assert.equal(statusMsgs[1].message, 'Second recovery attempt')
+
+    ws.close()
+  })
+
+  it('does not send server_status to unauthenticated clients', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect WITHOUT authenticating
+    const { ws, messages } = await createClient(port, false)
+
+    // Broadcast a status message
+    server.broadcastStatus('Recovery in progress')
+
+    // Wait a bit to see if any message arrives
+    await new Promise(r => setTimeout(r, 200))
+
+    const statusMsg = messages.find(m => m.type === 'server_status')
+    assert.ok(!statusMsg, 'Unauthenticated client should not receive server_status')
+
+    ws.close()
+  })
+
+  it('broadcasts server_status to multiple authenticated clients', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect two authenticated clients
+    const client1 = await createClient(port, true)
+    const client2 = await createClient(port, true)
+
+    // Clear initial messages
+    client1.messages.length = 0
+    client2.messages.length = 0
+
+    // Broadcast status message
+    server.broadcastStatus('Both clients should receive this')
+
+    // Both clients should receive the message
+    const msg1 = await waitForMessage(client1.messages, 'server_status', 1000)
+    const msg2 = await waitForMessage(client2.messages, 'server_status', 1000)
+
+    assert.ok(msg1, 'Client 1 should receive server_status')
+    assert.ok(msg2, 'Client 2 should receive server_status')
+    assert.equal(msg1.message, 'Both clients should receive this')
+    assert.equal(msg2.message, 'Both clients should receive this')
+
+    client1.ws.close()
+    client2.ws.close()
+  })
+
+  it('includes correct message format in server_status', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+    messages.length = 0
+
+    // Broadcast with specific message
+    const testMessage = 'Connection re-established after timeout'
+    server.broadcastStatus(testMessage)
+
+    const statusMsg = await waitForMessage(messages, 'server_status', 1000)
+    assert.ok(statusMsg, 'Should receive server_status message')
+    assert.equal(typeof statusMsg.type, 'string', 'type should be a string')
+    assert.equal(statusMsg.type, 'server_status', 'type should be "server_status"')
+    assert.equal(typeof statusMsg.message, 'string', 'message should be a string')
+    assert.equal(statusMsg.message, testMessage, 'message should match the broadcast text')
+    assert.ok(!statusMsg.category, 'server_status should not have category field')
+    assert.ok(!statusMsg.recoverable, 'server_status should not have recoverable field')
+
+    ws.close()
+  })
+})
+
 describe('auth_ok payload fields (single-session mode)', () => {
   let server
 
