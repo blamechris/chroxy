@@ -693,3 +693,275 @@ describe('auth_ok payload fields (single-session mode)', () => {
     ws.close()
   })
 })
+
+describe('auth_ok payload with sessionManager (multi-session mode)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  /** Create a minimal mock SessionManager */
+  function createMockSessionManager(sessions = []) {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+
+    // Initialize with provided sessions
+    for (const sessionData of sessions) {
+      const mockSession = createMockSession()
+      mockSession.cwd = sessionData.cwd
+      sessionsMap.set(sessionData.id, {
+        session: mockSession,
+        name: sessionData.name,
+        cwd: sessionData.cwd,
+        type: sessionData.type || 'cli',
+        isBusy: false,
+      })
+    }
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({
+          id,
+          name: entry.name,
+          cwd: entry.cwd,
+          type: entry.type,
+          isBusy: entry.isBusy,
+        })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+
+    // Add firstSessionId getter
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    })
+
+    return manager
+  }
+
+  it('includes serverMode "cli" when sessionManager is provided', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'session-1', name: 'Project 1', cwd: '/tmp/project-1' }
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.equal(authOk.serverMode, 'cli', 'serverMode should be "cli" when sessionManager is provided')
+
+    ws.close()
+  })
+
+  it('includes cwd from first session when no defaultSessionId is provided', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'session-1', name: 'First Project', cwd: '/tmp/first-project' },
+      { id: 'session-2', name: 'Second Project', cwd: '/tmp/second-project' }
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.equal(authOk.cwd, '/tmp/first-project', 'cwd should come from first session')
+    assert.equal(typeof authOk.serverVersion, 'string', 'serverVersion should be a string')
+
+    ws.close()
+  })
+
+  it('includes cwd from default session when defaultSessionId is provided', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'session-1', name: 'First Project', cwd: '/tmp/first-project' },
+      { id: 'session-default', name: 'Default Project', cwd: '/tmp/default-project' },
+      { id: 'session-3', name: 'Third Project', cwd: '/tmp/third-project' }
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'session-default',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.equal(authOk.cwd, '/tmp/default-project', 'cwd should come from default session')
+
+    ws.close()
+  })
+
+  it('sends session_list after auth_ok when sessionManager is present', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'session-1', name: 'Project 1', cwd: '/tmp/project-1' },
+      { id: 'session-2', name: 'Project 2', cwd: '/tmp/project-2' }
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    // Wait for session_list
+    const sessionList = await waitForMessage(messages, 'session_list', 2000)
+    assert.ok(sessionList, 'Should receive session_list message')
+    assert.ok(Array.isArray(sessionList.sessions), 'session_list.sessions should be an array')
+    assert.equal(sessionList.sessions.length, 2, 'Should have 2 sessions')
+
+    // Verify session structure
+    const firstSession = sessionList.sessions[0]
+    assert.ok(firstSession.id, 'Session should have id')
+    assert.ok(firstSession.name, 'Session should have name')
+    assert.ok(firstSession.cwd, 'Session should have cwd')
+    assert.ok(firstSession.type, 'Session should have type')
+    assert.equal(typeof firstSession.isBusy, 'boolean', 'Session should have isBusy flag')
+
+    ws.close()
+  })
+
+  it('includes session info in correct order: auth_ok, server_mode, status, session_list', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'session-1', name: 'Project 1', cwd: '/tmp/project-1' }
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    // Wait for all messages
+    await waitForMessage(messages, 'session_list', 2000)
+
+    // Verify message order
+    const authOkIndex = messages.findIndex(m => m.type === 'auth_ok')
+    const serverModeIndex = messages.findIndex(m => m.type === 'server_mode')
+    const statusIndex = messages.findIndex(m => m.type === 'status')
+    const sessionListIndex = messages.findIndex(m => m.type === 'session_list')
+
+    assert.ok(authOkIndex >= 0, 'Should receive auth_ok')
+    assert.ok(serverModeIndex >= 0, 'Should receive server_mode')
+    assert.ok(statusIndex >= 0, 'Should receive status')
+    assert.ok(sessionListIndex >= 0, 'Should receive session_list')
+
+    assert.ok(authOkIndex < serverModeIndex, 'auth_ok should come before server_mode')
+    assert.ok(serverModeIndex < statusIndex, 'server_mode should come before status')
+    assert.ok(statusIndex < sessionListIndex, 'status should come before session_list')
+
+    ws.close()
+  })
+
+  it('sends session_switched after session_list when sessionManager has sessions', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'session-1', name: 'Active Project', cwd: '/tmp/active' }
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    // Wait for session_switched
+    const sessionSwitched = await waitForMessage(messages, 'session_switched', 2000)
+    assert.ok(sessionSwitched, 'Should receive session_switched message')
+    assert.equal(sessionSwitched.sessionId, 'session-1', 'Should switch to first session')
+    assert.equal(sessionSwitched.name, 'Active Project', 'Should include session name')
+    assert.equal(sessionSwitched.cwd, '/tmp/active', 'Should include session cwd')
+
+    ws.close()
+  })
+
+  it('sets cwd to null when sessionManager has no sessions', async () => {
+    const mockManager = createMockSessionManager([])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.equal(authOk.cwd, null, 'cwd should be null when no sessions exist')
+
+    ws.close()
+  })
+
+  it('includes available_models and available_permission_modes after session info', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'session-1', name: 'Project 1', cwd: '/tmp/project-1' }
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    // Wait for both messages
+    const availableModels = await waitForMessage(messages, 'available_models', 2000)
+    const availablePermModes = await waitForMessage(messages, 'available_permission_modes', 2000)
+
+    assert.ok(availableModels, 'Should receive available_models')
+    assert.ok(Array.isArray(availableModels.models), 'available_models.models should be an array')
+    assert.ok(availableModels.models.length > 0, 'Should have at least one model')
+
+    assert.ok(availablePermModes, 'Should receive available_permission_modes')
+    assert.ok(Array.isArray(availablePermModes.modes), 'available_permission_modes.modes should be an array')
+    assert.ok(availablePermModes.modes.length > 0, 'Should have at least one permission mode')
+
+    ws.close()
+  })
+})
