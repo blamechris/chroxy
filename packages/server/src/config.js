@@ -21,6 +21,7 @@ const CONFIG_SCHEMA = {
   allowedTools: 'array',
   resume: 'boolean',
   noAuth: 'boolean',
+  discoveryInterval: 'number',
 }
 
 /**
@@ -159,6 +160,7 @@ function envKeyForConfig(key) {
     allowedTools: 'CHROXY_ALLOWED_TOOLS',
     resume: 'CHROXY_RESUME',
     noAuth: 'CHROXY_NO_AUTH',
+    discoveryInterval: 'CHROXY_DISCOVERY_INTERVAL',
   }
   return envMap[key] || key.toUpperCase()
 }

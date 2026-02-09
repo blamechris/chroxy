@@ -33,6 +33,7 @@ export async function startCliServer(config) {
   }
 
   // 1. Create session manager
+  const discoveryIntervalMs = config.discoveryInterval ? config.discoveryInterval * 1000 : 45000
   const sessionManager = new SessionManager({
     maxSessions: 5,
     port: PORT,
@@ -40,6 +41,7 @@ export async function startCliServer(config) {
     defaultCwd: config.cwd || process.cwd(),
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
+    discoveryIntervalMs,
   })
 
   // 2. Auto-discover tmux sessions running Claude
