@@ -127,6 +127,17 @@ export function renderInline(text: string, keyBase: string): React.ReactNode[] {
   return parts;
 }
 
+/** Check if a line is a valid table row (has pipe separators and at least one non-empty cell) */
+function isValidTableRow(line: string): boolean {
+  if (!line.includes('|')) return false;
+  const rawCells = line.split('|').map(cell => cell.trim());
+  // Remove leading/trailing empty cells (from leading/trailing pipes)
+  const cellStart = rawCells[0] === '' ? 1 : 0;
+  const cellEnd = rawCells[rawCells.length - 1] === '' ? rawCells.length - 1 : rawCells.length;
+  const cells = rawCells.slice(cellStart, cellEnd);
+  return cells.length > 0;
+}
+
 /** Parse markdown table: | col1 | col2 | ... */
 function parseTable(lines: string[], startIndex: number): { headers: string[]; rows: string[][]; endIndex: number } | null {
   if (startIndex >= lines.length) return null;
@@ -153,14 +164,13 @@ function parseTable(lines: string[], startIndex: number): { headers: string[]; r
   let i = startIndex + 2;
   while (i < lines.length) {
     const line = lines[i];
-    if (!line.includes('|')) break;
+    if (!isValidTableRow(line)) break;
     // Split and trim, preserving empty cells between pipes
     const rawCells = line.split('|').map(cell => cell.trim());
     // Remove leading/trailing empty cells (from leading/trailing pipes)
     const cellStart = rawCells[0] === '' ? 1 : 0;
     const cellEnd = rawCells[rawCells.length - 1] === '' ? rawCells.length - 1 : rawCells.length;
     const cells = rawCells.slice(cellStart, cellEnd);
-    if (cells.length === 0) break;
     // Normalize row length to match header count (pad with empty strings or truncate)
     while (cells.length < headers.length) cells.push('');
     rows.push(cells.slice(0, headers.length));
@@ -170,12 +180,35 @@ function parseTable(lines: string[], startIndex: number): { headers: string[]; r
   return { headers, rows, endIndex: i - 1 };
 }
 
-/** Render a markdown table */
-function renderTable(headers: string[], rows: string[][], keyBase: string, messageTextStyle: StyleProp<TextStyle>): React.ReactNode {
+/** Memoized table component that parses and renders markdown tables.
+ *  Parsing is wrapped in useMemo to prevent re-computation on every render.
+ *  The component itself is wrapped in React.memo to prevent re-renders when props haven't changed. */
+const TableBlock = React.memo(({
+  paragraphText,
+  startIndex,
+  keyBase,
+  messageTextStyle
+}: {
+  paragraphText: string;
+  startIndex: number;
+  keyBase: string;
+  messageTextStyle: StyleProp<TextStyle>;
+}) => {
+  // Memoize the lines array split - stable string input prevents unnecessary re-computation
+  const lines = useMemo(() => paragraphText.split('\n'), [paragraphText]);
+
+  // Memoize table parsing - only re-parse when lines or startIndex changes
+  const tableData = useMemo(() => {
+    return parseTable(lines, startIndex);
+  }, [lines, startIndex]);
+
+  if (!tableData) return null;
+
+  const { headers, rows } = tableData;
+
   return (
-    <ScrollView 
-      key={keyBase} 
-      horizontal 
+    <ScrollView
+      horizontal
       showsHorizontalScrollIndicator={true}
       accessibilityHint="Swipe left or right to view more columns"
       style={md.tableScrollContainer}
@@ -202,7 +235,7 @@ function renderTable(headers: string[], rows: string[][], keyBase: string, messa
       </View>
     </ScrollView>
   );
-}
+});
 
 /** Render a text block with headers, lists, bold, and inline code.
  *  Enables cross-paragraph selection by wrapping entire text content in a single
@@ -234,12 +267,26 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
 
       if (!line.trim()) continue;
 
-      // Table: | col1 | col2 | (check for table starting at this line)
-      const tableData = parseTable(lines, i);
-      if (tableData) {
+      // Table: | col1 | col2 | (lightweight check for table pattern)
+      // Full parsing happens inside TableBlock's useMemo
+      if (line.includes('|') && i + 1 < lines.length &&
+          lines[i + 1].match(/^\s*\|?\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/)) {
         hasViewChildren = true;
-        elements.push(renderTable(tableData.headers, tableData.rows, lk, messageTextStyle));
-        i = tableData.endIndex; // Skip processed lines
+        elements.push(
+          <TableBlock
+            key={lk}
+            paragraphText={para}
+            startIndex={i}
+            keyBase={lk}
+            messageTextStyle={messageTextStyle}
+          />
+        );
+        // Lightweight scan to find table end - use same validity check as parseTable
+        let j = i + 2;
+        while (j < lines.length && isValidTableRow(lines[j])) {
+          j++;
+        }
+        i = j - 1; // Skip processed lines
         continue;
       }
 
