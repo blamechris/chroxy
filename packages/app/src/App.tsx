@@ -17,6 +17,7 @@ const Stack = createNativeStackNavigator<RootStackParamList>();
 export default function App() {
   const isConnected = useConnectionStore((s) => s.isConnected);
   const isReconnecting = useConnectionStore((s) => s.isReconnecting);
+  // Stay on SessionScreen during reconnection attempts to show reconnect state
   const showSession = isConnected || isReconnecting;
 
   return (
