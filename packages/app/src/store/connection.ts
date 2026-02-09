@@ -740,14 +740,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         case 'tool_start': {
           // During reconnect replay, skip if app already has messages (cache is fresh)
           if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
-          // During session-switch replay, skip if tool already in cache (dedup)
+          // Use server messageId as stable identifier for dedup (same ID on live + replay)
+          const toolId = msg.messageId || nextMessageId('tool');
+          // During session-switch replay, skip if tool already in cache (dedup by stable ID)
           if (_receivingHistoryReplay && _isSessionSwitchReplay) {
-            const toolContent = msg.input ? JSON.stringify(msg.input) : msg.tool || '';
             const cached = get().messages;
-            if (cached.some((m) => m.type === 'tool_use' && m.tool === msg.tool && m.content === toolContent)) break;
+            if (cached.some((m) => m.id === toolId)) break;
           }
           const toolMsg: ChatMessage = {
-            id: nextMessageId('tool'),
+            id: toolId,
             type: 'tool_use',
             content: msg.input ? JSON.stringify(msg.input) : msg.tool || '',
             tool: msg.tool,
