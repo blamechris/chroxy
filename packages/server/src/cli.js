@@ -339,4 +339,65 @@ tunnelCmd
     console.log('The QR code will always be the same — scan it once, connect forever.\n')
   })
 
+/**
+ * chroxy wrap — Create a discoverable tmux session running Claude Code
+ */
+program
+  .command('wrap')
+  .description('Create a tmux session running Claude Code (discoverable by chroxy start)')
+  .requiredOption('-n, --name <name>', 'Session name (alphanumeric, hyphens, underscores)')
+  .option('--cwd <path>', 'Working directory for Claude', process.cwd())
+  .action(async (options) => {
+    const { execSync } = await import('child_process')
+    const { existsSync, statSync } = await import('fs')
+    const { resolve } = await import('path')
+
+    const name = options.name
+
+    // Validate name: alphanumeric, hyphens, underscores only
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      console.error('Error: Session name must contain only letters, numbers, hyphens, and underscores.')
+      process.exit(1)
+    }
+
+    // Check tmux is installed
+    try {
+      execSync('which tmux', { stdio: 'pipe' })
+    } catch {
+      console.error('Error: tmux is not installed. Install with: brew install tmux')
+      process.exit(1)
+    }
+
+    const sessionName = `chroxy-${name}`
+
+    // Check session doesn't already exist
+    try {
+      execSync(`tmux has-session -t ${sessionName}`, { stdio: 'pipe' })
+      console.error(`Error: tmux session '${sessionName}' already exists.`)
+      console.error(`  Attach to it:  tmux attach -t ${sessionName}`)
+      console.error(`  Or kill it:    tmux kill-session -t ${sessionName}`)
+      process.exit(1)
+    } catch {
+      // Session doesn't exist — good, we can create it
+    }
+
+    // Resolve and validate cwd
+    const cwd = resolve(options.cwd)
+    if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
+      console.error(`Error: Directory does not exist: ${cwd}`)
+      process.exit(1)
+    }
+
+    // Create tmux session and launch Claude
+    execSync(`tmux new-session -d -s ${sessionName} -c ${JSON.stringify(cwd)}`)
+    execSync(`tmux send-keys -t ${sessionName} "claude" Enter`)
+
+    console.log(`\nSession '${sessionName}' created in ${cwd}`)
+    console.log(`Claude Code is starting inside the tmux session.\n`)
+    console.log(`  Attach to it:  tmux attach -t ${sessionName}`)
+    console.log(`  Kill it:       tmux kill-session -t ${sessionName}`)
+    console.log(`\nRun 'npx chroxy start' to connect from your phone.`)
+    console.log(`The session will be auto-discovered.\n`)
+  })
+
 program.parse()
