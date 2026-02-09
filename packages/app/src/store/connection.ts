@@ -537,11 +537,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           }, delay);
         } else {
           set({ connectionPhase: 'disconnected' as ConnectionPhase, isReconnecting: false });
-          clearConnection();
-          set({ savedConnection: null });
           Alert.alert(
             'Connection Failed',
-            'Could not reach the Chroxy server. Make sure it\'s running and scan the QR code again.',
+            'Could not reach the Chroxy server. Make sure it\'s running.',
+            [
+              { text: 'Retry', onPress: () => get().connect(url, token, 0) },
+              { text: 'Forget Server', style: 'destructive', onPress: () => { void get().clearSavedConnection(); } },
+              { text: 'OK', style: 'cancel' },
+            ],
           );
         }
       });

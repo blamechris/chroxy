@@ -113,11 +113,20 @@ export async function startCliServer(config) {
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
 
+  // Determine tunnel mode
+  const TUNNEL_MODE = config.tunnel || 'quick'
+  const SKIP_TUNNEL = NO_AUTH || TUNNEL_MODE === 'none'
+
   let tunnel = null
   let currentWsUrl = null
-  if (!NO_AUTH) {
+  if (!SKIP_TUNNEL) {
     // 4. Start the Cloudflare tunnel
-    tunnel = new TunnelManager({ port: PORT })
+    tunnel = new TunnelManager({
+      port: PORT,
+      mode: TUNNEL_MODE,
+      tunnelName: config.tunnelName || null,
+      tunnelHostname: config.tunnelHostname || null,
+    })
     const { wsUrl, httpUrl } = await tunnel.start()
     currentWsUrl = wsUrl
 
@@ -153,14 +162,19 @@ export async function startCliServer(config) {
 
     // 7. Generate connection info
     const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
+    const modeLabel = TUNNEL_MODE === 'named' ? 'Named Tunnel' : 'Quick Tunnel'
 
-    console.log('\n[✓] Server ready! (CLI headless mode)\n')
+    console.log(`\n[✓] Server ready! (CLI headless mode, ${modeLabel})\n`)
     console.log('📱 Scan this QR code with the Chroxy app:\n')
     qrcode.generate(connectionUrl, { small: true })
     console.log(`\nOr connect manually:`)
     console.log(`   URL:   ${wsUrl}`)
     console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
 
+  } else if (TUNNEL_MODE === 'none' && !NO_AUTH) {
+    console.log(`[✓] Server ready! (CLI headless mode, no tunnel)\n`)
+    console.log(`   Connect: ws://localhost:${PORT}`)
+    console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
   } else {
     console.log(`[✓] Server ready! (CLI headless mode, no auth)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)
