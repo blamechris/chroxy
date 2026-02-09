@@ -911,6 +911,30 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
         }
 
+        case 'server_status': {
+          // Non-error status update (e.g., tunnel recovery notifications)
+          const statusMessage: string =
+            typeof msg.message === 'string' && msg.message.trim().length > 0
+              ? stripAnsi(msg.message)
+              : 'Status update';
+          // Display as a system message in the chat
+          const statusMsg: ChatMessage = {
+            id: nextMessageId('status'),
+            type: 'system',
+            content: statusMessage,
+            timestamp: Date.now(),
+          };
+          const activeStatusId = get().activeSessionId;
+          if (activeStatusId && get().sessionStates[activeStatusId]) {
+            updateActiveSession((ss) => ({
+              messages: [...ss.messages, statusMsg],
+            }));
+          } else {
+            get().addMessage(statusMsg);
+          }
+          break;
+        }
+
         case 'server_error': {
           // Validate and coerce untyped JSON fields
           const allowedCategories = new Set<ServerError['category']>([
