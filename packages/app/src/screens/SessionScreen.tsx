@@ -23,7 +23,7 @@ import { SettingsBar } from '../components/SettingsBar';
 import { InputBar } from '../components/InputBar';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../App';
+import type { RootStackParamList } from '../App';
 import { ICON_CLOSE, ICON_GEAR } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
