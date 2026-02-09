@@ -111,6 +111,8 @@ export function SessionScreen() {
 
   const sessions = useConnectionStore((s) => s.sessions);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
+  const serverErrors = useConnectionStore((s) => s.serverErrors);
+  const dismissServerError = useConnectionStore((s) => s.dismissServerError);
   const isCliMode = serverMode === 'cli';
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
@@ -316,6 +318,39 @@ export function SessionScreen() {
         </View>
       )}
 
+      {/* Server error banners */}
+      {serverErrors.map((err) => (
+        <View
+          key={err.id}
+          style={[
+            styles.reconnectingBanner,
+            err.recoverable ? styles.warningBanner : styles.errorBanner,
+          ]}
+        >
+          <View style={styles.errorBannerContent}>
+            <Text
+              style={[
+                styles.reconnectingText,
+                err.recoverable ? styles.warningBannerText : styles.errorBannerText,
+              ]}
+              numberOfLines={2}
+            >
+              {err.message}
+            </Text>
+            <TouchableOpacity
+              onPress={() => dismissServerError(err.id)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss server error"
+            >
+              <Text style={err.recoverable ? styles.warningBannerText : styles.errorBannerText}>
+                {ICON_CLOSE}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ))}
+
       {/* Content area */}
       {viewMode === 'chat' ? (
         <ChatView
@@ -452,6 +487,29 @@ const styles = StyleSheet.create({
   reconnectingText: {
     color: '#f59e0b',
     fontSize: 13,
+    fontWeight: '600',
+  },
+  warningBanner: {
+    backgroundColor: '#f59e0b22',
+  },
+  errorBanner: {
+    backgroundColor: '#ff4a4a22',
+  },
+  errorBannerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    width: '100%',
+  },
+  warningBannerText: {
+    color: '#f59e0b',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  errorBannerText: {
+    color: '#ff4a4a',
+    fontSize: 12,
     fontWeight: '600',
   },
 });
