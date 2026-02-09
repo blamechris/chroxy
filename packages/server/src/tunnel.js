@@ -28,17 +28,19 @@ export class TunnelManager extends EventEmitter {
     return this._startTunnel();
   }
 
-  _spawnCloudflared() {
-    return spawn("cloudflared", [
-      "tunnel", "--url", `http://localhost:${this.port}`, "--no-autoupdate",
-    ], {
-      stdio: ["ignore", "pipe", "pipe"],
-    })
+  _spawnCloudflared(argv, spawnOpts) {
+    return spawn("cloudflared", argv, spawnOpts)
   }
 
   async _startTunnel() {
     return new Promise((resolve, reject) => {
-      const proc = this._spawnCloudflared()
+      const argv = [
+        "tunnel", "--url", `http://localhost:${this.port}`, "--no-autoupdate",
+      ]
+      const spawnOpts = {
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+      const proc = this._spawnCloudflared(argv, spawnOpts)
 
       this.process = proc;
       let resolved = false;
