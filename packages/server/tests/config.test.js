@@ -163,6 +163,17 @@ describe('mergeConfig', () => {
     assert.equal(merged.resume, true)
   })
 
+  it('handles invalid number in environment variable gracefully', () => {
+    process.env.PORT = 'notanumber'
+    
+    const merged = mergeConfig({ defaults: { port: 8765 } })
+    
+    // parseEnvValue returns the string if parseInt returns NaN
+    // This will be caught by validateConfig which will warn about type mismatch
+    assert.equal(merged.port, 'notanumber')
+    assert.equal(typeof merged.port, 'string')
+  })
+
   it('does not include undefined values', () => {
     const merged = mergeConfig({ 
       defaults: { port: 8765 },

@@ -24,6 +24,11 @@ const CONFIG_SCHEMA = {
 }
 
 /**
+ * Config keys that should be masked in verbose output.
+ */
+const SENSITIVE_KEYS = ['apiToken']
+
+/**
  * Validate config object against schema.
  * Logs warnings for unknown keys and type mismatches.
  *
@@ -127,8 +132,8 @@ export function mergeConfig({ fileConfig = {}, cliOverrides = {}, defaults = {},
   if (verbose) {
     console.log('\n[config] Configuration sources:')
     for (const [key, source] of Object.entries(sources)) {
-      const valueStr = key === 'apiToken' && merged[key]
-        ? `${merged[key].slice(0, 8)}...`
+      const valueStr = SENSITIVE_KEYS.includes(key) && merged[key]
+        ? `${String(merged[key]).slice(0, 8)}...`
         : JSON.stringify(merged[key])
       console.log(`  ${key.padEnd(16)} = ${valueStr.padEnd(24)} (${source})`)
     }
