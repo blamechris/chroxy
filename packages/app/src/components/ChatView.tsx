@@ -90,7 +90,7 @@ export interface ChatViewProps {
   messages: ChatMessage[];
   scrollViewRef: React.RefObject<ScrollView | null>;
   claudeReady: boolean;
-  onSelectOption: (value: string, requestId?: string) => void;
+  onSelectOption: (value: string, requestId?: string, toolUseId?: string) => void;
   isCliMode: boolean;
   selectedIds: Set<string>;
   isSelecting: boolean;
@@ -358,7 +358,7 @@ function PermissionDetailOrFallback({ tool, toolInput, fallback }: { tool?: stri
 
 function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress }: {
   message: ChatMessage;
-  onSelectOption?: (value: string, requestId?: string) => void;
+  onSelectOption?: (value: string, requestId?: string, toolUseId?: string) => void;
   isSelected: boolean;
   isSelecting: boolean;
   onLongPress: () => void;
@@ -411,7 +411,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
             <TouchableOpacity
               key={i}
               style={styles.promptOptionButton}
-              onPress={() => onSelectOption?.(opt.value, message.requestId)}
+              onPress={() => onSelectOption?.(opt.value, message.requestId, message.toolUseId)}
             >
               <Text style={styles.promptOptionText}>{opt.label}</Text>
             </TouchableOpacity>

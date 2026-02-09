@@ -46,6 +46,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'trigger_discovery' }                     — trigger on-demand tmux session discovery
  *   { type: 'attach_session', tmuxSession, name? }    — attach to a tmux session
  *   { type: 'register_push_token', token }             — register Expo push token for notifications
+ *   { type: 'user_question_response', answer }         — respond to AskUserQuestion prompt
  *
  * Server -> Client:
  *   { type: 'auth_ok', serverMode, serverVersion, cwd: string|null } — auth succeeded with server context
@@ -74,6 +75,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'history_replay_start', sessionId }      — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
  *   { type: 'raw_background', data: '...' }           — raw PTY data for chat-mode clients
+ *   { type: 'user_question', toolUseId, questions }   — AskUserQuestion prompt from Claude
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
  */
@@ -644,6 +646,14 @@ export class WsServer {
         break
       }
 
+      case 'user_question_response': {
+        const entry = this.sessionManager.getSession(client.activeSessionId)
+        if (entry && entry.type === 'cli' && typeof msg.answer === 'string') {
+          entry.session.respondToQuestion(msg.answer)
+        }
+        break
+      }
+
       case 'register_push_token':
         if (this.pushManager && typeof msg.token === 'string') {
           this.pushManager.registerToken(msg.token)
@@ -710,6 +720,13 @@ export class WsServer {
         const { requestId, decision } = msg
         if (requestId && decision) {
           this._resolvePermission(requestId, decision)
+        }
+        break
+      }
+
+      case 'user_question_response': {
+        if (this.cliSession && typeof msg.answer === 'string') {
+          this.cliSession.respondToQuestion(msg.answer)
         }
         break
       }
@@ -857,6 +874,14 @@ export class WsServer {
           this._broadcastToSession(sessionId, { type: 'status_update', ...data })
           break
 
+        case 'user_question':
+          this._broadcastToSession(sessionId, {
+            type: 'user_question',
+            toolUseId: data.toolUseId,
+            questions: data.questions,
+          })
+          break
+
         case 'error':
           this._broadcastToSession(sessionId, {
             type: 'message',
@@ -949,6 +974,14 @@ export class WsServer {
 
     this.cliSession.on('result', ({ cost, duration, usage, sessionId }) => {
       this._broadcast({ type: 'result', cost, duration, usage, sessionId })
+    })
+
+    this.cliSession.on('user_question', (data) => {
+      this._broadcast({
+        type: 'user_question',
+        toolUseId: data.toolUseId,
+        questions: data.questions,
+      })
     })
 
     this.cliSession.on('error', ({ message }) => {

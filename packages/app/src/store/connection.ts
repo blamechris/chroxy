@@ -47,6 +47,7 @@ export interface ChatMessage {
   options?: { label: string; value: string }[];
   requestId?: string;
   toolInput?: Record<string, unknown>;
+  toolUseId?: string;
   timestamp: number;
 }
 
@@ -212,6 +213,7 @@ interface ConnectionState {
   sendInput: (input: string) => void;
   sendInterrupt: () => void;
   sendPermissionResponse: (requestId: string, decision: string) => void;
+  sendUserQuestionResponse: (answer: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
   resize: (cols: number, rows: number) => void;
@@ -969,6 +971,37 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
         }
 
+        case 'user_question': {
+          const questions = msg.questions;
+          if (!Array.isArray(questions) || questions.length === 0) break;
+          const q = questions[0];
+          if (!q || typeof q !== 'object' || typeof q.question !== 'string') break;
+          const questionMsg: ChatMessage = {
+            id: nextMessageId('question'),
+            type: 'prompt',
+            content: q.question,
+            toolUseId: msg.toolUseId,
+            options: Array.isArray(q.options)
+              ? q.options
+                  .filter((o: unknown): o is { label: string } => !!o && typeof o === 'object' && typeof (o as Record<string, unknown>).label === 'string')
+                  .map((o: { label: string }) => ({
+                    label: o.label,
+                    value: o.label,
+                  }))
+              : [],
+            timestamp: Date.now(),
+          };
+          const activeQId = get().activeSessionId;
+          if (activeQId && get().sessionStates[activeQId]) {
+            updateActiveSession((ss) => ({
+              messages: [...ss.messages, questionMsg],
+            }));
+          } else {
+            get().addMessage(questionMsg);
+          }
+          break;
+        }
+
         case 'server_status': {
           // Non-error status update (e.g., tunnel recovery notifications)
           const statusMessage: string =
@@ -1250,6 +1283,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'permission_response', requestId, decision }));
+    }
+  },
+
+  sendUserQuestionResponse: (answer: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'user_question_response', answer }));
     }
   },
 

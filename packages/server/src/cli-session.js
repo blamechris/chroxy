@@ -76,6 +76,7 @@ export class CliSession extends EventEmitter {
 
     // Persistent-process state
     this._isBusy = false
+    this._waitingForAnswer = false
     this._processReady = false
     this._currentMessageId = null
     this._currentCtx = null
@@ -278,7 +279,7 @@ export class CliSession extends EventEmitter {
     this._isBusy = true
     this._messageCounter++
     this._currentMessageId = `msg-${this._messageCounter}`
-    this._currentCtx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null }
+    this._currentCtx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null, currentToolName: null, currentToolUseId: null, toolInputChunks: '' }
 
     const ndjson = JSON.stringify({
       type: 'user',
@@ -354,6 +355,9 @@ export class CliSession extends EventEmitter {
                 this.emit('stream_start', { messageId })
               }
             } else if (blockType === 'tool_use') {
+              ctx.currentToolName = event.content_block.name
+              ctx.currentToolUseId = event.content_block.id
+              ctx.toolInputChunks = ''
               this.emit('tool_start', {
                 messageId,
                 tool: event.content_block.name,
@@ -374,12 +378,34 @@ export class CliSession extends EventEmitter {
               }
               ctx.didStreamText = true
               this.emit('stream_delta', { messageId, delta: delta.text })
+            } else if (delta.type === 'input_json_delta' && ctx.currentContentBlockType === 'tool_use') {
+              if (typeof delta.partial_json === 'string') {
+                ctx.toolInputChunks += delta.partial_json
+              }
             }
             break
           }
 
           case 'content_block_stop': {
-            if (ctx) ctx.currentContentBlockType = null
+            if (ctx && ctx.currentToolName === 'AskUserQuestion' && ctx.toolInputChunks) {
+              try {
+                const input = JSON.parse(ctx.toolInputChunks)
+                console.log(`[cli-session] AskUserQuestion detected (${ctx.currentToolUseId})`)
+                this._waitingForAnswer = true
+                this.emit('user_question', {
+                  toolUseId: ctx.currentToolUseId,
+                  questions: input.questions,
+                })
+              } catch (err) {
+                console.error(`[cli-session] Failed to parse AskUserQuestion input: ${err.message}`)
+              }
+            }
+            if (ctx) {
+              ctx.currentContentBlockType = null
+              ctx.currentToolName = null
+              ctx.currentToolUseId = null
+              ctx.toolInputChunks = ''
+            }
             break
           }
         }
@@ -443,6 +469,7 @@ export class CliSession extends EventEmitter {
    */
   _clearMessageState() {
     this._isBusy = false
+    this._waitingForAnswer = false
     this._currentMessageId = null
     this._currentCtx = null
     if (this._resultTimeout) {
@@ -625,6 +652,24 @@ export class CliSession extends EventEmitter {
       this._respawnCount = 0
       this.start()
     }
+  }
+
+  /**
+   * Send a response to an AskUserQuestion prompt.
+   * Claude is waiting for user input on stdin mid-turn, so we bypass
+   * the _isBusy check and write directly.
+   */
+  respondToQuestion(text) {
+    if (!this._child || !this._waitingForAnswer) return
+    this._waitingForAnswer = false
+    const ndjson = JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text }],
+      },
+    })
+    this._child.stdin.write(ndjson + '\n')
   }
 
   /** Interrupt the current message (send SIGINT to child process) */
