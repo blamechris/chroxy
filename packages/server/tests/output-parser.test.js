@@ -329,16 +329,30 @@ describe('OutputParser state machine', () => {
     assert.equal(messages.length, 0)
   })
 
-  it('starts as response when content appears in IDLE state', async () => {
+  it('starts as response when content appears in IDLE state after recent Claude activity', async () => {
     const parser = createParser()
     const messages = collectEvents(parser, 'message')
 
+    // Simulate recent Claude activity (e.g. tool block just ended)
+    parser._lastClaudeActivity = Date.now()
     parser.feed('some content without marker\n')
 
     await new Promise(r => setTimeout(r, 200))
 
     assert.ok(messages.length >= 1)
     assert.equal(messages[0].type, 'response')
+  })
+
+  it('drops content in IDLE state without recent Claude activity', async () => {
+    const parser = createParser()
+    const messages = collectEvents(parser, 'message')
+
+    // No recent Claude activity — _lastClaudeActivity is 0 (default)
+    parser.feed('some terminal noise\n')
+
+    await new Promise(r => setTimeout(r, 200))
+
+    assert.equal(messages.length, 0)
   })
 
   it('additional ⏺ lines within RESPONSE state append to same message', async () => {
@@ -1473,6 +1487,8 @@ describe('Echo suppression', () => {
     parser.expectEcho('old echo')
     // Manually expire it
     parser._pendingEchos[0].expires = Date.now() - 1
+    // Simulate recent Claude activity so the line is accepted as response
+    parser._lastClaudeActivity = Date.now()
 
     parser.feed('old echo\n')
 
