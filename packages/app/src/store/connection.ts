@@ -520,7 +520,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           const body = await res.json();
           console.log('[ws] Health check response:', body.status ?? 'no status field');
           if (body.status === 'restarting') {
-            console.log('[ws] Server is restarting, will retry (attempt %d/%d)', _retryCount + 1, MAX_RETRIES + 1);
+            console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${MAX_RETRIES + 1})`);
             set({ connectionPhase: 'server_restarting' as ConnectionPhase, isReconnecting: true });
             // Retry — the server will come back
             if (_retryCount < MAX_RETRIES) {
