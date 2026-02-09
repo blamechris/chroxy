@@ -280,6 +280,8 @@ function nextMessageId(prefix = 'msg'): string {
 // Flag: currently receiving history replay from server — skip adding messages
 // if local state already has them (prevents duplicates on reconnect)
 let _receivingHistoryReplay = false;
+// Flag: replay is from a session switch (cache may be stale) vs reconnect (cache is fresh)
+let _isSessionSwitchReplay = false;
 
 // Delta batching: accumulate stream deltas and flush to state periodically
 // to reduce re-renders (dozens of deltas/sec → one state update per 100ms).
@@ -525,8 +527,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       switch (msg.type) {
         case 'auth_ok': {
-          // Reset replay flag — fresh auth means clean slate
+          // Reset replay flags — fresh auth means clean slate
           _receivingHistoryReplay = false;
+          _isSessionSwitchReplay = false;
           // Track this URL as successfully connected
           lastConnectedUrl = url;
           // Extract server context from auth_ok
@@ -570,6 +573,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
 
         case 'session_switched': {
+          _isSessionSwitchReplay = true;
           const sessionId = msg.sessionId;
           set((state) => {
             // Initialize session state if it doesn't exist
@@ -613,6 +617,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'history_replay_end':
           _receivingHistoryReplay = false;
+          _isSessionSwitchReplay = false;
           break;
 
         // --- Existing message handlers (now session-aware) ---
@@ -621,8 +626,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           const msgType = msg.messageType || msg.type;
           // Skip server-echoed user_input — we already show it instantly client-side
           if (msgType === 'user_input') break;
-          // During history replay, skip if app already has messages (reconnect with preserved state)
-          if (_receivingHistoryReplay && get().messages.length > 0) break;
+          // During reconnect replay, skip if app already has messages (cache is fresh)
+          if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
+          // During session-switch replay, skip if message content already in cache (dedup)
+          if (_receivingHistoryReplay && _isSessionSwitchReplay) {
+            const cached = get().messages;
+            if (cached.some((m) => m.type === msgType && m.content === msg.content)) break;
+          }
           const newMsg: ChatMessage = {
             id: nextMessageId(msgType),
             type: msgType,
@@ -712,8 +722,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
 
         case 'tool_start': {
-          // During history replay, skip if app already has messages
-          if (_receivingHistoryReplay && get().messages.length > 0) break;
+          // During reconnect replay, skip if app already has messages (cache is fresh)
+          if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
+          // During session-switch replay, skip if tool already in cache (dedup)
+          if (_receivingHistoryReplay && _isSessionSwitchReplay) {
+            const toolContent = msg.input ? JSON.stringify(msg.input) : msg.tool || '';
+            const cached = get().messages;
+            if (cached.some((m) => m.type === 'tool_use' && m.tool === msg.tool && m.content === toolContent)) break;
+          }
           const toolMsg: ChatMessage = {
             id: nextMessageId('tool'),
             type: 'tool_use',
@@ -957,8 +973,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       socket.onclose = null;
       socket.close();
     }
-    // Reset replay flag in case disconnect happened mid-replay
+    // Reset replay flags in case disconnect happened mid-replay
     _receivingHistoryReplay = false;
+    _isSessionSwitchReplay = false;
     // Flush and clear any pending delta buffer
     if (deltaFlushTimer) {
       clearTimeout(deltaFlushTimer);
