@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, Platform, Linking } from 'react-native';
+import { View, Text, StyleSheet, Platform, Linking, StyleProp, TextStyle } from 'react-native';
 
 // -- Content Block Types --
 
@@ -117,7 +117,7 @@ export function renderInline(text: string, keyBase: string): React.ReactNode[] {
  *
  *  The `messageTextStyle` prop is applied to selectable text runs so the
  *  caller can control font size / color without duplicating the stylesheet. */
-export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: string; keyBase: string; messageTextStyle: object }) {
+export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: string; keyBase: string; messageTextStyle: StyleProp<TextStyle> }) {
   // Split into paragraphs on blank lines for visual spacing
   const paragraphs = text.split(/\n{2,}/);
   const paraElements: React.ReactNode[] = [];
@@ -234,7 +234,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
  *
  *  `messageTextStyle` is threaded through to FormattedTextBlock so the
  *  parent can control the base text appearance. */
-export function FormattedResponse({ content, messageTextStyle }: { content: string; messageTextStyle: object }) {
+export function FormattedResponse({ content, messageTextStyle }: { content: string; messageTextStyle: StyleProp<TextStyle> }) {
   const blocks = useMemo(() => splitContentBlocks(content.trim()), [content]);
 
   if (blocks.length === 0) return null;
