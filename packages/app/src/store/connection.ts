@@ -518,8 +518,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         // Check if the server is in restart mode (supervisor standby)
         try {
           const body = await res.json();
+          console.log('[ws] Health check response:', body.status ?? 'no status field');
           if (body.status === 'restarting') {
-            console.log('[ws] Server is restarting, waiting...');
+            console.log('[ws] Server is restarting, will retry (attempt %d/%d)', _retryCount + 1, MAX_RETRIES + 1);
             set({ connectionPhase: 'server_restarting' as ConnectionPhase, isReconnecting: true });
             // Retry — the server will come back
             if (_retryCount < MAX_RETRIES) {
@@ -531,8 +532,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             }
             return;
           }
-        } catch {
-          // Body parse failed — that's fine, proceed with WebSocket
+        } catch (err) {
+          console.log('[ws] Could not parse health check response:', (err as Error).message);
         }
 
         console.log('[ws] Health check passed, connecting WebSocket...');
