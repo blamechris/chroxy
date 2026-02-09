@@ -7,6 +7,8 @@ import {
   ScrollView,
   Platform,
   LayoutAnimation,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
 } from 'react-native';
 import { ChatMessage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
@@ -14,6 +16,8 @@ import { FormattedResponse } from './MarkdownRenderer';
 // Named Unicode constants for readability
 const ICON_CHEVRON_RIGHT = '\u25B8'; // Right-pointing triangle
 const ICON_CHEVRON_DOWN = '\u25BE';  // Down-pointing triangle
+const ICON_ARROW_UP = '\u2191';      // Up arrow
+const ICON_ARROW_DOWN = '\u2193';    // Down arrow
 
 // -- Props --
 
@@ -151,18 +155,12 @@ function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: 
   onPress: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const longPressedRef = useRef(false);
   const content = message.content?.trim();
 
   // Hide empty tool messages
   if (!content) return null;
 
   const handlePress = () => {
-    // Suppress onPress that fires after a long-press gesture
-    if (longPressedRef.current) {
-      longPressedRef.current = false;
-      return;
-    }
     if (isSelecting) {
       onPress();
     } else {
@@ -171,18 +169,13 @@ function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: 
     }
   };
 
-  const handleLongPress = () => {
-    longPressedRef.current = true;
-    onLongPress();
-  };
-
   const preview = content.length > 60 ? content.slice(0, 60) + '...' : content;
 
   return (
     <TouchableOpacity
       activeOpacity={0.7}
       onPress={handlePress}
-      onLongPress={handleLongPress}
+      onLongPress={isSelecting ? onPress : undefined}
       style={[styles.toolBubble, isSelected && styles.selectedBubble]}
     >
       <View style={styles.toolHeader}>
