@@ -7,6 +7,8 @@ import {
   ScrollView,
   Platform,
   LayoutAnimation,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
 } from 'react-native';
 import { ChatMessage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
@@ -14,6 +16,8 @@ import { FormattedResponse } from './MarkdownRenderer';
 // Named Unicode constants for readability
 const ICON_CHEVRON_RIGHT = '\u25B8'; // Right-pointing triangle
 const ICON_CHEVRON_DOWN = '\u25BE';  // Down-pointing triangle
+const ICON_ARROW_UP = '\u2191';      // Upward arrow
+const ICON_ARROW_DOWN = '\u2193';    // Downward arrow
 
 // -- Props --
 
@@ -370,6 +374,9 @@ export function ChatView({
           style={[styles.scrollButton, styles.scrollButtonTop]}
           onPress={scrollToTop}
           activeOpacity={0.7}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          accessibilityRole="button"
+          accessibilityLabel="Scroll to top of conversation"
         >
           <Text style={styles.scrollButtonText}>{ICON_ARROW_UP}</Text>
         </TouchableOpacity>
@@ -379,6 +386,9 @@ export function ChatView({
           style={[styles.scrollButton, styles.scrollButtonBottom]}
           onPress={scrollToBottom}
           activeOpacity={0.7}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          accessibilityRole="button"
+          accessibilityLabel="Scroll to bottom of conversation"
         >
           <Text style={styles.scrollButtonText}>{ICON_ARROW_DOWN}</Text>
         </TouchableOpacity>
