@@ -206,26 +206,36 @@ function ActivityGroup({
 
 // -- Collapsible tool use bubble --
 
-function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: {
+function ToolBubble({ message, isSelected, isSelecting, onToggleSelection }: {
   message: ChatMessage;
   isSelected: boolean;
   isSelecting: boolean;
-  onLongPress: () => void;
-  onPress: () => void;
+  onToggleSelection: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const longPressedRef = useRef(false);
   const content = message.content?.trim();
 
   // Hide empty tool messages
   if (!content) return null;
 
   const handlePress = () => {
+    // Suppress the tap that fires on release after a long-press
+    if (longPressedRef.current) {
+      longPressedRef.current = false;
+      return;
+    }
     if (isSelecting) {
-      onPress();
+      onToggleSelection();
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded((prev) => !prev);
     }
+  };
+
+  const handleLongPress = () => {
+    longPressedRef.current = true;
+    onToggleSelection();
   };
 
   const preview = content.length > 60 ? content.slice(0, 60) + '...' : content;
@@ -234,7 +244,7 @@ function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: 
     <TouchableOpacity
       activeOpacity={0.7}
       onPress={handlePress}
-      onLongPress={isSelecting ? onPress : undefined}
+      onLongPress={!expanded && !isSelecting ? handleLongPress : undefined}
       style={[styles.toolBubble, isSelected && styles.selectedBubble]}
     >
       <View style={styles.toolHeader}>
@@ -276,8 +286,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
         message={message}
         isSelected={isSelected}
         isSelecting={isSelecting}
-        onLongPress={onLongPress}
-        onPress={onPress}
+        onToggleSelection={onPress}
       />
     );
   }
