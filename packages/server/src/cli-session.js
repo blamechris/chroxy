@@ -352,7 +352,7 @@ export class CliSession extends EventEmitter {
         const content = data.message?.content
         if (Array.isArray(content) && ctx) {
           for (const block of content) {
-            if (block.type === 'text' && !ctx.didStreamText && !ctx.hasStreamStarted) {
+            if (block.type === 'text' && ctx && !ctx.didStreamText && !ctx.hasStreamStarted) {
               this.emit('message', {
                 type: 'response',
                 content: block.text,
