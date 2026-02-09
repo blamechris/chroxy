@@ -100,7 +100,6 @@ export function SessionScreen() {
     serverMode,
     sessionCwd,
     streamingMessageId,
-    isReconnecting,
     connectionPhase,
     activeModel,
     availableModels,
