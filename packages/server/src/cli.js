@@ -5,6 +5,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import readline from 'readline'
+import { validateConfig, mergeConfig } from './config.js'
 
 const CONFIG_DIR = join(homedir(), '.chroxy')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -93,6 +94,12 @@ program
 /**
  * chroxy start — Launch the server
  *
+ * Configuration precedence (highest to lowest):
+ * 1. CLI flags (--port, --model, etc.)
+ * 2. Environment variables (PORT, API_TOKEN, etc.)
+ * 3. Config file (~/.chroxy/config.json)
+ * 4. Defaults
+ *
  * Default: CLI headless mode (claude -p, no tmux/PTY needed)
  * --terminal: Legacy PTY/tmux mode (requires node-pty + tmux)
  */
@@ -106,25 +113,69 @@ program
   .option('--model <model>', 'Model to use (CLI mode)')
   .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve (CLI mode)')
   .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
+  .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
-    // Load config
-    if (!existsSync(options.config)) {
+    // Load config file
+    let fileConfig = {}
+    if (existsSync(options.config)) {
+      fileConfig = JSON.parse(readFileSync(options.config, 'utf-8'))
+    } else if (options.config !== CONFIG_FILE) {
+      // User specified a custom config path that doesn't exist
+      console.error(`❌ Config file not found: ${options.config}`)
+      process.exit(1)
+    } else {
+      // Default config path doesn't exist
       console.error('❌ No config found. Run \'npx chroxy init\' first.')
       process.exit(1)
     }
 
-    const config = JSON.parse(readFileSync(options.config, 'utf-8'))
-    config.resume = !!options.resume
+    // Validate file config
+    validateConfig(fileConfig, options.verbose)
 
-    // Set environment variables for the server
-    process.env.API_TOKEN = config.apiToken
-    process.env.PORT = String(config.port)
-    process.env.TMUX_SESSION = config.tmuxSession
-    process.env.SHELL_CMD = config.shell
+    // Build CLI overrides from command-line flags
+    const cliOverrides = {}
+    if (options.terminal !== undefined) cliOverrides.terminal = options.terminal
+    if (options.resume !== undefined) cliOverrides.resume = options.resume
+    if (options.cwd !== undefined) cliOverrides.cwd = options.cwd
+    if (options.model !== undefined) cliOverrides.model = options.model
+    if (options.allowedTools !== undefined) {
+      cliOverrides.allowedTools = options.allowedTools.split(',').map((t) => t.trim())
+    }
+    if (options.auth === false) cliOverrides.noAuth = true
 
-    if (options.terminal) {
+    // Define defaults
+    const defaults = {
+      port: 8765,
+      tmuxSession: 'claude-code',
+      shell: process.env.SHELL || '/bin/zsh',
+      resume: false,
+      noAuth: false,
+    }
+
+    // Merge config with proper precedence: CLI > ENV > file > defaults
+    const config = mergeConfig({
+      fileConfig,
+      cliOverrides,
+      defaults,
+      verbose: options.verbose,
+    })
+
+    // Validate merged config
+    const validation = validateConfig(config, options.verbose)
+    if (!validation.valid && options.verbose) {
+      console.log('[config] Continuing despite warnings...\n')
+    }
+
+    // Set environment variables for backward compatibility with server code
+    if (config.apiToken) process.env.API_TOKEN = config.apiToken
+    if (config.port) process.env.PORT = String(config.port)
+    if (config.tmuxSession) process.env.TMUX_SESSION = config.tmuxSession
+    if (config.shell) process.env.SHELL_CMD = config.shell
+
+    // Launch appropriate server mode
+    if (config.terminal) {
       // Legacy PTY/tmux mode — --no-auth is not supported
-      if (options.auth === false) {
+      if (config.noAuth) {
         console.error('❌ --no-auth is only supported in CLI headless mode (remove --terminal).')
         process.exit(1)
       }
@@ -132,12 +183,6 @@ program
       await startServer(config)
     } else {
       // Default: CLI headless mode
-      if (options.cwd) config.cwd = options.cwd
-      if (options.model) config.model = options.model
-      if (options.allowedTools) {
-        config.allowedTools = options.allowedTools.split(',').map((t) => t.trim())
-      }
-      if (options.auth === false) config.noAuth = true
       const { startCliServer } = await import('./server-cli.js')
       await startCliServer(config)
     }
@@ -163,7 +208,8 @@ program
     console.log(`   tmux session: ${config.tmuxSession}`)
     console.log(`   Tunnel: Cloudflare (automatic)`)
     console.log(`   API token: ${config.apiToken.slice(0, 8)}...`)
-    console.log('')
+    console.log('\nNote: CLI flags and environment variables can override these values.')
+    console.log('Run \'npx chroxy start --verbose\' to see full config resolution.\n')
   })
 
 program.parse()
