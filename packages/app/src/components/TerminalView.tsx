@@ -41,7 +41,7 @@ export function TerminalView({ content, scrollViewRef }: TerminalViewProps) {
       keyboardDismissMode="on-drag"
       onContentSizeChange={() => scrollViewRef.current?.scrollToEnd()}
     >
-      <Text style={styles.terminalText}>{processed || 'Connected. Terminal output will appear here...'}</Text>
+      <Text selectable style={styles.terminalText}>{processed || 'Connected. Terminal output will appear here...'}</Text>
     </ScrollView>
   );
 }
