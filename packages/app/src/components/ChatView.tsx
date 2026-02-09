@@ -38,6 +38,8 @@ function ThinkingIndicator() {
             duration: 400,
             useNativeDriver: true,
           }),
+          // Compensating delay ensures all sequences have the same 1200ms duration
+          Animated.delay(400 - delay),
         ]),
       );
     };
