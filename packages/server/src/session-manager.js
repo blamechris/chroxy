@@ -112,6 +112,7 @@ export class SessionManager extends EventEmitter {
    */
   createSession({ name, cwd, model, permissionMode } = {}) {
     if (this._sessions.size >= this.maxSessions) {
+      console.error(`[session-manager] Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
     }
 
@@ -155,6 +156,7 @@ export class SessionManager extends EventEmitter {
     this._wireSessionEvents(sessionId, session)
     session.start()
 
+    console.log(`[session-manager] Created session ${sessionId} "${sessionName}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_created', { sessionId, name: sessionName, cwd: resolvedCwd })
     return sessionId
   }
@@ -195,8 +197,12 @@ export class SessionManager extends EventEmitter {
    */
   renameSession(sessionId, name) {
     const entry = this._sessions.get(sessionId)
-    if (!entry) return false
+    if (!entry) {
+      console.error(`[session-manager] Cannot rename: session ${sessionId} not found`)
+      return false
+    }
     entry.name = name
+    console.log(`[session-manager] Renamed session ${sessionId} to "${name}"`)
     this.emit('session_updated', { sessionId, name })
     return true
   }
@@ -207,7 +213,11 @@ export class SessionManager extends EventEmitter {
    */
   destroySession(sessionId) {
     const entry = this._sessions.get(sessionId)
-    if (!entry) return false
+    if (!entry) {
+      console.error(`[session-manager] Cannot destroy: session ${sessionId} not found`)
+      return false
+    }
+    console.log(`[session-manager] Destroying session ${sessionId} "${entry.name}" (${this._sessions.size - 1}/${this.maxSessions} after removal)`)
     entry.session.destroy()
     this._sessions.delete(sessionId)
     this._messageHistory.delete(sessionId)
@@ -252,7 +262,7 @@ export class SessionManager extends EventEmitter {
       throw new SessionLimitError(this.maxSessions)
     }
 
-    console.log(`[SessionManager] Attempting to attach to tmux session '${tmuxSession}'`)
+    console.log(`[session-manager] Attempting to attach to tmux session '${tmuxSession}'`)
 
     // Prevent duplicate attachments to the same tmux session
     for (const [, entry] of this._sessions) {
@@ -285,11 +295,11 @@ export class SessionManager extends EventEmitter {
     try {
       // Wait for PTY start to complete — surface failures synchronously
       await session.start()
-      console.log(`[SessionManager] Successfully attached session ${sessionId} to tmux '${tmuxSession}'`)
+      console.log(`[session-manager] Successfully attached session ${sessionId} to tmux '${tmuxSession}'`)
     } catch (err) {
       // Clean up failed session entry before rethrowing
       this._sessions.delete(sessionId)
-      console.error(`[SessionManager] Attach failed for session ${sessionId} (tmux: '${tmuxSession}'):`, err)
+      console.error(`[session-manager] Attach failed for session ${sessionId} (tmux: '${tmuxSession}'):`, err)
       throw new SessionAttachError(`Failed to attach to tmux session '${tmuxSession}': ${err.message}`, { tmuxSession, sessionId, originalError: err })
     }
 
@@ -322,7 +332,7 @@ export class SessionManager extends EventEmitter {
     if (!this._autoDiscovery) return
     if (this._discoveryTimer) return // Already running
 
-    console.log(`[SessionManager] Starting auto-discovery (interval: ${this._discoveryIntervalMs}ms)`)
+    console.log(`[session-manager] Starting auto-discovery (interval: ${this._discoveryIntervalMs}ms)`)
 
     // Initialize tracking with current discovered sessions
     const initial = this.discoverSessions()
@@ -342,7 +352,7 @@ export class SessionManager extends EventEmitter {
     if (this._discoveryTimer) {
       clearInterval(this._discoveryTimer)
       this._discoveryTimer = null
-      console.log('[SessionManager] Stopped auto-discovery')
+      console.log('[session-manager] Stopped auto-discovery')
     }
   }
 
@@ -370,7 +380,7 @@ export class SessionManager extends EventEmitter {
     }
 
     if (newSessions.length > 0) {
-      console.log(`[SessionManager] Discovered ${newSessions.length} new tmux session(s): ${newSessions.map((s) => s.sessionName).join(', ')}`)
+      console.log(`[session-manager] Discovered ${newSessions.length} new tmux session(s): ${newSessions.map((s) => s.sessionName).join(', ')}`)
       this.emit('new_sessions_discovered', { tmux: newSessions })
     }
   }
@@ -494,7 +504,7 @@ export class SessionManager extends EventEmitter {
 
     // PtySession emits 'session_crashed' when health checks detect a crashed Claude process
     session.on('session_crashed', (data) => {
-      console.log(`[SessionManager] Session ${sessionId} crashed: ${data.error}`)
+      console.error(`[session-manager] Session ${sessionId} crashed: ${data.error}`)
       this.emit('session_crashed', { sessionId, reason: data.reason, error: data.error })
     })
   }
