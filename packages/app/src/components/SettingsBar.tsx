@@ -62,7 +62,7 @@ export function SettingsBar({
     truncatedCwd = homeShortened.length > 30 ? homeShortened.slice(-30) : homeShortened;
   }
 
-  // Build collapsed summary: "~/Projects/chroxy . cli . Opus . $0.02"
+  // Build collapsed summary: "~/Projects/chroxy · cli · Opus · $0.02"
   const summaryParts: string[] = [];
 
   if (truncatedCwd) {
