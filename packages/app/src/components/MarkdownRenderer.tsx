@@ -24,6 +24,10 @@ const SPACES_PER_INDENT_LEVEL = 3;
  *  consuming excessive horizontal space on small screens. */
 const MAX_LIST_INDENT_LEVEL = 3;
 
+/** Bullet character used for deeply nested list items (level 4+).
+ *  A small triangle distinguishes deep nesting from MAX_LIST_INDENT_LEVEL items. */
+const DEEP_NEST_BULLET = '\u25E6'; // White bullet ◦
+
 // -- Content Block Types --
 
 type ContentBlock =
@@ -156,7 +160,7 @@ function isValidTableRow(line: string): boolean {
 }
 
 /** Parse markdown table: | col1 | col2 | ... */
-function parseTable(lines: string[], startIndex: number): { headers: string[]; rows: string[][]; endIndex: number } | null {
+function parseTable(lines: string[], startIndex: number): { headers: string[]; rows: string[][]; columnWidths: number[]; endIndex: number } | null {
   if (startIndex >= lines.length) return null;
 
   // Check for table header row (must contain | separators)
@@ -194,7 +198,19 @@ function parseTable(lines: string[], startIndex: number): { headers: string[]; r
     i++;
   }
 
-  return { headers, rows, endIndex: i - 1 };
+  // Compute max content length per column (across headers + all rows)
+  // Used as flex weights so wider-content columns get more space
+  const columnWidths = headers.map((header, colIdx) => {
+    let maxLen = header.length;
+    for (const row of rows) {
+      const cellLen = (row[colIdx] || '').length;
+      if (cellLen > maxLen) maxLen = cellLen;
+    }
+    // Minimum weight of 1 so narrow columns aren't invisible
+    return Math.max(maxLen, 1);
+  });
+
+  return { headers, rows, columnWidths, endIndex: i - 1 };
 }
 
 /** Memoized table component that parses and renders markdown tables.
@@ -221,7 +237,7 @@ const TableBlock = React.memo(({
 
   if (!tableData) return null;
 
-  const { headers, rows } = tableData;
+  const { headers, rows, columnWidths } = tableData;
 
   return (
     <ScrollView
@@ -234,7 +250,7 @@ const TableBlock = React.memo(({
         {/* Header row */}
         <View style={md.tableRow}>
           {headers.map((header, idx) => (
-            <View key={`${keyBase}-h${idx}`} style={[md.tableCell, md.tableHeaderCell]}>
+            <View key={`${keyBase}-h${idx}`} style={[md.tableCell, md.tableHeaderCell, { flex: columnWidths[idx] }]}>
               <Text selectable style={md.tableHeaderText}>{renderInline(header, `${keyBase}-h${idx}`)}</Text>
             </View>
           ))}
@@ -243,7 +259,7 @@ const TableBlock = React.memo(({
         {rows.map((row, rowIdx) => (
           <View key={`${keyBase}-r${rowIdx}`} style={md.tableRow}>
             {headers.map((_, cellIdx) => (
-              <View key={`${keyBase}-r${rowIdx}-c${cellIdx}`} style={md.tableCell}>
+              <View key={`${keyBase}-r${rowIdx}-c${cellIdx}`} style={[md.tableCell, { flex: columnWidths[cellIdx] }]}>
                 <Text selectable style={messageTextStyle}>{renderInline(row[cellIdx] || '', `${keyBase}-r${rowIdx}-c${cellIdx}`)}</Text>
               </View>
             ))}
@@ -353,7 +369,14 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
         const nestLevel = Math.floor(indentSpaces / 2);
         const checked = tlm[2].toLowerCase() === 'x';
         const indentStr = indent(nestLevel);
-        elements.push(<Text key={lk} selectable style={messageTextStyle}>{indentStr}{checked ? `${ICON_CHECKBOX_CHECKED} ` : `${ICON_CHECKBOX_UNCHECKED} `}{renderInline(tlm[3], lk)}</Text>);
+        const isDeep = nestLevel > MAX_LIST_INDENT_LEVEL;
+        elements.push(
+          <Text key={lk} selectable style={messageTextStyle}>
+            {indentStr}
+            {isDeep && <Text style={md.depthIndicator}>{'\u00B7'.repeat(nestLevel - MAX_LIST_INDENT_LEVEL)}{' '}</Text>}
+            {checked ? `${ICON_CHECKBOX_CHECKED} ` : `${ICON_CHECKBOX_UNCHECKED} `}{renderInline(tlm[3], lk)}
+          </Text>
+        );
         continue;
       }
 
@@ -363,7 +386,15 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
         const indentSpaces = ulm[1].length;
         const nestLevel = Math.floor(indentSpaces / 2); // 2 spaces = 1 nesting level
         const indentStr = indent(nestLevel);
-        elements.push(<Text key={lk} selectable style={messageTextStyle}>{indentStr}{`${ICON_BULLET} `}{renderInline(ulm[2], lk)}</Text>);
+        const isDeep = nestLevel > MAX_LIST_INDENT_LEVEL;
+        const bullet = isDeep ? DEEP_NEST_BULLET : ICON_BULLET;
+        elements.push(
+          <Text key={lk} selectable style={messageTextStyle}>
+            {indentStr}
+            {isDeep && <Text style={md.depthIndicator}>{'\u00B7'.repeat(nestLevel - MAX_LIST_INDENT_LEVEL)}{' '}</Text>}
+            {`${bullet} `}{renderInline(ulm[2], lk)}
+          </Text>
+        );
         continue;
       }
 
@@ -373,7 +404,14 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
         const indentSpaces = olm[1].length;
         const nestLevel = Math.floor(indentSpaces / 2); // 2 spaces = 1 nesting level
         const indentStr = indent(nestLevel);
-        elements.push(<Text key={lk} selectable style={messageTextStyle}>{indentStr}{olm[2]}{'. '}{renderInline(olm[3], lk)}</Text>);
+        const isDeep = nestLevel > MAX_LIST_INDENT_LEVEL;
+        elements.push(
+          <Text key={lk} selectable style={messageTextStyle}>
+            {indentStr}
+            {isDeep && <Text style={md.depthIndicator}>{'\u00B7'.repeat(nestLevel - MAX_LIST_INDENT_LEVEL)}{' '}</Text>}
+            {olm[2]}{'. '}{renderInline(olm[3], lk)}
+          </Text>
+        );
         continue;
       }
 
@@ -395,11 +433,9 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
 
   // Helper: Check if an element is a View component (HR, blockquote, table)
   // These are the elements that force paragraph splitting for selectability
-  const isViewElement = (element: React.ReactNode): boolean => {
-    if (!element || typeof element !== 'object') return false;
-    if (!('type' in element)) return false;
-    const type = (element as any).type;
-    return type === View || type === TableBlock;
+  const isViewElement = (element: React.ReactNode): element is React.ReactElement => {
+    if (!React.isValidElement(element)) return false;
+    return element.type === View || element.type === TableBlock;
   };
 
   // Helper: Group paragraph elements into selectable text runs and View blocks
@@ -622,5 +658,9 @@ export const md = StyleSheet.create({
     color: '#4a9eff',
     fontSize: 13,
     fontWeight: '600',
+  },
+  depthIndicator: {
+    color: COLORS.textDim,
+    fontSize: 11,
   },
 });
