@@ -37,6 +37,11 @@ export class OutputParser extends EventEmitter {
     // Pending interactive prompt being accumulated
     this._pendingPrompt = null;
     this._promptFlushTimer = null;
+    // Timestamp of last Claude-specific activity (tool use, thinking, response marker).
+    // Used to gate the IDLE→RESPONSE fallthrough: only accept unrecognized lines as
+    // response continuation if Claude was recently active. Prevents host terminal
+    // activity (user typing, redraws) from creating false chat bubbles.
+    this._lastClaudeActivity = 0;
     // Echo suppression: lines expected from PTY echo of user input
     this._pendingEchos = [];
     // Scrollback suppression: when attaching to an existing tmux session,
@@ -405,6 +410,7 @@ export class OutputParser extends EventEmitter {
 
     // Skip thinking/spinner lines
     if (this._isThinking(trimmed)) {
+      this._lastClaudeActivity = Date.now();
       if (this.state !== State.THINKING && this.state !== State.TOOL_USE) {
         this._finishCurrentMessage();
         this.state = State.THINKING;
@@ -424,6 +430,7 @@ export class OutputParser extends EventEmitter {
     const toolBoxMatch = trimmed.match(new RegExp(`^[╭┌]─+\\s*(${toolNames})`));
     const toolCompactMatch = !toolBoxMatch && trimmed.match(new RegExp(`^(${toolNames})\\(`));
     if (toolBoxMatch || toolCompactMatch) {
+      this._lastClaudeActivity = Date.now();
       this._finishCurrentMessage();
       const tool = toolBoxMatch ? toolBoxMatch[1] : toolCompactMatch[1];
       this.state = State.TOOL_USE;
@@ -441,6 +448,7 @@ export class OutputParser extends EventEmitter {
 
     // Tool use block end
     if (this.state === State.TOOL_USE && /^[╰└]─+/.test(trimmed)) {
+      this._lastClaudeActivity = Date.now();
       this._finishCurrentMessage();
       this.state = State.IDLE;
       return;
@@ -473,6 +481,7 @@ export class OutputParser extends EventEmitter {
 
     // Response marker: ⏺ followed by text
     if (/^⏺\s*/.test(trimmed)) {
+      this._lastClaudeActivity = Date.now();
       if (this.state !== State.RESPONSE) {
         this._finishCurrentMessage();
         this.state = State.RESPONSE;
@@ -500,7 +509,11 @@ export class OutputParser extends EventEmitter {
     } else if (this.state === State.IDLE || this.state === State.THINKING) {
       // Suppress echoed user input from PTY
       if (this._matchAndConsumeEcho(trimmed)) return;
-      // New response content
+      // Only accept as response continuation if Claude was recently active.
+      // Without this guard, host terminal activity (user typing in tmux,
+      // terminal redraws) creates false chat bubbles during idle periods.
+      if (Date.now() - this._lastClaudeActivity > 5000) return;
+      // New response content (continuation after tool block or thinking)
       this.state = State.RESPONSE;
       this.currentMessage = {
         type: "response",
