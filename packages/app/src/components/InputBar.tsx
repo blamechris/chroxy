@@ -20,6 +20,8 @@ export interface InputBarProps {
   viewMode: 'chat' | 'terminal';
   hasTerminal: boolean;
   bottomPadding: number;
+  disabled?: boolean;
+  disabledPlaceholder?: string;
 }
 
 // -- Component --
@@ -38,6 +40,8 @@ export function InputBar({
   viewMode,
   hasTerminal,
   bottomPadding,
+  disabled,
+  disabledPlaceholder,
 }: InputBarProps) {
   return (
     <View style={[styles.inputContainer, { paddingBottom: bottomPadding }]}>
@@ -73,25 +77,26 @@ export function InputBar({
           <Text style={styles.enterModeText}>{enterToSend ? ICON_RETURN : ICON_PARAGRAPH}</Text>
         </TouchableOpacity>
         <TextInput
-          style={[styles.input, !enterToSend && styles.inputMultiline]}
-          placeholder={!claudeReady ? 'Connecting to Claude...' : 'Message Claude...'}
+          style={[styles.input, !enterToSend && styles.inputMultiline, disabled && styles.inputDisabled]}
+          placeholder={disabled ? (disabledPlaceholder || 'Reconnecting...') : !claudeReady ? 'Connecting to Claude...' : 'Message Claude...'}
           placeholderTextColor={COLORS.textDim}
           value={inputText}
           onChangeText={onChangeText}
           // When enterToSend is true, multiline is false and onSubmitEditing fires on Enter.
           // When enterToSend is false, multiline is true so onSubmitEditing never fires.
-          onSubmitEditing={enterToSend && !isStreaming ? onSend : undefined}
+          onSubmitEditing={enterToSend && !isStreaming && !disabled ? onSend : undefined}
           blurOnSubmit={false}
           multiline={!enterToSend}
           autoCapitalize={viewMode === 'chat' ? 'sentences' : 'none'}
           autoCorrect={viewMode === 'chat'}
+          editable={!disabled}
         />
         {isStreaming ? (
-          <TouchableOpacity style={styles.interruptButton} onPress={onInterrupt}>
+          <TouchableOpacity style={styles.interruptButton} onPress={onInterrupt} disabled={disabled}>
             <Text style={styles.interruptButtonText}>{ICON_SQUARE}</Text>
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity style={styles.sendButton} onPress={onSend}>
+          <TouchableOpacity style={[styles.sendButton, disabled && styles.sendButtonDisabled]} onPress={onSend} disabled={disabled}>
             <Text style={styles.sendButtonText}>{ICON_ARROW_UP}</Text>
           </TouchableOpacity>
         )}
@@ -152,6 +157,12 @@ const styles = StyleSheet.create({
   },
   inputMultiline: {
     maxHeight: 100,
+  },
+  inputDisabled: {
+    opacity: 0.5,
+  },
+  sendButtonDisabled: {
+    opacity: 0.4,
   },
   sendButton: {
     backgroundColor: COLORS.accentBlue,

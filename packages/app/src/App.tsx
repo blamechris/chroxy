@@ -5,7 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 import { ConnectScreen } from './screens/ConnectScreen';
 import { SessionScreen } from './screens/SessionScreen';
-import { useConnectionStore } from './store/connection';
+import { useConnectionStore, selectShowSession } from './store/connection';
 
 export type RootStackParamList = {
   Connect: undefined;
@@ -15,7 +15,7 @@ export type RootStackParamList = {
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 export default function App() {
-  const isConnected = useConnectionStore((state) => state.isConnected);
+  const showSession = useConnectionStore(selectShowSession);
 
   return (
     <NavigationContainer>
@@ -27,7 +27,7 @@ export default function App() {
           contentStyle: { backgroundColor: '#0f0f1a' },
         }}
       >
-        {!isConnected ? (
+        {!showSession ? (
           <Stack.Screen
             name="Connect"
             component={ConnectScreen}
