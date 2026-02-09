@@ -146,8 +146,13 @@ export function SettingsScreen() {
               style={styles.row}
               onPress={async () => {
                 if (wsUrl) {
-                  await Clipboard.setStringAsync(wsUrl);
-                  Alert.alert('Copied', 'Server URL copied to clipboard.');
+                  try {
+                    await Clipboard.setStringAsync(wsUrl);
+                    Alert.alert('Copied', 'Server URL copied to clipboard.');
+                  } catch (error) {
+                    console.error('Failed to copy server URL to clipboard:', error);
+                    Alert.alert('Error', 'Failed to copy server URL to clipboard.');
+                  }
                 }
               }}
             >
