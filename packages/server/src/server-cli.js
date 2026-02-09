@@ -64,7 +64,7 @@ export async function startCliServer(config) {
       console.error(`[cli] Session ${sessionId} error: ${data.message}`)
       // Forward session errors as server_error (in addition to the in-chat error message)
       const isFatal = /failed to stay alive|max respawn/i.test(data.message)
-      wsServer.broadcastError('session', data.message, !isFatal)
+      if (wsServer) wsServer.broadcastError('session', data.message, !isFatal)
     } else if (event === 'result' && data.cost != null) {
       console.log(`[cli] Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
     }
