@@ -1,10 +1,7 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
 import { ModelInfo, ClaudeStatus } from '../store/connection';
-
-// Named Unicode constants for readability
-const ICON_CHEVRON_RIGHT = '\u25B8'; // Right-pointing triangle
-const ICON_CHEVRON_DOWN = '\u25BE';  // Down-pointing triangle
+import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 
 // -- Props --
 

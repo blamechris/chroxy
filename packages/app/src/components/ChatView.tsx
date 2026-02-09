@@ -13,12 +13,7 @@ import {
 } from 'react-native';
 import { ChatMessage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
-
-// Named Unicode constants for readability
-const ICON_CHEVRON_RIGHT = '\u25B8'; // Right-pointing triangle
-const ICON_CHEVRON_DOWN = '\u25BE';  // Down-pointing triangle
-const ICON_ARROW_UP = '\u2191';      // Up arrow
-const ICON_ARROW_DOWN = '\u2193';    // Down arrow
+import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN } from '../constants/icons';
 
 // -- Animated Thinking Indicator --
 
@@ -64,7 +59,12 @@ function ThinkingIndicator() {
   }, [dot1Opacity, dot2Opacity, dot3Opacity]);
 
   return (
-    <View style={styles.thinkingIndicator}>
+    <View
+      style={styles.thinkingIndicator}
+      accessible={true}
+      accessibilityLabel="Claude is thinking"
+      accessibilityRole="text"
+    >
       <Text style={styles.thinkingLabel}>Claude is thinking</Text>
       <View style={styles.thinkingDots}>
         <Animated.View style={[styles.thinkingDot, { opacity: dot1Opacity }]} />
