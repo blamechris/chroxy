@@ -35,7 +35,7 @@ interface SavedConnection {
   token: string;
 }
 
-interface ContextUsage {
+export interface ContextUsage {
   inputTokens: number;
   outputTokens: number;
   cacheCreation: number;
