@@ -9,6 +9,7 @@ import {
   LayoutChangeEvent,
 } from 'react-native';
 import { useConnectionStore, SessionInfo } from '../store/connection';
+import { ICON_SQUARE } from '../constants/icons';
 
 interface SessionPillProps {
   session: SessionInfo;
@@ -29,7 +30,7 @@ function SessionPill({ session, isActive, onPress, onLongPress, onLayout }: Sess
       activeOpacity={0.7}
     >
       {session.isBusy && <View style={styles.busyDot} />}
-      {isPty && <Text style={[styles.ptyIcon, isActive && styles.ptyIconActive]}>{'\u25A0'} </Text>}
+      {isPty && <Text style={[styles.ptyIcon, isActive && styles.ptyIconActive]}>{ICON_SQUARE} </Text>}
       <Text style={[styles.pillText, isActive && styles.pillTextActive]} numberOfLines={1}>
         {session.name}
       </Text>
@@ -51,20 +52,26 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
   const scrollViewRef = useRef<ScrollView>(null);
   const pillLayouts = useRef<Map<string, { x: number; width: number }>>(new Map());
   const [viewportWidth, setViewportWidth] = useState(0);
+  const pendingScrollRef = useRef<string | null>(null);
 
   const scrollToSession = useCallback((sessionId: string) => {
     const layout = pillLayouts.current.get(sessionId);
-    if (!layout || !scrollViewRef.current || viewportWidth === 0) return;
+    if (!layout || !scrollViewRef.current || viewportWidth === 0) {
+      // Layout not ready yet, mark for scroll when it is
+      pendingScrollRef.current = sessionId;
+      return;
+    }
     // Center the pill within the viewport, clamped to 0
     const offset = Math.max(0, layout.x - (viewportWidth - layout.width) / 2);
     scrollViewRef.current.scrollTo({ x: offset, animated: true });
+    pendingScrollRef.current = null;
   }, [viewportWidth]);
 
   const handlePillLayout = useCallback((sessionId: string, e: LayoutChangeEvent) => {
     const { x, width } = e.nativeEvent.layout;
     pillLayouts.current.set(sessionId, { x, width });
-    // If this pill is the active session, scroll to it now (handles first mount)
-    if (sessionId === activeSessionId) {
+    // If this pill is the active session or has a pending scroll, scroll to it now
+    if (sessionId === activeSessionId || sessionId === pendingScrollRef.current) {
       scrollToSession(sessionId);
     }
   }, [activeSessionId, scrollToSession]);
@@ -79,14 +86,10 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
     }
   }, [sessions]);
 
-  // Auto-scroll active session pill into view
+  // Auto-scroll active session pill into view when it changes
   useEffect(() => {
-    if (!activeSessionId || !scrollViewRef.current) return;
-    // Defer to let layout settle after session switch
-    const timer = setTimeout(() => {
-      scrollToSession(activeSessionId);
-    }, 100);
-    return () => clearTimeout(timer);
+    if (!activeSessionId) return;
+    scrollToSession(activeSessionId);
   }, [activeSessionId, scrollToSession]);
 
   const handleLongPress = (session: SessionInfo) => {
@@ -142,6 +145,13 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
     );
   };
 
+  const handleContentSizeChange = useCallback(() => {
+    // When content size changes (e.g., new session added), scroll to show the active session
+    if (activeSessionId) {
+      scrollToSession(activeSessionId);
+    }
+  }, [activeSessionId, scrollToSession]);
+
   return (
     <View style={styles.container}>
       <ScrollView
@@ -150,6 +160,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.scrollContent}
         onLayout={(e) => setViewportWidth(e.nativeEvent.layout.width)}
+        onContentSizeChange={handleContentSizeChange}
       >
         {sessions.map((session) => (
           <SessionPill
