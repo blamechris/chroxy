@@ -20,9 +20,9 @@ chroxy/
 ```
 
 **Current Status (v0.1.0):**
-- Server works: CLI headless mode (default), PTY/tmux mode, WebSocket protocol, Cloudflare tunnel, session management, model switching, auto-discovery of new tmux sessions
-- App works: QR code scanning, connection flow with health checks and retries, markdown rendering, dual-view chat/terminal
-- Priority: xterm.js integration, output parser tuning, push notifications
+- Server works: CLI headless mode (default), PTY/tmux mode, WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, session management, model switching, auto-discovery
+- App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal
+- Priority: xterm.js integration, plan mode UI, permission handling UI, settings page
 
 ## Critical Dev Notes
 
@@ -46,10 +46,15 @@ brew install tmux
 
 ### Cloudflare Tunnel Dependency
 
-The server uses Cloudflare Quick Tunnel for secure remote access. Install cloudflared:
+The server uses Cloudflare tunnels for secure remote access. Two modes:
+- **Quick Tunnel** (default): random URL, no account needed
+- **Named Tunnel** (`--tunnel named`): stable URL, requires Cloudflare account + domain
 
 ```bash
 brew install cloudflared
+
+# Named tunnel setup (interactive):
+npx chroxy tunnel setup
 ```
 
 ## Session Start Protocol
@@ -177,14 +182,17 @@ Chroxy server operates in two modes:
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| CLI | `src/cli.js` | `init`, `start`, `config` commands |
+| CLI | `src/cli.js` | `init`, `start`, `config`, `tunnel setup` commands |
+| Config | `src/config.js` | Schema validation + merge (CLI > ENV > file > defaults) |
+| Supervisor | `src/supervisor.js` | Tunnel owner + child auto-restart (named tunnel mode) |
 | ServerCLI | `src/server-cli.js` | CLI mode orchestrator |
 | CliSession | `src/cli-session.js` | Claude Code headless executor |
 | Server | `src/server.js` | PTY mode orchestrator |
 | WsServer | `src/ws-server.js` | WebSocket protocol with auth |
+| PushManager | `src/push.js` | Push notifications via Expo Push API (CLI mode) |
 | PtyManager | `src/pty-manager.js` | tmux session management (PTY mode) |
 | OutputParser | `src/output-parser.js` | Terminal output parser (PTY mode) |
-| TunnelManager | `src/tunnel.js` | Cloudflare tunnel lifecycle |
+| TunnelManager | `src/tunnel.js` | Cloudflare tunnel lifecycle (quick/named/none) |
 | SessionManager | `src/session-manager.js` | Session lifecycle management + auto-discovery |
 | Models | `src/models.js` | Model switching utilities |
 
@@ -212,10 +220,10 @@ Chroxy server operates in two modes:
 
 ### WebSocket Protocol
 
-Client → Server: `auth`, `input`, `resize`, `mode`, `interrupt`, `set_model`, `set_permission_mode`, `permission_response`, `list_sessions`, `switch_session`, `create_session`, `destroy_session`, `rename_session`, `discover_sessions`, `attach_session`, `register_push_token`
+Client → Server: `auth`, `input`, `resize`, `mode`, `interrupt`, `set_model`, `set_permission_mode`, `permission_response`, `list_sessions`, `switch_session`, `create_session`, `destroy_session`, `rename_session`, `discover_sessions`, `attach_session`, `trigger_discovery`, `register_push_token`
 Server → Client: `auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `stream_delta`, `stream_end`, `raw`, `message`, `status`, `model_changed`, `status_update`, `available_models`, `permission_request`, `permission_mode_changed`, `available_permission_modes`, `session_list`, `session_switched`, `session_created`, `session_destroyed`, `session_error`, `discovered_sessions`, `history_replay_start`, `history_replay_end`, `raw_background`, `claude_ready`, `tool_start`, `result`, `server_status`, `server_error`
 
-`server_status` is used for non-error status updates, while `server_error` is reserved for error conditions. `discovered_sessions` can be sent proactively when auto-discovery finds new tmux sessions (every 45s by default).
+`server_status` is used for non-error status updates, while `server_error` is reserved for error conditions. `discovered_sessions` can be sent proactively when auto-discovery finds new tmux sessions (configurable via `--discovery-interval`, default 45s). `trigger_discovery` requests an immediate discovery scan.
 
 ### App Screens
 
@@ -226,7 +234,10 @@ Server → Client: `auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `strea
 
 ### State Management (Zustand)
 
-Key state: `isConnected`, `wsUrl`, `apiToken`, `viewMode`, `messages[]`, `terminalBuffer`
+Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewMode`, `messages[]`, `terminalBuffer`
+
+`ConnectionPhase`: `disconnected` → `connecting` → `connected` / `reconnecting` / `server_restarting`
+`selectShowSession`: stays on SessionScreen during transient disconnects (reconnecting/server_restarting)
 
 ## Dev Commands
 
@@ -258,15 +269,18 @@ node packages/server/src/test-client.js wss://your-url
 
 | File | Purpose |
 |------|---------|
-| `packages/server/src/cli.js` | CLI commands (init, start, config) |
-| `packages/server/src/index.js` | Entry point, mode selector |
+| `packages/server/src/cli.js` | CLI commands (init, start, config, tunnel setup) |
+| `packages/server/src/config.js` | Config schema validation + merge precedence |
+| `packages/server/src/supervisor.js` | Supervisor: tunnel owner + child auto-restart |
+| `packages/server/src/server-cli-child.js` | Supervised child entry point |
 | `packages/server/src/server-cli.js` | CLI mode orchestrator |
 | `packages/server/src/cli-session.js` | Claude Code headless executor |
+| `packages/server/src/push.js` | Push notifications via Expo Push API |
 | `packages/server/src/server.js` | PTY mode orchestrator |
 | `packages/server/src/pty-manager.js` | PTY/tmux management |
 | `packages/server/src/output-parser.js` | Terminal output parser |
 | `packages/server/src/ws-server.js` | WebSocket protocol with auth |
-| `packages/server/src/tunnel.js` | Cloudflare tunnel manager |
+| `packages/server/src/tunnel.js` | Cloudflare tunnel manager (quick/named/none) |
 | `packages/server/src/tunnel-check.js` | Tunnel health verification |
 | `packages/server/src/session-manager.js` | Session lifecycle management |
 | `packages/server/src/session-discovery.js` | Session discovery utilities |
@@ -275,11 +289,13 @@ node packages/server/src/test-client.js wss://your-url
 | `packages/app/src/App.tsx` | App root with navigation |
 | `packages/app/src/screens/ConnectScreen.tsx` | QR scan + manual connection UI |
 | `packages/app/src/screens/SessionScreen.tsx` | Chat + terminal dual-view UI |
-| `packages/app/src/store/connection.ts` | Zustand state store |
+| `packages/app/src/store/connection.ts` | Zustand state store (ConnectionPhase) |
+| `packages/app/src/notifications.ts` | Push notification registration |
 | `docs/qa-log.md` | QA audit log with coverage matrix |
+| `docs/architecture/in-app-dev.md` | In-app iterative development design |
 | `CLAUDE.md` | This file |
 
 ---
 
-*Last Updated: 2026-02-07*
+*Last Updated: 2026-02-09*
 *Version: 0.1.0*
