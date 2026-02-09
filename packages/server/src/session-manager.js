@@ -217,9 +217,9 @@ export class SessionManager extends EventEmitter {
       console.error(`[session-manager] Cannot destroy: session ${sessionId} not found`)
       return false
     }
-    console.log(`[session-manager] Destroying session ${sessionId} "${entry.name}" (${this._sessions.size - 1}/${this.maxSessions} after removal)`)
     entry.session.destroy()
     this._sessions.delete(sessionId)
+    console.log(`[session-manager] Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
     this._messageHistory.delete(sessionId)
     // Clean up any pending streams for this session
     for (const key of this._pendingStreams.keys()) {
