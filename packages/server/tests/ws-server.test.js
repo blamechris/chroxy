@@ -951,3 +951,457 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
     ws.close()
   })
 })
+
+describe('WsServer attach_session message flow', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  /** Create a mock SessionManager with attachSession method */
+  function createMockSessionManagerWithAttach(options = {}) {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    const tmuxSessionsMap = new Map()
+
+    // Initialize with any provided sessions
+    if (options.sessions) {
+      for (const sessionData of options.sessions) {
+        const mockSession = createMockSession()
+        mockSession.cwd = sessionData.cwd
+        sessionsMap.set(sessionData.id, {
+          session: mockSession,
+          name: sessionData.name,
+          cwd: sessionData.cwd,
+          type: sessionData.type || 'pty',
+          isBusy: false,
+          tmuxSession: sessionData.tmuxSession,
+        })
+        if (sessionData.tmuxSession) {
+          tmuxSessionsMap.set(sessionData.tmuxSession, sessionData.id)
+        }
+      }
+    }
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({
+          id,
+          name: entry.name,
+          cwd: entry.cwd,
+          type: entry.type,
+          isBusy: entry.isBusy,
+        })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+
+    // Mock attachSession behavior
+    manager.attachSession = async ({ tmuxSession, name }) => {
+      // Simulate SessionLimitError
+      if (options.shouldReachLimit && sessionsMap.size >= (options.maxSessions || 5)) {
+        const err = new Error(`Cannot create session: limit of ${options.maxSessions || 5} sessions reached`)
+        err.name = 'SessionLimitError'
+        throw err
+      }
+
+      // Simulate SessionExistsError
+      if (tmuxSessionsMap.has(tmuxSession)) {
+        const err = new Error(`Session already attached to tmux session '${tmuxSession}'`)
+        err.name = 'SessionExistsError'
+        throw err
+      }
+
+      // Simulate custom error if provided
+      if (options.attachError) {
+        throw options.attachError
+      }
+
+      // Success case: create a new session
+      const sessionId = `session-${Date.now()}`
+      const mockSession = createMockSession()
+      mockSession.cwd = '/tmp/attached-session'
+      
+      const entry = {
+        session: mockSession,
+        name: name || tmuxSession,
+        cwd: '/tmp/attached-session',
+        type: 'pty',
+        isBusy: false,
+        tmuxSession,
+      }
+
+      sessionsMap.set(sessionId, entry)
+      tmuxSessionsMap.set(tmuxSession, sessionId)
+
+      return sessionId
+    }
+
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    })
+
+    return manager
+  }
+
+  /**
+   * Helper to authenticate a client and wait for all post-auth messages
+   * before clearing the message buffer. This prevents race conditions where
+   * the initial session_list (sent after auth) arrives after messages.length = 0
+   * and gets mistaken for the broadcast triggered by attach_session.
+   */
+  async function authenticateAndDrainPostAuth(ws, messages, token = 'test-token') {
+    send(ws, { type: 'auth', token })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    
+    // Wait for the final post-auth message (available_permission_modes) to ensure
+    // all post-auth messages have arrived before we clear the buffer
+    await waitForMessage(messages, 'available_permission_modes', 2000)
+    
+    // Now safe to clear for attach flow assertions
+    messages.length = 0
+  }
+
+  it('successfully attaches to tmux session', async () => {
+    const mockManager = createMockSessionManagerWithAttach()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    await authenticateAndDrainPostAuth(ws, messages)
+
+    // Send attach_session message
+    send(ws, {
+      type: 'attach_session',
+      tmuxSession: 'my-tmux-session',
+      name: 'My Attached Session'
+    })
+
+    // Should receive session_switched
+    const sessionSwitched = await waitForMessage(messages, 'session_switched', 2000)
+    assert.ok(sessionSwitched, 'Should receive session_switched message')
+    assert.ok(sessionSwitched.sessionId, 'session_switched should include sessionId')
+    assert.equal(sessionSwitched.name, 'My Attached Session', 'session_switched should include custom name')
+    assert.equal(sessionSwitched.cwd, '/tmp/attached-session', 'session_switched should include cwd')
+
+    // Should receive session_list broadcast
+    const sessionList = await waitForMessage(messages, 'session_list', 2000)
+    assert.ok(sessionList, 'Should receive session_list broadcast')
+    assert.ok(Array.isArray(sessionList.sessions), 'session_list should include sessions array')
+    assert.equal(sessionList.sessions.length, 1, 'Should have one session after attachment')
+
+    ws.close()
+  })
+
+  it('attaches with default name when name not provided', async () => {
+    const mockManager = createMockSessionManagerWithAttach()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    await authenticateAndDrainPostAuth(ws, messages)
+
+    // Send attach_session without custom name
+    send(ws, {
+      type: 'attach_session',
+      tmuxSession: 'default-name-session'
+    })
+
+    const sessionSwitched = await waitForMessage(messages, 'session_switched', 2000)
+    assert.ok(sessionSwitched, 'Should receive session_switched message')
+    assert.equal(sessionSwitched.name, 'default-name-session', 'Should use tmuxSession as default name')
+
+    ws.close()
+  })
+
+  it('rejects attach_session with missing tmuxSession field', async () => {
+    const mockManager = createMockSessionManagerWithAttach()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    await authenticateAndDrainPostAuth(ws, messages)
+
+    // Send attach_session without tmuxSession
+    send(ws, { type: 'attach_session', name: 'Some Name' })
+
+    // Should receive session_error
+    const sessionError = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(sessionError, 'Should receive session_error message')
+    assert.equal(sessionError.message, 'tmuxSession is required', 'Should indicate tmuxSession is required')
+
+    ws.close()
+  })
+
+  it('rejects attach_session with empty tmuxSession', async () => {
+    const mockManager = createMockSessionManagerWithAttach()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    await authenticateAndDrainPostAuth(ws, messages)
+
+    // Send attach_session with empty string
+    send(ws, { type: 'attach_session', tmuxSession: '   ' })
+
+    const sessionError = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(sessionError, 'Should receive session_error message')
+    assert.equal(sessionError.message, 'tmuxSession is required', 'Should reject empty tmuxSession')
+
+    ws.close()
+  })
+
+  it('rejects attach_session with invalid tmuxSession name (shell injection protection)', async () => {
+    const mockManager = createMockSessionManagerWithAttach()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    await authenticateAndDrainPostAuth(ws, messages)
+
+    // Send attach_session with invalid characters (potential shell injection)
+    send(ws, { type: 'attach_session', tmuxSession: 'evil; rm -rf /' })
+
+    const sessionError = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(sessionError, 'Should receive session_error message')
+    assert.equal(sessionError.message, 'Invalid tmux session name', 'Should reject invalid session name')
+
+    ws.close()
+  })
+
+  it('rejects attach_session with invalid characters in tmuxSession', async () => {
+    const mockManager = createMockSessionManagerWithAttach()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    await authenticateAndDrainPostAuth(ws, messages)
+
+    // Test various invalid characters
+    const invalidNames = [
+      'session/with/slash',
+      'session with spaces',
+      'session$var',
+      'session`cmd`',
+      'session|pipe',
+      'session&background'
+    ]
+
+    for (const invalidName of invalidNames) {
+      messages.length = 0
+      send(ws, { type: 'attach_session', tmuxSession: invalidName })
+
+      const sessionError = await waitForMessage(messages, 'session_error', 2000)
+      assert.ok(sessionError, `Should reject tmuxSession: ${invalidName}`)
+      assert.equal(sessionError.message, 'Invalid tmux session name', 'Should indicate invalid session name')
+    }
+
+    ws.close()
+  })
+
+  it('handles SessionLimitError when session limit reached', async () => {
+    // Create manager with 5 existing sessions and limit of 5
+    const existingSessions = Array.from({ length: 5 }, (_, i) => ({
+      id: `session-${i}`,
+      name: `Session ${i}`,
+      cwd: `/tmp/session-${i}`,
+      type: 'pty',
+      tmuxSession: `tmux-${i}`
+    }))
+
+    const mockManager = createMockSessionManagerWithAttach({
+      sessions: existingSessions,
+      shouldReachLimit: true,
+      maxSessions: 5
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    await authenticateAndDrainPostAuth(ws, messages)
+
+    // Try to attach when limit is reached
+    send(ws, { type: 'attach_session', tmuxSession: 'new-session' })
+
+    const sessionError = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(sessionError, 'Should receive session_error message')
+    assert.match(sessionError.message, /limit.*reached/i, 'Error should mention session limit')
+
+    ws.close()
+  })
+
+  it('handles SessionExistsError when tmux session already attached', async () => {
+    // Create manager with one existing session attached to 'existing-tmux'
+    const mockManager = createMockSessionManagerWithAttach({
+      sessions: [{
+        id: 'session-1',
+        name: 'Existing Session',
+        cwd: '/tmp/existing',
+        type: 'pty',
+        tmuxSession: 'existing-tmux'
+      }]
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    await authenticateAndDrainPostAuth(ws, messages)
+
+    // Try to attach to the same tmux session
+    send(ws, { type: 'attach_session', tmuxSession: 'existing-tmux' })
+
+    const sessionError = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(sessionError, 'Should receive session_error message')
+    assert.match(sessionError.message, /already attached/i, 'Error should mention session already exists')
+    assert.match(sessionError.message, /existing-tmux/, 'Error should mention the tmux session name')
+
+    ws.close()
+  })
+
+  it('handles generic error from SessionManager.attachSession', async () => {
+    const customError = new Error('Failed to spawn PTY process')
+    const mockManager = createMockSessionManagerWithAttach({
+      attachError: customError
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    await authenticateAndDrainPostAuth(ws, messages)
+
+    send(ws, { type: 'attach_session', tmuxSession: 'some-session' })
+
+    const sessionError = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(sessionError, 'Should receive session_error message')
+    assert.equal(sessionError.message, 'Failed to spawn PTY process', 'Should forward the error message')
+
+    ws.close()
+  })
+
+  it('broadcasts session_list to all clients after successful attachment', async () => {
+    const mockManager = createMockSessionManagerWithAttach()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect two clients
+    const client1 = await createClient(port, false)
+    await authenticateAndDrainPostAuth(client1.ws, client1.messages)
+
+    const client2 = await createClient(port, false)
+    await authenticateAndDrainPostAuth(client2.ws, client2.messages)
+
+    // Client1 attaches to a session
+    send(client1.ws, { type: 'attach_session', tmuxSession: 'broadcast-test' })
+
+    // Both clients should receive session_list broadcast
+    const list1 = await waitForMessage(client1.messages, 'session_list', 2000)
+    const list2 = await waitForMessage(client2.messages, 'session_list', 2000)
+
+    assert.ok(list1, 'Client1 should receive session_list')
+    assert.ok(list2, 'Client2 should receive session_list')
+    assert.equal(list1.sessions.length, 1, 'Both clients should see the new session')
+    assert.equal(list2.sessions.length, 1, 'Both clients should see the new session')
+
+    client1.ws.close()
+    client2.ws.close()
+  })
+
+  it('auto-switches attaching client to newly attached session', async () => {
+    const mockManager = createMockSessionManagerWithAttach()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    await authenticateAndDrainPostAuth(ws, messages)
+
+    // Attach to a session
+    send(ws, { type: 'attach_session', tmuxSession: 'auto-switch-test', name: 'Auto Switch Session' })
+
+    // Should receive session_switched before session_list
+    await waitForMessage(messages, 'session_switched', 2000)
+    await waitForMessage(messages, 'session_list', 2000)
+
+    const switchedIndex = messages.findIndex(m => m.type === 'session_switched')
+    const listIndex = messages.findIndex(m => m.type === 'session_list')
+
+    assert.ok(switchedIndex < listIndex, 'session_switched should come before session_list')
+    
+    const sessionSwitched = messages[switchedIndex]
+    assert.equal(sessionSwitched.name, 'Auto Switch Session', 'Should switch to the newly attached session')
+
+    ws.close()
+  })
+})
