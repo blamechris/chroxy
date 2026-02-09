@@ -110,20 +110,7 @@ export async function startCliServer(config) {
     const { wsUrl, httpUrl } = await tunnel.start()
     currentWsUrl = wsUrl
 
-    // 5. Wait for tunnel to be fully routable (DNS propagation)
-    await waitForTunnel(httpUrl)
-
-    // 6. Generate connection info
-    const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
-
-    console.log('\n[✓] Server ready! (CLI headless mode)\n')
-    console.log('📱 Scan this QR code with the Chroxy app:\n')
-    qrcode.generate(connectionUrl, { small: true })
-    console.log(`\nOr connect manually:`)
-    console.log(`   URL:   ${wsUrl}`)
-    console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
-
-    // 7. Wire up tunnel lifecycle events
+    // 5. Wire up tunnel lifecycle events (before waitForTunnel to catch early failures)
     tunnel.on('tunnel_lost', ({ code, signal }) => {
       const exitReason = signal ? `signal ${signal}` : `code ${code}`
       console.log(`\n[!] Tunnel lost (${exitReason})`)
@@ -151,8 +138,10 @@ export async function startCliServer(config) {
         console.log(`   URL:   ${newWsUrl}`)
         console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
         console.log('')
+        wsServer.broadcastError('tunnel', `Tunnel reconnected with new URL: ${newWsUrl}`, true)
       } else {
         console.log(`[✓] Tunnel URL unchanged: ${newWsUrl}`)
+        wsServer.broadcastError('tunnel', 'Tunnel reconnected successfully', true)
       }
     })
 
@@ -162,6 +151,20 @@ export async function startCliServer(config) {
       console.error(`[!] Server will continue on localhost only. Remote connections will not work.`)
       wsServer.broadcastError('tunnel', 'Tunnel recovery failed. Remote connections will not work.', false)
     })
+
+    // 6. Wait for tunnel to be fully routable (DNS propagation)
+    await waitForTunnel(httpUrl)
+
+    // 7. Generate connection info
+    const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
+
+    console.log('\n[✓] Server ready! (CLI headless mode)\n')
+    console.log('📱 Scan this QR code with the Chroxy app:\n')
+    qrcode.generate(connectionUrl, { small: true })
+    console.log(`\nOr connect manually:`)
+    console.log(`   URL:   ${wsUrl}`)
+    console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+
   } else {
     console.log(`[✓] Server ready! (CLI headless mode, no auth)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)
