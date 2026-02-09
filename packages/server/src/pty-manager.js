@@ -1,5 +1,5 @@
 import pty from "node-pty";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { EventEmitter } from "events";
 
 /**
@@ -32,7 +32,10 @@ export class PtyManager extends EventEmitter {
       // Fresh start — kill the old session so there's no scrollback
       console.log(`[pty] Killing old tmux session: ${this.sessionName}`);
       try {
-        execSync(`/opt/homebrew/bin/tmux kill-session -t ${this.sessionName} 2>/dev/null`);
+        execFileSync('/opt/homebrew/bin/tmux', ['kill-session', '-t', this.sessionName], {
+          stdio: 'ignore',
+          timeout: 5000,
+        });
       } catch {
         // Session may have died already
       }
@@ -115,7 +118,10 @@ export class PtyManager extends EventEmitter {
   /** Check if the named tmux session already exists */
   _hasTmuxSession() {
     try {
-      execSync(`tmux has-session -t ${this.sessionName} 2>/dev/null`);
+      execFileSync('tmux', ['has-session', '-t', this.sessionName], {
+        stdio: 'ignore',
+        timeout: 5000,
+      });
       return true;
     } catch {
       return false;
@@ -158,9 +164,10 @@ export class PtyManager extends EventEmitter {
       }
 
       // Check pane status (pane_dead flag) to catch dead panes
-      const paneDeadOutput = execSync(
-        `tmux list-panes -t ${this.sessionName} -F '#{pane_dead}' 2>/dev/null`,
-        { encoding: 'utf-8' }
+      const paneDeadOutput = execFileSync(
+        'tmux',
+        ['list-panes', '-t', this.sessionName, '-F', '#{pane_dead}'],
+        { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
       ).trim();
 
       // If any pane reports '1', it's dead
@@ -178,9 +185,10 @@ export class PtyManager extends EventEmitter {
 
       // Additionally, verify that a Claude process/command is still running in the session.
       // We use tmux's pane_current_command to see what each pane is currently running.
-      const currentCmdOutput = execSync(
-        `tmux list-panes -t ${this.sessionName} -F '#{pane_current_command}' 2>/dev/null`,
-        { encoding: 'utf-8' }
+      const currentCmdOutput = execFileSync(
+        'tmux',
+        ['list-panes', '-t', this.sessionName, '-F', '#{pane_current_command}'],
+        { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
       ).trim();
 
       const paneCommands = currentCmdOutput === '' ? [] : currentCmdOutput.split('\n');
