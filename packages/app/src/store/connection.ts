@@ -636,10 +636,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           if (msgType === 'user_input') break;
           // During reconnect replay, skip if app already has messages (cache is fresh)
           if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
-          // During session-switch replay, skip if message content already in cache (dedup)
+          // During session-switch replay, skip if an equivalent message is already in cache (dedup)
           if (_receivingHistoryReplay && _isSessionSwitchReplay) {
             const cached = get().messages;
-            if (cached.some((m) => m.type === msgType && m.content === msg.content)) break;
+            const isDuplicate = cached.some((m) => {
+              if (m.type !== msgType || m.content !== msg.content) return false;
+              // Strengthen signature: timestamp + tool + options to avoid dropping
+              // legitimate repeated messages (e.g., identical errors, repeated "OK")
+              if (m.timestamp !== msg.timestamp) return false;
+              if ((m.tool ?? null) !== (msg.tool ?? null)) return false;
+              return JSON.stringify(m.options ?? null) === JSON.stringify(msg.options ?? null);
+            });
+            if (isDuplicate) break;
           }
           const newMsg: ChatMessage = {
             id: nextMessageId(msgType),
