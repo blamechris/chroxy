@@ -4,6 +4,19 @@ import { once, EventEmitter } from 'node:events'
 import { WsServer } from '../src/ws-server.js'
 import WebSocket from 'ws'
 
+
+
+/**
+ * Helper to wait for an event with timeout.
+ * Throws if timeout expires before event fires.
+ */
+async function withTimeout(promise, timeoutMs, timeoutMessage) {
+  const timer = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs)
+  )
+  return Promise.race([promise, timer])
+}
+
 /**
  * Start a WsServer on port 0 (OS-assigned) and return the actual port.
  * Resolves only after the HTTP server emits 'listening', so the port is
@@ -11,18 +24,14 @@ import WebSocket from 'ws'
  */
 async function startServerAndGetPort(server) {
   server.start('127.0.0.1')
-  await new Promise((resolve, reject) => {
-    const onListening = () => {
-      server.httpServer.off('error', onError)
-      resolve()
-    }
-    const onError = (err) => {
-      server.httpServer.off('listening', onListening)
-      reject(err)
-    }
-    server.httpServer.once('listening', onListening)
-    server.httpServer.once('error', onError)
-  })
+  try {
+    await Promise.race([
+      once(server.httpServer, 'listening'),
+      once(server.httpServer, 'error').then(err => { throw err })
+    ])
+  } catch (err) {
+    throw err
+  }
   return server.httpServer.address().port
 }
 
@@ -30,56 +39,39 @@ async function startServerAndGetPort(server) {
 async function createClient(port, expectAuth = true) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`)
   const messages = []
-  const timers = []
-  let authResolve = null
 
   // Set up message handler before connection opens
-  const authPromise = expectAuth ? new Promise((resolve) => {
-    authResolve = resolve
-  }) : null
-
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString())
       messages.push(msg)
-      // Check if this is the auth_ok message we're waiting for
-      if (expectAuth && msg.type === 'auth_ok' && authResolve) {
-        authResolve()
-        authResolve = null
-      }
     } catch (err) {
       console.error('Failed to parse message:', data.toString())
     }
   })
 
-  // Wait for connection with timeout + error handling
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Connection timeout')), 2000)
-    timers.push(timer)
-
-    const cleanup = () => {
-      clearTimeout(timer)
-      ws.off('open', handleOpen)
-      ws.off('error', handleError)
-    }
-    const handleOpen = () => { cleanup(); resolve() }
-    const handleError = (err) => { cleanup(); reject(err) }
-
-    ws.once('open', handleOpen)
-    ws.once('error', handleError)
-  })
+  // Wait for connection with timeout
+  await withTimeout(
+    Promise.race([
+      once(ws, 'open'),
+      once(ws, 'error').then(err => { throw err })
+    ]),
+    2000,
+    'Connection timeout'
+  )
 
   // If expecting auth, wait for auth_ok with timeout
-  if (expectAuth && authPromise) {
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Auth timeout')), 2000)
-      timers.push(timer)
-      authPromise.then(() => { clearTimeout(timer); resolve() })
-    })
+  if (expectAuth) {
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'auth_ok')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Auth timeout'
+    )
   }
-
-  // Clear any remaining timers to avoid keeping the event loop alive
-  for (const t of timers) clearTimeout(t)
 
   return { ws, messages }
 }
@@ -90,31 +82,25 @@ function send(ws, msg) {
 }
 
 /**
- * Helper to wait for a message of a specific type.
- * Uses promise-based pattern with proper timeout handling.
+ * Helper to wait for a message of a specific type with timeout.
  */
 async function waitForMessage(messages, type, timeout = 1000) {
-  const startTime = Date.now()
-
   // Check if message already exists
   const existing = messages.find(m => m.type === type)
   if (existing) return existing
 
-  // Wait for new message with timeout
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Timeout waiting for message type: ${type}`))
-    }, timeout)
-
-    const checkInterval = setInterval(() => {
-      const msg = messages.find(m => m.type === type)
-      if (msg) {
-        clearTimeout(timer)
-        clearInterval(checkInterval)
-        resolve(msg)
+  // Poll for message with timeout
+  await withTimeout(
+    (async () => {
+      while (!messages.find(m => m.type === type)) {
+        await new Promise(r => setTimeout(r, 10))
       }
-    }, 10)
-  })
+    })(),
+    timeout,
+    `Timeout waiting for message type: ${type}`
+  )
+
+  return messages.find(m => m.type === type)
 }
 
 /** Create a minimal mock session */
@@ -129,6 +115,7 @@ function createMockSession() {
   session.setPermissionMode = () => {}
   return session
 }
+
 
 describe('WsServer with authRequired: false', () => {
   let server
