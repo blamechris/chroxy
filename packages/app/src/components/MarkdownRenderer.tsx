@@ -10,6 +10,10 @@ import { COLORS } from '../constants/colors';
  *  forcing excessive horizontal scrolling. */
 const TABLE_CELL_MIN_WIDTH = 80;
 
+/** Regex pattern for matching markdown table separator rows (e.g., |---|---|)
+ *  Matches lines with optional leading/trailing pipes and dashes/colons. */
+const TABLE_SEPARATOR_RE = /^\s*\|?\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/;
+
 // -- Content Block Types --
 
 type ContentBlock =
@@ -157,7 +161,7 @@ function parseTable(lines: string[], startIndex: number): { headers: string[]; r
   // Check for separator row (e.g., |---|---|)
   if (startIndex + 1 >= lines.length) return null;
   const sepLine = lines[startIndex + 1];
-  if (!sepLine.match(/^\s*\|?\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/)) return null;
+  if (!sepLine.match(TABLE_SEPARATOR_RE)) return null;
 
   // Parse data rows - preserve empty cells and normalize row length
   const rows: string[][] = [];
@@ -270,7 +274,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
       // Table: | col1 | col2 | (lightweight check for table pattern)
       // Full parsing happens inside TableBlock's useMemo
       if (line.includes('|') && i + 1 < lines.length &&
-          lines[i + 1].match(/^\s*\|?\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/)) {
+          lines[i + 1].match(TABLE_SEPARATOR_RE)) {
         hasViewChildren = true;
         elements.push(
           <TableBlock
