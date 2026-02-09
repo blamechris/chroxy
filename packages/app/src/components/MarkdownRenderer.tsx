@@ -14,6 +14,15 @@ const TABLE_CELL_MIN_WIDTH = 80;
  *  Matches lines with optional leading/trailing pipes and dashes/colons. */
 const TABLE_SEPARATOR_RE = /^\s*\|?\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/;
 
+/** Number of spaces added per indentation level in nested lists.
+ *  Reduces visual depth to fit narrow mobile screens. */
+const SPACES_PER_INDENT_LEVEL = 3;
+
+/** Maximum nesting level for list indentation.
+ *  Levels deeper than this render with the same indentation to prevent
+ *  consuming excessive horizontal space on small screens. */
+const MAX_LIST_INDENT_LEVEL = 3;
+
 // -- Content Block Types --
 
 type ContentBlock =
@@ -69,11 +78,13 @@ function openURL(url: string) {
   });
 }
 
-/** Generate indentation whitespace based on nest level.
- *  Each level adds 3 spaces of indentation, capped at 3 levels to save space on small screens. */
+/** Generate indentation whitespace based on nesting level.
+ *  `level` is 0-based (e.g., 0 = top-level). Each level adds `SPACES_PER_INDENT_LEVEL` spaces.
+ *  Levels deeper than `MAX_LIST_INDENT_LEVEL` are rendered with the same indentation as the
+ *  maximum level to save space on small screens. */
 function indent(level: number): string {
-  const cappedLevel = Math.min(level, 3);
-  return '   '.repeat(cappedLevel);
+  const cappedLevel = Math.min(level, MAX_LIST_INDENT_LEVEL);
+  return ' '.repeat(cappedLevel * SPACES_PER_INDENT_LEVEL);
 }
 
 /** Render inline markdown: **bold**, `code`, and links within a line */
