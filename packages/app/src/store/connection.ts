@@ -704,6 +704,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         case 'history_replay_end':
           _receivingHistoryReplay = false;
           _isSessionSwitchReplay = false;
+          // Mark all replayed prompts as answered — any prompt in history
+          // has already been resolved by the server
+          updateActiveSession((ss) => {
+            const hasUnansweredPrompts = ss.messages.some(
+              (m) => m.type === 'prompt' && !m.answered
+            );
+            if (!hasUnansweredPrompts) return {};
+            return {
+              messages: ss.messages.map((m) =>
+                m.type === 'prompt' && !m.answered
+                  ? { ...m, answered: '(resolved)' }
+                  : m
+              ),
+            };
+          });
           break;
 
         // --- Existing message handlers (now session-aware) ---
