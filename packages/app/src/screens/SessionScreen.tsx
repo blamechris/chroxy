@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage, ModelInfo, ClaudeStatus, ServerError } from '../store/connection';
+import { useConnectionStore, ChatMessage, ModelInfo, ClaudeStatus } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 
