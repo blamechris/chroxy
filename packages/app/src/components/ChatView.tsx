@@ -9,6 +9,7 @@ import {
   LayoutAnimation,
   NativeSyntheticEvent,
   NativeScrollEvent,
+  AccessibilityInfo,
   Animated,
 } from 'react-native';
 import { ChatMessage } from '../store/connection';
@@ -58,12 +59,18 @@ function ThinkingIndicator() {
     };
   }, [dot1Opacity, dot2Opacity, dot3Opacity]);
 
+  // Announce to screen readers when thinking indicator mounts
+  useEffect(() => {
+    AccessibilityInfo.announceForAccessibility('Claude is thinking');
+  }, []);
+
   return (
     <View
       style={styles.thinkingIndicator}
       accessible={true}
       accessibilityLabel="Claude is thinking"
       accessibilityRole="text"
+      accessibilityLiveRegion="polite"
     >
       <Text style={styles.thinkingLabel}>Claude is thinking</Text>
       <View style={styles.thinkingDots}>
