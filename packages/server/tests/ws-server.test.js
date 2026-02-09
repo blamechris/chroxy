@@ -563,3 +563,124 @@ describe('WsServer.broadcastError', () => {
     ws.close()
   })
 })
+
+describe('auth_ok payload fields', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('includes serverMode "cli" when cliSession is provided', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.equal(authOk.serverMode, 'cli', 'serverMode should be "cli" when cliSession is provided')
+
+    ws.close()
+  })
+
+  it('includes serverMode "terminal" when only ptyManager is provided', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.equal(authOk.serverMode, 'terminal', 'serverMode should be "terminal" when only ptyManager is provided')
+
+    ws.close()
+  })
+
+  it('includes serverVersion as a semver string', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.equal(typeof authOk.serverVersion, 'string', 'serverVersion should be a string')
+    assert.match(authOk.serverVersion, /^\d+\.\d+\.\d+/, 'serverVersion should be semver format')
+
+    ws.close()
+  })
+
+  it('includes cwd from cliSession when available', async () => {
+    const mockSession = createMockSession()
+    mockSession.cwd = '/tmp/test-project'
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.equal(authOk.cwd, '/tmp/test-project', 'cwd should match cliSession.cwd')
+
+    ws.close()
+  })
+
+  it('sets cwd to null when no session cwd is available', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.equal(authOk.cwd, null, 'cwd should be null in PTY mode (no session cwd)')
+
+    ws.close()
+  })
+})
