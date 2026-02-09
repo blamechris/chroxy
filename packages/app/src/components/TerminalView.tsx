@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useRef } from 'react';
-import { Text, ScrollView, StyleSheet, Platform, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
+import { Text, ScrollView, StyleSheet, Platform, NativeSyntheticEvent, NativeScrollEvent, View } from 'react-native';
 
 // -- Props --
 
@@ -42,7 +42,9 @@ export function TerminalView({ content, scrollViewRef }: TerminalViewProps) {
   const processed = useMemo(() => processTerminalBuffer(content), [content]);
   const isAtBottomRef = useRef(true);
   const userInteractingRef = useRef(false);
+  const isSelectingRef = useRef(false);
   const interactTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const selectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
@@ -65,6 +67,20 @@ export function TerminalView({ content, scrollViewRef }: TerminalViewProps) {
     }, USER_INTERACT_IDLE_MS);
   }, []);
 
+  /** Track when user starts selecting text (long press on selectable Text). */
+  const handleTextTouchStart = useCallback(() => {
+    isSelectingRef.current = true;
+    if (selectTimerRef.current) clearTimeout(selectTimerRef.current);
+  }, []);
+
+  /** Re-enable auto-scroll after user finishes text selection. */
+  const handleTextTouchEnd = useCallback(() => {
+    if (selectTimerRef.current) clearTimeout(selectTimerRef.current);
+    selectTimerRef.current = setTimeout(() => {
+      isSelectingRef.current = false;
+    }, USER_INTERACT_IDLE_MS);
+  }, []);
+
   return (
     <ScrollView
       ref={scrollViewRef}
@@ -76,12 +92,18 @@ export function TerminalView({ content, scrollViewRef }: TerminalViewProps) {
       onScrollBeginDrag={handleScrollBeginDrag}
       onScrollEndDrag={handleScrollEndDrag}
       onContentSizeChange={() => {
-        if (isAtBottomRef.current && !userInteractingRef.current) {
+        if (isAtBottomRef.current && !userInteractingRef.current && !isSelectingRef.current) {
           scrollViewRef.current?.scrollToEnd();
         }
       }}
     >
-      <Text selectable style={styles.terminalText}>{processed || 'Connected. Terminal output will appear here...'}</Text>
+      <View
+        onStartShouldSetResponder={() => true}
+        onResponderGrant={handleTextTouchStart}
+        onResponderRelease={handleTextTouchEnd}
+      >
+        <Text selectable style={styles.terminalText}>{processed || 'Connected. Terminal output will appear here...'}</Text>
+      </View>
     </ScrollView>
   );
 }
