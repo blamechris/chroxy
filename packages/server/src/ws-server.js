@@ -43,6 +43,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'destroy_session', sessionId }            — destroy a session
  *   { type: 'rename_session', sessionId, name }       — rename a session
  *   { type: 'discover_sessions' }                     — scan for host tmux sessions
+ *   { type: 'trigger_discovery' }                     — trigger on-demand tmux session discovery
  *   { type: 'attach_session', tmuxSession, name? }    — attach to a tmux session
  *
  * Server -> Client:
@@ -595,6 +596,13 @@ export class WsServer {
         }
         break
       }
+
+      case 'trigger_discovery':
+        if (this.sessionManager) {
+          console.log(`[ws] Triggering on-demand discovery from ${client.id}`)
+          this.sessionManager._pollForNewSessions()
+        }
+        break
 
       case 'attach_session': {
         const tmuxSession = typeof msg.tmuxSession === 'string' ? msg.tmuxSession.trim() : null
