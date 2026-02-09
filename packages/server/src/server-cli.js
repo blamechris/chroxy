@@ -151,8 +151,10 @@ export async function startCliServer(config) {
         console.log(`   URL:   ${newWsUrl}`)
         console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
         console.log('')
+        wsServer.broadcastError('tunnel', `Tunnel reconnected with new URL: ${newWsUrl}`, true)
       } else {
         console.log(`[✓] Tunnel URL unchanged: ${newWsUrl}`)
+        wsServer.broadcastError('tunnel', 'Tunnel reconnected successfully', true)
       }
     })
 

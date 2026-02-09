@@ -80,6 +80,50 @@ export async function startServer(config) {
   // 5. Wait for tunnel to be fully routable (DNS propagation)
   await waitForTunnel(httpUrl);
 
+  // Wire up tunnel lifecycle events
+  let currentWsUrl = wsUrl
+  
+  tunnel.on('tunnel_lost', ({ code, signal }) => {
+    const exitReason = signal ? `signal ${signal}` : `code ${code}`
+    console.log(`\n[!] Tunnel lost (${exitReason})`)
+    wsServer.broadcastError('tunnel', `Tunnel connection lost (${exitReason}). Recovering...`, true)
+  })
+
+  tunnel.on('tunnel_recovering', ({ attempt, delayMs }) => {
+    console.log(`[!] Attempting tunnel recovery (attempt ${attempt}, waiting ${delayMs}ms)...`)
+  })
+
+  tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
+    console.log(`[✓] Tunnel recovered after ${attempt} attempt(s)`)
+    
+    // Re-verify the new tunnel URL
+    await waitForTunnel(newHttpUrl)
+    
+    if (newWsUrl !== currentWsUrl) {
+      currentWsUrl = newWsUrl
+      const newConnectionUrl = `chroxy://${newWsUrl.replace('wss://', '')}?token=${API_TOKEN}`
+      console.log('\n[✓] New tunnel URL established:\n')
+      console.log('📱 Scan this QR code with the Chroxy app:\n')
+      qrcode.generate(newConnectionUrl, { small: true })
+      console.log(`\nOr connect manually:`)
+      console.log(`   URL:   ${newWsUrl}`)
+      console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+      console.log('')
+      wsServer.broadcastError('tunnel', `Tunnel reconnected with new URL: ${newWsUrl}`, true)
+    } else {
+      console.log(`[✓] Tunnel URL unchanged: ${newWsUrl}`)
+      wsServer.broadcastError('tunnel', 'Tunnel reconnected successfully', true)
+    }
+  })
+
+  tunnel.on('tunnel_failed', ({ message, lastExitCode, lastSignal }) => {
+    console.error(`\n[!] ${message}`)
+    console.error(`[!] Last exit: code=${lastExitCode} signal=${lastSignal}`)
+    console.error(`[!] Server will continue on localhost only. Remote connections will not work.`)
+    wsServer.broadcastError('tunnel', 'Tunnel recovery failed. Remote connections will not work.', false)
+  })
+
+
   // 6. Start the PTY (do this last so tunnel is ready)
   await ptyManager.start();
 
