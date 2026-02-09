@@ -213,12 +213,18 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection }: {
   onToggleSelection: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const longPressedRef = useRef(false);
   const content = message.content?.trim();
 
   // Hide empty tool messages
   if (!content) return null;
 
   const handlePress = () => {
+    // Suppress the tap that fires on release after a long-press
+    if (longPressedRef.current) {
+      longPressedRef.current = false;
+      return;
+    }
     if (isSelecting) {
       onToggleSelection();
     } else {
@@ -227,13 +233,18 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection }: {
     }
   };
 
+  const handleLongPress = () => {
+    longPressedRef.current = true;
+    onToggleSelection();
+  };
+
   const preview = content.length > 60 ? content.slice(0, 60) + '...' : content;
 
   return (
     <TouchableOpacity
       activeOpacity={0.7}
       onPress={handlePress}
-      onLongPress={isSelecting ? undefined : onToggleSelection}
+      onLongPress={!expanded && !isSelecting ? handleLongPress : undefined}
       style={[styles.toolBubble, isSelected && styles.selectedBubble]}
     >
       <View style={styles.toolHeader}>
