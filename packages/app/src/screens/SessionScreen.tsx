@@ -668,6 +668,8 @@ export function SessionScreen() {
             <TouchableOpacity
               onPress={() => dismissServerError(err.id)}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss server error"
             >
               <Text style={err.recoverable ? styles.warningBannerText : styles.errorBannerText}>
                 {ICON_CLOSE}
