@@ -174,16 +174,19 @@ function parseTable(lines: string[], startIndex: number): { headers: string[]; r
  *  Parsing is wrapped in useMemo to prevent re-computation on every render.
  *  The component itself is wrapped in React.memo to prevent re-renders when props haven't changed. */
 const TableBlock = React.memo(({
-  lines,
+  paragraphText,
   startIndex,
   keyBase,
   messageTextStyle
 }: {
-  lines: string[];
+  paragraphText: string;
   startIndex: number;
   keyBase: string;
   messageTextStyle: StyleProp<TextStyle>;
 }) => {
+  // Memoize the lines array split - stable string input prevents unnecessary re-computation
+  const lines = useMemo(() => paragraphText.split('\n'), [paragraphText]);
+
   // Memoize table parsing - only re-parse when lines or startIndex changes
   const tableData = useMemo(() => {
     return parseTable(lines, startIndex);
@@ -262,7 +265,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
         elements.push(
           <TableBlock
             key={lk}
-            lines={lines}
+            paragraphText={para}
             startIndex={i}
             keyBase={lk}
             messageTextStyle={messageTextStyle}
