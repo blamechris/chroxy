@@ -733,7 +733,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }
 
         case 'result': {
+          // Flush any buffered deltas before clearing streaming state (safety net
+          // for when stream_end was missed — mirrors the stream_end flush logic)
+          if (deltaFlushTimer) {
+            clearTimeout(deltaFlushTimer);
+          }
+          flushPendingDeltas();
           const resultPatch = {
+            streamingMessageId: null as string | null,
             contextUsage: msg.usage
               ? {
                   inputTokens: msg.usage.input_tokens || 0,
@@ -1039,13 +1046,33 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Session mode: use updateActiveSession helper for consistent sync logic
       updateActiveSession((ss) => ({
         messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
+        streamingMessageId: 'pending',
       }));
     } else {
       // No active session: update flat state only (PTY mode, CLI mode pre-session, or legacy)
       set((state) => ({
         messages: [...filterThinking(state.messages), userMsg, thinkingMsg],
+        streamingMessageId: 'pending',
       }));
     }
+
+    // Safety net: if no stream_start arrives (e.g., WS not open, Claude not ready),
+    // clear pending state and remove the thinking placeholder after 5 seconds.
+    setTimeout(() => {
+      if (get().streamingMessageId !== 'pending') return;
+      const sid = get().activeSessionId;
+      if (sid && get().sessionStates[sid]) {
+        updateActiveSession((ss) => ({
+          messages: filterThinking(ss.messages),
+          streamingMessageId: null,
+        }));
+      } else {
+        set((s) => ({
+          messages: filterThinking(s.messages),
+          streamingMessageId: null,
+        }));
+      }
+    }, 5000);
   },
 
   appendTerminalData: (data) => {
