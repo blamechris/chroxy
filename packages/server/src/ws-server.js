@@ -62,7 +62,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'claude_ready' }                          — Claude Code ready for input
  *   { type: 'model_changed', model: '...' }          — active model updated
  *   { type: 'available_models', models: [...] }       — models the server accepts
- *   { type: 'permission_request', requestId, tool, description } — permission prompt
+ *   { type: 'permission_request', requestId, tool, description, input } — permission prompt
  *   { type: 'permission_mode_changed', mode: '...' } — permission mode updated
  *   { type: 'available_permission_modes', modes: [...] } — permission modes
  *   { type: 'session_list', sessions: [...] }         — all sessions
@@ -1068,6 +1068,7 @@ export class WsServer {
         requestId,
         tool,
         description,
+        input: toolInput,
       })
 
       // Send push notification for permission — user may have the app backgrounded
