@@ -173,9 +173,9 @@ export class SessionManager extends EventEmitter {
   /**
    * Attach to an existing tmux session running Claude.
    * Creates a PtySession and adds it to the session map.
-   * @returns {string} sessionId
+   * @returns {Promise<string>} sessionId
    */
-  attachSession({ tmuxSession, name, cols, rows }) {
+  async attachSession({ tmuxSession, name, cols, rows }) {
     if (this._sessions.size >= this.maxSessions) {
       throw new Error(`Maximum sessions (${this.maxSessions}) reached`)
     }
@@ -207,7 +207,9 @@ export class SessionManager extends EventEmitter {
 
     this._sessions.set(sessionId, entry)
     this._wireSessionEvents(sessionId, session)
-    session.start()
+
+    // Wait for PTY start to complete — surface failures synchronously
+    await session.start()
 
     this.emit('session_created', { sessionId, name: sessionName, cwd: entry.cwd })
     return sessionId

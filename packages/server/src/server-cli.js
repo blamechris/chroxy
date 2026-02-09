@@ -48,11 +48,11 @@ export async function startCliServer(config) {
     console.log(`[cli] Found ${discovered.length} tmux session(s) running Claude`)
     for (const tmux of discovered) {
       try {
-        const sid = sessionManager.attachSession({ tmuxSession: tmux.sessionName, name: tmux.sessionName })
+        const sid = await sessionManager.attachSession({ tmuxSession: tmux.sessionName, name: tmux.sessionName })
         if (!defaultSessionId) defaultSessionId = sid
         console.log(`[cli] Attached to tmux session: ${tmux.sessionName}`)
       } catch (err) {
-        console.error(`[cli] Failed to attach tmux session '${tmux.sessionName}': ${err.message}`)
+        console.error(`[cli] Failed to attach tmux session '${tmux.sessionName}': ${err?.message ?? String(err)}`)
       }
     }
   }

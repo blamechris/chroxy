@@ -41,18 +41,22 @@ export class PtyManager extends EventEmitter {
       ? ["/opt/homebrew/bin/tmux", "new-session", "-s", this.sessionName]
       : ["/opt/homebrew/bin/tmux", "attach-session", "-t", this.sessionName];
 
-    this.ptyProcess = pty.spawn(tmuxCmd[0], tmuxCmd.slice(1), {
-      name: "xterm-256color",
-      cols: this.cols,
-      rows: this.rows,
-      cwd: process.env.HOME,
-      env: {
-        ...process.env,
-        TERM: "xterm-256color",
-        FORCE_COLOR: "1",
-        COLORTERM: "truecolor",
-      },
-    });
+    try {
+      this.ptyProcess = pty.spawn(tmuxCmd[0], tmuxCmd.slice(1), {
+        name: "xterm-256color",
+        cols: this.cols,
+        rows: this.rows,
+        cwd: process.env.HOME,
+        env: {
+          ...process.env,
+          TERM: "xterm-256color",
+          FORCE_COLOR: "1",
+          COLORTERM: "truecolor",
+        },
+      });
+    } catch (err) {
+      throw new Error(`Failed to spawn PTY: ${err.message}`);
+    }
 
     // Forward raw PTY data
     this.ptyProcess.onData((data) => {
