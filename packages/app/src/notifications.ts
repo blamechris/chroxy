@@ -65,19 +65,3 @@ export async function registerForPushNotifications(): Promise<string | null> {
   }
 }
 
-/**
- * Set up a notification tap handler that calls the provided callback
- * with the notification data when the user taps a notification.
- * Returns a cleanup function.
- */
-export function onNotificationTap(
-  callback: (data: Record<string, unknown>) => void,
-): () => void {
-  const subscription = Notifications.addNotificationResponseReceivedListener(
-    (response) => {
-      const data = response.notification.request.content.data ?? {};
-      callback(data as Record<string, unknown>);
-    },
-  );
-  return () => subscription.remove();
-}

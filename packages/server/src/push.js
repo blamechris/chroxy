@@ -7,6 +7,9 @@
  *
  * No Expo account or additional infrastructure required — uses the
  * free Expo Push Service (HTTPS POST to exp.host).
+ *
+ * Currently wired into CLI headless mode only (server-cli.js).
+ * PTY/tmux mode (server.js) does not integrate push notifications.
  */
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send'
