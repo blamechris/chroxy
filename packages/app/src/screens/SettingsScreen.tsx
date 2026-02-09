@@ -9,11 +9,12 @@ import {
   Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Constants from 'expo-constants';
+import * as Clipboard from 'expo-clipboard';
 import { useConnectionStore } from '../store/connection';
 import { COLORS } from '../constants/colors';
-import appJson from '../../app.json';
 
-const APP_VERSION = appJson.expo.version;
+const APP_VERSION = Constants.expoConfig?.version ?? 'unknown';
 
 export function SettingsScreen() {
   const insets = useSafeAreaInsets();
@@ -141,12 +142,25 @@ export function SettingsScreen() {
         {truncatedUrl != null && (
           <>
             <View style={styles.separator} />
-            <View style={styles.row}>
+            <TouchableOpacity
+              style={styles.row}
+              onPress={async () => {
+                if (wsUrl) {
+                  try {
+                    await Clipboard.setStringAsync(wsUrl);
+                    Alert.alert('Copied', 'Server URL copied to clipboard.');
+                  } catch (error) {
+                    console.error('Failed to copy server URL to clipboard:', error);
+                    Alert.alert('Error', 'Failed to copy server URL to clipboard.');
+                  }
+                }
+              }}
+            >
               <Text style={styles.rowLabel}>Server</Text>
               <Text style={[styles.rowValue, styles.rowValueSmall]} numberOfLines={1}>
                 {truncatedUrl}
               </Text>
-            </View>
+            </TouchableOpacity>
           </>
         )}
       </View>
