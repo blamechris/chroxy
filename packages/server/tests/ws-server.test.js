@@ -21,17 +21,25 @@ async function withTimeout(promise, timeoutMs, timeoutMessage) {
  * Start a WsServer on port 0 (OS-assigned) and return the actual port.
  * Resolves only after the HTTP server emits 'listening', so the port is
  * guaranteed to be open and ready for connections.
+ *
+ * Uses once() listeners with cross-removal so the losing listener does not
+ * remain attached after the promise settles.
  */
 async function startServerAndGetPort(server) {
   server.start('127.0.0.1')
-  try {
-    await Promise.race([
-      once(server.httpServer, 'listening'),
-      once(server.httpServer, 'error').then(err => { throw err })
-    ])
-  } catch (err) {
-    throw err
-  }
+  const httpServer = server.httpServer
+  await new Promise((resolve, reject) => {
+    function onListening() {
+      httpServer.removeListener('error', onError)
+      resolve()
+    }
+    function onError(err) {
+      httpServer.removeListener('listening', onListening)
+      reject(err)
+    }
+    httpServer.once('listening', onListening)
+    httpServer.once('error', onError)
+  })
   return server.httpServer.address().port
 }
 
@@ -50,12 +58,21 @@ async function createClient(port, expectAuth = true) {
     }
   })
 
-  // Wait for connection with timeout
+  // Wait for connection with timeout, using once() with cross-removal
+  // so the losing listener does not remain attached after the promise settles.
   await withTimeout(
-    Promise.race([
-      once(ws, 'open'),
-      once(ws, 'error').then(err => { throw err })
-    ]),
+    new Promise((resolve, reject) => {
+      function onOpen() {
+        ws.removeListener('error', onError)
+        resolve()
+      }
+      function onError(err) {
+        ws.removeListener('open', onOpen)
+        reject(err)
+      }
+      ws.once('open', onOpen)
+      ws.once('error', onError)
+    }),
     2000,
     'Connection timeout'
   )
