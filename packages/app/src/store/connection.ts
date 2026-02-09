@@ -282,6 +282,8 @@ function nextMessageId(prefix = 'msg'): string {
 let _receivingHistoryReplay = false;
 // Flag: replay is from a session switch (cache may be stale) vs reconnect (cache is fresh)
 let _isSessionSwitchReplay = false;
+// Track user-initiated switch_session so we can distinguish it from auth-triggered session_switched
+let _pendingSwitchSessionId: string | null = null;
 
 // Delta batching: accumulate stream deltas and flush to state periodically
 // to reduce re-renders (dozens of deltas/sec → one state update per 100ms).
@@ -530,6 +532,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // Reset replay flags — fresh auth means clean slate
           _receivingHistoryReplay = false;
           _isSessionSwitchReplay = false;
+          _pendingSwitchSessionId = null;
           // Track this URL as successfully connected
           lastConnectedUrl = url;
           // Extract server context from auth_ok
@@ -573,8 +576,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
 
         case 'session_switched': {
-          _isSessionSwitchReplay = true;
           const sessionId = msg.sessionId;
+          // Only treat as session-switch replay if the user explicitly initiated it
+          // (auth-triggered session_switched on reconnect should use reconnect dedup)
+          if (_pendingSwitchSessionId && _pendingSwitchSessionId === sessionId) {
+            _isSessionSwitchReplay = true;
+          }
+          _pendingSwitchSessionId = null;
           set((state) => {
             // Initialize session state if it doesn't exist
             const sessionStates = { ...state.sessionStates };
@@ -976,6 +984,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Reset replay flags in case disconnect happened mid-replay
     _receivingHistoryReplay = false;
     _isSessionSwitchReplay = false;
+    _pendingSwitchSessionId = null;
     // Flush and clear any pending delta buffer
     if (deltaFlushTimer) {
       clearTimeout(deltaFlushTimer);
@@ -1161,6 +1170,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Save current session state is already in sessionStates (it's always synced)
     // Just update activeSessionId locally and send WS message
     if (sessionId === activeSessionId) return;
+
+    // Mark as user-initiated switch so session_switched handler uses session-switch dedup
+    _pendingSwitchSessionId = sessionId;
 
     // Optimistically switch to cached state
     const cached = sessionStates[sessionId];
