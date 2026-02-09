@@ -1,5 +1,6 @@
 import React from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH } from '../constants/icons';
 
 // -- Props --
 
@@ -67,7 +68,7 @@ export function InputBar({
           accessibilityLabel={enterToSend ? 'Enter key sends message. Tap to switch to newline mode.' : 'Enter key inserts newline. Tap to switch to send mode.'}
           onPress={onToggleEnterMode}
         >
-          <Text style={styles.enterModeText}>{enterToSend ? '\u21B5' : '\u00B6'}</Text>
+          <Text style={styles.enterModeText}>{enterToSend ? ICON_RETURN : ICON_PARAGRAPH}</Text>
         </TouchableOpacity>
         <TextInput
           style={[styles.input, !enterToSend && styles.inputMultiline]}
@@ -85,11 +86,11 @@ export function InputBar({
         />
         {isStreaming ? (
           <TouchableOpacity style={styles.interruptButton} onPress={onInterrupt}>
-            <Text style={styles.interruptButtonText}>{'\u25A0'}</Text>
+            <Text style={styles.interruptButtonText}>{ICON_SQUARE}</Text>
           </TouchableOpacity>
         ) : (
           <TouchableOpacity style={styles.sendButton} onPress={onSend}>
-            <Text style={styles.sendButtonText}>{'\u2191'}</Text>
+            <Text style={styles.sendButtonText}>{ICON_ARROW_UP}</Text>
           </TouchableOpacity>
         )}
       </View>

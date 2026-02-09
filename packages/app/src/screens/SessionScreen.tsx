@@ -21,9 +21,7 @@ import { ChatView } from '../components/ChatView';
 import { TerminalView } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { InputBar } from '../components/InputBar';
-
-// Named Unicode constants for readability
-const ICON_CLOSE = '\u2715'; // Multiplication X
+import { ICON_CLOSE } from '../constants/icons';
 
 // Enable LayoutAnimation on Android
 UIManager.setLayoutAnimationEnabledExperimental?.(true);

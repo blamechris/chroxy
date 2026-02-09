@@ -9,6 +9,7 @@ import {
   LayoutChangeEvent,
 } from 'react-native';
 import { useConnectionStore, SessionInfo } from '../store/connection';
+import { ICON_SQUARE } from '../constants/icons';
 
 interface SessionPillProps {
   session: SessionInfo;
@@ -29,7 +30,7 @@ function SessionPill({ session, isActive, onPress, onLongPress, onLayout }: Sess
       activeOpacity={0.7}
     >
       {session.isBusy && <View style={styles.busyDot} />}
-      {isPty && <Text style={[styles.ptyIcon, isActive && styles.ptyIconActive]}>{'\u25A0'} </Text>}
+      {isPty && <Text style={[styles.ptyIcon, isActive && styles.ptyIconActive]}>{ICON_SQUARE} </Text>}
       <Text style={[styles.pillText, isActive && styles.pillTextActive]} numberOfLines={1}>
         {session.name}
       </Text>
