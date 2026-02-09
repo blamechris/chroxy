@@ -379,7 +379,7 @@ export class CliSession extends EventEmitter {
               ctx.didStreamText = true
               this.emit('stream_delta', { messageId, delta: delta.text })
             } else if (delta.type === 'input_json_delta' && ctx.currentContentBlockType === 'tool_use') {
-              if (typeof delta.partial_json === 'string') {
+              if (typeof delta.partial_json === 'string' && ctx.toolInputChunks.length < 262144) {
                 ctx.toolInputChunks += delta.partial_json
               }
             }
