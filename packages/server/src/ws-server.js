@@ -45,6 +45,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'discover_sessions' }                     — scan for host tmux sessions
  *   { type: 'trigger_discovery' }                     — trigger on-demand tmux session discovery
  *   { type: 'attach_session', tmuxSession, name? }    — attach to a tmux session
+ *   { type: 'register_push_token', token }             — register Expo push token for notifications
  *
  * Server -> Client:
  *   { type: 'auth_ok', serverMode, serverVersion, cwd: string|null } — auth succeeded with server context
@@ -77,7 +78,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
  */
 export class WsServer {
-  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true }) {
+  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null }) {
     this.port = port
     this.apiToken = apiToken
     this.ptyManager = ptyManager || null
@@ -89,6 +90,7 @@ export class WsServer {
     this._pingInterval = null
     this._pendingPermissions = new Map() // requestId -> { resolve, timer }
     this._permissionCounter = 0
+    this.pushManager = pushManager
 
     // Multi-session support: prefer sessionManager, fall back to single cliSession
     this.sessionManager = sessionManager || null
@@ -642,6 +644,12 @@ export class WsServer {
         break
       }
 
+      case 'register_push_token':
+        if (this.pushManager && typeof msg.token === 'string') {
+          this.pushManager.registerToken(msg.token)
+        }
+        break
+
       case 'mode':
         if (msg.mode === 'terminal' || msg.mode === 'chat') {
           client.mode = msg.mode
@@ -1062,6 +1070,11 @@ export class WsServer {
         description,
       })
 
+      // Send push notification for permission — user may have the app backgrounded
+      if (this.pushManager) {
+        this.pushManager.send('permission', 'Permission needed', `Claude wants to use: ${tool}`, { requestId, tool })
+      }
+
       // Track whether the HTTP connection has been closed (client disconnect / abort)
       let closed = false
 
@@ -1159,6 +1172,15 @@ export class WsServer {
       type: 'server_status',
       message,
     })
+  }
+
+  /** Count of authenticated, connected clients */
+  get authenticatedClientCount() {
+    let count = 0
+    for (const [ws, client] of this.clients) {
+      if (client.authenticated && ws.readyState === 1) count++
+    }
+    return count
   }
 
   /** Send JSON to a single client */

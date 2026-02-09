@@ -3,6 +3,7 @@ import { WsServer } from './ws-server.js'
 import { TunnelManager } from './tunnel.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { wireTunnelEvents } from './tunnel-events.js'
+import { PushManager } from './push.js'
 import qrcode from 'qrcode-terminal'
 
 /**
@@ -83,6 +84,10 @@ export async function startCliServer(config) {
       if (wsServer) wsServer.broadcastError('session', data.message, !isFatal)
     } else if (event === 'result' && data.cost != null) {
       console.log(`[cli] Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
+      // Push notification for idle: if no active WS clients, Claude may be waiting for input
+      if (pushManager.hasTokens && wsServer && wsServer.authenticatedClientCount === 0) {
+        pushManager.send('idle', 'Claude is waiting', 'A query completed while the app was disconnected.', { sessionId })
+      }
     }
   })
 
@@ -102,13 +107,16 @@ export async function startCliServer(config) {
     }
   })
 
-  // 3. Start the WebSocket server
+  // 3. Create push notification manager and WebSocket server
+  const pushManager = new PushManager()
+
   wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
     sessionManager,
     defaultSessionId,
     authRequired: !NO_AUTH,
+    pushManager,
   })
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)

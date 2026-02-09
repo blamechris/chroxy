@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { Alert, AppState } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import { registerForPushNotifications } from '../notifications';
 
 const STORAGE_KEY_URL = 'chroxy_last_url';
 const STORAGE_KEY_TOKEN = 'chroxy_last_token';
@@ -18,6 +19,19 @@ function stripAnsi(str: string): string {
 /** Filter out thinking placeholder messages */
 function filterThinking(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter((m) => m.id !== 'thinking');
+}
+
+/** Register push notification token with the server */
+async function registerPushToken(socket: WebSocket): Promise<void> {
+  try {
+    const token = await registerForPushNotifications();
+    if (token && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'register_push_token', token }));
+      console.log('[push] Registered push token with server');
+    }
+  } catch (err) {
+    console.log('[push] Push registration skipped:', err);
+  }
 }
 
 export interface ChatMessage {
@@ -587,6 +601,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // Save for quick reconnect
           saveConnection(url, token);
           set({ savedConnection: { url, token } });
+          // Register push token (async, non-blocking)
+          void registerPushToken(socket);
           break;
         }
 
