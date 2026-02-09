@@ -9,7 +9,7 @@ import {
   LayoutChangeEvent,
 } from 'react-native';
 import { useConnectionStore, SessionInfo } from '../store/connection';
-import { ICON_SQUARE } from '../constants/icons';
+import { ICON_SQUARE, ICON_PLUS } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 
@@ -179,7 +179,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
           onPress={onCreatePress}
           activeOpacity={0.7}
         >
-          <Text style={styles.addButtonText}>+</Text>
+          <Text style={styles.addButtonText}>{ICON_PLUS}</Text>
         </TouchableOpacity>
       </ScrollView>
     </View>
