@@ -48,6 +48,7 @@ export interface ChatMessage {
   requestId?: string;
   toolInput?: Record<string, unknown>;
   toolUseId?: string;
+  answered?: string;
   timestamp: number;
 }
 
@@ -214,6 +215,7 @@ interface ConnectionState {
   sendInterrupt: () => void;
   sendPermissionResponse: (requestId: string, decision: string) => void;
   sendUserQuestionResponse: (answer: string) => void;
+  markPromptAnswered: (messageId: string, answer: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
   resize: (cols: number, rows: number) => void;
@@ -1291,6 +1293,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'user_question_response', answer }));
     }
+  },
+
+  markPromptAnswered: (messageId: string, answer: string) => {
+    updateActiveSession((ss) => ({
+      messages: ss.messages.map((m) =>
+        m.id === messageId ? { ...m, answered: answer } : m
+      ),
+    }));
   },
 
   setModel: (model: string) => {

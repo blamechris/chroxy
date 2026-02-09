@@ -113,6 +113,7 @@ export function SessionScreen() {
     setPermissionMode,
     sendPermissionResponse,
     sendUserQuestionResponse,
+    markPromptAnswered,
   } = useConnectionStore();
 
   const sessions = useConnectionStore((s) => s.sessions);
@@ -216,7 +217,8 @@ export function SessionScreen() {
   };
 
   // Handle tapping a prompt option
-  const handleSelectOption = (value: string, requestId?: string, toolUseId?: string) => {
+  const handleSelectOption = (value: string, messageId: string, requestId?: string, toolUseId?: string) => {
+    markPromptAnswered(messageId, value);
     if (toolUseId) {
       // AskUserQuestion prompt — send answer back to Claude
       sendUserQuestionResponse(value);

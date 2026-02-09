@@ -90,7 +90,7 @@ export interface ChatViewProps {
   messages: ChatMessage[];
   scrollViewRef: React.RefObject<ScrollView | null>;
   claudeReady: boolean;
-  onSelectOption: (value: string, requestId?: string, toolUseId?: string) => void;
+  onSelectOption: (value: string, messageId: string, requestId?: string, toolUseId?: string) => void;
   isCliMode: boolean;
   selectedIds: Set<string>;
   isSelecting: boolean;
@@ -269,9 +269,9 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection }: {
   );
 }
 
-// -- Permission detail renderer --
+// -- Permission detail renderer (plain helper, not a React component) --
 
-function PermissionDetail({ tool, toolInput }: { tool?: string; toolInput?: Record<string, unknown> }) {
+function renderPermissionDetail(tool?: string, toolInput?: Record<string, unknown>) {
   if (!toolInput || !tool) return null;
 
   const toolName = tool.toLowerCase();
@@ -349,7 +349,7 @@ function PermissionDetail({ tool, toolInput }: { tool?: string; toolInput?: Reco
 }
 
 function PermissionDetailOrFallback({ tool, toolInput, fallback }: { tool?: string; toolInput?: Record<string, unknown>; fallback: string }) {
-  const detail = PermissionDetail({ tool, toolInput });
+  const detail = renderPermissionDetail(tool, toolInput);
   if (detail) return detail;
   return <Text selectable style={styles.messageText}>{fallback}</Text>;
 }
@@ -358,7 +358,7 @@ function PermissionDetailOrFallback({ tool, toolInput, fallback }: { tool?: stri
 
 function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress }: {
   message: ChatMessage;
-  onSelectOption?: (value: string, requestId?: string, toolUseId?: string) => void;
+  onSelectOption?: (value: string, messageId: string, requestId?: string, toolUseId?: string) => void;
   isSelected: boolean;
   isSelecting: boolean;
   onLongPress: () => void;
@@ -407,15 +407,28 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
       )}
       {isPrompt && message.options && (
         <View style={styles.promptOptions}>
-          {message.options.map((opt, i) => (
-            <TouchableOpacity
-              key={i}
-              style={styles.promptOptionButton}
-              onPress={() => onSelectOption?.(opt.value, message.requestId, message.toolUseId)}
-            >
-              <Text style={styles.promptOptionText}>{opt.label}</Text>
-            </TouchableOpacity>
-          ))}
+          {message.options.map((opt, i) => {
+            const isAnswered = !!message.answered;
+            const isChosen = message.answered === opt.value;
+            return (
+              <TouchableOpacity
+                key={i}
+                style={[
+                  styles.promptOptionButton,
+                  isAnswered && !isChosen && styles.promptOptionDisabled,
+                  isChosen && styles.promptOptionChosen,
+                ]}
+                disabled={isAnswered}
+                onPress={() => onSelectOption?.(opt.value, message.id, message.requestId, message.toolUseId)}
+              >
+                <Text style={[
+                  styles.promptOptionText,
+                  isAnswered && !isChosen && styles.promptOptionTextDisabled,
+                  isChosen && styles.promptOptionTextChosen,
+                ]}>{opt.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
       )}
     </TouchableOpacity>
@@ -649,6 +662,19 @@ const styles = StyleSheet.create({
     color: COLORS.accentOrange,
     fontSize: 14,
     fontWeight: '600',
+  },
+  promptOptionDisabled: {
+    opacity: 0.4,
+  },
+  promptOptionChosen: {
+    backgroundColor: COLORS.accentOrange,
+    borderColor: COLORS.accentOrange,
+  },
+  promptOptionTextDisabled: {
+    color: COLORS.textSecondary,
+  },
+  promptOptionTextChosen: {
+    color: '#fff',
   },
   errorBubble: {
     backgroundColor: COLORS.accentRedLight,
