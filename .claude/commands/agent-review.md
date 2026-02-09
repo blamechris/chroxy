@@ -18,6 +18,7 @@ cat CLAUDE.md
 
 # Get PR info
 PR_NUM=${1:-$(gh pr view --json number -q .number)}
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 gh pr view ${PR_NUM}
 gh pr diff ${PR_NUM}
 ```
@@ -121,8 +122,6 @@ How this change fits within the server/app architecture.
 Post review as a PR comment using heredoc:
 
 ```bash
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-
 gh pr comment ${PR_NUM} --body "$(cat <<'EOF'
 ## Code Review: PR #XX
 
@@ -133,11 +132,11 @@ EOF
 
 ### 5. Create Follow-Up Issues for Deferred Items
 
-For any suggestion or nit that is **valid but out of scope** for the current PR, create a tracked GitHub issue so it doesn't get lost:
+**MANDATORY: For any suggestion or nitpick that is valid but out of scope, create a tracked GitHub issue.**
+
+Never leave deferred items as just review comments. If it's worth mentioning, it's worth tracking.
 
 ```bash
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-
 ISSUE_URL=$(gh issue create \
   --title "Short descriptive title" \
   --label "enhancement" \
@@ -160,22 +159,34 @@ What needs to be done and why.
 - [ ] Criterion 1
 - [ ] Criterion 2
 EOF
-)"
+)")
 ```
-
-**When to create issues vs. just noting in the review:**
-- **Create issue**: Valid suggestion that should be done eventually but would expand PR scope
-- **Just note**: Pure style preference, trivial nit, or "nice to have" with no clear action
 
 Include created issue URLs in the review summary table.
 
-### 6. Report to User
+### 6. Reconcile Issues Resolved in This PR
+
+After all fixes are committed, check whether any issues created during this review — or pre-existing `from-review` issues — were already addressed by fixes in this PR.
+
+```bash
+# List open from-review issues
+gh issue list --label "from-review" --json number,title,body
+
+# For each issue resolved by a fix in this PR:
+gh issue comment ${ISSUE_NUM} --body "Addressed in PR #${PR_NUM} — ${DESCRIPTION}."
+gh issue close ${ISSUE_NUM}
+```
+
+**RULE: Every closed issue MUST reference a PR.** The comment is the paper trail. No silent closes.
+
+### 7. Report to User
 
 Output:
 - Review verdict
 - Critical issues count
 - Suggestions count
 - Follow-up issues created (with URLs)
+- Issues closed as already resolved (with URLs)
 - Link to posted review
 
 ## Agent Persona
