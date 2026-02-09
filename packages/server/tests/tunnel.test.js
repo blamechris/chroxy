@@ -223,6 +223,75 @@ describe('TunnelManager', () => {
 
       await tunnel.stop()
     })
+
+    it('emits tunnel_url_changed when URL changes after recovery', async () => {
+      let spawnCount = 0
+      const mockSpawn = () => {
+        spawnCount++
+        return createMockProcess({
+          url: spawnCount === 1
+            ? 'https://first-tunnel.trycloudflare.com'
+            : 'https://new-tunnel.trycloudflare.com'
+        })
+      }
+
+      const tunnel = new TestTunnelManager({ port: 3000, mockSpawn })
+      tunnel.recoveryBackoffs = [10, 20, 30]
+
+      await tunnel.start()
+      assert.equal(tunnel.url, 'https://first-tunnel.trycloudflare.com')
+
+      const urlChangedPromise = new Promise((resolve) => {
+        tunnel.once('tunnel_url_changed', (info) => {
+          resolve(info)
+        })
+      })
+
+      // Simulate crash
+      tunnel.process.emit('close', 1, null)
+
+      const urlChangedEvent = await urlChangedPromise
+      assert.equal(urlChangedEvent.oldUrl, 'https://first-tunnel.trycloudflare.com')
+      assert.equal(urlChangedEvent.newUrl, 'https://new-tunnel.trycloudflare.com')
+
+      await tunnel.stop()
+    })
+
+    it('does NOT emit tunnel_url_changed when URL stays the same after recovery', async () => {
+      const mockSpawn = () => {
+        return createMockProcess({
+          url: 'https://same-tunnel.trycloudflare.com'
+        })
+      }
+
+      const tunnel = new TestTunnelManager({ port: 3000, mockSpawn })
+      tunnel.recoveryBackoffs = [10, 20, 30]
+
+      await tunnel.start()
+
+      let urlChangedFired = false
+      tunnel.once('tunnel_url_changed', () => {
+        urlChangedFired = true
+      })
+
+      const recoveredPromise = new Promise((resolve) => {
+        tunnel.once('tunnel_recovered', () => {
+          resolve()
+        })
+      })
+
+      // Simulate crash
+      tunnel.process.emit('close', 1, null)
+
+      await recoveredPromise
+
+      // Give time for any potential tunnel_url_changed event to fire
+      await new Promise(resolve => setTimeout(resolve, 50))
+
+      assert.equal(urlChangedFired, false, 'tunnel_url_changed should not fire when URL stays the same')
+
+      await tunnel.stop()
+    })
   })
 
   describe('recovery attempt limits', () => {
