@@ -6,6 +6,72 @@ import { PtySession } from './pty-session.js'
 import { discoverTmuxSessions } from './session-discovery.js'
 
 /**
+ * Base error class for session management operations.
+ */
+export class SessionError extends Error {
+  constructor(message, code) {
+    super(message)
+    this.name = 'SessionError'
+    this.code = code
+  }
+}
+
+/**
+ * Thrown when attempting to retrieve or operate on a non-existent session.
+ */
+export class SessionNotFoundError extends SessionError {
+  constructor(sessionId) {
+    super(`Session not found: ${sessionId}`, 'SESSION_NOT_FOUND')
+    this.name = 'SessionNotFoundError'
+    this.sessionId = sessionId
+  }
+}
+
+/**
+ * Thrown when attempting to create a session that already exists.
+ */
+export class SessionExistsError extends SessionError {
+  constructor(tmuxSession) {
+    super(`Already attached to tmux session: ${tmuxSession}`, 'SESSION_EXISTS')
+    this.name = 'SessionExistsError'
+    this.tmuxSession = tmuxSession
+  }
+}
+
+/**
+ * Thrown when session attachment fails.
+ */
+export class SessionAttachError extends SessionError {
+  constructor(message, details) {
+    super(message, 'SESSION_ATTACH_FAILED')
+    this.name = 'SessionAttachError'
+    this.details = details
+  }
+}
+
+/**
+ * Thrown when maximum session limit is reached.
+ */
+export class SessionLimitError extends SessionError {
+  constructor(maxSessions) {
+    super(`Maximum sessions (${maxSessions}) reached`, 'SESSION_LIMIT_REACHED')
+    this.name = 'SessionLimitError'
+    this.maxSessions = maxSessions
+  }
+}
+
+/**
+ * Thrown when session directory validation fails.
+ */
+export class SessionDirectoryError extends SessionError {
+  constructor(message, path) {
+    super(message, 'INVALID_DIRECTORY')
+    this.name = 'SessionDirectoryError'
+    this.path = path
+  }
+}
+
+/**
  * Manages the lifecycle of multiple sessions (CliSession and PtySession).
  *
  * Two session types:
@@ -41,7 +107,7 @@ export class SessionManager extends EventEmitter {
    */
   createSession({ name, cwd, model, permissionMode } = {}) {
     if (this._sessions.size >= this.maxSessions) {
-      throw new Error(`Maximum sessions (${this.maxSessions}) reached`)
+      throw new SessionLimitError(this.maxSessions)
     }
 
     const resolvedCwd = cwd || this._defaultCwd
@@ -52,11 +118,11 @@ export class SessionManager extends EventEmitter {
     try {
       const stat = statSync(resolvedCwd)
       if (!stat.isDirectory()) {
-        throw new Error(`Not a directory: ${resolvedCwd}`)
+        throw new SessionDirectoryError(`Not a directory: ${resolvedCwd}`, resolvedCwd)
       }
     } catch (err) {
       if (err.code === 'ENOENT') {
-        throw new Error(`Directory does not exist: ${resolvedCwd}`)
+        throw new SessionDirectoryError(`Directory does not exist: ${resolvedCwd}`, resolvedCwd)
       }
       throw err
     }
@@ -177,13 +243,13 @@ export class SessionManager extends EventEmitter {
    */
   async attachSession({ tmuxSession, name, cols, rows }) {
     if (this._sessions.size >= this.maxSessions) {
-      throw new Error(`Maximum sessions (${this.maxSessions}) reached`)
+      throw new SessionLimitError(this.maxSessions)
     }
 
     // Prevent duplicate attachments to the same tmux session
     for (const [, entry] of this._sessions) {
       if (entry.tmuxSession === tmuxSession) {
-        throw new Error(`Already attached to tmux session: ${tmuxSession}`)
+        throw new SessionExistsError(tmuxSession)
       }
     }
 
