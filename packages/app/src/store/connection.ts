@@ -951,7 +951,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           const permMsg: ChatMessage = {
             id: nextMessageId('perm'),
             type: 'prompt',
-            content: `${msg.tool}: ${msg.description}`,
+            content: msg.tool ? `${msg.tool}: ${msg.description}` : (msg.description || 'Permission required'),
             tool: msg.tool,
             requestId: msg.requestId,
             toolInput: msg.input && typeof msg.input === 'object' ? msg.input as Record<string, unknown> : undefined,

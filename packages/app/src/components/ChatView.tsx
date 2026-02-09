@@ -311,19 +311,22 @@ function PermissionDetail({ tool, toolInput }: { tool?: string; toolInput?: Reco
     );
   }
 
-  // Read/Glob/Grep: show path or pattern
+  // Read/Glob/Grep: show path or pattern with correct label
   if (toolName === 'read' || toolName === 'glob' || toolName === 'grep') {
-    const target = typeof toolInput.file_path === 'string'
-      ? toolInput.file_path
-      : typeof toolInput.pattern === 'string'
-        ? toolInput.pattern
-        : typeof toolInput.path === 'string'
-          ? toolInput.path
-          : null;
+    let target: string | null = null;
+    let label = 'Path';
+    if (typeof toolInput.file_path === 'string') {
+      target = toolInput.file_path;
+    } else if (typeof toolInput.pattern === 'string') {
+      target = toolInput.pattern;
+      label = 'Pattern';
+    } else if (typeof toolInput.path === 'string') {
+      target = toolInput.path;
+    }
     if (target) {
       return (
         <View style={styles.permDetailBlock}>
-          <Text style={styles.permDetailLabel}>{toolName === 'grep' ? 'Pattern' : 'Path'}</Text>
+          <Text style={styles.permDetailLabel}>{label}</Text>
           <Text selectable style={styles.permDetailCode}>{target}</Text>
         </View>
       );
@@ -343,6 +346,12 @@ function PermissionDetail({ tool, toolInput }: { tool?: string; toolInput?: Reco
   }
 
   return null;
+}
+
+function PermissionDetailOrFallback({ tool, toolInput, fallback }: { tool?: string; toolInput?: Record<string, unknown>; fallback: string }) {
+  const detail = PermissionDetail({ tool, toolInput });
+  if (detail) return detail;
+  return <Text selectable style={styles.messageText}>{fallback}</Text>;
 }
 
 // -- Single message bubble --
@@ -388,7 +397,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
         {isUser ? 'You' : isPrompt ? (message.tool || 'Action Required') : isError ? 'Error' : isSystem ? 'System' : 'Claude'}
       </Text>
       {isPrompt && message.toolInput ? (
-        <PermissionDetail tool={message.tool} toolInput={message.toolInput} />
+        <PermissionDetailOrFallback tool={message.tool} toolInput={message.toolInput} fallback={message.content?.trim() || ''} />
       ) : !isUser && !isPrompt && !isError && !isSystem ? (
         <FormattedResponse content={message.content?.trim() || ''} messageTextStyle={styles.messageText} />
       ) : (
