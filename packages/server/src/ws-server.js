@@ -618,6 +618,7 @@ export class WsServer {
           // Broadcast updated session list to all clients
           this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
         } catch (err) {
+          console.error(`[ws] Failed to attach session (tmux: '${tmuxSession}'):`, err)
           this._send(ws, { type: 'session_error', message: err.message })
         }
         break
