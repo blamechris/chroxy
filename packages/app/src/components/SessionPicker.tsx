@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,7 @@ import {
   ScrollView,
   StyleSheet,
   Alert,
+  LayoutChangeEvent,
 } from 'react-native';
 import { useConnectionStore, SessionInfo } from '../store/connection';
 
@@ -14,15 +15,17 @@ interface SessionPillProps {
   isActive: boolean;
   onPress: () => void;
   onLongPress: () => void;
+  onLayout: (e: LayoutChangeEvent) => void;
 }
 
-function SessionPill({ session, isActive, onPress, onLongPress }: SessionPillProps) {
+function SessionPill({ session, isActive, onPress, onLongPress, onLayout }: SessionPillProps) {
   const isPty = session.type === 'pty';
   return (
     <TouchableOpacity
       style={[styles.pill, isActive && styles.pillActive, isPty && styles.pillPty, isActive && isPty && styles.pillPtyActive]}
       onPress={onPress}
       onLongPress={onLongPress}
+      onLayout={onLayout}
       activeOpacity={0.7}
     >
       {session.isBusy && <View style={styles.busyDot} />}
@@ -44,6 +47,29 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
   const switchSession = useConnectionStore((s) => s.switchSession);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const renameSession = useConnectionStore((s) => s.renameSession);
+
+  const scrollViewRef = useRef<ScrollView>(null);
+  const pillLayouts = useRef<Map<string, { x: number; width: number }>>(new Map());
+
+  const handlePillLayout = useCallback((sessionId: string, e: LayoutChangeEvent) => {
+    const { x, width } = e.nativeEvent.layout;
+    pillLayouts.current.set(sessionId, { x, width });
+  }, []);
+
+  // Auto-scroll active session pill into view
+  useEffect(() => {
+    if (!activeSessionId || !scrollViewRef.current) return;
+    // Defer to let layout settle after session switch
+    const timer = setTimeout(() => {
+      const layout = pillLayouts.current.get(activeSessionId);
+      if (layout) {
+        // Scroll so the pill is roughly centered, but clamp to 0
+        const offset = Math.max(0, layout.x - 40);
+        scrollViewRef.current?.scrollTo({ x: offset, animated: true });
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [activeSessionId]);
 
   const handleLongPress = (session: SessionInfo) => {
     Alert.alert(
@@ -101,6 +127,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
   return (
     <View style={styles.container}>
       <ScrollView
+        ref={scrollViewRef}
         horizontal
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.scrollContent}
@@ -112,6 +139,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
             isActive={session.sessionId === activeSessionId}
             onPress={() => switchSession(session.sessionId)}
             onLongPress={() => handleLongPress(session)}
+            onLayout={(e) => handlePillLayout(session.sessionId, e)}
           />
         ))}
         <TouchableOpacity
