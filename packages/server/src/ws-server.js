@@ -397,7 +397,7 @@ export class WsServer {
   }
 
   /** Handle messages in multi-session mode */
-  _handleSessionMessage(ws, client, msg) {
+  async _handleSessionMessage(ws, client, msg) {
     switch (msg.type) {
       case 'input': {
         const text = msg.data
