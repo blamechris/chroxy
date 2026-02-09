@@ -120,8 +120,12 @@ function parseTable(lines: string[], startIndex: number): { headers: string[]; r
   const headerLine = lines[startIndex];
   if (!headerLine.includes('|')) return null;
 
-  // Parse header row
-  const headers = headerLine.split('|').map(cell => cell.trim()).filter(cell => cell.length > 0);
+  // Parse header row - preserve empty cells between pipes
+  const rawHeaders = headerLine.split('|').map(cell => cell.trim());
+  // Remove leading/trailing empty cells (from leading/trailing pipes like |col1|col2|)
+  const headerStart = rawHeaders[0] === '' ? 1 : 0;
+  const headerEnd = rawHeaders[rawHeaders.length - 1] === '' ? rawHeaders.length - 1 : rawHeaders.length;
+  const headers = rawHeaders.slice(headerStart, headerEnd);
   if (headers.length === 0) return null;
 
   // Check for separator row (e.g., |---|---|)
@@ -129,15 +133,22 @@ function parseTable(lines: string[], startIndex: number): { headers: string[]; r
   const sepLine = lines[startIndex + 1];
   if (!sepLine.match(/^\s*\|?\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/)) return null;
 
-  // Parse data rows
+  // Parse data rows - preserve empty cells and normalize row length
   const rows: string[][] = [];
   let i = startIndex + 2;
   while (i < lines.length) {
     const line = lines[i];
     if (!line.includes('|')) break;
-    const cells = line.split('|').map(cell => cell.trim()).filter(cell => cell.length > 0);
+    // Split and trim, preserving empty cells between pipes
+    const rawCells = line.split('|').map(cell => cell.trim());
+    // Remove leading/trailing empty cells (from leading/trailing pipes)
+    const cellStart = rawCells[0] === '' ? 1 : 0;
+    const cellEnd = rawCells[rawCells.length - 1] === '' ? rawCells.length - 1 : rawCells.length;
+    const cells = rawCells.slice(cellStart, cellEnd);
     if (cells.length === 0) break;
-    rows.push(cells);
+    // Normalize row length to match header count (pad with empty strings or truncate)
+    while (cells.length < headers.length) cells.push('');
+    rows.push(cells.slice(0, headers.length));
     i++;
   }
 
@@ -152,16 +163,16 @@ function renderTable(headers: string[], rows: string[][], keyBase: string, messa
       <View style={md.tableRow}>
         {headers.map((header, idx) => (
           <View key={`${keyBase}-h${idx}`} style={[md.tableCell, md.tableHeaderCell]}>
-            <Text style={md.tableHeaderText}>{header}</Text>
+            <Text selectable style={md.tableHeaderText}>{renderInline(header, `${keyBase}-h${idx}`)}</Text>
           </View>
         ))}
       </View>
       {/* Data rows */}
       {rows.map((row, rowIdx) => (
         <View key={`${keyBase}-r${rowIdx}`} style={md.tableRow}>
-          {row.map((cell, cellIdx) => (
+          {headers.map((_, cellIdx) => (
             <View key={`${keyBase}-r${rowIdx}-c${cellIdx}`} style={md.tableCell}>
-              <Text style={messageTextStyle}>{cell}</Text>
+              <Text selectable style={messageTextStyle}>{renderInline(row[cellIdx] || '', `${keyBase}-r${rowIdx}-c${cellIdx}`)}</Text>
             </View>
           ))}
         </View>
@@ -247,8 +258,11 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
       // Task list: - [x] or - [ ]
       const tlm = line.match(/^(\s*)[-*]\s+\[([ xX])\]\s+(.+)/);
       if (tlm) {
+        const indent = tlm[1].length;
+        const nestLevel = Math.floor(indent / 2);
+        const leftMargin = 2 + nestLevel * 16;
         const checked = tlm[2].toLowerCase() === 'x';
-        elements.push(<Text key={lk}>{checked ? '  \u2611 ' : '  \u2610 '}{renderInline(tlm[3], lk)}</Text>);
+        elements.push(<Text key={lk} selectable style={[messageTextStyle, { marginLeft: leftMargin }]}>{checked ? '  \u2611 ' : '  \u2610 '}{renderInline(tlm[3], lk)}</Text>);
         continue;
       }
 
@@ -258,7 +272,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
         const indent = ulm[1].length;
         const nestLevel = Math.floor(indent / 2); // 2 spaces = 1 nesting level
         const leftMargin = 2 + nestLevel * 16; // Base 2 + 16px per level
-        elements.push(<Text key={lk} style={{ marginLeft: leftMargin }}>{'  \u2022 '}{renderInline(ulm[2], lk)}</Text>);
+        elements.push(<Text key={lk} selectable style={[messageTextStyle, { marginLeft: leftMargin }]}>{'  \u2022 '}{renderInline(ulm[2], lk)}</Text>);
         continue;
       }
 
