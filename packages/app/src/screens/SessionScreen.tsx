@@ -183,12 +183,11 @@ export function SessionScreen() {
       addUserMessage(text);
     }
 
-    sendInput(text);
-    // PTY sessions: send Enter separately -- Claude Code's TUI needs text and CR as separate writes
-    // CLI sessions: the server handles the full message directly
-    if (hasTerminal) {
-      setTimeout(() => sendInput('\r'), 50);
-    }
+    // PTY sessions: append CR so text + submit arrive as a single atomic write.
+    // Sending them separately caused a race condition where multi-line text
+    // would sit in the terminal input buffer before the CR arrived.
+    // CLI sessions: the server handles the full message directly (no CR needed).
+    sendInput(hasTerminal ? text + '\r' : text);
   };
 
   const handleKeyPress = (key: string) => {
@@ -217,11 +216,7 @@ export function SessionScreen() {
       sendPermissionResponse(requestId, value);
       return;
     }
-    sendInput(value);
-    // PTY sessions: send Enter separately -- the TUI needs text and CR as separate writes
-    if (hasTerminal) {
-      setTimeout(() => sendInput('\r'), 50);
-    }
+    sendInput(hasTerminal ? value + '\r' : value);
   };
 
   // Check if Enter key should send based on current mode and settings
