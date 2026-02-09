@@ -4,7 +4,7 @@
  */
 
 export const COLORS = {
-  /** -- Background Colors -- */
+  // -- Background Colors --
   /** Primary background: main app surface */
   backgroundPrimary: '#0f0f1a',
   /** Secondary background: secondary surfaces, slightly lighter than primary */
@@ -20,7 +20,7 @@ export const COLORS = {
   /** Terminal area background */
   backgroundTerminal: '#000',
 
-  /** -- Text Colors -- */
+  // -- Text Colors --
   /** Primary text: main readable text */
   textPrimary: '#fff',
   /** Secondary text: less prominent text */
@@ -40,7 +40,7 @@ export const COLORS = {
   /** Terminal text output */
   textTerminal: '#00ff00',
 
-  /** -- Accent Colors: Blue (Primary) -- */
+  // -- Accent Colors: Blue (Primary) --
   /** Primary blue accent */
   accentBlue: '#4a9eff',
   /** Light blue: low-opacity background (13%) */
@@ -51,10 +51,10 @@ export const COLORS = {
   accentBlueBorder: '#4a9eff44',
   /** Strong blue border: higher opacity (40%) */
   accentBlueBorderStrong: '#4a9eff66',
-  /** Blue transparent: 25% opacity */
+  /** Blue transparent: alpha 0x40 (~25% opacity) */
   accentBlueTransparent40: '#4a9eff40',
 
-  /** -- Accent Colors: Green (Claude/Success) -- */
+  // -- Accent Colors: Green (Claude/Success) --
   /** Primary green accent: success state */
   accentGreen: '#22c55e',
   /** Light green: low-opacity background (13%) */
@@ -64,13 +64,13 @@ export const COLORS = {
   /** Strong green border: higher opacity (40%) */
   accentGreenBorderStrong: '#22c55e66',
 
-  /** -- Accent Colors: Purple (Tool/Activity) -- */
+  // -- Accent Colors: Purple (Tool/Activity) --
   /** Primary purple accent: tool usage */
   accentPurple: '#a78bfa',
   /** Purple code text */
   accentPurpleCode: '#c4a5ff',
 
-  /** -- Accent Colors: Orange (Warning/Prompt) -- */
+  // -- Accent Colors: Orange (Warning/Prompt) --
   /** Primary orange accent: warning/attention */
   accentOrange: '#f59e0b',
   /** Light orange: very low-opacity background (7%) */
@@ -84,7 +84,7 @@ export const COLORS = {
   /** Strong orange border: higher opacity (40%) */
   accentOrangeBorderStrong: '#f59e0b66',
 
-  /** -- Accent Colors: Red (Error/Interrupt) -- */
+  // -- Accent Colors: Red (Error/Interrupt) --
   /** Primary red accent: error state */
   accentRed: '#ff4a4a',
   /** Light red: very low-opacity background (7%) */
@@ -94,7 +94,7 @@ export const COLORS = {
   /** Red border: standard opacity (27%) */
   accentRedBorder: '#ff4a4a44',
 
-  /** -- Border Colors -- */
+  // -- Border Colors --
   /** Primary border: main component borders */
   borderPrimary: '#2a2a4e',
   /** Secondary border: secondary borders */
@@ -104,7 +104,7 @@ export const COLORS = {
   /** Transparent border: invisible */
   borderTransparent: 'transparent',
 
-  /** -- Header Colors -- */
+  // -- Header Colors --
   /** Header text level 1: largest headers */
   headerText1: '#f0f0f0',
   /** Header text level 2: medium headers */
@@ -112,7 +112,7 @@ export const COLORS = {
   /** Header text level 3: smallest headers */
   headerText3: '#e0e0e0',
 
-  /** -- Special UI Colors -- */
+  // -- Special UI Colors --
   /** Scroll button background */
   scrollButtonBackground: '#1a1a2ebb',
   /** Cancel button overlay: semi-transparent white */
@@ -120,10 +120,10 @@ export const COLORS = {
   /** Reconnect URL text color */
   reconnectUrlText: 'rgba(255,255,255,0.7)',
 
-  /** -- Shadow -- */
+  // -- Shadow --
   /** Shadow color: used in elevation effects */
   shadowColor: '#000',
-} as const
+} as const;
 
 /**
  * Type helper for color constants.
@@ -133,4 +133,4 @@ export const COLORS = {
  * const color: ColorKey = 'textPrimary'
  * const colorValue = COLORS[color]
  */
-export type ColorKey = keyof typeof COLORS
+export type ColorKey = keyof typeof COLORS;
