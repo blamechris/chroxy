@@ -47,12 +47,23 @@ export async function startCliServer(config) {
   if (discovered.length > 0) {
     console.log(`[cli] Found ${discovered.length} tmux session(s) running Claude`)
     for (const tmux of discovered) {
-      const sid = sessionManager.attachSession({ tmuxSession: tmux.sessionName, name: tmux.sessionName })
-      if (!defaultSessionId) defaultSessionId = sid
-      console.log(`[cli] Attached to tmux session: ${tmux.sessionName}`)
+      try {
+        const sid = sessionManager.attachSession({ tmuxSession: tmux.sessionName, name: tmux.sessionName })
+        if (!defaultSessionId) defaultSessionId = sid
+        console.log(`[cli] Attached to tmux session: ${tmux.sessionName}`)
+      } catch (err) {
+        console.error(`[cli] Failed to attach tmux session '${tmux.sessionName}': ${err.message}`)
+      }
     }
-  } else {
-    console.log('[cli] No tmux sessions found, creating default CLI session')
+  }
+
+  // Fall back to a default CLI session if no sessions attached (none found or all failed)
+  if (!defaultSessionId) {
+    if (discovered.length > 0) {
+      console.log('[cli] All tmux attachments failed, creating default CLI session')
+    } else {
+      console.log('[cli] No tmux sessions found, creating default CLI session')
+    }
     defaultSessionId = sessionManager.createSession({ name: 'Default' })
   }
 
