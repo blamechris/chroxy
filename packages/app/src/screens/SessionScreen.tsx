@@ -65,27 +65,36 @@ function splitContentBlocks(rawContent: string): ContentBlock[] {
 
 /** Safe URL opener with scheme validation and error handling */
 function openURL(url: string) {
-  // Strip trailing punctuation that shouldn't be part of the URL
-  const cleanUrl = url.replace(/[.,;!?)\]]+$/, '');
-
   // Only allow http/https schemes
-  if (!/^https?:\/\//i.test(cleanUrl)) {
-    console.warn('Invalid URL scheme:', cleanUrl);
+  if (!/^https?:\/\//i.test(url)) {
+    console.warn('Invalid URL scheme:', url);
+    Alert.alert(
+      'Cannot Open Link',
+      `The link could not be opened:\n\n${url}`,
+      [{ text: 'OK' }],
+    );
     return;
   }
 
-  void Linking.openURL(cleanUrl).catch((err) => {
-    console.error('Failed to open URL:', cleanUrl, err);
+  void Linking.openURL(url).catch((err) => {
+    console.warn('Failed to open URL:', url, err);
+    Alert.alert(
+      'Cannot Open Link',
+      `The link could not be opened:\n\n${url}`,
+      [{ text: 'OK' }],
+    );
   });
 }
 
 /** Render inline markdown: **bold**, `code`, and links within a line */
 function renderInline(text: string, keyBase: string): React.ReactNode[] {
   const parts: React.ReactNode[] = [];
-  // Combined regex: bold, inline code, markdown links, or URLs
+  // Combined regex: bold, inline code, markdown links, or bare URLs
   // Order matters: match markdown links before bare URLs to avoid breaking [text](url)
-  // URL regex captures trailing punctuation separately to handle "Visit https://example.com."
-  const regex = /(\*\*(.+?)\*\*|`([^`\n]+)`|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<>]+?)([.,;!?)\]]*(?:\s|$)))/g;
+  // Bare URL: match non-whitespace chars, but the last char must NOT be common sentence
+  // punctuation (.,;:!?)]>) so "Visit https://example.com." stops before the period.
+  // Mid-URL punctuation (query strings, fragments) is preserved since only the final char is checked.
+  const regex = /(\*\*(.+?)\*\*|`([^`\n]+)`|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<>]*[^\s<>.,;:!?)\]]))/g;
   let lastIdx = 0;
   let key = 0;
   let m;
@@ -107,27 +116,24 @@ function renderInline(text: string, keyBase: string): React.ReactNode[] {
           key={`${keyBase}-l${key++}`}
           style={md.link}
           onPress={() => openURL(url)}
+          pressRetentionOffset={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
           {linkText}
         </Text>
       );
     } else if (m[6]) {
-      // Bare URL (m[6] is URL without trailing punctuation, m[7] is trailing punctuation)
+      // Bare URL — trailing punctuation excluded by the regex
       const url = m[6];
-      const trailing = m[7] || '';
       parts.push(
         <Text
           key={`${keyBase}-u${key++}`}
           style={md.link}
           onPress={() => openURL(url)}
+          pressRetentionOffset={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
           {url}
         </Text>
       );
-      // Add trailing punctuation as plain text
-      if (trailing.trim()) {
-        parts.push(trailing);
-      }
     }
     lastIdx = m.index + m[0].length;
   }
