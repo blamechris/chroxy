@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, Platform, Linking, StyleProp, TextStyle } from 'react-native';
+import { View, Text, StyleSheet, Platform, Linking, StyleProp, TextStyle, ScrollView } from 'react-native';
 import { COLORS } from '../constants/colors';
 
 
@@ -160,26 +160,33 @@ function parseTable(lines: string[], startIndex: number): { headers: string[]; r
 /** Render a markdown table */
 function renderTable(headers: string[], rows: string[][], keyBase: string, messageTextStyle: StyleProp<TextStyle>): React.ReactNode {
   return (
-    <View key={keyBase} style={md.table}>
-      {/* Header row */}
-      <View style={md.tableRow}>
-        {headers.map((header, idx) => (
-          <View key={`${keyBase}-h${idx}`} style={[md.tableCell, md.tableHeaderCell]}>
-            <Text selectable style={md.tableHeaderText}>{renderInline(header, `${keyBase}-h${idx}`)}</Text>
-          </View>
-        ))}
-      </View>
-      {/* Data rows */}
-      {rows.map((row, rowIdx) => (
-        <View key={`${keyBase}-r${rowIdx}`} style={md.tableRow}>
-          {headers.map((_, cellIdx) => (
-            <View key={`${keyBase}-r${rowIdx}-c${cellIdx}`} style={md.tableCell}>
-              <Text selectable style={messageTextStyle}>{renderInline(row[cellIdx] || '', `${keyBase}-r${rowIdx}-c${cellIdx}`)}</Text>
+    <ScrollView 
+      key={keyBase} 
+      horizontal 
+      showsHorizontalScrollIndicator={true}
+      style={md.tableScrollContainer}
+    >
+      <View style={md.table}>
+        {/* Header row */}
+        <View style={md.tableRow}>
+          {headers.map((header, idx) => (
+            <View key={`${keyBase}-h${idx}`} style={[md.tableCell, md.tableHeaderCell]}>
+              <Text selectable style={md.tableHeaderText}>{renderInline(header, `${keyBase}-h${idx}`)}</Text>
             </View>
           ))}
         </View>
-      ))}
-    </View>
+        {/* Data rows */}
+        {rows.map((row, rowIdx) => (
+          <View key={`${keyBase}-r${rowIdx}`} style={md.tableRow}>
+            {headers.map((_, cellIdx) => (
+              <View key={`${keyBase}-r${rowIdx}-c${cellIdx}`} style={md.tableCell}>
+                <Text selectable style={messageTextStyle}>{renderInline(row[cellIdx] || '', `${keyBase}-r${rowIdx}-c${cellIdx}`)}</Text>
+              </View>
+            ))}
+          </View>
+        ))}
+      </View>
+    </ScrollView>
   );
 }
 
@@ -461,12 +468,14 @@ export const md = StyleSheet.create({
     backgroundColor: COLORS.borderPrimary,
     marginVertical: 8,
   },
+  tableScrollContainer: {
+    marginVertical: 8,
+  },
   table: {
     borderWidth: 1,
     borderColor: '#2a2a4e',
     borderRadius: 6,
     overflow: 'hidden',
-    marginVertical: 8,
   },
   tableRow: {
     flexDirection: 'row',
@@ -474,7 +483,7 @@ export const md = StyleSheet.create({
     borderBottomColor: '#2a2a4e',
   },
   tableCell: {
-    flex: 1,
+    minWidth: 80,
     padding: 8,
     borderRightWidth: 1,
     borderRightColor: '#2a2a4e',
