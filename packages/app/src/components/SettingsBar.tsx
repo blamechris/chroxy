@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
-import { ModelInfo, ClaudeStatus } from '../store/connection';
+import { ModelInfo, ClaudeStatus, ContextUsage } from '../store/connection';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 
 // -- Props --
@@ -14,7 +14,7 @@ export interface SettingsBarProps {
   availablePermissionModes: { id: string; label: string }[];
   lastResultCost: number | null;
   lastResultDuration: number | null;
-  contextUsage: { inputTokens: number; outputTokens: number; cacheCreation: number; cacheRead: number } | null;
+  contextUsage: ContextUsage | null;
   claudeStatus: ClaudeStatus | null;
   sessionCwd: string | null;
   serverMode: 'cli' | 'terminal' | null;
