@@ -72,6 +72,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'history_replay_start', sessionId }      — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
  *   { type: 'raw_background', data: '...' }           — raw PTY data for chat-mode clients
+ *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
  */
 export class WsServer {
@@ -1125,6 +1126,19 @@ export class WsServer {
       category,
       message,
       recoverable,
+    })
+  }
+
+  /**
+   * Broadcast a server status update to all authenticated clients.
+   * Used for non-error status updates like recovery notifications.
+   * @param {string} message - Human-readable status message
+   */
+  broadcastStatus(message) {
+    console.log(`[ws] Broadcasting server_status: ${message}`)
+    this._broadcast({
+      type: 'server_status',
+      message,
     })
   }
 

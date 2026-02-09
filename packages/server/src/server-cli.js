@@ -2,6 +2,7 @@ import { SessionManager } from './session-manager.js'
 import { WsServer } from './ws-server.js'
 import { TunnelManager } from './tunnel.js'
 import { waitForTunnel } from './tunnel-check.js'
+import { wireTunnelEvents } from './tunnel-events.js'
 import qrcode from 'qrcode-terminal'
 
 /**
@@ -111,15 +112,7 @@ export async function startCliServer(config) {
     currentWsUrl = wsUrl
 
     // 5. Wire up tunnel lifecycle events (before waitForTunnel to catch early failures)
-    tunnel.on('tunnel_lost', ({ code, signal }) => {
-      const exitReason = signal ? `signal ${signal}` : `code ${code}`
-      console.log(`\n[!] Tunnel lost (${exitReason})`)
-      wsServer.broadcastError('tunnel', `Tunnel connection lost (${exitReason}). Recovering...`, true)
-    })
-
-    tunnel.on('tunnel_recovering', ({ attempt, delayMs }) => {
-      console.log(`[!] Attempting tunnel recovery (attempt ${attempt}, waiting ${delayMs}ms)...`)
-    })
+    wireTunnelEvents(tunnel, wsServer)
 
     tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
       console.log(`[✓] Tunnel recovered after ${attempt} attempt(s)`)
@@ -138,18 +131,11 @@ export async function startCliServer(config) {
         console.log(`   URL:   ${newWsUrl}`)
         console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
         console.log('')
-        wsServer.broadcastError('tunnel', `Tunnel reconnected with new URL: ${newWsUrl}`, true)
+        wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
       } else {
         console.log(`[✓] Tunnel URL unchanged: ${newWsUrl}`)
-        wsServer.broadcastError('tunnel', 'Tunnel reconnected successfully', true)
+        wsServer.broadcastStatus('Tunnel connection recovered')
       }
-    })
-
-    tunnel.on('tunnel_failed', ({ message, lastExitCode, lastSignal }) => {
-      console.error(`\n[!] ${message}`)
-      console.error(`[!] Last exit: code=${lastExitCode} signal=${lastSignal}`)
-      console.error(`[!] Server will continue on localhost only. Remote connections will not work.`)
-      wsServer.broadcastError('tunnel', 'Tunnel recovery failed. Remote connections will not work.', false)
     })
 
     // 6. Wait for tunnel to be fully routable (DNS propagation)
