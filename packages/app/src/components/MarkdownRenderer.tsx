@@ -170,12 +170,32 @@ function parseTable(lines: string[], startIndex: number): { headers: string[]; r
   return { headers, rows, endIndex: i - 1 };
 }
 
-/** Render a markdown table */
-function renderTable(headers: string[], rows: string[][], keyBase: string, messageTextStyle: StyleProp<TextStyle>): React.ReactNode {
+/** Memoized table component that parses and renders markdown tables.
+ *  Parsing is wrapped in useMemo to prevent re-computation on every render.
+ *  The component itself is wrapped in React.memo to prevent re-renders when props haven't changed. */
+const TableBlock = React.memo(({
+  lines,
+  startIndex,
+  keyBase,
+  messageTextStyle
+}: {
+  lines: string[];
+  startIndex: number;
+  keyBase: string;
+  messageTextStyle: StyleProp<TextStyle>;
+}) => {
+  // Memoize table parsing - only re-parse when lines or startIndex changes
+  const tableData = useMemo(() => {
+    return parseTable(lines, startIndex);
+  }, [lines, startIndex]);
+
+  if (!tableData) return null;
+
+  const { headers, rows } = tableData;
+
   return (
-    <ScrollView 
-      key={keyBase} 
-      horizontal 
+    <ScrollView
+      horizontal
       showsHorizontalScrollIndicator={true}
       accessibilityHint="Swipe left or right to view more columns"
       style={md.tableScrollContainer}
@@ -202,7 +222,7 @@ function renderTable(headers: string[], rows: string[][], keyBase: string, messa
       </View>
     </ScrollView>
   );
-}
+});
 
 /** Render a text block with headers, lists, bold, and inline code.
  *  Enables cross-paragraph selection by wrapping entire text content in a single
@@ -234,12 +254,26 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
 
       if (!line.trim()) continue;
 
-      // Table: | col1 | col2 | (check for table starting at this line)
-      const tableData = parseTable(lines, i);
-      if (tableData) {
+      // Table: | col1 | col2 | (lightweight check for table pattern)
+      // Full parsing happens inside TableBlock's useMemo
+      if (line.includes('|') && i + 1 < lines.length &&
+          lines[i + 1].match(/^\s*\|?\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/)) {
         hasViewChildren = true;
-        elements.push(renderTable(tableData.headers, tableData.rows, lk, messageTextStyle));
-        i = tableData.endIndex; // Skip processed lines
+        elements.push(
+          <TableBlock
+            key={lk}
+            lines={lines}
+            startIndex={i}
+            keyBase={lk}
+            messageTextStyle={messageTextStyle}
+          />
+        );
+        // Lightweight scan to find table end (without full parsing)
+        let j = i + 2;
+        while (j < lines.length && lines[j].includes('|')) {
+          j++;
+        }
+        i = j - 1; // Skip processed lines
         continue;
       }
 
