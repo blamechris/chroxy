@@ -12,6 +12,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import { useConnectionStore } from '../store/connection';
+import { ICON_SATELLITE, ICON_CAMERA, ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 
@@ -157,7 +158,7 @@ export function ConnectScreen() {
       keyboardShouldPersistTaps="handled"
     >
       <View style={styles.header}>
-        <Text style={styles.logo}>📡</Text>
+        <Text style={styles.logo}>{ICON_SATELLITE}</Text>
         <Text style={styles.title}>Connect to Chroxy</Text>
         <Text style={styles.subtitle}>
           Run 'npx chroxy start' on your Mac, then scan the QR code
@@ -178,7 +179,7 @@ export function ConnectScreen() {
       )}
 
       <TouchableOpacity style={styles.qrButton} onPress={handleScanQR}>
-        <Text style={styles.qrButtonText}>📷 Scan QR Code</Text>
+        <Text style={styles.qrButtonText}>{ICON_CAMERA} Scan QR Code</Text>
       </TouchableOpacity>
 
       <TouchableOpacity
@@ -186,7 +187,7 @@ export function ConnectScreen() {
         onPress={() => setShowManual(!showManual)}
       >
         <Text style={styles.manualToggleText}>
-          {showManual ? '▼ Hide manual entry' : '▶ Enter manually'}
+          {showManual ? `${ICON_TRIANGLE_DOWN} Hide manual entry` : `${ICON_TRIANGLE_RIGHT} Enter manually`}
         </Text>
       </TouchableOpacity>
 

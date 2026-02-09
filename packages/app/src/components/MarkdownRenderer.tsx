@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, Platform, Linking, StyleProp, TextStyle, ScrollView } from 'react-native';
+import { ICON_BULLET, ICON_CHECKBOX_CHECKED, ICON_CHECKBOX_UNCHECKED } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 
@@ -352,7 +353,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
         const nestLevel = Math.floor(indentSpaces / 2);
         const checked = tlm[2].toLowerCase() === 'x';
         const indentStr = indent(nestLevel);
-        elements.push(<Text key={lk} selectable style={messageTextStyle}>{indentStr}{checked ? '\u2611 ' : '\u2610 '}{renderInline(tlm[3], lk)}</Text>);
+        elements.push(<Text key={lk} selectable style={messageTextStyle}>{indentStr}{checked ? `${ICON_CHECKBOX_CHECKED} ` : `${ICON_CHECKBOX_UNCHECKED} `}{renderInline(tlm[3], lk)}</Text>);
         continue;
       }
 
@@ -362,7 +363,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
         const indentSpaces = ulm[1].length;
         const nestLevel = Math.floor(indentSpaces / 2); // 2 spaces = 1 nesting level
         const indentStr = indent(nestLevel);
-        elements.push(<Text key={lk} selectable style={messageTextStyle}>{indentStr}{'\u2022 '}{renderInline(ulm[2], lk)}</Text>);
+        elements.push(<Text key={lk} selectable style={messageTextStyle}>{indentStr}{`${ICON_BULLET} `}{renderInline(ulm[2], lk)}</Text>);
         continue;
       }
 
