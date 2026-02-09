@@ -70,9 +70,10 @@ function openURL(url: string) {
 }
 
 /** Generate indentation whitespace based on nest level.
- *  Each level adds 4 spaces of indentation. */
+ *  Each level adds 3 spaces of indentation, capped at 3 levels to save space on small screens. */
 function indent(level: number): string {
-  return '    '.repeat(level);
+  const cappedLevel = Math.min(level, 3);
+  return '   '.repeat(cappedLevel);
 }
 
 /** Render inline markdown: **bold**, `code`, and links within a line */
