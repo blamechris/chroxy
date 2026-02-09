@@ -84,13 +84,18 @@ export class TunnelManager extends EventEmitter {
       });
 
       // Timeout after 30 seconds
-      setTimeout(() => {
+      const timeoutHandle = setTimeout(() => {
         if (!resolved) {
           resolved = true;
           proc.kill();
           reject(new Error("Tunnel timed out after 30s. Is cloudflared installed? (brew install cloudflared)"));
         }
       }, 30_000);
+
+      // Clear timeout on close (success or failure)
+      proc.once('close', () => {
+        clearTimeout(timeoutHandle);
+      });
     });
   }
 
