@@ -304,6 +304,16 @@ export class CliSession extends EventEmitter {
             model: data.model,
             tools: data.tools,
           })
+        } else {
+          // Forward non-init system events (e.g. usage limits, sub-agent
+          // notifications) as system messages to the client
+          const text = data.message || data.text || data.subtype || 'System event'
+          console.log(`[cli-session] System event (${data.subtype || 'unknown'}): ${text}`)
+          this.emit('message', {
+            type: 'system',
+            content: text,
+            timestamp: Date.now(),
+          })
         }
         break
       }

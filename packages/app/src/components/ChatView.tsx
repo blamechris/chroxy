@@ -578,18 +578,21 @@ const styles = StyleSheet.create({
     color: COLORS.textError,
   },
   systemBubble: {
-    backgroundColor: '#16162a',
-    borderColor: '#3a3a5e',
+    backgroundColor: COLORS.accentGrayLight,
+    borderColor: COLORS.accentGrayBorder,
     borderWidth: 1,
+    alignSelf: 'center',
+    maxWidth: '90%',
   },
   senderLabelSystem: {
-    color: '#888',
-    fontSize: 12,
+    color: COLORS.accentGray,
+    fontSize: 11,
     fontWeight: '600',
-    marginBottom: 4,
+    marginBottom: 2,
   },
   systemMessageText: {
-    color: '#b0b0b0',
+    color: COLORS.textSystem,
+    fontSize: 13,
   },
   selectedBubble: {
     borderColor: COLORS.accentBlue,
