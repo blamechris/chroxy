@@ -20,7 +20,7 @@ chroxy/
 ```
 
 **Current Status (v0.1.0):**
-- Server works: CLI headless mode (default), PTY/tmux mode, WebSocket protocol, Cloudflare tunnel, session management, model switching
+- Server works: CLI headless mode (default), PTY/tmux mode, WebSocket protocol, Cloudflare tunnel, session management, model switching, auto-discovery of new tmux sessions
 - App works: QR code scanning, connection flow with health checks and retries, markdown rendering, dual-view chat/terminal
 - Priority: xterm.js integration, output parser tuning, push notifications
 
@@ -185,7 +185,7 @@ Chroxy server operates in two modes:
 | PtyManager | `src/pty-manager.js` | tmux session management (PTY mode) |
 | OutputParser | `src/output-parser.js` | Terminal output parser (PTY mode) |
 | TunnelManager | `src/tunnel.js` | Cloudflare tunnel lifecycle |
-| SessionManager | `src/session-manager.js` | Session discovery and management |
+| SessionManager | `src/session-manager.js` | Session lifecycle management + auto-discovery |
 | Models | `src/models.js` | Model switching utilities |
 
 ### Data Flow
@@ -215,7 +215,7 @@ Chroxy server operates in two modes:
 Client → Server: `auth`, `input`, `resize`, `mode`, `interrupt`, `set_model`, `set_permission_mode`, `permission_response`, `list_sessions`, `switch_session`, `create_session`, `destroy_session`, `rename_session`, `discover_sessions`, `attach_session`
 Server → Client: `auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `stream_delta`, `stream_end`, `raw`, `message`, `status`, `model_changed`, `status_update`, `available_models`, `permission_request`, `permission_mode_changed`, `available_permission_modes`, `session_list`, `session_switched`, `session_created`, `session_destroyed`, `session_error`, `discovered_sessions`, `history_replay_start`, `history_replay_end`, `raw_background`, `claude_ready`, `tool_start`, `result`, `server_status`, `server_error`
 
-`server_status` is used for non-error status updates, while `server_error` is reserved for error conditions.
+`server_status` is used for non-error status updates, while `server_error` is reserved for error conditions. `discovered_sessions` can be sent proactively when auto-discovery finds new tmux sessions (every 45s by default).
 
 ### App Screens
 

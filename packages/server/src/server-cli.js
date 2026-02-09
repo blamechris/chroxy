@@ -92,6 +92,14 @@ export async function startCliServer(config) {
     console.log(`[cli] Session destroyed: ${sessionId}`)
   })
 
+  sessionManager.on('new_sessions_discovered', ({ tmux }) => {
+    console.log(`[cli] Auto-discovered ${tmux.length} new tmux session(s): ${tmux.map((s) => s.sessionName).join(', ')}`)
+    // Broadcast to clients so they can show a notification or auto-attach
+    if (wsServer) {
+      wsServer.broadcast({ type: 'discovered_sessions', tmux })
+    }
+  })
+
   // 3. Start the WebSocket server
   wsServer = new WsServer({
     port: PORT,
@@ -157,6 +165,9 @@ export async function startCliServer(config) {
   }
 
   console.log('\nPress Ctrl+C to stop.\n')
+
+  // 8. Start auto-discovery of new tmux sessions
+  sessionManager.startAutoDiscovery()
 
   // Graceful shutdown
   const shutdown = async (signal) => {
