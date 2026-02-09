@@ -1038,6 +1038,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }, 1500);
       } else if (disconnectedAttemptId === myAttemptId) {
         set({ connectionPhase: 'disconnected' as ConnectionPhase });
+      } else {
+        // Connection dropped before auth completed — reset to disconnected
+        set({ connectionPhase: 'disconnected' as ConnectionPhase, isReconnecting: false });
       }
     };
 
