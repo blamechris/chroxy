@@ -7,6 +7,11 @@ const STORAGE_KEY_URL = 'chroxy_last_url';
 const STORAGE_KEY_TOKEN = 'chroxy_last_token';
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
+/** Delay before auto-reconnecting after an unexpected socket close (ms) */
+const AUTO_RECONNECT_DELAY = 1500;
+/** Delay before reconnecting after a WebSocket error (ms) */
+const ERROR_RECONNECT_DELAY = 2000;
+
 /** Strip ANSI escape codes for plain text display */
 function stripAnsi(str: string): string {
   return str.replace(
@@ -1054,7 +1059,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
-        }, 1500);
+        }, AUTO_RECONNECT_DELAY);
       } else if (disconnectedAttemptId === myAttemptId) {
         set({ connectionPhase: 'disconnected' as ConnectionPhase });
       } else {
@@ -1076,7 +1081,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
-        }, 2000);
+        }, ERROR_RECONNECT_DELAY);
       }
     };
     } // end _connectWebSocket
