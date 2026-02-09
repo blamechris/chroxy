@@ -1,9 +1,8 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { once } from 'node:events'
+import { once, EventEmitter } from 'node:events'
 import { WsServer } from '../src/ws-server.js'
 import WebSocket from 'ws'
-import { EventEmitter } from 'events'
 
 /**
  * Start a WsServer on port 0 (OS-assigned) and return the actual port.
