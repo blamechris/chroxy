@@ -117,6 +117,7 @@ program
   .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
   .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
   .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
+  .option('--no-supervisor', 'Disable supervisor mode (direct server, no auto-restart)')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
     // Load config file
@@ -182,6 +183,14 @@ program
     if (config.tmuxSession) process.env.TMUX_SESSION = config.tmuxSession
     if (config.shell) process.env.SHELL_CMD = config.shell
 
+    // Determine if supervisor should be used
+    const tunnelMode = config.tunnel || 'quick'
+    const useSupervisor = tunnelMode === 'named'
+      && !config.terminal
+      && !config.noAuth
+      && options.supervisor !== false
+      && process.env.CHROXY_SUPERVISED !== '1'
+
     // Launch appropriate server mode
     if (config.terminal) {
       // Legacy PTY/tmux mode — --no-auth is not supported
@@ -191,8 +200,12 @@ program
       }
       const { startServer } = await import('./server.js')
       await startServer(config)
+    } else if (useSupervisor) {
+      // Named tunnel with supervisor: auto-restart server child on crash
+      const { startSupervisor } = await import('./supervisor.js')
+      await startSupervisor(config)
     } else {
-      // Default: CLI headless mode
+      // Default: CLI headless mode (direct, no supervisor)
       const { startCliServer } = await import('./server-cli.js')
       await startCliServer(config)
     }
