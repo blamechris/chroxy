@@ -218,18 +218,17 @@ export function SessionScreen() {
 
   // Handle tapping a prompt option
   const handleSelectOption = (value: string, messageId: string, requestId?: string, toolUseId?: string) => {
-    markPromptAnswered(messageId, value);
+    let sent = false;
     if (toolUseId) {
-      // AskUserQuestion prompt — send answer back to Claude
-      sendUserQuestionResponse(value);
-      return;
+      sent = sendUserQuestionResponse(value);
+    } else if (requestId) {
+      sent = sendPermissionResponse(requestId, value);
+    } else {
+      sent = sendInput(hasTerminal ? value + '\r' : value);
     }
-    if (requestId) {
-      // Permission prompt -- send structured response back to server
-      sendPermissionResponse(requestId, value);
-      return;
+    if (sent) {
+      markPromptAnswered(messageId, value);
     }
-    sendInput(hasTerminal ? value + '\r' : value);
   };
 
   // Check if Enter key should send based on current mode and settings
