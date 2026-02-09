@@ -54,11 +54,11 @@ class TestTunnelManager extends TunnelManager {
     this._mockSpawn = mockSpawn
   }
 
-  _spawnCloudflared(args) {
+  _spawnCloudflared(argv, spawnOpts) {
     if (this._mockSpawn) {
-      return this._mockSpawn(args)
+      return this._mockSpawn(argv, spawnOpts)
     }
-    return super._spawnCloudflared(args)
+    return super._spawnCloudflared(argv, spawnOpts)
   }
 }
 
