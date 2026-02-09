@@ -397,7 +397,7 @@ export class WsServer {
   }
 
   /** Handle messages in multi-session mode */
-  _handleSessionMessage(ws, client, msg) {
+  async _handleSessionMessage(ws, client, msg) {
     switch (msg.type) {
       case 'input': {
         const text = msg.data
@@ -609,7 +609,7 @@ export class WsServer {
 
         try {
           const name = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : undefined
-          const sessionId = this.sessionManager.attachSession({ tmuxSession, name })
+          const sessionId = await this.sessionManager.attachSession({ tmuxSession, name })
           // Auto-switch the attaching client to the new session
           client.activeSessionId = sessionId
           const entry = this.sessionManager.getSession(sessionId)
@@ -618,6 +618,7 @@ export class WsServer {
           // Broadcast updated session list to all clients
           this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
         } catch (err) {
+          console.error(`[ws] Failed to attach session (tmux: '${tmuxSession}'):`, err)
           this._send(ws, { type: 'session_error', message: err.message })
         }
         break

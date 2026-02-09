@@ -246,6 +246,8 @@ export class SessionManager extends EventEmitter {
       throw new SessionLimitError(this.maxSessions)
     }
 
+    console.log(`[SessionManager] Attempting to attach to tmux session '${tmuxSession}'`)
+
     // Prevent duplicate attachments to the same tmux session
     for (const [, entry] of this._sessions) {
       if (entry.tmuxSession === tmuxSession) {
@@ -274,8 +276,16 @@ export class SessionManager extends EventEmitter {
     this._sessions.set(sessionId, entry)
     this._wireSessionEvents(sessionId, session)
 
-    // Wait for PTY start to complete — surface failures synchronously
-    await session.start()
+    try {
+      // Wait for PTY start to complete — surface failures synchronously
+      await session.start()
+      console.log(`[SessionManager] Successfully attached session ${sessionId} to tmux '${tmuxSession}'`)
+    } catch (err) {
+      // Clean up failed session entry before rethrowing
+      this._sessions.delete(sessionId)
+      console.error(`[SessionManager] Attach failed for session ${sessionId} (tmux: '${tmuxSession}'):`, err)
+      throw new SessionAttachError(`Failed to attach to tmux session '${tmuxSession}': ${err.message}`, { tmuxSession, sessionId, originalError: err })
+    }
 
     this.emit('session_created', { sessionId, name: sessionName, cwd: entry.cwd })
     return sessionId
