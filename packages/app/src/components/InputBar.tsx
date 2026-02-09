@@ -80,8 +80,8 @@ export function InputBar({
           onSubmitEditing={enterToSend && !isStreaming ? onSend : undefined}
           blurOnSubmit={false}
           multiline={!enterToSend}
-          autoCapitalize="none"
-          autoCorrect={false}
+          autoCapitalize={viewMode === 'chat' ? 'sentences' : 'none'}
+          autoCorrect={viewMode === 'chat'}
         />
         {isStreaming ? (
           <TouchableOpacity style={styles.interruptButton} onPress={onInterrupt}>
