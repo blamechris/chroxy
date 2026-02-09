@@ -184,14 +184,18 @@ function renderTable(headers: string[], rows: string[][], keyBase: string, messa
 }
 
 /** Render a text block with headers, lists, bold, and inline code.
- *  Splits on blank lines into separate paragraphs with visible spacing.
+ *  Enables cross-paragraph selection by wrapping entire text content in a single
+ *  selectable Text component where possible.
  *
  *  The `messageTextStyle` prop is applied to selectable text runs so the
  *  caller can control font size / color without duplicating the stylesheet. */
 export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: string; keyBase: string; messageTextStyle: StyleProp<TextStyle> }) {
   // Split into paragraphs on blank lines for visual spacing
   const paragraphs = text.split(/\n{2,}/);
-  const paraElements: React.ReactNode[] = [];
+
+  // First pass: process all paragraphs and determine if we have View-only elements
+  const processedParagraphs: Array<{ elements: React.ReactNode[]; hasViewChildren: boolean }> = [];
+  let anyHasViewChildren = false;
 
   for (let p = 0; p < paragraphs.length; p++) {
     const para = paragraphs[p].trim();
@@ -205,7 +209,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const lk = `${keyBase}-P${p}-L${i}`;
-      if (i > 0 && !hasViewChildren) elements.push('\n');
+      if (i > 0) elements.push('\n');
 
       if (!line.trim()) continue;
 
@@ -246,7 +250,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
         }
         // Render the blockquote as a styled View
         const quoteContent = quoteLines.map((qLine, qIdx) =>
-          <Text key={`${lk}-q${qIdx}`} selectable style={messageTextStyle}>{renderInline(qLine, `${lk}-q${qIdx}`)}</Text>
+          <Text key={`${lk}-q${qIdx}`}>{renderInline(qLine, `${lk}-q${qIdx}`)}</Text>
         );
         elements.push(
           <View key={lk} style={md.blockquote}>
@@ -291,32 +295,72 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
       // Regular line with inline formatting
       const inlineElements = renderInline(line, lk);
       if (inlineElements.length > 0) {
-        elements.push(<Text key={lk} selectable style={messageTextStyle}>{inlineElements}</Text>);
+        elements.push(<Text key={lk}>{inlineElements}</Text>);
       }
     }
 
     if (elements.length > 0) {
-      // Use View wrapper when we have View children (HR/blockquote/table), Text wrapper otherwise
-      if (hasViewChildren) {
-        paraElements.push(
-          <View key={`${keyBase}-P${p}`}>
-            {elements}
-          </View>
-        );
-      } else {
-        paraElements.push(
-          <Text key={`${keyBase}-P${p}`} selectable style={messageTextStyle}>
-            {elements}
-          </Text>
-        );
-      }
+      processedParagraphs.push({ elements, hasViewChildren });
+      if (hasViewChildren) anyHasViewChildren = true;
     }
   }
 
-  // Single paragraph -- no wrapper needed
-  if (paraElements.length <= 1) return <>{paraElements}</>;
+  // If no content, return nothing
+  if (processedParagraphs.length === 0) return null;
 
-  return <View style={md.paragraphs}>{paraElements}</View>;
+  // If we have any View children (HR/blockquote/table), we can't use a single Text wrapper
+  // Instead, group consecutive Text-only paragraphs together for cross-paragraph selection
+  if (anyHasViewChildren) {
+    const grouped: React.ReactNode[] = [];
+    let textGroup: React.ReactNode[] = [];
+    let textGroupKey = 0;
+
+    const flushTextGroup = () => {
+      if (textGroup.length > 0) {
+        grouped.push(
+          <Text key={`textgroup-${textGroupKey++}`} selectable style={messageTextStyle}>
+            {textGroup}
+          </Text>
+        );
+        textGroup = [];
+      }
+    };
+
+    processedParagraphs.forEach((para, idx) => {
+      if (para.hasViewChildren) {
+        flushTextGroup();
+        grouped.push(
+          <View key={`para-${idx}`}>
+            {para.elements}
+          </View>
+        );
+      } else {
+        // Add paragraph separator if not the first in the group
+        if (textGroup.length > 0) {
+          textGroup.push('\n\n');
+        }
+        textGroup.push(...para.elements);
+      }
+    });
+
+    flushTextGroup();
+
+    // Return with paragraph spacing
+    return <View style={md.paragraphs}>{grouped}</View>;
+  }
+
+  // No View children — wrap everything in a single selectable Text for cross-paragraph selection
+  const allElements: React.ReactNode[] = [];
+  processedParagraphs.forEach((para, idx) => {
+    if (idx > 0) allElements.push('\n\n');
+    allElements.push(...para.elements);
+  });
+
+  return (
+    <Text selectable style={messageTextStyle}>
+      {allElements}
+    </Text>
+  );
 }
 
 /** Formatted response -- renders Claude's markdown as styled blocks.
