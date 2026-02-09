@@ -43,6 +43,8 @@ export function InputBar({
   disabled,
   disabledPlaceholder,
 }: InputBarProps) {
+  const a11yDisabled = disabled ? { disabled: true as const } : undefined;
+
   return (
     <View style={[styles.inputContainer, { paddingBottom: bottomPadding }]}>
       {viewMode === 'terminal' && hasTerminal && (
@@ -90,16 +92,16 @@ export function InputBar({
           autoCapitalize={viewMode === 'chat' ? 'sentences' : 'none'}
           autoCorrect={viewMode === 'chat'}
           editable={!disabled}
-          accessibilityState={disabled ? { disabled: true } : undefined}
+          accessibilityState={a11yDisabled}
         />
         {isStreaming ? (
           <TouchableOpacity
-            style={styles.interruptButton}
+            style={[styles.interruptButton, disabled && styles.interruptButtonDisabled]}
             onPress={onInterrupt}
             disabled={disabled}
             accessibilityRole="button"
             accessibilityLabel="Interrupt Claude"
-            accessibilityState={disabled ? { disabled: true } : undefined}
+            accessibilityState={a11yDisabled}
           >
             <Text style={styles.interruptButtonText}>{ICON_SQUARE}</Text>
           </TouchableOpacity>
@@ -110,7 +112,7 @@ export function InputBar({
             disabled={disabled}
             accessibilityRole="button"
             accessibilityLabel="Send message"
-            accessibilityState={disabled ? { disabled: true } : undefined}
+            accessibilityState={a11yDisabled}
           >
             <Text style={styles.sendButtonText}>{ICON_ARROW_UP}</Text>
           </TouchableOpacity>
@@ -199,6 +201,9 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  interruptButtonDisabled: {
+    opacity: 0.4,
   },
   interruptButtonText: {
     color: COLORS.textPrimary,
