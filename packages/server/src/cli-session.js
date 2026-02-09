@@ -16,6 +16,8 @@ const __dirname = dirname(__filename)
 let _settingsLock = Promise.resolve()
 
 function withSettingsLock(fn) {
+  // Serialize regardless of success/failure — then(fn, fn) ensures fn runs after
+  // the previous operation completes, whether it succeeded or failed
   const next = _settingsLock.then(fn, fn)
   _settingsLock = next.catch(() => {})
   return next
@@ -633,7 +635,7 @@ export class CliSession extends EventEmitter {
    * when multiple sessions start simultaneously.
    */
   _registerPermissionHook() {
-    withSettingsLock(() => this._registerPermissionHookSync())
+    return withSettingsLock(() => this._registerPermissionHookSync())
   }
 
   _registerPermissionHookSync() {
@@ -737,7 +739,7 @@ export class CliSession extends EventEmitter {
    * when multiple sessions stop simultaneously.
    */
   _unregisterPermissionHook() {
-    withSettingsLock(() => this._unregisterPermissionHookSync())
+    return withSettingsLock(() => this._unregisterPermissionHookSync())
   }
 
   _unregisterPermissionHookSync() {
