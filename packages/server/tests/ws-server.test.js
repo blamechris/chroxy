@@ -561,11 +561,6 @@ describe('WsServer.broadcastError', () => {
 
 describe('WsServer.broadcastStatus', () => {
   let server
-  let port
-
-  beforeEach(() => {
-    port = 30000 + Math.floor(Math.random() * 10000)
-  })
 
   afterEach(() => {
     if (server) {
@@ -577,13 +572,12 @@ describe('WsServer.broadcastStatus', () => {
   it('broadcasts server_status to authenticated clients', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
     })
-    server.start('127.0.0.1')
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     // Connect and auto-authenticate
     const { ws, messages } = await createClient(port, true)
@@ -606,13 +600,12 @@ describe('WsServer.broadcastStatus', () => {
   it('broadcasts multiple server_status messages', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
     })
-    server.start('127.0.0.1')
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, true)
     messages.length = 0
@@ -621,9 +614,16 @@ describe('WsServer.broadcastStatus', () => {
     server.broadcastStatus('First recovery attempt')
     server.broadcastStatus('Second recovery attempt')
 
-    // Wait for both messages
-    await waitForMessage(messages, 'server_status', 1000)
-    await new Promise(r => setTimeout(r, 100))
+    // Wait until both server_status messages have been received
+    await withTimeout(
+      (async () => {
+        while (messages.filter(m => m.type === 'server_status').length < 2) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      1000,
+      'Timed out waiting for 2 server_status messages'
+    )
 
     const statusMsgs = messages.filter(m => m.type === 'server_status')
     assert.equal(statusMsgs.length, 2, 'Should receive both status messages')
@@ -636,13 +636,12 @@ describe('WsServer.broadcastStatus', () => {
   it('does not send server_status to unauthenticated clients', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: true,
     })
-    server.start('127.0.0.1')
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     // Connect WITHOUT authenticating
     const { ws, messages } = await createClient(port, false)
@@ -662,13 +661,12 @@ describe('WsServer.broadcastStatus', () => {
   it('broadcasts server_status to multiple authenticated clients', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
     })
-    server.start('127.0.0.1')
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     // Connect two authenticated clients
     const client1 = await createClient(port, true)
@@ -697,13 +695,12 @@ describe('WsServer.broadcastStatus', () => {
   it('includes correct message format in server_status', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
     })
-    server.start('127.0.0.1')
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, true)
     messages.length = 0
