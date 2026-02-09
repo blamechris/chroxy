@@ -282,22 +282,48 @@ export function ChatView({
   onToggleSelection,
   streamingMessageId,
 }: ChatViewProps) {
+  const [showScrollToTop, setShowScrollToTop] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+
   const displayGroups = useMemo(
     () => groupMessages(messages, streamingMessageId),
     [messages, streamingMessageId],
   );
 
+  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const threshold = 100;
+
+    // Show "jump to top" when scrolled down from the top
+    setShowScrollToTop(contentOffset.y > threshold);
+
+    // Show "jump to bottom" when scrolled up from the bottom
+    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+    setShowScrollToBottom(distanceFromBottom > threshold);
+  };
+
+  const scrollToTop = () => {
+    scrollViewRef.current?.scrollTo({ y: 0, animated: true });
+  };
+
+  const scrollToBottom = () => {
+    scrollViewRef.current?.scrollToEnd({ animated: true });
+  };
+
   return (
-    <ScrollView
-      ref={scrollViewRef}
-      style={styles.chatContainer}
-      contentContainerStyle={styles.chatContent}
-      onContentSizeChange={() => {
-        if (!isSelectingRef.current) scrollViewRef.current?.scrollToEnd();
-      }}
-      keyboardDismissMode="on-drag"
-      keyboardShouldPersistTaps="handled"
-    >
+    <View style={styles.chatContainer}>
+      <ScrollView
+        ref={scrollViewRef}
+        style={styles.scrollView}
+        contentContainerStyle={styles.chatContent}
+        onContentSizeChange={() => {
+          if (!isSelectingRef.current) scrollViewRef.current?.scrollToEnd();
+        }}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
+        keyboardDismissMode="on-drag"
+        keyboardShouldPersistTaps="handled"
+      >
       {messages.length === 0 ? (
         <View style={styles.emptyState}>
           <Text style={styles.emptyStateText}>
@@ -336,7 +362,28 @@ export function ChatView({
           );
         })
       )}
-    </ScrollView>
+      </ScrollView>
+
+      {/* Scroll navigation buttons */}
+      {showScrollToTop && (
+        <TouchableOpacity
+          style={[styles.scrollButton, styles.scrollButtonTop]}
+          onPress={scrollToTop}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.scrollButtonText}>{ICON_ARROW_UP}</Text>
+        </TouchableOpacity>
+      )}
+      {showScrollToBottom && (
+        <TouchableOpacity
+          style={[styles.scrollButton, styles.scrollButtonBottom]}
+          onPress={scrollToBottom}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.scrollButtonText}>{ICON_ARROW_DOWN}</Text>
+        </TouchableOpacity>
+      )}
+    </View>
   );
 }
 
@@ -344,6 +391,9 @@ export function ChatView({
 
 const styles = StyleSheet.create({
   chatContainer: {
+    flex: 1,
+  },
+  scrollView: {
     flex: 1,
   },
   chatContent: {
@@ -545,5 +595,33 @@ const styles = StyleSheet.create({
   },
   userMessageText: {
     color: '#fff',
+  },
+  scrollButton: {
+    position: 'absolute',
+    right: 16,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#1a1a2ebb',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#4a4a6e',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  scrollButtonTop: {
+    top: 16,
+  },
+  scrollButtonBottom: {
+    bottom: 16,
+  },
+  scrollButtonText: {
+    color: '#4a9eff',
+    fontSize: 18,
+    fontWeight: 'bold',
   },
 });
