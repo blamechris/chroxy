@@ -555,9 +555,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             'Connection Failed',
             'Could not reach the Chroxy server. Make sure it\'s running.',
             [
-              { text: 'Retry', onPress: () => get().connect(url, token, 0) },
-              { text: 'Forget Server', style: 'destructive', onPress: () => { void get().clearSavedConnection(); } },
               { text: 'OK', style: 'cancel' },
+              { text: 'Forget Server', style: 'destructive', onPress: () => { void get().clearSavedConnection(); } },
+              { text: 'Retry', onPress: () => get().connect(url, token, 0) },
             ],
           );
         }
