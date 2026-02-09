@@ -7,6 +7,7 @@ import {
   ScrollView,
   Platform,
   LayoutAnimation,
+  Animated,
 } from 'react-native';
 import { ChatMessage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
@@ -14,6 +15,59 @@ import { FormattedResponse } from './MarkdownRenderer';
 // Named Unicode constants for readability
 const ICON_CHEVRON_RIGHT = '\u25B8'; // Right-pointing triangle
 const ICON_CHEVRON_DOWN = '\u25BE';  // Down-pointing triangle
+
+// -- Animated Thinking Indicator --
+
+function ThinkingIndicator() {
+  const dot1Opacity = useRef(new Animated.Value(0.3)).current;
+  const dot2Opacity = useRef(new Animated.Value(0.3)).current;
+  const dot3Opacity = useRef(new Animated.Value(0.3)).current;
+
+  useEffect(() => {
+    const createPulseAnimation = (animatedValue: Animated.Value, delay: number) => {
+      return Animated.loop(
+        Animated.sequence([
+          Animated.delay(delay),
+          Animated.timing(animatedValue, {
+            toValue: 1,
+            duration: 400,
+            useNativeDriver: true,
+          }),
+          Animated.timing(animatedValue, {
+            toValue: 0.3,
+            duration: 400,
+            useNativeDriver: true,
+          }),
+        ]),
+      );
+    };
+
+    const animation1 = createPulseAnimation(dot1Opacity, 0);
+    const animation2 = createPulseAnimation(dot2Opacity, 200);
+    const animation3 = createPulseAnimation(dot3Opacity, 400);
+
+    animation1.start();
+    animation2.start();
+    animation3.start();
+
+    return () => {
+      animation1.stop();
+      animation2.stop();
+      animation3.stop();
+    };
+  }, [dot1Opacity, dot2Opacity, dot3Opacity]);
+
+  return (
+    <View style={styles.thinkingIndicator}>
+      <Text style={styles.thinkingLabel}>Claude is thinking</Text>
+      <View style={styles.thinkingDots}>
+        <Animated.View style={[styles.thinkingDot, { opacity: dot1Opacity }]} />
+        <Animated.View style={[styles.thinkingDot, { opacity: dot2Opacity }]} />
+        <Animated.View style={[styles.thinkingDot, { opacity: dot3Opacity }]} />
+      </View>
+    </View>
+  );
+}
 
 // -- Props --
 
@@ -215,11 +269,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   const isError = message.type === 'error';
 
   if (isThinking) {
-    return (
-      <View style={styles.thinkingBubble}>
-        <Text style={styles.thinkingText}>Thinking...</Text>
-      </View>
-    );
+    return <ThinkingIndicator />;
   }
 
   if (isTool) {
@@ -373,15 +423,29 @@ const styles = StyleSheet.create({
     borderColor: '#4a9eff44',
     borderWidth: 1,
   },
-  thinkingBubble: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginBottom: 8,
+  thinkingIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginBottom: 12,
   },
-  thinkingText: {
-    color: '#666',
+  thinkingLabel: {
+    color: '#888',
     fontSize: 13,
     fontStyle: 'italic',
+  },
+  thinkingDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  thinkingDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#4a9eff',
   },
   senderLabelUser: {
     color: '#4a9eff',
