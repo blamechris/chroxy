@@ -209,7 +209,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const lk = `${keyBase}-P${p}-L${i}`;
-      if (i > 0) elements.push('\n');
+      if (i > 0) elements.push(<Text key={`${lk}-nl`}>{'\n'}</Text>);
 
       if (!line.trim()) continue;
 
@@ -250,7 +250,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
         }
         // Render the blockquote as a styled View
         const quoteContent = quoteLines.map((qLine, qIdx) =>
-          <Text key={`${lk}-q${qIdx}`}>{renderInline(qLine, `${lk}-q${qIdx}`)}</Text>
+          <Text key={`${lk}-q${qIdx}`} selectable style={messageTextStyle}>{renderInline(qLine, `${lk}-q${qIdx}`)}</Text>
         );
         elements.push(
           <View key={lk} style={md.blockquote}>
