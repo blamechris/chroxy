@@ -94,6 +94,16 @@ export const COLORS = {
   /** Red border: standard opacity (27%) */
   accentRedBorder: '#ff4a4a44',
 
+  // -- Accent Colors: Gray (System Messages) --
+  /** System message text: muted gray */
+  textSystem: '#b0b0b0',
+  /** System message label: dimmer than regular labels */
+  accentGray: '#888888',
+  /** System message background: very dark, subtle */
+  accentGrayLight: '#16162a',
+  /** System message border: subtle gray */
+  accentGrayBorder: '#3a3a5e',
+
   // -- Border Colors --
   /** Primary border: main component borders */
   borderPrimary: '#2a2a4e',
