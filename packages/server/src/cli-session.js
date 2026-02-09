@@ -10,6 +10,17 @@ import { resolveModelId } from './models.js'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
+// Module-level lock for settings.json read-modify-write operations.
+// Multiple CliSession instances starting/stopping simultaneously can
+// corrupt each other's writes without serialization.
+let _settingsLock = Promise.resolve()
+
+function withSettingsLock(fn) {
+  const next = _settingsLock.then(fn, fn)
+  _settingsLock = next.catch(() => {})
+  return next
+}
+
 /**
  * Manages a persistent Claude Code CLI session using headless mode.
  *
@@ -617,10 +628,15 @@ export class CliSession extends EventEmitter {
   /**
    * Register the Chroxy permission hook in ~/.claude/settings.json.
    * Adds a PreToolUse hook that forwards all tool requests to our HTTP endpoint.
-   * 
-   * Returns true on success, false on failure.
+   *
+   * Serialized via module-level lock to prevent concurrent write races
+   * when multiple sessions start simultaneously.
    */
   _registerPermissionHook() {
+    withSettingsLock(() => this._registerPermissionHookSync())
+  }
+
+  _registerPermissionHookSync() {
     try {
       const hookScript = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
       const settingsPath = resolve(homedir(), '.claude', 'settings.json')
@@ -638,7 +654,7 @@ export class CliSession extends EventEmitter {
           console.error(`[cli-session] ${errMsg}`)
           this.emit('error', { message: errMsg })
           this._scheduleHookRetry()
-          return false
+          return
         }
       }
 
@@ -676,13 +692,11 @@ export class CliSession extends EventEmitter {
 
       this._hookRegistered = true
       this._hookRetryCount = 0
-      return true
     } catch (err) {
       const errMsg = `Failed to register permission hook: ${err.message}. Will retry hook registration.`
       console.error(`[cli-session] ${errMsg}`)
       this.emit('error', { message: errMsg })
       this._scheduleHookRetry()
-      return false
     }
   }
 
@@ -718,8 +732,15 @@ export class CliSession extends EventEmitter {
 
   /**
    * Remove the Chroxy permission hook from ~/.claude/settings.json.
+   *
+   * Serialized via module-level lock to prevent concurrent write races
+   * when multiple sessions stop simultaneously.
    */
   _unregisterPermissionHook() {
+    withSettingsLock(() => this._unregisterPermissionHookSync())
+  }
+
+  _unregisterPermissionHookSync() {
     try {
       const settingsPath = resolve(homedir(), '.claude', 'settings.json')
       const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
