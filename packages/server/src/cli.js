@@ -112,6 +112,7 @@ program
   .option('--cwd <path>', 'Working directory for Claude (CLI mode)')
   .option('--model <model>', 'Model to use (CLI mode)')
   .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve (CLI mode)')
+  .option('--discovery-interval <seconds>', 'Auto-discovery polling interval in seconds (PTY mode)')
   .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
@@ -140,6 +141,9 @@ program
     if (options.model !== undefined) cliOverrides.model = options.model
     if (options.allowedTools !== undefined) {
       cliOverrides.allowedTools = options.allowedTools.split(',').map((t) => t.trim())
+    }
+    if (options.discoveryInterval !== undefined) {
+      cliOverrides.discoveryInterval = parseInt(options.discoveryInterval, 10)
     }
     if (options.auth === false) cliOverrides.noAuth = true
 
