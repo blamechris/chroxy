@@ -1,10 +1,10 @@
 import pty from "node-pty";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { EventEmitter } from "events";
 
 /**
  * Manages a PTY process running tmux.
- * Handles spawning, attaching, resizing, and cleanup.
+ * Handles spawning, attaching, resizing, cleanup, and crash detection.
  */
 export class PtyManager extends EventEmitter {
   constructor(config = {}) {
@@ -15,6 +15,8 @@ export class PtyManager extends EventEmitter {
     this.ptyProcess = null;
     this.cols = config.cols || 120;
     this.rows = config.rows || 40;
+    this._healthCheckInterval = null;
+    this._healthCheckIntervalMs = 30000; // 30 seconds
   }
 
   /**
@@ -30,7 +32,10 @@ export class PtyManager extends EventEmitter {
       // Fresh start — kill the old session so there's no scrollback
       console.log(`[pty] Killing old tmux session: ${this.sessionName}`);
       try {
-        execSync(`/opt/homebrew/bin/tmux kill-session -t ${this.sessionName} 2>/dev/null`);
+        execFileSync('/opt/homebrew/bin/tmux', ['kill-session', '-t', this.sessionName], {
+          stdio: 'ignore',
+          timeout: 5000,
+        });
       } catch {
         // Session may have died already
       }
@@ -79,6 +84,9 @@ export class PtyManager extends EventEmitter {
       console.log(`[pty] Resumed tmux session: ${this.sessionName}`);
     }
 
+    // Start periodic health checks to detect session crashes
+    this._startHealthCheck();
+
     return this;
   }
 
@@ -100,6 +108,7 @@ export class PtyManager extends EventEmitter {
 
   /** Kill the PTY process (not the tmux session — it persists) */
   destroy() {
+    this._stopHealthCheck();
     if (this.ptyProcess) {
       this.ptyProcess.kill();
       this.ptyProcess = null;
@@ -109,10 +118,97 @@ export class PtyManager extends EventEmitter {
   /** Check if the named tmux session already exists */
   _hasTmuxSession() {
     try {
-      execSync(`tmux has-session -t ${this.sessionName} 2>/dev/null`);
+      execFileSync('tmux', ['has-session', '-t', this.sessionName], {
+        stdio: 'ignore',
+        timeout: 5000,
+      });
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Start periodic health checks to detect crashes.
+   * Checks if the tmux session still exists and if panes are alive.
+   */
+  _startHealthCheck() {
+    this._stopHealthCheck();
+    this._healthCheckInterval = setInterval(() => {
+      this._checkHealth();
+    }, this._healthCheckIntervalMs);
+  }
+
+  /**
+   * Stop periodic health checks.
+   */
+  _stopHealthCheck() {
+    if (this._healthCheckInterval) {
+      clearInterval(this._healthCheckInterval);
+      this._healthCheckInterval = null;
+    }
+  }
+
+  /**
+   * Check if the tmux session and its panes are still alive.
+   * Emits 'crashed' event if the session or Claude process has died.
+   */
+  _checkHealth() {
+    try {
+      // Check if tmux session exists
+      if (!this._hasTmuxSession()) {
+        console.log(`[pty] Health check failed: tmux session '${this.sessionName}' no longer exists`);
+        this._stopHealthCheck();
+        this.emit('crashed', { reason: 'session_not_found' });
+        return;
+      }
+
+      // Check pane status (pane_dead flag) to catch dead panes
+      const paneDeadOutput = execFileSync(
+        'tmux',
+        ['list-panes', '-t', this.sessionName, '-F', '#{pane_dead}'],
+        { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim();
+
+      // If any pane reports '1', it's dead
+      const panes = paneDeadOutput.split('\n');
+      const deadPanes = panes.filter((status) => status === '1');
+
+      if (deadPanes.length > 0) {
+        console.log(
+          `[pty] Health check failed: ${deadPanes.length} dead pane(s) in session '${this.sessionName}'`
+        );
+        this._stopHealthCheck();
+        this.emit('crashed', { reason: 'pane_dead' });
+        return;
+      }
+
+      // Additionally, verify that a Claude process/command is still running in the session.
+      // We use tmux's pane_current_command to see what each pane is currently running.
+      const currentCmdOutput = execFileSync(
+        'tmux',
+        ['list-panes', '-t', this.sessionName, '-F', '#{pane_current_command}'],
+        { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim();
+
+      const paneCommands = currentCmdOutput === '' ? [] : currentCmdOutput.split('\n');
+      // Consider Claude "present" if any pane's current command string contains "claude".
+      const hasClaudeProcess = paneCommands.some((cmd) =>
+        typeof cmd === 'string' && cmd.toLowerCase().includes('claude')
+      );
+
+      if (!hasClaudeProcess) {
+        console.log(
+          `[pty] Health check failed: no Claude process found in tmux session '${this.sessionName}'`
+        );
+        this._stopHealthCheck();
+        this.emit('crashed', { reason: 'claude_process_not_found' });
+        return;
+      }
+    } catch (err) {
+      console.error(`[pty] Health check error for session '${this.sessionName}':`, err.message);
+      this._stopHealthCheck();
+      this.emit('crashed', { reason: 'health_check_error', error: err.message });
     }
   }
 }

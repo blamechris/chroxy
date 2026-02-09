@@ -491,5 +491,11 @@ export class SessionManager extends EventEmitter {
     session.on('status_update', (data) => {
       this.emit('session_event', { sessionId, event: 'status_update', data })
     })
+
+    // PtySession emits 'session_crashed' when health checks detect a crashed Claude process
+    session.on('session_crashed', (data) => {
+      console.log(`[SessionManager] Session ${sessionId} crashed: ${data.error}`)
+      this.emit('session_crashed', { sessionId, reason: data.reason, error: data.error })
+    })
   }
 }

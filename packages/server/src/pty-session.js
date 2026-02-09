@@ -105,6 +105,13 @@ export class PtySession extends EventEmitter {
       this.emit('error', { message: `PTY session exited (code ${exitCode})` })
     })
 
+    // Handle crash detection from PtyManager health checks
+    this._ptyManager.on('crashed', ({ reason, error }) => {
+      console.log(`[pty-session] Session crashed (${reason}) for ${this.tmuxSession}`)
+      const errorMsg = error ? `${reason}: ${error}` : reason
+      this.emit('session_crashed', { reason, error: errorMsg })
+    })
+
     // Start the PTY (attach to existing tmux session) and wait for success
     await this._ptyManager.start()
 

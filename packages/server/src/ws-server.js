@@ -851,6 +851,17 @@ export class WsServer {
           break
       }
     })
+
+    // Handle session crashes detected by health checks
+    this.sessionManager.on('session_crashed', ({ sessionId, reason, error }) => {
+      console.log(`[ws] Session ${sessionId} crashed (${reason}): ${error}`)
+      this._broadcastToSession(sessionId, {
+        type: 'session_error',
+        message: `Session crashed: ${error}`,
+        category: 'crash',
+        recoverable: false,
+      })
+    })
   }
 
   /** Wire up CLI session events to broadcast to clients (legacy single-session) */
