@@ -5,6 +5,9 @@ import { COLORS } from '../constants/colors';
 
 // -- Constants --
 
+/** Minimum width for markdown table cells in logical pixels.
+ *  80dp keeps short headers/values readable on small screens without
+ *  forcing excessive horizontal scrolling. */
 const TABLE_CELL_MIN_WIDTH = 80;
 
 // -- Content Block Types --
@@ -174,7 +177,7 @@ function renderTable(headers: string[], rows: string[][], keyBase: string, messa
       key={keyBase} 
       horizontal 
       showsHorizontalScrollIndicator={true}
-      accessibilityHint="Scroll horizontally to see full table"
+      accessibilityHint="Swipe left or right to view more columns"
       style={md.tableScrollContainer}
     >
       <View style={md.table}>
