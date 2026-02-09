@@ -15,7 +15,9 @@ export type RootStackParamList = {
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 export default function App() {
-  const isConnected = useConnectionStore((state) => state.isConnected);
+  const isConnected = useConnectionStore((s) => s.isConnected);
+  const isReconnecting = useConnectionStore((s) => s.isReconnecting);
+  const showSession = isConnected || isReconnecting;
 
   return (
     <NavigationContainer>
@@ -27,7 +29,7 @@ export default function App() {
           contentStyle: { backgroundColor: '#0f0f1a' },
         }}
       >
-        {!isConnected ? (
+        {!showSession ? (
           <Stack.Screen
             name="Connect"
             component={ConnectScreen}
