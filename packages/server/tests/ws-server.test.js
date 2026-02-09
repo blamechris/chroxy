@@ -12,8 +12,16 @@ import { EventEmitter } from 'events'
 async function startServerAndGetPort(server) {
   server.start('127.0.0.1')
   await new Promise((resolve, reject) => {
-    server.httpServer.on('listening', resolve)
-    server.httpServer.on('error', reject)
+    const onListening = () => {
+      server.httpServer.off('error', onError)
+      resolve()
+    }
+    const onError = (err) => {
+      server.httpServer.off('listening', onListening)
+      reject(err)
+    }
+    server.httpServer.once('listening', onListening)
+    server.httpServer.once('error', onError)
   })
   return server.httpServer.address().port
 }
@@ -48,8 +56,17 @@ async function createClient(port, expectAuth = true) {
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Connection timeout')), 2000)
     timers.push(timer)
-    ws.on('open', () => { clearTimeout(timer); resolve() })
-    ws.on('error', (err) => { clearTimeout(timer); reject(err) })
+
+    const cleanup = () => {
+      clearTimeout(timer)
+      ws.off('open', handleOpen)
+      ws.off('error', handleError)
+    }
+    const handleOpen = () => { cleanup(); resolve() }
+    const handleError = (err) => { cleanup(); reject(err) }
+
+    ws.once('open', handleOpen)
+    ws.once('error', handleError)
   })
 
   // If expecting auth, wait for auth_ok with timeout
