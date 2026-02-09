@@ -9,6 +9,7 @@ import {
   LayoutAnimation,
   NativeSyntheticEvent,
   NativeScrollEvent,
+  Animated,
 } from 'react-native';
 import { ChatMessage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
@@ -16,8 +17,63 @@ import { FormattedResponse } from './MarkdownRenderer';
 // Named Unicode constants for readability
 const ICON_CHEVRON_RIGHT = '\u25B8'; // Right-pointing triangle
 const ICON_CHEVRON_DOWN = '\u25BE';  // Down-pointing triangle
-const ICON_ARROW_UP = '\u2191';      // Upward arrow
-const ICON_ARROW_DOWN = '\u2193';    // Downward arrow
+const ICON_ARROW_UP = '\u2191';      // Up arrow
+const ICON_ARROW_DOWN = '\u2193';    // Down arrow
+
+// -- Animated Thinking Indicator --
+
+function ThinkingIndicator() {
+  const dot1Opacity = useRef(new Animated.Value(0.3)).current;
+  const dot2Opacity = useRef(new Animated.Value(0.3)).current;
+  const dot3Opacity = useRef(new Animated.Value(0.3)).current;
+
+  useEffect(() => {
+    const createPulseAnimation = (animatedValue: Animated.Value, delay: number) => {
+      return Animated.loop(
+        Animated.sequence([
+          Animated.delay(delay),
+          Animated.timing(animatedValue, {
+            toValue: 1,
+            duration: 400,
+            useNativeDriver: true,
+          }),
+          Animated.timing(animatedValue, {
+            toValue: 0.3,
+            duration: 400,
+            useNativeDriver: true,
+          }),
+          // Compensating delay ensures all sequences have the same 1200ms duration
+          Animated.delay(400 - delay),
+        ]),
+      );
+    };
+
+    const animation1 = createPulseAnimation(dot1Opacity, 0);
+    const animation2 = createPulseAnimation(dot2Opacity, 200);
+    const animation3 = createPulseAnimation(dot3Opacity, 400);
+
+    animation1.start();
+    animation2.start();
+    animation3.start();
+
+    return () => {
+      animation1.stop();
+      animation2.stop();
+      animation3.stop();
+    };
+  }, [dot1Opacity, dot2Opacity, dot3Opacity]);
+
+  return (
+    <View style={styles.thinkingIndicator}>
+      <Text style={styles.thinkingLabel}>Claude is thinking</Text>
+      <View style={styles.thinkingDots}>
+        <Animated.View style={[styles.thinkingDot, { opacity: dot1Opacity }]} />
+        <Animated.View style={[styles.thinkingDot, { opacity: dot2Opacity }]} />
+        <Animated.View style={[styles.thinkingDot, { opacity: dot3Opacity }]} />
+      </View>
+    </View>
+  );
+}
 
 // -- Props --
 
@@ -90,6 +146,8 @@ function ActivityGroup({
 }) {
   const [expanded, setExpanded] = useState(false);
   const toolCount = activityMessages.filter((m) => m.type === 'tool_use').length;
+  const lastMessage = activityMessages[activityMessages.length - 1];
+  const isThinking = isActive && lastMessage?.type === 'thinking';
 
   const handlePress = () => {
     if (isSelecting) return;
@@ -122,6 +180,7 @@ function ActivityGroup({
         <Text style={styles.activitySummary}>{summary}</Text>
         <Text style={styles.activityChevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
       </View>
+      {isThinking && <ThinkingIndicator />}
       {expanded && (
         <ScrollView style={styles.activityList} nestedScrollEnabled>
           {activityMessages.map((msg) => (
@@ -155,18 +214,12 @@ function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: 
   onPress: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const longPressedRef = useRef(false);
   const content = message.content?.trim();
 
   // Hide empty tool messages
   if (!content) return null;
 
   const handlePress = () => {
-    // Suppress onPress that fires after a long-press gesture
-    if (longPressedRef.current) {
-      longPressedRef.current = false;
-      return;
-    }
     if (isSelecting) {
       onPress();
     } else {
@@ -175,18 +228,13 @@ function ToolBubble({ message, isSelected, isSelecting, onLongPress, onPress }: 
     }
   };
 
-  const handleLongPress = () => {
-    longPressedRef.current = true;
-    onLongPress();
-  };
-
   const preview = content.length > 60 ? content.slice(0, 60) + '...' : content;
 
   return (
     <TouchableOpacity
       activeOpacity={0.7}
       onPress={handlePress}
-      onLongPress={handleLongPress}
+      onLongPress={isSelecting ? onPress : undefined}
       style={[styles.toolBubble, isSelected && styles.selectedBubble]}
     >
       <View style={styles.toolHeader}>
@@ -219,11 +267,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   const isError = message.type === 'error';
 
   if (isThinking) {
-    return (
-      <View style={styles.thinkingBubble}>
-        <Text style={styles.thinkingText}>Thinking...</Text>
-      </View>
-    );
+    return <ThinkingIndicator />;
   }
 
   if (isTool) {
@@ -433,15 +477,29 @@ const styles = StyleSheet.create({
     borderColor: '#4a9eff44',
     borderWidth: 1,
   },
-  thinkingBubble: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginBottom: 8,
+  thinkingIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginBottom: 12,
   },
-  thinkingText: {
-    color: '#666',
+  thinkingLabel: {
+    color: '#888',
     fontSize: 13,
     fontStyle: 'italic',
+  },
+  thinkingDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  thinkingDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#4a9eff',
   },
   senderLabelUser: {
     color: '#4a9eff',
