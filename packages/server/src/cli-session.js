@@ -10,6 +10,9 @@ import { resolveModelId } from './models.js'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
+// Max accumulated size for tool_use input_json_delta chunks (UTF-16 code units, ~256KB for ASCII)
+const MAX_TOOL_INPUT_LENGTH = 262144
+
 // Module-level lock for settings.json read-modify-write operations.
 // Multiple CliSession instances starting/stopping simultaneously can
 // corrupt each other's writes without serialization.
@@ -279,7 +282,7 @@ export class CliSession extends EventEmitter {
     this._isBusy = true
     this._messageCounter++
     this._currentMessageId = `msg-${this._messageCounter}`
-    this._currentCtx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null, currentToolName: null, currentToolUseId: null, toolInputChunks: '' }
+    this._currentCtx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null, currentToolName: null, currentToolUseId: null, toolInputChunks: '', toolInputOverflow: false }
 
     const ndjson = JSON.stringify({
       type: 'user',
@@ -358,6 +361,7 @@ export class CliSession extends EventEmitter {
               ctx.currentToolName = event.content_block.name
               ctx.currentToolUseId = event.content_block.id
               ctx.toolInputChunks = ''
+              ctx.toolInputOverflow = false
               this.emit('tool_start', {
                 messageId,
                 tool: event.content_block.name,
@@ -379,8 +383,14 @@ export class CliSession extends EventEmitter {
               ctx.didStreamText = true
               this.emit('stream_delta', { messageId, delta: delta.text })
             } else if (delta.type === 'input_json_delta' && ctx.currentContentBlockType === 'tool_use') {
-              if (typeof delta.partial_json === 'string' && ctx.toolInputChunks.length < 262144) {
-                ctx.toolInputChunks += delta.partial_json
+              if (typeof delta.partial_json === 'string' && !ctx.toolInputOverflow) {
+                if (ctx.toolInputChunks.length + delta.partial_json.length > MAX_TOOL_INPUT_LENGTH) {
+                  console.warn(`[cli-session] toolInputChunks exceeded ${MAX_TOOL_INPUT_LENGTH} chars, discarding buffer`)
+                  ctx.toolInputChunks = ''
+                  ctx.toolInputOverflow = true
+                } else {
+                  ctx.toolInputChunks += delta.partial_json
+                }
               }
             }
             break
