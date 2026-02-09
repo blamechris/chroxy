@@ -77,10 +77,7 @@ export async function startServer(config) {
 
   const { wsUrl, httpUrl } = await tunnel.start();
 
-  // 5. Wait for tunnel to be fully routable (DNS propagation)
-  await waitForTunnel(httpUrl);
-
-  // Wire up tunnel lifecycle events
+  // 5. Wire up tunnel lifecycle events (before waitForTunnel to catch early failures)
   let currentWsUrl = wsUrl
   
   tunnel.on('tunnel_lost', ({ code, signal }) => {
@@ -124,7 +121,11 @@ export async function startServer(config) {
   })
 
 
-  // 6. Start the PTY (do this last so tunnel is ready)
+
+  // 6. Wait for tunnel to be fully routable (DNS propagation)
+  await waitForTunnel(httpUrl);
+
+  // 7. Start the PTY (do this last so tunnel is ready)
   await ptyManager.start();
 
   // Generate connection info for the app
