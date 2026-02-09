@@ -348,7 +348,7 @@ program
   .requiredOption('-n, --name <name>', 'Session name (alphanumeric, hyphens, underscores)')
   .option('--cwd <path>', 'Working directory for Claude', process.cwd())
   .action(async (options) => {
-    const { execSync } = await import('child_process')
+    const { execFileSync } = await import('child_process')
     const { existsSync, statSync } = await import('fs')
     const { resolve } = await import('path')
 
@@ -356,15 +356,15 @@ program
 
     // Validate name: alphanumeric, hyphens, underscores only
     if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-      console.error('Error: Session name must contain only letters, numbers, hyphens, and underscores.')
+      console.error('❌ Session name must contain only letters, numbers, hyphens, and underscores.')
       process.exit(1)
     }
 
     // Check tmux is installed
     try {
-      execSync('which tmux', { stdio: 'pipe' })
+      execFileSync('which', ['tmux'], { stdio: 'pipe' })
     } catch {
-      console.error('Error: tmux is not installed. Install with: brew install tmux')
+      console.error('❌ tmux is not installed. Install it with your system package manager.')
       process.exit(1)
     }
 
@@ -372,8 +372,8 @@ program
 
     // Check session doesn't already exist
     try {
-      execSync(`tmux has-session -t ${sessionName}`, { stdio: 'pipe' })
-      console.error(`Error: tmux session '${sessionName}' already exists.`)
+      execFileSync('tmux', ['has-session', '-t', sessionName], { stdio: 'pipe' })
+      console.error(`❌ tmux session '${sessionName}' already exists.`)
       console.error(`  Attach to it:  tmux attach -t ${sessionName}`)
       console.error(`  Or kill it:    tmux kill-session -t ${sessionName}`)
       process.exit(1)
@@ -384,13 +384,20 @@ program
     // Resolve and validate cwd
     const cwd = resolve(options.cwd)
     if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
-      console.error(`Error: Directory does not exist: ${cwd}`)
+      console.error(`❌ Directory does not exist: ${cwd}`)
       process.exit(1)
     }
 
     // Create tmux session and launch Claude
-    execSync(`tmux new-session -d -s ${sessionName} -c ${JSON.stringify(cwd)}`)
-    execSync(`tmux send-keys -t ${sessionName} "claude" Enter`)
+    try {
+      execFileSync('tmux', ['new-session', '-d', '-s', sessionName, '-c', cwd])
+      execFileSync('tmux', ['send-keys', '-t', sessionName, 'claude', 'Enter'])
+    } catch (err) {
+      // Clean up stray session on failure
+      try { execFileSync('tmux', ['kill-session', '-t', sessionName], { stdio: 'pipe' }) } catch {}
+      console.error(`❌ Failed to create tmux session: ${err.message}`)
+      process.exit(1)
+    }
 
     console.log(`\nSession '${sessionName}' created in ${cwd}`)
     console.log(`Claude Code is starting inside the tmux session.\n`)
