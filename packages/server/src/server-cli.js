@@ -56,6 +56,8 @@ export async function startCliServer(config) {
     defaultSessionId = sessionManager.createSession({ name: 'Default' })
   }
 
+  let wsServer
+
   // Log events for debugging and forward critical errors
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     if (event === 'ready') {
@@ -79,7 +81,7 @@ export async function startCliServer(config) {
   })
 
   // 3. Start the WebSocket server
-  const wsServer = new WsServer({
+  wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
     sessionManager,
