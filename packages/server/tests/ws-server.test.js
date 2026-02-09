@@ -466,3 +466,100 @@ describe('WsServer with authRequired: true (default behavior)', () => {
     ws.close()
   })
 })
+
+describe('WsServer.broadcastError', () => {
+  let server
+  let port
+
+  beforeEach(() => {
+    port = 30000 + Math.floor(Math.random() * 10000)
+  })
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('broadcasts server_error to authenticated clients', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    server.start('127.0.0.1')
+    await new Promise(r => setTimeout(r, 100))
+
+    // Connect and auto-authenticate
+    const { ws, messages } = await createClient(port, true)
+
+    // Clear initial messages (auth_ok, server_mode, status, etc.)
+    messages.length = 0
+
+    // Broadcast a recoverable error
+    server.broadcastError('tunnel', 'Tunnel connection lost', true)
+
+    // Wait for the message
+    const errorMsg = await waitForMessage(messages, 'server_error', 1000)
+    assert.ok(errorMsg, 'Should receive server_error message')
+    assert.equal(errorMsg.type, 'server_error')
+    assert.equal(errorMsg.category, 'tunnel')
+    assert.equal(errorMsg.message, 'Tunnel connection lost')
+    assert.equal(errorMsg.recoverable, true)
+
+    ws.close()
+  })
+
+  it('broadcasts non-recoverable server_error', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    server.start('127.0.0.1')
+    await new Promise(r => setTimeout(r, 100))
+
+    const { ws, messages } = await createClient(port, true)
+    messages.length = 0
+
+    server.broadcastError('session', 'Process crashed', false)
+
+    const errorMsg = await waitForMessage(messages, 'server_error', 1000)
+    assert.equal(errorMsg.category, 'session')
+    assert.equal(errorMsg.message, 'Process crashed')
+    assert.equal(errorMsg.recoverable, false)
+
+    ws.close()
+  })
+
+  it('does not send server_error to unauthenticated clients', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    server.start('127.0.0.1')
+    await new Promise(r => setTimeout(r, 100))
+
+    // Connect WITHOUT authenticating
+    const { ws, messages } = await createClient(port, false)
+
+    // Broadcast an error
+    server.broadcastError('general', 'Test error', true)
+
+    // Wait a bit to see if any message arrives
+    await new Promise(r => setTimeout(r, 200))
+
+    const errorMsg = messages.find(m => m.type === 'server_error')
+    assert.ok(!errorMsg, 'Unauthenticated client should not receive server_error')
+
+    ws.close()
+  })
+})

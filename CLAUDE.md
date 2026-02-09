@@ -213,7 +213,7 @@ Chroxy server operates in two modes:
 ### WebSocket Protocol
 
 Client → Server: `auth`, `input`, `resize`, `mode`, `interrupt`, `set_model`, `set_permission_mode`, `permission_response`, `list_sessions`, `switch_session`, `create_session`, `destroy_session`, `rename_session`, `discover_sessions`, `attach_session`
-Server → Client: `auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `stream_delta`, `stream_end`, `raw`, `message`, `status`, `model_changed`, `status_update`, `available_models`, `permission_request`, `permission_mode_changed`, `available_permission_modes`, `session_list`, `session_switched`, `session_created`, `session_destroyed`, `session_error`, `discovered_sessions`, `history_replay_start`, `history_replay_end`, `raw_background`, `claude_ready`, `tool_start`, `result`
+Server → Client: `auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `stream_delta`, `stream_end`, `raw`, `message`, `status`, `model_changed`, `status_update`, `available_models`, `permission_request`, `permission_mode_changed`, `available_permission_modes`, `session_list`, `session_switched`, `session_created`, `session_destroyed`, `session_error`, `discovered_sessions`, `history_replay_start`, `history_replay_end`, `raw_background`, `claude_ready`, `tool_start`, `result`, `server_error`
 
 ### App Screens
 

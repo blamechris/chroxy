@@ -56,12 +56,17 @@ export async function startCliServer(config) {
     defaultSessionId = sessionManager.createSession({ name: 'Default' })
   }
 
-  // Log events for debugging
+  let wsServer
+
+  // Log events for debugging and forward critical errors
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     if (event === 'ready') {
       console.log(`[cli] Session ${sessionId} ready: ${data.sessionId} (model: ${data.model})`)
     } else if (event === 'error') {
       console.error(`[cli] Session ${sessionId} error: ${data.message}`)
+      // Forward session errors as server_error (in addition to the in-chat error message)
+      const isFatal = /failed to stay alive|max respawn/i.test(data.message)
+      if (wsServer) wsServer.broadcastError('session', data.message, !isFatal)
     } else if (event === 'result' && data.cost != null) {
       console.log(`[cli] Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
     }
@@ -76,7 +81,7 @@ export async function startCliServer(config) {
   })
 
   // 3. Start the WebSocket server
-  const wsServer = new WsServer({
+  wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
     sessionManager,
@@ -111,6 +116,7 @@ export async function startCliServer(config) {
     tunnel.on('tunnel_lost', ({ code, signal }) => {
       const exitReason = signal ? `signal ${signal}` : `code ${code}`
       console.log(`\n[!] Tunnel lost (${exitReason})`)
+      wsServer.broadcastError('tunnel', `Tunnel connection lost (${exitReason}). Recovering...`, true)
     })
 
     tunnel.on('tunnel_recovering', ({ attempt, delayMs }) => {
@@ -143,6 +149,7 @@ export async function startCliServer(config) {
       console.error(`\n[!] ${message}`)
       console.error(`[!] Last exit: code=${lastExitCode} signal=${lastSignal}`)
       console.error(`[!] Server will continue on localhost only. Remote connections will not work.`)
+      wsServer.broadcastError('tunnel', 'Tunnel recovery failed. Remote connections will not work.', false)
     })
   } else {
     console.log(`[✓] Server ready! (CLI headless mode, no auth)\n`)

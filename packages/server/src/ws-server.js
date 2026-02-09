@@ -72,6 +72,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'history_replay_start', sessionId }      — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
  *   { type: 'raw_background', data: '...' }           — raw PTY data for chat-mode clients
+ *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
  */
 export class WsServer {
   constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true }) {
@@ -1108,6 +1109,22 @@ export class WsServer {
         this._send(ws, message)
       }
     }
+  }
+
+  /**
+   * Broadcast a server-side error to all authenticated clients.
+   * @param {'tunnel'|'session'|'permission'|'general'} category
+   * @param {string} message - Human-readable error description
+   * @param {boolean} recoverable - true for warnings, false for fatal errors
+   */
+  broadcastError(category, message, recoverable = true) {
+    console.error(`[ws] Broadcasting server_error (${category}): ${message}`)
+    this._broadcast({
+      type: 'server_error',
+      category,
+      message,
+      recoverable,
+    })
   }
 
   /** Send JSON to a single client */
