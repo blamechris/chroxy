@@ -346,11 +346,13 @@ export class CliSession extends EventEmitter {
         // Text is only emitted here as a fallback for non-streamed responses.
         // If streaming has started (hasStreamStarted), text arrives via deltas —
         // emitting it here too would create duplicate/fragmented response bubbles.
+        // Only emit when ctx exists (i.e., when processing a user request) to
+        // filter out startup hints that arrive before the first message.
         const ctx = this._currentCtx
         const content = data.message?.content
-        if (Array.isArray(content)) {
+        if (Array.isArray(content) && ctx) {
           for (const block of content) {
-            if (block.type === 'text' && (!ctx || (!ctx.didStreamText && !ctx.hasStreamStarted))) {
+            if (block.type === 'text' && !ctx.didStreamText && !ctx.hasStreamStarted) {
               this.emit('message', {
                 type: 'response',
                 content: block.text,
