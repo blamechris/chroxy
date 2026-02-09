@@ -1296,11 +1296,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   markPromptAnswered: (messageId: string, answer: string) => {
-    updateActiveSession((ss) => ({
-      messages: ss.messages.map((m) =>
-        m.id === messageId ? { ...m, answered: answer } : m
-      ),
-    }));
+    const { activeSessionId, sessionStates } = get();
+
+    if (activeSessionId && sessionStates[activeSessionId]) {
+      updateActiveSession((ss) => ({
+        messages: ss.messages.map((m) =>
+          m.id === messageId ? { ...m, answered: answer } : m
+        ),
+      }));
+    } else {
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          m.id === messageId ? { ...m, answered: answer } : m
+        ),
+      }));
+    }
   },
 
   setModel: (model: string) => {
