@@ -872,11 +872,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }
 
         case 'server_error': {
+          // Validate and coerce untyped JSON fields
+          const allowedCategories = new Set<ServerError['category']>([
+            'tunnel', 'session', 'permission', 'general',
+          ]);
+          const category: ServerError['category'] =
+            typeof msg.category === 'string' && allowedCategories.has(msg.category as ServerError['category'])
+              ? (msg.category as ServerError['category'])
+              : 'general';
+          const message: string =
+            typeof msg.message === 'string' && msg.message.trim().length > 0
+              ? stripAnsi(msg.message)
+              : 'Unknown server error';
+          const recoverable: boolean =
+            typeof msg.recoverable === 'boolean' ? msg.recoverable : true;
+
           const serverError: ServerError = {
             id: nextMessageId('err'),
-            category: msg.category || 'general',
-            message: msg.message || 'Unknown server error',
-            recoverable: msg.recoverable !== false,
+            category,
+            message,
+            recoverable,
             timestamp: Date.now(),
           };
           set((state) => ({
