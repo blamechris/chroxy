@@ -58,6 +58,12 @@ function openURL(url: string) {
   });
 }
 
+/** Generate indentation whitespace based on nest level.
+ *  Each level adds 4 spaces of indentation. */
+function indent(level: number): string {
+  return '    '.repeat(level);
+}
+
 /** Render inline markdown: **bold**, `code`, and links within a line */
 export function renderInline(text: string, keyBase: string): React.ReactNode[] {
   const parts: React.ReactNode[] = [];
@@ -271,31 +277,31 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
       // Task list: - [x] or - [ ]
       const tlm = line.match(/^(\s*)[-*]\s+\[([ xX])\]\s+(.+)/);
       if (tlm) {
-        const indent = tlm[1].length;
-        const nestLevel = Math.floor(indent / 2);
-        const leftMargin = 2 + nestLevel * 16;
+        const indentSpaces = tlm[1].length;
+        const nestLevel = Math.floor(indentSpaces / 2);
         const checked = tlm[2].toLowerCase() === 'x';
-        elements.push(<Text key={lk} selectable style={[messageTextStyle, { marginLeft: leftMargin }]}>{checked ? '  \u2611 ' : '  \u2610 '}{renderInline(tlm[3], lk)}</Text>);
+        const indentStr = indent(nestLevel);
+        elements.push(<Text key={lk} selectable style={messageTextStyle}>{indentStr}{checked ? '\u2611 ' : '\u2610 '}{renderInline(tlm[3], lk)}</Text>);
         continue;
       }
 
       // Unordered list with nesting support: - or * (capture leading whitespace for indentation)
       const ulm = line.match(/^(\s*)[-*]\s+(.+)/);
       if (ulm) {
-        const indent = ulm[1].length;
-        const nestLevel = Math.floor(indent / 2); // 2 spaces = 1 nesting level
-        const leftMargin = 2 + nestLevel * 16; // Base 2 + 16px per level
-        elements.push(<Text key={lk} selectable style={[messageTextStyle, { marginLeft: leftMargin }]}>{'  \u2022 '}{renderInline(ulm[2], lk)}</Text>);
+        const indentSpaces = ulm[1].length;
+        const nestLevel = Math.floor(indentSpaces / 2); // 2 spaces = 1 nesting level
+        const indentStr = indent(nestLevel);
+        elements.push(<Text key={lk} selectable style={messageTextStyle}>{indentStr}{'\u2022 '}{renderInline(ulm[2], lk)}</Text>);
         continue;
       }
 
       // Ordered list with nesting support: 1. 2. etc (capture leading whitespace for indentation)
       const olm = line.match(/^(\s*)(\d+)\.\s+(.+)/);
       if (olm) {
-        const indent = olm[1].length;
-        const nestLevel = Math.floor(indent / 2); // 2 spaces = 1 nesting level
-        const leftMargin = 2 + nestLevel * 16; // Base 2 + 16px per level
-        elements.push(<Text key={lk} style={{ marginLeft: leftMargin }}>{'  '}{olm[2]}{'. '}{renderInline(olm[3], lk)}</Text>);
+        const indentSpaces = olm[1].length;
+        const nestLevel = Math.floor(indentSpaces / 2); // 2 spaces = 1 nesting level
+        const indentStr = indent(nestLevel);
+        elements.push(<Text key={lk} selectable style={messageTextStyle}>{indentStr}{olm[2]}{'. '}{renderInline(olm[3], lk)}</Text>);
         continue;
       }
 
