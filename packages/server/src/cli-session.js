@@ -54,6 +54,11 @@ export class CliSession extends EventEmitter {
     this._respawnTimer = null
     this._resultTimeout = null
     this._interruptTimer = null
+
+    // Hook registration retry state
+    this._hookRetryCount = 0
+    this._hookRetryTimer = null
+    this._hookRegistered = false
   }
 
   get sessionId() {
@@ -612,6 +617,8 @@ export class CliSession extends EventEmitter {
   /**
    * Register the Chroxy permission hook in ~/.claude/settings.json.
    * Adds a PreToolUse hook that forwards all tool requests to our HTTP endpoint.
+   * 
+   * Returns true on success, false on failure.
    */
   _registerPermissionHook() {
     try {
@@ -626,11 +633,12 @@ export class CliSession extends EventEmitter {
           // File doesn't exist — start fresh
           mkdirSync(resolve(homedir(), '.claude'), { recursive: true })
         } else {
-          // File exists but contains invalid JSON — bail out to avoid data loss
-          const errMsg = `Cannot parse ${settingsPath}: ${err.message}. Skipping hook registration to avoid overwriting corrupt settings. Permissions will not work until this file is fixed.`
+          // File exists but contains invalid JSON — schedule retry
+          const errMsg = `Cannot parse ${settingsPath}: ${err.message}. Will retry hook registration.`
           console.error(`[cli-session] ${errMsg}`)
           this.emit('error', { message: errMsg })
-          return
+          this._scheduleHookRetry()
+          return false
         }
       }
 
@@ -659,11 +667,53 @@ export class CliSession extends EventEmitter {
 
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
       console.log('[cli-session] Registered permission hook in ~/.claude/settings.json')
+
+      // Clear any pending retry timer
+      if (this._hookRetryTimer) {
+        clearTimeout(this._hookRetryTimer)
+        this._hookRetryTimer = null
+      }
+
+      this._hookRegistered = true
+      this._hookRetryCount = 0
+      return true
     } catch (err) {
-      const errMsg = `Failed to register permission hook: ${err.message}. Permissions will not work.`
+      const errMsg = `Failed to register permission hook: ${err.message}. Will retry hook registration.`
       console.error(`[cli-session] ${errMsg}`)
       this.emit('error', { message: errMsg })
+      this._scheduleHookRetry()
+      return false
     }
+  }
+
+  /**
+   * Schedule a retry of hook registration with exponential backoff.
+   * Delays: 2s, 5s, 10s. Max 3 attempts.
+   */
+  _scheduleHookRetry() {
+    if (this._destroying || this._hookRegistered) return
+
+    // If a retry is already scheduled, don't schedule another one
+    if (this._hookRetryTimer) return
+
+    this._hookRetryCount++
+    if (this._hookRetryCount > 3) {
+      const errMsg = 'Hook registration failed after 3 attempts. Please check ~/.claude/settings.json and restart the server. Permissions will not work until this is fixed.'
+      console.error(`[cli-session] ${errMsg}`)
+      this.emit('error', { message: errMsg })
+      return
+    }
+
+    const delays = [2000, 5000, 10000]
+    const delay = delays[this._hookRetryCount - 1]
+    console.log(`[cli-session] Hook registration failed, retrying in ${delay / 1000}s (attempt ${this._hookRetryCount}/3)`)
+
+    this._hookRetryTimer = setTimeout(() => {
+      this._hookRetryTimer = null
+      if (!this._destroying && !this._hookRegistered) {
+        this._registerPermissionHook()
+      }
+    }, delay)
   }
 
   /**
@@ -696,6 +746,12 @@ export class CliSession extends EventEmitter {
   /** Clean up resources */
   destroy() {
     this._destroying = true
+
+    // Clean up hook retry timer
+    if (this._hookRetryTimer) {
+      clearTimeout(this._hookRetryTimer)
+      this._hookRetryTimer = null
+    }
 
     // Remove permission hook from settings
     if (this._port) {
