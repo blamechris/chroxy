@@ -1,13 +1,36 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { WsServer } from '../src/ws-server.js'
 import WebSocket from 'ws'
 import { EventEmitter } from 'events'
 
+/**
+ * Start a WsServer on port 0 (OS-assigned) and return the actual port.
+ * Resolves only after the HTTP server emits 'listening', so the port is
+ * guaranteed to be open and ready for connections.
+ */
+async function startServerAndGetPort(server) {
+  server.start('127.0.0.1')
+  await new Promise((resolve, reject) => {
+    const onListening = () => {
+      server.httpServer.off('error', onError)
+      resolve()
+    }
+    const onError = (err) => {
+      server.httpServer.off('listening', onListening)
+      reject(err)
+    }
+    server.httpServer.once('listening', onListening)
+    server.httpServer.once('error', onError)
+  })
+  return server.httpServer.address().port
+}
+
 /** Helper to connect a WebSocket client and collect messages */
 async function createClient(port, expectAuth = true) {
-  const ws = new WebSocket(`ws://localhost:${port}`)
+  const ws = new WebSocket(`ws://127.0.0.1:${port}`)
   const messages = []
+  const timers = []
   let authResolve = null
 
   // Set up message handler before connection opens
@@ -29,20 +52,34 @@ async function createClient(port, expectAuth = true) {
     }
   })
 
-  // Wait for connection
+  // Wait for connection with timeout + error handling
   await new Promise((resolve, reject) => {
-    ws.on('open', resolve)
-    ws.on('error', reject)
-    setTimeout(() => reject(new Error('Connection timeout')), 2000)
+    const timer = setTimeout(() => reject(new Error('Connection timeout')), 2000)
+    timers.push(timer)
+
+    const cleanup = () => {
+      clearTimeout(timer)
+      ws.off('open', handleOpen)
+      ws.off('error', handleError)
+    }
+    const handleOpen = () => { cleanup(); resolve() }
+    const handleError = (err) => { cleanup(); reject(err) }
+
+    ws.once('open', handleOpen)
+    ws.once('error', handleError)
   })
 
-  // If expecting auth, wait for auth_ok
+  // If expecting auth, wait for auth_ok with timeout
   if (expectAuth && authPromise) {
-    await Promise.race([
-      authPromise,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Auth timeout')), 2000))
-    ])
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Auth timeout')), 2000)
+      timers.push(timer)
+      authPromise.then(() => { clearTimeout(timer); resolve() })
+    })
   }
+
+  // Clear any remaining timers to avoid keeping the event loop alive
+  for (const t of timers) clearTimeout(t)
 
   return { ws, messages }
 }
@@ -85,12 +122,6 @@ function createMockSession() {
 
 describe('WsServer with authRequired: false', () => {
   let server
-  let port
-
-  beforeEach(() => {
-    // Use a random port to avoid conflicts
-    port = 30000 + Math.floor(Math.random() * 10000)
-  })
 
   afterEach(() => {
     if (server) {
@@ -100,18 +131,15 @@ describe('WsServer with authRequired: false', () => {
   })
 
   it('auto-authenticates client without requiring auth message', async () => {
-    // Create server with authRequired: false
+    // Create server with authRequired: false on OS-assigned port
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
     })
-    server.start('127.0.0.1')
-
-    // Wait for server to be ready
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     // Connect client WITHOUT sending auth message
     const { ws, messages } = await createClient(port, true)
@@ -136,17 +164,14 @@ describe('WsServer with authRequired: false', () => {
   })
 
   it('silently ignores duplicate auth message from auto-authenticated client', async () => {
-    // Create server with authRequired: false
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
     })
-    server.start('127.0.0.1')
-
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     // Connect and wait for auto-auth
     const { ws, messages } = await createClient(port, true)
@@ -171,7 +196,6 @@ describe('WsServer with authRequired: false', () => {
   })
 
   it('accepts input messages after auto-authentication', async () => {
-    // Create server with authRequired: false
     const mockSession = createMockSession()
     let receivedInput = null
     mockSession.sendMessage = (text) => {
@@ -179,14 +203,12 @@ describe('WsServer with authRequired: false', () => {
     }
 
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
     })
-    server.start('127.0.0.1')
-
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     // Connect and wait for auto-auth
     const { ws } = await createClient(port, true)
@@ -206,11 +228,6 @@ describe('WsServer with authRequired: false', () => {
 
 describe('WsServer POST /permission with authRequired: false', () => {
   let server
-  let port
-
-  beforeEach(() => {
-    port = 30000 + Math.floor(Math.random() * 10000)
-  })
 
   afterEach(() => {
     if (server) {
@@ -220,17 +237,14 @@ describe('WsServer POST /permission with authRequired: false', () => {
   })
 
   it('accepts POST /permission without Bearer token when authRequired: false', async () => {
-    // Create server with authRequired: false
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
     })
-    server.start('127.0.0.1')
-
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     // Connect a WebSocket client to receive the permission_request broadcast
     const { ws, messages } = await createClient(port, true)
@@ -262,8 +276,9 @@ describe('WsServer POST /permission with authRequired: false', () => {
     // Now await the HTTP response - it should complete
     const response = await responsePromise
 
-    // Should NOT return 403
-    assert.notEqual(response.status, 403, 'Should not reject request without auth')
+    // Should return 200
+    assert.equal(response.status, 200, 'Should accept request without auth when authRequired: false')
+    assert.match(response.headers.get('content-type') ?? '', /^application\/json\b/, 'Response should be JSON')
 
     const data = await response.json()
     assert.equal(data.decision, 'allow', 'Should return the permission decision')
@@ -272,17 +287,14 @@ describe('WsServer POST /permission with authRequired: false', () => {
   })
 
   it('still rejects POST /permission without Bearer token when authRequired: true', async () => {
-    // Create server with authRequired: true (default)
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: true,
     })
-    server.start('127.0.0.1')
-
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     // Make a POST request to /permission WITHOUT Authorization header
     const response = await fetch(`http://127.0.0.1:${port}/permission`, {
@@ -304,33 +316,17 @@ describe('WsServer POST /permission with authRequired: false', () => {
   })
 
   it('accepts POST /permission with Bearer token when authRequired: true', async () => {
-    // Create server with authRequired: true (default)
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: true,
     })
-    server.start('127.0.0.1')
+    const port = await startServerAndGetPort(server)
 
-    await new Promise(r => setTimeout(r, 100))
-
-    // Connect client with auth
-    const client = new WebSocket(`ws://localhost:${port}`)
-    const messages = []
-
-    client.on('message', (data) => {
-      try {
-        messages.push(JSON.parse(data.toString()))
-      } catch {}
-    })
-
-    await new Promise((resolve, reject) => {
-      client.on('open', resolve)
-      client.on('error', reject)
-      setTimeout(() => reject(new Error('Connection timeout')), 2000)
-    })
+    // Connect client with auth using createClient helper (includes timeout/error handling)
+    const { ws: client, messages } = await createClient(port, false)
 
     // Send auth
     send(client, { type: 'auth', token: 'test-token' })
@@ -365,8 +361,8 @@ describe('WsServer POST /permission with authRequired: false', () => {
     // Now await the HTTP response
     const response = await responsePromise
 
-    // Should NOT return 403
-    assert.notEqual(response.status, 403, 'Should accept request with valid Bearer token')
+    // Should return 200
+    assert.equal(response.status, 200, 'Should return 200 for request with valid Bearer token')
 
     const data = await response.json()
     assert.equal(data.decision, 'deny')
@@ -377,11 +373,6 @@ describe('WsServer POST /permission with authRequired: false', () => {
 
 describe('WsServer with authRequired: true (default behavior)', () => {
   let server
-  let port
-
-  beforeEach(() => {
-    port = 30000 + Math.floor(Math.random() * 10000)
-  })
 
   afterEach(() => {
     if (server) {
@@ -393,30 +384,15 @@ describe('WsServer with authRequired: true (default behavior)', () => {
   it('requires auth message and valid token', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: true,
     })
-    server.start('127.0.0.1')
-
-    await new Promise(r => setTimeout(r, 100))
+    const port = await startServerAndGetPort(server)
 
     // Connect but don't expect auto-auth
-    const ws = new WebSocket(`ws://localhost:${port}`)
-    const messages = []
-
-    ws.on('message', (data) => {
-      try {
-        messages.push(JSON.parse(data.toString()))
-      } catch {}
-    })
-
-    await new Promise((resolve, reject) => {
-      ws.on('open', resolve)
-      ws.on('error', reject)
-      setTimeout(() => reject(new Error('Connection timeout')), 2000)
-    })
+    const { ws, messages } = await createClient(port, false)
 
     // Should NOT receive auth_ok immediately
     await new Promise(r => setTimeout(r, 100))
@@ -439,27 +415,15 @@ describe('WsServer with authRequired: true (default behavior)', () => {
   it('rejects invalid token', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: true,
     })
-    server.start('127.0.0.1')
+    const port = await startServerAndGetPort(server)
 
-    await new Promise(r => setTimeout(r, 100))
-
-    const ws = new WebSocket(`ws://localhost:${port}`)
-    const messages = []
-
-    ws.on('message', (data) => {
-      try {
-        messages.push(JSON.parse(data.toString()))
-      } catch {}
-    })
-
-    await new Promise((resolve) => {
-      ws.on('open', resolve)
-    })
+    // Connect with timeout/error handling via createClient (no auth expected)
+    const { ws, messages } = await createClient(port, false)
 
     // Send invalid auth
     send(ws, { type: 'auth', token: 'wrong-token' })
@@ -471,38 +435,28 @@ describe('WsServer with authRequired: true (default behavior)', () => {
 
     // Connection should be closed
     await new Promise((resolve) => {
+      if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        resolve()
+        return
+      }
       ws.on('close', resolve)
       setTimeout(resolve, 1000)
     })
     assert.notEqual(ws.readyState, WebSocket.OPEN, 'Connection should be closed')
   })
 
-  it('tracks unauthenticated client', async () => {
+  it('tracks unauthenticated client before auth', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
-      port,
+      port: 0,
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: true,
     })
-    server.start('127.0.0.1')
+    const port = await startServerAndGetPort(server)
 
-    await new Promise(r => setTimeout(r, 100))
-
-    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
-    const messages = []
-
-    ws.on('message', (data) => {
-      try {
-        messages.push(JSON.parse(data.toString()))
-      } catch {}
-    })
-
-    await new Promise((resolve, reject) => {
-      ws.on('open', resolve)
-      ws.on('error', reject)
-      setTimeout(() => reject(new Error('Connection timeout')), 2000)
-    })
+    // Connect with timeout/error handling via createClient (no auth expected)
+    const { ws } = await createClient(port, false)
 
     // Verify client is tracked but not authenticated
     assert.equal(server.clients.size, 1, 'Client should be tracked')
