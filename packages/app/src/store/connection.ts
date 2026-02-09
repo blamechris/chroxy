@@ -734,6 +734,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'result': {
           const resultPatch = {
+            streamingMessageId: null as string | null,
             contextUsage: msg.usage
               ? {
                   inputTokens: msg.usage.input_tokens || 0,
@@ -1039,11 +1040,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Session mode: use updateActiveSession helper for consistent sync logic
       updateActiveSession((ss) => ({
         messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
+        streamingMessageId: 'pending',
       }));
     } else {
       // No active session: update flat state only (PTY mode, CLI mode pre-session, or legacy)
       set((state) => ({
         messages: [...filterThinking(state.messages), userMsg, thinkingMsg],
+        streamingMessageId: 'pending',
       }));
     }
   },
