@@ -68,10 +68,16 @@ function openURL(url: string) {
   // Only allow http/https schemes
   if (!/^https?:\/\//i.test(url)) {
     console.warn('Invalid URL scheme:', url);
+    Alert.alert(
+      'Cannot Open Link',
+      `The link could not be opened:\n\n${url}`,
+      [{ text: 'OK' }],
+    );
     return;
   }
 
-  void Linking.openURL(url).catch(() => {
+  void Linking.openURL(url).catch((err) => {
+    console.warn('Failed to open URL:', url, err);
     Alert.alert(
       'Cannot Open Link',
       `The link could not be opened:\n\n${url}`,
@@ -88,7 +94,7 @@ function renderInline(text: string, keyBase: string): React.ReactNode[] {
   // Bare URL: match non-whitespace chars, but the last char must NOT be common sentence
   // punctuation (.,;:!?)]>) so "Visit https://example.com." stops before the period.
   // Mid-URL punctuation (query strings, fragments) is preserved since only the final char is checked.
-  const regex = /(\*\*(.+?)\*\*|`([^`\n]+)`|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<>]*[^\s<>.,;:!?)\]>]))/g;
+  const regex = /(\*\*(.+?)\*\*|`([^`\n]+)`|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<>]*[^\s<>.,;:!?)\]]))/g;
   let lastIdx = 0;
   let key = 0;
   let m;
