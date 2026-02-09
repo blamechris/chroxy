@@ -5,11 +5,13 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 import { ConnectScreen } from './screens/ConnectScreen';
 import { SessionScreen } from './screens/SessionScreen';
+import { SettingsScreen } from './screens/SettingsScreen';
 import { useConnectionStore, selectShowSession } from './store/connection';
 
 export type RootStackParamList = {
   Connect: undefined;
   Session: undefined;
+  Settings: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -34,11 +36,18 @@ export default function App() {
             options={{ title: 'Chroxy' }}
           />
         ) : (
-          <Stack.Screen
-            name="Session"
-            component={SessionScreen}
-            options={{ title: 'Session' }}
-          />
+          <>
+            <Stack.Screen
+              name="Session"
+              component={SessionScreen}
+              options={{ title: 'Session' }}
+            />
+            <Stack.Screen
+              name="Settings"
+              component={SettingsScreen}
+              options={{ title: 'Settings' }}
+            />
+          </>
         )}
       </Stack.Navigator>
     </NavigationContainer>

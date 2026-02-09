@@ -21,7 +21,10 @@ import { ChatView } from '../components/ChatView';
 import { TerminalView } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { InputBar } from '../components/InputBar';
-import { ICON_CLOSE } from '../constants/icons';
+import { useNavigation } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { RootStackParamList } from '../App';
+import { ICON_CLOSE, ICON_GEAR } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 
@@ -75,6 +78,7 @@ function formatTranscript(selected: ChatMessage[]): string {
 }
 
 export function SessionScreen() {
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [inputText, setInputText] = useState('');
   const scrollViewRef = useRef<ScrollView>(null);
   const insets = useSafeAreaInsets();
@@ -279,6 +283,9 @@ export function SessionScreen() {
               </Text>
             </TouchableOpacity>
           )}
+          <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
+            <Text style={styles.settingsButtonText}>{ICON_GEAR}</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
             <Text style={styles.disconnectButtonText}>{ICON_CLOSE}</Text>
           </TouchableOpacity>
@@ -430,6 +437,17 @@ const styles = StyleSheet.create({
   modeButtonTextActive: {
     color: COLORS.accentBlue,
     fontWeight: '600',
+  },
+  settingsButton: {
+    paddingHorizontal: 12,
+    justifyContent: 'center',
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+  },
+  settingsButtonText: {
+    color: COLORS.textMuted,
+    fontSize: 16,
   },
   disconnectButton: {
     paddingHorizontal: 16,
