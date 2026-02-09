@@ -22,7 +22,7 @@ function filterThinking(messages: ChatMessage[]): ChatMessage[] {
 
 export interface ChatMessage {
   id: string;
-  type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error';
+  type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error' | 'status';
   content: string;
   tool?: string;
   options?: { label: string; value: string }[];
@@ -937,6 +937,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           set((state) => ({
             serverErrors: [...state.serverErrors, serverError].slice(-10),
           }));
+          // Surface server errors into chat stream so they're visible
+          const errorMsg: ChatMessage = {
+            id: nextMessageId('err'),
+            type: 'error',
+            content: serverError.message,
+            timestamp: Date.now(),
+          };
+          const activeErrId = get().activeSessionId;
+          if (activeErrId && get().sessionStates[activeErrId]) {
+            updateActiveSession((ss) => ({
+              messages: [...ss.messages, errorMsg],
+            }));
+          } else {
+            get().addMessage(errorMsg);
+          }
           // Show an alert for non-recoverable errors
           if (!serverError.recoverable) {
             Alert.alert('Server Error', serverError.message);

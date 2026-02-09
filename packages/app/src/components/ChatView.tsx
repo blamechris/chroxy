@@ -282,6 +282,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   const isThinking = message.type === 'thinking';
   const isPrompt = message.type === 'prompt';
   const isError = message.type === 'error';
+  const isStatus = message.type === 'status';
 
   if (isThinking) {
     return <ThinkingIndicator />;
@@ -303,15 +304,15 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
       activeOpacity={0.7}
       onPress={isSelecting ? onPress : undefined}
       onLongPress={isSelecting ? undefined : onLongPress}
-      style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isError && styles.errorBubble, isSelected && styles.selectedBubble]}
+      style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isError && styles.errorBubble, isStatus && styles.statusBubble, isSelected && styles.selectedBubble]}
     >
-      <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : isError ? styles.senderLabelError : styles.senderLabelClaude}>
-        {isUser ? 'You' : isPrompt ? 'Action Required' : isError ? 'Error' : 'Claude'}
+      <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : isError ? styles.senderLabelError : isStatus ? styles.senderLabelStatus : styles.senderLabelClaude}>
+        {isUser ? 'You' : isPrompt ? 'Action Required' : isError ? 'Error' : isStatus ? 'System' : 'Claude'}
       </Text>
-      {!isUser && !isPrompt && !isError ? (
+      {!isUser && !isPrompt && !isError && !isStatus ? (
         <FormattedResponse content={message.content?.trim() || ''} messageTextStyle={styles.messageText} />
       ) : (
-        <Text selectable style={[styles.messageText, isUser && styles.userMessageText, isError && styles.errorMessageText]}>
+        <Text selectable style={[styles.messageText, isUser && styles.userMessageText, isError && styles.errorMessageText, isStatus && styles.statusMessageText]}>
           {message.content?.trim()}
         </Text>
       )}
@@ -573,6 +574,20 @@ const styles = StyleSheet.create({
   },
   errorMessageText: {
     color: '#e8a0a0',
+  },
+  statusBubble: {
+    backgroundColor: '#16162a',
+    borderColor: '#3a3a5e',
+    borderWidth: 1,
+  },
+  senderLabelStatus: {
+    color: '#888',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  statusMessageText: {
+    color: '#b0b0b0',
   },
   selectedBubble: {
     borderColor: '#4a9eff',
