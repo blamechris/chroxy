@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { Text, ScrollView, StyleSheet, Platform, NativeSyntheticEvent, NativeScrollEvent, View } from 'react-native';
+import { COLORS } from '../constants/colors';
+
 
 // -- Props --
 
@@ -122,7 +124,7 @@ export function TerminalView({ content, scrollViewRef }: TerminalViewProps) {
 const styles = StyleSheet.create({
   terminalContainer: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: COLORS.backgroundTerminal,
   },
   terminalContent: {
     padding: 12,
@@ -130,7 +132,7 @@ const styles = StyleSheet.create({
   terminalText: {
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontSize: 12,
-    color: '#00ff00',
+    color: COLORS.textTerminal,
     lineHeight: 16,
   },
 });

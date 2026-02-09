@@ -2,6 +2,8 @@ import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
 import { ModelInfo, ClaudeStatus, ContextUsage } from '../store/connection';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
+import { COLORS } from '../constants/colors';
+
 
 // -- Props --
 
@@ -204,9 +206,9 @@ export function SettingsBar({
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#1a1a2e',
+    backgroundColor: COLORS.backgroundSecondary,
     borderBottomWidth: 1,
-    borderBottomColor: '#2a2a4e',
+    borderBottomColor: COLORS.backgroundCard,
   },
   summaryRow: {
     flexDirection: 'row',
@@ -217,12 +219,12 @@ const styles = StyleSheet.create({
   },
   summaryText: {
     flex: 1,
-    color: '#888',
+    color: COLORS.textMuted,
     fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   chevron: {
-    color: '#666',
+    color: COLORS.textDim,
     fontSize: 10,
     marginLeft: 8,
   },
@@ -240,31 +242,31 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 10,
-    backgroundColor: '#2a2a4e',
+    backgroundColor: COLORS.backgroundCard,
     borderWidth: 1,
-    borderColor: 'transparent',
+    borderColor: COLORS.borderTransparent,
     minHeight: 44,
     minWidth: 44,
     justifyContent: 'center',
   },
   chipActive: {
-    backgroundColor: '#4a9eff33',
-    borderColor: '#4a9eff66',
+    backgroundColor: COLORS.accentBlueSubtle,
+    borderColor: COLORS.accentBlueBorderStrong,
   },
   chipText: {
-    color: '#666',
+    color: COLORS.textDim,
     fontSize: 11,
     fontWeight: '500',
   },
   chipTextActive: {
-    color: '#4a9eff',
+    color: COLORS.accentBlue,
   },
   contextRow: {
     flexDirection: 'row',
     gap: 12,
   },
   contextText: {
-    color: '#888',
+    color: COLORS.textMuted,
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },

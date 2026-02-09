@@ -1,5 +1,7 @@
 import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, Platform, Linking, StyleProp, TextStyle } from 'react-native';
+import { COLORS } from '../constants/colors';
+
 
 // -- Content Block Types --
 
