@@ -1567,4 +1567,56 @@ describe('WsServer attach_session message flow', () => {
 
     ws.close()
   })
+
+  it('broadcasts session_error to clients when session_crashed is emitted', async () => {
+    const mockManager = createMockSessionManagerWithAttach({
+      sessions: [
+        { id: 'session-1', name: 'Test Session', cwd: '/tmp/test', type: 'pty', tmuxSession: 'test-session' }
+      ]
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Create two clients in the same session
+    const client1 = await createClient(port, false)
+    await authenticateAndDrainPostAuth(client1.ws, client1.messages)
+    send(client1.ws, { type: 'switch_session', sessionId: 'session-1' })
+    await waitForMessage(client1.messages, 'session_switched', 1000)
+
+    const client2 = await createClient(port, false)
+    await authenticateAndDrainPostAuth(client2.ws, client2.messages)
+    send(client2.ws, { type: 'switch_session', sessionId: 'session-1' })
+    await waitForMessage(client2.messages, 'session_switched', 1000)
+
+    // Clear messages to focus on crash event
+    client1.messages.length = 0
+    client2.messages.length = 0
+
+    // Emit session_crashed event from the mock SessionManager
+    mockManager.emit('session_crashed', {
+      sessionId: 'session-1',
+      reason: 'claude_process_not_found',
+      error: 'Claude process is no longer running'
+    })
+
+    // Both clients should receive session_error broadcast
+    const error1 = await waitForMessage(client1.messages, 'session_error', 2000)
+    const error2 = await waitForMessage(client2.messages, 'session_error', 2000)
+
+    assert.ok(error1, 'Client1 should receive session_error')
+    assert.ok(error2, 'Client2 should receive session_error')
+    assert.equal(error1.message, 'Session crashed: Claude process is no longer running', 'Should include error message')
+    assert.equal(error1.category, 'crash', 'Should have crash category')
+    assert.equal(error1.recoverable, false, 'Should mark as non-recoverable')
+    assert.equal(error2.message, error1.message, 'Both clients should get same error')
+
+    client1.ws.close()
+    client2.ws.close()
+  })
 })
