@@ -1,5 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { once } from 'node:events'
 import { WsServer } from '../src/ws-server.js'
 import WebSocket from 'ws'
 import { EventEmitter } from 'events'
@@ -89,19 +90,29 @@ function send(ws, msg) {
   ws.send(JSON.stringify(msg))
 }
 
-/** Helper to wait for a message of a specific type */
-function waitForMessage(messages, type, timeout = 1000) {
+/**
+ * Helper to wait for a message of a specific type.
+ * Uses promise-based pattern with proper timeout handling.
+ */
+async function waitForMessage(messages, type, timeout = 1000) {
   const startTime = Date.now()
+
+  // Check if message already exists
+  const existing = messages.find(m => m.type === type)
+  if (existing) return existing
+
+  // Wait for new message with timeout
   return new Promise((resolve, reject) => {
-    const interval = setInterval(() => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timeout waiting for message type: ${type}`))
+    }, timeout)
+
+    const checkInterval = setInterval(() => {
       const msg = messages.find(m => m.type === type)
       if (msg) {
-        clearInterval(interval)
+        clearTimeout(timer)
+        clearInterval(checkInterval)
         resolve(msg)
-      }
-      if (Date.now() - startTime > timeout) {
-        clearInterval(interval)
-        reject(new Error(`Timeout waiting for message type: ${type}`))
       }
     }, 10)
   })
@@ -433,15 +444,13 @@ describe('WsServer with authRequired: true (default behavior)', () => {
     assert.ok(authFail, 'Should receive auth_fail')
     assert.equal(authFail.reason, 'invalid_token')
 
-    // Connection should be closed
-    await new Promise((resolve) => {
-      if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-        resolve()
-        return
-      }
-      ws.on('close', resolve)
-      setTimeout(resolve, 1000)
-    })
+    // Connection should be closed - use once() with timeout
+    if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+      await Promise.race([
+        once(ws, 'close'),
+        new Promise(resolve => setTimeout(resolve, 1000))
+      ])
+    }
     assert.notEqual(ws.readyState, WebSocket.OPEN, 'Connection should be closed')
   })
 
@@ -564,7 +573,7 @@ describe('WsServer.broadcastError', () => {
   })
 })
 
-describe('auth_ok payload fields', () => {
+describe('auth_ok payload fields (single-session mode)', () => {
   let server
 
   afterEach(() => {
