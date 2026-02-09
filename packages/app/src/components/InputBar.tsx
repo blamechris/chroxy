@@ -90,13 +90,28 @@ export function InputBar({
           autoCapitalize={viewMode === 'chat' ? 'sentences' : 'none'}
           autoCorrect={viewMode === 'chat'}
           editable={!disabled}
+          accessibilityState={disabled ? { disabled: true } : undefined}
         />
         {isStreaming ? (
-          <TouchableOpacity style={styles.interruptButton} onPress={onInterrupt} disabled={disabled}>
+          <TouchableOpacity
+            style={styles.interruptButton}
+            onPress={onInterrupt}
+            disabled={disabled}
+            accessibilityRole="button"
+            accessibilityLabel="Interrupt Claude"
+            accessibilityState={disabled ? { disabled: true } : undefined}
+          >
             <Text style={styles.interruptButtonText}>{ICON_SQUARE}</Text>
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity style={[styles.sendButton, disabled && styles.sendButtonDisabled]} onPress={onSend} disabled={disabled}>
+          <TouchableOpacity
+            style={[styles.sendButton, disabled && styles.sendButtonDisabled]}
+            onPress={onSend}
+            disabled={disabled}
+            accessibilityRole="button"
+            accessibilityLabel="Send message"
+            accessibilityState={disabled ? { disabled: true } : undefined}
+          >
             <Text style={styles.sendButtonText}>{ICON_ARROW_UP}</Text>
           </TouchableOpacity>
         )}
