@@ -392,8 +392,52 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
   // If no content, return nothing
   if (processedParagraphs.length === 0) return null;
 
+  // Helper: Check if an element is a View component (HR, blockquote, table)
+  // These are the elements that force paragraph splitting for selectability
+  const isViewElement = (element: React.ReactNode): boolean => {
+    if (!element || typeof element !== 'object') return false;
+    if (!('type' in element)) return false;
+    const type = (element as any).type;
+    return type === View || type === TableBlock;
+  };
+
+  // Helper: Group paragraph elements into selectable text runs and View blocks
+  // Within a paragraph, consecutive Text elements are wrapped in <Text selectable>,
+  // View elements (HR, blockquote, table) are rendered as-is (selection stops at boundaries)
+  const groupParagraphElements = (elements: React.ReactNode[], paraKey: string): React.ReactNode[] => {
+    const grouped: React.ReactNode[] = [];
+    let textGroup: React.ReactNode[] = [];
+    let groupIdx = 0;
+
+    const flushTextGroup = () => {
+      if (textGroup.length > 0) {
+        grouped.push(
+          <Text key={`${paraKey}-tg${groupIdx++}`} selectable style={messageTextStyle}>
+            {textGroup}
+          </Text>
+        );
+        textGroup = [];
+      }
+    };
+
+    elements.forEach((elem) => {
+      if (isViewElement(elem)) {
+        // Flush accumulated text, then add the View element
+        flushTextGroup();
+        grouped.push(elem);
+      } else {
+        // Accumulate text/inline elements
+        textGroup.push(elem);
+      }
+    });
+
+    flushTextGroup();
+    return grouped;
+  };
+
   // If we have any View children (HR/blockquote/table), we can't use a single Text wrapper
-  // Instead, group consecutive Text-only paragraphs together for cross-paragraph selection
+  // Instead, group consecutive Text-only paragraphs together for cross-paragraph selection,
+  // and within mixed paragraphs, group text runs around View children
   if (anyHasViewChildren) {
     const grouped: React.ReactNode[] = [];
     let textGroup: React.ReactNode[] = [];
@@ -412,13 +456,17 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
 
     processedParagraphs.forEach((para, idx) => {
       if (para.hasViewChildren) {
+        // Mixed paragraph with View children - flush any accumulated text-only paragraphs,
+        // then group elements within this paragraph to preserve text selectability
         flushTextGroup();
+        const paraElements = groupParagraphElements(para.elements, `para-${idx}`);
         grouped.push(
           <View key={`para-${idx}`}>
-            {para.elements}
+            {paraElements}
           </View>
         );
       } else {
+        // Text-only paragraph - accumulate for cross-paragraph selection
         // Add paragraph separator if not the first in the group
         if (textGroup.length > 0) {
           textGroup.push('\n\n');
