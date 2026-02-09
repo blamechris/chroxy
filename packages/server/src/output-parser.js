@@ -23,9 +23,13 @@ const State = {
  * @typedef {Object} NoisePattern
  * @property {RegExp} pattern - Regex to test against trimmed line
  * @property {string} description - Human-readable description of what this filters
- * @property {Function} [condition] - Optional guard function(trimmed) that must return true
+ * @property {(trimmed: string) => boolean} [condition] - Optional guard function that must return true
  */
-/** @type {NoisePattern[]} */
+/**
+ * Ordered baseline noise filters applied to each trimmed line before stateful parsing.
+ * State-dependent patterns (below) are evaluated after these have run.
+ * @type {NoisePattern[]}
+ */
 const NOISE_PATTERNS = [
   {
     pattern: /^\[(?:parser|ws|cli|tunnel|pty|pty-session|SIGINT)\]\s/,
@@ -261,10 +265,15 @@ const NOISE_PATTERNS = [
 /**
  * @typedef {Object} StateDependentPattern
  * @property {RegExp} pattern - Regex to test against trimmed line
- * @property {Function} condition - Guard function(trimmed, state) that must return true
+ * @property {(trimmed: string, state: string) => boolean} condition - Guard function that must return true
  * @property {string} description - Human-readable description of what this filters
  */
-/** @type {StateDependentPattern[]} */
+/**
+ * Additional, state-aware noise filters that are applied after NOISE_PATTERNS.
+ * These patterns depend on the current parser state and should be kept separate
+ * from the basic patterns so the base filters run first, then these refinements.
+ * @type {StateDependentPattern[]}
+ */
 const STATE_DEPENDENT_PATTERNS = [
   {
     pattern: /^[a-zA-Z\d\s.·…]+$/,
