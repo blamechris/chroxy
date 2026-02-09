@@ -211,10 +211,10 @@ interface ConnectionState {
   appendTerminalData: (data: string) => void;
   clearTerminalBuffer: () => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
-  sendInput: (input: string) => void;
+  sendInput: (input: string) => boolean;
   sendInterrupt: () => void;
-  sendPermissionResponse: (requestId: string, decision: string) => void;
-  sendUserQuestionResponse: (answer: string) => void;
+  sendPermissionResponse: (requestId: string, decision: string) => boolean;
+  sendUserQuestionResponse: (answer: string) => boolean;
   markPromptAnswered: (messageId: string, answer: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
@@ -1289,7 +1289,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'input', data: input }));
+      return true;
     }
+    return false;
   },
 
   sendInterrupt: () => {
@@ -1303,14 +1305,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'permission_response', requestId, decision }));
+      return true;
     }
+    return false;
   },
 
   sendUserQuestionResponse: (answer: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'user_question_response', answer }));
+      return true;
     }
+    return false;
   },
 
   markPromptAnswered: (messageId: string, answer: string) => {
