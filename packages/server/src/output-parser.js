@@ -20,10 +20,12 @@ const State = {
 };
 
 /**
- * Declarative noise filter patterns.
- * Each entry has a pattern (regex) and description explaining what it filters.
- * Optional condition function for additional logic beyond regex matching.
+ * @typedef {Object} NoisePattern
+ * @property {RegExp} pattern - Regex to test against trimmed line
+ * @property {string} description - Human-readable description of what this filters
+ * @property {Function} [condition] - Optional guard function(trimmed) that must return true
  */
+/** @type {NoisePattern[]} */
 const NOISE_PATTERNS = [
   {
     pattern: /^\[(?:parser|ws|cli|tunnel|pty|pty-session|SIGINT)\]\s/,
@@ -257,9 +259,12 @@ const NOISE_PATTERNS = [
 ]
 
 /**
- * State-dependent noise patterns that require checking parser state.
- * These are evaluated after the basic patterns above.
+ * @typedef {Object} StateDependentPattern
+ * @property {RegExp} pattern - Regex to test against trimmed line
+ * @property {Function} condition - Guard function(trimmed, state) that must return true
+ * @property {string} description - Human-readable description of what this filters
  */
+/** @type {StateDependentPattern[]} */
 const STATE_DEPENDENT_PATTERNS = [
   {
     pattern: /^[a-zA-Z\d\s.·…]+$/,
