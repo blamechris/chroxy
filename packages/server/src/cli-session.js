@@ -14,11 +14,28 @@ const __dirname = dirname(__filename)
 // Multiple CliSession instances starting/stopping simultaneously can
 // corrupt each other's writes without serialization.
 let _settingsLock = Promise.resolve()
+let _settingsLockHeld = 0
 
 function withSettingsLock(fn) {
-  // Serialize regardless of success/failure — then(fn, fn) ensures fn runs after
-  // the previous operation completes, whether it succeeded or failed
-  const next = _settingsLock.then(fn, fn)
+  // Log only when there is contention (another write is already in-flight)
+  if (_settingsLockHeld > 0) {
+    console.log('[config] Settings write queued (lock contended)')
+  }
+
+  _settingsLockHeld++
+
+  const wrapped = () => {
+    if (_settingsLockHeld > 1) {
+      console.log('[config] Settings write proceeding (lock acquired)')
+    }
+    return Promise.resolve(fn()).finally(() => {
+      _settingsLockHeld--
+    })
+  }
+
+  // Serialize regardless of success/failure — then(wrapped, wrapped) ensures
+  // wrapped runs after the previous operation completes
+  const next = _settingsLock.then(wrapped, wrapped)
   _settingsLock = next.catch(() => {})
   return next
 }
