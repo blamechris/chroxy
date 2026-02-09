@@ -634,7 +634,7 @@ export class CliSession extends EventEmitter {
           mkdirSync(resolve(homedir(), '.claude'), { recursive: true })
         } else {
           // File exists but contains invalid JSON — schedule retry
-          const errMsg = `Cannot parse ${settingsPath}: ${err.message}. Will retry after fixing settings file.`
+          const errMsg = `Cannot parse ${settingsPath}: ${err.message}. Will retry hook registration.`
           console.error(`[cli-session] ${errMsg}`)
           this.emit('error', { message: errMsg })
           this._scheduleHookRetry()
@@ -667,11 +667,18 @@ export class CliSession extends EventEmitter {
 
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
       console.log('[cli-session] Registered permission hook in ~/.claude/settings.json')
+
+      // Clear any pending retry timer
+      if (this._hookRetryTimer) {
+        clearTimeout(this._hookRetryTimer)
+        this._hookRetryTimer = null
+      }
+
       this._hookRegistered = true
       this._hookRetryCount = 0
       return true
     } catch (err) {
-      const errMsg = `Failed to register permission hook: ${err.message}. Will retry after fixing settings file.`
+      const errMsg = `Failed to register permission hook: ${err.message}. Will retry hook registration.`
       console.error(`[cli-session] ${errMsg}`)
       this.emit('error', { message: errMsg })
       this._scheduleHookRetry()
@@ -685,6 +692,9 @@ export class CliSession extends EventEmitter {
    */
   _scheduleHookRetry() {
     if (this._destroying || this._hookRegistered) return
+
+    // If a retry is already scheduled, don't schedule another one
+    if (this._hookRetryTimer) return
 
     this._hookRetryCount++
     if (this._hookRetryCount > 3) {
