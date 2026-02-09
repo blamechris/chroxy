@@ -11,6 +11,9 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore } from '../store/connection';
 import { COLORS } from '../constants/colors';
+import appJson from '../../app.json';
+
+const APP_VERSION = appJson.expo.version;
 
 export function SettingsScreen() {
   const insets = useSafeAreaInsets();
@@ -35,8 +38,8 @@ export function SettingsScreen() {
           text: 'Clear',
           style: 'destructive',
           onPress: () => {
-            forgetSession();
             disconnect();
+            forgetSession();
           },
         },
       ],
@@ -52,8 +55,9 @@ export function SettingsScreen() {
         {
           text: 'Clear',
           style: 'destructive',
-          onPress: () => {
-            void clearSavedConnection();
+          onPress: async () => {
+            await clearSavedConnection();
+            Alert.alert('Done', 'Saved connection has been cleared.');
           },
         },
       ],
@@ -114,7 +118,7 @@ export function SettingsScreen() {
       <View style={styles.section}>
         <View style={styles.row}>
           <Text style={styles.rowLabel}>App Version</Text>
-          <Text style={styles.rowValue}>0.1.0</Text>
+          <Text style={styles.rowValue}>{APP_VERSION}</Text>
         </View>
         {serverVersion != null && (
           <>

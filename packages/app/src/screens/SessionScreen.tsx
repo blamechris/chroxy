@@ -441,6 +441,9 @@ const styles = StyleSheet.create({
   settingsButton: {
     paddingHorizontal: 12,
     justifyContent: 'center',
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
   },
   settingsButtonText: {
     color: COLORS.textMuted,
