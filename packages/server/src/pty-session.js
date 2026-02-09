@@ -45,7 +45,7 @@ export class PtySession extends EventEmitter {
     return null
   }
 
-  start() {
+  async start() {
     this._ptyManager = new PtyManager({
       sessionName: this.tmuxSession,
       resume: true, // always attach, never create
@@ -105,14 +105,8 @@ export class PtySession extends EventEmitter {
       this.emit('error', { message: `PTY session exited (code ${exitCode})` })
     })
 
-    // Start the PTY (attach to existing tmux session)
-    const startResult = this._ptyManager.start()
-    if (startResult && typeof startResult.catch === 'function') {
-      startResult.catch((err) => {
-        console.error(`[pty-session] Failed to start PTY for ${this.tmuxSession}:`, err)
-        this.emit('error', { message: 'Failed to start PTY session' })
-      })
-    }
+    // Start the PTY (attach to existing tmux session) and wait for success
+    await this._ptyManager.start()
 
     // Mark ready immediately for attached sessions (Claude is already running)
     this._isReady = true
