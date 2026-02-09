@@ -533,7 +533,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             return;
           }
         } catch (err) {
-          console.log('[ws] Could not parse health check response:', (err as Error).message);
+          console.log('[ws] Health check body unreadable:', err instanceof Error ? err.message : String(err));
         }
 
         console.log('[ws] Health check passed, connecting WebSocket...');
