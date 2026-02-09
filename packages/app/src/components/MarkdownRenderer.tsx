@@ -127,6 +127,17 @@ export function renderInline(text: string, keyBase: string): React.ReactNode[] {
   return parts;
 }
 
+/** Check if a line is a valid table row (has pipe separators and at least one non-empty cell) */
+function isValidTableRow(line: string): boolean {
+  if (!line.includes('|')) return false;
+  const rawCells = line.split('|').map(cell => cell.trim());
+  // Remove leading/trailing empty cells (from leading/trailing pipes)
+  const cellStart = rawCells[0] === '' ? 1 : 0;
+  const cellEnd = rawCells[rawCells.length - 1] === '' ? rawCells.length - 1 : rawCells.length;
+  const cells = rawCells.slice(cellStart, cellEnd);
+  return cells.length > 0;
+}
+
 /** Parse markdown table: | col1 | col2 | ... */
 function parseTable(lines: string[], startIndex: number): { headers: string[]; rows: string[][]; endIndex: number } | null {
   if (startIndex >= lines.length) return null;
@@ -153,14 +164,13 @@ function parseTable(lines: string[], startIndex: number): { headers: string[]; r
   let i = startIndex + 2;
   while (i < lines.length) {
     const line = lines[i];
-    if (!line.includes('|')) break;
+    if (!isValidTableRow(line)) break;
     // Split and trim, preserving empty cells between pipes
     const rawCells = line.split('|').map(cell => cell.trim());
     // Remove leading/trailing empty cells (from leading/trailing pipes)
     const cellStart = rawCells[0] === '' ? 1 : 0;
     const cellEnd = rawCells[rawCells.length - 1] === '' ? rawCells.length - 1 : rawCells.length;
     const cells = rawCells.slice(cellStart, cellEnd);
-    if (cells.length === 0) break;
     // Normalize row length to match header count (pad with empty strings or truncate)
     while (cells.length < headers.length) cells.push('');
     rows.push(cells.slice(0, headers.length));
@@ -271,9 +281,9 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
             messageTextStyle={messageTextStyle}
           />
         );
-        // Lightweight scan to find table end (without full parsing)
+        // Lightweight scan to find table end - use same validity check as parseTable
         let j = i + 2;
-        while (j < lines.length && lines[j].includes('|')) {
+        while (j < lines.length && isValidTableRow(lines[j])) {
           j++;
         }
         i = j - 1; // Skip processed lines
