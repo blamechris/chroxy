@@ -344,6 +344,7 @@ export function SessionScreen() {
         onSend={handleSend}
         onInterrupt={sendInterrupt}
         onClearTerminal={clearTerminalBuffer}
+        onKeyPress={handleKeyPress}
         enterToSend={enterToSend}
         onToggleEnterMode={() => {
           const key = viewMode === 'chat' ? 'chatEnterToSend' : 'terminalEnterToSend';
