@@ -269,6 +269,91 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection }: {
   );
 }
 
+// -- Permission detail renderer --
+
+function PermissionDetail({ tool, toolInput }: { tool?: string; toolInput?: Record<string, unknown> }) {
+  if (!toolInput || !tool) return null;
+
+  const toolName = tool.toLowerCase();
+
+  // Bash: show command in code block
+  if (toolName === 'bash' && typeof toolInput.command === 'string') {
+    return (
+      <View style={styles.permDetailBlock}>
+        <Text style={styles.permDetailLabel}>Command</Text>
+        <Text selectable style={styles.permDetailCode}>{toolInput.command}</Text>
+      </View>
+    );
+  }
+
+  // Edit/Write: show file path and content preview
+  if ((toolName === 'edit' || toolName === 'write') && typeof toolInput.file_path === 'string') {
+    const preview = typeof toolInput.new_string === 'string'
+      ? toolInput.new_string
+      : typeof toolInput.content === 'string'
+        ? toolInput.content
+        : null;
+    return (
+      <View style={styles.permDetailBlock}>
+        <Text style={styles.permDetailLabel}>File</Text>
+        <Text selectable style={styles.permDetailCode}>{toolInput.file_path}</Text>
+        {preview && (
+          <>
+            <Text style={[styles.permDetailLabel, { marginTop: 6 }]}>
+              {toolName === 'edit' ? 'Change' : 'Content'}
+            </Text>
+            <Text selectable style={styles.permDetailCode} numberOfLines={6}>
+              {preview.slice(0, 500)}
+            </Text>
+          </>
+        )}
+      </View>
+    );
+  }
+
+  // Read/Glob/Grep: show path or pattern with correct label
+  if (toolName === 'read' || toolName === 'glob' || toolName === 'grep') {
+    let target: string | null = null;
+    let label = 'Path';
+    if (typeof toolInput.file_path === 'string') {
+      target = toolInput.file_path;
+    } else if (typeof toolInput.pattern === 'string') {
+      target = toolInput.pattern;
+      label = 'Pattern';
+    } else if (typeof toolInput.path === 'string') {
+      target = toolInput.path;
+    }
+    if (target) {
+      return (
+        <View style={styles.permDetailBlock}>
+          <Text style={styles.permDetailLabel}>{label}</Text>
+          <Text selectable style={styles.permDetailCode}>{target}</Text>
+        </View>
+      );
+    }
+  }
+
+  // Fallback: show description or first meaningful field
+  const desc = typeof toolInput.description === 'string'
+    ? toolInput.description
+    : null;
+  if (desc) {
+    return (
+      <View style={styles.permDetailBlock}>
+        <Text selectable style={styles.permDetailCode}>{desc}</Text>
+      </View>
+    );
+  }
+
+  return null;
+}
+
+function PermissionDetailOrFallback({ tool, toolInput, fallback }: { tool?: string; toolInput?: Record<string, unknown>; fallback: string }) {
+  const detail = PermissionDetail({ tool, toolInput });
+  if (detail) return detail;
+  return <Text selectable style={styles.messageText}>{fallback}</Text>;
+}
+
 // -- Single message bubble --
 
 function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress }: {
@@ -309,9 +394,11 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
       style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isError && styles.errorBubble, isSystem && styles.systemBubble, isSelected && styles.selectedBubble]}
     >
       <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : isError ? styles.senderLabelError : isSystem ? styles.senderLabelSystem : styles.senderLabelClaude}>
-        {isUser ? 'You' : isPrompt ? 'Action Required' : isError ? 'Error' : isSystem ? 'System' : 'Claude'}
+        {isUser ? 'You' : isPrompt ? (message.tool || 'Action Required') : isError ? 'Error' : isSystem ? 'System' : 'Claude'}
       </Text>
-      {!isUser && !isPrompt && !isError && !isSystem ? (
+      {isPrompt && message.toolInput ? (
+        <PermissionDetailOrFallback tool={message.tool} toolInput={message.toolInput} fallback={message.content?.trim() || ''} />
+      ) : !isUser && !isPrompt && !isError && !isSystem ? (
         <FormattedResponse content={message.content?.trim() || ''} messageTextStyle={styles.messageText} />
       ) : (
         <Text selectable style={[styles.messageText, isUser && styles.userMessageText, isError && styles.errorMessageText, isSystem && styles.systemMessageText]}>
@@ -727,5 +814,23 @@ const styles = StyleSheet.create({
     color: COLORS.accentBlue,
     fontSize: 18,
     fontWeight: 'bold',
+  },
+  permDetailBlock: {
+    marginTop: 4,
+  },
+  permDetailLabel: {
+    color: COLORS.accentOrange,
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  permDetailCode: {
+    color: COLORS.textPrimary,
+    fontSize: 13,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    backgroundColor: COLORS.backgroundTertiary,
+    padding: 8,
+    borderRadius: 6,
+    overflow: 'hidden',
   },
 });
