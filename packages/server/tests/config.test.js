@@ -66,7 +66,7 @@ describe('validateConfig', () => {
 
 describe('mergeConfig', () => {
   let originalEnv
-  const envKeys = ['API_TOKEN', 'PORT', 'TMUX_SESSION', 'SHELL_CMD', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_RESUME']
+  const envKeys = ['API_TOKEN', 'PORT', 'TMUX_SESSION', 'SHELL_CMD', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_RESUME', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME']
 
   beforeEach(() => {
     originalEnv = {}
@@ -175,13 +175,40 @@ describe('mergeConfig', () => {
   })
 
   it('does not include undefined values', () => {
-    const merged = mergeConfig({ 
+    const merged = mergeConfig({
       defaults: { port: 8765 },
       fileConfig: { apiToken: 'token' },
     })
-    
+
     assert.equal(merged.port, 8765)
     assert.equal(merged.apiToken, 'token')
     assert.equal(merged.tmuxSession, undefined)
+  })
+
+  it('merges tunnel config from file', () => {
+    const fileConfig = {
+      tunnel: 'named',
+      tunnelName: 'chroxy',
+      tunnelHostname: 'chroxy.example.com',
+    }
+    const merged = mergeConfig({ fileConfig })
+    assert.equal(merged.tunnel, 'named')
+    assert.equal(merged.tunnelName, 'chroxy')
+    assert.equal(merged.tunnelHostname, 'chroxy.example.com')
+  })
+
+  it('tunnel config from env vars overrides file', () => {
+    process.env.CHROXY_TUNNEL = 'quick'
+    const fileConfig = { tunnel: 'named', tunnelName: 'chroxy' }
+    const merged = mergeConfig({ fileConfig })
+    assert.equal(merged.tunnel, 'quick')
+    assert.equal(merged.tunnelName, 'chroxy')
+  })
+
+  it('tunnel config from CLI overrides env', () => {
+    process.env.CHROXY_TUNNEL = 'named'
+    const cliOverrides = { tunnel: 'none' }
+    const merged = mergeConfig({ cliOverrides })
+    assert.equal(merged.tunnel, 'none')
   })
 })

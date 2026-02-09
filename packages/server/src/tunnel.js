@@ -2,17 +2,20 @@ import { spawn } from "child_process";
 import { EventEmitter } from "events";
 
 /**
- * Manages a Cloudflare Quick Tunnel.
- * Spawns `cloudflared tunnel` as a child process and parses
- * the assigned URL from its stderr output.
- * No account or configuration required.
+ * Manages Cloudflare tunnels (Quick or Named).
+ *
+ * Quick mode: spawns `cloudflared tunnel --url` — random URL, no account needed.
+ * Named mode: spawns `cloudflared tunnel run <name>` — stable URL via DNS CNAME.
  *
  * Auto-recovers on unexpected cloudflared crash with exponential backoff.
  */
 export class TunnelManager extends EventEmitter {
-  constructor({ port }) {
+  constructor({ port, mode = 'quick', tunnelName = null, tunnelHostname = null }) {
     super();
     this.port = port;
+    this.mode = mode;
+    this.tunnelName = tunnelName;
+    this.tunnelHostname = tunnelHostname;
     this.process = null;
     this.url = null;
     this.intentionalShutdown = false;
@@ -25,14 +28,105 @@ export class TunnelManager extends EventEmitter {
   async start() {
     this.intentionalShutdown = false;
     this.recoveryAttempt = 0;
-    return this._startTunnel();
+
+    if (this.mode === 'named') {
+      return this._startNamedTunnel();
+    }
+    return this._startQuickTunnel();
   }
 
   _spawnCloudflared(argv, spawnOpts) {
     return spawn("cloudflared", argv, spawnOpts)
   }
 
-  async _startTunnel() {
+  /**
+   * Start a Named Tunnel. URL is known from config (no regex parsing needed).
+   * Requires: cloudflared login, tunnel created, DNS route configured.
+   */
+  async _startNamedTunnel() {
+    if (!this.tunnelName) {
+      throw new Error('Named tunnel requires tunnelName config. Run: chroxy tunnel setup')
+    }
+    if (!this.tunnelHostname) {
+      throw new Error('Named tunnel requires tunnelHostname config. Run: chroxy tunnel setup')
+    }
+
+    return new Promise((resolve, reject) => {
+      const argv = [
+        "tunnel", "run",
+        "--url", `http://localhost:${this.port}`,
+        this.tunnelName,
+      ]
+      const spawnOpts = {
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+      const proc = this._spawnCloudflared(argv, spawnOpts)
+
+      this.process = proc;
+      let resolved = false;
+
+      // For named tunnels, we know the URL from config
+      const httpUrl = `https://${this.tunnelHostname}`;
+      const wsUrl = `wss://${this.tunnelHostname}`;
+
+      // Wait for cloudflared to indicate it's connected (look for connection established messages)
+      const handleOutput = (data) => {
+        const text = data.toString();
+        // cloudflared logs "Registered tunnel connection" or "Connection ... registered"
+        // when a named tunnel connection is established
+        if (!resolved && /[Rr]egistered.*connection|[Cc]onnection.*registered|Serving tunnel/i.test(text)) {
+          resolved = true;
+          this.url = httpUrl;
+
+          console.log(`[tunnel] Named tunnel established:`);
+          console.log(`  HTTP:      ${httpUrl}`);
+          console.log(`  WebSocket: ${wsUrl}`);
+
+          resolve({ httpUrl, wsUrl });
+        }
+      };
+
+      proc.stdout.on("data", handleOutput);
+      proc.stderr.on("data", handleOutput);
+
+      proc.on("error", (err) => {
+        if (!resolved) {
+          reject(new Error(`Failed to start cloudflared: ${err.message}. Install with: brew install cloudflared`));
+        }
+      });
+
+      proc.on("close", (code, signal) => {
+        if (!resolved) {
+          reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`));
+        } else {
+          void this._handleUnexpectedExit(code, signal).catch((err) => {
+            console.error("[tunnel] Error while handling unexpected cloudflared exit:", err);
+          });
+        }
+        this.process = null;
+        // For named tunnels, keep the URL (it never changes)
+        if (this.mode !== 'named') {
+          this.url = null;
+        }
+      });
+
+      // Timeout after 30 seconds
+      const timeoutHandle = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          proc.kill();
+          reject(new Error("Tunnel timed out after 30s. Is cloudflared installed and logged in? (brew install cloudflared)"));
+        }
+      }, 30_000);
+
+      proc.once('close', () => {
+        clearTimeout(timeoutHandle);
+      });
+    });
+  }
+
+  /** Start a Quick Tunnel (random URL, no account needed) */
+  async _startQuickTunnel() {
     return new Promise((resolve, reject) => {
       const argv = [
         "tunnel", "--url", `http://localhost:${this.port}`, "--no-autoupdate",
@@ -137,7 +231,13 @@ export class TunnelManager extends EventEmitter {
       }
 
       try {
-        const { httpUrl, wsUrl } = await this._startTunnel();
+        let result
+        if (this.mode === 'named') {
+          result = await this._startNamedTunnel();
+        } else {
+          result = await this._startQuickTunnel();
+        }
+        const { httpUrl, wsUrl } = result
         console.log(`[tunnel] Recovery successful`);
         this.emit("tunnel_recovered", {
           httpUrl,
@@ -146,7 +246,7 @@ export class TunnelManager extends EventEmitter {
         });
         this.recoveryAttempt = 0; // Reset on success
 
-        // Check if URL changed during recovery
+        // Check if URL changed during recovery (only possible for quick tunnels)
         if (oldUrl && httpUrl !== oldUrl) {
           console.log(`[tunnel] URL changed from ${oldUrl} to ${httpUrl}`);
           this.emit("tunnel_url_changed", {

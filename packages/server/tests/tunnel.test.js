@@ -49,8 +49,8 @@ function createMockProcess(behavior = {}) {
  * Test-only wrapper that allows injecting mock spawn
  */
 class TestTunnelManager extends TunnelManager {
-  constructor({ port, mockSpawn }) {
-    super({ port })
+  constructor({ port, mockSpawn, mode, tunnelName, tunnelHostname }) {
+    super({ port, mode, tunnelName, tunnelHostname })
     this._mockSpawn = mockSpawn
   }
 
@@ -472,6 +472,144 @@ describe('TunnelManager', () => {
       const recoveringEvent = await recoveringPromise
       assert.equal(recoveringEvent.attempt, 1)
       assert.equal(spawnCount, 1, 'Recovery should start (spawning happens after delay)')
+
+      await tunnel.stop()
+    })
+  })
+
+  describe('named tunnel mode', () => {
+    function createNamedMockProcess(behavior = {}) {
+      const proc = new EventEmitter()
+      proc.stdout = new EventEmitter()
+      proc.stderr = new EventEmitter()
+      proc.killed = false
+
+      proc.kill = function() {
+        this.killed = true
+        setImmediate(() => {
+          this.emit('close', 0, null)
+        })
+      }
+
+      // Emit "Registered tunnel connection" message for named tunnels
+      if (!behavior.skipDefaultUrl && !behavior.crashImmediately && !behavior.crashBeforeUrl) {
+        setImmediate(() => {
+          proc.stderr.emit('data', Buffer.from('Registered tunnel connection connIndex=0'))
+        })
+      }
+
+      if (behavior.crashImmediately || behavior.crashBeforeUrl) {
+        setImmediate(() => {
+          proc.emit('close', behavior.exitCode || 1, behavior.signal || null)
+        })
+      }
+
+      return proc
+    }
+
+    it('starts named tunnel with correct args', async () => {
+      let capturedArgv = null
+      const mockSpawn = (argv) => {
+        capturedArgv = argv
+        return createNamedMockProcess()
+      }
+
+      const tunnel = new TestTunnelManager({
+        port: 3000,
+        mockSpawn,
+        mode: 'named',
+        tunnelName: 'chroxy',
+        tunnelHostname: 'chroxy.example.com',
+      })
+
+      const result = await tunnel.start()
+
+      assert.ok(capturedArgv)
+      assert.deepEqual(capturedArgv, ['tunnel', 'run', '--url', 'http://localhost:3000', 'chroxy'])
+      assert.equal(result.httpUrl, 'https://chroxy.example.com')
+      assert.equal(result.wsUrl, 'wss://chroxy.example.com')
+      assert.equal(tunnel.url, 'https://chroxy.example.com')
+
+      await tunnel.stop()
+    })
+
+    it('rejects when tunnelName is missing', async () => {
+      const tunnel = new TestTunnelManager({
+        port: 3000,
+        mockSpawn: () => createNamedMockProcess(),
+        mode: 'named',
+        tunnelHostname: 'chroxy.example.com',
+      })
+
+      await assert.rejects(
+        async () => await tunnel.start(),
+        /tunnelName/
+      )
+    })
+
+    it('rejects when tunnelHostname is missing', async () => {
+      const tunnel = new TestTunnelManager({
+        port: 3000,
+        mockSpawn: () => createNamedMockProcess(),
+        mode: 'named',
+        tunnelName: 'chroxy',
+      })
+
+      await assert.rejects(
+        async () => await tunnel.start(),
+        /tunnelHostname/
+      )
+    })
+
+    it('recovers from crash with same URL (no url_changed event)', async () => {
+      let spawnCount = 0
+      const mockSpawn = () => {
+        spawnCount++
+        return createNamedMockProcess()
+      }
+
+      const tunnel = new TestTunnelManager({
+        port: 3000,
+        mockSpawn,
+        mode: 'named',
+        tunnelName: 'chroxy',
+        tunnelHostname: 'chroxy.example.com',
+      })
+      tunnel.recoveryBackoffs = [10, 20, 30]
+
+      await tunnel.start()
+      const firstProcess = tunnel.process
+
+      let urlChangedFired = false
+      tunnel.on('tunnel_url_changed', () => { urlChangedFired = true })
+
+      const recoveredPromise = new Promise((resolve) => {
+        tunnel.once('tunnel_recovered', (info) => resolve(info))
+      })
+
+      // Simulate crash
+      firstProcess.emit('close', 1, null)
+
+      const recovered = await recoveredPromise
+      assert.equal(recovered.httpUrl, 'https://chroxy.example.com')
+      assert.equal(recovered.wsUrl, 'wss://chroxy.example.com')
+      assert.equal(spawnCount, 2)
+
+      // Named tunnels should never change URL
+      await new Promise(resolve => setTimeout(resolve, 50))
+      assert.equal(urlChangedFired, false)
+
+      await tunnel.stop()
+    })
+
+    it('defaults to quick mode when mode is not specified', async () => {
+      const mockSpawn = () => createMockProcess()
+      const tunnel = new TestTunnelManager({ port: 3000, mockSpawn })
+
+      assert.equal(tunnel.mode, 'quick')
+
+      const result = await tunnel.start()
+      assert.equal(result.httpUrl, 'https://test-tunnel.trycloudflare.com')
 
       await tunnel.stop()
     })
