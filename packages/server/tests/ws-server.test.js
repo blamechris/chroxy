@@ -1051,6 +1051,24 @@ describe('WsServer attach_session message flow', () => {
     return manager
   }
 
+  /**
+   * Helper to authenticate a client and wait for all post-auth messages
+   * before clearing the message buffer. This prevents race conditions where
+   * the initial session_list (sent after auth) arrives after messages.length = 0
+   * and gets mistaken for the broadcast triggered by attach_session.
+   */
+  async function authenticateAndDrainPostAuth(ws, messages, token = 'test-token') {
+    send(ws, { type: 'auth', token })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    
+    // Wait for the final post-auth message (available_permission_modes) to ensure
+    // all post-auth messages have arrived before we clear the buffer
+    await waitForMessage(messages, 'available_permission_modes', 2000)
+    
+    // Now safe to clear for attach flow assertions
+    messages.length = 0
+  }
+
   it('successfully attaches to tmux session', async () => {
     const mockManager = createMockSessionManagerWithAttach()
 
@@ -1063,11 +1081,7 @@ describe('WsServer attach_session message flow', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    // Clear initial messages
-    messages.length = 0
+    await authenticateAndDrainPostAuth(ws, messages)
 
     // Send attach_session message
     send(ws, {
@@ -1104,10 +1118,7 @@ describe('WsServer attach_session message flow', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    messages.length = 0
+    await authenticateAndDrainPostAuth(ws, messages)
 
     // Send attach_session without custom name
     send(ws, {
@@ -1134,10 +1145,7 @@ describe('WsServer attach_session message flow', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    messages.length = 0
+    await authenticateAndDrainPostAuth(ws, messages)
 
     // Send attach_session without tmuxSession
     send(ws, { type: 'attach_session', name: 'Some Name' })
@@ -1162,10 +1170,7 @@ describe('WsServer attach_session message flow', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    messages.length = 0
+    await authenticateAndDrainPostAuth(ws, messages)
 
     // Send attach_session with empty string
     send(ws, { type: 'attach_session', tmuxSession: '   ' })
@@ -1189,10 +1194,7 @@ describe('WsServer attach_session message flow', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    messages.length = 0
+    await authenticateAndDrainPostAuth(ws, messages)
 
     // Send attach_session with invalid characters (potential shell injection)
     send(ws, { type: 'attach_session', tmuxSession: 'evil; rm -rf /' })
@@ -1216,10 +1218,7 @@ describe('WsServer attach_session message flow', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    messages.length = 0
+    await authenticateAndDrainPostAuth(ws, messages)
 
     // Test various invalid characters
     const invalidNames = [
@@ -1268,10 +1267,7 @@ describe('WsServer attach_session message flow', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    messages.length = 0
+    await authenticateAndDrainPostAuth(ws, messages)
 
     // Try to attach when limit is reached
     send(ws, { type: 'attach_session', tmuxSession: 'new-session' })
@@ -1304,10 +1300,7 @@ describe('WsServer attach_session message flow', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    messages.length = 0
+    await authenticateAndDrainPostAuth(ws, messages)
 
     // Try to attach to the same tmux session
     send(ws, { type: 'attach_session', tmuxSession: 'existing-tmux' })
@@ -1335,10 +1328,7 @@ describe('WsServer attach_session message flow', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    messages.length = 0
+    await authenticateAndDrainPostAuth(ws, messages)
 
     send(ws, { type: 'attach_session', tmuxSession: 'some-session' })
 
@@ -1362,16 +1352,10 @@ describe('WsServer attach_session message flow', () => {
 
     // Connect two clients
     const client1 = await createClient(port, false)
-    send(client1.ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(client1.messages, 'auth_ok', 2000)
+    await authenticateAndDrainPostAuth(client1.ws, client1.messages)
 
     const client2 = await createClient(port, false)
-    send(client2.ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(client2.messages, 'auth_ok', 2000)
-
-    // Clear messages
-    client1.messages.length = 0
-    client2.messages.length = 0
+    await authenticateAndDrainPostAuth(client2.ws, client2.messages)
 
     // Client1 attaches to a session
     send(client1.ws, { type: 'attach_session', tmuxSession: 'broadcast-test' })
@@ -1401,22 +1385,21 @@ describe('WsServer attach_session message flow', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    messages.length = 0
+    await authenticateAndDrainPostAuth(ws, messages)
 
     // Attach to a session
     send(ws, { type: 'attach_session', tmuxSession: 'auto-switch-test', name: 'Auto Switch Session' })
 
     // Should receive session_switched before session_list
-    const sessionSwitched = await waitForMessage(messages, 'session_switched', 2000)
-    const sessionList = await waitForMessage(messages, 'session_list', 2000)
+    await waitForMessage(messages, 'session_switched', 2000)
+    await waitForMessage(messages, 'session_list', 2000)
 
     const switchedIndex = messages.findIndex(m => m.type === 'session_switched')
     const listIndex = messages.findIndex(m => m.type === 'session_list')
 
     assert.ok(switchedIndex < listIndex, 'session_switched should come before session_list')
+    
+    const sessionSwitched = messages[switchedIndex]
     assert.equal(sessionSwitched.name, 'Auto Switch Session', 'Should switch to the newly attached session')
 
     ws.close()
