@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage } from '../store/connection';
+import { useConnectionStore, ChatMessage, ConnectionPhase } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
@@ -97,6 +97,7 @@ export function SessionScreen() {
     sessionCwd,
     streamingMessageId,
     isReconnecting,
+    connectionPhase,
     activeModel,
     availableModels,
     permissionMode,
@@ -307,10 +308,12 @@ export function SessionScreen() {
         />
       )}
 
-      {/* Reconnecting banner */}
-      {isReconnecting && (
+      {/* Reconnecting / restarting banner */}
+      {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting') && (
         <View style={styles.reconnectingBanner}>
-          <Text style={styles.reconnectingText}>Reconnecting...</Text>
+          <Text style={styles.reconnectingText}>
+            {connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
+          </Text>
         </View>
       )}
 
@@ -386,6 +389,8 @@ export function SessionScreen() {
         viewMode={viewMode}
         hasTerminal={hasTerminal}
         bottomPadding={bottomPadding}
+        disabled={connectionPhase !== 'connected'}
+        disabledPlaceholder={connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
       />
 
       {/* Create session modal */}

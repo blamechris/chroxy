@@ -99,6 +99,16 @@ export interface ServerError {
   timestamp: number;
 }
 
+export type ConnectionPhase =
+  | 'disconnected'        // Not connected, no auto-reconnect
+  | 'connecting'          // Initial connection attempt
+  | 'connected'           // WebSocket open + authenticated
+  | 'reconnecting'        // Auto-reconnecting after unexpected disconnect
+  | 'server_restarting';  // Health check returns { status: 'restarting' }
+
+export const selectShowSession = (s: ConnectionState): boolean =>
+  s.connectionPhase !== 'disconnected';
+
 function createEmptySessionState(): SessionState {
   return {
     messages: [],
@@ -114,6 +124,7 @@ function createEmptySessionState(): SessionState {
 
 interface ConnectionState {
   // Connection
+  connectionPhase: ConnectionPhase;
   isConnected: boolean;
   isReconnecting: boolean;
   wsUrl: string | null;
@@ -370,6 +381,7 @@ function updateActiveSession(updater: (session: SessionState) => Partial<Session
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
+  connectionPhase: 'disconnected' as ConnectionPhase,
   isConnected: false,
   isReconnecting: false,
   wsUrl: null,
@@ -472,7 +484,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       existing.onmessage = null;
       existing.close();
     }
-    set({ socket: null, isConnected: false, isReconnecting: isReconnect || _retryCount > 0 });
+    const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
+    set({ socket: null, isConnected: false, isReconnecting: isReconnect || _retryCount > 0, connectionPhase: phase as ConnectionPhase });
 
     if (_retryCount > 0) {
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
@@ -484,9 +497,30 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const timeoutId = setTimeout(() => controller.abort(), 5000);
     fetch(httpUrl, { method: 'GET', signal: controller.signal })
       .finally(() => clearTimeout(timeoutId))
-      .then((res) => {
+      .then(async (res) => {
         if (myAttemptId !== connectionAttemptId) return;
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        // Check if the server is in restart mode (supervisor standby)
+        try {
+          const body = await res.json();
+          if (body.status === 'restarting') {
+            console.log('[ws] Server is restarting, waiting...');
+            set({ connectionPhase: 'server_restarting' as ConnectionPhase, isReconnecting: true });
+            // Retry — the server will come back
+            if (_retryCount < MAX_RETRIES) {
+              const delay = RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)];
+              setTimeout(() => {
+                if (myAttemptId !== connectionAttemptId) return;
+                get().connect(url, token, _retryCount + 1);
+              }, delay);
+            }
+            return;
+          }
+        } catch {
+          // Body parse failed — that's fine, proceed with WebSocket
+        }
+
         console.log('[ws] Health check passed, connecting WebSocket...');
         _connectWebSocket();
       })
@@ -502,7 +536,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             get().connect(url, token, _retryCount + 1);
           }, delay);
         } else {
-          set({ isReconnecting: false });
+          set({ connectionPhase: 'disconnected' as ConnectionPhase, isReconnecting: false });
           Alert.alert(
             'Connection Failed',
             'Could not reach the Chroxy server. Make sure it\'s running.',
@@ -545,9 +579,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
           // On reconnect, preserve messages and terminal buffer
           if (isReconnect) {
-            set({ isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: authServerMode, sessionCwd: authSessionCwd, serverVersion: authServerVersion, streamingMessageId: null });
+            set({ connectionPhase: 'connected' as ConnectionPhase, isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: authServerMode, sessionCwd: authSessionCwd, serverVersion: authServerVersion, streamingMessageId: null });
           } else {
-            set({ isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: authServerMode, sessionCwd: authSessionCwd, serverVersion: authServerVersion, streamingMessageId: null, messages: [], terminalBuffer: '', sessions: [], activeSessionId: null, sessionStates: {} });
+            set({ connectionPhase: 'connected' as ConnectionPhase, isConnected: true, isReconnecting: false, wsUrl: url, apiToken: token, socket, claudeReady: false, serverMode: authServerMode, sessionCwd: authSessionCwd, serverVersion: authServerVersion, streamingMessageId: null, messages: [], terminalBuffer: '', sessions: [], activeSessionId: null, sessionStates: {} });
           }
           socket.send(JSON.stringify({ type: 'mode', mode: get().viewMode }));
           // Save for quick reconnect
@@ -558,7 +592,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'auth_fail':
           socket.close();
-          set({ isConnected: false, isReconnecting: false, socket: null });
+          set({ connectionPhase: 'disconnected' as ConnectionPhase, isConnected: false, isReconnecting: false, socket: null });
           Alert.alert('Auth Failed', msg.reason || 'Invalid token');
           break;
 
@@ -1000,11 +1034,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] Connection lost, auto-reconnecting...');
-        set({ isReconnecting: true });
+        set({ connectionPhase: 'reconnecting' as ConnectionPhase, isReconnecting: true });
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
         }, 1500);
+      } else if (disconnectedAttemptId === myAttemptId) {
+        set({ connectionPhase: 'disconnected' as ConnectionPhase });
+      } else {
+        // Connection dropped before auth completed — reset to disconnected
+        set({ connectionPhase: 'disconnected' as ConnectionPhase, isReconnecting: false });
       }
     };
 
@@ -1017,7 +1056,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Auto-reconnect on unexpected WS error
       if (disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] WebSocket error, reconnecting...');
-        set({ isReconnecting: true });
+        set({ connectionPhase: 'reconnecting' as ConnectionPhase, isReconnecting: true });
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
@@ -1048,6 +1087,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // so reconnect to the same server can show previous chat history.
     // Only clear connection-level state.
     set({
+      connectionPhase: 'disconnected' as ConnectionPhase,
       isConnected: false,
       isReconnecting: false,
       socket: null,

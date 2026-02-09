@@ -5,7 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 import { ConnectScreen } from './screens/ConnectScreen';
 import { SessionScreen } from './screens/SessionScreen';
-import { useConnectionStore } from './store/connection';
+import { useConnectionStore, selectShowSession } from './store/connection';
 
 export type RootStackParamList = {
   Connect: undefined;
@@ -15,10 +15,7 @@ export type RootStackParamList = {
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 export default function App() {
-  const isConnected = useConnectionStore((s) => s.isConnected);
-  const isReconnecting = useConnectionStore((s) => s.isReconnecting);
-  // Stay on SessionScreen during reconnection attempts to show reconnect state
-  const showSession = isConnected || isReconnecting;
+  const showSession = useConnectionStore(selectShowSession);
 
   return (
     <NavigationContainer>
