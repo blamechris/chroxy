@@ -68,6 +68,7 @@ function formatTranscript(selected: ChatMessage[]): string {
         : m.type === 'tool_use' ? `Tool: ${m.tool || 'unknown'}`
         : m.type === 'error' ? 'Error'
         : m.type === 'prompt' ? 'Prompt'
+        : m.type === 'system' ? 'System'
         : 'Claude';
       return `[${label}] ${m.content?.trim() || ''}`;
     }).join('\n\n');
