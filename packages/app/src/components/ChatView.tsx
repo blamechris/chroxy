@@ -142,6 +142,8 @@ function ActivityGroup({
 }) {
   const [expanded, setExpanded] = useState(false);
   const toolCount = activityMessages.filter((m) => m.type === 'tool_use').length;
+  const lastMessage = activityMessages[activityMessages.length - 1];
+  const isThinking = isActive && lastMessage?.type === 'thinking';
 
   const handlePress = () => {
     if (isSelecting) return;
@@ -174,6 +176,7 @@ function ActivityGroup({
         <Text style={styles.activitySummary}>{summary}</Text>
         <Text style={styles.activityChevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
       </View>
+      {isThinking && <ThinkingIndicator />}
       {expanded && (
         <ScrollView style={styles.activityList} nestedScrollEnabled>
           {activityMessages.map((msg) => (
