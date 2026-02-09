@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { Text, ScrollView, StyleSheet, Platform } from 'react-native';
+import React, { useCallback, useMemo, useRef } from 'react';
+import { Text, ScrollView, StyleSheet, Platform, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
 
 // -- Props --
 
@@ -32,6 +32,12 @@ function processTerminalBuffer(buffer: string): string {
 
 export function TerminalView({ content, scrollViewRef }: TerminalViewProps) {
   const processed = useMemo(() => processTerminalBuffer(content), [content]);
+  const isAtBottomRef = useRef(true);
+
+  const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
+    isAtBottomRef.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 50;
+  }, []);
 
   return (
     <ScrollView
@@ -39,7 +45,13 @@ export function TerminalView({ content, scrollViewRef }: TerminalViewProps) {
       style={styles.terminalContainer}
       contentContainerStyle={styles.terminalContent}
       keyboardDismissMode="on-drag"
-      onContentSizeChange={() => scrollViewRef.current?.scrollToEnd()}
+      onScroll={handleScroll}
+      scrollEventThrottle={16}
+      onContentSizeChange={() => {
+        if (isAtBottomRef.current) {
+          scrollViewRef.current?.scrollToEnd();
+        }
+      }}
     >
       <Text selectable style={styles.terminalText}>{processed || 'Connected. Terminal output will appear here...'}</Text>
     </ScrollView>
