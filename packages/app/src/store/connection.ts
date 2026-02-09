@@ -22,7 +22,7 @@ function filterThinking(messages: ChatMessage[]): ChatMessage[] {
 
 export interface ChatMessage {
   id: string;
-  type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error' | 'status';
+  type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error' | 'system';
   content: string;
   tool?: string;
   options?: { label: string; value: string }[];
@@ -947,9 +947,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           const activeErrId = get().activeSessionId;
           if (activeErrId && get().sessionStates[activeErrId]) {
             updateActiveSession((ss) => ({
-              messages: [...ss.messages, errorMsg],
+              messages: filterThinking([...ss.messages, errorMsg]),
+              streamingMessageId: null,
             }));
           } else {
+            set({ streamingMessageId: null });
             get().addMessage(errorMsg);
           }
           // Show an alert for non-recoverable errors
