@@ -19,6 +19,301 @@ const State = {
   TOOL_USE: "tool_use",
 };
 
+/**
+ * Declarative noise filter patterns.
+ * Each entry has a pattern (regex) and description explaining what it filters.
+ * Optional condition function for additional logic beyond regex matching.
+ */
+const NOISE_PATTERNS = [
+  {
+    pattern: /^\[(?:parser|ws|cli|tunnel|pty|pty-session|SIGINT)\]\s/,
+    description: 'Server log lines (prevents recursive amplification)'
+  },
+  {
+    pattern: /^Press Ctrl\+C to stop/i,
+    description: 'Server output fragments from tmux scrollback'
+  },
+  {
+    pattern: /^Press\s+(up|enter|escape|ctrl)/i,
+    condition: (trimmed) => trimmed.length < 60,
+    description: 'CLI chrome: prompts for user actions'
+  },
+  {
+    pattern: /^Or connect manually:/i,
+    description: 'Connection instruction text'
+  },
+  {
+    pattern: /^URL:\s+wss?:\/\//i,
+    description: 'Connection URL display'
+  },
+  {
+    pattern: /^Token:\s+\w+/i,
+    description: 'API token display'
+  },
+  {
+    pattern: /^Scan this QR code/i,
+    description: 'QR code instruction text'
+  },
+  {
+    pattern: /^[▄▀█\s]+$/,
+    condition: (trimmed) => trimmed.length > 10,
+    description: 'QR code block characters'
+  },
+  {
+    pattern: /^[━─╌]{3,}/,
+    description: 'Divider lines (all dashes)'
+  },
+  {
+    pattern: /^[─━n\d]+$/,
+    condition: (trimmed) => /[─━]/.test(trimmed),
+    description: 'Lines mostly dashes with text mixed in'
+  },
+  {
+    pattern: /^\[[\w-]+\]\s*\d+:/,
+    description: 'tmux status bar (session name in brackets)'
+  },
+  {
+    pattern: /\[claude-co/,
+    description: 'tmux status bar fragment'
+  },
+  {
+    pattern: /\[[\w-]+\]\s+\d+:[\w.-]+[*#!\-]?\s{2,}/,
+    description: 'tmux status bar with window name (non-anchored)'
+  },
+  {
+    pattern: /^"[\u2800-\u28FF✻✶✳✽✢·•⏺]/,
+    description: 'Quoted pane titles from tmux with spinner chars'
+  },
+  {
+    pattern: /^"\*?\s*Claude\s*Code"/,
+    description: 'Quoted Claude Code pane title'
+  },
+  {
+    pattern: /^"Christophers-/,
+    description: 'Quoted hostname pane title'
+  },
+  {
+    pattern: /^\*\s*Claude\s*Code/,
+    description: 'Active window indicator with name'
+  },
+  {
+    pattern: /^\$[\d.]+(\s*\||$)/,
+    description: 'Token/cost line prefix'
+  },
+  {
+    pattern: /tokens?\s*current:/i,
+    description: 'Token count status line'
+  },
+  {
+    pattern: /latest:\s*[\d.]+/i,
+    condition: (trimmed) => !/^⏺/.test(trimmed),
+    description: 'Version "latest" line'
+  },
+  {
+    pattern: /current:\s*[\d.]+/i,
+    condition: (trimmed) => !/^⏺/.test(trimmed),
+    description: 'Version "current" line'
+  },
+  {
+    pattern: /til compact/i,
+    description: 'Context compaction progress'
+  },
+  {
+    pattern: /^\d+\s*tokens?$/i,
+    description: 'Bare token count'
+  },
+  {
+    pattern: /\d+tokens/i,
+    description: 'Token count fragment'
+  },
+  {
+    pattern: /^\d+\.?\d*k?\s*tokens?\)?$/i,
+    description: 'Token counts with optional closing paren'
+  },
+  {
+    pattern: /\d+s\s*·\s*[↓↑]?\s*\d/,
+    condition: (trimmed) => /tokens/i.test(trimmed),
+    description: 'Timing/token status lines with arrows'
+  },
+  {
+    pattern: /thought\s+for\s+\d+s\)/i,
+    description: 'Thinking timing fragments'
+  },
+  {
+    pattern: /^\(No content\)/i,
+    description: 'No content marker from Claude Code UI'
+  },
+  {
+    pattern: /^\d+\.\d+\.\d+$/,
+    description: 'Bare version numbers'
+  },
+  {
+    pattern: /^ctrl\+g/i,
+    description: 'Keyboard shortcut hints'
+  },
+  {
+    pattern: /\/ide\s+for/i,
+    description: 'IDE command hints'
+  },
+  {
+    pattern: /^[╭╮╰╯│┌┐└┘├┤┬┴┼\s]+$/,
+    description: 'Empty box-drawing fragments'
+  },
+  {
+    pattern: /^│.*│$/,
+    description: 'Welcome screen box content'
+  },
+  {
+    pattern: /^[▐▛▜▌▝▘█░▒▓]/,
+    description: 'Welcome banner block elements (ASCII art logo)'
+  },
+  {
+    pattern: /Claude\s*Code\s*v\d/i,
+    condition: (trimmed) => !/^⏺/.test(trimmed),
+    description: 'Claude Code version line from banner'
+  },
+  {
+    pattern: /(?:Opus|Sonnet|Haiku)\s+\d/i,
+    condition: (trimmed) => !/^⏺/.test(trimmed),
+    description: 'Model name with version from banner'
+  },
+  {
+    pattern: /Claude\s*(?:Max|Pro|Free)/i,
+    condition: (trimmed) => !/^⏺/.test(trimmed),
+    description: 'Claude plan name from banner'
+  },
+  {
+    pattern: /^Try "/,
+    description: 'Placeholder prompt suggestion'
+  },
+  {
+    pattern: /\d+\.\d+%/,
+    condition: (trimmed) => !/^⏺/.test(trimmed),
+    description: 'Percentage/compact status line'
+  },
+  {
+    pattern: /^start\s*of\s*a\s*new/i,
+    condition: (trimmed) => !/^⏺/.test(trimmed),
+    description: 'New conversation banner text'
+  },
+  {
+    pattern: /^new\s*conversation/i,
+    condition: (trimmed) => !/^⏺/.test(trimmed),
+    description: 'New conversation banner text'
+  },
+  {
+    pattern: /^[╰└]─{2,}/,
+    description: 'Tool block end boundaries that leak outside TOOL_USE state'
+  },
+  {
+    pattern: /⎿\s*(Running|Completed|Done|Failed)/i,
+    description: 'Tool status lines'
+  },
+  {
+    pattern: /[↓↑]\s*\d*$/,
+    condition: (trimmed) => trimmed.length < 25,
+    description: 'Status bar fragments with scroll arrows'
+  },
+  {
+    pattern: /^\/Users\/\w+$/,
+    description: 'Path-only lines from welcome banner'
+  },
+  {
+    pattern: /PTY\s*Scrollback/i,
+    description: 'PTY scrollback marker'
+  },
+  {
+    pattern: /^\[Pasted text #\d+/,
+    description: 'Paste markers from Claude Code paste handling'
+  },
+  {
+    pattern: /^Baked\s+for\s+\d/i,
+    description: 'Completion timing lines'
+  },
+  {
+    pattern: /conversation\s+compacted/i,
+    description: 'Context compaction notification'
+  },
+  {
+    pattern: /⎿\s*\w+\s+\d+\s*(lines?|chars?|bytes?)/i,
+    description: 'Tool result summaries (lines read/written)'
+  },
+  {
+    pattern: /^tokens\)?$/i,
+    description: 'Standalone "tokens" word'
+  },
+  {
+    pattern: /compact\s+\d+\s*tokens/i,
+    description: 'CUP-split compact status line'
+  },
+  {
+    pattern: /msgs?:\s*\d+/i,
+    description: 'Message count status'
+  },
+  {
+    pattern: /tsc:\s*The\s*TypeScript/i,
+    description: 'TypeScript compiler output leakage'
+  },
+]
+
+/**
+ * State-dependent noise patterns that require checking parser state.
+ * These are evaluated after the basic patterns above.
+ */
+const STATE_DEPENDENT_PATTERNS = [
+  {
+    pattern: /^[a-zA-Z\d\s.·…]+$/,
+    condition: (trimmed, state) => {
+      return state !== State.RESPONSE &&
+        trimmed.length <= 5 &&
+        !/^[❯⏺]/.test(trimmed)
+    },
+    description: 'Very short non-marker lines (terminal redraw artifacts)'
+  },
+  {
+    pattern: /.+/,
+    condition: (trimmed, state) => {
+      if (trimmed.length >= 20) return false
+      const tokens = trimmed.split(/\s+/)
+      return tokens.length >= 2 && tokens.every(t => t.length <= 1 || /^\d{1,3}$/.test(t))
+    },
+    description: 'CUP-split status fragments (single-char tokens)'
+  },
+  {
+    pattern: /^[\d\s.()+-]+$/,
+    condition: (trimmed, state) => {
+      return state !== State.RESPONSE && trimmed.length < 20
+    },
+    description: 'Numeric-only fragments with punctuation'
+  },
+  {
+    pattern: /⎿/,
+    condition: (trimmed, state) => {
+      return state !== State.TOOL_USE && state !== State.RESPONSE &&
+        trimmed.length < 60 &&
+        !/^(Read|Write|Edit|Bash|Search|Glob|Grep|TodoRead|TodoWrite|Task|Skill|WebFetch|WebSearch|NotebookEdit)\(/.test(trimmed)
+    },
+    description: 'General ⎿ lines outside tool/response state'
+  },
+  {
+    pattern: /^\d+\s+files?\s+changed\b/i,
+    condition: (trimmed, state) => trimmed.length < 50 && !/^⏺/.test(trimmed),
+    description: 'Git diff summary (files changed)'
+  },
+  {
+    pattern: /^\d+\s+files?\s+\+\d+\s+-\d+\b/i,
+    condition: (trimmed, state) => trimmed.length < 50 && !/^⏺/.test(trimmed),
+    description: 'Git diff summary (with additions/deletions)'
+  },
+  {
+    pattern: /^(merge|commit|push|pull|rebase|checkout)\s/i,
+    condition: (trimmed, state) => {
+      return state !== State.RESPONSE && trimmed.length < 30
+    },
+    description: 'Autosuggest ghost text (git commands)'
+  },
+]
+
 export class OutputParser extends EventEmitter {
   constructor({ assumeReady = false, suppressScrollback = false, flushDelay = 1500 } = {}) {
     super();
@@ -122,134 +417,30 @@ export class OutputParser extends EventEmitter {
     }
   }
 
-  /** Check if a line is noise that should be skipped */
+  /**
+   * Check if a line is noise that should be skipped.
+   * Iterates through declarative pattern tables defined above.
+   */
   _isNoise(trimmed) {
-    // Server log lines — when tmux scrollback includes chroxy server output,
-    // the parser would re-parse its own logs creating recursive amplification.
-    // Must be checked FIRST before any other pattern to prevent feedback loops.
-    if (/^\[(?:parser|ws|cli|tunnel|pty|pty-session|SIGINT)\]\s/.test(trimmed)) return true
-    // Server output fragments that leak from tmux scrollback
-    if (/^Press Ctrl\+C to stop/i.test(trimmed)) return true
-    // CLI chrome: "Press up to edit queued messages", "Press enter to send", etc.
-    if (/^Press\s+(up|enter|escape|ctrl)/i.test(trimmed) && trimmed.length < 60) return true
-    if (/^Or connect manually:/i.test(trimmed)) return true
-    if (/^URL:\s+wss?:\/\//i.test(trimmed)) return true
-    if (/^Token:\s+\w+/i.test(trimmed)) return true
-    if (/^Scan this QR code/i.test(trimmed)) return true
-    // QR code block characters
-    if (/^[▄▀█\s]+$/.test(trimmed) && trimmed.length > 10) return true
-    // Very short non-marker lines (≤5 chars) that are just letters/digits/spaces
-    // are terminal redraw artifacts (e.g. "z g", "c 9", "i n", "A u").
-    // Skip this filter during RESPONSE state to preserve legitimate short content like "OK", "Yes."
-    if (this.state !== State.RESPONSE &&
-        trimmed.length <= 5 && !/^[❯⏺]/.test(trimmed) && /^[a-zA-Z\d\s.·…]+$/.test(trimmed)) return true;
-    // CUP-split status fragments: short lines where every token is a single character.
-    // These are cursor-positioning artifacts from terminal screen redraws.
-    // Examples: "c a", "z g", "i n", "A u", "· c a 9"
-    // State-independent — these are never legitimate content in any state.
-    if (trimmed.length < 20) {
-      const tokens = trimmed.split(/\s+/)
-      if (tokens.length >= 2 && tokens.every(t => t.length <= 1 || /^\d{1,3}$/.test(t))) return true
+    // Check basic patterns first
+    for (const { pattern, condition, description } of NOISE_PATTERNS) {
+      if (pattern.test(trimmed)) {
+        if (!condition || condition(trimmed, this.state)) {
+          return true
+        }
+      }
     }
-    // Numeric-only fragments with optional punctuation (CUP artifacts, line counters)
-    // Examples: "7 0 -0", "8 187 -3", "2 9 )"
-    // Skip during RESPONSE state — "42" or "100" can be legitimate response content.
-    if (this.state !== State.RESPONSE &&
-        /^[\d\s.()+-]+$/.test(trimmed) && trimmed.length < 20) return true
-    // Divider lines (all dashes, or dashes with a few other chars)
-    if (/^[━─╌]{3,}/.test(trimmed)) return true;
-    // Lines that are mostly dashes with some text mixed in (require at least one dash)
-    if (/[─━]/.test(trimmed) && /^[─━n\d]+$/.test(trimmed)) return true;
-    // tmux status bar — any session name in brackets followed by window:pane
-    if (/^\[[\w-]+\]\s*\d+:/.test(trimmed)) return true;
-    if (/\[claude-co/.test(trimmed)) return true;
-    // tmux status bar (non-anchored) — CUP joining may prepend content before [session]
-    // Pattern: [name] N:window_name with multiple trailing spaces (tmux pads with spaces)
-    if (/\[[\w-]+\]\s+\d+:[\w.-]+[*#!\-]?\s{2,}/.test(trimmed)) return true
-    // Quoted pane titles from tmux status bar (braille/spinner char inside quotes)
-    if (/^"[\u2800-\u28FF✻✶✳✽✢·•⏺]/.test(trimmed)) return true
-    if (/^"\*?\s*Claude\s*Code"/.test(trimmed)) return true;
-    if (/^"Christophers-/.test(trimmed)) return true;
-    if (/^\*\s*Claude\s*Code/.test(trimmed)) return true;
-    // Token/cost/version lines
-    if (/^\$[\d.]+(\s*\||$)/.test(trimmed)) return true;
-    if (/tokens?\s*current:/i.test(trimmed)) return true;
-    if (/latest:\s*[\d.]+/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
-    if (/current:\s*[\d.]+/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
-    if (/til compact/i.test(trimmed)) return true;
-    if (/^\d+\s*tokens?$/i.test(trimmed)) return true;
-    if (/\d+tokens/i.test(trimmed)) return true;
-    // Token counts with closing paren — status line fragments like "775 tokens)"
-    if (/^\d+\.?\d*k?\s*tokens?\)?$/i.test(trimmed)) return true;
-    // Timing/token status lines: "10s · ↓ 150 tokens · thinking)" etc.
-    if (/\d+s\s*·\s*[↓↑]?\s*\d/.test(trimmed) && /tokens/i.test(trimmed)) return true;
-    // "thought for Ns)" timing fragments
-    if (/thought\s+for\s+\d+s\)/i.test(trimmed)) return true;
-    // "(No content)" marker from Claude Code UI
-    if (/^\(No content\)/i.test(trimmed)) return true;
-    // Bare version numbers
-    if (/^\d+\.\d+\.\d+$/.test(trimmed)) return true;
-    // ctrl+g / ide hints
-    if (/^ctrl\+g/i.test(trimmed)) return true;
-    if (/\/ide\s+for/i.test(trimmed)) return true;
-    // Empty box-drawing fragments or lines with only box chars + spaces
-    if (/^[╭╮╰╯│┌┐└┘├┤┬┴┼\s]+$/.test(trimmed)) return true;
-    // Welcome screen fragments (box content without ⏺ prefix)
-    if (/^│.*│$/.test(trimmed)) return true;
-    // Welcome banner block elements (ASCII art logo) — with or without trailing text
-    if (/^[▐▛▜▌▝▘█░▒▓]/.test(trimmed)) return true;
-    // Claude Code version/model lines from welcome banner
-    if (/Claude\s*Code\s*v\d/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
-    if (/(?:Opus|Sonnet|Haiku)\s+\d/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
-    if (/Claude\s*(?:Max|Pro|Free)/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
-    // Try "edit..." placeholder prompt
-    if (/^Try "/.test(trimmed)) return true;
-    // Percentage/compact lines
-    if (/\d+\.\d+%/.test(trimmed) && !/^⏺/.test(trimmed)) return true;
-    // "start of a new conversation" banner text
-    if (/^start\s*of\s*a\s*new/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
-    if (/^new\s*conversation/i.test(trimmed) && !/^⏺/.test(trimmed)) return true;
-    // Tool block end boundaries (╰───) that leak when not in TOOL_USE state
-    if (/^[╰└]─{2,}/.test(trimmed)) return true;
-    // Tool status lines: "Bash(cmd)   ⎿ Running…"
-    if (/⎿\s*(Running|Completed|Done|Failed)/i.test(trimmed)) return true;
-    // Status bar fragments with scroll arrows
-    if (/[↓↑]\s*\d*$/.test(trimmed) && trimmed.length < 25) return true;
-    // Path-only lines from welcome banner (not inside a response)
-    if (/^\/Users\/\w+$/.test(trimmed)) return true;
-    // PTY Scrollback marker
-    if (/PTY\s*Scrollback/i.test(trimmed)) return true;
-    // [Pasted text #N] markers from Claude Code paste handling
-    if (/^\[Pasted text #\d+/.test(trimmed)) return true
-    // "Baked for Nm Ns" / completion timing lines
-    if (/^Baked\s+for\s+\d/i.test(trimmed)) return true
-    // "Conversation compacted" notification from Claude Code context compaction
-    if (/conversation\s+compacted/i.test(trimmed)) return true
-    // Tool result summaries: "⎿ Read 15 lines" / "⎿ Added 3 lines"
-    if (/⎿\s*\w+\s+\d+\s*(lines?|chars?|bytes?)/i.test(trimmed)) return true
-    // General ⎿ lines outside TOOL_USE/RESPONSE (tool chrome)
-    // Skip if line starts with a tool name (compact tool format like "Bash(cmd) ⎿ output")
-    if (this.state !== State.TOOL_USE && this.state !== State.RESPONSE &&
-        /⎿/.test(trimmed) && trimmed.length < 60 &&
-        !/^(Read|Write|Edit|Bash|Search|Glob|Grep|TodoRead|TodoWrite|Task|Skill|WebFetch|WebSearch|NotebookEdit)\(/.test(trimmed)) return true
-    // Git diff summaries: "1 file +3 -0" / "N files changed"
-    if ((/^\d+\s+files?\s+changed\b/i.test(trimmed) ||
-         /^\d+\s+files?\s+\+\d+\s+-\d+\b/i.test(trimmed)) &&
-        trimmed.length < 50 &&
-        !/^⏺/.test(trimmed)) return true
-    // Standalone "tokens" / "tokens)"
-    if (/^tokens\)?$/i.test(trimmed)) return true
-    // CUP-split compact status: "l compact 100653 tokens"
-    if (/compact\s+\d+\s*tokens/i.test(trimmed)) return true
-    // Message count: "msgs:375"
-    if (/msgs?:\s*\d+/i.test(trimmed)) return true
-    // tsc output leakage
-    if (/tsc:\s*The\s*TypeScript/i.test(trimmed)) return true
-    // Autosuggest ghost text: short imperative git commands (not in RESPONSE)
-    if (this.state !== State.RESPONSE &&
-        /^(merge|commit|push|pull|rebase|checkout)\s/i.test(trimmed)
-        && trimmed.length < 30) return true
-    return false;
+
+    // Check state-dependent patterns
+    for (const { pattern, condition, description } of STATE_DEPENDENT_PATTERNS) {
+      if (pattern.test(trimmed)) {
+        if (!condition || condition(trimmed, this.state)) {
+          return true
+        }
+      }
+    }
+
+    return false
   }
 
   /** Check if a line is a Claude Code spinner/thinking indicator */
