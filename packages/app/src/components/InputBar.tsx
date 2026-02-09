@@ -1,6 +1,8 @@
 import React from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Platform } from 'react-native';
 import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH } from '../constants/icons';
+import { COLORS } from '../constants/colors';
+
 
 // -- Props --
 
@@ -73,7 +75,7 @@ export function InputBar({
         <TextInput
           style={[styles.input, !enterToSend && styles.inputMultiline]}
           placeholder={!claudeReady ? 'Connecting to Claude...' : 'Message Claude...'}
-          placeholderTextColor="#666"
+          placeholderTextColor={COLORS.textDim}
           value={inputText}
           onChangeText={onChangeText}
           // When enterToSend is true, multiline is false and onSubmitEditing fires on Enter.
@@ -103,8 +105,8 @@ export function InputBar({
 const styles = StyleSheet.create({
   inputContainer: {
     borderTopWidth: 1,
-    borderTopColor: '#2a2a4e',
-    backgroundColor: '#1a1a2e',
+    borderTopColor: COLORS.backgroundCard,
+    backgroundColor: COLORS.backgroundSecondary,
   },
   specialKeys: {
     flexDirection: 'row',
@@ -112,13 +114,13 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   specialKey: {
-    backgroundColor: '#2a2a4e',
+    backgroundColor: COLORS.backgroundCard,
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 4,
   },
   specialKeyText: {
-    color: '#888',
+    color: COLORS.textMuted,
     fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
@@ -136,23 +138,23 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   enterModeText: {
-    color: '#555',
+    color: COLORS.textDisabled,
     fontSize: 16,
   },
   input: {
     flex: 1,
-    backgroundColor: '#0f0f1a',
+    backgroundColor: COLORS.backgroundPrimary,
     borderRadius: 20,
     paddingHorizontal: 16,
     paddingVertical: 10,
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 16,
   },
   inputMultiline: {
     maxHeight: 100,
   },
   sendButton: {
-    backgroundColor: '#4a9eff',
+    backgroundColor: COLORS.accentBlue,
     width: 40,
     height: 40,
     borderRadius: 20,
@@ -160,12 +162,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   sendButtonText: {
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 20,
     fontWeight: 'bold',
   },
   interruptButton: {
-    backgroundColor: '#ff4a4a',
+    backgroundColor: COLORS.accentRed,
     width: 40,
     height: 40,
     borderRadius: 20,
@@ -173,7 +175,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   interruptButtonText: {
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 16,
     fontWeight: 'bold',
   },

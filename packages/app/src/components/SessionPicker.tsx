@@ -10,6 +10,8 @@ import {
 } from 'react-native';
 import { useConnectionStore, SessionInfo } from '../store/connection';
 import { ICON_SQUARE } from '../constants/icons';
+import { COLORS } from '../constants/colors';
+
 
 interface SessionPillProps {
   session: SessionInfo;
@@ -186,9 +188,9 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#1a1a2e',
+    backgroundColor: COLORS.backgroundSecondary,
     borderBottomWidth: 1,
-    borderBottomColor: '#2a2a4e',
+    borderBottomColor: COLORS.backgroundCard,
   },
   scrollContent: {
     paddingHorizontal: 8,
@@ -202,56 +204,56 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 16,
-    backgroundColor: '#2a2a4e',
+    backgroundColor: COLORS.backgroundCard,
     borderWidth: 1,
-    borderColor: 'transparent',
+    borderColor: COLORS.borderTransparent,
     maxWidth: 140,
   },
   pillActive: {
-    backgroundColor: '#4a9eff22',
-    borderColor: '#4a9eff66',
+    backgroundColor: COLORS.accentBlueLight,
+    borderColor: COLORS.accentBlueBorderStrong,
   },
   pillPty: {
-    borderColor: '#22c55e33',
+    borderColor: COLORS.accentGreenBorder,
   },
   pillPtyActive: {
-    backgroundColor: '#22c55e22',
-    borderColor: '#22c55e66',
+    backgroundColor: COLORS.accentGreenLight,
+    borderColor: COLORS.accentGreenBorderStrong,
   },
   ptyIcon: {
-    color: '#22c55e66',
+    color: COLORS.accentGreenBorderStrong,
     fontSize: 8,
   },
   ptyIconActive: {
-    color: '#22c55e',
+    color: COLORS.accentGreen,
   },
   pillText: {
-    color: '#888',
+    color: COLORS.textMuted,
     fontSize: 13,
     fontWeight: '500',
   },
   pillTextActive: {
-    color: '#4a9eff',
+    color: COLORS.accentBlue,
   },
   busyDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: '#f59e0b',
+    backgroundColor: COLORS.accentOrange,
     marginRight: 6,
   },
   addButton: {
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: '#2a2a4e',
+    backgroundColor: COLORS.backgroundCard,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: '#3a3a5e',
+    borderColor: COLORS.borderSecondary,
   },
   addButtonText: {
-    color: '#888',
+    color: COLORS.textMuted,
     fontSize: 18,
     fontWeight: '400',
     lineHeight: 20,

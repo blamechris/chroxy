@@ -15,6 +15,8 @@ import {
 import { ChatMessage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN } from '../constants/icons';
+import { COLORS } from '../constants/colors';
+
 
 // -- Animated Thinking Indicator --
 
@@ -478,20 +480,20 @@ const styles = StyleSheet.create({
     paddingTop: 100,
   },
   emptyStateText: {
-    color: '#666',
+    color: COLORS.textDim,
     fontSize: 16,
   },
   messageBubble: {
-    backgroundColor: '#1a1a2e',
+    backgroundColor: COLORS.backgroundSecondary,
     padding: 12,
     borderRadius: 12,
     marginBottom: 12,
     maxWidth: '85%',
   },
   userBubble: {
-    backgroundColor: '#4a9eff22',
+    backgroundColor: COLORS.accentBlueLight,
     alignSelf: 'flex-end',
-    borderColor: '#4a9eff44',
+    borderColor: COLORS.accentBlueBorder,
     borderWidth: 1,
   },
   thinkingIndicator: {
@@ -503,7 +505,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   thinkingLabel: {
-    color: '#888',
+    color: COLORS.textMuted,
     fontSize: 13,
     fontStyle: 'italic',
   },
@@ -516,29 +518,29 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: '#4a9eff',
+    backgroundColor: COLORS.accentBlue,
   },
   senderLabelUser: {
-    color: '#4a9eff',
+    color: COLORS.accentBlue,
     fontSize: 12,
     fontWeight: '600',
     marginBottom: 4,
   },
   senderLabelClaude: {
-    color: '#22c55e',
+    color: COLORS.accentGreen,
     fontSize: 12,
     fontWeight: '600',
     marginBottom: 4,
   },
   senderLabelPrompt: {
-    color: '#f59e0b',
+    color: COLORS.accentOrange,
     fontSize: 12,
     fontWeight: '600',
     marginBottom: 4,
   },
   promptBubble: {
-    backgroundColor: '#f59e0b11',
-    borderColor: '#f59e0b44',
+    backgroundColor: COLORS.accentOrangeLight,
+    borderColor: COLORS.accentOrangeBorder,
     borderWidth: 1,
     maxWidth: '95%',
   },
@@ -549,31 +551,31 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   promptOptionButton: {
-    backgroundColor: '#f59e0b33',
+    backgroundColor: COLORS.accentOrangeMedium,
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#f59e0b66',
+    borderColor: COLORS.accentOrangeBorderStrong,
   },
   promptOptionText: {
-    color: '#f59e0b',
+    color: COLORS.accentOrange,
     fontSize: 14,
     fontWeight: '600',
   },
   errorBubble: {
-    backgroundColor: '#ff4a4a11',
-    borderColor: '#ff4a4a44',
+    backgroundColor: COLORS.accentRedLight,
+    borderColor: COLORS.accentRedBorder,
     borderWidth: 1,
   },
   senderLabelError: {
-    color: '#ff4a4a',
+    color: COLORS.accentRed,
     fontSize: 12,
     fontWeight: '600',
     marginBottom: 4,
   },
   errorMessageText: {
-    color: '#e8a0a0',
+    color: COLORS.textError,
   },
   systemBubble: {
     backgroundColor: '#16162a',
@@ -590,16 +592,16 @@ const styles = StyleSheet.create({
     color: '#b0b0b0',
   },
   selectedBubble: {
-    borderColor: '#4a9eff',
+    borderColor: COLORS.accentBlue,
     borderWidth: 2,
   },
   activityGroup: {
-    backgroundColor: '#16162a',
+    backgroundColor: COLORS.backgroundTertiary,
     padding: 10,
     borderRadius: 10,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#2a2a4e',
+    borderColor: COLORS.backgroundCard,
     maxWidth: '90%',
   },
   activityHeader: {
@@ -611,17 +613,17 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: '#4a9eff',
+    backgroundColor: COLORS.accentBlue,
     opacity: 0.8,
   },
   activitySummary: {
     flex: 1,
-    color: '#a78bfa',
+    color: COLORS.accentPurple,
     fontSize: 12,
     fontWeight: '600',
   },
   activityChevron: {
-    color: '#888',
+    color: COLORS.textMuted,
     fontSize: 10,
   },
   activityList: {
@@ -635,30 +637,30 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   activityEntryIcon: {
-    color: '#666',
+    color: COLORS.textDim,
     fontSize: 8,
   },
   activityEntryTool: {
-    color: '#a78bfa',
+    color: COLORS.accentPurple,
     fontSize: 11,
     fontWeight: '500',
     minWidth: 40,
   },
   activityEntryPreview: {
     flex: 1,
-    color: '#888',
+    color: COLORS.textMuted,
     fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   toolBubble: {
-    backgroundColor: '#16162a',
+    backgroundColor: COLORS.backgroundTertiary,
     padding: 8,
     paddingHorizontal: 10,
     borderRadius: 8,
     marginBottom: 8,
     maxWidth: '85%',
     borderWidth: 1,
-    borderColor: '#2a2a4e',
+    borderColor: COLORS.backgroundCard,
   },
   toolHeader: {
     flexDirection: 'row',
@@ -666,34 +668,34 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   toolChevron: {
-    color: '#888',
+    color: COLORS.textMuted,
     fontSize: 10,
   },
   senderLabelTool: {
-    color: '#a78bfa',
+    color: COLORS.accentPurple,
     fontSize: 11,
     fontWeight: '600',
   },
   toolContentCollapsed: {
-    color: '#888',
+    color: COLORS.textMuted,
     fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginTop: 2,
   },
   toolContentExpanded: {
-    color: '#ccc',
+    color: COLORS.textSecondary,
     fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginTop: 6,
     lineHeight: 18,
   },
   messageText: {
-    color: '#e0e0e0',
+    color: COLORS.textChatMessage,
     fontSize: 15,
     lineHeight: 22,
   },
   userMessageText: {
-    color: '#fff',
+    color: COLORS.textPrimary,
   },
   scrollButton: {
     position: 'absolute',
@@ -701,12 +703,12 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: '#1a1a2ebb',
+    backgroundColor: COLORS.scrollButtonBackground,
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#4a4a6e',
-    shadowColor: '#000',
+    borderColor: COLORS.borderSubtle,
+    shadowColor: COLORS.shadowColor,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,
     shadowRadius: 4,
@@ -719,7 +721,7 @@ const styles = StyleSheet.create({
     bottom: 16,
   },
   scrollButtonText: {
-    color: '#4a9eff',
+    color: COLORS.accentBlue,
     fontSize: 18,
     fontWeight: 'bold',
   },

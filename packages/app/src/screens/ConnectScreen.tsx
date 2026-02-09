@@ -12,6 +12,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import { useConnectionStore } from '../store/connection';
+import { COLORS } from '../constants/colors';
+
 
 function parseChroxyUrl(raw: string): { wsUrl: string; token: string } | null {
   try {
@@ -194,7 +196,7 @@ export function ConnectScreen() {
           <TextInput
             style={styles.input}
             placeholder="ws://localhost:8765 (default)"
-            placeholderTextColor="#666"
+            placeholderTextColor={COLORS.textDim}
             value={url}
             onChangeText={setUrl}
             onFocus={scrollToInput}
@@ -208,7 +210,7 @@ export function ConnectScreen() {
           <TextInput
             style={styles.input}
             placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-            placeholderTextColor="#666"
+            placeholderTextColor={COLORS.textDim}
             value={token}
             onChangeText={setToken}
             onFocus={scrollToInput}
@@ -229,7 +231,7 @@ export function ConnectScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0f0f1a',
+    backgroundColor: COLORS.backgroundPrimary,
   },
   scrollContent: {
     padding: 24,
@@ -246,12 +248,12 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 28,
     fontWeight: 'bold',
-    color: '#fff',
+    color: COLORS.textPrimary,
     marginBottom: 8,
   },
   subtitle: {
     fontSize: 16,
-    color: '#888',
+    color: COLORS.textMuted,
     textAlign: 'center',
     lineHeight: 22,
   },
@@ -264,19 +266,19 @@ const styles = StyleSheet.create({
   },
   reconnectButton: {
     flex: 1,
-    backgroundColor: '#22c55e',
+    backgroundColor: COLORS.accentGreen,
     paddingVertical: 16,
     paddingHorizontal: 20,
     borderRadius: 12,
     alignItems: 'center',
   },
   reconnectButtonText: {
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 18,
     fontWeight: '600',
   },
   reconnectUrl: {
-    color: 'rgba(255,255,255,0.7)',
+    color: COLORS.reconnectUrlText,
     fontSize: 12,
     marginTop: 4,
   },
@@ -285,12 +287,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   forgetButtonText: {
-    color: '#ff4a4a',
+    color: COLORS.accentRed,
     fontSize: 14,
   },
   // QR and manual
   qrButton: {
-    backgroundColor: '#4a9eff',
+    backgroundColor: COLORS.accentBlue,
     paddingVertical: 16,
     paddingHorizontal: 32,
     borderRadius: 12,
@@ -298,7 +300,7 @@ const styles = StyleSheet.create({
     marginBottom: 24,
   },
   qrButtonText: {
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 18,
     fontWeight: '600',
   },
@@ -307,43 +309,43 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   manualToggleText: {
-    color: '#4a9eff',
+    color: COLORS.accentBlue,
     fontSize: 14,
   },
   manualForm: {
     marginTop: 16,
   },
   label: {
-    color: '#888',
+    color: COLORS.textMuted,
     fontSize: 14,
     marginBottom: 8,
     marginTop: 16,
   },
   input: {
-    backgroundColor: '#1a1a2e',
+    backgroundColor: COLORS.backgroundSecondary,
     borderRadius: 8,
     padding: 16,
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 16,
     borderWidth: 1,
-    borderColor: '#2a2a4e',
+    borderColor: COLORS.backgroundCard,
   },
   connectButton: {
-    backgroundColor: '#22c55e',
+    backgroundColor: COLORS.accentGreen,
     paddingVertical: 16,
     borderRadius: 12,
     alignItems: 'center',
     marginTop: 24,
   },
   connectButtonText: {
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 18,
     fontWeight: '600',
   },
   // Scanner styles
   scannerContainer: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: COLORS.backgroundTerminal,
   },
   camera: {
     flex: 1,
@@ -357,12 +359,12 @@ const styles = StyleSheet.create({
     width: 250,
     height: 250,
     borderWidth: 2,
-    borderColor: '#4a9eff',
+    borderColor: COLORS.accentBlue,
     borderRadius: 16,
-    backgroundColor: 'transparent',
+    backgroundColor: COLORS.borderTransparent,
   },
   scannerHint: {
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 16,
     marginTop: 24,
     textAlign: 'center',
@@ -372,13 +374,13 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 60,
     alignSelf: 'center',
-    backgroundColor: 'rgba(255,255,255,0.2)',
+    backgroundColor: COLORS.cancelButtonOverlay,
     paddingVertical: 14,
     paddingHorizontal: 40,
     borderRadius: 12,
   },
   cancelButtonText: {
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 16,
     fontWeight: '600',
   },

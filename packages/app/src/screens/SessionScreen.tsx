@@ -22,6 +22,8 @@ import { TerminalView } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { InputBar } from '../components/InputBar';
 import { ICON_CLOSE } from '../constants/icons';
+import { COLORS } from '../constants/colors';
+
 
 // Enable LayoutAnimation on Android
 UIManager.setLayoutAnimationEnabledExperimental?.(true);
@@ -397,14 +399,14 @@ export function SessionScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0f0f1a',
+    backgroundColor: COLORS.backgroundPrimary,
   },
   modeToggle: {
     flexDirection: 'row',
     padding: 8,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: COLORS.backgroundSecondary,
     borderBottomWidth: 1,
-    borderBottomColor: '#2a2a4e',
+    borderBottomColor: COLORS.backgroundCard,
   },
   modeButton: {
     flex: 1,
@@ -413,14 +415,14 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   modeButtonActive: {
-    backgroundColor: '#4a9eff22',
+    backgroundColor: COLORS.accentBlueLight,
   },
   modeButtonText: {
-    color: '#666',
+    color: COLORS.textDim,
     fontSize: 14,
   },
   modeButtonTextActive: {
-    color: '#4a9eff',
+    color: COLORS.accentBlue,
     fontWeight: '600',
   },
   disconnectButton: {
@@ -428,7 +430,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   disconnectButtonText: {
-    color: '#ff4a4a',
+    color: COLORS.accentRed,
     fontSize: 16,
   },
   selectionBar: {
@@ -437,12 +439,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     padding: 8,
     paddingHorizontal: 16,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: COLORS.backgroundSecondary,
     borderBottomWidth: 1,
-    borderBottomColor: '#4a9eff44',
+    borderBottomColor: COLORS.accentBlueBorder,
   },
   selectionCount: {
-    color: '#4a9eff',
+    color: COLORS.accentBlue,
     fontSize: 14,
     fontWeight: '600',
   },
@@ -452,15 +454,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   selectionButton: {
-    backgroundColor: '#4a9eff22',
+    backgroundColor: COLORS.accentBlueLight,
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#4a9eff44',
+    borderColor: COLORS.accentBlueBorder,
   },
   selectionButtonText: {
-    color: '#4a9eff',
+    color: COLORS.accentBlue,
     fontSize: 13,
     fontWeight: '600',
   },
@@ -469,24 +471,24 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
   },
   selectionCancelText: {
-    color: '#ff4a4a',
+    color: COLORS.accentRed,
     fontSize: 16,
   },
   reconnectingBanner: {
-    backgroundColor: '#f59e0b33',
+    backgroundColor: COLORS.accentOrangeMedium,
     paddingVertical: 6,
     alignItems: 'center',
   },
   reconnectingText: {
-    color: '#f59e0b',
+    color: COLORS.accentOrange,
     fontSize: 13,
     fontWeight: '600',
   },
   warningBanner: {
-    backgroundColor: '#f59e0b22',
+    backgroundColor: COLORS.accentOrangeSubtle,
   },
   errorBanner: {
-    backgroundColor: '#ff4a4a22',
+    backgroundColor: COLORS.accentRedSubtle,
   },
   errorBannerContent: {
     flexDirection: 'row',
@@ -496,12 +498,12 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   warningBannerText: {
-    color: '#f59e0b',
+    color: COLORS.accentOrange,
     fontSize: 12,
     fontWeight: '600',
   },
   errorBannerText: {
-    color: '#ff4a4a',
+    color: COLORS.accentRed,
     fontSize: 12,
     fontWeight: '600',
   },

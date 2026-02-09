@@ -1,5 +1,7 @@
 import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, Platform, Linking, StyleProp, TextStyle } from 'react-native';
+import { COLORS } from '../constants/colors';
+
 
 // -- Content Block Types --
 
@@ -128,7 +130,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
 
     const lines = para.split('\n');
     const elements: React.ReactNode[] = [];
-    // Track if we have any View children (HR/blockquote), which require View wrapper instead of Text
+    // Track if we have any View children (HR/blockquote/table), which require View wrapper instead of Text
     let hasViewChildren = false;
 
     for (let i = 0; i < lines.length; i++) {
@@ -180,8 +182,11 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
       // Task list: - [x] or - [ ]
       const tlm = line.match(/^(\s*)[-*]\s+\[([ xX])\]\s+(.+)/);
       if (tlm) {
+        const indent = tlm[1].length;
+        const nestLevel = Math.floor(indent / 2);
+        const leftMargin = 2 + nestLevel * 16;
         const checked = tlm[2].toLowerCase() === 'x';
-        elements.push(<Text key={lk}>{checked ? '  \u2611 ' : '  \u2610 '}{renderInline(tlm[3], lk)}</Text>);
+        elements.push(<Text key={lk} selectable style={[messageTextStyle, { marginLeft: leftMargin }]}>{checked ? '  \u2611 ' : '  \u2610 '}{renderInline(tlm[3], lk)}</Text>);
         continue;
       }
 
@@ -268,8 +273,8 @@ export const md = StyleSheet.create({
   },
   inlineCode: {
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    backgroundColor: '#2a2a4e',
-    color: '#c4a5ff',
+    backgroundColor: COLORS.backgroundCard,
+    color: COLORS.accentPurpleCode,
     fontSize: 13,
     paddingHorizontal: 3,
     borderRadius: 3,
@@ -277,55 +282,55 @@ export const md = StyleSheet.create({
   h1: {
     fontSize: 17,
     fontWeight: '700',
-    color: '#f0f0f0',
+    color: COLORS.headerText1,
     lineHeight: 24,
   },
   h2: {
     fontSize: 16,
     fontWeight: '700',
-    color: '#e8e8e8',
+    color: COLORS.headerText2,
     lineHeight: 22,
   },
   h3: {
     fontSize: 15,
     fontWeight: '600',
-    color: '#e0e0e0',
+    color: COLORS.headerText3,
     lineHeight: 22,
   },
   codeBlock: {
-    backgroundColor: '#0a0a18',
+    backgroundColor: COLORS.backgroundCodeBlock,
     borderRadius: 8,
     padding: 10,
     borderWidth: 1,
-    borderColor: '#2a2a4e',
+    borderColor: COLORS.borderPrimary,
   },
   codeLang: {
-    color: '#666',
+    color: COLORS.textDim,
     fontSize: 10,
     marginBottom: 4,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     textTransform: 'uppercase',
   },
   codeText: {
-    color: '#a0d0ff',
+    color: COLORS.textCodeBlock,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontSize: 12,
     lineHeight: 18,
   },
   link: {
-    color: '#4a9eff',
+    color: COLORS.accentBlue,
     textDecorationLine: 'underline',
   },
   blockquote: {
     borderLeftWidth: 3,
-    borderLeftColor: '#4a9eff40',
+    borderLeftColor: COLORS.accentBlueTransparent40,
     paddingLeft: 12,
     marginVertical: 4,
     opacity: 0.9,
   },
   horizontalRule: {
     height: 1,
-    backgroundColor: '#2a2a4e',
+    backgroundColor: COLORS.borderPrimary,
     marginVertical: 8,
   },
 });
