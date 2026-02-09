@@ -20,9 +20,15 @@ const State = {
 };
 
 /**
- * Declarative noise filter patterns.
- * Each entry has a pattern (regex) and description explaining what it filters.
- * Optional condition function for additional logic beyond regex matching.
+ * @typedef {Object} NoisePattern
+ * @property {RegExp} pattern - Regex to test against trimmed line
+ * @property {string} description - Human-readable description of what this filters
+ * @property {(trimmed: string) => boolean} [condition] - Optional guard function that must return true
+ */
+/**
+ * Ordered baseline noise filters applied to each trimmed line before stateful parsing.
+ * State-dependent patterns (below) are evaluated after these have run.
+ * @type {NoisePattern[]}
  */
 const NOISE_PATTERNS = [
   {
@@ -257,8 +263,16 @@ const NOISE_PATTERNS = [
 ]
 
 /**
- * State-dependent noise patterns that require checking parser state.
- * These are evaluated after the basic patterns above.
+ * @typedef {Object} StateDependentPattern
+ * @property {RegExp} pattern - Regex to test against trimmed line
+ * @property {(trimmed: string, state: string) => boolean} condition - Guard function that must return true
+ * @property {string} description - Human-readable description of what this filters
+ */
+/**
+ * Additional, state-aware noise filters that are applied after NOISE_PATTERNS.
+ * These patterns depend on the current parser state and should be kept separate
+ * from the basic patterns so the base filters run first, then these refinements.
+ * @type {StateDependentPattern[]}
  */
 const STATE_DEPENDENT_PATTERNS = [
   {

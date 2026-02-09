@@ -3,6 +3,10 @@ import { View, Text, StyleSheet, Platform, Linking, StyleProp, TextStyle, Scroll
 import { COLORS } from '../constants/colors';
 
 
+// -- Constants --
+
+const TABLE_CELL_MIN_WIDTH = 80;
+
 // -- Content Block Types --
 
 type ContentBlock =
@@ -170,6 +174,7 @@ function renderTable(headers: string[], rows: string[][], keyBase: string, messa
       key={keyBase} 
       horizontal 
       showsHorizontalScrollIndicator={true}
+      accessibilityHint="Scroll horizontally to see full table"
       style={md.tableScrollContainer}
     >
       <View style={md.table}>
@@ -489,7 +494,7 @@ export const md = StyleSheet.create({
     borderBottomColor: '#2a2a4e',
   },
   tableCell: {
-    minWidth: 80,
+    minWidth: TABLE_CELL_MIN_WIDTH,
     padding: 8,
     borderRightWidth: 1,
     borderRightColor: '#2a2a4e',
