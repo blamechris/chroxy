@@ -109,6 +109,7 @@ export function TerminalView({ content, scrollViewRef }: TerminalViewProps) {
         onStartShouldSetResponder={() => true}
         onResponderGrant={handleTextTouchStart}
         onResponderRelease={handleTextTouchEnd}
+        onResponderTerminate={handleTextTouchEnd}
       >
         <Text selectable style={styles.terminalText}>{processed || 'Connected. Terminal output will appear here...'}</Text>
       </View>
