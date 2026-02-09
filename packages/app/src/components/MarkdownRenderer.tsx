@@ -112,6 +112,64 @@ export function renderInline(text: string, keyBase: string): React.ReactNode[] {
   return parts;
 }
 
+/** Parse markdown table: | col1 | col2 | ... */
+function parseTable(lines: string[], startIndex: number): { headers: string[]; rows: string[][]; endIndex: number } | null {
+  if (startIndex >= lines.length) return null;
+
+  // Check for table header row (must contain | separators)
+  const headerLine = lines[startIndex];
+  if (!headerLine.includes('|')) return null;
+
+  // Parse header row
+  const headers = headerLine.split('|').map(cell => cell.trim()).filter(cell => cell.length > 0);
+  if (headers.length === 0) return null;
+
+  // Check for separator row (e.g., |---|---|)
+  if (startIndex + 1 >= lines.length) return null;
+  const sepLine = lines[startIndex + 1];
+  if (!sepLine.match(/^\s*\|?\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/)) return null;
+
+  // Parse data rows
+  const rows: string[][] = [];
+  let i = startIndex + 2;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.includes('|')) break;
+    const cells = line.split('|').map(cell => cell.trim()).filter(cell => cell.length > 0);
+    if (cells.length === 0) break;
+    rows.push(cells);
+    i++;
+  }
+
+  return { headers, rows, endIndex: i - 1 };
+}
+
+/** Render a markdown table */
+function renderTable(headers: string[], rows: string[][], keyBase: string, messageTextStyle: StyleProp<TextStyle>): React.ReactNode {
+  return (
+    <View key={keyBase} style={md.table}>
+      {/* Header row */}
+      <View style={md.tableRow}>
+        {headers.map((header, idx) => (
+          <View key={`${keyBase}-h${idx}`} style={[md.tableCell, md.tableHeaderCell]}>
+            <Text style={md.tableHeaderText}>{header}</Text>
+          </View>
+        ))}
+      </View>
+      {/* Data rows */}
+      {rows.map((row, rowIdx) => (
+        <View key={`${keyBase}-r${rowIdx}`} style={md.tableRow}>
+          {row.map((cell, cellIdx) => (
+            <View key={`${keyBase}-r${rowIdx}-c${cellIdx}`} style={md.tableCell}>
+              <Text style={messageTextStyle}>{cell}</Text>
+            </View>
+          ))}
+        </View>
+      ))}
+    </View>
+  );
+}
+
 /** Render a text block with headers, lists, bold, and inline code.
  *  Splits on blank lines into separate paragraphs with visible spacing.
  *
@@ -128,7 +186,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
 
     const lines = para.split('\n');
     const elements: React.ReactNode[] = [];
-    // Track if we have any View children (HR/blockquote), which require View wrapper instead of Text
+    // Track if we have any View children (HR/blockquote/table), which require View wrapper instead of Text
     let hasViewChildren = false;
 
     for (let i = 0; i < lines.length; i++) {
@@ -137,6 +195,15 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
       if (i > 0 && !hasViewChildren) elements.push('\n');
 
       if (!line.trim()) continue;
+
+      // Table: | col1 | col2 | (check for table starting at this line)
+      const tableData = parseTable(lines, i);
+      if (tableData) {
+        hasViewChildren = true;
+        elements.push(renderTable(tableData.headers, tableData.rows, lk, messageTextStyle));
+        i = tableData.endIndex; // Skip processed lines
+        continue;
+      }
 
       // Header: # ## ###
       const hm = line.match(/^(#{1,3})\s+(.+)/);
@@ -185,17 +252,23 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
         continue;
       }
 
-      // Unordered list: - or *
+      // Unordered list with nesting support: - or * (capture leading whitespace for indentation)
       const ulm = line.match(/^(\s*)[-*]\s+(.+)/);
       if (ulm) {
-        elements.push(<Text key={lk}>{'  \u2022 '}{renderInline(ulm[2], lk)}</Text>);
+        const indent = ulm[1].length;
+        const nestLevel = Math.floor(indent / 2); // 2 spaces = 1 nesting level
+        const leftMargin = 2 + nestLevel * 16; // Base 2 + 16px per level
+        elements.push(<Text key={lk} style={{ marginLeft: leftMargin }}>{'  \u2022 '}{renderInline(ulm[2], lk)}</Text>);
         continue;
       }
 
-      // Ordered list: 1. 2. etc
+      // Ordered list with nesting support: 1. 2. etc (capture leading whitespace for indentation)
       const olm = line.match(/^(\s*)(\d+)\.\s+(.+)/);
       if (olm) {
-        elements.push(<Text key={lk}>{'  '}{olm[2]}{'. '}{renderInline(olm[3], lk)}</Text>);
+        const indent = olm[1].length;
+        const nestLevel = Math.floor(indent / 2); // 2 spaces = 1 nesting level
+        const leftMargin = 2 + nestLevel * 16; // Base 2 + 16px per level
+        elements.push(<Text key={lk} style={{ marginLeft: leftMargin }}>{'  '}{olm[2]}{'. '}{renderInline(olm[3], lk)}</Text>);
         continue;
       }
 
@@ -207,7 +280,7 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
     }
 
     if (elements.length > 0) {
-      // Use View wrapper when we have View children (HR/blockquote), Text wrapper otherwise
+      // Use View wrapper when we have View children (HR/blockquote/table), Text wrapper otherwise
       if (hasViewChildren) {
         paraElements.push(
           <View key={`${keyBase}-P${p}`}>
@@ -327,5 +400,32 @@ export const md = StyleSheet.create({
     height: 1,
     backgroundColor: '#2a2a4e',
     marginVertical: 8,
+  },
+  table: {
+    borderWidth: 1,
+    borderColor: '#2a2a4e',
+    borderRadius: 6,
+    overflow: 'hidden',
+    marginVertical: 8,
+  },
+  tableRow: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2a2a4e',
+  },
+  tableCell: {
+    flex: 1,
+    padding: 8,
+    borderRightWidth: 1,
+    borderRightColor: '#2a2a4e',
+    justifyContent: 'center',
+  },
+  tableHeaderCell: {
+    backgroundColor: '#1a1a2e',
+  },
+  tableHeaderText: {
+    color: '#4a9eff',
+    fontSize: 13,
+    fontWeight: '600',
   },
 });
