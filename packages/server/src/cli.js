@@ -113,6 +113,9 @@ program
   .option('--model <model>', 'Model to use (CLI mode)')
   .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve (CLI mode)')
   .option('--discovery-interval <seconds>', 'Auto-discovery polling interval in seconds (PTY mode)')
+  .option('--tunnel <mode>', 'Tunnel mode: quick (default), named, or none')
+  .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
+  .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
   .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
@@ -145,6 +148,9 @@ program
     if (options.discoveryInterval !== undefined) {
       cliOverrides.discoveryInterval = parseInt(options.discoveryInterval, 10)
     }
+    if (options.tunnel !== undefined) cliOverrides.tunnel = options.tunnel
+    if (options.tunnelName !== undefined) cliOverrides.tunnelName = options.tunnelName
+    if (options.tunnelHostname !== undefined) cliOverrides.tunnelHostname = options.tunnelHostname
     if (options.auth === false) cliOverrides.noAuth = true
 
     // Define defaults
@@ -210,10 +216,114 @@ program
     console.log(`   Config file: ${CONFIG_FILE}`)
     console.log(`   Port: ${config.port}`)
     console.log(`   tmux session: ${config.tmuxSession}`)
-    console.log(`   Tunnel: Cloudflare (automatic)`)
+    const tunnelMode = config.tunnel || 'quick'
+    if (tunnelMode === 'named') {
+      console.log(`   Tunnel: Named (${config.tunnelName || '?'} -> ${config.tunnelHostname || '?'})`)
+    } else if (tunnelMode === 'none') {
+      console.log(`   Tunnel: None (local only)`)
+    } else {
+      console.log(`   Tunnel: Quick (random URL)`)
+    }
     console.log(`   API token: ${config.apiToken.slice(0, 8)}...`)
     console.log('\nNote: CLI flags and environment variables can override these values.')
     console.log('Run \'npx chroxy start --verbose\' to see full config resolution.\n')
+  })
+
+/**
+ * chroxy tunnel setup — Interactive guided setup for Named Tunnels
+ */
+const tunnelCmd = program
+  .command('tunnel')
+  .description('Manage Cloudflare tunnel configuration')
+
+tunnelCmd
+  .command('setup')
+  .description('Set up a Named Tunnel for stable URLs')
+  .action(async () => {
+    console.log('\n🔧 Named Tunnel Setup\n')
+    console.log('A Named Tunnel gives you a stable URL that never changes.')
+    console.log('You need: a Cloudflare account + a domain on Cloudflare DNS.\n')
+
+    // Check cloudflared is installed
+    const { execSync } = await import('child_process')
+    try {
+      execSync('cloudflared --version', { stdio: 'pipe' })
+    } catch {
+      console.error('❌ cloudflared not found. Install with: brew install cloudflared')
+      process.exit(1)
+    }
+
+    // Step 1: Login
+    console.log('Step 1: Authenticate with Cloudflare\n')
+    console.log('This will open a browser window to log in to Cloudflare.')
+    const loginAnswer = await prompt('Ready to login? (Y/n): ')
+    if (loginAnswer.toLowerCase() === 'n') {
+      console.log('\nRun \'cloudflared tunnel login\' manually when ready.')
+      process.exit(0)
+    }
+
+    try {
+      execSync('cloudflared tunnel login', { stdio: 'inherit' })
+    } catch (err) {
+      console.error('\n❌ Login failed. Run \'cloudflared tunnel login\' manually.')
+      process.exit(1)
+    }
+
+    console.log('\n✅ Authenticated with Cloudflare\n')
+
+    // Step 2: Create tunnel
+    console.log('Step 2: Create a tunnel\n')
+    const tunnelName = (await prompt('Tunnel name (default \'chroxy\'): ')) || 'chroxy'
+
+    try {
+      execSync(`cloudflared tunnel create ${tunnelName}`, { stdio: 'inherit' })
+    } catch {
+      // Tunnel might already exist — try to continue
+      console.log(`\nTunnel '${tunnelName}' may already exist. Continuing...\n`)
+    }
+
+    // Step 3: DNS route
+    console.log('\nStep 3: Set up DNS route\n')
+    console.log('Enter the hostname you want to use (e.g., chroxy.example.com).')
+    console.log('The domain must be on Cloudflare DNS.\n')
+    const hostname = await prompt('Hostname: ')
+    if (!hostname) {
+      console.error('❌ Hostname is required.')
+      process.exit(1)
+    }
+
+    try {
+      execSync(`cloudflared tunnel route dns ${tunnelName} ${hostname}`, { stdio: 'inherit' })
+    } catch {
+      console.log('\nDNS route may already exist. Continuing...\n')
+    }
+
+    // Step 4: Save to config
+    console.log('\nStep 4: Saving configuration\n')
+
+    if (!existsSync(CONFIG_DIR)) {
+      mkdirSync(CONFIG_DIR, { recursive: true })
+    }
+
+    let config = {}
+    if (existsSync(CONFIG_FILE)) {
+      config = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
+    }
+
+    config.tunnel = 'named'
+    config.tunnelName = tunnelName
+    config.tunnelHostname = hostname
+
+    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2))
+
+    console.log('✅ Configuration saved to:', CONFIG_FILE)
+    console.log('')
+    console.log('Your stable URLs:')
+    console.log(`   HTTP:      https://${hostname}`)
+    console.log(`   WebSocket: wss://${hostname}`)
+    console.log('')
+    console.log('Run \'npx chroxy start\' to launch with your Named Tunnel.')
+    console.log('The QR code will always be the same — scan it once, connect forever.\n')
   })
 
 program.parse()

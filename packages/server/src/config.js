@@ -22,6 +22,9 @@ const CONFIG_SCHEMA = {
   resume: 'boolean',
   noAuth: 'boolean',
   discoveryInterval: 'number',
+  tunnel: 'string',
+  tunnelName: 'string',
+  tunnelHostname: 'string',
 }
 
 /**
@@ -161,6 +164,9 @@ function envKeyForConfig(key) {
     resume: 'CHROXY_RESUME',
     noAuth: 'CHROXY_NO_AUTH',
     discoveryInterval: 'CHROXY_DISCOVERY_INTERVAL',
+    tunnel: 'CHROXY_TUNNEL',
+    tunnelName: 'CHROXY_TUNNEL_NAME',
+    tunnelHostname: 'CHROXY_TUNNEL_HOSTNAME',
   }
   return envMap[key] || key.toUpperCase()
 }
