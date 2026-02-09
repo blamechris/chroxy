@@ -46,7 +46,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'attach_session', tmuxSession, name? }    — attach to a tmux session
  *
  * Server -> Client:
- *   { type: 'auth_ok', serverMode?, serverVersion?, cwd? } — auth succeeded with server context
+ *   { type: 'auth_ok', serverMode, serverVersion, cwd: string|null } — auth succeeded with server context
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli'|'terminal' }  — which backend mode is active
  *   { type: 'raw',          data: '...' }             — raw PTY output (terminal view)
