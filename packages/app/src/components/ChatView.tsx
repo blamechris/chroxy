@@ -693,7 +693,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: COLORS.borderSubtle,
-    shadowColor: COLORS.backgroundTerminal,
+    shadowColor: COLORS.shadowColor,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,
     shadowRadius: 4,
