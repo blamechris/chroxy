@@ -733,6 +733,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }
 
         case 'result': {
+          // Flush any buffered deltas before clearing streaming state (safety net
+          // for when stream_end was missed — mirrors the stream_end flush logic)
+          if (deltaFlushTimer) {
+            clearTimeout(deltaFlushTimer);
+          }
+          flushPendingDeltas();
           const resultPatch = {
             streamingMessageId: null as string | null,
             contextUsage: msg.usage
@@ -1049,6 +1055,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         streamingMessageId: 'pending',
       }));
     }
+
+    // Safety net: if no stream_start arrives (e.g., WS not open, Claude not ready),
+    // clear pending state and remove the thinking placeholder after 5 seconds.
+    setTimeout(() => {
+      if (get().streamingMessageId !== 'pending') return;
+      const sid = get().activeSessionId;
+      if (sid && get().sessionStates[sid]) {
+        updateActiveSession((ss) => ({
+          messages: filterThinking(ss.messages),
+          streamingMessageId: null,
+        }));
+      } else {
+        set((s) => ({
+          messages: filterThinking(s.messages),
+          streamingMessageId: null,
+        }));
+      }
+    }, 5000);
   },
 
   appendTerminalData: (data) => {
