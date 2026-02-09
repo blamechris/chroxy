@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { Text, ScrollView, StyleSheet, Platform, NativeSyntheticEvent, NativeScrollEvent, View } from 'react-native';
 
 // -- Props --
@@ -79,6 +79,14 @@ export function TerminalView({ content, scrollViewRef }: TerminalViewProps) {
     selectTimerRef.current = setTimeout(() => {
       isSelectingRef.current = false;
     }, USER_INTERACT_IDLE_MS);
+  }, []);
+
+  /** Clean up pending timers on unmount. */
+  useEffect(() => {
+    return () => {
+      if (interactTimerRef.current) clearTimeout(interactTimerRef.current);
+      if (selectTimerRef.current) clearTimeout(selectTimerRef.current);
+    };
   }, []);
 
   return (
