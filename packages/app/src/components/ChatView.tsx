@@ -408,7 +408,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
       {isPrompt && message.options && (
         <View style={styles.promptOptions}>
           {message.options.map((opt, i) => {
-            const isAnswered = !!message.answered;
+            const isAnswered = message.answered != null;
             const isChosen = message.answered === opt.value;
             return (
               <TouchableOpacity
