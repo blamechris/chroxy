@@ -85,9 +85,10 @@ export class SessionDirectoryError extends SessionError {
  *   session_created   { sessionId, name, cwd }
  *   session_destroyed { sessionId }
  *   session_updated   { sessionId, name }
+ *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
  */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000 } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -99,6 +100,10 @@ export class SessionManager extends EventEmitter {
     this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
     this._maxHistory = 100
+    this._autoDiscovery = autoDiscovery
+    this._discoveryIntervalMs = discoveryIntervalMs
+    this._discoveryTimer = null
+    this._lastDiscoveredSessions = new Set() // Track tmux session names we've seen
   }
 
   /**
@@ -220,6 +225,7 @@ export class SessionManager extends EventEmitter {
    * Destroy all sessions (shutdown cleanup).
    */
   destroyAll() {
+    this.stopAutoDiscovery()
     for (const [sessionId, entry] of this._sessions) {
       entry.session.destroy()
       this.emit('session_destroyed', { sessionId })
@@ -306,6 +312,67 @@ export class SessionManager extends EventEmitter {
     }
 
     return discovered.filter((s) => !attachedTmux.has(s.sessionName))
+  }
+
+  /**
+   * Start periodic auto-discovery of new tmux sessions.
+   * Only runs if autoDiscovery is enabled.
+   */
+  startAutoDiscovery() {
+    if (!this._autoDiscovery) return
+    if (this._discoveryTimer) return // Already running
+
+    console.log(`[SessionManager] Starting auto-discovery (interval: ${this._discoveryIntervalMs}ms)`)
+
+    // Initialize tracking with current discovered sessions
+    const initial = this.discoverSessions()
+    for (const session of initial) {
+      this._lastDiscoveredSessions.add(session.sessionName)
+    }
+
+    this._discoveryTimer = setInterval(() => {
+      this._pollForNewSessions()
+    }, this._discoveryIntervalMs)
+  }
+
+  /**
+   * Stop periodic auto-discovery.
+   */
+  stopAutoDiscovery() {
+    if (this._discoveryTimer) {
+      clearInterval(this._discoveryTimer)
+      this._discoveryTimer = null
+      console.log('[SessionManager] Stopped auto-discovery')
+    }
+  }
+
+  /**
+   * Poll for new tmux sessions and emit event if any are found.
+   * @private
+   */
+  _pollForNewSessions() {
+    const current = this.discoverSessions()
+    const newSessions = []
+
+    for (const session of current) {
+      if (!this._lastDiscoveredSessions.has(session.sessionName)) {
+        newSessions.push(session)
+        this._lastDiscoveredSessions.add(session.sessionName)
+      }
+    }
+
+    // Prune sessions that no longer exist
+    const currentNames = new Set(current.map((s) => s.sessionName))
+    for (const name of this._lastDiscoveredSessions) {
+      if (!currentNames.has(name)) {
+        this._lastDiscoveredSessions.delete(name)
+      }
+    }
+
+    if (newSessions.length > 0) {
+      console.log(`[SessionManager] Discovered ${newSessions.length} new tmux session(s): ${newSessions.map((s) => s.sessionName).join(', ')}`)
+      this.emit('new_sessions_discovered', { tmux: newSessions })
+    }
   }
 
   /**
