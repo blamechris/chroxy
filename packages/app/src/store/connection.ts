@@ -1087,11 +1087,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         case 'agent_completed': {
           const completeTargetId = msg.sessionId || get().activeSessionId;
           if (completeTargetId && get().sessionStates[completeTargetId]) {
-            updateSession(completeTargetId, (ss) => ({
-              activeAgents: ss.activeAgents.filter(
+            updateSession(completeTargetId, (ss) => {
+              const filtered = ss.activeAgents.filter(
                 (a) => a.toolUseId !== msg.toolUseId
-              ),
-            }));
+              );
+              // Skip no-op update if agent wasn't tracked (e.g. duplicate event)
+              if (filtered.length === ss.activeAgents.length) return {};
+              return { activeAgents: filtered };
+            });
           }
           break;
         }

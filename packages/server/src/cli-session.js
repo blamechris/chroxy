@@ -211,14 +211,6 @@ export class CliSession extends EventEmitter {
 
       if (this._destroying) return
 
-      // Emit completions for any tracked agents before clearing state
-      if (this._activeAgents.size > 0) {
-        for (const agent of this._activeAgents.values()) {
-          this.emit('agent_completed', { toolUseId: agent.toolUseId })
-        }
-        this._activeAgents.clear()
-      }
-
       // Safety net: if we were mid-message, close the stream
       if (this._isBusy && this._currentMessageId) {
         if (this._currentCtx?.hasStreamStarted) {
@@ -487,14 +479,6 @@ export class CliSession extends EventEmitter {
           this.emit('stream_end', { messageId })
         }
 
-        // Emit completions for any tracked background agents
-        if (this._activeAgents.size > 0) {
-          for (const agent of this._activeAgents.values()) {
-            this.emit('agent_completed', { toolUseId: agent.toolUseId })
-          }
-          this._activeAgents.clear()
-        }
-
         this.emit('result', {
           sessionId: data.session_id,
           cost: data.total_cost_usd,
@@ -517,10 +501,15 @@ export class CliSession extends EventEmitter {
     this._waitingForAnswer = false
     this._currentMessageId = null
     this._currentCtx = null
-    // Safety net: callers (close handler, result handler, destroy) emit
-    // agent_completed and clear the Map before calling this method, so this
-    // is typically a no-op. Kept as a defensive guard against future callers.
-    this._activeAgents.clear()
+    // Emit completions for any tracked agents so the app clears badges.
+    // Centralised here so every callsite (result, crash, timeout, interrupt,
+    // destroy) is safe by default.
+    if (this._activeAgents.size > 0) {
+      for (const agent of this._activeAgents.values()) {
+        this.emit('agent_completed', { toolUseId: agent.toolUseId })
+      }
+      this._activeAgents.clear()
+    }
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
       this._resultTimeout = null
@@ -933,15 +922,10 @@ export class CliSession extends EventEmitter {
       this._child = null
     }
 
-    // Emit completions for any tracked agents before removing listeners
-    if (this._activeAgents.size > 0) {
-      for (const agent of this._activeAgents.values()) {
-        this.emit('agent_completed', { toolUseId: agent.toolUseId })
-      }
-      this._activeAgents.clear()
-    }
+    // Emit completions for any tracked agents and clear busy state.
+    // Must happen before removeAllListeners() so events are delivered.
+    this._clearMessageState()
 
-    this._isBusy = false
     this._processReady = false
     this.removeAllListeners()
   }
