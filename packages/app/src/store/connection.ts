@@ -221,7 +221,7 @@ interface ConnectionState {
   terminalBuffer: string;
 
   // Actions
-  connect: (url: string, token: string, _retryCount?: number) => void;
+  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => void;
   disconnect: () => void;
   loadSavedConnection: () => Promise<void>;
   clearSavedConnection: () => Promise<void>;
@@ -347,6 +347,50 @@ let _pendingSwitchSessionId: string | null = null;
 // the user switches sessions during the 100ms batching window.
 const pendingDeltas = new Map<string, { sessionId: string | null; delta: string }>();
 let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Message queue: buffer messages while disconnected, drain on reconnect
+interface QueuedMessage {
+  type: string;
+  payload: unknown;
+  queuedAt: number;
+  maxAge: number;
+}
+
+const QUEUE_TTLS: Record<string, number> = {
+  input: 60_000,
+  interrupt: 5_000,
+  permission_response: 300_000,
+  user_question_response: 60_000,
+};
+const QUEUE_MAX_SIZE = 10;
+const QUEUE_EXCLUDED = new Set(['set_model', 'set_permission_mode', 'mode', 'resize']);
+const messageQueue: QueuedMessage[] = [];
+
+function enqueueMessage(type: string, payload: unknown): boolean {
+  if (QUEUE_EXCLUDED.has(type)) return false;
+  const maxAge = QUEUE_TTLS[type];
+  if (!maxAge) return false; // Unknown message type — don't queue
+  if (messageQueue.length >= QUEUE_MAX_SIZE) return false;
+  messageQueue.push({ type, payload, queuedAt: Date.now(), maxAge });
+  console.log(`[queue] Queued ${type} (${messageQueue.length}/${QUEUE_MAX_SIZE})`);
+  return true;
+}
+
+function drainMessageQueue(socket: WebSocket) {
+  if (messageQueue.length === 0) return;
+  const now = Date.now();
+  const valid = messageQueue.filter((m) => now - m.queuedAt < m.maxAge);
+  messageQueue.length = 0;
+  if (valid.length === 0) return;
+  console.log(`[queue] Draining ${valid.length} queued message(s)`);
+  for (const m of valid) {
+    try {
+      socket.send(JSON.stringify(m.payload));
+    } catch (err) {
+      console.warn(`[queue] Failed to send queued ${m.type}:`, err);
+    }
+  }
+}
 
 function flushPendingDeltas() {
   deltaFlushTimer = null;
@@ -524,14 +568,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // Auto-reconnect (socket.onclose) calls connect() with _retryCount=0, resetting
   // the retry budget — intentional, since established connections should recover
   // aggressively after transient drops (tunnel blips, server restarts, etc.).
-  connect: (url: string, token: string, _retryCount = 0) => {
+  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => {
+    const _retryCount = options?._retryCount ?? 0;
+    const silent = options?.silent ?? false;
     const MAX_RETRIES = 5;
     const RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000];
 
-    // Detect if connecting to a different server — clear old session data
+    // Detect if connecting to a different server — clear old session data + queue
     const currentUrl = get().wsUrl;
     if (_retryCount === 0 && currentUrl !== null && currentUrl !== url) {
       get().forgetSession();
+      messageQueue.length = 0;
     }
 
     // Robust reconnect detection: check if we've successfully connected to this URL before
@@ -581,7 +628,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               const delay = RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)];
               setTimeout(() => {
                 if (myAttemptId !== connectionAttemptId) return;
-                get().connect(url, token, _retryCount + 1);
+                get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
               }, delay);
             }
             return;
@@ -602,19 +649,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           console.log(`[ws] Retrying in ${delay}ms...`);
           setTimeout(() => {
             if (myAttemptId !== connectionAttemptId) return;
-            get().connect(url, token, _retryCount + 1);
+            get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
           }, delay);
         } else {
           set({ connectionPhase: 'disconnected' });
-          Alert.alert(
-            'Connection Failed',
-            'Could not reach the Chroxy server. Make sure it\'s running.',
-            [
-              { text: 'OK' },
-              { text: 'Forget Server', style: 'destructive', onPress: () => { void get().clearSavedConnection(); } },
-              { text: 'Retry', onPress: () => get().connect(url, token, 0) },
-            ],
-          );
+          if (!silent) {
+            Alert.alert(
+              'Connection Failed',
+              'Could not reach the Chroxy server. Make sure it\'s running.',
+              [
+                { text: 'OK' },
+                { text: 'Forget Server', style: 'destructive', onPress: () => { void get().clearSavedConnection(); } },
+                { text: 'Retry', onPress: () => get().connect(url, token) },
+              ],
+            );
+          }
         }
       });
 
@@ -684,7 +733,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         case 'auth_fail':
           socket.close();
           set({ connectionPhase: 'disconnected', socket: null });
-          Alert.alert('Auth Failed', msg.reason || 'Invalid token');
+          if (!silent) {
+            Alert.alert('Auth Failed', msg.reason || 'Invalid token');
+          }
           break;
 
         case 'server_mode':
@@ -1066,6 +1117,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           } else {
             set({ claudeReady: true });
           }
+          // Drain queued messages on reconnect
+          const readySocket = get().socket;
+          if (readySocket && readySocket.readyState === WebSocket.OPEN) {
+            drainMessageQueue(readySocket);
+          }
           break;
         }
 
@@ -1326,6 +1382,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   disconnect: () => {
+    // Bump attempt ID to cancel any pending health checks / retry timers
+    connectionAttemptId++;
     disconnectedAttemptId = connectionAttemptId;
     const { socket } = get();
     if (socket) {
@@ -1342,6 +1400,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       deltaFlushTimer = null;
     }
     pendingDeltas.clear();
+    // Clear message queue on explicit disconnect
+    messageQueue.length = 0;
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
     // so reconnect to the same server can show previous chat history.
     // Only clear connection-level state.
@@ -1474,38 +1534,42 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   sendInput: (input) => {
     const { socket } = get();
+    const payload = { type: 'input', data: input };
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'input', data: input }));
+      socket.send(JSON.stringify(payload));
       return true;
     }
-    return false;
+    return enqueueMessage('input', payload);
   },
 
   sendInterrupt: () => {
     const { socket } = get();
+    const payload = { type: 'interrupt' };
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'interrupt' }));
+      socket.send(JSON.stringify(payload));
       return true;
     }
-    return false;
+    return enqueueMessage('interrupt', payload);
   },
 
   sendPermissionResponse: (requestId: string, decision: string) => {
     const { socket } = get();
+    const payload = { type: 'permission_response', requestId, decision };
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'permission_response', requestId, decision }));
+      socket.send(JSON.stringify(payload));
       return true;
     }
-    return false;
+    return enqueueMessage('permission_response', payload);
   },
 
   sendUserQuestionResponse: (answer: string) => {
     const { socket } = get();
+    const payload = { type: 'user_question_response', answer };
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'user_question_response', answer }));
+      socket.send(JSON.stringify(payload));
       return true;
     }
-    return false;
+    return enqueueMessage('user_question_response', payload);
   },
 
   markPromptAnswered: (messageId: string, answer: string) => {

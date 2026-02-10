@@ -8,6 +8,7 @@ import {
   Alert,
   ScrollView,
   Keyboard,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
@@ -44,19 +45,38 @@ export function ConnectScreen() {
   const [token, setToken] = useState('');
   const [showManual, setShowManual] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
+  const [autoConnecting, setAutoConnecting] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const insets = useSafeAreaInsets();
   const scanLock = useRef(false);
   const scrollRef = useRef<ScrollView>(null);
 
   const connect = useConnectionStore((state) => state.connect);
+  const connectionPhase = useConnectionStore((state) => state.connectionPhase);
   const savedConnection = useConnectionStore((state) => state.savedConnection);
   const loadSavedConnection = useConnectionStore((state) => state.loadSavedConnection);
   const clearSavedConnection = useConnectionStore((state) => state.clearSavedConnection);
 
+  // Load saved connection and auto-connect on mount
   useEffect(() => {
-    loadSavedConnection();
+    let mounted = true;
+    loadSavedConnection().then(() => {
+      if (!mounted) return;
+      const saved = useConnectionStore.getState().savedConnection;
+      if (saved) {
+        setAutoConnecting(true);
+        connect(saved.url, saved.token, { silent: true });
+      }
+    });
+    return () => { mounted = false; };
   }, []);
+
+  // Fall back to normal ConnectScreen if auto-connect fails
+  useEffect(() => {
+    if (autoConnecting && connectionPhase === 'disconnected') {
+      setAutoConnecting(false);
+    }
+  }, [connectionPhase, autoConnecting]);
 
   const isLocalUrl = (u: string) => {
     const lower = u.toLowerCase();
@@ -124,6 +144,27 @@ export function ConnectScreen() {
       scrollRef.current?.scrollToEnd({ animated: true });
     }, 300);
   };
+
+  if (autoConnecting) {
+    return (
+      <View style={styles.autoConnectContainer}>
+        <Text style={styles.logo}>{ICON_SATELLITE}</Text>
+        <ActivityIndicator size="large" color={COLORS.accentBlue} style={styles.autoConnectSpinner} />
+        <Text style={styles.autoConnectText}>
+          Connecting to {savedConnection ? formatUrl(savedConnection.url) : 'server'}...
+        </Text>
+        <TouchableOpacity
+          style={styles.autoConnectCancel}
+          onPress={() => {
+            setAutoConnecting(false);
+            useConnectionStore.getState().disconnect();
+          }}
+        >
+          <Text style={styles.autoConnectCancelText}>Cancel</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   if (showScanner) {
     return (
@@ -384,5 +425,31 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontSize: 16,
     fontWeight: '600',
+  },
+  // Auto-connect styles
+  autoConnectContainer: {
+    flex: 1,
+    backgroundColor: COLORS.backgroundPrimary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  autoConnectSpinner: {
+    marginTop: 24,
+    marginBottom: 16,
+  },
+  autoConnectText: {
+    color: COLORS.textMuted,
+    fontSize: 16,
+    textAlign: 'center',
+  },
+  autoConnectCancel: {
+    marginTop: 32,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+  },
+  autoConnectCancelText: {
+    color: COLORS.accentBlue,
+    fontSize: 16,
   },
 });
