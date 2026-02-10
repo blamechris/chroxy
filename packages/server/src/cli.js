@@ -490,6 +490,7 @@ program
     const LOCK_FILE = join(CONFIG_DIR, 'update.lock')
     const KNOWN_GOOD_FILE = join(CONFIG_DIR, 'known-good-ref')
 
+    let lockAcquired = false
     try {
       // 1. Pre-checks
       console.log('\n[deploy] Pre-checks...')
@@ -499,7 +500,8 @@ program
       if (gitStatus) {
         console.error('[deploy] Working tree is not clean. Commit or stash changes first.')
         console.error(gitStatus)
-        process.exit(1)
+        process.exitCode = 1
+        return
       }
 
       // Check lock file
@@ -509,7 +511,8 @@ program
         try {
           process.kill(parseInt(lockPid, 10), 0)
           console.error(`[deploy] Another deploy is in progress (pid: ${lockPid})`)
-          process.exit(1)
+          process.exitCode = 1
+          return
         } catch {
           // Dead lock — clean it up
           unlinkSync(LOCK_FILE)
@@ -519,6 +522,7 @@ program
       // Write lock file
       if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true })
       writeFileSync(LOCK_FILE, String(process.pid))
+      lockAcquired = true
 
       // 2. Validate JS files
       console.log('[deploy] Validating JavaScript files...')
@@ -544,7 +548,8 @@ program
 
       if (validationErrors > 0) {
         console.error(`[deploy] ${validationErrors} file(s) failed validation`)
-        process.exit(1)
+        process.exitCode = 1
+        return
       }
       console.log(`[deploy] ${jsFiles.filter(Boolean).length || 0} file(s) validated`)
 
@@ -562,7 +567,8 @@ program
             console.log('[deploy] Tests passed')
           } catch {
             console.error('[deploy] Tests failed')
-            process.exit(1)
+            process.exitCode = 1
+            return
           }
         }
       } else {
@@ -584,13 +590,15 @@ program
       // 5. Signal supervisor
       if (!existsSync(PID_FILE)) {
         console.error('[deploy] Supervisor PID file not found. Is chroxy running with supervisor mode?')
-        process.exit(1)
+        process.exitCode = 1
+        return
       }
 
       const supervisorPid = parseInt(readFileSync(PID_FILE, 'utf-8').trim(), 10)
       if (isNaN(supervisorPid)) {
         console.error('[deploy] Invalid supervisor PID')
-        process.exit(1)
+        process.exitCode = 1
+        return
       }
 
       // Verify supervisor is alive
@@ -598,7 +606,8 @@ program
         process.kill(supervisorPid, 0)
       } catch {
         console.error(`[deploy] Supervisor (pid ${supervisorPid}) is not running`)
-        process.exit(1)
+        process.exitCode = 1
+        return
       }
 
       console.log(`[deploy] Signaling supervisor (pid ${supervisorPid}) to restart...`)
@@ -606,8 +615,10 @@ program
       console.log('[deploy] Deploy signal sent. Server will restart momentarily.\n')
 
     } finally {
-      // Always clean up lock file
-      try { unlinkSync(LOCK_FILE) } catch {}
+      // Clean up lock file if we acquired it
+      if (lockAcquired) {
+        try { unlinkSync(LOCK_FILE) } catch {}
+      }
     }
   })
 
