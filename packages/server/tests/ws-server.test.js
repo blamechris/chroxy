@@ -1992,3 +1992,40 @@ describe('background session sync (_broadcastToSession)', () => {
     ws.close()
   })
 })
+
+describe('public broadcast method', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('broadcast() sends to all authenticated clients', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Use public broadcast to send discovered_sessions
+    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'test-session', cwd: '/tmp', pid: 123 }] })
+    await new Promise(r => setTimeout(r, 100))
+
+    const discoveryMsg = messages.find(m => m.type === 'discovered_sessions')
+    assert.ok(discoveryMsg, 'Client should receive broadcast message')
+    assert.equal(discoveryMsg.tmux.length, 1)
+    assert.equal(discoveryMsg.tmux[0].sessionName, 'test-session')
+
+    ws.close()
+  })
+})
