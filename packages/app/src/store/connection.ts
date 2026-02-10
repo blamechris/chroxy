@@ -212,7 +212,7 @@ interface ConnectionState {
   clearTerminalBuffer: () => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   sendInput: (input: string) => boolean;
-  sendInterrupt: () => void;
+  sendInterrupt: () => boolean;
   sendPermissionResponse: (requestId: string, decision: string) => boolean;
   sendUserQuestionResponse: (answer: string) => boolean;
   markPromptAnswered: (messageId: string, answer: string) => void;
@@ -1313,7 +1313,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'interrupt' }));
+      return true;
     }
+    return false;
   },
 
   sendPermissionResponse: (requestId: string, decision: string) => {

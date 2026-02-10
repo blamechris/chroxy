@@ -75,6 +75,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'history_replay_start', sessionId }      — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
  *   { type: 'raw_background', data: '...' }           — raw PTY data for chat-mode clients
+ *   { type: 'status_update', model, cost, ... }       — Claude Code status bar metadata
  *   { type: 'user_question', toolUseId, questions }   — AskUserQuestion prompt from Claude
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
