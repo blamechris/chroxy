@@ -8,7 +8,7 @@ import {
   Alert,
   LayoutChangeEvent,
 } from 'react-native';
-import { useConnectionStore, SessionInfo } from '../store/connection';
+import { useConnectionStore, SessionInfo, SessionHealth } from '../store/connection';
 import { ICON_SQUARE, ICON_PLUS } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
@@ -16,24 +16,32 @@ import { COLORS } from '../constants/colors';
 interface SessionPillProps {
   session: SessionInfo;
   isActive: boolean;
+  health: SessionHealth;
   onPress: () => void;
   onLongPress: () => void;
   onLayout: (e: LayoutChangeEvent) => void;
 }
 
-function SessionPill({ session, isActive, onPress, onLongPress, onLayout }: SessionPillProps) {
+function SessionPill({ session, isActive, health, onPress, onLongPress, onLayout }: SessionPillProps) {
   const isPty = session.type === 'pty';
+  const isCrashed = health === 'crashed';
   return (
     <TouchableOpacity
-      style={[styles.pill, isActive && styles.pillActive, isPty && styles.pillPty, isActive && isPty && styles.pillPtyActive]}
+      style={[
+        styles.pill,
+        isActive && styles.pillActive,
+        isPty && styles.pillPty,
+        isActive && isPty && styles.pillPtyActive,
+        isCrashed && styles.pillCrashed,
+      ]}
       onPress={onPress}
       onLongPress={onLongPress}
       onLayout={onLayout}
       activeOpacity={0.7}
     >
-      {session.isBusy && <View style={styles.busyDot} />}
+      {isCrashed ? <View style={styles.crashDot} /> : session.isBusy && <View style={styles.busyDot} />}
       {isPty && <Text style={[styles.ptyIcon, isActive && styles.ptyIconActive]}>{ICON_SQUARE} </Text>}
-      <Text style={[styles.pillText, isActive && styles.pillTextActive]} numberOfLines={1}>
+      <Text style={[styles.pillText, isActive && styles.pillTextActive, isCrashed && styles.pillTextCrashed]} numberOfLines={1}>
         {session.name}
       </Text>
     </TouchableOpacity>
@@ -47,6 +55,7 @@ interface SessionPickerProps {
 export function SessionPicker({ onCreatePress }: SessionPickerProps) {
   const sessions = useConnectionStore((s) => s.sessions);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
+  const sessionStates = useConnectionStore((s) => s.sessionStates);
   const switchSession = useConnectionStore((s) => s.switchSession);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const renameSession = useConnectionStore((s) => s.renameSession);
@@ -95,6 +104,31 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
   }, [activeSessionId, scrollToSession]);
 
   const handleLongPress = (session: SessionInfo) => {
+    const health = sessionStates[session.sessionId]?.health || 'healthy';
+    const isCrashed = health === 'crashed';
+
+    if (isCrashed) {
+      Alert.alert(
+        `${session.name} (crashed)`,
+        'This session has crashed and is no longer running.',
+        [
+          {
+            text: 'Delete Crashed Session',
+            style: 'destructive',
+            onPress: () => {
+              if (sessions.length <= 1) {
+                Alert.alert('Cannot Delete', 'You must have at least one session.');
+                return;
+              }
+              destroySession(session.sessionId);
+            },
+          },
+          { text: 'Cancel', style: 'cancel' },
+        ],
+      );
+      return;
+    }
+
     Alert.alert(
       session.name,
       `CWD: ${session.cwd}`,
@@ -169,6 +203,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
             key={session.sessionId}
             session={session}
             isActive={session.sessionId === activeSessionId}
+            health={sessionStates[session.sessionId]?.health || 'healthy'}
             onPress={() => switchSession(session.sessionId)}
             onLongPress={() => handleLongPress(session)}
             onLayout={(e) => handlePillLayout(session.sessionId, e)}
@@ -234,6 +269,19 @@ const styles = StyleSheet.create({
   },
   pillTextActive: {
     color: COLORS.accentBlue,
+  },
+  pillCrashed: {
+    borderColor: COLORS.accentRedBorder,
+  },
+  pillTextCrashed: {
+    color: COLORS.accentRed,
+  },
+  crashDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.accentRed,
+    marginRight: 6,
   },
   busyDot: {
     width: 6,

@@ -122,6 +122,11 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].isIdle : s.isIdle;
   });
+  const activeSessionHealth = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].health : 'healthy';
+  });
+  const destroySession = useConnectionStore((s) => s.destroySession);
   const serverErrors = useConnectionStore((s) => s.serverErrors);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
   const isCliMode = serverMode === 'cli';
@@ -332,6 +337,42 @@ export function SessionScreen() {
           <Text style={styles.reconnectingText}>
             {connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
           </Text>
+        </View>
+      )}
+
+      {/* Crash banner for active session */}
+      {activeSessionHealth === 'crashed' && (
+        <View style={[styles.reconnectingBanner, styles.errorBanner]}>
+          <View style={styles.errorBannerContent}>
+            <Text style={styles.errorBannerText} numberOfLines={2}>
+              Session crashed. Delete this session to free resources.
+            </Text>
+            <TouchableOpacity
+              onPress={() => {
+                if (sessions.length <= 1) {
+                  Alert.alert('Cannot Delete', 'You must have at least one session.');
+                  return;
+                }
+                Alert.alert(
+                  'Delete Crashed Session',
+                  'This session has crashed. Delete it?',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Delete',
+                      style: 'destructive',
+                      onPress: () => { if (activeSessionId) destroySession(activeSessionId); },
+                    },
+                  ],
+                );
+              }}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityRole="button"
+              accessibilityLabel="Delete crashed session"
+            >
+              <Text style={styles.errorBannerText}>{ICON_CLOSE}</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 
