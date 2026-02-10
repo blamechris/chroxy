@@ -501,10 +501,18 @@ export class SessionManager extends EventEmitter {
    * Handles both CliSession and PtySession events.
    */
   _wireSessionEvents(sessionId, session) {
-    const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'result', 'error', 'user_question', 'permission_request']
+    const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'result', 'error', 'user_question']
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
         this._recordHistory(sessionId, event, data)
+        this.emit('session_event', { sessionId, event, data })
+      })
+    }
+
+    // Transient events — forwarded but not recorded in history (not replayed on reconnect)
+    const TRANSIENT_EVENTS = ['permission_request', 'agent_spawned', 'agent_completed']
+    for (const event of TRANSIENT_EVENTS) {
+      session.on(event, (data) => {
         this.emit('session_event', { sessionId, event, data })
       })
     }
@@ -517,14 +525,6 @@ export class SessionManager extends EventEmitter {
     // PtySession emits 'status_update' for Claude Code status bar metadata (not recorded in history)
     session.on('status_update', (data) => {
       this.emit('session_event', { sessionId, event: 'status_update', data })
-    })
-
-    // Agent lifecycle events — transient, not recorded in history
-    session.on('agent_spawned', (data) => {
-      this.emit('session_event', { sessionId, event: 'agent_spawned', data })
-    })
-    session.on('agent_completed', (data) => {
-      this.emit('session_event', { sessionId, event: 'agent_completed', data })
     })
 
     // PtySession emits 'session_crashed' when health checks detect a crashed Claude process
