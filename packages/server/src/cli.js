@@ -119,6 +119,7 @@ program
   .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
   .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
   .option('--no-supervisor', 'Disable supervisor mode (direct server, no auto-restart)')
+  .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
     // Load config file
@@ -157,6 +158,7 @@ program
     if (options.tunnelName !== undefined) cliOverrides.tunnelName = options.tunnelName
     if (options.tunnelHostname !== undefined) cliOverrides.tunnelHostname = options.tunnelHostname
     if (options.auth === false) cliOverrides.noAuth = true
+    if (options.legacyCli) cliOverrides.legacyCli = true
 
     // Define defaults
     const defaults = {

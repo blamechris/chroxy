@@ -2,6 +2,7 @@ import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
 import { statSync } from 'fs'
 import { CliSession } from './cli-session.js'
+import { SdkSession } from './sdk-session.js'
 import { PtySession } from './pty-session.js'
 import { discoverTmuxSessions } from './session-discovery.js'
 
@@ -88,11 +89,12 @@ export class SessionDirectoryError extends SessionError {
  *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
  */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000 } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, useLegacyCli = false } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
     this._apiToken = apiToken || null
+    this._useLegacyCli = !!useLegacyCli
     this._defaultCwd = defaultCwd || process.cwd()
     this._defaultModel = defaultModel || null
     this._defaultPermissionMode = defaultPermissionMode || 'approve'
@@ -136,13 +138,19 @@ export class SessionManager extends EventEmitter {
     const sessionId = randomUUID().slice(0, 8)
     const sessionName = name || `Session ${this._sessions.size + 1}`
 
-    const session = new CliSession({
-      cwd: resolvedCwd,
-      model: resolvedModel,
-      permissionMode: resolvedPermissionMode,
-      port: this._port,
-      apiToken: this._apiToken,
-    })
+    const session = this._useLegacyCli
+      ? new CliSession({
+          cwd: resolvedCwd,
+          model: resolvedModel,
+          permissionMode: resolvedPermissionMode,
+          port: this._port,
+          apiToken: this._apiToken,
+        })
+      : new SdkSession({
+          cwd: resolvedCwd,
+          model: resolvedModel,
+          permissionMode: resolvedPermissionMode,
+        })
 
     const entry = {
       session,
@@ -493,7 +501,7 @@ export class SessionManager extends EventEmitter {
    * Handles both CliSession and PtySession events.
    */
   _wireSessionEvents(sessionId, session) {
-    const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'result', 'error', 'user_question']
+    const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'result', 'error', 'user_question', 'permission_request']
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
         this._recordHistory(sessionId, event, data)
