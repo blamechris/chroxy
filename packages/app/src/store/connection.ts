@@ -13,7 +13,7 @@ const AUTO_RECONNECT_DELAY = 1500;
 const ERROR_RECONNECT_DELAY = 2000;
 
 /** Strip ANSI escape codes for plain text display */
-function stripAnsi(str: string): string {
+export function stripAnsi(str: string): string {
   return str.replace(
     // eslint-disable-next-line no-control-regex
     /\x1b\[[0-9;?]*[A-Za-z~]|\x1b\][^\x07]*\x07?|\x1b[()#][A-Z0-2]|\x1b[A-Za-z]|\x9b[0-9;?]*[A-Za-z~]/g,
@@ -22,7 +22,7 @@ function stripAnsi(str: string): string {
 }
 
 /** Filter out thinking placeholder messages */
-function filterThinking(messages: ChatMessage[]): ChatMessage[] {
+export function filterThinking(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter((m) => m.id !== 'thinking');
 }
 
@@ -142,7 +142,7 @@ export type ConnectionPhase =
 export const selectShowSession = (s: ConnectionState): boolean =>
   s.connectionPhase !== 'disconnected';
 
-function createEmptySessionState(): SessionState {
+export function createEmptySessionState(): SessionState {
   return {
     messages: [],
     streamingMessageId: null,
@@ -321,7 +321,7 @@ let lastConnectedUrl: string | null = null;
 
 // Monotonic message ID counter (avoids Math.random() collisions)
 let messageIdCounter = 0;
-function nextMessageId(prefix = 'msg'): string {
+export function nextMessageId(prefix = 'msg'): string {
   return `${prefix}-${++messageIdCounter}-${Date.now()}`;
 }
 

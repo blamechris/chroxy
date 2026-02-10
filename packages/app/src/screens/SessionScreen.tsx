@@ -66,7 +66,7 @@ function useKeyboardHeight() {
 }
 
 /** Shared transcript formatter for copy/share actions */
-function formatTranscript(selected: ChatMessage[]): string {
+export function formatTranscript(selected: ChatMessage[]): string {
   return selected
     .filter((m) => m.type !== 'thinking')
     .map((m) => {

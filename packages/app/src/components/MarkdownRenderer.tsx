@@ -37,7 +37,7 @@ type ContentBlock =
 /** Split content into alternating text and fenced code blocks.
  *  Code fences must start at the beginning of a line -- triple backticks
  *  inside prose (e.g. "Code blocks (```)") are NOT treated as fences. */
-function splitContentBlocks(rawContent: string): ContentBlock[] {
+export function splitContentBlocks(rawContent: string): ContentBlock[] {
   // Normalize CRLF -> LF so fence regex works on all line endings
   const content = rawContent.replace(/\r\n/g, '\n');
   const blocks: ContentBlock[] = [];
@@ -87,7 +87,7 @@ function openURL(url: string) {
  *  `level` is 0-based (e.g., 0 = top-level). Each level adds `SPACES_PER_INDENT_LEVEL` spaces.
  *  Levels deeper than `MAX_LIST_INDENT_LEVEL` are rendered with the same indentation as the
  *  maximum level to save space on small screens. */
-function indent(level: number): string {
+export function indent(level: number): string {
   const cappedLevel = Math.min(level, MAX_LIST_INDENT_LEVEL);
   return ' '.repeat(cappedLevel * SPACES_PER_INDENT_LEVEL);
 }
@@ -149,7 +149,7 @@ export function renderInline(text: string, keyBase: string): React.ReactNode[] {
 }
 
 /** Check if a line is a valid table row (has pipe separators and at least one non-empty cell) */
-function isValidTableRow(line: string): boolean {
+export function isValidTableRow(line: string): boolean {
   if (!line.includes('|')) return false;
   const rawCells = line.split('|').map(cell => cell.trim());
   // Remove leading/trailing empty cells (from leading/trailing pipes)
@@ -160,7 +160,7 @@ function isValidTableRow(line: string): boolean {
 }
 
 /** Parse markdown table: | col1 | col2 | ... */
-function parseTable(lines: string[], startIndex: number): { headers: string[]; rows: string[][]; columnWidths: number[]; endIndex: number } | null {
+export function parseTable(lines: string[], startIndex: number): { headers: string[]; rows: string[][]; columnWidths: number[]; endIndex: number } | null {
   if (startIndex >= lines.length) return null;
 
   // Check for table header row (must contain | separators)
