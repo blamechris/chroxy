@@ -397,6 +397,8 @@ export class CliSession extends EventEmitter {
           }
 
           case 'content_block_stop': {
+            // toolInputChunks is falsy ('') after overflow discard, so the
+            // AskUserQuestion parse path is naturally skipped on overflow.
             if (ctx && ctx.currentToolName === 'AskUserQuestion' && ctx.toolInputChunks) {
               try {
                 const input = JSON.parse(ctx.toolInputChunks)

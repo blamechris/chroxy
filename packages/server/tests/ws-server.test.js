@@ -1744,3 +1744,64 @@ describe('user_question_response forwarding (multi-session)', () => {
     ws.close()
   })
 })
+
+describe('user_question_response forwarding (single-session)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('forwards user_question_response to cliSession', async () => {
+    const mockSession = createMockSession()
+    let receivedAnswer = null
+    mockSession.respondToQuestion = (answer) => { receivedAnswer = answer }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    send(ws, { type: 'user_question_response', answer: 'Option A' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(receivedAnswer, 'Option A', 'Answer should be forwarded to cliSession')
+
+    ws.close()
+  })
+
+  it('ignores user_question_response with non-string answer', async () => {
+    const mockSession = createMockSession()
+    let called = false
+    mockSession.respondToQuestion = () => { called = true }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    send(ws, { type: 'user_question_response', answer: 123 })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(called, false, 'respondToQuestion should NOT be called for non-string answer')
+
+    ws.close()
+  })
+})
