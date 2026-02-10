@@ -1,9 +1,9 @@
-import { fork } from 'child_process'
+import { fork, execFileSync } from 'child_process'
 import { createServer } from 'http'
 import { dirname, resolve, join } from 'path'
 import { createInterface } from 'readline'
 import { fileURLToPath } from 'url'
-import { writeFileSync, unlinkSync, mkdirSync } from 'fs'
+import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { TunnelManager } from './tunnel.js'
 import { waitForTunnel } from './tunnel-check.js'
@@ -110,6 +110,14 @@ export async function startSupervisor(config) {
     : 10
   const RESTART_BACKOFFS = [2000, 2000, 3000, 3000, 5000, 5000, 8000, 8000, 10000, 10000]
 
+  // Deploy rollback tracking
+  let lastDeployTimestamp = 0
+  let deployFailureCount = 0
+  const DEPLOY_CRASH_WINDOW = 60000  // Crash within 60s of deploy = deploy failure
+  const DEPLOY_FAILURE_WINDOW = 300000 // 5 min window for counting failures
+  const MAX_DEPLOY_FAILURES = 3
+  const KNOWN_GOOD_FILE = join(homedir(), '.chroxy', 'known-good-ref')
+
   const metrics = {
     startedAt: Date.now(),
     childStartedAt: null,
@@ -163,6 +171,7 @@ export async function startSupervisor(config) {
         log.info('Server child is ready')
         restartCount = 0
         metrics.consecutiveRestarts = 0
+        deployFailureCount = 0
         stopStandbyServer()
       }
 
@@ -186,6 +195,27 @@ export async function startSupervisor(config) {
       metrics.consecutiveRestarts = restartCount
       metrics.lastExitReason = { code, signal }
       metrics.childStartedAt = null
+
+      // Deploy crash detection: if child crashes within 60s of a deploy restart,
+      // count it as a deploy failure. 3 failures in 5 min triggers rollback.
+      const timeSinceDeploy = Date.now() - lastDeployTimestamp
+      if (lastDeployTimestamp > 0 && timeSinceDeploy < DEPLOY_CRASH_WINDOW) {
+        deployFailureCount++
+        log.error(`Deploy crash detected (${deployFailureCount}/${MAX_DEPLOY_FAILURES}) — child lasted ${Math.round(childUptimeMs / 1000)}s`)
+
+        if (deployFailureCount >= MAX_DEPLOY_FAILURES) {
+          log.error('Max deploy failures reached, attempting rollback')
+          if (rollbackToKnownGood()) {
+            deployFailureCount = 0
+            lastDeployTimestamp = 0
+            restartCount = 0
+            startStandbyServer()
+            setTimeout(startChild, 2000)
+            return
+          }
+          log.error('Rollback failed, continuing with normal restart')
+        }
+      }
 
       if (restartCount > MAX_RESTARTS) {
         log.error(`Max restarts (${MAX_RESTARTS}) exceeded, giving up`)
@@ -293,9 +323,37 @@ export async function startSupervisor(config) {
     }
   }
 
+  /**
+   * Rollback to the last known-good git commit.
+   * Called when deploy crashes exceed MAX_DEPLOY_FAILURES.
+   * @returns {boolean} true if rollback succeeded
+   */
+  function rollbackToKnownGood() {
+    if (!existsSync(KNOWN_GOOD_FILE)) {
+      log.error('No known-good ref file found, cannot rollback')
+      return false
+    }
+
+    try {
+      const ref = readFileSync(KNOWN_GOOD_FILE, 'utf-8').trim()
+      if (!ref || ref.length < 7) {
+        log.error(`Invalid known-good ref: "${ref}"`)
+        return false
+      }
+      log.info(`Rolling back to known-good commit: ${ref.slice(0, 8)}`)
+      execFileSync('git', ['checkout', ref], { stdio: 'pipe' })
+      log.info('Rollback successful')
+      return true
+    } catch (err) {
+      log.error(`Rollback failed: ${err.message}`)
+      return false
+    }
+  }
+
   // SIGUSR2 handler: deploy command signals supervisor to restart child
   process.on('SIGUSR2', () => {
     log.info('SIGUSR2 received (deploy restart)')
+    lastDeployTimestamp = Date.now()
     restartChild()
   })
 
