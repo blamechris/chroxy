@@ -267,9 +267,23 @@ describe('message queue', () => {
 
   it('does not queue excluded message types (setModel)', () => {
     // setModel calls socket.send directly and doesn't use enqueueMessage,
-    // so it just silently no-ops when disconnected. Test that sendInput
-    // (which does queue) works differently from setModel.
-    const result = useConnectionStore.getState().sendInput('test');
-    expect(result).toBe('queued');
+    // so it just silently no-ops when disconnected. Verify that calling
+    // setModel does not consume queue capacity.
+    const store = useConnectionStore.getState();
+
+    // Fill the queue to 9 items.
+    for (let i = 0; i < 9; i++) {
+      expect(store.sendInput(`msg-${i}`)).toBe('queued');
+    }
+
+    // This excluded action should not be added to the queue.
+    store.setModel('test-model');
+
+    // We should still be able to enqueue the 10th item.
+    expect(store.sendInput('msg-9')).toBe('queued');
+
+    // And the 11th should fail, proving only 10 items were queued and
+    // setModel did not count towards the limit.
+    expect(store.sendInput('overflow')).toBe(false);
   });
 });

@@ -373,7 +373,10 @@ export async function startSupervisor(config) {
 
       log.info(`Rolling back to known-good commit: ${ref.slice(0, 8)}`)
       execFileSync('git', ['checkout', ref], { stdio: 'pipe', cwd: repoRoot })
-      log.info(`Rollback successful. To recover: git checkout ${originalBranch}`)
+      const recoverHint = originalBranch && originalBranch !== 'HEAD'
+        ? `git checkout ${originalBranch}`
+        : 'git reflog  # find your previous HEAD and git checkout <ref>'
+      log.info(`Rollback successful. To recover: ${recoverHint}`)
       return true
     } catch (err) {
       const stderr = err.stderr?.toString?.().trim()
