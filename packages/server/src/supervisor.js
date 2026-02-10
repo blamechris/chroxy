@@ -3,7 +3,7 @@ import { createServer } from 'http'
 import { dirname, resolve, join } from 'path'
 import { createInterface } from 'readline'
 import { fileURLToPath } from 'url'
-import { writeFileSync, unlinkSync, existsSync } from 'fs'
+import { writeFileSync, unlinkSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { TunnelManager } from './tunnel.js'
 import { waitForTunnel } from './tunnel-check.js'
@@ -90,8 +90,13 @@ export async function startSupervisor(config) {
   console.log('')
 
   // 4. Write PID file for deploy command signaling
-  writeFileSync(PID_FILE, String(process.pid))
-  log.info(`PID file written: ${PID_FILE} (pid: ${process.pid})`)
+  try {
+    mkdirSync(dirname(PID_FILE), { recursive: true })
+    writeFileSync(PID_FILE, String(process.pid))
+    log.info(`PID file written: ${PID_FILE} (pid: ${process.pid})`)
+  } catch (err) {
+    log.error(`Failed to write PID file ${PID_FILE}: ${err.message}`)
+  }
 
   // 5. Child process management
   let child = null
