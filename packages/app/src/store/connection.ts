@@ -574,10 +574,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const MAX_RETRIES = 5;
     const RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000];
 
-    // Detect if connecting to a different server — clear old session data
+    // Detect if connecting to a different server — clear old session data + queue
     const currentUrl = get().wsUrl;
     if (_retryCount === 0 && currentUrl !== null && currentUrl !== url) {
       get().forgetSession();
+      messageQueue.length = 0;
     }
 
     // Robust reconnect detection: check if we've successfully connected to this URL before
