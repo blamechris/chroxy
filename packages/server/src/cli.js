@@ -413,4 +413,98 @@ program
     console.log(`The session will be auto-discovered.\n`)
   })
 
+/**
+ * chroxy dev — Development mode with supervisor auto-restart
+ *
+ * Like `chroxy start` but always uses the supervisor process for auto-restart,
+ * regardless of tunnel type. Designed for self-modification workflows: Claude
+ * modifies server code, `chroxy deploy` restarts, the phone stays connected.
+ */
+program
+  .command('dev')
+  .description('Start in development mode (supervisor + auto-restart)')
+  .option('-c, --config <path>', 'Path to config file', CONFIG_FILE)
+  .option('-r, --resume', 'Resume an existing Claude Code session instead of starting fresh')
+  .option('--cwd <path>', 'Working directory for Claude (CLI mode)')
+  .option('--model <model>', 'Model to use (CLI mode)')
+  .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve (CLI mode)')
+  .option('--max-restarts <count>', 'Max supervisor restart attempts before exit (default: 10)')
+  .option('--tunnel <mode>', 'Tunnel mode: quick (default), named, or none')
+  .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
+  .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
+  .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
+  .option('-v, --verbose', 'Show detailed config sources and validation info')
+  .action(async (options) => {
+    // Load config file
+    let fileConfig = {}
+    if (existsSync(options.config)) {
+      fileConfig = JSON.parse(readFileSync(options.config, 'utf-8'))
+    } else if (options.config !== CONFIG_FILE) {
+      console.error(`\u274c Config file not found: ${options.config}`)
+      process.exit(1)
+    } else {
+      console.error('\u274c No config found. Run \'npx chroxy init\' first.')
+      process.exit(1)
+    }
+
+    validateConfig(fileConfig, options.verbose)
+
+    // Build CLI overrides from command-line flags
+    const cliOverrides = {}
+    if (options.resume !== undefined) cliOverrides.resume = options.resume
+    if (options.cwd !== undefined) cliOverrides.cwd = options.cwd
+    if (options.model !== undefined) cliOverrides.model = options.model
+    if (options.allowedTools !== undefined) {
+      cliOverrides.allowedTools = options.allowedTools.split(',').map((t) => t.trim())
+    }
+    if (options.maxRestarts !== undefined) {
+      cliOverrides.maxRestarts = parseInt(options.maxRestarts, 10)
+    }
+    if (options.tunnel !== undefined) cliOverrides.tunnel = options.tunnel
+    if (options.tunnelName !== undefined) cliOverrides.tunnelName = options.tunnelName
+    if (options.tunnelHostname !== undefined) cliOverrides.tunnelHostname = options.tunnelHostname
+    if (options.legacyCli) cliOverrides.legacyCli = true
+
+    const defaults = {
+      port: 8765,
+      tmuxSession: 'claude-code',
+      shell: process.env.SHELL || '/bin/zsh',
+      resume: false,
+      noAuth: false,
+    }
+
+    const config = mergeConfig({
+      fileConfig,
+      cliOverrides,
+      defaults,
+      verbose: options.verbose,
+    })
+
+    const validation = validateConfig(config, options.verbose)
+    if (!validation.valid && options.verbose) {
+      console.log('[config] Continuing despite warnings...\n')
+    }
+
+    if (config.apiToken) process.env.API_TOKEN = config.apiToken
+    if (config.port) process.env.PORT = String(config.port)
+    if (config.tmuxSession) process.env.TMUX_SESSION = config.tmuxSession
+    if (config.shell) process.env.SHELL_CMD = config.shell
+
+    // Dev mode does not support --terminal (PTY) mode
+    if (config.terminal) {
+      console.error('\u274c chroxy dev does not support --terminal mode')
+      process.exit(1)
+    }
+
+    // Dev mode always uses supervisor, regardless of tunnel type
+    if (process.env.CHROXY_SUPERVISED === '1') {
+      // Already running as a supervised child — start directly
+      const { startCliServer } = await import('./server-cli.js')
+      await startCliServer(config)
+    } else {
+      const { startSupervisor } = await import('./supervisor.js')
+      await startSupervisor(config)
+    }
+  })
+
 program.parse()
