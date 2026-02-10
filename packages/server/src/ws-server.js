@@ -49,6 +49,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'user_question_response', answer }         — respond to AskUserQuestion prompt
  *
  * Server -> Client:
+ *   All session-scoped messages include a `sessionId` field for background sync.
  *   { type: 'auth_ok', serverMode, serverVersion, cwd: string|null } — auth succeeded with server context
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli'|'terminal' }  — which backend mode is active
@@ -866,15 +867,16 @@ export class WsServer {
           break
 
         case 'raw':
-          // Forward raw PTY data to terminal-mode clients on this session
-          this._broadcastToSession(sessionId, { type: 'raw', data }, (client) => client.mode === 'terminal')
-          // Also send as raw_background to chat-mode clients (keeps terminal buffer current)
-          this._broadcastToSession(sessionId, { type: 'raw_background', data }, (client) => client.mode === 'chat')
+          // Forward raw PTY data only to clients actively viewing this session (bandwidth-heavy)
+          this._broadcastToSession(sessionId, { type: 'raw', data }, (client) => client.mode === 'terminal' && client.activeSessionId === sessionId)
+          // Also send as raw_background to chat-mode clients on this session
+          this._broadcastToSession(sessionId, { type: 'raw_background', data }, (client) => client.mode === 'chat' && client.activeSessionId === sessionId)
           break
 
         case 'status_update':
+          // Status bar metadata only goes to clients on this session (global claudeStatus would get confused)
           console.log(this._formatStatusLog(data))
-          this._broadcastToSession(sessionId, { type: 'status_update', ...data })
+          this._broadcastToSession(sessionId, { type: 'status_update', ...data }, (client) => client.activeSessionId === sessionId)
           break
 
         case 'user_question':
@@ -1173,11 +1175,17 @@ export class WsServer {
     }
   }
 
-  /** Broadcast a message only to clients whose activeSessionId matches */
+  /**
+   * Broadcast a session-scoped message to all authenticated clients.
+   * Tags the message with `sessionId` so clients can route it to the correct
+   * session state. The optional `filter` callback restricts delivery (e.g.,
+   * raw PTY data is only sent to clients actively viewing the session).
+   */
   _broadcastToSession(sessionId, message, filter = () => true) {
+    const tagged = { ...message, sessionId }
     for (const [ws, client] of this.clients) {
-      if (client.authenticated && client.activeSessionId === sessionId && filter(client) && ws.readyState === 1) {
-        this._send(ws, message)
+      if (client.authenticated && filter(client) && ws.readyState === 1) {
+        this._send(ws, tagged)
       }
     }
   }
