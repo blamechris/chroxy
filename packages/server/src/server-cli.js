@@ -38,6 +38,9 @@ export async function startCliServer(config) {
     console.log('')
   }
 
+  // Check for saved session state (from graceful restart via drain protocol)
+  const isSupervised = process.env.CHROXY_SUPERVISED === '1'
+
   // 1. Create session manager
   const discoveryIntervalMs = config.discoveryInterval ? config.discoveryInterval * 1000 : 45000
   const useLegacyCli = !!config.legacyCli
@@ -52,30 +55,40 @@ export async function startCliServer(config) {
     useLegacyCli,
   })
 
-  // 2. Auto-discover tmux sessions running Claude
+  // 2. Try restoring session state from a previous graceful restart
   let defaultSessionId
-  const discovered = sessionManager.discoverSessions()
-  if (discovered.length > 0) {
-    console.log(`[cli] Found ${discovered.length} tmux session(s) running Claude`)
-    for (const tmux of discovered) {
-      try {
-        const sid = await sessionManager.attachSession({ tmuxSession: tmux.sessionName, name: tmux.sessionName })
-        if (!defaultSessionId) defaultSessionId = sid
-        console.log(`[cli] Attached to tmux session: ${tmux.sessionName}`)
-      } catch (err) {
-        console.error(`[cli] Failed to attach tmux session '${tmux.sessionName}':`, err)
-      }
+  if (isSupervised) {
+    defaultSessionId = sessionManager.restoreState()
+    if (defaultSessionId) {
+      console.log(`[cli] Restored sessions from previous server instance`)
     }
   }
 
-  // Fall back to a default CLI session if no sessions attached (none found or all failed)
+  // 3. Auto-discover tmux sessions running Claude (if no restore)
   if (!defaultSessionId) {
+    const discovered = sessionManager.discoverSessions()
     if (discovered.length > 0) {
-      console.log('[cli] All tmux attachments failed, creating default CLI session')
-    } else {
-      console.log('[cli] No tmux sessions found, creating default CLI session')
+      console.log(`[cli] Found ${discovered.length} tmux session(s) running Claude`)
+      for (const tmux of discovered) {
+        try {
+          const sid = await sessionManager.attachSession({ tmuxSession: tmux.sessionName, name: tmux.sessionName })
+          if (!defaultSessionId) defaultSessionId = sid
+          console.log(`[cli] Attached to tmux session: ${tmux.sessionName}`)
+        } catch (err) {
+          console.error(`[cli] Failed to attach tmux session '${tmux.sessionName}':`, err)
+        }
+      }
     }
-    defaultSessionId = sessionManager.createSession({ name: 'Default' })
+
+    // Fall back to a default CLI session if no sessions attached (none found or all failed)
+    if (!defaultSessionId) {
+      if (discovered.length > 0) {
+        console.log('[cli] All tmux attachments failed, creating default CLI session')
+      } else {
+        console.log('[cli] No tmux sessions found, creating default CLI session')
+      }
+      defaultSessionId = sessionManager.createSession({ name: 'Default' })
+    }
   }
 
   let wsServer
@@ -219,4 +232,7 @@ export async function startCliServer(config) {
 
   process.on('SIGINT', () => shutdown('SIGINT'))
   process.on('SIGTERM', () => shutdown('SIGTERM'))
+
+  // Return references for supervised child drain protocol
+  return { sessionManager, wsServer }
 }

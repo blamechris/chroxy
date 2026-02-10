@@ -28,13 +28,13 @@ import { resolveModelId } from './models.js'
  *   agent_completed    { toolUseId }
  */
 export class SdkSession extends EventEmitter {
-  constructor({ cwd, model, permissionMode } = {}) {
+  constructor({ cwd, model, permissionMode, resumeSessionId } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.model = model || null
     this.permissionMode = permissionMode || 'approve'
 
-    this._sdkSessionId = null
+    this._sdkSessionId = resumeSessionId || null
     this._sessionId = null
     this._query = null
     this._isBusy = false
