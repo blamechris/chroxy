@@ -599,7 +599,9 @@ program
           execFileSync('git', ['tag', '-d', old], { stdio: 'pipe' })
         }
         if (stale.length > 0) console.log(`[deploy] Pruned ${stale.length} old known-good tag(s)`)
-      } catch {}
+      } catch (err) {
+        console.warn(`[deploy] Warning: failed to prune old tags: ${err.message}`)
+      }
 
       // 5. Signal supervisor
       if (!existsSync(PID_FILE)) {

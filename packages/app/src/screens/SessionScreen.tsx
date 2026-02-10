@@ -261,7 +261,7 @@ export function SessionScreen() {
     } else {
       sent = sendInput(hasTerminal ? value + '\r' : value);
     }
-    if (sent) {
+    if (sent === 'sent') {
       markPromptAnswered(messageId, value);
     }
   };

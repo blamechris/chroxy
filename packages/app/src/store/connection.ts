@@ -376,6 +376,14 @@ function enqueueMessage(type: string, payload: unknown): 'queued' | false {
   return 'queued';
 }
 
+/** @internal Exposed for testing only */
+export const _testQueueInternals = {
+  getQueue: () => messageQueue,
+  enqueue: enqueueMessage,
+  drain: drainMessageQueue,
+  clear: () => { messageQueue.length = 0; },
+};
+
 function drainMessageQueue(socket: WebSocket) {
   if (messageQueue.length === 0) return;
   const now = Date.now();
