@@ -104,6 +104,7 @@ export async function startSupervisor(config) {
   let standbyServer = null
   let shuttingDown = false
   let draining = false
+  let childReady = false
   const DRAIN_TIMEOUT = 30000
   const MAX_RESTARTS = (typeof config.maxRestarts === 'number' && config.maxRestarts >= 0)
     ? config.maxRestarts
@@ -171,6 +172,7 @@ export async function startSupervisor(config) {
     child.on('message', (msg) => {
       if (msg.type === 'ready') {
         log.info('Server child is ready')
+        childReady = true
         restartCount = 0
         metrics.consecutiveRestarts = 0
         stopStandbyServer()
@@ -202,6 +204,7 @@ export async function startSupervisor(config) {
       if (deployResetTimer) { clearTimeout(deployResetTimer); deployResetTimer = null }
       const childUptimeMs = metrics.childStartedAt ? Date.now() - metrics.childStartedAt : 0
       child = null
+      childReady = false
       if (shuttingDown) return
 
       log.info(`Server child exited (code ${code}, signal ${signal})`)
@@ -363,9 +366,14 @@ export async function startSupervisor(config) {
         return false
       }
 
+      let originalBranch = 'unknown'
+      try {
+        originalBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf-8', cwd: repoRoot }).trim()
+      } catch {}
+
       log.info(`Rolling back to known-good commit: ${ref.slice(0, 8)}`)
       execFileSync('git', ['checkout', ref], { stdio: 'pipe', cwd: repoRoot })
-      log.info('Rollback successful')
+      log.info(`Rollback successful. To recover: git checkout ${originalBranch}`)
       return true
     } catch (err) {
       const stderr = err.stderr?.toString?.().trim()
@@ -377,6 +385,14 @@ export async function startSupervisor(config) {
 
   // SIGUSR2 handler: deploy command signals supervisor to restart child
   process.on('SIGUSR2', () => {
+    if (draining) {
+      log.info('SIGUSR2 received but drain already in progress, ignoring')
+      return
+    }
+    if (!childReady) {
+      log.info('SIGUSR2 received but child not ready yet, ignoring')
+      return
+    }
     log.info('SIGUSR2 received (deploy restart)')
     lastDeployTimestamp = Date.now()
     restartChild()

@@ -231,10 +231,10 @@ interface ConnectionState {
   appendTerminalData: (data: string) => void;
   clearTerminalBuffer: () => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
-  sendInput: (input: string) => boolean;
-  sendInterrupt: () => boolean;
-  sendPermissionResponse: (requestId: string, decision: string) => boolean;
-  sendUserQuestionResponse: (answer: string) => boolean;
+  sendInput: (input: string) => 'sent' | 'queued' | false;
+  sendInterrupt: () => 'sent' | 'queued' | false;
+  sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
+  sendUserQuestionResponse: (answer: string) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
@@ -366,14 +366,14 @@ const QUEUE_MAX_SIZE = 10;
 const QUEUE_EXCLUDED = new Set(['set_model', 'set_permission_mode', 'mode', 'resize']);
 const messageQueue: QueuedMessage[] = [];
 
-function enqueueMessage(type: string, payload: unknown): boolean {
+function enqueueMessage(type: string, payload: unknown): 'queued' | false {
   if (QUEUE_EXCLUDED.has(type)) return false;
   const maxAge = QUEUE_TTLS[type];
   if (!maxAge) return false; // Unknown message type — don't queue
   if (messageQueue.length >= QUEUE_MAX_SIZE) return false;
   messageQueue.push({ type, payload, queuedAt: Date.now(), maxAge });
   console.log(`[queue] Queued ${type} (${messageQueue.length}/${QUEUE_MAX_SIZE})`);
-  return true;
+  return 'queued';
 }
 
 function drainMessageQueue(socket: WebSocket) {
@@ -1537,7 +1537,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const payload = { type: 'input', data: input };
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(payload));
-      return true;
+      return 'sent';
     }
     return enqueueMessage('input', payload);
   },
@@ -1547,7 +1547,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const payload = { type: 'interrupt' };
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(payload));
-      return true;
+      return 'sent';
     }
     return enqueueMessage('interrupt', payload);
   },
@@ -1557,7 +1557,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const payload = { type: 'permission_response', requestId, decision };
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(payload));
-      return true;
+      return 'sent';
     }
     return enqueueMessage('permission_response', payload);
   },
@@ -1567,7 +1567,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const payload = { type: 'user_question_response', answer };
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(payload));
-      return true;
+      return 'sent';
     }
     return enqueueMessage('user_question_response', payload);
   },

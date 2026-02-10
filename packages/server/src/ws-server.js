@@ -61,7 +61,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
- *   { type: 'auth_ok', serverMode, serverVersion, cwd: string|null } — auth succeeded with server context
+ *   { type: 'auth_ok', serverMode, serverVersion, serverCommit, cwd: string|null } — auth succeeded with server context
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli'|'terminal' }  — which backend mode is active
  *   { type: 'raw',          data: '...' }             — raw PTY output (terminal view)
@@ -426,6 +426,14 @@ export class WsServer {
     // Ignore duplicate auth messages from already-authenticated clients (e.g. auto-auth mode)
     if (msg.type === 'auth') return
 
+    // During drain, only allow permission_response and user_question_response
+    if (this._draining && msg.type !== 'permission_response' && msg.type !== 'user_question_response') {
+      if (msg.type === 'input') {
+        this._send(ws, { type: 'server_status', message: 'Server is restarting, please wait...' })
+      }
+      return
+    }
+
     // Route based on server mode
     if (this.sessionManager) {
       this._handleSessionMessage(ws, client, msg)
@@ -438,14 +446,6 @@ export class WsServer {
 
   /** Handle messages in multi-session mode */
   async _handleSessionMessage(ws, client, msg) {
-    // During drain, only allow permission_response and user_question_response
-    if (this._draining && msg.type !== 'permission_response' && msg.type !== 'user_question_response') {
-      if (msg.type === 'input') {
-        this._send(ws, { type: 'server_status', message: 'Server is restarting, please wait...' })
-      }
-      return
-    }
-
     switch (msg.type) {
       case 'input': {
         const text = msg.data
