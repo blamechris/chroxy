@@ -33,6 +33,9 @@ import { COLORS } from '../constants/colors';
 const EMPTY_AGENTS: AgentInfo[] = [];
 const EMPTY_PROMPTS: { tool: string; prompt: string }[] = [];
 
+// Message sent when user taps "Approve" on a plan approval card
+const PLAN_APPROVAL_MESSAGE = 'Go ahead with the plan';
+
 // Enable LayoutAnimation on Android
 UIManager.setLayoutAnimationEnabledExperimental?.(true);
 
@@ -266,8 +269,8 @@ export function SessionScreen() {
   const clearPlanState = useConnectionStore((s) => s.clearPlanState);
 
   const handleApprovePlan = useCallback(() => {
-    addUserMessage('Go ahead with the plan');
-    sendInput('Go ahead with the plan');
+    addUserMessage(PLAN_APPROVAL_MESSAGE);
+    sendInput(PLAN_APPROVAL_MESSAGE);
     clearPlanState();
   }, [addUserMessage, sendInput, clearPlanState]);
 
