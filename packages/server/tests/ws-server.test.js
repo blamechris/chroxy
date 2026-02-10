@@ -2214,3 +2214,193 @@ describe('agent idle/busy notifications', () => {
     ws.close()
   })
 })
+
+describe('WsServer drain behavior (multi-session mode)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  /** Create a mock SessionManager with one session for drain tests */
+  function createDrainSessionManager() {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+
+    const mockSession = createMockSession()
+    mockSession.cwd = '/tmp/project'
+    mockSession.respondToPermission = () => {}
+    mockSession.respondToQuestion = () => {}
+    sessionsMap.set('sess-1', {
+      session: mockSession,
+      name: 'Session 1',
+      cwd: '/tmp/project',
+      type: 'cli',
+      isBusy: false,
+    })
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    })
+
+    return { manager, sessionsMap }
+  }
+
+  it('rejects input messages while draining', async () => {
+    const { manager } = createDrainSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+    messages.length = 0
+
+    // Enable draining via public API
+    server.setDraining(true)
+
+    // Send an input message — should be rejected with server_status
+    send(ws, { type: 'input', data: 'hello' })
+    const statusMsg = await waitForMessage(messages, 'server_status', 1000)
+    assert.ok(statusMsg, 'Should receive server_status when input is rejected during drain')
+    assert.match(statusMsg.message, /restarting/i, 'Status message should mention restarting')
+
+    ws.close()
+  })
+
+  it('allows permission_response while draining', async () => {
+    const { manager, sessionsMap } = createDrainSessionManager()
+    const entry = sessionsMap.get('sess-1')
+    let permissionResolved = false
+    entry.session.respondToPermission = () => { permissionResolved = true }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+
+    // Enable draining
+    server.setDraining(true)
+
+    // Send permission_response — should still be forwarded
+    send(ws, { type: 'permission_response', requestId: 'perm-1', decision: 'allow' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(permissionResolved, true, 'permission_response should be forwarded even during drain')
+
+    ws.close()
+  })
+
+  it('allows user_question_response while draining', async () => {
+    const { manager, sessionsMap } = createDrainSessionManager()
+    const entry = sessionsMap.get('sess-1')
+    let questionResolved = false
+    entry.session.respondToQuestion = () => { questionResolved = true }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+
+    // Enable draining
+    server.setDraining(true)
+
+    // Send user_question_response — should still be forwarded
+    send(ws, { type: 'user_question_response', answer: 'yes' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(questionResolved, true, 'user_question_response should be forwarded even during drain')
+
+    ws.close()
+  })
+
+  it('blocks non-critical messages silently while draining', async () => {
+    const { manager } = createDrainSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+    messages.length = 0
+
+    // Enable draining
+    server.setDraining(true)
+
+    // Send non-input messages that should be silently dropped
+    send(ws, { type: 'list_sessions' })
+    send(ws, { type: 'set_model', model: 'claude-sonnet-4-20250514' })
+
+    // Wait and check no session_list was returned
+    await new Promise(r => setTimeout(r, 200))
+
+    const sessionList = messages.find(m => m.type === 'session_list')
+    assert.equal(sessionList, undefined, 'list_sessions should be silently blocked during drain')
+
+    ws.close()
+  })
+
+  it('setDraining(false) restores normal operation', async () => {
+    const { manager, sessionsMap } = createDrainSessionManager()
+    const entry = sessionsMap.get('sess-1')
+    let receivedInput = null
+    entry.session.sendMessage = (text) => { receivedInput = text }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+
+    // Enable then disable draining
+    server.setDraining(true)
+    server.setDraining(false)
+
+    // Input should now work again
+    send(ws, { type: 'input', data: 'hello after drain' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(receivedInput, 'hello after drain', 'Input should be accepted after drain is disabled')
+
+    ws.close()
+  })
+})
