@@ -440,10 +440,10 @@ program
     if (existsSync(options.config)) {
       fileConfig = JSON.parse(readFileSync(options.config, 'utf-8'))
     } else if (options.config !== CONFIG_FILE) {
-      console.error(`\u274c Config file not found: ${options.config}`)
+      console.error(`❌ Config file not found: ${options.config}`)
       process.exit(1)
     } else {
-      console.error('\u274c No config found. Run \'npx chroxy init\' first.')
+      console.error('❌ No config found. Run \'npx chroxy init\' first.')
       process.exit(1)
     }
 
@@ -492,7 +492,7 @@ program
 
     // Dev mode does not support --terminal (PTY) mode
     if (config.terminal) {
-      console.error('\u274c chroxy dev does not support --terminal mode')
+      console.error('❌ chroxy dev does not support terminal (PTY) mode; remove "terminal" from your config')
       process.exit(1)
     }
 
