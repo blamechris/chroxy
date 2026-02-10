@@ -534,7 +534,7 @@ export class CliSession extends EventEmitter {
     this._currentCtx = null
     // NOTE: _inPlanMode is NOT reset here — it spans multiple turns
     // (EnterPlanMode in one turn, ExitPlanMode in a later turn).
-    // It's reset only after plan_ready is emitted, or on destroy().
+    // It's reset after plan_ready is emitted and in destroy().
     this._planAllowedPrompts = null
     // Emit completions for any tracked agents so the app clears badges.
     // Centralised here so every callsite (result, crash, timeout, interrupt,
@@ -960,6 +960,7 @@ export class CliSession extends EventEmitter {
     // Emit completions for any tracked agents and clear busy state.
     // Must happen before removeAllListeners() so events are delivered.
     this._clearMessageState()
+    this._inPlanMode = false
 
     this._processReady = false
     this.removeAllListeners()
