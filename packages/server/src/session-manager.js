@@ -466,6 +466,15 @@ export class SessionManager extends EventEmitter {
           timestamp: Date.now(),
         })
         break
+
+      case 'user_question':
+        this._pushHistory(history, {
+          type: 'user_question',
+          toolUseId: data.toolUseId,
+          questions: data.questions,
+          timestamp: Date.now(),
+        })
+        break
     }
   }
 
