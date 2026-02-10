@@ -108,7 +108,11 @@ export function SettingsBar({
   return (
     <View style={styles.container}>
       <TouchableOpacity onPress={onToggle} style={styles.summaryRow} activeOpacity={0.7}>
-        <View style={[styles.statusDot, { backgroundColor: isIdle ? COLORS.accentGreen : COLORS.accentOrange }]} />
+        <View
+          style={[styles.statusDot, { backgroundColor: isIdle ? COLORS.accentGreen : COLORS.accentOrange }]}
+          accessibilityLabel={isIdle ? 'Agent idle' : 'Agent busy'}
+          accessibilityRole="image"
+        />
         <Text style={styles.summaryText} numberOfLines={1}>
           {summaryParts.join(' \u00B7 ') || 'Settings'}
         </Text>
