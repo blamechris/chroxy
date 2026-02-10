@@ -1333,6 +1333,11 @@ export class WsServer {
     })
   }
 
+  /** Set the draining state. When draining, new input is rejected. */
+  setDraining(draining) {
+    this._draining = !!draining
+  }
+
   /** Count of authenticated, connected clients */
   get authenticatedClientCount() {
     let count = 0

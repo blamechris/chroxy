@@ -64,6 +64,11 @@ export class SdkSession extends EventEmitter {
     return this._sessionId
   }
 
+  /** Public accessor for the SDK session ID used to resume conversations. */
+  get resumeSessionId() {
+    return this._sdkSessionId
+  }
+
   get isRunning() {
     return this._isBusy
   }

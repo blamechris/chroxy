@@ -77,7 +77,7 @@ async function handleDrain(timeout) {
 
   // Broadcast restarting status to connected clients
   if (_wsServer) {
-    _wsServer._draining = true
+    _wsServer.setDraining(true)
     _wsServer.broadcastStatus('Server restarting...')
   }
 
