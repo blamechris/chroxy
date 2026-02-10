@@ -601,6 +601,18 @@ export function ChatView({
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string } | null>(null);
 
+  // Auto-scroll when plan approval card appears
+  useEffect(() => {
+    if (isPlanPending && !isSelectingRef.current) {
+      // Small delay to let the card render before scrolling
+      const timer = setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef and isSelectingRef are stable refs
+  }, [isPlanPending]);
+
   const handleOpenDetail = (toolName: string, content: string) => {
     setToolDetail({ toolName, content });
   };
