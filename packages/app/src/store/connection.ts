@@ -708,6 +708,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         case 'discovered_sessions':
           if (Array.isArray(msg.tmux)) {
             set({ discoveredSessions: msg.tmux });
+            if (msg.tmux.length > 0) {
+              const names = msg.tmux.map((s: DiscoveredSession) => s.sessionName).join(', ');
+              const discoveryMsg: ChatMessage = {
+                id: nextMessageId('discovery'),
+                type: 'system',
+                content: msg.tmux.length === 1
+                  ? `New Claude session found: ${names}. Open session picker to attach.`
+                  : `${msg.tmux.length} new Claude sessions found: ${names}. Open session picker to attach.`,
+                timestamp: Date.now(),
+              };
+              const activeId = get().activeSessionId;
+              if (activeId && get().sessionStates[activeId]) {
+                updateActiveSession((ss) => ({
+                  messages: [...ss.messages, discoveryMsg],
+                }));
+              } else {
+                get().addMessage(discoveryMsg);
+              }
+            }
           }
           break;
 
