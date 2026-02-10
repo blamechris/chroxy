@@ -166,13 +166,26 @@ export async function startSupervisor(config) {
       })
     }
 
+    let deployResetTimer = null
     child.on('message', (msg) => {
       if (msg.type === 'ready') {
         log.info('Server child is ready')
         restartCount = 0
         metrics.consecutiveRestarts = 0
-        deployFailureCount = 0
         stopStandbyServer()
+
+        // Only reset deploy failure count after child survives past the crash window
+        if (lastDeployTimestamp > 0 && deployFailureCount > 0) {
+          const remaining = DEPLOY_CRASH_WINDOW - (Date.now() - lastDeployTimestamp)
+          if (remaining > 0) {
+            deployResetTimer = setTimeout(() => {
+              deployFailureCount = 0
+              log.info('Deploy crash window passed, resetting failure count')
+            }, remaining)
+          } else {
+            deployFailureCount = 0
+          }
+        }
       }
 
       if (msg.type === 'drain_complete') {
@@ -185,6 +198,7 @@ export async function startSupervisor(config) {
     child.on('exit', (code, signal) => {
       stdoutRl?.close()
       stderrRl?.close()
+      if (deployResetTimer) { clearTimeout(deployResetTimer); deployResetTimer = null }
       const childUptimeMs = metrics.childStartedAt ? Date.now() - metrics.childStartedAt : 0
       child = null
       if (shuttingDown) return
