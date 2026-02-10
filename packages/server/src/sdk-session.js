@@ -177,7 +177,7 @@ export class SdkSession extends EventEmitter {
                   }
                 } else if (blockType === 'tool_use') {
                   this.emit('tool_start', {
-                    messageId,
+                    messageId: event.content_block.id || `${messageId}-tool`,
                     tool: event.content_block.name,
                     input: null,
                   })
