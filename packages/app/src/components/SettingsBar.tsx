@@ -28,7 +28,7 @@ export interface SettingsBarProps {
 
 // -- Helpers --
 
-function formatElapsed(startedAt: number, now: number): string {
+export function formatElapsed(startedAt: number, now: number): string {
   const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
