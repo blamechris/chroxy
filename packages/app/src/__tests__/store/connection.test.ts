@@ -6,6 +6,7 @@ import {
   selectShowSession,
   useConnectionStore,
   ChatMessage,
+  _testQueueInternals,
 } from '../../store/connection';
 
 // Reset store between tests
@@ -285,5 +286,89 @@ describe('message queue', () => {
     // And the 11th should fail, proving only 10 items were queued and
     // setModel did not count towards the limit.
     expect(store.sendInput('overflow')).toBe(false);
+  });
+});
+
+// -- Message queue internals (TTL, drain, clear) --
+
+describe('message queue internals', () => {
+  beforeEach(() => {
+    _testQueueInternals.clear();
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('filters expired messages on drain', () => {
+    // Enqueue an input message (TTL = 60s)
+    _testQueueInternals.enqueue('input', { type: 'input', data: 'hello' });
+    expect(_testQueueInternals.getQueue()).toHaveLength(1);
+
+    // Advance past its TTL
+    jest.advanceTimersByTime(61_000);
+
+    // Drain into a mock socket — expired message should be filtered out
+    const sent: string[] = [];
+    const mockSocket = { send: (data: string) => sent.push(data) } as unknown as WebSocket;
+    _testQueueInternals.drain(mockSocket);
+
+    expect(sent).toHaveLength(0);
+    expect(_testQueueInternals.getQueue()).toHaveLength(0);
+  });
+
+  it('sends valid (non-expired) messages on drain', () => {
+    _testQueueInternals.enqueue('input', { type: 'input', data: 'msg1' });
+    _testQueueInternals.enqueue('input', { type: 'input', data: 'msg2' });
+
+    // Advance less than TTL
+    jest.advanceTimersByTime(30_000);
+
+    const sent: string[] = [];
+    const mockSocket = { send: (data: string) => sent.push(data) } as unknown as WebSocket;
+    _testQueueInternals.drain(mockSocket);
+
+    expect(sent).toHaveLength(2);
+    expect(JSON.parse(sent[0])).toEqual({ type: 'input', data: 'msg1' });
+    expect(JSON.parse(sent[1])).toEqual({ type: 'input', data: 'msg2' });
+    expect(_testQueueInternals.getQueue()).toHaveLength(0);
+  });
+
+  it('respects per-type TTL (interrupt = 5s)', () => {
+    _testQueueInternals.enqueue('interrupt', { type: 'interrupt' });
+    _testQueueInternals.enqueue('input', { type: 'input', data: 'hello' });
+
+    // Advance past interrupt TTL but within input TTL
+    jest.advanceTimersByTime(6_000);
+
+    const sent: string[] = [];
+    const mockSocket = { send: (data: string) => sent.push(data) } as unknown as WebSocket;
+    _testQueueInternals.drain(mockSocket);
+
+    // Only the input message should survive
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0]).type).toBe('input');
+  });
+
+  it('disconnect clears the queue', () => {
+    _testQueueInternals.enqueue('input', { type: 'input', data: 'queued' });
+    _testQueueInternals.enqueue('input', { type: 'input', data: 'queued2' });
+    expect(_testQueueInternals.getQueue()).toHaveLength(2);
+
+    useConnectionStore.getState().disconnect();
+    expect(_testQueueInternals.getQueue()).toHaveLength(0);
+  });
+
+  it('drain clears the queue even when all messages are expired', () => {
+    _testQueueInternals.enqueue('interrupt', { type: 'interrupt' });
+    jest.advanceTimersByTime(10_000);
+
+    const sent: string[] = [];
+    const mockSocket = { send: (data: string) => sent.push(data) } as unknown as WebSocket;
+    _testQueueInternals.drain(mockSocket);
+
+    expect(sent).toHaveLength(0);
+    expect(_testQueueInternals.getQueue()).toHaveLength(0);
   });
 });
