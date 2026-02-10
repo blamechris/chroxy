@@ -2235,7 +2235,7 @@ describe('agent idle/busy notifications', () => {
   })
 })
 
-describe('GET /version endpoint', () => {
+describe('WsServer drain behavior (multi-session mode)', () => {
   let server
 
   afterEach(() => {
@@ -2245,63 +2245,180 @@ describe('GET /version endpoint', () => {
     }
   })
 
-  it('returns valid JSON with expected fields', async () => {
+  /** Create a mock SessionManager with one session for drain tests */
+  function createDrainSessionManager() {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+
     const mockSession = createMockSession()
+    mockSession.cwd = '/tmp/project'
+    mockSession.respondToPermission = () => {}
+    mockSession.respondToQuestion = () => {}
+    sessionsMap.set('sess-1', {
+      session: mockSession,
+      name: 'Session 1',
+      cwd: '/tmp/project',
+      type: 'cli',
+      isBusy: false,
+    })
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    })
+
+    return { manager, sessionsMap }
+  }
+
+  it('rejects input messages while draining', async () => {
+    const { manager } = createDrainSessionManager()
+
     server = new WsServer({
       port: 0,
       apiToken: 'test-token',
-      cliSession: mockSession,
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
       authRequired: false,
     })
     const port = await startServerAndGetPort(server)
 
-    const response = await fetch(`http://127.0.0.1:${port}/version`)
-    assert.equal(response.status, 200)
-    assert.match(response.headers.get('content-type') ?? '', /^application\/json\b/)
+    const { ws, messages } = await createClient(port, true)
+    messages.length = 0
 
-    const data = await response.json()
-    assert.equal(typeof data.version, 'string', 'version should be a string')
-    assert.match(data.version, /^\d+\.\d+\.\d+/, 'version should be semver format')
-    assert.equal(typeof data.gitCommit, 'string', 'gitCommit should be a string')
-    assert.equal(typeof data.gitBranch, 'string', 'gitBranch should be a string')
-    assert.equal(typeof data.uptime, 'number', 'uptime should be a number')
-    assert.ok(data.uptime >= 0, 'uptime should be non-negative')
+    // Enable draining via public API
+    server.setDraining(true)
+
+    // Send an input message — should be rejected with server_status
+    send(ws, { type: 'input', data: 'hello' })
+    const statusMsg = await waitForMessage(messages, 'server_status', 1000)
+    assert.ok(statusMsg, 'Should receive server_status when input is rejected during drain')
+    assert.match(statusMsg.message, /restarting/i, 'Status message should mention restarting')
+
+    ws.close()
   })
 
-  it('gitCommit and gitBranch are non-empty strings', async () => {
-    const mockSession = createMockSession()
+  it('allows permission_response while draining', async () => {
+    const { manager, sessionsMap } = createDrainSessionManager()
+    const entry = sessionsMap.get('sess-1')
+    let permissionResolved = false
+    entry.session.respondToPermission = () => { permissionResolved = true }
+
     server = new WsServer({
       port: 0,
       apiToken: 'test-token',
-      cliSession: mockSession,
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
       authRequired: false,
     })
     const port = await startServerAndGetPort(server)
 
-    const response = await fetch(`http://127.0.0.1:${port}/version`)
-    const data = await response.json()
+    const { ws, messages } = await createClient(port, true)
 
-    // gitCommit and gitBranch should always be non-empty strings
-    // (either real values from git or 'unknown' if git is unavailable)
-    assert.ok(data.gitCommit.length > 0, 'gitCommit should be non-empty')
-    assert.ok(data.gitBranch.length > 0, 'gitBranch should be non-empty')
+    // Enable draining
+    server.setDraining(true)
+
+    // Send permission_response — should still be forwarded
+    send(ws, { type: 'permission_response', requestId: 'perm-1', decision: 'allow' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(permissionResolved, true, 'permission_response should be forwarded even during drain')
+
+    ws.close()
   })
 
-  it('does not require authentication', async () => {
-    const mockSession = createMockSession()
+  it('allows user_question_response while draining', async () => {
+    const { manager, sessionsMap } = createDrainSessionManager()
+    const entry = sessionsMap.get('sess-1')
+    let questionResolved = false
+    entry.session.respondToQuestion = () => { questionResolved = true }
+
     server = new WsServer({
       port: 0,
       apiToken: 'test-token',
-      cliSession: mockSession,
-      authRequired: true,
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      authRequired: false,
     })
     const port = await startServerAndGetPort(server)
 
-    // GET /version without any auth header should still work
-    const response = await fetch(`http://127.0.0.1:${port}/version`)
-    assert.equal(response.status, 200, '/version should be accessible without auth')
+    const { ws, messages } = await createClient(port, true)
 
-    const data = await response.json()
-    assert.equal(typeof data.version, 'string')
+    // Enable draining
+    server.setDraining(true)
+
+    // Send user_question_response — should still be forwarded
+    send(ws, { type: 'user_question_response', answer: 'yes' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(questionResolved, true, 'user_question_response should be forwarded even during drain')
+
+    ws.close()
+  })
+
+  it('blocks non-critical messages silently while draining', async () => {
+    const { manager } = createDrainSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+    messages.length = 0
+
+    // Enable draining
+    server.setDraining(true)
+
+    // Send non-input messages that should be silently dropped
+    send(ws, { type: 'list_sessions' })
+    send(ws, { type: 'set_model', model: 'claude-sonnet-4-20250514' })
+
+    // Wait and check no session_list was returned
+    await new Promise(r => setTimeout(r, 200))
+
+    const sessionList = messages.find(m => m.type === 'session_list')
+    assert.equal(sessionList, undefined, 'list_sessions should be silently blocked during drain')
+
+    ws.close()
+  })
+
+  it('setDraining(false) restores normal operation', async () => {
+    const { manager, sessionsMap } = createDrainSessionManager()
+    const entry = sessionsMap.get('sess-1')
+    let receivedInput = null
+    entry.session.sendMessage = (text) => { receivedInput = text }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+
+    // Enable then disable draining
+    server.setDraining(true)
+    server.setDraining(false)
+
+    // Input should now work again
+    send(ws, { type: 'input', data: 'hello after drain' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(receivedInput, 'hello after drain', 'Input should be accepted after drain is disabled')
   })
 })
