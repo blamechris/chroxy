@@ -248,4 +248,37 @@ describe('CliSession stream-event handling', () => {
       assert.equal(session._currentCtx.didStreamText, true)
     })
   })
+
+  describe('content_block_stop cleanup', () => {
+    it('clears tool state after content_block_stop', () => {
+      const session = createSession()
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta('{"command":"ls"}'))
+
+      assert.equal(session._currentCtx.currentToolName, 'Bash')
+      assert.equal(session._currentCtx.currentToolUseId, 'toolu_1')
+
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(session._currentCtx.currentToolName, null)
+      assert.equal(session._currentCtx.currentToolUseId, null)
+      assert.equal(session._currentCtx.toolInputChunks, '')
+    })
+  })
+
+  describe('malformed JSON in AskUserQuestion', () => {
+    it('does not emit user_question for invalid JSON', () => {
+      const session = createSession()
+      const events = []
+      const errors = []
+      session.on('user_question', (data) => events.push(data))
+
+      session._handleEvent(toolUseStart('AskUserQuestion', 'toolu_bad'))
+      session._handleEvent(inputJsonDelta('{invalid json'))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(events.length, 0)
+      assert.equal(session._waitingForAnswer, false)
+    })
+  })
 })
