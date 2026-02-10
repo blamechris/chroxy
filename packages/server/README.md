@@ -3,17 +3,17 @@
 Node.js daemon that bridges your phone to Claude Code via WebSocket over Cloudflare tunnel.
 
 **Two modes:**
-- **CLI headless (default)**: Wraps `claude -p --input-format stream-json --output-format stream-json`, no tmux needed
-- **PTY/tmux (opt-in with `--terminal`)**: Spawns tmux session for raw terminal access
+- **CLI headless (default)**: Uses the Claude Agent SDK for in-process streaming. No tmux needed.
+- **PTY/tmux (opt-in with `--terminal`)**: Spawns tmux session for raw terminal access.
 
 ## Quick Start
 
 ```bash
 # Initialize configuration
-npx chroxy init
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy init
 
 # Start the server
-npx chroxy start
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 ```
 
 The server will print a QR code. Scan it with the Chroxy app.
@@ -25,23 +25,17 @@ The server will print a QR code. Scan it with the Chroxy app.
 | `chroxy init` | Interactive setup — generates API token and config file |
 | `chroxy start` | Start server in CLI headless mode (default) |
 | `chroxy start --terminal` | Start server in PTY/tmux mode |
-| `chroxy start --no-auth` | Start without authentication in CLI mode only; binds to localhost and disables Cloudflare tunnel (development only) |
-| `chroxy start --config /path` | Use a specific config file instead of the default |
-| `chroxy start --resume` | Resume the previous session where supported (reuses prior working directory/context) |
+| `chroxy start --tunnel named` | Use a named tunnel for stable URLs (requires Cloudflare account) |
+| `chroxy start --tunnel none` | Disable tunnel (local only) |
+| `chroxy start --no-auth` | Start without authentication (CLI mode only, binds to localhost) |
+| `chroxy start --no-supervisor` | Disable supervisor auto-restart (named tunnel mode) |
+| `chroxy start --config /path` | Use a specific config file |
+| `chroxy start --resume` | Resume the previous session |
 | `chroxy start --cwd /path` | Set working directory (CLI mode) |
 | `chroxy start --model opus` | Use a specific Claude model (CLI mode) |
-| `chroxy start --allowed-tools tool1,tool2` | Restrict which tools are exposed to clients (CLI mode, comma-separated list) |
+| `chroxy start --allowed-tools tool1,tool2` | Restrict exposed tools (CLI mode) |
 | `chroxy config` | Show current configuration |
-
-## Manual Setup
-
-If you prefer to configure manually:
-
-```bash
-cp .env.example .env
-# Edit .env with your settings
-npm run dev
-```
+| `chroxy tunnel setup` | Interactive named tunnel setup |
 
 ## Architecture
 
@@ -58,17 +52,15 @@ npm run dev
 │ server-cli.js │ │ ws-server │ │    tunnel     │
 │               │ │           │ │               │
 │ Orchestrates  │ │ WebSocket │ │ cloudflared   │
-│ CLI sessions  │ │ + auth    │ │ management    │
+│ SDK sessions  │ │ + auth    │ │ management    │
 └───────┬───────┘ └───────────┘ └───────────────┘
         │
         ▼
 ┌───────────────┐
-│ cli-session.js│
+│sdk-session.js │
 │               │
-│ claude -p     │
-│ --output-     │
-│ format        │
-│ stream-json   │
+│ Claude Agent  │
+│ SDK query()   │
 └───────────────┘
 ```
 
@@ -98,34 +90,33 @@ npm run dev
 └───────────────┘
 ```
 
-## WebSocket Protocol
+## Key Components
 
-See the main [README](../../README.md) for protocol details.
-
-## Tuning the Output Parser
-
-The output parser (`src/output-parser.js`) is only used in PTY/tmux mode. It uses regex patterns and state machines to identify Claude Code output structures from raw terminal output.
-
-CLI headless mode receives structured JSON events from `claude -p --output-format stream-json`, so no parsing is needed.
-
-To capture sample output for PTY mode analysis:
-
-```bash
-# Start server in PTY mode
-npx chroxy start --terminal
-
-# In another terminal, capture the raw output
-tmux pipe-pane -o -t claude-code 'cat >> ~/claude-output.log'
-
-# Run claude code, do some work, then analyze the log
-```
+| Component | File | Purpose |
+|-----------|------|---------|
+| SdkSession | `sdk-session.js` | Claude Agent SDK executor (CLI mode) |
+| CliSession | `cli-session.js` | Legacy headless executor via `claude -p` |
+| SessionManager | `session-manager.js` | Multi-session lifecycle management |
+| WsServer | `ws-server.js` | WebSocket protocol with auth |
+| TunnelManager | `tunnel.js` | Cloudflare tunnel lifecycle (quick/named/none) |
+| Supervisor | `supervisor.js` | Tunnel owner + child auto-restart (named tunnel) |
+| PushManager | `push.js` | Push notifications via Expo Push API |
+| PtyManager | `pty-manager.js` | tmux session management (PTY mode) |
+| OutputParser | `output-parser.js` | Terminal output parser (PTY mode) |
 
 ## Development
 
 ```bash
 # Run with auto-reload
-npm run dev
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dev
+
+# Run tests (395 tests)
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test
 
 # Test with the CLI client
 node src/test-client.js wss://your-cloudflare-url
 ```
+
+## WebSocket Protocol
+
+See the main [README](../../README.md) for protocol details, or the header comment in `src/ws-server.js` for the full message type reference.

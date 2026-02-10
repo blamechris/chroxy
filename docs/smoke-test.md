@@ -11,7 +11,7 @@ Use this table to determine which test scopes to run based on files changed in a
 | Changed File(s) | Test Scopes |
 |---|---|
 | `ws-server.js` | Connection, Chat, Permissions, No-Auth |
-| `cli-session.js` | Chat, Permissions, Model Switching |
+| `cli-session.js`, `sdk-session.js` | Chat, Permissions, Model Switching |
 | `server-cli.js`, `cli.js` | Connection, No-Auth, Shutdown |
 | `tunnel.js`, `tunnel-check.js` | Connection |
 | `permission-hook.sh` | Permissions |
@@ -109,7 +109,7 @@ Test when: `ws-server.js`, `server-cli.js`, `cli.js`, `tunnel.js`, `tunnel-check
 
 ## Chat
 
-Test when: `ws-server.js`, `cli-session.js`, `connection.ts`, `SessionScreen.tsx`
+Test when: `ws-server.js`, `sdk-session.js`, `cli-session.js`, `connection.ts`, `SessionScreen.tsx`
 
 ### Sending Messages
 - [ ] Type message + tap send (blue arrow) → "You" bubble appears immediately
@@ -148,11 +148,7 @@ Test when: `ws-server.js`, `cli-session.js`, `connection.ts`, `SessionScreen.tsx
 
 ## Permissions
 
-Test when: `ws-server.js`, `cli-session.js`, `permission-hook.sh`, `connection.ts`, `SessionScreen.tsx`
-
-### Hook Registration
-- [ ] On server start, check `~/.claude/settings.json` → `hooks.PreToolUse` contains entry with `"_chroxy": true`
-- [ ] On server shutdown (Ctrl+C), check again → `_chroxy` entry removed
+Test when: `ws-server.js`, `sdk-session.js`, `cli-session.js`, `connection.ts`, `SessionScreen.tsx`
 
 ### Permission Prompts (Approve Mode)
 - [ ] Ask Claude to do something that requires a tool (e.g., "Create /tmp/chroxy-perm.txt with hello")
@@ -164,7 +160,7 @@ Test when: `ws-server.js`, `cli-session.js`, `permission-hook.sh`, `connection.t
 
 ### Permission Timeout
 - [ ] Trigger a permission prompt → do NOT respond for 5 minutes
-- [ ] After timeout, hook falls through to Claude's default behavior (check server logs)
+- [ ] After timeout, permission auto-denies (check server logs for "timed out, auto-denying")
 
 ### Permission Modes
 _Requires permission mode UI (if implemented). Otherwise test via server restart with env vars._
@@ -173,7 +169,7 @@ _Requires permission mode UI (if implemented). Otherwise test via server restart
 
 ## Model Switching
 
-Test when: `models.js`, `cli-session.js`, `connection.ts`, `SessionScreen.tsx`
+Test when: `models.js`, `sdk-session.js`, `cli-session.js`, `connection.ts`, `SessionScreen.tsx`
 
 - [ ] After connecting, status bar shows model chips: **Haiku**, **Sonnet**, **Opus**, **Opus 4.6**
 - [ ] Active model is highlighted (blue background + border)
