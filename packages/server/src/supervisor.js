@@ -87,7 +87,9 @@ export async function startSupervisor(config) {
   let restartCount = 0
   let standbyServer = null
   let shuttingDown = false
-  const MAX_RESTARTS = 10
+  const MAX_RESTARTS = (typeof config.maxRestarts === 'number' && config.maxRestarts >= 0)
+    ? config.maxRestarts
+    : 10
   const RESTART_BACKOFFS = [2000, 2000, 3000, 3000, 5000, 5000, 8000, 8000, 10000, 10000]
 
   function startChild() {

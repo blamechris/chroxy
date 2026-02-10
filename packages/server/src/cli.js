@@ -113,6 +113,7 @@ program
   .option('--model <model>', 'Model to use (CLI mode)')
   .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve (CLI mode)')
   .option('--discovery-interval <seconds>', 'Auto-discovery polling interval in seconds (PTY mode)')
+  .option('--max-restarts <count>', 'Max supervisor restart attempts before exit (default: 10)')
   .option('--tunnel <mode>', 'Tunnel mode: quick (default), named, or none')
   .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
   .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
@@ -148,6 +149,9 @@ program
     }
     if (options.discoveryInterval !== undefined) {
       cliOverrides.discoveryInterval = parseInt(options.discoveryInterval, 10)
+    }
+    if (options.maxRestarts !== undefined) {
+      cliOverrides.maxRestarts = parseInt(options.maxRestarts, 10)
     }
     if (options.tunnel !== undefined) cliOverrides.tunnel = options.tunnel
     if (options.tunnelName !== undefined) cliOverrides.tunnelName = options.tunnelName
