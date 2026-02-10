@@ -67,6 +67,8 @@ export const COLORS = {
   // -- Accent Colors: Purple (Tool/Activity) --
   /** Primary purple accent: tool usage */
   accentPurple: '#a78bfa',
+  /** Subtle purple: low-opacity background (20%) */
+  accentPurpleSubtle: '#a78bfa33',
   /** Purple code text */
   accentPurpleCode: '#c4a5ff',
 

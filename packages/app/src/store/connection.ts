@@ -102,6 +102,12 @@ export interface DiscoveredSession {
   pid: number;
 }
 
+export interface AgentInfo {
+  toolUseId: string;
+  description: string;
+  startedAt: number;
+}
+
 export type SessionHealth = 'healthy' | 'crashed';
 
 export interface SessionState {
@@ -115,6 +121,7 @@ export interface SessionState {
   lastResultDuration: number | null;
   isIdle: boolean;
   health: SessionHealth;
+  activeAgents: AgentInfo[];
 }
 
 export interface ServerError {
@@ -147,6 +154,7 @@ function createEmptySessionState(): SessionState {
     lastResultDuration: null,
     isIdle: true,
     health: 'healthy',
+    activeAgents: [],
   };
 }
 
@@ -393,6 +401,7 @@ function updateSession(sessionId: string, updater: (session: SessionState) => Pa
 
   const current = state.sessionStates[sessionId];
   const patch = updater(current);
+  if (Object.keys(patch).length === 0) return;
   const updated = { ...current, ...patch };
   const newSessionStates = { ...state.sessionStates, [sessionId]: updated };
 
@@ -471,6 +480,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       lastResultDuration: get().lastResultDuration,
       isIdle: true,
       health: 'healthy' as const,
+      activeAgents: [],
     };
   },
 
@@ -753,6 +763,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'history_replay_start':
           _receivingHistoryReplay = true;
+          // Clear transient agent tracking — these events are not replayed
+          // from history, so any surviving entries are stale from pre-disconnect
+          updateActiveSession((ss) =>
+            ss.activeAgents.length > 0 ? { activeAgents: [] } : {}
+          );
           break;
 
         case 'history_replay_end':
@@ -1047,6 +1062,36 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           const busyTargetId = msg.sessionId || get().activeSessionId;
           if (busyTargetId && get().sessionStates[busyTargetId]) {
             updateSession(busyTargetId, () => ({ isIdle: false }));
+          }
+          break;
+        }
+
+        case 'agent_spawned': {
+          const spawnTargetId = msg.sessionId || get().activeSessionId;
+          if (spawnTargetId && get().sessionStates[spawnTargetId]) {
+            updateSession(spawnTargetId, (ss) => {
+              // Dedup: skip if agent with same toolUseId already tracked
+              if (ss.activeAgents.some((a) => a.toolUseId === msg.toolUseId)) return {};
+              return {
+                activeAgents: [...ss.activeAgents, {
+                  toolUseId: msg.toolUseId,
+                  description: msg.description || 'Background task',
+                  startedAt: msg.startedAt || Date.now(),
+                }],
+              };
+            });
+          }
+          break;
+        }
+
+        case 'agent_completed': {
+          const completeTargetId = msg.sessionId || get().activeSessionId;
+          if (completeTargetId && get().sessionStates[completeTargetId]) {
+            updateSession(completeTargetId, (ss) => ({
+              activeAgents: ss.activeAgents.filter(
+                (a) => a.toolUseId !== msg.toolUseId
+              ),
+            }));
           }
           break;
         }

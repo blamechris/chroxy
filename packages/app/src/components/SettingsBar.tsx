@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
-import { ModelInfo, ClaudeStatus, ContextUsage } from '../store/connection';
+import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo } from '../store/connection';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
@@ -21,6 +21,7 @@ export interface SettingsBarProps {
   sessionCwd: string | null;
   serverMode: 'cli' | 'terminal' | null;
   isIdle: boolean;
+  activeAgents: AgentInfo[];
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
 }
@@ -49,6 +50,7 @@ export function SettingsBar({
   sessionCwd,
   serverMode,
   isIdle,
+  activeAgents,
   setModel,
   setPermissionMode,
 }: SettingsBarProps) {
@@ -113,6 +115,17 @@ export function SettingsBar({
           accessibilityLabel={isIdle ? 'Agent idle' : 'Agent busy'}
           accessibilityRole="image"
         />
+        {activeAgents.length > 0 && (
+          <View
+            style={styles.agentBadge}
+            accessibilityLabel={`${activeAgents.length} background agent${activeAgents.length !== 1 ? 's' : ''} running`}
+            accessibilityRole="text"
+          >
+            <Text style={styles.agentBadgeText}>
+              {activeAgents.length} agent{activeAgents.length !== 1 ? 's' : ''}
+            </Text>
+          </View>
+        )}
         <Text style={styles.summaryText} numberOfLines={1}>
           {summaryParts.join(' \u00B7 ') || 'Settings'}
         </Text>
@@ -203,6 +216,21 @@ export function SettingsBar({
               )}
             </>
           )}
+          {activeAgents.length > 0 && (
+            <View style={styles.agentSection}>
+              <Text style={styles.agentSectionTitle}>
+                Running Agents ({activeAgents.length})
+              </Text>
+              {activeAgents.map((agent) => (
+                <View key={agent.toolUseId} style={styles.agentEntry}>
+                  <View style={styles.agentDot} />
+                  <Text style={styles.agentDescription} numberOfLines={2}>
+                    {agent.description}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
         </View>
       )}
     </View>
@@ -279,6 +307,44 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   contextText: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  agentBadge: {
+    backgroundColor: COLORS.accentPurpleSubtle,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginRight: 8,
+  },
+  agentBadgeText: {
+    color: COLORS.accentPurple,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  agentSection: {
+    gap: 4,
+  },
+  agentSectionTitle: {
+    color: COLORS.accentPurple,
+    fontSize: 10,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  agentEntry: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  agentDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.accentPurple,
+  },
+  agentDescription: {
+    flex: 1,
     color: COLORS.textMuted,
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
