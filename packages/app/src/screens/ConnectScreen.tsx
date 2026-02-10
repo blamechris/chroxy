@@ -59,13 +59,16 @@ export function ConnectScreen() {
 
   // Load saved connection and auto-connect on mount
   useEffect(() => {
+    let mounted = true;
     loadSavedConnection().then(() => {
+      if (!mounted) return;
       const saved = useConnectionStore.getState().savedConnection;
       if (saved) {
         setAutoConnecting(true);
         connect(saved.url, saved.token, { silent: true });
       }
     });
+    return () => { mounted = false; };
   }, []);
 
   // Fall back to normal ConnectScreen if auto-connect fails
