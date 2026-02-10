@@ -2,6 +2,31 @@ import pty from "node-pty";
 import { execFileSync } from "child_process";
 import { EventEmitter } from "events";
 
+export function createDefaultTmuxExecutor() {
+  return {
+    hasTmuxSession(name) {
+      try {
+        execFileSync('tmux', ['has-session', '-t', name], {
+          stdio: 'ignore', timeout: 5000,
+        })
+        return true
+      } catch { return false }
+    },
+    checkPaneStatus(name) {
+      return execFileSync('tmux',
+        ['list-panes', '-t', name, '-F', '#{pane_dead}'],
+        { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim()
+    },
+    getCurrentCommands(name) {
+      return execFileSync('tmux',
+        ['list-panes', '-t', name, '-F', '#{pane_current_command}'],
+        { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim()
+    },
+  }
+}
+
 /**
  * Manages a PTY process running tmux.
  * Handles spawning, attaching, resizing, cleanup, and crash detection.
@@ -17,6 +42,7 @@ export class PtyManager extends EventEmitter {
     this.rows = config.rows || 40;
     this._healthCheckInterval = null;
     this._healthCheckIntervalMs = 30000; // 30 seconds
+    this._tmux = config.tmuxExecutor || createDefaultTmuxExecutor();
   }
 
   /**
@@ -117,15 +143,7 @@ export class PtyManager extends EventEmitter {
 
   /** Check if the named tmux session already exists */
   _hasTmuxSession() {
-    try {
-      execFileSync('tmux', ['has-session', '-t', this.sessionName], {
-        stdio: 'ignore',
-        timeout: 5000,
-      });
-      return true;
-    } catch {
-      return false;
-    }
+    return this._tmux.hasTmuxSession(this.sessionName);
   }
 
   /**
@@ -164,11 +182,7 @@ export class PtyManager extends EventEmitter {
       }
 
       // Check pane status (pane_dead flag) to catch dead panes
-      const paneDeadOutput = execFileSync(
-        'tmux',
-        ['list-panes', '-t', this.sessionName, '-F', '#{pane_dead}'],
-        { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
-      ).trim();
+      const paneDeadOutput = this._tmux.checkPaneStatus(this.sessionName);
 
       // If any pane reports '1', it's dead
       const panes = paneDeadOutput.split('\n');
@@ -184,12 +198,7 @@ export class PtyManager extends EventEmitter {
       }
 
       // Additionally, verify that a Claude process/command is still running in the session.
-      // We use tmux's pane_current_command to see what each pane is currently running.
-      const currentCmdOutput = execFileSync(
-        'tmux',
-        ['list-panes', '-t', this.sessionName, '-F', '#{pane_current_command}'],
-        { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
-      ).trim();
+      const currentCmdOutput = this._tmux.getCurrentCommands(this.sessionName);
 
       const paneCommands = currentCmdOutput === '' ? [] : currentCmdOutput.split('\n');
       // Consider Claude "present" if any pane's current command string contains "claude".

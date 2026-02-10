@@ -6,7 +6,7 @@ import { PtyManager } from '../src/pty-manager.js'
 /**
  * Test helper: Mock tmux command results
  */
-class MockTmuxCommands {
+class MockTmuxState {
   constructor() {
     this.reset()
   }
@@ -20,80 +20,20 @@ class MockTmuxCommands {
   }
 }
 
-/**
- * Test-only wrapper that allows injecting mock tmux commands
- */
-class TestPtyManager extends PtyManager {
-  constructor(config = {}) {
-    super(config)
-    this.mockTmux = config.mockTmux || new MockTmuxCommands()
-    this._skipPtySpawn = config.skipPtySpawn !== false // Default to skip
-  }
-
-  async start() {
-    if (this._skipPtySpawn) {
-      // Skip actual PTY spawn for unit tests
-      this._startHealthCheck()
-      return this
-    }
-    return super.start()
-  }
-
-  _hasTmuxSession() {
-    if (this.mockTmux.shouldThrowError) {
-      throw new Error(this.mockTmux.errorMessage)
-    }
-    return this.mockTmux.sessionExists
-  }
-
-  _checkHealth() {
-    try {
-      // Check if tmux session exists
-      if (!this._hasTmuxSession()) {
-        console.log(`[pty] Health check failed: tmux session '${this.sessionName}' no longer exists`)
-        this._stopHealthCheck()
-        this.emit('crashed', { reason: 'session_not_found' })
-        return
-      }
-
-      if (this.mockTmux.shouldThrowError) {
-        throw new Error(this.mockTmux.errorMessage)
-      }
-
-      // Check pane status
-      const paneDeadOutput = this.mockTmux.paneDeadOutput
-      const panes = paneDeadOutput.split('\n')
-      const deadPanes = panes.filter((status) => status === '1')
-
-      if (deadPanes.length > 0) {
-        console.log(
-          `[pty] Health check failed: ${deadPanes.length} dead pane(s) in session '${this.sessionName}'`
-        )
-        this._stopHealthCheck()
-        this.emit('crashed', { reason: 'pane_dead' })
-        return
-      }
-
-      // Check Claude process
-      const currentCmdOutput = this.mockTmux.paneCommandOutput
-      const paneCommands = currentCmdOutput === '' ? [] : currentCmdOutput.split('\n')
-      const hasClaudeProcess = paneCommands.some((cmd) =>
-        typeof cmd === 'string' && cmd.toLowerCase().includes('claude')
-      )
-
-      if (!hasClaudeProcess) {
-        console.log(
-          `[pty] Health check failed: no Claude process found in tmux session '${this.sessionName}'`
-        )
-        this._stopHealthCheck()
-        this.emit('crashed', { reason: 'claude_process_not_found' })
-        return
-      }
-    } catch (err) {
-      console.error(`[pty] Health check error for session '${this.sessionName}':`, err.message)
-      this._stopHealthCheck()
-      this.emit('crashed', { reason: 'health_check_error', error: err.message })
-    }
+function createMockTmuxExecutor(mockState) {
+  return {
+    hasTmuxSession() {
+      if (mockState.shouldThrowError) throw new Error(mockState.errorMessage)
+      return mockState.sessionExists
+    },
+    checkPaneStatus() {
+      if (mockState.shouldThrowError) throw new Error(mockState.errorMessage)
+      return mockState.paneDeadOutput
+    },
+    getCurrentCommands() {
+      if (mockState.shouldThrowError) throw new Error(mockState.errorMessage)
+      return mockState.paneCommandOutput
+    },
   }
 }
 
@@ -102,7 +42,7 @@ describe('PtyManager Health Check', () => {
   let mockTmux
 
   beforeEach(() => {
-    mockTmux = new MockTmuxCommands()
+    mockTmux = new MockTmuxState()
   })
 
   afterEach(() => {
@@ -114,15 +54,17 @@ describe('PtyManager Health Check', () => {
 
   describe('_startHealthCheck and _stopHealthCheck', () => {
     it('starts periodic health check timer', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       assert.ok(ptyManager._healthCheckInterval, 'Health check interval should be set')
     })
 
     it('stops health check timer on destroy', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       assert.ok(ptyManager._healthCheckInterval, 'Health check interval should be set')
 
@@ -132,8 +74,9 @@ describe('PtyManager Health Check', () => {
     })
 
     it('stops health check timer when manually called', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       ptyManager._stopHealthCheck()
 
@@ -143,8 +86,9 @@ describe('PtyManager Health Check', () => {
 
   describe('_checkHealth - healthy session', () => {
     it('passes health check when session and process are healthy', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       let crashedFired = false
       ptyManager.once('crashed', () => {
@@ -164,8 +108,9 @@ describe('PtyManager Health Check', () => {
 
   describe('_checkHealth - crash detection', () => {
     it('detects missing tmux session and emits crashed event', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       const crashedPromise = new Promise((resolve) => {
         ptyManager.once('crashed', (info) => {
@@ -185,8 +130,9 @@ describe('PtyManager Health Check', () => {
     })
 
     it('detects dead pane and emits crashed event', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       const crashedPromise = new Promise((resolve) => {
         ptyManager.once('crashed', (info) => {
@@ -206,8 +152,9 @@ describe('PtyManager Health Check', () => {
     })
 
     it('detects multiple dead panes', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       const crashedPromise = new Promise((resolve) => {
         ptyManager.once('crashed', (info) => {
@@ -226,8 +173,9 @@ describe('PtyManager Health Check', () => {
     })
 
     it('detects Claude process not running and emits crashed event', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       const crashedPromise = new Promise((resolve) => {
         ptyManager.once('crashed', (info) => {
@@ -247,8 +195,9 @@ describe('PtyManager Health Check', () => {
     })
 
     it('detects Claude process not running with empty pane commands', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       const crashedPromise = new Promise((resolve) => {
         ptyManager.once('crashed', (info) => {
@@ -267,8 +216,9 @@ describe('PtyManager Health Check', () => {
     })
 
     it('handles health check error and emits crashed event', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       const crashedPromise = new Promise((resolve) => {
         ptyManager.once('crashed', (info) => {
@@ -292,8 +242,9 @@ describe('PtyManager Health Check', () => {
 
   describe('health check stops after detecting crash', () => {
     it('stops periodic interval after detecting crash', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       let crashedCount = 0
       ptyManager.on('crashed', () => {
@@ -314,10 +265,11 @@ describe('PtyManager Health Check', () => {
     })
 
     it('does not run periodic health checks after crash is detected', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
       // Use very short interval for testing
       ptyManager._healthCheckIntervalMs = 50
-      await ptyManager.start()
+      ptyManager._startHealthCheck()
 
       let crashedCount = 0
       ptyManager.on('crashed', () => {
@@ -337,8 +289,9 @@ describe('PtyManager Health Check', () => {
 
   describe('health check detects Claude process variations', () => {
     it('accepts "claude" command (lowercase)', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       mockTmux.paneCommandOutput = 'claude'
 
@@ -355,8 +308,9 @@ describe('PtyManager Health Check', () => {
     })
 
     it('accepts "Claude" command (capitalized)', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       mockTmux.paneCommandOutput = 'Claude'
 
@@ -373,8 +327,9 @@ describe('PtyManager Health Check', () => {
     })
 
     it('accepts command containing "claude" substring', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       mockTmux.paneCommandOutput = 'node-claude-wrapper'
 
@@ -391,8 +346,9 @@ describe('PtyManager Health Check', () => {
     })
 
     it('rejects command not containing "claude"', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       const crashedPromise = new Promise((resolve) => {
         ptyManager.once('crashed', (info) => {
@@ -409,8 +365,9 @@ describe('PtyManager Health Check', () => {
     })
 
     it('accepts Claude process in multi-pane session', async () => {
-      ptyManager = new TestPtyManager({ mockTmux, skipPtySpawn: true })
-      await ptyManager.start()
+      const executor = createMockTmuxExecutor(mockTmux)
+      ptyManager = new PtyManager({ tmuxExecutor: executor })
+      ptyManager._startHealthCheck()
 
       // First pane running bash, second pane running claude
       mockTmux.paneCommandOutput = 'bash\nclaude'
