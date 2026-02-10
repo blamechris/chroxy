@@ -1,4 +1,4 @@
-const store: Record<string, string> = {};
+let store: Record<string, string> = {};
 
 export async function getItemAsync(key: string): Promise<string | null> {
   return store[key] ?? null;
@@ -10,4 +10,9 @@ export async function setItemAsync(key: string, value: string): Promise<void> {
 
 export async function deleteItemAsync(key: string): Promise<void> {
   delete store[key];
+}
+
+/** Reset mock storage between tests */
+export function __reset(): void {
+  store = {};
 }

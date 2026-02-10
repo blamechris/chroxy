@@ -125,7 +125,9 @@ describe('isValidTableRow', () => {
     expect(isValidTableRow('no pipes here')).toBe(false);
   });
 
-  it('returns true for minimal table row', () => {
+  it('returns true for minimal pipe-separated content (no outer pipes)', () => {
+    // Matches implementation: any line with a pipe and non-empty cells is valid.
+    // Full table validation (header + separator) happens in parseTable.
     expect(isValidTableRow('a|b')).toBe(true);
   });
 });
