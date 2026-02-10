@@ -36,31 +36,31 @@ export async function registerForPushNotifications(): Promise<string | null> {
     return null;
   }
 
-  // Check existing permission status
-  const { status: existingStatus } = await Notifications.getPermissionsAsync();
-  let finalStatus = existingStatus;
-
-  // Request permission if not already granted
-  if (existingStatus !== 'granted') {
-    const { status } = await Notifications.requestPermissionsAsync();
-    finalStatus = status;
-  }
-
-  if (finalStatus !== 'granted') {
-    console.log('[push] Push notification permission denied');
-    return null;
-  }
-
-  // Android requires a notification channel
-  if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync('default', {
-      name: 'Chroxy',
-      importance: Notifications.AndroidImportance.HIGH,
-      sound: 'default',
-    });
-  }
-
   try {
+    // Check existing permission status
+    const { status: existingStatus } = await Notifications.getPermissionsAsync();
+    let finalStatus = existingStatus;
+
+    // Request permission if not already granted
+    if (existingStatus !== 'granted') {
+      const { status } = await Notifications.requestPermissionsAsync();
+      finalStatus = status;
+    }
+
+    if (finalStatus !== 'granted') {
+      console.log('[push] Push notification permission denied');
+      return null;
+    }
+
+    // Android requires a notification channel
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync('default', {
+        name: 'Chroxy',
+        importance: Notifications.AndroidImportance.HIGH,
+        sound: 'default',
+      });
+    }
+
     const projectId = Constants.expoConfig?.extra?.eas?.projectId;
     const tokenData = await Notifications.getExpoPushTokenAsync(
       projectId ? { projectId } : undefined
@@ -68,7 +68,8 @@ export async function registerForPushNotifications(): Promise<string | null> {
     console.log('[push] Expo push token:', tokenData.data);
     return tokenData.data;
   } catch (err) {
-    console.error('[push] Failed to get push token:', err);
+    // Expo Go SDK 53+ removed push notification support — gracefully degrade
+    console.log('[push] Push registration unavailable:', err);
     return null;
   }
 }

@@ -28,10 +28,9 @@ import { resolveModelId } from './models.js'
  *   agent_completed    { toolUseId }
  */
 export class SdkSession extends EventEmitter {
-  constructor({ cwd, allowedTools, model, permissionMode } = {}) {
+  constructor({ cwd, model, permissionMode } = {}) {
     super()
     this.cwd = cwd || process.cwd()
-    this.allowedTools = allowedTools || []
     this.model = model || null
     this.permissionMode = permissionMode || 'approve'
 
@@ -52,6 +51,7 @@ export class SdkSession extends EventEmitter {
 
     // AskUserQuestion handling
     this._pendingUserAnswer = null // { resolve, input } when waiting for user answer
+    this._questionTimer = null
 
     // Agent tracking
     this._activeAgents = new Map() // toolUseId -> { toolUseId, description, startedAt }
@@ -365,13 +365,35 @@ export class SdkSession extends EventEmitter {
       if (signal) {
         signal.addEventListener('abort', () => {
           if (this._pendingUserAnswer) {
+            this._clearQuestionTimer()
             this._pendingUserAnswer = null
             this._waitingForAnswer = false
             resolve({ behavior: 'deny', message: 'Cancelled' })
           }
         }, { once: true })
       }
+
+      // Auto-deny after 5 minutes if no response
+      this._questionTimer = setTimeout(() => {
+        this._questionTimer = null
+        if (this._pendingUserAnswer) {
+          console.log(`[sdk-session] Question ${toolUseId} timed out, auto-denying`)
+          this._pendingUserAnswer = null
+          this._waitingForAnswer = false
+          resolve({ behavior: 'deny', message: 'Question timed out' })
+        }
+      }, 300_000)
     })
+  }
+
+  /**
+   * Clear the AskUserQuestion timeout timer.
+   */
+  _clearQuestionTimer() {
+    if (this._questionTimer) {
+      clearTimeout(this._questionTimer)
+      this._questionTimer = null
+    }
   }
 
   /**
@@ -414,6 +436,7 @@ export class SdkSession extends EventEmitter {
    */
   respondToQuestion(text) {
     if (!this._pendingUserAnswer) return
+    this._clearQuestionTimer()
     const { resolve, input } = this._pendingUserAnswer
     this._pendingUserAnswer = null
     this._waitingForAnswer = false
@@ -538,6 +561,7 @@ export class SdkSession extends EventEmitter {
     this._pendingPermissions.clear()
 
     // Auto-deny pending user answer
+    this._clearQuestionTimer()
     if (this._pendingUserAnswer) {
       this._pendingUserAnswer.resolve({ behavior: 'deny', message: 'Message completed' })
       this._pendingUserAnswer = null
