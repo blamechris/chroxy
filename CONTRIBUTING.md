@@ -15,19 +15,18 @@ Thanks for your interest in contributing! This document covers how to get starte
    npm install
    ```
 
-3. **Set up the server**
+3. **Start the server** (Terminal 1)
    ```bash
-   cd packages/server
-   cp .env.example .env
-   # Edit .env and generate an API token
-   npm run dev
+   PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
    ```
 
-4. **Run the app** (in another terminal)
+4. **Start the app dev server** (Terminal 2)
    ```bash
    cd packages/app
-   npm run ios  # or android
+   npx expo start
    ```
+
+5. **Connect from your phone** — Open Expo Go, scan the Expo QR code, then scan the Chroxy server QR code inside the app.
 
 ## Project Structure
 
@@ -40,9 +39,10 @@ Thanks for your interest in contributing! This document covers how to get starte
 
 1. Create a branch: `git checkout -b feature/your-feature`
 2. Make your changes
-3. Test both server and app
-4. Commit with a clear message
-5. Push and open a PR
+3. Run server tests: `cd packages/server && PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test`
+4. Run app type check: `cd packages/app && npx tsc --noEmit`
+5. Commit with a clear message
+6. Push and open a PR
 
 ## Code Style
 
@@ -57,20 +57,20 @@ Thanks for your interest in contributing! This document covers how to get starte
 ## Areas to Contribute
 
 ### Easy Wins
-- Improve output parser patterns (`packages/server/src/output-parser.js`)
-- Add more special key buttons to terminal view
 - UI polish and animations
+- Improve output parser patterns (`packages/server/src/output-parser.js`) for PTY mode
+- Better error messages and edge case handling
 - Syntax highlighting for code blocks in chat
 
 ### Medium
-- Enhanced markdown rendering features
-- Better error handling and recovery
-- Session history and search
+- App-side test suite (component rendering, store logic)
+- Plan mode UI (display Claude's plan steps)
+- Settings page improvements
 
 ### Larger Projects
-- Proper xterm.js integration for terminal view (replace plain text display)
-- Push notifications for long-running tasks
+- xterm.js integration for terminal view (replace plain text display)
 - Session recording and replay
+- Tailscale support as tunnel alternative
 
 ## Questions?
 

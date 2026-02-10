@@ -9,43 +9,45 @@ Run a lightweight daemon on your dev machine. Connect from anywhere via your pho
 
 ```
 ┌─────────────┐                        ┌──────────────────┐
-│  📱 Phone   │◄───── secure tunnel ──►│  💻 Your Mac     │
+│  Phone      │◄───── secure tunnel ──►│  Your Mac        │
 │             │                        │                  │
 │ ┌─────────┐ │                        │ ┌──────────────┐ │
 │ │Chat View│ │◄── parsed messages ────│ │ Chroxy Server│ │
 │ └─────────┘ │                        │ └──────┬───────┘ │
 │ ┌─────────┐ │                        │ ┌──────┴───────┐ │
-│ │Terminal │ │◄── raw PTY stream ─────│ │tmux + Claude │ │
-│ └─────────┘ │                        │ │    Code      │ │
+│ │Terminal │ │◄── raw PTY stream ─────│ │  Claude Code  │ │
+│ └─────────┘ │                        │ └──────────────┘ │
 └─────────────┘                        └──────────────────┘
 ```
 
 ## Why Chroxy?
 
-- **Persistent sessions** — Your Claude Code session lives in tmux. Disconnect and reconnect anytime.
-- **Two views, one session** — Swipe between a clean chat UI and raw terminal access.
+- **No tmux required** — CLI headless mode wraps Claude Code directly. Just start the server and connect.
+- **Two views, one session** — Switch between a clean chat UI and raw terminal access.
+- **Multi-session** — Run multiple Claude sessions from one server. Create, switch, and destroy from the app.
 - **Privacy-first** — Your machine, your tunnel. No cloud middleman storing your code.
+- **Resilient** — Auto-reconnect on network drops, supervisor auto-restart on crash, push notifications for permission prompts.
 - **Open source** — MIT licensed. Audit it, fork it, improve it.
 
 ## Prerequisites
 
-- **Node.js 22** — `node-pty` does not compile on Node 25. Install via Homebrew:
+- **Node.js 22** — Required for `node-pty` (PTY mode). Install via Homebrew:
   ```bash
   brew install node@22
   ```
-  Then run commands with Node 22 on your PATH:
+  Run server commands with Node 22 on your PATH:
   ```bash
   PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
   ```
 
-- **tmux** — Required for persistent terminal sessions:
-  ```bash
-  brew install tmux
-  ```
-
-- **cloudflared** — Cloudflare's tunnel client. No account needed:
+- **cloudflared** — Cloudflare's tunnel client for remote access. No account needed for Quick Tunnels:
   ```bash
   brew install cloudflared
+  ```
+
+- **tmux** *(optional)* — Only required for PTY mode (`--terminal` flag). CLI headless mode (default) does not need tmux:
+  ```bash
+  brew install tmux
   ```
 
 ## Quick Start
@@ -56,7 +58,7 @@ Run a lightweight daemon on your dev machine. Connect from anywhere via your pho
 # Install and configure
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy init
 
-# Start the server
+# Start the server (CLI headless mode — no tmux needed)
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 ```
 
@@ -78,30 +80,45 @@ This skips the Cloudflare tunnel — lower latency, fully local.
 
 ### App (on your phone)
 
-Download from [TestFlight](#) (iOS) or [Play Store](#) (Android).
-
-Or build from source:
+For development, use Expo Go:
 ```bash
 cd packages/app
 npm install
-npm run ios   # or npm run android
+npx expo start
 ```
+
+Scan the Expo dev server QR code with Expo Go on your phone.
 
 ## How It Works
 
-1. **Server** spawns (or attaches to) a tmux session running Claude Code
-2. **Output parser** converts terminal output into structured messages
-3. **WebSocket server** streams both raw and parsed output to connected clients
-4. **Cloudflare tunnel** provides secure remote access without port forwarding
-5. **Mobile app** renders the dual-view UI and sends your input back
+1. **Server** starts a Claude Code process (`claude -p` with structured JSON streaming)
+2. **WebSocket server** streams parsed messages, tool use, and permission requests to the app
+3. **Cloudflare tunnel** provides secure remote access without port forwarding
+4. **Mobile app** renders a chat UI with markdown, handles permissions, and sends input back
+5. **Multi-session manager** lets you run multiple conversations in parallel
+
+### Server Modes
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| CLI headless | *(default)* | Wraps `claude -p` directly. No tmux needed. Structured JSON streaming. |
+| PTY/tmux | `--terminal` | Spawns tmux session for raw terminal access. Requires tmux + node-pty. |
+
+### Tunnel Modes
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| Quick Tunnel | *(default)* | Random URL, no account needed. URL changes on restart. |
+| Named Tunnel | `--tunnel named` | Stable URL that survives restarts. Requires Cloudflare account + domain. |
+| No Tunnel | `--tunnel none` | Local only. Use with `--no-auth` for development. |
 
 ## Project Structure
 
 ```
 chroxy/
 ├── packages/
-│   ├── server/     # Node.js daemon + CLI
-│   └── app/        # React Native mobile app
+│   ├── server/     # Node.js daemon + CLI (ES modules, no TypeScript)
+│   └── app/        # React Native mobile app (TypeScript, Expo 54)
 ├── docs/           # Setup guides, architecture
 └── scripts/        # Install helpers
 ```
@@ -119,27 +136,41 @@ npm install
 # Terminal 1: Start the Chroxy server
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
-# Terminal 2: Start the Expo dev server (for hot-reload to phone/simulator)
+# Terminal 2: Start the Expo dev server (for hot-reload to phone)
 cd packages/app
 npx expo start
 ```
 
-The Expo dev server is only needed during development — it hot-reloads the app to Expo Go on your phone or the iOS/Android simulator. Once the app is built as a standalone binary, users only need `npx chroxy start`.
+Open Expo Go on your phone and scan the Expo dev server QR code. Then use the Chroxy app to scan the server's QR code (from Terminal 1) to connect.
+
+### Running Tests
+
+```bash
+# Server tests (395 tests)
+cd packages/server
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test
+```
 
 ## Roadmap
 
-- [x] Core server daemon with PTY management
-- [x] Output parser for Claude Code patterns
+- [x] CLI headless mode with structured JSON streaming
+- [x] Claude Agent SDK integration
 - [x] WebSocket protocol with auth
-- [x] Cloudflare tunnel integration
-- [x] CLI with `init` and `start` commands
-- [x] QR code generation for easy app pairing
+- [x] Cloudflare tunnel (Quick + Named)
+- [x] Supervisor auto-restart (named tunnel mode)
+- [x] Multi-session support
+- [x] Push notifications for permission prompts
 - [x] React Native app with QR scanning
-- [x] Chat view with parsed messages
-- [x] Terminal view (plain text)
-- [x] One-tap reconnect with saved credentials
-- [ ] Terminal view with xterm.js
-- [ ] Scrollback buffer on reconnect
+- [x] Chat view with markdown rendering
+- [x] Permission handling UI (approve/deny/always allow)
+- [x] Model switching and permission mode switching
+- [x] Context window and cost tracking
+- [x] Auto-reconnect with ConnectionPhase state machine
+- [x] Message selection (copy/share)
+- [x] Agent monitoring (background tasks)
+- [ ] Terminal view with xterm.js (currently plain text)
+- [ ] Plan mode UI
+- [ ] Settings page polish
 - [ ] TestFlight / Play Store release
 - [ ] Tailscale support as tunnel alternative
 - [ ] Session recording and replay
