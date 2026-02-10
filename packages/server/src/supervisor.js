@@ -92,6 +92,15 @@ export async function startSupervisor(config) {
     : 10
   const RESTART_BACKOFFS = [2000, 2000, 3000, 3000, 5000, 5000, 8000, 8000, 10000, 10000]
 
+  const metrics = {
+    startedAt: Date.now(),
+    childStartedAt: null,
+    totalRestarts: 0,
+    consecutiveRestarts: 0,
+    lastExitReason: null,
+    lastBackoffMs: 0,
+  }
+
   function startChild() {
     if (shuttingDown) return
 
@@ -110,6 +119,7 @@ export async function startSupervisor(config) {
     if (config.discoveryInterval) childEnv.CHROXY_DISCOVERY_INTERVAL = String(config.discoveryInterval)
 
     console.log(`[supervisor] Starting server child (attempt ${restartCount + 1})`)
+    metrics.childStartedAt = Date.now()
 
     child = fork(childScript, [], {
       env: childEnv,
@@ -120,16 +130,22 @@ export async function startSupervisor(config) {
       if (msg.type === 'ready') {
         console.log('[supervisor] Server child is ready')
         restartCount = 0
+        metrics.consecutiveRestarts = 0
         stopStandbyServer()
       }
     })
 
     child.on('exit', (code, signal) => {
+      const childUptimeMs = metrics.childStartedAt ? Date.now() - metrics.childStartedAt : 0
       child = null
       if (shuttingDown) return
 
       console.log(`[supervisor] Server child exited (code ${code}, signal ${signal})`)
       restartCount++
+      metrics.totalRestarts++
+      metrics.consecutiveRestarts = restartCount
+      metrics.lastExitReason = { code, signal }
+      metrics.childStartedAt = null
 
       if (restartCount > MAX_RESTARTS) {
         console.error(`[supervisor] Max restarts (${MAX_RESTARTS}) exceeded, giving up`)
@@ -140,7 +156,8 @@ export async function startSupervisor(config) {
       startStandbyServer()
 
       const delay = RESTART_BACKOFFS[Math.min(restartCount - 1, RESTART_BACKOFFS.length - 1)]
-      console.log(`[supervisor] Restarting in ${delay}ms...`)
+      metrics.lastBackoffMs = delay
+      console.log(`[supervisor] Child ran for ${Math.round(childUptimeMs / 1000)}s | total restarts: ${metrics.totalRestarts} | next backoff: ${delay}ms`)
       setTimeout(startChild, delay)
     })
 
@@ -159,7 +176,16 @@ export async function startSupervisor(config) {
     standbyServer = createServer((req, res) => {
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ status: 'restarting' }))
+        res.end(JSON.stringify({
+          status: 'restarting',
+          metrics: {
+            supervisorUptimeS: Math.round((Date.now() - metrics.startedAt) / 1000),
+            totalRestarts: metrics.totalRestarts,
+            consecutiveRestarts: metrics.consecutiveRestarts,
+            lastExitReason: metrics.lastExitReason,
+            lastBackoffMs: metrics.lastBackoffMs,
+          },
+        }))
         return
       }
       res.writeHead(503)
@@ -196,10 +222,20 @@ export async function startSupervisor(config) {
   // 5. Start the first child
   startChild()
 
+  // 5b. Periodic heartbeat
+  const heartbeatInterval = setInterval(() => {
+    if (!child || shuttingDown) return
+    const childUptime = metrics.childStartedAt ? Math.round((Date.now() - metrics.childStartedAt) / 1000) : 0
+    const totalUptime = Math.round((Date.now() - metrics.startedAt) / 1000)
+    console.log(`[supervisor] Heartbeat: uptime=${totalUptime}s, childUptime=${childUptime}s, totalRestarts=${metrics.totalRestarts}`)
+  }, 5 * 60 * 1000)
+  heartbeatInterval.unref()
+
   // 6. Graceful shutdown
   const shutdown = async (signal) => {
     if (shuttingDown) return
     shuttingDown = true
+    clearInterval(heartbeatInterval)
     console.log(`\n[supervisor] ${signal} received, shutting down...`)
 
     stopStandbyServer()
