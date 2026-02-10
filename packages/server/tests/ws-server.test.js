@@ -1637,3 +1637,110 @@ describe('WsServer attach_session message flow', () => {
     client2.ws.close()
   })
 })
+
+describe('user_question_response forwarding (multi-session)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  function createMockSessionManagerForQuestion(sessions = []) {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+
+    for (const sessionData of sessions) {
+      const mockSession = createMockSession()
+      mockSession.respondToQuestion = () => {}
+      mockSession.cwd = sessionData.cwd
+
+      sessionsMap.set(sessionData.id, {
+        session: mockSession,
+        name: sessionData.name,
+        cwd: sessionData.cwd,
+        type: sessionData.type || 'cli',
+        isBusy: false,
+      })
+    }
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    })
+
+    return { manager, sessionsMap }
+  }
+
+  it('forwards user_question_response to active cli session', async () => {
+    const { manager, sessionsMap } = createMockSessionManagerForQuestion([
+      { id: 'sess-1', name: 'Test', cwd: '/tmp', type: 'cli' },
+    ])
+
+    const entry = sessionsMap.get('sess-1')
+    let receivedAnswer = null
+    entry.session.respondToQuestion = (answer) => { receivedAnswer = answer }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    send(ws, { type: 'user_question_response', answer: 'Option A' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(receivedAnswer, 'Option A', 'Answer should be forwarded to session')
+
+    ws.close()
+  })
+
+  it('ignores user_question_response for pty sessions', async () => {
+    const { manager, sessionsMap } = createMockSessionManagerForQuestion([
+      { id: 'sess-pty', name: 'PTY', cwd: '/tmp', type: 'pty' },
+    ])
+
+    const entry = sessionsMap.get('sess-pty')
+    let called = false
+    entry.session.respondToQuestion = () => { called = true }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      defaultSessionId: 'sess-pty',
+      authRequired: true,
+    })
+
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    send(ws, { type: 'user_question_response', answer: 'Option B' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(called, false, 'respondToQuestion should NOT be called for PTY sessions')
+
+    ws.close()
+  })
+})
