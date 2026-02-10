@@ -102,6 +102,8 @@ export interface DiscoveredSession {
   pid: number;
 }
 
+export type SessionHealth = 'healthy' | 'crashed';
+
 export interface SessionState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
@@ -112,6 +114,7 @@ export interface SessionState {
   lastResultCost: number | null;
   lastResultDuration: number | null;
   isIdle: boolean;
+  health: SessionHealth;
 }
 
 export interface ServerError {
@@ -143,6 +146,7 @@ function createEmptySessionState(): SessionState {
     lastResultCost: null,
     lastResultDuration: null,
     isIdle: true,
+    health: 'healthy',
   };
 }
 
@@ -466,6 +470,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       lastResultCost: get().lastResultCost,
       lastResultDuration: get().lastResultDuration,
       isIdle: true,
+      health: 'healthy' as const,
     };
   },
 
@@ -708,9 +713,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
         }
 
-        case 'session_error':
-          Alert.alert('Session Error', msg.message || 'Unknown error');
+        case 'session_error': {
+          const errorSessionId = msg.sessionId || get().activeSessionId;
+          if (msg.category === 'crash' && errorSessionId && get().sessionStates[errorSessionId]) {
+            updateSession(errorSessionId, () => ({ health: 'crashed' as const }));
+          }
+          if (msg.category !== 'crash') {
+            Alert.alert('Session Error', msg.message || 'Unknown error');
+          }
           break;
+        }
 
         case 'discovered_sessions':
           if (Array.isArray(msg.tmux)) {
