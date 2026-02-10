@@ -510,7 +510,7 @@ export class SessionManager extends EventEmitter {
     }
 
     // Transient events — forwarded but not recorded in history (not replayed on reconnect)
-    const TRANSIENT_EVENTS = ['permission_request', 'agent_spawned', 'agent_completed']
+    const TRANSIENT_EVENTS = ['permission_request', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready']
     for (const event of TRANSIENT_EVENTS) {
       session.on(event, (data) => {
         this.emit('session_event', { sessionId, event, data })

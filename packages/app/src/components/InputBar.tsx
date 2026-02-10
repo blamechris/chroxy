@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { forwardRef } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Platform } from 'react-native';
 import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH } from '../constants/icons';
 import { COLORS } from '../constants/colors';
@@ -26,7 +26,7 @@ export interface InputBarProps {
 
 // -- Component --
 
-export function InputBar({
+export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
   inputText,
   onChangeText,
   onSend,
@@ -42,7 +42,7 @@ export function InputBar({
   bottomPadding,
   disabled,
   disabledPlaceholder,
-}: InputBarProps) {
+}, ref) {
   const a11yDisabled = disabled ? { disabled: true as const } : undefined;
 
   return (
@@ -79,6 +79,7 @@ export function InputBar({
           <Text style={styles.enterModeText}>{enterToSend ? ICON_RETURN : ICON_PARAGRAPH}</Text>
         </TouchableOpacity>
         <TextInput
+          ref={ref}
           style={[styles.input, !enterToSend && styles.inputMultiline, disabled && styles.inputDisabled]}
           placeholder={disabled ? (disabledPlaceholder || 'Reconnecting...') : !claudeReady ? 'Connecting to Claude...' : 'Message Claude...'}
           placeholderTextColor={COLORS.textDim}
@@ -120,7 +121,7 @@ export function InputBar({
       </View>
     </View>
   );
-}
+});
 
 // -- Styles --
 

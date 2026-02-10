@@ -81,6 +81,8 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'user_question', toolUseId, questions }   — AskUserQuestion prompt from Claude
  *   { type: 'agent_busy' }                           — agent started processing (per-session)
  *   { type: 'agent_idle' }                           — agent finished processing (per-session)
+ *   { type: 'plan_started' }                         — Claude entered plan mode (transient)
+ *   { type: 'plan_ready', allowedPrompts }           — plan complete, awaiting approval (transient)
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
  */
@@ -891,6 +893,17 @@ export class WsServer {
           })
           break
 
+        case 'plan_started':
+          this._broadcastToSession(sessionId, { type: 'plan_started' })
+          break
+
+        case 'plan_ready':
+          this._broadcastToSession(sessionId, {
+            type: 'plan_ready',
+            allowedPrompts: data.allowedPrompts,
+          })
+          break
+
         case 'result':
           this._broadcastToSession(sessionId, { type: 'result', cost: data.cost, duration: data.duration, usage: data.usage, sessionId: data.sessionId })
           this._broadcastToSession(sessionId, { type: 'agent_idle' })
@@ -1040,6 +1053,13 @@ export class WsServer {
     })
     this.cliSession.on('agent_completed', (data) => {
       this._broadcast({ type: 'agent_completed', ...data })
+    })
+
+    this.cliSession.on('plan_started', () => {
+      this._broadcast({ type: 'plan_started' })
+    })
+    this.cliSession.on('plan_ready', (data) => {
+      this._broadcast({ type: 'plan_ready', allowedPrompts: data.allowedPrompts })
     })
 
     this.cliSession.on('error', ({ message }) => {

@@ -99,6 +99,10 @@ export interface ChatViewProps {
   isSelectingRef: React.MutableRefObject<boolean>;
   onToggleSelection: (id: string) => void;
   streamingMessageId: string | null;
+  isPlanPending?: boolean;
+  planAllowedPrompts?: { tool: string; prompt: string }[];
+  onApprovePlan?: () => void;
+  onFocusInput?: () => void;
 }
 
 // -- Display group types for message grouping --
@@ -529,6 +533,52 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   );
 }
 
+// -- Plan Approval Card --
+
+function PlanApprovalCard({
+  allowedPrompts,
+  onApprove,
+  onFeedback,
+}: {
+  allowedPrompts: { tool: string; prompt: string }[];
+  onApprove: () => void;
+  onFeedback: () => void;
+}) {
+  return (
+    <View style={styles.planCard}>
+      <Text style={styles.planCardHeader}>Plan Ready for Review</Text>
+      {allowedPrompts.length > 0 && (
+        <View style={styles.planPromptsList}>
+          <Text style={styles.planPromptsLabel}>Permissions needed:</Text>
+          {allowedPrompts.map((p, i) => (
+            <Text key={i} style={styles.planPromptItem}>
+              {ICON_CHEVRON_RIGHT} {p.tool}: {p.prompt}
+            </Text>
+          ))}
+        </View>
+      )}
+      <View style={styles.planButtonRow}>
+        <TouchableOpacity
+          style={styles.planApproveButton}
+          onPress={onApprove}
+          accessibilityRole="button"
+          accessibilityLabel="Approve plan"
+        >
+          <Text style={styles.planApproveText}>Approve</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.planFeedbackButton}
+          onPress={onFeedback}
+          accessibilityRole="button"
+          accessibilityLabel="Give feedback on plan"
+        >
+          <Text style={styles.planFeedbackText}>Give Feedback</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
 // -- Main ChatView component --
 
 export function ChatView({
@@ -542,6 +592,10 @@ export function ChatView({
   isSelectingRef,
   onToggleSelection,
   streamingMessageId,
+  isPlanPending,
+  planAllowedPrompts,
+  onApprovePlan,
+  onFocusInput,
 }: ChatViewProps) {
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
@@ -628,6 +682,13 @@ export function ChatView({
             />
           );
         })
+      )}
+      {isPlanPending && onApprovePlan && onFocusInput && (
+        <PlanApprovalCard
+          allowedPrompts={planAllowedPrompts || []}
+          onApprove={onApprovePlan}
+          onFeedback={onFocusInput}
+        />
       )}
       </ScrollView>
 
@@ -1018,5 +1079,68 @@ const styles = StyleSheet.create({
     padding: 8,
     borderRadius: 6,
     overflow: 'hidden',
+  },
+  planCard: {
+    backgroundColor: COLORS.accentGreenLight,
+    borderColor: COLORS.accentGreenBorder,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 8,
+    marginBottom: 12,
+    maxWidth: '95%',
+  },
+  planCardHeader: {
+    color: COLORS.accentGreen,
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  planPromptsList: {
+    marginBottom: 10,
+  },
+  planPromptsLabel: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  planPromptItem: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    paddingVertical: 2,
+    paddingLeft: 4,
+  },
+  planButtonRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  planApproveButton: {
+    backgroundColor: COLORS.accentGreen,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+    minHeight: 44,
+    justifyContent: 'center',
+  },
+  planApproveText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  planFeedbackButton: {
+    backgroundColor: COLORS.accentGreenLight,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.accentGreenBorderStrong,
+    minHeight: 44,
+    justifyContent: 'center',
+  },
+  planFeedbackText: {
+    color: COLORS.accentGreen,
+    fontSize: 14,
+    fontWeight: '600',
   },
 });

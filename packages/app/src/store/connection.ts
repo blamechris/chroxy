@@ -122,6 +122,8 @@ export interface SessionState {
   isIdle: boolean;
   health: SessionHealth;
   activeAgents: AgentInfo[];
+  isPlanPending: boolean;
+  planAllowedPrompts: { tool: string; prompt: string }[];
 }
 
 export interface ServerError {
@@ -155,6 +157,8 @@ export function createEmptySessionState(): SessionState {
     isIdle: true,
     health: 'healthy',
     activeAgents: [],
+    isPlanPending: false,
+    planAllowedPrompts: [],
   };
 }
 
@@ -243,6 +247,9 @@ interface ConnectionState {
   discoverSessions: () => void;
   attachSession: (tmuxSession: string, name?: string) => void;
   forgetSession: () => void;
+
+  // Plan mode actions
+  clearPlanState: () => void;
 
   // Server error actions
   dismissServerError: (id: string) => void;
@@ -481,6 +488,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       isIdle: true,
       health: 'healthy' as const,
       activeAgents: [],
+      isPlanPending: false,
+      planAllowedPrompts: [],
     };
   },
 
@@ -763,11 +772,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'history_replay_start':
           _receivingHistoryReplay = true;
-          // Clear transient agent tracking — these events are not replayed
-          // from history, so any surviving entries are stale from pre-disconnect
-          updateActiveSession((ss) =>
-            ss.activeAgents.length > 0 ? { activeAgents: [] } : {}
-          );
+          // Clear transient state — these events are not replayed from history,
+          // so any surviving entries are stale from pre-disconnect
+          updateActiveSession((ss) => {
+            const patch: Partial<SessionState> = {};
+            if (ss.activeAgents.length > 0) patch.activeAgents = [];
+            if (ss.isPlanPending) {
+              patch.isPlanPending = false;
+              patch.planAllowedPrompts = [];
+            }
+            return Object.keys(patch).length > 0 ? patch : {};
+          });
           break;
 
         case 'history_replay_end':
@@ -1095,6 +1110,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               if (filtered.length === ss.activeAgents.length) return {};
               return { activeAgents: filtered };
             });
+          }
+          break;
+        }
+
+        case 'plan_started': {
+          const planStartTargetId = msg.sessionId || get().activeSessionId;
+          if (planStartTargetId && get().sessionStates[planStartTargetId]) {
+            updateSession(planStartTargetId, () => ({
+              isPlanPending: false,
+              planAllowedPrompts: [],
+            }));
+          }
+          break;
+        }
+
+        case 'plan_ready': {
+          const planReadyTargetId = msg.sessionId || get().activeSessionId;
+          const prompts = Array.isArray(msg.allowedPrompts) ? msg.allowedPrompts : [];
+          if (planReadyTargetId && get().sessionStates[planReadyTargetId]) {
+            updateSession(planReadyTargetId, () => ({
+              isPlanPending: true,
+              planAllowedPrompts: prompts,
+            }));
           }
           break;
         }
@@ -1575,6 +1613,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (name) msg.name = name;
       socket.send(JSON.stringify(msg));
     }
+  },
+
+  clearPlanState: () => {
+    updateActiveSession(() => ({
+      isPlanPending: false,
+      planAllowedPrompts: [],
+    }));
   },
 
   dismissServerError: (id: string) => {

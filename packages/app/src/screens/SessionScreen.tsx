@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback } from 'react';
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   StyleSheet,
   ScrollView,
@@ -28,8 +29,9 @@ import { ICON_CLOSE, ICON_GEAR } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 
-// Stable empty array to avoid new-reference-per-render in Zustand selectors
+// Stable empty arrays to avoid new-reference-per-render in Zustand selectors
 const EMPTY_AGENTS: AgentInfo[] = [];
+const EMPTY_PROMPTS: { tool: string; prompt: string }[] = [];
 
 // Enable LayoutAnimation on Android
 UIManager.setLayoutAnimationEnabledExperimental?.(true);
@@ -133,6 +135,14 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].health : 'healthy';
   });
+  const isPlanPending = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].isPlanPending : false;
+  });
+  const planAllowedPrompts = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].planAllowedPrompts : EMPTY_PROMPTS;
+  });
   const destroySession = useConnectionStore((s) => s.destroySession);
   const serverErrors = useConnectionStore((s) => s.serverErrors);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
@@ -150,6 +160,9 @@ export function SessionScreen() {
   // Ref so onContentSizeChange always reads the latest value (avoids stale closure)
   const isSelectingRef = useRef(false);
   isSelectingRef.current = isSelecting;
+
+  // Ref for focusing the input bar when user taps "Give Feedback" on plan approval
+  const inputRef = useRef<TextInput>(null);
 
   const toggleSelection = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -206,6 +219,9 @@ export function SessionScreen() {
       addUserMessage(text);
     }
 
+    // Clear plan approval card — user has responded (whether approving or giving feedback)
+    if (isPlanPending) clearPlanState();
+
     // PTY sessions: append CR so text + submit arrive as a single atomic write.
     // Sending them separately caused a race condition where multi-line text
     // would sit in the terminal input buffer before the CR arrived.
@@ -246,6 +262,18 @@ export function SessionScreen() {
       markPromptAnswered(messageId, value);
     }
   };
+
+  const clearPlanState = useConnectionStore((s) => s.clearPlanState);
+
+  const handleApprovePlan = useCallback(() => {
+    addUserMessage('Go ahead with the plan');
+    sendInput('Go ahead with the plan');
+    clearPlanState();
+  }, [addUserMessage, sendInput, clearPlanState]);
+
+  const handleFocusInput = useCallback(() => {
+    inputRef.current?.focus();
+  }, []);
 
   // Check if Enter key should send based on current mode and settings
   const enterToSend = viewMode === 'chat'
@@ -430,6 +458,10 @@ export function SessionScreen() {
           isSelectingRef={isSelectingRef}
           onToggleSelection={toggleSelection}
           streamingMessageId={streamingMessageId}
+          isPlanPending={isPlanPending}
+          planAllowedPrompts={planAllowedPrompts}
+          onApprovePlan={handleApprovePlan}
+          onFocusInput={handleFocusInput}
         />
       ) : (
         <TerminalView
@@ -440,6 +472,7 @@ export function SessionScreen() {
 
       {/* Input area */}
       <InputBar
+        ref={inputRef}
         inputText={inputText}
         onChangeText={setInputText}
         onSend={handleSend}
