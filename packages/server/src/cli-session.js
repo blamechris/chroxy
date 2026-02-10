@@ -52,14 +52,19 @@ function withSettingsLock(fn) {
  * stdout (not process exit).
  *
  * Events emitted:
- *   ready        { sessionId, model, tools }
- *   stream_start { messageId }
- *   stream_delta { messageId, delta }
- *   stream_end   { messageId }
- *   message      { type, content, tool, timestamp }
- *   tool_start   { messageId, tool, input }
- *   result       { cost, duration, usage, sessionId }
- *   error        { message }
+ *   ready            { sessionId, model, tools }
+ *   stream_start     { messageId }
+ *   stream_delta     { messageId, delta }
+ *   stream_end       { messageId }
+ *   message          { type, content, tool, timestamp }
+ *   tool_start       { messageId, tool, input }
+ *   result           { cost, duration, usage, sessionId }
+ *   error            { message }
+ *   user_question    { toolUseId, questions }
+ *   agent_spawned    { toolUseId, description, startedAt }
+ *   agent_completed  { toolUseId }
+ *   plan_started     {}
+ *   plan_ready       { allowedPrompts }
  */
 export class CliSession extends EventEmitter {
   constructor({ cwd, allowedTools, model, port, apiToken, permissionMode } = {}) {
@@ -79,6 +84,8 @@ export class CliSession extends EventEmitter {
 
     // Persistent-process state
     this._activeAgents = new Map() // toolUseId -> { toolUseId, description, startedAt }
+    this._inPlanMode = false
+    this._planAllowedPrompts = null
     this._isBusy = false
     this._waitingForAnswer = false
     this._processReady = false
@@ -429,6 +436,22 @@ export class CliSession extends EventEmitter {
                 console.warn(`[cli-session] Failed to parse Task tool input: ${err.message}`)
               }
             }
+            if (ctx && ctx.currentToolName === 'EnterPlanMode') {
+              this._inPlanMode = true
+              this.emit('plan_started')
+            }
+            if (ctx && ctx.currentToolName === 'ExitPlanMode') {
+              let allowedPrompts = []
+              if (ctx.toolInputChunks) {
+                try {
+                  const input = JSON.parse(ctx.toolInputChunks)
+                  allowedPrompts = Array.isArray(input.allowedPrompts) ? input.allowedPrompts : []
+                } catch (err) {
+                  console.warn(`[cli-session] Failed to parse ExitPlanMode input: ${err.message}`)
+                }
+              }
+              this._planAllowedPrompts = allowedPrompts
+            }
             if (ctx) {
               ctx.currentContentBlockType = null
               ctx.currentToolName = null
@@ -479,6 +502,14 @@ export class CliSession extends EventEmitter {
           this.emit('stream_end', { messageId })
         }
 
+        // Emit plan_ready before clearing state — the turn that calls
+        // ExitPlanMode ends with a normal result event
+        if (this._inPlanMode && this._planAllowedPrompts !== null) {
+          this.emit('plan_ready', { allowedPrompts: this._planAllowedPrompts })
+          this._inPlanMode = false
+          this._planAllowedPrompts = null
+        }
+
         this.emit('result', {
           sessionId: data.session_id,
           cost: data.total_cost_usd,
@@ -501,6 +532,10 @@ export class CliSession extends EventEmitter {
     this._waitingForAnswer = false
     this._currentMessageId = null
     this._currentCtx = null
+    // NOTE: _inPlanMode is NOT reset here — it spans multiple turns
+    // (EnterPlanMode in one turn, ExitPlanMode in a later turn).
+    // It's reset only after plan_ready is emitted, or on destroy().
+    this._planAllowedPrompts = null
     // Emit completions for any tracked agents so the app clears badges.
     // Centralised here so every callsite (result, crash, timeout, interrupt,
     // destroy) is safe by default.
