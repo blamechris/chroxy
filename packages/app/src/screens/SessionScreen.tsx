@@ -122,6 +122,10 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].isIdle : s.isIdle;
   });
+  const activeAgents = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].activeAgents : [];
+  });
   const activeSessionHealth = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].health : 'healthy';
@@ -326,6 +330,7 @@ export function SessionScreen() {
           sessionCwd={sessionCwd}
           serverMode={serverMode}
           isIdle={isIdle}
+          activeAgents={activeAgents}
           setModel={setModel}
           setPermissionMode={setPermissionMode}
         />

@@ -511,6 +511,14 @@ export class SessionManager extends EventEmitter {
       this.emit('session_event', { sessionId, event: 'status_update', data })
     })
 
+    // Agent lifecycle events — transient, not recorded in history
+    session.on('agent_spawned', (data) => {
+      this.emit('session_event', { sessionId, event: 'agent_spawned', data })
+    })
+    session.on('agent_completed', (data) => {
+      this.emit('session_event', { sessionId, event: 'agent_completed', data })
+    })
+
     // PtySession emits 'session_crashed' when health checks detect a crashed Claude process
     session.on('session_crashed', (data) => {
       console.error(`[session-manager] Session ${sessionId} crashed: ${data.error}`)

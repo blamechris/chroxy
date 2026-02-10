@@ -78,6 +78,7 @@ export class CliSession extends EventEmitter {
     this._stderrRL = null
 
     // Persistent-process state
+    this._activeAgents = new Map() // toolUseId -> { toolUseId, description, startedAt }
     this._isBusy = false
     this._waitingForAnswer = false
     this._processReady = false
@@ -412,6 +413,22 @@ export class CliSession extends EventEmitter {
                 console.error(`[cli-session] Failed to parse AskUserQuestion input: ${err.message}`)
               }
             }
+            if (ctx && ctx.currentToolName === 'Task' && ctx.toolInputChunks) {
+              try {
+                const input = JSON.parse(ctx.toolInputChunks)
+                const description = (typeof input.description === 'string'
+                  ? input.description : 'Background task').slice(0, 200)
+                const agentInfo = {
+                  toolUseId: ctx.currentToolUseId,
+                  description,
+                  startedAt: Date.now(),
+                }
+                this._activeAgents.set(ctx.currentToolUseId, agentInfo)
+                this.emit('agent_spawned', agentInfo)
+              } catch (err) {
+                console.warn(`[cli-session] Failed to parse Task tool input: ${err.message}`)
+              }
+            }
             if (ctx) {
               ctx.currentContentBlockType = null
               ctx.currentToolName = null
@@ -484,6 +501,15 @@ export class CliSession extends EventEmitter {
     this._waitingForAnswer = false
     this._currentMessageId = null
     this._currentCtx = null
+    // Emit completions for any tracked agents so the app clears badges.
+    // Centralised here so every callsite (result, crash, timeout, interrupt,
+    // destroy) is safe by default.
+    if (this._activeAgents.size > 0) {
+      for (const agent of this._activeAgents.values()) {
+        this.emit('agent_completed', { toolUseId: agent.toolUseId })
+      }
+      this._activeAgents.clear()
+    }
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
       this._resultTimeout = null
@@ -896,7 +922,10 @@ export class CliSession extends EventEmitter {
       this._child = null
     }
 
-    this._isBusy = false
+    // Emit completions for any tracked agents and clear busy state.
+    // Must happen before removeAllListeners() so events are delivered.
+    this._clearMessageState()
+
     this._processReady = false
     this.removeAllListeners()
   }

@@ -865,6 +865,22 @@ export class WsServer {
           this._broadcastToSession(sessionId, { type: 'tool_start', messageId: data.messageId, tool: data.tool, input: data.input })
           break
 
+        case 'agent_spawned':
+          this._broadcastToSession(sessionId, {
+            type: 'agent_spawned',
+            toolUseId: data.toolUseId,
+            description: data.description,
+            startedAt: data.startedAt,
+          })
+          break
+
+        case 'agent_completed':
+          this._broadcastToSession(sessionId, {
+            type: 'agent_completed',
+            toolUseId: data.toolUseId,
+          })
+          break
+
         case 'result':
           this._broadcastToSession(sessionId, { type: 'result', cost: data.cost, duration: data.duration, usage: data.usage, sessionId: data.sessionId })
           this._broadcastToSession(sessionId, { type: 'agent_idle' })
@@ -993,6 +1009,13 @@ export class WsServer {
         toolUseId: data.toolUseId,
         questions: data.questions,
       })
+    })
+
+    this.cliSession.on('agent_spawned', (data) => {
+      this._broadcast({ type: 'agent_spawned', ...data })
+    })
+    this.cliSession.on('agent_completed', (data) => {
+      this._broadcast({ type: 'agent_completed', ...data })
     })
 
     this.cliSession.on('error', ({ message }) => {
