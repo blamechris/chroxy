@@ -274,9 +274,9 @@ function ToolDetailModal({ visible, toolName, content, onClose }: {
             <Text style={styles.toolModalTitle} numberOfLines={1}>Tool: {toolName}</Text>
             <TouchableOpacity
               onPress={onClose}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              style={styles.toolModalCloseButton}
             >
-              <Text style={styles.toolModalClose}>{ICON_CLOSE}</Text>
+              <Text style={styles.toolModalCloseIcon}>{ICON_CLOSE}</Text>
             </TouchableOpacity>
           </View>
           <ScrollView style={styles.toolModalScroll}>
@@ -290,14 +290,14 @@ function ToolDetailModal({ visible, toolName, content, onClose }: {
 
 // -- Collapsible tool use bubble --
 
-function ToolBubble({ message, isSelected, isSelecting, onToggleSelection }: {
+function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpenDetail }: {
   message: ChatMessage;
   isSelected: boolean;
   isSelecting: boolean;
   onToggleSelection: () => void;
+  onOpenDetail: (toolName: string, content: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [modalVisible, setModalVisible] = useState(false);
   const longPressedRef = useRef(false);
   const content = message.content?.trim();
 
@@ -313,7 +313,7 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection }: {
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      setModalVisible(true);
+      onOpenDetail(message.tool || 'Unknown', content);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -328,30 +328,22 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection }: {
   const preview = content.length > 60 ? content.slice(0, 60) + '...' : content;
 
   return (
-    <>
-      <TouchableOpacity
-        activeOpacity={0.7}
-        onPress={handlePress}
-        onLongPress={!expanded && !isSelecting ? handleLongPress : undefined}
-        style={[styles.toolBubble, isSelected && styles.selectedBubble]}
-      >
-        <View style={styles.toolHeader}>
-          <Text style={styles.toolChevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
-          <Text style={styles.senderLabelTool}>Tool: {message.tool}</Text>
-        </View>
-        {expanded ? (
-          <Text selectable style={styles.toolContentExpanded}>{content}</Text>
-        ) : (
-          <Text style={styles.toolContentCollapsed} numberOfLines={1}>{preview}</Text>
-        )}
-      </TouchableOpacity>
-      <ToolDetailModal
-        visible={modalVisible}
-        toolName={message.tool || 'Unknown'}
-        content={content}
-        onClose={() => setModalVisible(false)}
-      />
-    </>
+    <TouchableOpacity
+      activeOpacity={0.7}
+      onPress={handlePress}
+      onLongPress={!expanded && !isSelecting ? handleLongPress : undefined}
+      style={[styles.toolBubble, isSelected && styles.selectedBubble]}
+    >
+      <View style={styles.toolHeader}>
+        <Text style={styles.toolChevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
+        <Text style={styles.senderLabelTool}>Tool: {message.tool}</Text>
+      </View>
+      {expanded ? (
+        <Text selectable style={styles.toolContentExpanded}>{content}</Text>
+      ) : (
+        <Text style={styles.toolContentCollapsed} numberOfLines={1}>{preview}</Text>
+      )}
+    </TouchableOpacity>
   );
 }
 
@@ -442,13 +434,14 @@ function PermissionDetailOrFallback({ tool, toolInput, fallback }: { tool?: stri
 
 // -- Single message bubble --
 
-function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress }: {
+function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress, onOpenDetail }: {
   message: ChatMessage;
   onSelectOption?: (value: string, messageId: string, requestId?: string, toolUseId?: string) => void;
   isSelected: boolean;
   isSelecting: boolean;
   onLongPress: () => void;
   onPress: () => void;
+  onOpenDetail: (toolName: string, content: string) => void;
 }) {
   const longPressedRef = useRef(false);
   const isUser = message.type === 'user_input';
@@ -482,6 +475,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
         isSelected={isSelected}
         isSelecting={isSelecting}
         onToggleSelection={onPress}
+        onOpenDetail={onOpenDetail}
       />
     );
   }
@@ -551,6 +545,11 @@ export function ChatView({
 }: ChatViewProps) {
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string } | null>(null);
+
+  const handleOpenDetail = (toolName: string, content: string) => {
+    setToolDetail({ toolName, content });
+  };
 
   const displayGroups = useMemo(
     () => groupMessages(messages, streamingMessageId),
@@ -625,6 +624,7 @@ export function ChatView({
               isSelecting={isSelecting}
               onLongPress={() => onToggleSelection(msg.id)}
               onPress={() => onToggleSelection(msg.id)}
+              onOpenDetail={handleOpenDetail}
             />
           );
         })
@@ -656,6 +656,13 @@ export function ChatView({
           <Text style={styles.scrollButtonText}>{ICON_ARROW_DOWN}</Text>
         </TouchableOpacity>
       )}
+
+      <ToolDetailModal
+        visible={toolDetail !== null}
+        toolName={toolDetail?.toolName || ''}
+        content={toolDetail?.content || ''}
+        onClose={() => setToolDetail(null)}
+      />
     </View>
   );
 }
@@ -850,7 +857,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingVertical: 3,
+    minHeight: 44,
+    paddingVertical: 10,
   },
   activityEntryIcon: {
     color: COLORS.textDim,
@@ -937,7 +945,14 @@ const styles = StyleSheet.create({
     flex: 1,
     marginRight: 12,
   },
-  toolModalClose: {
+  toolModalCloseButton: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: -12,
+  },
+  toolModalCloseIcon: {
     color: COLORS.textMuted,
     fontSize: 18,
   },
