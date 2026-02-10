@@ -2052,3 +2052,165 @@ describe('public broadcast method', () => {
     ws.close()
   })
 })
+
+describe('agent idle/busy notifications', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  /** Create a mock SessionManager with two sessions */
+  function createTwoSessionManager() {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+
+    const session1 = createMockSession()
+    session1.cwd = '/tmp/project-1'
+    sessionsMap.set('sess-1', { session: session1, name: 'Session 1', cwd: '/tmp/project-1', type: 'cli', isBusy: false })
+
+    const session2 = createMockSession()
+    session2.cwd = '/tmp/project-2'
+    sessionsMap.set('sess-2', { session: session2, name: 'Session 2', cwd: '/tmp/project-2', type: 'cli', isBusy: false })
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.keys().next().value
+    })
+
+    return manager
+  }
+
+  it('broadcasts agent_busy after stream_start', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    messages.length = 0
+
+    mockManager.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'stream_start',
+      data: { messageId: 'msg-1' },
+    })
+    await new Promise(r => setTimeout(r, 100))
+
+    const agentBusy = messages.find(m => m.type === 'agent_busy')
+    assert.ok(agentBusy, 'Should receive agent_busy after stream_start')
+    assert.equal(agentBusy.sessionId, 'sess-1', 'agent_busy should include sessionId')
+
+    ws.close()
+  })
+
+  it('broadcasts agent_idle after result', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    messages.length = 0
+
+    mockManager.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'result',
+      data: { cost: 0.01, duration: 500, usage: {} },
+    })
+    await new Promise(r => setTimeout(r, 100))
+
+    const agentIdle = messages.find(m => m.type === 'agent_idle')
+    assert.ok(agentIdle, 'Should receive agent_idle after result')
+    assert.equal(agentIdle.sessionId, 'sess-1', 'agent_idle should include sessionId')
+
+    ws.close()
+  })
+
+  it('broadcasts session_list on stream_start for immediate busy dot', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    messages.length = 0
+
+    mockManager.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'stream_start',
+      data: { messageId: 'msg-1' },
+    })
+    await new Promise(r => setTimeout(r, 100))
+
+    const sessionList = messages.find(m => m.type === 'session_list')
+    assert.ok(sessionList, 'Should receive session_list broadcast on stream_start')
+    assert.ok(Array.isArray(sessionList.sessions), 'session_list should contain sessions array')
+
+    ws.close()
+  })
+
+  it('hasActiveViewersForSession returns correct values', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // No clients — should be false for both
+    assert.equal(server.hasActiveViewersForSession('sess-1'), false, 'No viewers when no clients')
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Client is on sess-1 (default)
+    assert.equal(server.hasActiveViewersForSession('sess-1'), true, 'Client is viewing sess-1')
+    assert.equal(server.hasActiveViewersForSession('sess-2'), false, 'No client is viewing sess-2')
+
+    ws.close()
+  })
+})

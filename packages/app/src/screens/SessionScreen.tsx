@@ -118,6 +118,10 @@ export function SessionScreen() {
 
   const sessions = useConnectionStore((s) => s.sessions);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
+  const isIdle = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].isIdle : s.isIdle;
+  });
   const serverErrors = useConnectionStore((s) => s.serverErrors);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
   const isCliMode = serverMode === 'cli';
@@ -316,6 +320,7 @@ export function SessionScreen() {
           claudeStatus={claudeStatus}
           sessionCwd={sessionCwd}
           serverMode={serverMode}
+          isIdle={isIdle}
           setModel={setModel}
           setPermissionMode={setPermissionMode}
         />

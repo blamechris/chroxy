@@ -84,9 +84,17 @@ export async function startCliServer(config) {
       if (wsServer) wsServer.broadcastError('session', data.message, !isFatal)
     } else if (event === 'result' && data.cost != null) {
       console.log(`[cli] Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
-      // Push notification for idle: if no active WS clients, Claude may be waiting for input
-      if (pushManager.hasTokens && wsServer && wsServer.authenticatedClientCount === 0) {
-        pushManager.send('idle', 'Claude is waiting', 'A query completed while the app was disconnected.', { sessionId })
+      // Push notification for idle: fire when no clients connected OR when clients are
+      // connected but none viewing this session (background session completed)
+      if (pushManager.hasTokens && wsServer) {
+        const noClients = wsServer.authenticatedClientCount === 0
+        const noActiveViewers = !noClients && !wsServer.hasActiveViewersForSession(sessionId)
+        if (noClients || noActiveViewers) {
+          const body = noClients
+            ? 'A query completed while the app was disconnected.'
+            : 'A query completed on a background session.'
+          pushManager.send('idle', 'Claude is waiting', body, { sessionId })
+        }
       }
     }
   })
