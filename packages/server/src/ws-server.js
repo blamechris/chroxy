@@ -126,6 +126,7 @@ export class WsServer {
     this.serverMode = (this.sessionManager || this.cliSession) ? 'cli' : 'terminal'
     this._gitInfo = getGitInfo()
     this._startedAt = Date.now()
+    this._draining = false
   }
 
   _formatStatusLog(status) {
@@ -437,6 +438,14 @@ export class WsServer {
 
   /** Handle messages in multi-session mode */
   async _handleSessionMessage(ws, client, msg) {
+    // During drain, only allow permission_response and user_question_response
+    if (this._draining && msg.type !== 'permission_response' && msg.type !== 'user_question_response') {
+      if (msg.type === 'input') {
+        this._send(ws, { type: 'server_status', message: 'Server is restarting, please wait...' })
+      }
+      return
+    }
+
     switch (msg.type) {
       case 'input': {
         const text = msg.data

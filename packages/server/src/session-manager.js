@@ -1,10 +1,14 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
-import { statSync } from 'fs'
+import { statSync, writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
+import { join } from 'path'
+import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { PtySession } from './pty-session.js'
 import { discoverTmuxSessions } from './session-discovery.js'
+
+const STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
 /**
  * Base error class for session management operations.
@@ -112,7 +116,7 @@ export class SessionManager extends EventEmitter {
    * Create a new session.
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       console.error(`[session-manager] Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -150,6 +154,7 @@ export class SessionManager extends EventEmitter {
           cwd: resolvedCwd,
           model: resolvedModel,
           permissionMode: resolvedPermissionMode,
+          resumeSessionId: resumeSessionId || null,
         })
 
     const entry = {
@@ -391,6 +396,96 @@ export class SessionManager extends EventEmitter {
       console.log(`[session-manager] Discovered ${newSessions.length} new tmux session(s): ${newSessions.map((s) => s.sessionName).join(', ')}`)
       this.emit('new_sessions_discovered', { tmux: newSessions })
     }
+  }
+
+  /**
+   * Serialize session state to disk for graceful restart.
+   * Called during drain before the process exits.
+   * @returns {object} The serialized state
+   */
+  serializeState() {
+    const state = { timestamp: Date.now(), sessions: [] }
+    for (const [id, entry] of this._sessions) {
+      if (entry.type === 'pty') continue // PTY sessions can't be serialized
+      state.sessions.push({
+        chroxyId: id,
+        sdkSessionId: entry.session._sdkSessionId || null,
+        cwd: entry.cwd,
+        model: entry.session.model,
+        permissionMode: entry.session.permissionMode,
+        name: entry.name,
+      })
+    }
+
+    const dir = join(homedir(), '.chroxy')
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
+    console.log(`[session-manager] Serialized ${state.sessions.length} session(s) to ${STATE_FILE}`)
+    return state
+  }
+
+  /**
+   * Restore session state from disk after a restart.
+   * Creates new sessions using saved parameters. SdkSession can resume
+   * via resumeSessionId; CliSession starts fresh (process state is ephemeral).
+   * @returns {string|null} The first restored session ID, or null
+   */
+  restoreState() {
+    if (!existsSync(STATE_FILE)) return null
+
+    let state
+    try {
+      state = JSON.parse(readFileSync(STATE_FILE, 'utf-8'))
+    } catch (err) {
+      console.error(`[session-manager] Failed to parse session state: ${err.message}`)
+      try { unlinkSync(STATE_FILE) } catch {}
+      return null
+    }
+
+    // Clean up state file immediately
+    try { unlinkSync(STATE_FILE) } catch {}
+
+    if (!Array.isArray(state.sessions) || state.sessions.length === 0) {
+      console.log('[session-manager] No sessions to restore')
+      return null
+    }
+
+    // Reject stale state (older than 5 minutes)
+    if (state.timestamp && Date.now() - state.timestamp > 5 * 60 * 1000) {
+      console.log('[session-manager] Session state is stale (>5min), starting fresh')
+      return null
+    }
+
+    let firstId = null
+    for (const saved of state.sessions) {
+      try {
+        const sessionId = this.createSession({
+          name: saved.name,
+          cwd: saved.cwd,
+          model: saved.model,
+          permissionMode: saved.permissionMode,
+          resumeSessionId: saved.sdkSessionId,
+        })
+        if (!firstId) firstId = sessionId
+        console.log(`[session-manager] Restored session "${saved.name}" (SDK resume: ${saved.sdkSessionId || 'none'})`)
+      } catch (err) {
+        console.error(`[session-manager] Failed to restore session "${saved.name}": ${err.message}`)
+      }
+    }
+
+    return firstId
+  }
+
+  /**
+   * Check if all sessions are idle (not busy).
+   * Used by drain protocol to wait for in-flight work.
+   * @returns {boolean}
+   */
+  allIdle() {
+    for (const [, entry] of this._sessions) {
+      if (entry.session.isRunning) return false
+    }
+    return true
   }
 
   /**

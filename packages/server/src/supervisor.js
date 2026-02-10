@@ -1,8 +1,10 @@
 import { fork } from 'child_process'
 import { createServer } from 'http'
-import { dirname, resolve } from 'path'
+import { dirname, resolve, join } from 'path'
 import { createInterface } from 'readline'
 import { fileURLToPath } from 'url'
+import { writeFileSync, unlinkSync, existsSync } from 'fs'
+import { homedir } from 'os'
 import { TunnelManager } from './tunnel.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { createLogger } from './logger.js'
@@ -10,6 +12,7 @@ import qrcode from 'qrcode-terminal'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
+const PID_FILE = join(homedir(), '.chroxy', 'supervisor.pid')
 
 /**
  * Supervisor process: owns the tunnel, restarts the server child on crash.
@@ -86,11 +89,17 @@ export async function startSupervisor(config) {
   console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
   console.log('')
 
-  // 4. Child process management
+  // 4. Write PID file for deploy command signaling
+  writeFileSync(PID_FILE, String(process.pid))
+  log.info(`PID file written: ${PID_FILE} (pid: ${process.pid})`)
+
+  // 5. Child process management
   let child = null
   let restartCount = 0
   let standbyServer = null
   let shuttingDown = false
+  let draining = false
+  const DRAIN_TIMEOUT = 30000
   const MAX_RESTARTS = (typeof config.maxRestarts === 'number' && config.maxRestarts >= 0)
     ? config.maxRestarts
     : 10
@@ -150,6 +159,12 @@ export async function startSupervisor(config) {
         restartCount = 0
         metrics.consecutiveRestarts = 0
         stopStandbyServer()
+      }
+
+      if (msg.type === 'drain_complete') {
+        log.info('Child drain complete, sending SIGTERM')
+        draining = false
+        try { child.kill('SIGTERM') } catch {}
       }
     })
 
@@ -239,10 +254,50 @@ export async function startSupervisor(config) {
     }
   }
 
-  // 5. Start the first child
+  /**
+   * Graceful restart: drain the child, wait for completion, then restart.
+   * Used by the deploy command via SIGUSR2.
+   */
+  function restartChild() {
+    if (draining || shuttingDown) {
+      log.info('Restart requested but already draining/shutting down, ignoring')
+      return
+    }
+    if (!child) {
+      log.info('Restart requested but no child running, starting fresh')
+      startChild()
+      return
+    }
+
+    draining = true
+    log.info('Graceful restart: sending drain to child')
+    child.send({ type: 'drain', timeout: DRAIN_TIMEOUT })
+
+    // Safety net: if drain_complete never arrives, force restart
+    const drainTimer = setTimeout(() => {
+      if (draining && child) {
+        log.info(`Drain timeout (${DRAIN_TIMEOUT}ms), force-killing child`)
+        draining = false
+        try { child.kill('SIGTERM') } catch {}
+      }
+    }, DRAIN_TIMEOUT)
+
+    // Clean up timer when child exits (drain_complete → SIGTERM → exit triggers startChild)
+    if (child) {
+      child.once('exit', () => clearTimeout(drainTimer))
+    }
+  }
+
+  // SIGUSR2 handler: deploy command signals supervisor to restart child
+  process.on('SIGUSR2', () => {
+    log.info('SIGUSR2 received (deploy restart)')
+    restartChild()
+  })
+
+  // 6. Start the first child
   startChild()
 
-  // 5b. Periodic heartbeat
+  // 6b. Periodic heartbeat
   const heartbeatInterval = setInterval(() => {
     if (!child || shuttingDown) return
     const childUptime = metrics.childStartedAt ? Math.round((Date.now() - metrics.childStartedAt) / 1000) : 0
@@ -251,12 +306,15 @@ export async function startSupervisor(config) {
   }, 5 * 60 * 1000)
   heartbeatInterval.unref()
 
-  // 6. Graceful shutdown
+  // 7. Graceful shutdown
   const shutdown = async (signal) => {
     if (shuttingDown) return
     shuttingDown = true
     clearInterval(heartbeatInterval)
     log.info(`${signal} received, shutting down...`)
+
+    // Remove PID file
+    try { unlinkSync(PID_FILE) } catch {}
 
     stopStandbyServer()
 
