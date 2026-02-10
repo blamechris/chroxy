@@ -29,8 +29,9 @@ import { ICON_CLOSE, ICON_GEAR } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 
-// Stable empty array to avoid new-reference-per-render in Zustand selectors
+// Stable empty arrays to avoid new-reference-per-render in Zustand selectors
 const EMPTY_AGENTS: AgentInfo[] = [];
+const EMPTY_PROMPTS: { tool: string; prompt: string }[] = [];
 
 // Enable LayoutAnimation on Android
 UIManager.setLayoutAnimationEnabledExperimental?.(true);
@@ -140,7 +141,7 @@ export function SessionScreen() {
   });
   const planAllowedPrompts = useConnectionStore((s) => {
     const id = s.activeSessionId;
-    return id && s.sessionStates[id] ? s.sessionStates[id].planAllowedPrompts : [];
+    return id && s.sessionStates[id] ? s.sessionStates[id].planAllowedPrompts : EMPTY_PROMPTS;
   });
   const destroySession = useConnectionStore((s) => s.destroySession);
   const serverErrors = useConnectionStore((s) => s.serverErrors);
@@ -217,6 +218,9 @@ export function SessionScreen() {
       // Add user message + thinking indicator with session-aware state update
       addUserMessage(text);
     }
+
+    // Clear plan approval card — user has responded (whether approving or giving feedback)
+    if (isPlanPending) clearPlanState();
 
     // PTY sessions: append CR so text + submit arrive as a single atomic write.
     // Sending them separately caused a race condition where multi-line text
