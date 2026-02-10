@@ -526,11 +526,16 @@ program
 
       // 2. Validate JS files
       console.log('[deploy] Validating JavaScript files...')
-      const serverSrc = join(process.cwd(), 'packages', 'server', 'src')
-      const jsFiles = execFileSync('git', ['diff', '--name-only', 'HEAD~1', '--', 'packages/server/src/'], { encoding: 'utf-8' })
-        .trim()
-        .split('\n')
-        .filter((f) => f.endsWith('.js'))
+      const knownGoodRef = existsSync(KNOWN_GOOD_FILE)
+        ? readFileSync(KNOWN_GOOD_FILE, 'utf-8').trim()
+        : null
+
+      // Diff against known-good ref if available, otherwise validate all tracked files
+      const jsFiles = knownGoodRef
+        ? execFileSync('git', ['diff', '--name-only', knownGoodRef, '--', 'packages/server/src/'], { encoding: 'utf-8' })
+            .trim().split('\n').filter((f) => f.endsWith('.js'))
+        : execFileSync('git', ['ls-files', '--', 'packages/server/src/'], { encoding: 'utf-8' })
+            .trim().split('\n').filter((f) => f.endsWith('.js'))
 
       let validationErrors = 0
       for (const file of jsFiles) {
