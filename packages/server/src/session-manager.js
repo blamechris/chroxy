@@ -342,7 +342,7 @@ export class SessionManager extends EventEmitter {
     }
 
     this._discoveryTimer = setInterval(() => {
-      this._pollForNewSessions()
+      this.pollForNewSessions()
     }, this._discoveryIntervalMs)
   }
 
@@ -359,9 +359,8 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Poll for new tmux sessions and emit event if any are found.
-   * @private
    */
-  _pollForNewSessions() {
+  pollForNewSessions() {
     const current = this.discoverSessions()
     const newSessions = []
 

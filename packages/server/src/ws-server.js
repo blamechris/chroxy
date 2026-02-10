@@ -606,7 +606,7 @@ export class WsServer {
         if (this.sessionManager) {
           console.log(`[ws] Triggering on-demand discovery from ${client.id}`)
           this._send(ws, { type: 'discovery_triggered' })
-          this.sessionManager._pollForNewSessions()
+          this.sessionManager.pollForNewSessions()
         }
         break
 
