@@ -1,5 +1,5 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo } from 'react-native';
 import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo } from '../store/connection';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
@@ -28,6 +28,35 @@ export interface SettingsBarProps {
 
 // -- Helpers --
 
+function formatElapsed(startedAt: number, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${minutes}m ${secs.toString().padStart(2, '0')}s`;
+}
+
+function PulsingDot({ reduceMotion }: { reduceMotion: boolean }) {
+  const opacity = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (reduceMotion) {
+      opacity.setValue(1);
+      return;
+    }
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 0.3, duration: 1000, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 1, duration: 1000, useNativeDriver: true }),
+      ])
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [reduceMotion, opacity]);
+
+  return <Animated.View style={[styles.agentDot, { opacity }]} />;
+}
+
 function formatTokenCount(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M tokens`;
   if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k tokens`;
@@ -54,6 +83,24 @@ export function SettingsBar({
   setModel,
   setPermissionMode,
 }: SettingsBarProps) {
+  // Elapsed time ticker — only runs when expanded with active agents
+  const [now, setNow] = useState(Date.now());
+  const showAgentTimers = expanded && activeAgents.length > 0;
+  useEffect(() => {
+    if (!showAgentTimers) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(timer);
+  }, [showAgentTimers]);
+
+  // Reduce-motion preference for pulsing dots
+  const [reduceMotion, setReduceMotion] = useState(false);
+  useEffect(() => {
+    AccessibilityInfo.isReduceMotionEnabled().then(setReduceMotion);
+    const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
+    return () => sub.remove();
+  }, []);
+
   // Truncate working directory path for collapsed view
   let truncatedCwd: string | null = null;
   if (sessionCwd) {
@@ -223,9 +270,12 @@ export function SettingsBar({
               </Text>
               {activeAgents.map((agent) => (
                 <View key={agent.toolUseId} style={styles.agentEntry}>
-                  <View style={styles.agentDot} />
+                  <PulsingDot reduceMotion={reduceMotion} />
                   <Text style={styles.agentDescription} numberOfLines={2}>
                     {agent.description}
+                  </Text>
+                  <Text style={styles.agentElapsed}>
+                    {formatElapsed(agent.startedAt, now)}
                   </Text>
                 </View>
               ))}
@@ -348,5 +398,11 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  agentElapsed: {
+    color: COLORS.textDim,
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginLeft: 8,
   },
 });
