@@ -813,6 +813,26 @@ describe('auth_ok payload fields (single-session mode)', () => {
     ws.close()
   })
 
+  it('includes serverCommit as a non-empty string', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.equal(typeof authOk.serverCommit, 'string', 'serverCommit should be a string')
+    assert.ok(authOk.serverCommit.length > 0, 'serverCommit should be non-empty')
+
+    ws.close()
+  })
+
   it('includes cwd from cliSession when available', async () => {
     const mockSession = createMockSession()
     mockSession.cwd = '/tmp/test-project'
