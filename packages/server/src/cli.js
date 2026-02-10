@@ -454,6 +454,12 @@ program
       process.exit(1)
     }
 
+    // Dev mode requires an API token (supervisor needs it)
+    if (config.noAuth) {
+      console.error('❌ chroxy dev does not support noAuth mode; an API token is required')
+      process.exit(1)
+    }
+
     // Dev mode always uses supervisor, regardless of tunnel type
     if (process.env.CHROXY_SUPERVISED === '1') {
       // Already running as a supervised child — start directly
