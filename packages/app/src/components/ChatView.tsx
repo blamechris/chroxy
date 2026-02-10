@@ -11,10 +11,12 @@ import {
   NativeScrollEvent,
   AccessibilityInfo,
   Animated,
+  Modal,
+  Pressable,
 } from 'react-native';
 import { ChatMessage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
-import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN } from '../constants/icons';
+import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOSE } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 
@@ -138,6 +140,50 @@ function groupMessages(messages: ChatMessage[], streamingMessageId: string | nul
   return groups;
 }
 
+// -- Single activity entry with long-press guard --
+
+function ActivityEntry({
+  message,
+  isSelected,
+  isSelecting,
+  onToggleSelection,
+}: {
+  message: ChatMessage;
+  isSelected: boolean;
+  isSelecting: boolean;
+  onToggleSelection: (id: string) => void;
+}) {
+  const longPressedRef = useRef(false);
+
+  const handlePress = () => {
+    if (longPressedRef.current) {
+      longPressedRef.current = false;
+      return;
+    }
+    if (isSelecting) onToggleSelection(message.id);
+  };
+
+  const handleLongPress = () => {
+    longPressedRef.current = true;
+    onToggleSelection(message.id);
+  };
+
+  return (
+    <TouchableOpacity
+      activeOpacity={0.7}
+      onLongPress={isSelecting ? undefined : handleLongPress}
+      onPress={handlePress}
+      style={[styles.activityEntry, isSelected && styles.selectedBubble]}
+    >
+      <Text style={styles.activityEntryIcon}>{ICON_CHEVRON_RIGHT}</Text>
+      <Text style={styles.activityEntryTool}>{message.tool || 'Thinking'}</Text>
+      <Text style={styles.activityEntryPreview} numberOfLines={1}>
+        {(message.content || '').slice(0, 40)}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
 // -- Activity group component --
 
 function ActivityGroup({
@@ -193,23 +239,52 @@ function ActivityGroup({
       {expanded && (
         <ScrollView style={styles.activityList} nestedScrollEnabled>
           {activityMessages.map((msg) => (
-            <TouchableOpacity
+            <ActivityEntry
               key={msg.id}
-              activeOpacity={0.7}
-              onLongPress={isSelecting ? undefined : () => onToggleSelection(msg.id)}
-              onPress={isSelecting ? () => onToggleSelection(msg.id) : undefined}
-              style={[styles.activityEntry, selectedIds.has(msg.id) && styles.selectedBubble]}
-            >
-              <Text style={styles.activityEntryIcon}>{ICON_CHEVRON_RIGHT}</Text>
-              <Text style={styles.activityEntryTool}>{msg.tool || 'Thinking'}</Text>
-              <Text style={styles.activityEntryPreview} numberOfLines={1}>
-                {(msg.content || '').slice(0, 40)}
-              </Text>
-            </TouchableOpacity>
+              message={msg}
+              isSelected={selectedIds.has(msg.id)}
+              isSelecting={isSelecting}
+              onToggleSelection={onToggleSelection}
+            />
           ))}
         </ScrollView>
       )}
     </TouchableOpacity>
+  );
+}
+
+// -- Tool detail modal --
+
+function ToolDetailModal({ visible, toolName, content, onClose }: {
+  visible: boolean;
+  toolName: string;
+  content: string;
+  onClose: () => void;
+}) {
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <Pressable style={styles.toolModalOverlay} onPress={onClose}>
+        <Pressable style={styles.toolModalContainer} onPress={(e) => e.stopPropagation()}>
+          <View style={styles.toolModalHeader}>
+            <Text style={styles.toolModalTitle} numberOfLines={1}>Tool: {toolName}</Text>
+            <TouchableOpacity
+              onPress={onClose}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={styles.toolModalClose}>{ICON_CLOSE}</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={styles.toolModalScroll}>
+            <Text selectable style={styles.toolModalContent}>{content}</Text>
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 }
 
@@ -222,6 +297,7 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection }: {
   onToggleSelection: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [modalVisible, setModalVisible] = useState(false);
   const longPressedRef = useRef(false);
   const content = message.content?.trim();
 
@@ -236,9 +312,11 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection }: {
     }
     if (isSelecting) {
       onToggleSelection();
+    } else if (expanded) {
+      setModalVisible(true);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setExpanded((prev) => !prev);
+      setExpanded(true);
     }
   };
 
@@ -250,22 +328,30 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection }: {
   const preview = content.length > 60 ? content.slice(0, 60) + '...' : content;
 
   return (
-    <TouchableOpacity
-      activeOpacity={0.7}
-      onPress={handlePress}
-      onLongPress={!expanded && !isSelecting ? handleLongPress : undefined}
-      style={[styles.toolBubble, isSelected && styles.selectedBubble]}
-    >
-      <View style={styles.toolHeader}>
-        <Text style={styles.toolChevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
-        <Text style={styles.senderLabelTool}>Tool: {message.tool}</Text>
-      </View>
-      {expanded ? (
-        <Text selectable style={styles.toolContentExpanded}>{content}</Text>
-      ) : (
-        <Text style={styles.toolContentCollapsed} numberOfLines={1}>{preview}</Text>
-      )}
-    </TouchableOpacity>
+    <>
+      <TouchableOpacity
+        activeOpacity={0.7}
+        onPress={handlePress}
+        onLongPress={!expanded && !isSelecting ? handleLongPress : undefined}
+        style={[styles.toolBubble, isSelected && styles.selectedBubble]}
+      >
+        <View style={styles.toolHeader}>
+          <Text style={styles.toolChevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
+          <Text style={styles.senderLabelTool}>Tool: {message.tool}</Text>
+        </View>
+        {expanded ? (
+          <Text selectable style={styles.toolContentExpanded}>{content}</Text>
+        ) : (
+          <Text style={styles.toolContentCollapsed} numberOfLines={1}>{preview}</Text>
+        )}
+      </TouchableOpacity>
+      <ToolDetailModal
+        visible={modalVisible}
+        toolName={message.tool || 'Unknown'}
+        content={content}
+        onClose={() => setModalVisible(false)}
+      />
+    </>
   );
 }
 
@@ -364,12 +450,26 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   onLongPress: () => void;
   onPress: () => void;
 }) {
+  const longPressedRef = useRef(false);
   const isUser = message.type === 'user_input';
   const isTool = message.type === 'tool_use';
   const isThinking = message.type === 'thinking';
   const isPrompt = message.type === 'prompt';
   const isError = message.type === 'error';
   const isSystem = message.type === 'system';
+
+  const handlePress = () => {
+    if (longPressedRef.current) {
+      longPressedRef.current = false;
+      return;
+    }
+    if (isSelecting) onPress();
+  };
+
+  const handleLongPress = () => {
+    longPressedRef.current = true;
+    onLongPress();
+  };
 
   if (isThinking) {
     return <ThinkingIndicator />;
@@ -389,8 +489,8 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   return (
     <TouchableOpacity
       activeOpacity={0.7}
-      onPress={isSelecting ? onPress : undefined}
-      onLongPress={isSelecting ? undefined : onLongPress}
+      onPress={handlePress}
+      onLongPress={isSelecting ? undefined : handleLongPress}
       style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isError && styles.errorBubble, isSystem && styles.systemBubble, isSelected && styles.selectedBubble]}
     >
       <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : isError ? styles.senderLabelError : isSystem ? styles.senderLabelSystem : styles.senderLabelClaude}>
@@ -804,6 +904,51 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginTop: 6,
     lineHeight: 18,
+  },
+  toolModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  toolModalContainer: {
+    width: '100%',
+    maxHeight: '80%',
+    backgroundColor: COLORS.backgroundSecondary,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+    overflow: 'hidden',
+  },
+  toolModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.borderPrimary,
+  },
+  toolModalTitle: {
+    color: COLORS.accentPurple,
+    fontSize: 14,
+    fontWeight: '600',
+    flex: 1,
+    marginRight: 12,
+  },
+  toolModalClose: {
+    color: COLORS.textMuted,
+    fontSize: 18,
+  },
+  toolModalScroll: {
+    padding: 16,
+  },
+  toolModalContent: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 20,
   },
   messageText: {
     color: COLORS.textChatMessage,
