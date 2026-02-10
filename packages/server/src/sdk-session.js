@@ -47,15 +47,14 @@ export class SdkSession extends EventEmitter {
 
     // Permission handling
     this._pendingPermissions = new Map() // requestId -> resolve
+    this._permissionTimers = new Map() // requestId -> timer
     this._permissionCounter = 0
+
+    // AskUserQuestion handling
+    this._pendingUserAnswer = null // { resolve, input } when waiting for user answer
 
     // Agent tracking
     this._activeAgents = new Map() // toolUseId -> { toolUseId, description, startedAt }
-
-    // Streaming input: async generator + resolver for multi-turn
-    this._inputQueue = []
-    this._inputResolve = null
-    this._inputDone = false
 
     // Result timeout
     this._resultTimeout = null
@@ -263,7 +262,11 @@ export class SdkSession extends EventEmitter {
 
   /**
    * Handle tool_use blocks from assistant messages.
-   * Detects Task (agent monitoring) and AskUserQuestion.
+   * Detects Task tool for agent monitoring.
+   *
+   * Note: AskUserQuestion is NOT handled here — it flows through the
+   * canUseTool callback in _handleAskUserQuestion(), which emits
+   * user_question and waits for respondToQuestion().
    */
   _handleToolUseBlock(messageId, block) {
     if (block.name === 'Task') {
@@ -278,28 +281,20 @@ export class SdkSession extends EventEmitter {
       this._activeAgents.set(block.id, agentInfo)
       this.emit('agent_spawned', agentInfo)
     }
-
-    if (block.name === 'AskUserQuestion') {
-      const input = block.input || {}
-      this._waitingForAnswer = true
-      this.emit('user_question', {
-        toolUseId: block.id,
-        questions: input.questions,
-      })
-    }
   }
 
   /**
    * In-process permission handler for canUseTool callback.
-   * Emits permission_request and returns a Promise that resolves when
-   * the app sends a permission_response via respondToPermission().
+   *
+   * For AskUserQuestion: emits user_question and waits for respondToQuestion()
+   * to deliver the user's answer, then returns it as structured updatedInput.
+   *
+   * For all other tools: emits permission_request and waits for
+   * respondToPermission() to deliver the user's allow/deny decision.
    */
   _handlePermission(toolName, input, signal) {
-    // AskUserQuestion is handled via the tool_use block detection path,
-    // where canUseTool must allow it so the assistant message arrives
-    // with the full question input. We auto-approve it here.
     if (toolName === 'AskUserQuestion') {
-      return Promise.resolve({ behavior: 'allow', updatedInput: input })
+      return this._handleAskUserQuestion(input, signal)
     }
 
     return new Promise((resolve) => {
@@ -312,7 +307,7 @@ export class SdkSession extends EventEmitter {
         || toolInput.file_path
         || toolInput.pattern
         || toolInput.query
-        || JSON.stringify(toolInput).slice(0, 200)
+        || (Object.keys(toolInput).length > 0 ? JSON.stringify(toolInput).slice(0, 200) : toolName)
 
       console.log(`[sdk-session] Permission request ${requestId}: ${toolName}`)
 
@@ -328,20 +323,66 @@ export class SdkSession extends EventEmitter {
         signal.addEventListener('abort', () => {
           if (this._pendingPermissions.has(requestId)) {
             this._pendingPermissions.delete(requestId)
+            this._clearPermissionTimer(requestId)
             resolve({ behavior: 'deny', message: 'Request cancelled' })
           }
         }, { once: true })
       }
 
       // Auto-deny after 5 minutes if no response
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        this._permissionTimers.delete(requestId)
         if (this._pendingPermissions.has(requestId)) {
           console.log(`[sdk-session] Permission ${requestId} timed out, auto-denying`)
           this._pendingPermissions.delete(requestId)
           resolve({ behavior: 'deny', message: 'Permission timed out' })
         }
       }, 300_000)
+      this._permissionTimers.set(requestId, timer)
     })
+  }
+
+  /**
+   * Handle AskUserQuestion via canUseTool.
+   * Emits user_question and waits for respondToQuestion() to deliver the
+   * user's answer, then resolves with structured updatedInput.
+   */
+  _handleAskUserQuestion(input, signal) {
+    return new Promise((resolve) => {
+      const questionInput = input || {}
+      this._waitingForAnswer = true
+      this._pendingUserAnswer = { resolve, input: questionInput }
+
+      const toolUseId = `ask-${++this._permissionCounter}-${Date.now()}`
+      console.log(`[sdk-session] AskUserQuestion detected (${toolUseId})`)
+
+      this.emit('user_question', {
+        toolUseId,
+        questions: questionInput.questions,
+      })
+
+      // Auto-deny on abort signal
+      if (signal) {
+        signal.addEventListener('abort', () => {
+          if (this._pendingUserAnswer) {
+            this._pendingUserAnswer = null
+            this._waitingForAnswer = false
+            resolve({ behavior: 'deny', message: 'Cancelled' })
+          }
+        }, { once: true })
+      }
+    })
+  }
+
+  /**
+   * Clear a permission timeout timer by request ID.
+   */
+  _clearPermissionTimer(requestId) {
+    const timer = this._permissionTimers.get(requestId)
+    if (timer) {
+      clearTimeout(timer)
+      this._permissionTimers.delete(requestId)
+    }
   }
 
   /**
@@ -355,6 +396,7 @@ export class SdkSession extends EventEmitter {
       return
     }
     this._pendingPermissions.delete(requestId)
+    this._clearPermissionTimer(requestId)
 
     console.log(`[sdk-session] Permission ${requestId} resolved: ${decision}`)
 
@@ -367,18 +409,36 @@ export class SdkSession extends EventEmitter {
 
   /**
    * Send a response to an AskUserQuestion prompt.
-   * In SDK mode, the question is handled via canUseTool callback.
-   * For now this is a no-op since AskUserQuestion flows through the
-   * canUseTool path where it's auto-approved with user's answer injected.
+   * In SDK mode, the canUseTool callback is holding a Promise open.
+   * This method resolves it with the user's answer as structured updatedInput.
    */
   respondToQuestion(text) {
-    // AskUserQuestion in SDK mode works differently from CLI mode.
-    // The canUseTool callback auto-approves AskUserQuestion, and the
-    // answer is injected into the updatedInput. This method exists
-    // for interface compatibility.
-    if (!this._waitingForAnswer) return
+    if (!this._pendingUserAnswer) return
+    const { resolve, input } = this._pendingUserAnswer
+    this._pendingUserAnswer = null
     this._waitingForAnswer = false
+
     console.log(`[sdk-session] Question response received: "${text.slice(0, 60)}"`)
+
+    // Build structured answers map: SDK expects { [questionText]: selectedLabel }
+    const answers = {}
+    const questions = input.questions || []
+    if (questions.length > 0) {
+      // Map the answer to each question. The app sends a single text
+      // response, which works for the common single-question case.
+      // For multi-question prompts the user's text applies to all.
+      for (const q of questions) {
+        answers[q.question] = text
+      }
+    }
+
+    resolve({
+      behavior: 'allow',
+      updatedInput: {
+        questions,
+        answers,
+      },
+    })
   }
 
   /**
@@ -470,11 +530,18 @@ export class SdkSession extends EventEmitter {
       this._resultTimeout = null
     }
 
-    // Auto-deny any pending permissions
+    // Auto-deny any pending permissions and clear their timers
     for (const [requestId, resolve] of this._pendingPermissions) {
+      this._clearPermissionTimer(requestId)
       resolve({ behavior: 'deny', message: 'Message completed' })
     }
     this._pendingPermissions.clear()
+
+    // Auto-deny pending user answer
+    if (this._pendingUserAnswer) {
+      this._pendingUserAnswer.resolve({ behavior: 'deny', message: 'Message completed' })
+      this._pendingUserAnswer = null
+    }
   }
 
   /**
