@@ -476,6 +476,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ savedConnection: null });
   },
 
+  // Initial connection uses bounded retries (MAX_RETRIES) with exponential backoff.
+  // This prevents infinite loops on bad credentials or missing servers.
+  // Auto-reconnect (socket.onclose) calls connect() with _retryCount=0, resetting
+  // the retry budget — intentional, since established connections should recover
+  // aggressively after transient drops (tunnel blips, server restarts, etc.).
   connect: (url: string, token: string, _retryCount = 0) => {
     const MAX_RETRIES = 5;
     const RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000];
@@ -1120,7 +1125,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const wasConnected = get().connectionPhase === 'connected';
       set({ socket: null });
 
-      // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
+      // Auto-reconnect if the connection dropped unexpectedly (not user-initiated).
+      // Calls connect() with _retryCount=0 to reset the retry budget — see comment
+      // at connect() definition for rationale.
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] Connection lost, auto-reconnecting...');
         set({ connectionPhase: 'reconnecting' });
