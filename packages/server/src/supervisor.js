@@ -134,13 +134,16 @@ export async function startSupervisor(config) {
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     })
 
+    let stdoutRl, stderrRl
     if (child.stdout) {
-      createInterface({ input: child.stdout }).on('line', (line) => {
+      stdoutRl = createInterface({ input: child.stdout })
+      stdoutRl.on('line', (line) => {
         log(`[child:out] ${line}`)
       })
     }
     if (child.stderr) {
-      createInterface({ input: child.stderr }).on('line', (line) => {
+      stderrRl = createInterface({ input: child.stderr })
+      stderrRl.on('line', (line) => {
         logError(`[child:err] ${line}`)
       })
     }
@@ -155,6 +158,8 @@ export async function startSupervisor(config) {
     })
 
     child.on('exit', (code, signal) => {
+      stdoutRl?.close()
+      stderrRl?.close()
       const childUptimeMs = metrics.childStartedAt ? Date.now() - metrics.childStartedAt : 0
       child = null
       if (shuttingDown) return
