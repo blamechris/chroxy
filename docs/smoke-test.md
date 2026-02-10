@@ -11,13 +11,17 @@ Use this table to determine which test scopes to run based on files changed in a
 | Changed File(s) | Test Scopes |
 |---|---|
 | `ws-server.js` | Connection, Chat, Permissions, No-Auth |
-| `cli-session.js`, `sdk-session.js` | Chat, Permissions, Model Switching |
+| `cli-session.js`, `sdk-session.js` | Chat, Permissions, Model Switching, Plan Mode |
 | `server-cli.js`, `cli.js` | Connection, No-Auth, Shutdown |
 | `tunnel.js`, `tunnel-check.js` | Connection |
 | `permission-hook.sh` | Permissions |
 | `models.js` | Model Switching |
-| `connection.ts` | Connection, Chat, Permissions, Model Switching, Cost/Usage |
-| `SessionScreen.tsx` | Chat, Permissions, Model Switching, Cost/Usage, Selection |
+| `connection.ts` | Connection, Chat, Permissions, Model Switching, Cost/Usage, Plan Mode |
+| `SessionScreen.tsx` | Chat, Permissions, Model Switching, Cost/Usage, Selection, Plan Mode |
+| `ChatView.tsx` | Chat, Selection, Plan Mode |
+| `SettingsBar.tsx` | Model Switching, Cost/Usage, Agent Monitoring |
+| `InputBar.tsx` | Chat, Input Modes |
+| `SessionPicker.tsx` | Sessions |
 | `ConnectScreen.tsx` | Connection |
 | PTY files (`server.js`, `pty-manager.js`, `output-parser.js`) | Terminal |
 
@@ -241,6 +245,46 @@ Test when: `SessionScreen.tsx`
 - [ ] Type multiline text with Enter → text area grows (up to max height)
 - [ ] Tap paragraph icon → switches back to return arrow, Enter sends again
 - [ ] Setting persists within the session
+
+---
+
+## Plan Mode
+
+Test when: `cli-session.js`, `sdk-session.js`, `connection.ts`, `ChatView.tsx`, `SessionScreen.tsx`
+
+- [ ] Ask Claude to do something that triggers plan mode (e.g., "Plan how to add a new feature")
+- [ ] "Plan Ready for Review" card appears at bottom of chat after Claude calls ExitPlanMode
+- [ ] Card shows allowed prompts (if any) as a bulleted list
+- [ ] Tap "Approve" → sends approval message, card disappears, Claude proceeds
+- [ ] Tap "Give Feedback" → focuses input bar for custom response
+- [ ] Chat auto-scrolls to show the plan approval card
+- [ ] Sending a manual message while card is showing clears the card
+
+---
+
+## Agent Monitoring
+
+Test when: `cli-session.js`, `connection.ts`, `SettingsBar.tsx`
+
+- [ ] When Claude spawns background agents (Task tool), agent count badge appears in settings bar
+- [ ] Badge shows correct count (e.g., "2" for two running agents)
+- [ ] Expand settings bar → agent descriptions visible with pulsing activity dots
+- [ ] Elapsed time shown for each running agent
+- [ ] When agents complete, badge count decreases
+- [ ] All agents complete → badge disappears
+
+---
+
+## Sessions
+
+Test when: `session-manager.js`, `connection.ts`, `SessionPicker.tsx`, `CreateSessionModal.tsx`
+
+- [ ] Session picker visible at top of screen showing "Default" session
+- [ ] Tap "+" to create new session → modal appears → enter name → creates session
+- [ ] Switch between sessions → messages and state are independent
+- [ ] Long-press a session tab → rename or destroy options
+- [ ] Session state preserved when switching back
+- [ ] New session starts with fresh Claude conversation
 
 ---
 

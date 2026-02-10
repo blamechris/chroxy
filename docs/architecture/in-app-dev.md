@@ -4,8 +4,8 @@
 > Synthesized from 6 specialized agent analyses (System Architecture, Mobile App Updates, Server Migration, Connection Persistence, Build Pipeline, Safety & Reliability).
 
 **Version:** 0.1.0-draft
-**Date:** 2026-02-09
-**Status:** Design Phase
+**Date:** 2026-02-10
+**Status:** Design Phase (Phases 1-3 partially complete — see Roadmap section)
 
 ---
 
@@ -725,41 +725,41 @@ rm -f ~/.chroxy/update.lock
 
 **Server-side only. No app changes. No supervisor yet. Backwards compatible.**
 
-| Step | Description | Files | Effort |
-|------|-------------|-------|--------|
-| 1.1 | Build manifest + `GET /version` endpoint | `ws-server.js` | Small |
-| 1.2 | Session state serialization (`serialize()`/`restore()`) | `cli-session.js`, `session-manager.js` | Medium |
-| 1.3 | IPC drain protocol (`process.on('message')` in server) | `server-cli.js`, `ws-server.js` | Medium |
-| 1.4 | `--supervised` mode for server-cli.js | `server-cli.js` | Medium |
-| 1.5 | Named Tunnel support in TunnelManager | `tunnel.js`, `cli.js` | Medium |
+| Step | Description | Files | Effort | Status |
+|------|-------------|-------|--------|--------|
+| 1.1 | Build manifest + `GET /version` endpoint | `ws-server.js` | Small | Not started |
+| 1.2 | Session state serialization (`serialize()`/`restore()`) | `cli-session.js`, `session-manager.js` | Medium | Not started |
+| 1.3 | IPC drain protocol (`process.on('message')` in server) | `server-cli.js`, `ws-server.js` | Medium | Not started |
+| 1.4 | `--supervised` mode for server-cli.js | `server-cli.js` | Medium | **Done** (PR #355) |
+| 1.5 | Named Tunnel support in TunnelManager | `tunnel.js`, `cli.js` | Medium | **Done** (PR #232+) |
 
 ### Phase 2: Supervisor + Restart
 
 **The core self-update capability.**
 
-| Step | Description | Files | Effort |
-|------|-------------|-------|--------|
-| 2.1 | Supervisor process | `supervisor.js` (new) | Medium |
-| 2.2 | Move tunnel ownership to supervisor | `supervisor.js` | Small |
-| 2.3 | `chroxy dev` command (launches supervisor) | `cli.js` | Small |
-| 2.4 | Blue-green restart via IPC | `supervisor.js` | Medium |
-| 2.5 | Health check gate | `supervisor.js` | Small |
-| 2.6 | Automatic rollback + known-good tagging | `supervisor.js` | Medium |
-| 2.7 | Deploy script with change detection + validation | `scripts/deploy.js` (new) | Medium |
+| Step | Description | Files | Effort | Status |
+|------|-------------|-------|--------|--------|
+| 2.1 | Supervisor process | `supervisor.js` (new) | Medium | **Done** (PR #340+) |
+| 2.2 | Move tunnel ownership to supervisor | `supervisor.js` | Small | **Done** |
+| 2.3 | `chroxy dev` command (launches supervisor) | `cli.js` | Small | Not started |
+| 2.4 | Blue-green restart via IPC | `supervisor.js` | Medium | Partial (basic restart works, no blue-green) |
+| 2.5 | Health check gate | `supervisor.js` | Small | **Done** (standby health check) |
+| 2.6 | Automatic rollback + known-good tagging | `supervisor.js` | Medium | Not started |
+| 2.7 | Deploy script with change detection + validation | `scripts/deploy.js` (new) | Medium | Not started |
 
 ### Phase 3: App-Side Reconnection UX
 
 **Make the phone experience smooth during restarts.**
 
-| Step | Description | Files | Effort |
-|------|-------------|-------|--------|
-| 3.1 | `connectionPhase` enum replacing boolean flags | `connection.ts` | Medium |
-| 3.2 | Exponential backoff with phase transitions | `connection.ts` | Medium |
-| 3.3 | Restart banner in SessionScreen | `SessionScreen.tsx` | Small |
-| 3.4 | Auto-connect on app launch (skip QR on saved conn) | `ConnectScreen.tsx` | Small |
-| 3.5 | Never clear savedConnection on timeout | `connection.ts` | Small |
-| 3.6 | Message queue for offline periods | `connection.ts` | Medium |
-| 3.7 | `chroxy tunnel setup` guided command | `cli.js` | Medium |
+| Step | Description | Files | Effort | Status |
+|------|-------------|-------|--------|--------|
+| 3.1 | `connectionPhase` enum replacing boolean flags | `connection.ts` | Medium | **Done** (PR #278+) |
+| 3.2 | Exponential backoff with phase transitions | `connection.ts` | Medium | **Done** (6 retries with backoff) |
+| 3.3 | Restart banner in SessionScreen | `SessionScreen.tsx` | Small | **Done** (server_restarting phase) |
+| 3.4 | Auto-connect on app launch (skip QR on saved conn) | `ConnectScreen.tsx` | Small | Not started |
+| 3.5 | Never clear savedConnection on timeout | `connection.ts` | Small | **Done** |
+| 3.6 | Message queue for offline periods | `connection.ts` | Medium | Not started |
+| 3.7 | `chroxy tunnel setup` guided command | `cli.js` | Medium | **Done** (PR #232+) |
 
 ### Phase 4: App Self-Updates (Future)
 
@@ -777,19 +777,19 @@ rm -f ~/.chroxy/update.lock
 ### Critical Path
 
 ```
-Phase 1.1-1.5 (foundation)
+Phase 1.1-1.5 (foundation)        <-- 2/5 done (named tunnel, supervised mode)
     |
     v
-Phase 2.1-2.7 (supervisor + restart) <-- THIS IS THE MVP
+Phase 2.1-2.7 (supervisor + restart) <-- 3/7 done (supervisor, tunnel ownership, health check)
     |
     v
-Phase 3.1-3.7 (app UX) <-- makes it pleasant
+Phase 3.1-3.7 (app UX)            <-- 5/7 done (phase enum, backoff, banner, savedConn, tunnel setup)
     |
     v
-Phase 4.1-4.6 (app updates) <-- full vision
+Phase 4.1-4.6 (app updates)       <-- not started
 ```
 
-**MVP = Phase 1 + Phase 2**: Server can self-update with rollback safety. App reconnects automatically (basic). Named tunnel keeps URL stable.
+**Remaining for MVP**: Build manifest (1.1), session serialization (1.2), IPC drain (1.3), `chroxy dev` command (2.3), rollback + known-good tagging (2.6), deploy script (2.7). App UX needs auto-connect (3.4) and message queue (3.6).
 
 ---
 
