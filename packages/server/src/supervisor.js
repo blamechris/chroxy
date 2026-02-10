@@ -1,6 +1,7 @@
 import { fork } from 'child_process'
 import { createServer } from 'http'
 import { dirname, resolve } from 'path'
+import { createInterface } from 'readline'
 import { fileURLToPath } from 'url'
 import { TunnelManager } from './tunnel.js'
 import { waitForTunnel } from './tunnel-check.js'
@@ -22,6 +23,13 @@ const __dirname = dirname(__filename)
  * port to serve a health check that returns {"status":"restarting"}.
  */
 export async function startSupervisor(config) {
+  function log(msg) {
+    console.log(`${new Date().toISOString()} ${msg}`)
+  }
+  function logError(msg) {
+    console.error(`${new Date().toISOString()} ${msg}`)
+  }
+
   const PORT = config.port || parseInt(process.env.PORT || '8765', 10)
   const API_TOKEN = config.apiToken || process.env.API_TOKEN
   const TUNNEL_MODE = config.tunnel || 'quick'
@@ -49,7 +57,7 @@ export async function startSupervisor(config) {
   let currentWsUrl = wsUrl
 
   tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
-    console.log(`[supervisor] Tunnel recovered after ${attempt} attempt(s)`)
+    log(`[supervisor] Tunnel recovered after ${attempt} attempt(s)`)
     await waitForTunnel(newHttpUrl)
 
     if (newWsUrl !== currentWsUrl) {
@@ -64,7 +72,7 @@ export async function startSupervisor(config) {
   })
 
   tunnel.on('tunnel_failed', ({ message }) => {
-    console.error(`[supervisor] ${message}`)
+    logError(`[supervisor] ${message}`)
   })
 
   // 2. Wait for tunnel to be routable
@@ -74,7 +82,7 @@ export async function startSupervisor(config) {
   const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
   const modeLabel = TUNNEL_MODE === 'named' ? 'Named Tunnel' : 'Quick Tunnel'
 
-  console.log(`\n[supervisor] ${modeLabel} ready\n`)
+  log(`[supervisor] ${modeLabel} ready`)
   console.log('📱 Scan this QR code with the Chroxy app:\n')
   qrcode.generate(connectionUrl, { small: true })
   console.log(`\nOr connect manually:`)
@@ -118,17 +126,28 @@ export async function startSupervisor(config) {
     if (config.model) childEnv.CHROXY_MODEL = config.model
     if (config.discoveryInterval) childEnv.CHROXY_DISCOVERY_INTERVAL = String(config.discoveryInterval)
 
-    console.log(`[supervisor] Starting server child (attempt ${restartCount + 1})`)
+    log(`[supervisor] Starting server child (attempt ${restartCount + 1})`)
     metrics.childStartedAt = Date.now()
 
     child = fork(childScript, [], {
       env: childEnv,
-      stdio: ['pipe', 'inherit', 'inherit', 'ipc'],
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     })
+
+    if (child.stdout) {
+      createInterface({ input: child.stdout }).on('line', (line) => {
+        log(`[child:out] ${line}`)
+      })
+    }
+    if (child.stderr) {
+      createInterface({ input: child.stderr }).on('line', (line) => {
+        logError(`[child:err] ${line}`)
+      })
+    }
 
     child.on('message', (msg) => {
       if (msg.type === 'ready') {
-        console.log('[supervisor] Server child is ready')
+        log('[supervisor] Server child is ready')
         restartCount = 0
         metrics.consecutiveRestarts = 0
         stopStandbyServer()
@@ -140,7 +159,7 @@ export async function startSupervisor(config) {
       child = null
       if (shuttingDown) return
 
-      console.log(`[supervisor] Server child exited (code ${code}, signal ${signal})`)
+      log(`[supervisor] Server child exited (code ${code}, signal ${signal})`)
       restartCount++
       metrics.totalRestarts++
       metrics.consecutiveRestarts = restartCount
@@ -148,7 +167,7 @@ export async function startSupervisor(config) {
       metrics.childStartedAt = null
 
       if (restartCount > MAX_RESTARTS) {
-        console.error(`[supervisor] Max restarts (${MAX_RESTARTS}) exceeded, giving up`)
+        logError(`[supervisor] Max restarts (${MAX_RESTARTS}) exceeded, giving up`)
         process.exit(1)
       }
 
@@ -157,12 +176,12 @@ export async function startSupervisor(config) {
 
       const delay = RESTART_BACKOFFS[Math.min(restartCount - 1, RESTART_BACKOFFS.length - 1)]
       metrics.lastBackoffMs = delay
-      console.log(`[supervisor] Child ran for ${Math.round(childUptimeMs / 1000)}s | total restarts: ${metrics.totalRestarts} | next backoff: ${delay}ms`)
+      log(`[supervisor] Child ran for ${Math.round(childUptimeMs / 1000)}s | total restarts: ${metrics.totalRestarts} | next backoff: ${delay}ms`)
       setTimeout(startChild, delay)
     })
 
     child.on('error', (err) => {
-      console.error(`[supervisor] Child process error: ${err.message}`)
+      logError(`[supervisor] Child process error: ${err.message}`)
     })
   }
 
@@ -204,11 +223,11 @@ export async function startSupervisor(config) {
         }, 500)
         return
       }
-      console.error(`[supervisor] Standby server error: ${err.message}`)
+      logError(`[supervisor] Standby server error: ${err.message}`)
     })
 
     standbyServer.listen(PORT, () => {
-      console.log(`[supervisor] Standby health check server on port ${PORT}`)
+      log(`[supervisor] Standby health check server on port ${PORT}`)
     })
   }
 
@@ -227,7 +246,7 @@ export async function startSupervisor(config) {
     if (!child || shuttingDown) return
     const childUptime = metrics.childStartedAt ? Math.round((Date.now() - metrics.childStartedAt) / 1000) : 0
     const totalUptime = Math.round((Date.now() - metrics.startedAt) / 1000)
-    console.log(`[supervisor] Heartbeat: uptime=${totalUptime}s, childUptime=${childUptime}s, totalRestarts=${metrics.totalRestarts}`)
+    log(`[supervisor] Heartbeat: uptime=${totalUptime}s, childUptime=${childUptime}s, totalRestarts=${metrics.totalRestarts}`)
   }, 5 * 60 * 1000)
   heartbeatInterval.unref()
 
@@ -236,7 +255,7 @@ export async function startSupervisor(config) {
     if (shuttingDown) return
     shuttingDown = true
     clearInterval(heartbeatInterval)
-    console.log(`\n[supervisor] ${signal} received, shutting down...`)
+    log(`[supervisor] ${signal} received, shutting down...`)
 
     stopStandbyServer()
 
@@ -244,7 +263,7 @@ export async function startSupervisor(config) {
       // Send shutdown message to child, wait for graceful exit
       child.send({ type: 'shutdown' })
       const forceKillTimer = setTimeout(() => {
-        console.log('[supervisor] Force-killing child after 5s timeout')
+        log('[supervisor] Force-killing child after 5s timeout')
         try { child.kill('SIGKILL') } catch {}
       }, 5000)
 
