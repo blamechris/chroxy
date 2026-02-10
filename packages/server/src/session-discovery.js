@@ -6,9 +6,11 @@ import { execSync } from 'child_process'
  * Scans all tmux panes, checks their child processes for claude,
  * and returns structured session info for the app to display.
  *
+ * @param {{ prefix?: string }} [options] - Optional filter options
+ * @param {string} [options.prefix] - Only return sessions whose name starts with this prefix (e.g. 'chroxy-')
  * @returns {Array<{ sessionName: string, cwd: string, pid: number }>}
  */
-export function discoverTmuxSessions() {
+export function discoverTmuxSessions({ prefix } = {}) {
   try {
     // Check if tmux is available
     execSync('which tmux', { stdio: 'pipe' })
@@ -51,6 +53,9 @@ export function discoverTmuxSessions() {
       }
     }
 
+    if (prefix) {
+      return results.filter((s) => s.sessionName.startsWith(prefix))
+    }
     return results
   } catch (err) {
     console.error(`[discovery] Failed to discover tmux sessions: ${err.message}`)
