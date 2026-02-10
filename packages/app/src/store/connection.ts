@@ -1380,6 +1380,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   disconnect: () => {
+    // Bump attempt ID to cancel any pending health checks / retry timers
+    connectionAttemptId++;
     disconnectedAttemptId = connectionAttemptId;
     const { socket } = get();
     if (socket) {
