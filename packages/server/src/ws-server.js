@@ -72,6 +72,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'session_destroyed', sessionId }          — session removed
  *   { type: 'session_error', message }                — session operation error
  *   { type: 'discovered_sessions', tmux: [...] }     — host tmux session scan results
+ *   { type: 'discovery_triggered' }                  — ack that on-demand discovery started
  *   { type: 'history_replay_start', sessionId }      — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
  *   { type: 'raw_background', data: '...' }           — raw PTY data for chat-mode clients
@@ -604,6 +605,7 @@ export class WsServer {
       case 'trigger_discovery':
         if (this.sessionManager) {
           console.log(`[ws] Triggering on-demand discovery from ${client.id}`)
+          this._send(ws, { type: 'discovery_triggered' })
           this.sessionManager._pollForNewSessions()
         }
         break
