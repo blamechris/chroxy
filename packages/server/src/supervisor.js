@@ -110,11 +110,12 @@ export async function startSupervisor(config) {
     : 10
   const RESTART_BACKOFFS = [2000, 2000, 3000, 3000, 5000, 5000, 8000, 8000, 10000, 10000]
 
-  // Deploy rollback tracking
+  // Deploy rollback tracking: if child crashes within DEPLOY_CRASH_WINDOW of
+  // a deploy signal, it counts as a deploy failure. MAX_DEPLOY_FAILURES
+  // consecutive deploy crashes triggers automatic rollback.
   let lastDeployTimestamp = 0
   let deployFailureCount = 0
   const DEPLOY_CRASH_WINDOW = 60000  // Crash within 60s of deploy = deploy failure
-  const DEPLOY_FAILURE_WINDOW = 300000 // 5 min window for counting failures
   const MAX_DEPLOY_FAILURES = 3
   const KNOWN_GOOD_FILE = join(homedir(), '.chroxy', 'known-good-ref')
 
@@ -210,8 +211,8 @@ export async function startSupervisor(config) {
       metrics.lastExitReason = { code, signal }
       metrics.childStartedAt = null
 
-      // Deploy crash detection: if child crashes within 60s of a deploy restart,
-      // count it as a deploy failure. 3 failures in 5 min triggers rollback.
+      // Deploy crash detection: if child crashes within 60s of the deploy signal,
+      // count it as a deploy failure. 3 consecutive deploy crashes triggers rollback.
       const timeSinceDeploy = Date.now() - lastDeployTimestamp
       if (lastDeployTimestamp > 0 && timeSinceDeploy < DEPLOY_CRASH_WINDOW) {
         deployFailureCount++
