@@ -591,6 +591,16 @@ program
       writeFileSync(KNOWN_GOOD_FILE, headHash)
       console.log(`[deploy] Tagged ${headHash.slice(0, 8)} as ${tagName}`)
 
+      // Prune old known-good tags, keeping the 5 most recent
+      try {
+        const allTags = execFileSync('git', ['tag', '--list', 'known-good-*', '--sort=-creatordate'], { encoding: 'utf-8' }).trim().split('\n').filter(Boolean)
+        const stale = allTags.slice(5)
+        for (const old of stale) {
+          execFileSync('git', ['tag', '-d', old], { stdio: 'pipe' })
+        }
+        if (stale.length > 0) console.log(`[deploy] Pruned ${stale.length} old known-good tag(s)`)
+      } catch {}
+
       // 5. Signal supervisor
       if (!existsSync(PID_FILE)) {
         console.error('[deploy] Supervisor PID file not found. Is chroxy running with supervisor mode?')

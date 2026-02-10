@@ -64,6 +64,16 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
 The server prints a QR code. Scan it with the Chroxy app.
 
+#### Development mode
+
+Use `chroxy dev` when iterating on Chroxy itself. It forces supervisor mode (auto-restart on crash) regardless of tunnel type, so you can modify server code and deploy without losing your phone connection:
+
+```bash
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy dev
+```
+
+Does not support `--terminal` (PTY) mode.
+
 ### Local WiFi (same network)
 
 If your phone and Mac are on the same WiFi, you can connect directly without the tunnel:

@@ -87,7 +87,6 @@ describe('SessionManager.serializeState', () => {
     // Check returned state
     assert.equal(state.sessions.length, 2)
     assert.ok(state.timestamp > 0)
-    assert.equal(state.sessions[0].chroxyId, 'chroxy-1')
     assert.equal(state.sessions[0].sdkSessionId, 'sdk-abc-123')
     assert.equal(state.sessions[0].name, 'Project A')
     assert.equal(state.sessions[0].cwd, '/tmp/a')
@@ -117,7 +116,7 @@ describe('SessionManager.serializeState', () => {
 
     const state = mgr.serializeState()
     assert.equal(state.sessions.length, 1, 'PTY session should be skipped')
-    assert.equal(state.sessions[0].chroxyId, 'cli-1')
+    assert.equal(state.sessions[0].sdkSessionId, null)
   })
 
   it('creates .chroxy directory if needed', () => {

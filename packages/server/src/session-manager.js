@@ -408,7 +408,6 @@ export class SessionManager extends EventEmitter {
     for (const [id, entry] of this._sessions) {
       if (entry.type === 'pty') continue // PTY sessions can't be serialized
       state.sessions.push({
-        chroxyId: id,
         sdkSessionId: (typeof entry.session.resumeSessionId !== 'undefined' ? entry.session.resumeSessionId : null),
         cwd: entry.cwd,
         model: entry.session.model,

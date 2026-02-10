@@ -226,3 +226,64 @@ describe('store actions', () => {
     });
   });
 });
+
+// -- Message queue --
+
+describe('message queue', () => {
+  beforeEach(() => {
+    // Clear queue by calling disconnect, then reset state
+    useConnectionStore.getState().disconnect();
+    useConnectionStore.setState({ connectionPhase: 'disconnected' });
+  });
+
+  it('queues input when socket is not connected', () => {
+    const result = useConnectionStore.getState().sendInput('hello');
+    expect(result).toBe('queued');
+  });
+
+  it('queues interrupt when socket is not connected', () => {
+    const result = useConnectionStore.getState().sendInterrupt();
+    expect(result).toBe('queued');
+  });
+
+  it('queues permission_response when socket is not connected', () => {
+    const result = useConnectionStore.getState().sendPermissionResponse('req-1', 'allow');
+    expect(result).toBe('queued');
+  });
+
+  it('queues user_question_response when socket is not connected', () => {
+    const result = useConnectionStore.getState().sendUserQuestionResponse('yes');
+    expect(result).toBe('queued');
+  });
+
+  it('returns false when queue is full (max 10)', () => {
+    const store = useConnectionStore.getState();
+    for (let i = 0; i < 10; i++) {
+      expect(store.sendInput(`msg-${i}`)).toBe('queued');
+    }
+    // 11th should fail
+    expect(store.sendInput('overflow')).toBe(false);
+  });
+
+  it('does not queue excluded message types (setModel)', () => {
+    // setModel calls socket.send directly and doesn't use enqueueMessage,
+    // so it just silently no-ops when disconnected. Verify that calling
+    // setModel does not consume queue capacity.
+    const store = useConnectionStore.getState();
+
+    // Fill the queue to 9 items.
+    for (let i = 0; i < 9; i++) {
+      expect(store.sendInput(`msg-${i}`)).toBe('queued');
+    }
+
+    // This excluded action should not be added to the queue.
+    store.setModel('test-model');
+
+    // We should still be able to enqueue the 10th item.
+    expect(store.sendInput('msg-9')).toBe('queued');
+
+    // And the 11th should fail, proving only 10 items were queued and
+    // setModel did not count towards the limit.
+    expect(store.sendInput('overflow')).toBe(false);
+  });
+});
