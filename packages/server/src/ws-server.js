@@ -1,4 +1,5 @@
 import { createServer } from 'http'
+import { execFileSync } from 'child_process'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
 import { statSync, readFileSync } from 'fs'
@@ -10,6 +11,16 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
 const SERVER_VERSION = packageJson.version
+
+function getGitInfo() {
+  try {
+    const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim()
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim()
+    return { commit, branch }
+  } catch {
+    return { commit: 'unknown', branch: 'unknown' }
+  }
+}
 
 const PERMISSION_MODES = [
   { id: 'approve', label: 'Approve' },
@@ -113,6 +124,8 @@ export class WsServer {
     }
 
     this.serverMode = (this.sessionManager || this.cliSession) ? 'cli' : 'terminal'
+    this._gitInfo = getGitInfo()
+    this._startedAt = Date.now()
   }
 
   _formatStatusLog(status) {
@@ -126,6 +139,18 @@ export class WsServer {
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ status: 'ok', mode: this.serverMode }))
+        return
+      }
+
+      // Version endpoint — returns server version, git info, and uptime
+      if (req.method === 'GET' && req.url === '/version') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          version: SERVER_VERSION,
+          gitCommit: this._gitInfo.commit,
+          gitBranch: this._gitInfo.branch,
+          uptime: Math.round((Date.now() - this._startedAt) / 1000),
+        }))
         return
       }
 
@@ -269,6 +294,7 @@ export class WsServer {
       type: 'auth_ok',
       serverMode: this.serverMode,
       serverVersion: SERVER_VERSION,
+      serverCommit: this._gitInfo.commit,
       cwd: sessionInfo.cwd,
     })
     this._send(ws, { type: 'server_mode', mode: this.serverMode })

@@ -813,6 +813,26 @@ describe('auth_ok payload fields (single-session mode)', () => {
     ws.close()
   })
 
+  it('includes serverCommit as a non-empty string', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.equal(typeof authOk.serverCommit, 'string', 'serverCommit should be a string')
+    assert.ok(authOk.serverCommit.length > 0, 'serverCommit should be non-empty')
+
+    ws.close()
+  })
+
   it('includes cwd from cliSession when available', async () => {
     const mockSession = createMockSession()
     mockSession.cwd = '/tmp/test-project'
@@ -2212,5 +2232,76 @@ describe('agent idle/busy notifications', () => {
     assert.equal(server.hasActiveViewersForSession('sess-2'), false, 'No client is viewing sess-2')
 
     ws.close()
+  })
+})
+
+describe('GET /version endpoint', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('returns valid JSON with expected fields', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const response = await fetch(`http://127.0.0.1:${port}/version`)
+    assert.equal(response.status, 200)
+    assert.match(response.headers.get('content-type') ?? '', /^application\/json\b/)
+
+    const data = await response.json()
+    assert.equal(typeof data.version, 'string', 'version should be a string')
+    assert.match(data.version, /^\d+\.\d+\.\d+/, 'version should be semver format')
+    assert.equal(typeof data.gitCommit, 'string', 'gitCommit should be a string')
+    assert.equal(typeof data.gitBranch, 'string', 'gitBranch should be a string')
+    assert.equal(typeof data.uptime, 'number', 'uptime should be a number')
+    assert.ok(data.uptime >= 0, 'uptime should be non-negative')
+  })
+
+  it('gitCommit and gitBranch are non-empty strings', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const response = await fetch(`http://127.0.0.1:${port}/version`)
+    const data = await response.json()
+
+    // gitCommit and gitBranch should always be non-empty strings
+    // (either real values from git or 'unknown' if git is unavailable)
+    assert.ok(data.gitCommit.length > 0, 'gitCommit should be non-empty')
+    assert.ok(data.gitBranch.length > 0, 'gitBranch should be non-empty')
+  })
+
+  it('does not require authentication', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // GET /version without any auth header should still work
+    const response = await fetch(`http://127.0.0.1:${port}/version`)
+    assert.equal(response.status, 200, '/version should be accessible without auth')
+
+    const data = await response.json()
+    assert.equal(typeof data.version, 'string')
   })
 })

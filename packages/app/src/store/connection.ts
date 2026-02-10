@@ -178,6 +178,7 @@ interface ConnectionState {
   // Server context (from auth_ok)
   sessionCwd: string | null;
   serverVersion: string | null;
+  serverCommit: string | null;
 
   // Multi-session state
   sessions: SessionInfo[];
@@ -445,6 +446,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   serverMode: null,
   sessionCwd: null,
   serverVersion: null,
+  serverCommit: null,
   sessions: [],
   activeSessionId: null,
   sessionStates: {},
@@ -644,6 +646,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             msg.serverMode === 'cli' || msg.serverMode === 'terminal' ? msg.serverMode : null;
           const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
           const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
+          const authServerCommit = typeof msg.serverCommit === 'string' ? msg.serverCommit : null;
           // On reconnect, preserve messages and terminal buffer
           const connectedState = {
             connectionPhase: 'connected' as const,
@@ -654,6 +657,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             serverMode: authServerMode,
             sessionCwd: authSessionCwd,
             serverVersion: authServerVersion,
+            serverCommit: authServerCommit,
             streamingMessageId: null,
           };
           if (isReconnect) {
@@ -1347,6 +1351,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverMode: null,
       sessionCwd: null,
       serverVersion: null,
+      serverCommit: null,
       claudeReady: false,
       streamingMessageId: null,
       activeModel: null,
@@ -1377,6 +1382,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverMode: null,
       sessionCwd: null,
       serverVersion: null,
+      serverCommit: null,
     });
   },
 
