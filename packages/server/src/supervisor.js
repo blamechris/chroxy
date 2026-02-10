@@ -350,11 +350,21 @@ export async function startSupervisor(config) {
         log.error(`Invalid known-good ref: "${ref}"`)
         return false
       }
+
+      // Resolve repo root so rollback works regardless of cwd
+      const repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf-8' }).trim()
+      if (!repoRoot) {
+        log.error('Failed to determine git repository root, cannot rollback')
+        return false
+      }
+
       log.info(`Rolling back to known-good commit: ${ref.slice(0, 8)}`)
-      execFileSync('git', ['checkout', ref], { stdio: 'pipe' })
+      execFileSync('git', ['checkout', ref], { stdio: 'pipe', cwd: repoRoot })
       log.info('Rollback successful')
       return true
     } catch (err) {
+      const stderr = err.stderr?.toString?.().trim()
+      if (stderr) log.error(`Rollback git stderr: ${stderr}`)
       log.error(`Rollback failed: ${err.message}`)
       return false
     }
