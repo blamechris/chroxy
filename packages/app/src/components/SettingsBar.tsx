@@ -20,6 +20,7 @@ export interface SettingsBarProps {
   claudeStatus: ClaudeStatus | null;
   sessionCwd: string | null;
   serverMode: 'cli' | 'terminal' | null;
+  isIdle: boolean;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
 }
@@ -47,6 +48,7 @@ export function SettingsBar({
   claudeStatus,
   sessionCwd,
   serverMode,
+  isIdle,
   setModel,
   setPermissionMode,
 }: SettingsBarProps) {
@@ -106,6 +108,7 @@ export function SettingsBar({
   return (
     <View style={styles.container}>
       <TouchableOpacity onPress={onToggle} style={styles.summaryRow} activeOpacity={0.7}>
+        <View style={[styles.statusDot, { backgroundColor: isIdle ? COLORS.accentGreen : COLORS.accentOrange }]} />
         <Text style={styles.summaryText} numberOfLines={1}>
           {summaryParts.join(' \u00B7 ') || 'Settings'}
         </Text>
@@ -216,6 +219,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 6,
     minHeight: 44,
+  },
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 8,
   },
   summaryText: {
     flex: 1,

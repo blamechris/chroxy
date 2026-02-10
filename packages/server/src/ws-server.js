@@ -812,6 +812,9 @@ export class WsServer {
         case 'stream_start':
           console.log(`[ws] Broadcasting stream_start: ${data.messageId} (session ${sessionId})`)
           this._broadcastToSession(sessionId, { type: 'stream_start', messageId: data.messageId })
+          this._broadcastToSession(sessionId, { type: 'agent_busy' })
+          // Broadcast updated session list so SessionPicker busy dot appears immediately
+          this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
           break
 
         case 'stream_delta': {
@@ -862,6 +865,7 @@ export class WsServer {
 
         case 'result':
           this._broadcastToSession(sessionId, { type: 'result', cost: data.cost, duration: data.duration, usage: data.usage, sessionId: data.sessionId })
+          this._broadcastToSession(sessionId, { type: 'agent_idle' })
           // Broadcast updated session list (isBusy may have changed)
           this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
           break
@@ -1232,6 +1236,14 @@ export class WsServer {
       if (client.authenticated && ws.readyState === 1) count++
     }
     return count
+  }
+
+  /** Check if any authenticated client is actively viewing the given session */
+  hasActiveViewersForSession(sessionId) {
+    for (const [ws, client] of this.clients) {
+      if (client.authenticated && client.activeSessionId === sessionId && ws.readyState === 1) return true
+    }
+    return false
   }
 
   /** Send JSON to a single client */

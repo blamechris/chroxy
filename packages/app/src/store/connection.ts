@@ -111,6 +111,7 @@ export interface SessionState {
   contextUsage: ContextUsage | null;
   lastResultCost: number | null;
   lastResultDuration: number | null;
+  isIdle: boolean;
 }
 
 export interface ServerError {
@@ -141,6 +142,7 @@ function createEmptySessionState(): SessionState {
     contextUsage: null,
     lastResultCost: null,
     lastResultDuration: null,
+    isIdle: true,
   };
 }
 
@@ -174,6 +176,7 @@ interface ConnectionState {
   contextUsage: ContextUsage | null;
   lastResultCost: number | null;
   lastResultDuration: number | null;
+  isIdle: boolean;
   messages: ChatMessage[];
 
   // Available models from server (CLI mode)
@@ -400,6 +403,7 @@ function updateSession(sessionId: string, updater: (session: SessionState) => Pa
     if ('contextUsage' in patch) flatPatch.contextUsage = patch.contextUsage;
     if ('lastResultCost' in patch) flatPatch.lastResultCost = patch.lastResultCost;
     if ('lastResultDuration' in patch) flatPatch.lastResultDuration = patch.lastResultDuration;
+    if ('isIdle' in patch) flatPatch.isIdle = patch.isIdle;
     useConnectionStore.setState(flatPatch);
   } else {
     useConnectionStore.setState({ sessionStates: newSessionStates });
@@ -436,6 +440,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
+  isIdle: true,
   inputSettings: {
     chatEnterToSend: true,
     terminalEnterToSend: false,
@@ -460,6 +465,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       contextUsage: get().contextUsage,
       lastResultCost: get().lastResultCost,
       lastResultDuration: get().lastResultDuration,
+      isIdle: true,
     };
   },
 
@@ -696,6 +702,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               contextUsage: ss.contextUsage,
               lastResultCost: ss.lastResultCost,
               lastResultDuration: ss.lastResultDuration,
+              isIdle: ss.isIdle,
             };
           });
           break;
@@ -1012,6 +1019,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             updateSession(targetId, () => ({ claudeReady: true }));
           } else {
             set({ claudeReady: true });
+          }
+          break;
+        }
+
+        case 'agent_idle': {
+          const idleTargetId = msg.sessionId || get().activeSessionId;
+          if (idleTargetId && get().sessionStates[idleTargetId]) {
+            updateSession(idleTargetId, () => ({ isIdle: true }));
+          }
+          break;
+        }
+
+        case 'agent_busy': {
+          const busyTargetId = msg.sessionId || get().activeSessionId;
+          if (busyTargetId && get().sessionStates[busyTargetId]) {
+            updateSession(busyTargetId, () => ({ isIdle: false }));
           }
           break;
         }
