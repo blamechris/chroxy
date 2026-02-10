@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage, ConnectionPhase } from '../store/connection';
+import { useConnectionStore, ChatMessage, ConnectionPhase, AgentInfo } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
@@ -27,6 +27,9 @@ import type { RootStackParamList } from '../App';
 import { ICON_CLOSE, ICON_GEAR } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
+
+// Stable empty array to avoid new-reference-per-render in Zustand selectors
+const EMPTY_AGENTS: AgentInfo[] = [];
 
 // Enable LayoutAnimation on Android
 UIManager.setLayoutAnimationEnabledExperimental?.(true);
@@ -124,7 +127,7 @@ export function SessionScreen() {
   });
   const activeAgents = useConnectionStore((s) => {
     const id = s.activeSessionId;
-    return id && s.sessionStates[id] ? s.sessionStates[id].activeAgents : [];
+    return id && s.sessionStates[id] ? s.sessionStates[id].activeAgents : EMPTY_AGENTS;
   });
   const activeSessionHealth = useConnectionStore((s) => {
     const id = s.activeSessionId;

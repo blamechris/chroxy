@@ -169,7 +169,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
                     style={styles.discoveredItem}
                     onPress={() => handleAttach(s)}
                   >
-                    <Text style={styles.discoveredName}>{s.sessionName}</Text>
+                    <Text style={styles.discoveredName} numberOfLines={1}>{s.sessionName}</Text>
                     <Text style={styles.discoveredCwd} numberOfLines={1}>{s.cwd}</Text>
                   </TouchableOpacity>
                 ))}
