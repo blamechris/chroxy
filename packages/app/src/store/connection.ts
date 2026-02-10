@@ -721,7 +721,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           _receivingHistoryReplay = false;
           _isSessionSwitchReplay = false;
           // Mark all replayed prompts as answered — any prompt in history
-          // has already been resolved by the server
+          // has already been resolved by the server.
+          // Note: replay is always for the active session (connect or switch).
           updateActiveSession((ss) => {
             const hasUnansweredPrompts = ss.messages.some(
               (m) => m.type === 'prompt' && !m.answered
@@ -964,7 +965,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           }
           break;
 
-        case 'status_update':
+        case 'status_update': {
+          // Server filters status_update to active session only, but defend
+          // against misrouted messages on the client side too.
+          const statusSid = msg.sessionId || get().activeSessionId;
+          if (statusSid && statusSid !== get().activeSessionId) break;
           set({
             claudeStatus: {
               cost: msg.cost,
@@ -976,6 +981,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             },
           });
           break;
+        }
 
         case 'raw':
           get().appendTerminalData(msg.data);
@@ -1054,7 +1060,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }
 
         case 'server_status': {
-          // Non-error status update (e.g., tunnel recovery notifications)
+          // Non-error status update (e.g., tunnel recovery notifications).
+          // Global broadcast (no sessionId) — route to active session.
           const statusMessage: string =
             typeof msg.message === 'string' && msg.message.trim().length > 0
               ? stripAnsi(msg.message)
@@ -1078,6 +1085,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }
 
         case 'server_error': {
+          // Global broadcast (no sessionId) — route to active session.
           // Validate and coerce untyped JSON fields
           const allowedCategories = new Set<ServerError['category']>([
             'tunnel', 'session', 'permission', 'general',
