@@ -2028,4 +2028,27 @@ describe('public broadcast method', () => {
 
     ws.close()
   })
+
+  it('broadcast() does not send to unauthenticated clients', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect but do NOT authenticate
+    const { ws, messages } = await createClient(port, false)
+    await new Promise(r => setTimeout(r, 100))
+
+    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'test-session', cwd: '/tmp', pid: 123 }] })
+    await new Promise(r => setTimeout(r, 100))
+
+    const discoveryMsg = messages.find(m => m.type === 'discovered_sessions')
+    assert.ok(!discoveryMsg, 'Unauthenticated client should NOT receive broadcast')
+
+    ws.close()
+  })
 })

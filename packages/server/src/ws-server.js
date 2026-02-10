@@ -1168,6 +1168,7 @@ export class WsServer {
 
   /** Public broadcast: send a message to all authenticated clients */
   broadcast(message) {
+    console.log(`[ws] Broadcasting ${message.type || 'unknown'} to all clients`)
     this._broadcast(message)
   }
 
