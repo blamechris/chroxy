@@ -733,7 +733,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         case 'auth_fail':
           socket.close();
           set({ connectionPhase: 'disconnected', socket: null });
-          Alert.alert('Auth Failed', msg.reason || 'Invalid token');
+          if (!silent) {
+            Alert.alert('Auth Failed', msg.reason || 'Invalid token');
+          }
           break;
 
         case 'server_mode':
