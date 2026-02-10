@@ -1805,3 +1805,190 @@ describe('user_question_response forwarding (single-session)', () => {
     ws.close()
   })
 })
+
+describe('background session sync (_broadcastToSession)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  /** Create a mock SessionManager with two sessions */
+  function createTwoSessionManager() {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+
+    const session1 = createMockSession()
+    session1.cwd = '/tmp/project-1'
+    sessionsMap.set('sess-1', { session: session1, name: 'Session 1', cwd: '/tmp/project-1', type: 'cli', isBusy: false })
+
+    const session2 = createMockSession()
+    session2.cwd = '/tmp/project-2'
+    sessionsMap.set('sess-2', { session: session2, name: 'Session 2', cwd: '/tmp/project-2', type: 'cli', isBusy: false })
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.keys().next().value
+    })
+
+    return manager
+  }
+
+  it('tags session messages with sessionId', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Emit a message event on session-1
+    mockManager.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'message',
+      data: { type: 'response', content: 'Hello from session 1', timestamp: Date.now() },
+    })
+    await new Promise(r => setTimeout(r, 100))
+
+    const msgEvent = messages.find(m => m.type === 'message' && m.content === 'Hello from session 1')
+    assert.ok(msgEvent, 'Should receive the message event')
+    assert.equal(msgEvent.sessionId, 'sess-1', 'Message should include sessionId')
+
+    ws.close()
+  })
+
+  it('delivers messages for inactive sessions to all clients', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Client is on sess-1, but we emit an event for sess-2
+    mockManager.emit('session_event', {
+      sessionId: 'sess-2',
+      event: 'message',
+      data: { type: 'response', content: 'Background message', timestamp: Date.now() },
+    })
+    await new Promise(r => setTimeout(r, 100))
+
+    const bgMsg = messages.find(m => m.type === 'message' && m.content === 'Background message')
+    assert.ok(bgMsg, 'Client should receive message for inactive session')
+    assert.equal(bgMsg.sessionId, 'sess-2', 'Should be tagged with the originating sessionId')
+
+    ws.close()
+  })
+
+  it('stream_start/stream_end for inactive sessions include sessionId', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Emit stream lifecycle for sess-2 while client is on sess-1
+    mockManager.emit('session_event', {
+      sessionId: 'sess-2',
+      event: 'stream_start',
+      data: { messageId: 'msg-bg-1' },
+    })
+    mockManager.emit('session_event', {
+      sessionId: 'sess-2',
+      event: 'stream_end',
+      data: { messageId: 'msg-bg-1' },
+    })
+    await new Promise(r => setTimeout(r, 200))
+
+    const streamStart = messages.find(m => m.type === 'stream_start' && m.messageId === 'msg-bg-1')
+    assert.ok(streamStart, 'Should receive stream_start for background session')
+    assert.equal(streamStart.sessionId, 'sess-2')
+
+    const streamEnd = messages.find(m => m.type === 'stream_end' && m.messageId === 'msg-bg-1')
+    assert.ok(streamEnd, 'Should receive stream_end for background session')
+    assert.equal(streamEnd.sessionId, 'sess-2')
+
+    ws.close()
+  })
+
+  it('raw PTY data is NOT sent for inactive sessions', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Switch client to terminal mode
+    send(ws, { type: 'mode', mode: 'terminal' })
+    await new Promise(r => setTimeout(r, 50))
+
+    // Emit raw data for sess-2 (inactive)
+    mockManager.emit('session_event', {
+      sessionId: 'sess-2',
+      event: 'raw',
+      data: 'background raw data',
+    })
+    await new Promise(r => setTimeout(r, 100))
+
+    const rawMsg = messages.find(m => m.type === 'raw' && m.data === 'background raw data')
+    assert.equal(rawMsg, undefined, 'Raw PTY data should NOT be sent for inactive sessions')
+
+    // Emit raw data for sess-1 (active) — should be received
+    mockManager.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'raw',
+      data: 'active raw data',
+    })
+    await new Promise(r => setTimeout(r, 100))
+
+    const activeRaw = messages.find(m => m.type === 'raw' && m.data === 'active raw data')
+    assert.ok(activeRaw, 'Raw PTY data should be sent for active session')
+
+    ws.close()
+  })
+})

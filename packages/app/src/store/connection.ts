@@ -376,18 +376,21 @@ function flushPendingDeltas() {
   }
 }
 
-/** Helper to update the active session's state and sync to flat state */
-function updateActiveSession(updater: (session: SessionState) => Partial<SessionState>) {
+/**
+ * Update any session's state by ID. Syncs to flat state only when the target
+ * session is the currently active session (so UI reads remain correct).
+ */
+function updateSession(sessionId: string, updater: (session: SessionState) => Partial<SessionState>) {
   const state = useConnectionStore.getState();
-  const activeId = state.activeSessionId;
+  if (!state.sessionStates[sessionId]) return;
 
-  if (activeId && state.sessionStates[activeId]) {
-    const current = state.sessionStates[activeId];
-    const patch = updater(current);
-    const updated = { ...current, ...patch };
-    const newSessionStates = { ...state.sessionStates, [activeId]: updated };
+  const current = state.sessionStates[sessionId];
+  const patch = updater(current);
+  const updated = { ...current, ...patch };
+  const newSessionStates = { ...state.sessionStates, [sessionId]: updated };
 
-    // Sync relevant fields to flat state for backward compat reads
+  // Sync relevant fields to flat state only for the active session
+  if (sessionId === state.activeSessionId) {
     const flatPatch: Record<string, unknown> = { sessionStates: newSessionStates };
     if ('messages' in patch) flatPatch.messages = patch.messages;
     if ('streamingMessageId' in patch) flatPatch.streamingMessageId = patch.streamingMessageId;
@@ -397,9 +400,17 @@ function updateActiveSession(updater: (session: SessionState) => Partial<Session
     if ('contextUsage' in patch) flatPatch.contextUsage = patch.contextUsage;
     if ('lastResultCost' in patch) flatPatch.lastResultCost = patch.lastResultCost;
     if ('lastResultDuration' in patch) flatPatch.lastResultDuration = patch.lastResultDuration;
-
     useConnectionStore.setState(flatPatch);
+  } else {
+    useConnectionStore.setState({ sessionStates: newSessionStates });
   }
+}
+
+/** Helper to update the active session's state and sync to flat state */
+function updateActiveSession(updater: (session: SessionState) => Partial<SessionState>) {
+  const state = useConnectionStore.getState();
+  const activeId = state.activeSessionId;
+  if (activeId) updateSession(activeId, updater);
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
@@ -732,15 +743,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           const msgType = msg.messageType || msg.type;
           // Skip server-echoed user_input — we already show it instantly client-side
           if (msgType === 'user_input') break;
+          const targetId = msg.sessionId || get().activeSessionId;
           // During reconnect replay, skip if app already has messages (cache is fresh)
           if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
           // During session-switch replay, skip if an equivalent message is already in cache (dedup)
           if (_receivingHistoryReplay && _isSessionSwitchReplay) {
-            const cached = get().messages;
+            const targetState = targetId ? get().sessionStates[targetId] : null;
+            const cached = targetState ? targetState.messages : get().messages;
             const isDuplicate = cached.some((m) => {
               if (m.type !== msgType || m.content !== msg.content) return false;
-              // Strengthen signature: timestamp + tool + options to avoid dropping
-              // legitimate repeated messages (e.g., identical errors, repeated "OK")
               if (m.timestamp !== msg.timestamp) return false;
               if ((m.tool ?? null) !== (msg.tool ?? null)) return false;
               return JSON.stringify(m.options ?? null) === JSON.stringify(msg.options ?? null);
@@ -755,9 +766,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             options: msg.options,
             timestamp: msg.timestamp,
           };
-          const activeId = get().activeSessionId;
-          if (activeId && get().sessionStates[activeId]) {
-            updateActiveSession((ss) => ({
+          if (targetId && get().sessionStates[targetId]) {
+            updateSession(targetId, (ss) => ({
               messages: [
                 ...ss.messages.filter((m) => m.id !== 'thinking' || newMsg.id === 'thinking'),
                 newMsg,
@@ -771,9 +781,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'stream_start': {
           const streamId = msg.messageId;
-          const activeId = get().activeSessionId;
-          if (activeId && get().sessionStates[activeId]) {
-            updateActiveSession((ss) => {
+          const targetId = msg.sessionId || get().activeSessionId;
+          if (targetId && get().sessionStates[targetId]) {
+            updateSession(targetId, (ss) => {
               if (ss.messages.some((m) => m.id === streamId)) {
                 return { streamingMessageId: streamId };
               }
@@ -804,11 +814,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'stream_delta': {
           // Batch deltas — accumulate and flush to state periodically.
-          // Capture activeSessionId now so deltas flush to the correct session
-          // even if the user switches sessions during the 100ms batching window.
+          // Use server-provided sessionId so deltas route to the correct session
+          // even for background (non-active) sessions.
           const deltaId = msg.messageId;
           const existingDelta = pendingDeltas.get(deltaId);
-          const capturedSessionId = get().activeSessionId;
+          const capturedSessionId = msg.sessionId || get().activeSessionId;
           pendingDeltas.set(deltaId, {
             sessionId: capturedSessionId,
             delta: (existingDelta?.delta || '') + msg.delta,
@@ -826,9 +836,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           }
           flushPendingDeltas();
           {
-            const activeId = get().activeSessionId;
-            if (activeId && get().sessionStates[activeId]) {
-              updateActiveSession(() => ({ streamingMessageId: null }));
+            const targetId = msg.sessionId || get().activeSessionId;
+            if (targetId && get().sessionStates[targetId]) {
+              updateSession(targetId, () => ({ streamingMessageId: null }));
             } else {
               set({ streamingMessageId: null });
             }
@@ -836,13 +846,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
 
         case 'tool_start': {
+          const targetId = msg.sessionId || get().activeSessionId;
           // During reconnect replay, skip if app already has messages (cache is fresh)
           if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
           // Use server messageId as stable identifier for dedup (same ID on live + replay)
           const toolId = msg.messageId || nextMessageId('tool');
           // During session-switch replay, skip if tool already in cache (dedup by stable ID)
           if (_receivingHistoryReplay && _isSessionSwitchReplay) {
-            const cached = get().messages;
+            const targetState = targetId ? get().sessionStates[targetId] : null;
+            const cached = targetState ? targetState.messages : get().messages;
             if (cached.some((m) => m.id === toolId)) break;
           }
           const toolMsg: ChatMessage = {
@@ -852,9 +864,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             tool: msg.tool,
             timestamp: Date.now(),
           };
-          const activeId = get().activeSessionId;
-          if (activeId && get().sessionStates[activeId]) {
-            updateActiveSession((ss) => ({
+          if (targetId && get().sessionStates[targetId]) {
+            updateSession(targetId, (ss) => ({
               messages: [...ss.messages, toolMsg],
             }));
           } else {
@@ -883,9 +894,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             lastResultCost: typeof msg.cost === 'number' ? msg.cost : null,
             lastResultDuration: typeof msg.duration === 'number' ? msg.duration : null,
           };
-          const activeId = get().activeSessionId;
-          if (activeId && get().sessionStates[activeId]) {
-            updateActiveSession(() => resultPatch);
+          const targetId = msg.sessionId || get().activeSessionId;
+          if (targetId && get().sessionStates[targetId]) {
+            updateSession(targetId, () => resultPatch);
           } else {
             set(resultPatch);
           }
@@ -894,9 +905,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'model_changed': {
           const model = (typeof msg.model === 'string' && msg.model.trim()) ? msg.model.trim() : null;
-          const activeId = get().activeSessionId;
-          if (activeId && get().sessionStates[activeId]) {
-            updateActiveSession(() => ({ activeModel: model }));
+          const targetId = msg.sessionId || get().activeSessionId;
+          if (targetId && get().sessionStates[targetId]) {
+            updateSession(targetId, () => ({ activeModel: model }));
           } else {
             set({ activeModel: model });
           }
@@ -932,9 +943,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
         case 'permission_mode_changed': {
           const mode = (typeof msg.mode === 'string' && msg.mode.trim()) ? msg.mode.trim() : null;
-          const activeId = get().activeSessionId;
-          if (activeId && get().sessionStates[activeId]) {
-            updateActiveSession(() => ({ permissionMode: mode }));
+          const targetId = msg.sessionId || get().activeSessionId;
+          if (targetId && get().sessionStates[targetId]) {
+            updateSession(targetId, () => ({ permissionMode: mode }));
           } else {
             set({ permissionMode: mode });
           }
@@ -971,9 +982,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
 
         case 'claude_ready': {
-          const activeId = get().activeSessionId;
-          if (activeId && get().sessionStates[activeId]) {
-            updateActiveSession(() => ({ claudeReady: true }));
+          const targetId = msg.sessionId || get().activeSessionId;
+          if (targetId && get().sessionStates[targetId]) {
+            updateSession(targetId, () => ({ claudeReady: true }));
           } else {
             set({ claudeReady: true });
           }
@@ -1000,9 +1011,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             ],
             timestamp: Date.now(),
           };
-          const activeId = get().activeSessionId;
-          if (activeId && get().sessionStates[activeId]) {
-            updateActiveSession((ss) => ({
+          const permTargetId = msg.sessionId || get().activeSessionId;
+          if (permTargetId && get().sessionStates[permTargetId]) {
+            updateSession(permTargetId, (ss) => ({
               messages: [...ss.messages, permMsg],
             }));
           } else {
@@ -1031,9 +1042,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               : [],
             timestamp: Date.now(),
           };
-          const activeQId = get().activeSessionId;
-          if (activeQId && get().sessionStates[activeQId]) {
-            updateActiveSession((ss) => ({
+          const questionTargetId = msg.sessionId || get().activeSessionId;
+          if (questionTargetId && get().sessionStates[questionTargetId]) {
+            updateSession(questionTargetId, (ss) => ({
               messages: [...ss.messages, questionMsg],
             }));
           } else {
