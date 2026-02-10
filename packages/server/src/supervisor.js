@@ -176,7 +176,16 @@ export async function startSupervisor(config) {
     standbyServer = createServer((req, res) => {
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ status: 'restarting' }))
+        res.end(JSON.stringify({
+          status: 'restarting',
+          metrics: {
+            supervisorUptimeS: Math.round((Date.now() - metrics.startedAt) / 1000),
+            totalRestarts: metrics.totalRestarts,
+            consecutiveRestarts: metrics.consecutiveRestarts,
+            lastExitReason: metrics.lastExitReason,
+            lastBackoffMs: metrics.lastBackoffMs,
+          },
+        }))
         return
       }
       res.writeHead(503)
