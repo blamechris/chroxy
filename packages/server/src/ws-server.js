@@ -71,7 +71,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'session_switched', sessionId, name, cwd } — switched active session
  *   { type: 'session_created', sessionId, name }      — new session created
  *   { type: 'session_destroyed', sessionId }          — session removed
- *   { type: 'session_error', message, category?, sessionId? } — session operation error
+ *   { type: 'session_error', message, category?, sessionId?, recoverable? } — session operation error
  *   { type: 'discovered_sessions', tmux: [...] }     — host tmux session scan results
  *   { type: 'discovery_triggered' }                  — ack that on-demand discovery started
  *   { type: 'history_replay_start', sessionId }      — beginning of history replay
