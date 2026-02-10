@@ -20,9 +20,9 @@ chroxy/
 ```
 
 **Current Status (v0.1.0):**
-- Server works: CLI headless mode (default), PTY/tmux mode, WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, session management, model switching, auto-discovery
-- App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal
-- Priority: xterm.js integration, plan mode UI, permission handling UI, settings page
+- Server works: CLI headless mode (default), PTY/tmux mode, WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, session management, model switching, auto-discovery, plan mode detection, background agent tracking
+- App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal, plan approval UI, agent monitoring, settings screen
+- Priority: xterm.js integration, permission handling UI improvements
 
 ## Critical Dev Notes
 
@@ -186,15 +186,20 @@ Chroxy server operates in two modes:
 | Config | `src/config.js` | Schema validation + merge (CLI > ENV > file > defaults) |
 | Supervisor | `src/supervisor.js` | Tunnel owner + child auto-restart (named tunnel mode) |
 | ServerCLI | `src/server-cli.js` | CLI mode orchestrator |
-| CliSession | `src/cli-session.js` | Claude Code headless executor |
+| CliSession | `src/cli-session.js` | Claude Code headless executor (stream-json) |
+| SdkSession | `src/sdk-session.js` | Claude Agent SDK executor |
 | Server | `src/server.js` | PTY mode orchestrator |
 | WsServer | `src/ws-server.js` | WebSocket protocol with auth |
 | PushManager | `src/push.js` | Push notifications via Expo Push API (CLI mode) |
 | PtyManager | `src/pty-manager.js` | tmux session management (PTY mode) |
 | OutputParser | `src/output-parser.js` | Terminal output parser (PTY mode) |
+| NoisePatterns | `src/noise-patterns.js` | Terminal noise filter patterns (PTY mode) |
 | TunnelManager | `src/tunnel.js` | Cloudflare tunnel lifecycle (quick/named/none) |
+| TunnelEvents | `src/tunnel-events.js` | Tunnel event wiring helpers |
 | SessionManager | `src/session-manager.js` | Session lifecycle management + auto-discovery |
+| SessionDiscovery | `src/session-discovery.js` | tmux session discovery utilities |
 | Models | `src/models.js` | Model switching utilities |
+| Logger | `src/logger.js` | Shared logging utility |
 
 ### Data Flow
 
@@ -231,6 +236,19 @@ Server → Client: `auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `strea
 |--------|---------|
 | ConnectScreen | QR scan or manual URL/token entry |
 | SessionScreen | Dual-view: chat mode + terminal mode |
+| SettingsScreen | App version, server URL, tap-to-copy |
+
+### App Components
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| ChatView | `src/components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
+| TerminalView | `src/components/TerminalView.tsx` | Raw terminal output display |
+| InputBar | `src/components/InputBar.tsx` | Text input with send/interrupt toggle |
+| SettingsBar | `src/components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
+| SessionPicker | `src/components/SessionPicker.tsx` | Horizontal session tab strip |
+| MarkdownRenderer | `src/components/MarkdownRenderer.tsx` | Markdown parsing + inline code highlighting |
+| CreateSessionModal | `src/components/CreateSessionModal.tsx` | New session creation dialog |
 
 ### State Management (Zustand)
 
@@ -267,35 +285,63 @@ node packages/server/src/test-client.js wss://your-url
 
 ## Project Files Reference
 
+### Server (`packages/server/src/`)
+
 | File | Purpose |
 |------|---------|
-| `packages/server/src/cli.js` | CLI commands (init, start, config, tunnel setup) |
-| `packages/server/src/config.js` | Config schema validation + merge precedence |
-| `packages/server/src/supervisor.js` | Supervisor: tunnel owner + child auto-restart |
-| `packages/server/src/server-cli-child.js` | Supervised child entry point |
-| `packages/server/src/server-cli.js` | CLI mode orchestrator |
-| `packages/server/src/cli-session.js` | Claude Code headless executor |
-| `packages/server/src/push.js` | Push notifications via Expo Push API |
-| `packages/server/src/server.js` | PTY mode orchestrator |
-| `packages/server/src/pty-manager.js` | PTY/tmux management |
-| `packages/server/src/output-parser.js` | Terminal output parser |
-| `packages/server/src/ws-server.js` | WebSocket protocol with auth |
-| `packages/server/src/tunnel.js` | Cloudflare tunnel manager (quick/named/none) |
-| `packages/server/src/tunnel-check.js` | Tunnel health verification |
-| `packages/server/src/session-manager.js` | Session lifecycle management |
-| `packages/server/src/session-discovery.js` | Session discovery utilities |
-| `packages/server/src/pty-session.js` | PTY session state + I/O handling |
-| `packages/server/src/models.js` | Model switching utilities |
-| `packages/app/src/App.tsx` | App root with navigation |
-| `packages/app/src/screens/ConnectScreen.tsx` | QR scan + manual connection UI |
-| `packages/app/src/screens/SessionScreen.tsx` | Chat + terminal dual-view UI |
-| `packages/app/src/store/connection.ts` | Zustand state store (ConnectionPhase) |
-| `packages/app/src/notifications.ts` | Push notification registration |
-| `docs/qa-log.md` | QA audit log with coverage matrix |
-| `docs/architecture/in-app-dev.md` | In-app iterative development design |
+| `cli.js` | CLI commands (init, start, config, tunnel setup) |
+| `config.js` | Config schema validation + merge precedence |
+| `supervisor.js` | Supervisor: tunnel owner + child auto-restart |
+| `server-cli-child.js` | Supervised child entry point |
+| `server-cli.js` | CLI mode orchestrator |
+| `cli-session.js` | Claude Code headless executor (stream-json) |
+| `sdk-session.js` | Claude Agent SDK executor |
+| `push.js` | Push notifications via Expo Push API |
+| `server.js` | PTY mode orchestrator |
+| `pty-manager.js` | PTY/tmux management |
+| `pty-session.js` | PTY session state + I/O handling |
+| `output-parser.js` | Terminal output parser |
+| `noise-patterns.js` | Terminal noise filter patterns |
+| `ws-server.js` | WebSocket protocol with auth |
+| `tunnel.js` | Cloudflare tunnel manager (quick/named/none) |
+| `tunnel-check.js` | Tunnel health verification |
+| `tunnel-events.js` | Tunnel event wiring helpers |
+| `session-manager.js` | Session lifecycle management |
+| `session-discovery.js` | Session discovery utilities |
+| `models.js` | Model switching utilities |
+| `logger.js` | Shared logging utility |
+
+### App (`packages/app/src/`)
+
+| File | Purpose |
+|------|---------|
+| `App.tsx` | App root with navigation |
+| `screens/ConnectScreen.tsx` | QR scan + manual connection UI |
+| `screens/SessionScreen.tsx` | Session orchestrator (wires components) |
+| `screens/SettingsScreen.tsx` | App settings and version info |
+| `components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
+| `components/TerminalView.tsx` | Raw terminal output display |
+| `components/InputBar.tsx` | Text input with send/interrupt toggle |
+| `components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
+| `components/SessionPicker.tsx` | Horizontal session tab strip |
+| `components/MarkdownRenderer.tsx` | Markdown parsing + inline code highlighting |
+| `components/CreateSessionModal.tsx` | New session creation dialog |
+| `store/connection.ts` | Zustand state store (ConnectionPhase) |
+| `notifications.ts` | Push notification registration |
+| `constants/colors.ts` | Shared color palette |
+| `constants/icons.ts` | Shared icon constants |
+
+### Docs
+
+| File | Purpose |
+|------|---------|
 | `CLAUDE.md` | This file |
+| `docs/qa-log.md` | QA audit log with coverage matrix |
+| `docs/smoke-test.md` | Manual smoke test checklist |
+| `docs/named-tunnel-guide.md` | Named tunnel setup guide |
+| `docs/architecture/in-app-dev.md` | In-app iterative development design |
 
 ---
 
-*Last Updated: 2026-02-09*
+*Last Updated: 2026-02-10*
 *Version: 0.1.0*

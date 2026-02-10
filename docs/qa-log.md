@@ -10,15 +10,18 @@ Living record of manual QA testing against the [smoke test checklist](smoke-test
 
 | Scope | Status | Last Tested | SHA | Tester | Notes |
 |---|---|---|---|---|---|
-| Regression Baseline | PASS | 2026-02-06 | `5f35b9a` | Chris | |
+| Regression Baseline | STALE | 2026-02-06 | `5f35b9a` | Chris | Many PRs merged since |
 | Connection | -- | | | | |
-| Chat | PASS | 2026-02-06 | `5f35b9a` | Chris | Basic streaming verified |
+| Chat | STALE | 2026-02-06 | `5f35b9a` | Chris | Basic streaming verified |
 | Permissions | -- | | | | |
 | Model Switching | -- | | | | |
 | Cost/Usage Display | -- | | | | |
 | No-Auth Mode | -- | | | | |
 | Message Selection | -- | | | | |
 | Input Modes | -- | | | | |
+| Plan Mode | -- | | | | |
+| Agent Monitoring | -- | | | | |
+| Sessions | -- | | | | |
 | Terminal (PTY) | -- | | | | |
 | Shutdown/Cleanup | -- | | | | |
 | Edge Cases | -- | | | | |
