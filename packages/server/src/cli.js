@@ -484,7 +484,7 @@ program
   .option('--dry-run', 'Validate only, do not restart')
   .option('--skip-tests', 'Skip running server tests')
   .action(async (options) => {
-    const { execFileSync, execSync } = await import('child_process')
+    const { execFileSync } = await import('child_process')
 
     const PID_FILE = join(CONFIG_DIR, 'supervisor.pid')
     const LOCK_FILE = join(CONFIG_DIR, 'update.lock')
@@ -561,11 +561,10 @@ program
       // 3. Run tests (unless --skip-tests)
       if (!options.skipTests) {
         const testDir = join(process.cwd(), 'packages', 'server', 'tests')
-        const testGlob = join(testDir, '*.test.js')
         if (existsSync(testDir)) {
           console.log('[deploy] Running server tests...')
           try {
-            execSync(`node --test ${testGlob}`, {
+            execFileSync('node', ['--test', testDir], {
               stdio: 'inherit',
               timeout: 120000,
             })
