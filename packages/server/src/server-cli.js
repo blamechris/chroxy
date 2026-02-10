@@ -21,9 +21,14 @@ export async function startCliServer(config) {
     process.exit(1)
   }
 
+  const modeStr = config.legacyCli ? 'CLI legacy mode' : 'SDK mode'
+  const banner = `Chroxy Server v0.1.0 (${modeStr})`
+  const pad = Math.max(0, 38 - banner.length)
+  const left = Math.floor(pad / 2)
+  const right = pad - left
   console.log('')
   console.log('╔════════════════════════════════════════╗')
-  console.log('║     Chroxy Server v0.1.0 (CLI mode)    ║')
+  console.log(`║${' '.repeat(left + 1)}${banner}${' '.repeat(right + 1)}║`)
   console.log('╚════════════════════════════════════════╝')
   console.log('')
 
@@ -35,6 +40,7 @@ export async function startCliServer(config) {
 
   // 1. Create session manager
   const discoveryIntervalMs = config.discoveryInterval ? config.discoveryInterval * 1000 : 45000
+  const useLegacyCli = !!config.legacyCli
   const sessionManager = new SessionManager({
     maxSessions: 5,
     port: PORT,
@@ -43,6 +49,7 @@ export async function startCliServer(config) {
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
     discoveryIntervalMs,
+    useLegacyCli,
   })
 
   // 2. Auto-discover tmux sessions running Claude

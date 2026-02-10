@@ -490,9 +490,19 @@ export class WsServer {
 
       case 'permission_response': {
         const { requestId, decision } = msg
-        if (requestId && decision) {
-          this._resolvePermission(requestId, decision)
+        if (!requestId || !decision) break
+
+        // Try SDK-mode first (in-process permission)
+        if (client.activeSessionId && this.sessionManager) {
+          const entry = this.sessionManager.getSession(client.activeSessionId)
+          if (entry && typeof entry.session.respondToPermission === 'function') {
+            entry.session.respondToPermission(requestId, decision)
+            break
+          }
         }
+
+        // Fall through to legacy HTTP-based permission resolution
+        this._resolvePermission(requestId, decision)
         break
       }
 
@@ -907,6 +917,20 @@ export class WsServer {
             toolUseId: data.toolUseId,
             questions: data.questions,
           })
+          break
+
+        case 'permission_request':
+          this._broadcastToSession(sessionId, {
+            type: 'permission_request',
+            requestId: data.requestId,
+            tool: data.tool,
+            description: data.description,
+            input: data.input,
+          })
+          // Push notification
+          if (this.pushManager) {
+            this.pushManager.send('permission', 'Permission needed', `Claude wants to use: ${data.tool}`, { requestId: data.requestId, tool: data.tool })
+          }
           break
 
         case 'error':
