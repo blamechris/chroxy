@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, mkdtempSync, rmSync } from 'fs'
+import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
