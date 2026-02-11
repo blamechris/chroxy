@@ -683,16 +683,30 @@ export class OutputParser extends EventEmitter {
       }
 
       // Regular character — write at current column
+      // Use codePointAt to handle astral-plane characters (surrogate pairs)
+      const cp = data.codePointAt(i)
+
+      // Trailing high surrogate at end of chunk — save for next call
+      if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 >= len) {
+        this._screenPending = data.slice(i)
+        break
+      }
+
+      // Unpaired surrogate (invalid UTF-16) — replace with U+FFFD
+      const char = (cp >= 0xD800 && cp <= 0xDFFF)
+        ? '\uFFFD'
+        : String.fromCodePoint(cp)
+      const charLen = cp > 0xFFFF ? 2 : 1
       while (this._screenLine.length < this._screenCol) {
         this._screenLine.push(' ')
       }
       if (this._screenCol < this._screenLine.length) {
-        this._screenLine[this._screenCol] = ch
+        this._screenLine[this._screenCol] = char
       } else {
-        this._screenLine.push(ch)
+        this._screenLine.push(char)
       }
       this._screenCol++
-      i++
+      i += charLen
     }
 
     return lines
