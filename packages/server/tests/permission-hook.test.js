@@ -156,7 +156,7 @@ describe('createPermissionHookManager', () => {
     manager.destroy()
   })
 
-  it('register() handles corrupt JSON by replacing file', async () => {
+  it('register() emits error on corrupt JSON and schedules retry', async () => {
     const settingsPath = join(tempDir, 'settings.json')
     writeFileSync(settingsPath, 'not valid json {{{')
 
