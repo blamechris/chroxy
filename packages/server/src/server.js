@@ -141,6 +141,7 @@ export async function startServer(config) {
   const shutdown = async (signal) => {
     console.log(`\n[${signal}] Shutting down...`);
     hookManager.destroy();
+    await hookManager.unregister();
     ptyManager.destroy();
     wsServer.close();
     await tunnel.stop();

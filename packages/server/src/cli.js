@@ -276,9 +276,9 @@ tunnelCmd
     console.log('You need: a Cloudflare account + a domain on Cloudflare DNS.\n')
 
     // Check cloudflared is installed
-    const { execSync, execFileSync } = await import('child_process')
+    const { execFileSync } = await import('child_process')
     try {
-      execSync('cloudflared --version', { stdio: 'pipe' })
+      execFileSync('cloudflared', ['--version'], { stdio: 'pipe' })
     } catch {
       console.error('❌ cloudflared not found. Install with: brew install cloudflared')
       process.exit(1)
@@ -294,7 +294,7 @@ tunnelCmd
     }
 
     try {
-      execSync('cloudflared tunnel login', { stdio: 'inherit' })
+      execFileSync('cloudflared', ['tunnel', 'login'], { stdio: 'inherit' })
     } catch (err) {
       console.error('\n❌ Login failed. Run \'cloudflared tunnel login\' manually.')
       process.exit(1)

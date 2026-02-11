@@ -161,6 +161,22 @@ export class WsServer {
     return `[ws] Broadcasting status_update: $${status.cost} | ${status.model} | msgs:${status.messageCount} | ${status.contextTokens} (${status.contextPercent}%)`
   }
 
+  /**
+   * Validate Bearer token on an HTTP request. Returns true if auth passes
+   * (or auth is disabled). On failure, writes a 403 response and returns false.
+   */
+  _validateBearerAuth(req, res) {
+    if (!this.authRequired) return true
+    const authHeader = req.headers['authorization'] || ''
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+    if (!token || !safeTokenCompare(token, this.apiToken)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'unauthorized' }))
+      return false
+    }
+    return true
+  }
+
   start(host) {
     // Create HTTP server that handles health checks, permission hooks, and WebSocket upgrades
     this.httpServer = createServer((req, res) => {
@@ -173,6 +189,10 @@ export class WsServer {
 
       // Version endpoint — returns server version, git info, and uptime
       if (req.method === 'GET' && req.url === '/version') {
+        if (!this._validateBearerAuth(req, res)) {
+          console.warn('[ws] Rejected unauthenticated GET /version')
+          return
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({
           version: SERVER_VERSION,
@@ -1220,15 +1240,9 @@ export class WsServer {
   /** Handle POST /permission from the hook script */
   _handlePermissionRequest(req, res) {
     // Validate Bearer token — reject unauthenticated requests (unless --no-auth)
-    if (this.authRequired) {
-      const authHeader = req.headers['authorization'] || ''
-      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
-      if (!token || !safeTokenCompare(token, this.apiToken)) {
-        console.warn('[ws] Rejected unauthenticated POST /permission')
-        res.writeHead(403, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
+    if (!this._validateBearerAuth(req, res)) {
+      console.warn('[ws] Rejected unauthenticated POST /permission')
+      return
     }
 
     // Enforce body size limit (64KB) to prevent memory exhaustion
