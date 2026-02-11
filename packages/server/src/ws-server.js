@@ -204,6 +204,7 @@ export class WsServer {
         client.authenticated = true
         client.authTime = Date.now()
         this._sendPostAuthInfo(ws)
+        this._broadcastClientJoined(client, ws)
         console.log(`[ws] Client ${clientId} auto-authenticated (--no-auth)`)
       }
 
