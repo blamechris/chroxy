@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { homedir } from 'os'
@@ -75,6 +75,7 @@ function registerPermissionHookSync() {
   })
 
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 })
+  chmodSync(settingsPath, 0o600)
   console.log('[permission-hook] Registered hook in ~/.claude/settings.json')
 }
 
@@ -96,6 +97,7 @@ function unregisterPermissionHookSync() {
       delete settings.hooks
     }
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 })
+    chmodSync(settingsPath, 0o600)
     console.log('[permission-hook] Unregistered hook from ~/.claude/settings.json')
   }
 }
