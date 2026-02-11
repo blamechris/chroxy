@@ -17,6 +17,8 @@ beforeEach(() => {
   useConnectionStore.setState({
     messages: [],
     terminalBuffer: '',
+    terminalRawBuffer: '',
+    _terminalWriteCallback: null,
     serverErrors: [],
     connectedClients: [],
     myClientId: null,
@@ -199,6 +201,38 @@ describe('store actions', () => {
       expect(buf.length).toBe(50000);
       expect(buf.endsWith('b'.repeat(20))).toBe(true);
     });
+
+    it('stores raw ANSI data in terminalRawBuffer', () => {
+      const raw = '\x1b[32mhello\x1b[0m';
+      useConnectionStore.getState().appendTerminalData(raw);
+      expect(useConnectionStore.getState().terminalRawBuffer).toBe(raw);
+    });
+
+    it('truncates terminalRawBuffer at 100KB', () => {
+      const long = 'x'.repeat(110000);
+      useConnectionStore.getState().appendTerminalData(long);
+      expect(useConnectionStore.getState().terminalRawBuffer.length).toBe(100000);
+    });
+
+    it('calls _terminalWriteCallback when set', () => {
+      jest.useFakeTimers();
+      const writes: string[] = [];
+      useConnectionStore.getState().setTerminalWriteCallback((data) => writes.push(data));
+      useConnectionStore.getState().appendTerminalData('hello');
+      // Callback is batched — flush timer
+      jest.advanceTimersByTime(100);
+      expect(writes).toEqual(['hello']);
+      jest.useRealTimers();
+    });
+  });
+
+  describe('terminalWriteCallback', () => {
+    it('is cleared on disconnect', () => {
+      useConnectionStore.getState().setTerminalWriteCallback(() => {});
+      expect(useConnectionStore.getState()._terminalWriteCallback).not.toBeNull();
+      useConnectionStore.getState().disconnect();
+      expect(useConnectionStore.getState()._terminalWriteCallback).toBeNull();
+    });
   });
 
   describe('dismissServerError', () => {
@@ -227,10 +261,11 @@ describe('store actions', () => {
   });
 
   describe('clearTerminalBuffer', () => {
-    it('resets buffer to empty string', () => {
-      useConnectionStore.setState({ terminalBuffer: 'some content' });
+    it('resets both buffers to empty string', () => {
+      useConnectionStore.setState({ terminalBuffer: 'some content', terminalRawBuffer: '\x1b[32msome\x1b[0m content' });
       useConnectionStore.getState().clearTerminalBuffer();
       expect(useConnectionStore.getState().terminalBuffer).toBe('');
+      expect(useConnectionStore.getState().terminalRawBuffer).toBe('');
     });
   });
 });
@@ -902,5 +937,45 @@ describe('WS message handler (direct)', () => {
 
       expect(callCount).toBe(0);
     });
+  });
+});
+
+// -- buildXtermHtml --
+
+import { buildXtermHtml } from '../../components/xterm-html';
+
+describe('buildXtermHtml', () => {
+  it('returns valid HTML with doctype', () => {
+    const html = buildXtermHtml();
+    expect(html).toMatch(/^<!DOCTYPE html>/);
+    expect(html).toContain('<html>');
+    expect(html).toContain('</html>');
+  });
+
+  it('includes xterm.js CDN scripts', () => {
+    const html = buildXtermHtml();
+    expect(html).toContain('xterm.min.js');
+    expect(html).toContain('addon-fit.min.js');
+    expect(html).toContain('xterm.min.css');
+  });
+
+  it('interpolates theme colors', () => {
+    const html = buildXtermHtml();
+    expect(html).toContain('#000'); // backgroundTerminal
+    expect(html).toContain('#00ff00'); // textTerminal
+  });
+
+  it('includes bridge protocol handlers', () => {
+    const html = buildXtermHtml();
+    expect(html).toContain('ReactNativeWebView.postMessage');
+    expect(html).toContain("type: 'ready'");
+    expect(html).toContain("case 'write'");
+    expect(html).toContain("case 'clear'");
+    expect(html).toContain("case 'reset'");
+  });
+
+  it('configures terminal as display-only', () => {
+    const html = buildXtermHtml();
+    expect(html).toContain('disableStdin: true');
   });
 });

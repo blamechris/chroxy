@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -19,7 +19,7 @@ import { useConnectionStore, ChatMessage, ConnectionPhase, AgentInfo } from '../
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
-import { TerminalView } from '../components/TerminalView';
+import { TerminalView, TerminalHandle } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { InputBar } from '../components/InputBar';
 import { useNavigation } from '@react-navigation/native';
@@ -89,6 +89,7 @@ export function SessionScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [inputText, setInputText] = useState('');
   const scrollViewRef = useRef<ScrollView>(null);
+  const terminalRef = useRef<TerminalHandle>(null);
   const insets = useSafeAreaInsets();
   const keyboardHeight = useKeyboardHeight();
 
@@ -96,7 +97,6 @@ export function SessionScreen() {
     viewMode,
     setViewMode,
     messages,
-    terminalBuffer,
     sendInput,
     sendInterrupt,
     disconnect,
@@ -153,6 +153,7 @@ export function SessionScreen() {
   const destroySession = useConnectionStore((s) => s.destroySession);
   const serverErrors = useConnectionStore((s) => s.serverErrors);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
+  const setTerminalWriteCallback = useConnectionStore((s) => s.setTerminalWriteCallback);
   const isCliMode = serverMode === 'cli';
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
@@ -160,6 +161,26 @@ export function SessionScreen() {
   // Determine if the active session has a terminal (PTY sessions do, CLI sessions don't)
   const activeSession = sessions.find((s) => s.sessionId === activeSessionId);
   const hasTerminal = !isCliMode || (activeSession?.hasTerminal ?? false);
+
+  // Wire up terminal write callback when terminal view is visible
+  useEffect(() => {
+    if (viewMode !== 'terminal' || !hasTerminal) return;
+
+    const writeCallback = (data: string) => {
+      terminalRef.current?.write(data);
+    };
+    setTerminalWriteCallback(writeCallback);
+
+    // Replay raw buffer into xterm.js on mount/view switch
+    const rawBuffer = useConnectionStore.getState().terminalRawBuffer;
+    if (rawBuffer) {
+      terminalRef.current?.write(rawBuffer);
+    }
+
+    return () => {
+      setTerminalWriteCallback(null);
+    };
+  }, [viewMode, hasTerminal, setTerminalWriteCallback]);
 
   // Multi-select state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -475,10 +496,7 @@ export function SessionScreen() {
           onFocusInput={handleFocusInput}
         />
       ) : (
-        <TerminalView
-          content={terminalBuffer}
-          scrollViewRef={scrollViewRef}
-        />
+        <TerminalView ref={terminalRef} />
       )}
 
       {/* Input area */}
@@ -488,7 +506,7 @@ export function SessionScreen() {
         onChangeText={setInputText}
         onSend={handleSend}
         onInterrupt={sendInterrupt}
-        onClearTerminal={clearTerminalBuffer}
+        onClearTerminal={() => { clearTerminalBuffer(); terminalRef.current?.clear(); }}
         onKeyPress={handleKeyPress}
         enterToSend={enterToSend}
         onToggleEnterMode={() => {

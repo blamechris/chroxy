@@ -251,8 +251,14 @@ interface ConnectionState {
   // Input settings
   inputSettings: InputSettings;
 
-  // Raw terminal output buffer
+  // Raw terminal output buffer (ANSI-stripped, for plain text fallback)
   terminalBuffer: string;
+
+  // Raw terminal buffer with ANSI codes intact (for xterm.js replay on view switch)
+  terminalRawBuffer: string;
+
+  // Imperative write callback for xterm.js (bypasses React state for performance)
+  _terminalWriteCallback: ((data: string) => void) | null;
 
   // Actions
   connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => void;
@@ -264,6 +270,7 @@ interface ConnectionState {
   addUserMessage: (text: string) => void;
   appendTerminalData: (data: string) => void;
   clearTerminalBuffer: () => void;
+  setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   sendInput: (input: string) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
@@ -428,6 +435,19 @@ let _receivingHistoryReplay = false;
 let _isSessionSwitchReplay = false;
 // Track user-initiated switch_session so we can distinguish it from auth-triggered session_switched
 let _pendingSwitchSessionId: string | null = null;
+
+// Terminal write batching: coalesce rapid writes into single injectJavaScript calls (~20/sec max)
+let _pendingTerminalWrites = '';
+let _terminalWriteTimer: ReturnType<typeof setTimeout> | null = null;
+
+function _flushTerminalWrites() {
+  _terminalWriteTimer = null;
+  if (_pendingTerminalWrites.length === 0) return;
+  const data = _pendingTerminalWrites;
+  _pendingTerminalWrites = '';
+  const cb = useConnectionStore.getState()._terminalWriteCallback;
+  if (cb) cb(data);
+}
 
 // Delta batching: accumulate stream deltas and flush to state periodically
 // to reduce re-renders (dozens of deltas/sec → one state update per 100ms).
@@ -646,6 +666,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
           ...connectedState,
           messages: [],
           terminalBuffer: '',
+          terminalRawBuffer: '',
           sessions: [],
           activeSessionId: null,
           sessionStates: {},
@@ -1410,6 +1431,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   viewMode: 'chat',
   messages: [],
   terminalBuffer: '',
+  terminalRawBuffer: '',
+  _terminalWriteCallback: null,
 
   getActiveSessionState: () => {
     const { activeSessionId, sessionStates } = get();
@@ -1655,6 +1678,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       deltaFlushTimer = null;
     }
     pendingDeltas.clear();
+    // Clear terminal write batching
+    if (_terminalWriteTimer) {
+      clearTimeout(_terminalWriteTimer);
+      _terminalWriteTimer = null;
+    }
+    _pendingTerminalWrites = '';
     // Clear message queue on explicit disconnect
     messageQueue.length = 0;
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
@@ -1681,11 +1710,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverErrors: [],
       pendingPermissionConfirm: null,
       _directoryListingCallback: null,
+      _terminalWriteCallback: null,
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,
     });
-    // Keep wsUrl, apiToken, messages, terminalBuffer, sessions, sessionStates, savedConnection
+    // Keep wsUrl, apiToken, messages, terminalBuffer, terminalRawBuffer, sessions, sessionStates, savedConnection
   },
 
   forgetSession: () => {
@@ -1694,6 +1724,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({
       messages: [],
       terminalBuffer: '',
+      terminalRawBuffer: '',
       sessions: [],
       activeSessionId: null,
       sessionStates: {},
@@ -1776,11 +1807,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   appendTerminalData: (data) => {
     set((state) => ({
       terminalBuffer: (state.terminalBuffer + stripAnsi(data)).slice(-50000),
+      terminalRawBuffer: (state.terminalRawBuffer + data).slice(-100000),
     }));
+    // Forward raw data to xterm.js via batched write callback
+    const cb = get()._terminalWriteCallback;
+    if (cb) {
+      _pendingTerminalWrites += data;
+      if (!_terminalWriteTimer) {
+        _terminalWriteTimer = setTimeout(_flushTerminalWrites, 50);
+      }
+    }
   },
 
   clearTerminalBuffer: () => {
-    set({ terminalBuffer: '' });
+    set({ terminalBuffer: '', terminalRawBuffer: '' });
+  },
+
+  setTerminalWriteCallback: (cb) => {
+    set({ _terminalWriteCallback: cb });
   },
 
   updateInputSettings: (settings) => {

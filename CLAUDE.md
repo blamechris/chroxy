@@ -21,8 +21,8 @@ chroxy/
 
 **Current Status (v0.1.0):**
 - Server works: CLI headless mode (default), PTY/tmux mode, WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, session management, model switching, auto-discovery, plan mode detection, background agent tracking
-- App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal, plan approval UI, agent monitoring, settings screen
-- Priority: xterm.js integration, permission handling UI improvements
+- App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal, xterm.js terminal emulation (WebView), plan approval UI, agent monitoring, settings screen
+- Priority: permission handling UI improvements
 
 ## Critical Dev Notes
 
@@ -243,7 +243,7 @@ Server → Client: `auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `strea
 | Component | File | Purpose |
 |-----------|------|---------|
 | ChatView | `src/components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
-| TerminalView | `src/components/TerminalView.tsx` | Raw terminal output display |
+| TerminalView | `src/components/TerminalView.tsx` | xterm.js terminal emulator (WebView) |
 | InputBar | `src/components/InputBar.tsx` | Text input with send/interrupt toggle |
 | SettingsBar | `src/components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
 | SessionPicker | `src/components/SessionPicker.tsx` | Horizontal session tab strip |
@@ -320,7 +320,8 @@ node packages/server/src/test-client.js wss://your-url
 | `screens/SessionScreen.tsx` | Session orchestrator (wires components) |
 | `screens/SettingsScreen.tsx` | App settings and version info |
 | `components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
-| `components/TerminalView.tsx` | Raw terminal output display |
+| `components/TerminalView.tsx` | xterm.js terminal emulator (WebView) |
+| `components/xterm-html.ts` | Inline HTML template for xterm.js WebView |
 | `components/InputBar.tsx` | Text input with send/interrupt toggle |
 | `components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
 | `components/SessionPicker.tsx` | Horizontal session tab strip |
