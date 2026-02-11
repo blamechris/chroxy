@@ -140,8 +140,8 @@ export async function startServer(config) {
   // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`\n[${signal}] Shutting down...`);
-    await hookManager.unregister();
     hookManager.destroy();
+    await hookManager.unregister();
     ptyManager.destroy();
     wsServer.close();
     await tunnel.stop();
