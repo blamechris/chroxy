@@ -51,18 +51,15 @@ function createMockTunnel() {
  * Never spawns real child processes, tunnels, or registers signal handlers.
  */
 class TestSupervisor extends Supervisor {
-  constructor(config, options = {}) {
+  constructor(config) {
     super(config)
-    this._mockTunnel = options.tunnel || createMockTunnel()
+    this._mockTunnel = createMockTunnel()
     this._mockChildren = []
-    this._nextChild = options.nextChild || null
     this._exitCalled = null
-    this._qrDisplayed = []
   }
 
   _fork() {
-    const child = this._nextChild || createMockChild()
-    this._nextChild = null
+    const child = createMockChild()
     this._mockChildren.push(child)
     return child
   }
@@ -80,8 +77,8 @@ class TestSupervisor extends Supervisor {
     this.emit('test_exit', code)
   }
 
-  _displayQr(url) {
-    this._qrDisplayed.push(url)
+  _displayQr() {
+    // No-op in tests
   }
 
   _registerSignals() {
