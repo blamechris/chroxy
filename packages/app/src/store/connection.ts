@@ -342,6 +342,16 @@ async function clearConnection() {
   }
 }
 
+/** Context captured from connect() closure for use by the extracted handleMessage(). */
+interface ConnectionContext {
+  url: string;
+  token: string;
+  isReconnect: boolean;
+  silent: boolean;
+  socket: WebSocket;
+}
+let _connectionContext: ConnectionContext | null = null;
+
 // Monotonically increasing counter to cancel stale retry chains
 let connectionAttemptId = 0;
 // Tracks which attempt was user-disconnected (replaces boolean flag to avoid
@@ -543,6 +553,776 @@ function updateActiveSession(updater: (session: SessionState) => Partial<Session
   const activeId = state.activeSessionId;
   if (activeId) updateSession(activeId, updater);
 }
+
+/**
+ * Handles a parsed WebSocket message. Extracted from the socket.onmessage
+ * closure so it can be tested directly with raw JSON payloads.
+ *
+ * Reads/writes store via useConnectionStore.getState()/setState() and
+ * module-level helpers (updateSession, updateActiveSession, nextMessageId, etc).
+ * The few variables that were closured in connect() are accessed via _connectionContext.
+ */
+function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
+  const ctx = ctxOverride ?? _connectionContext;
+  if (!ctx) return;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+  const msg = raw as Record<string, unknown>;
+  if (typeof msg.type !== 'string') return;
+
+  const get = () => useConnectionStore.getState();
+  const set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void =
+    (s) => useConnectionStore.setState(s as ConnectionState);
+
+  switch (msg.type) {
+    case 'auth_ok': {
+      // Reset replay flags — fresh auth means clean slate
+      _receivingHistoryReplay = false;
+      _isSessionSwitchReplay = false;
+      _pendingSwitchSessionId = null;
+      // Track this URL as successfully connected
+      lastConnectedUrl = ctx.url;
+      // Extract server context from auth_ok
+      const authServerMode: 'cli' | 'terminal' | null =
+        msg.serverMode === 'cli' || msg.serverMode === 'terminal' ? msg.serverMode : null;
+      const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
+      const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
+      const authServerCommit = typeof msg.serverCommit === 'string' ? msg.serverCommit : null;
+      // Parse connected clients list with self-detection via clientId
+      const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
+      const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
+      const clients: ConnectedClient[] = rawClients
+        .filter((c: unknown): c is { clientId: string } => !!c && typeof c === 'object' && typeof (c as Record<string, unknown>).clientId === 'string')
+        .map((c: { clientId: string; deviceName?: string; deviceType?: string; platform?: string }) => ({
+          clientId: c.clientId,
+          deviceName: typeof c.deviceName === 'string' ? c.deviceName : null,
+          deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(c.deviceType ?? '') ? c.deviceType : 'unknown') as ConnectedClient['deviceType'],
+          platform: typeof c.platform === 'string' ? c.platform : 'unknown',
+          isSelf: c.clientId === myClientId,
+        }));
+
+      // On reconnect, preserve messages and terminal buffer
+      const connectedState = {
+        connectionPhase: 'connected' as const,
+        wsUrl: ctx.url,
+        apiToken: ctx.token,
+        socket: ctx.socket,
+        claudeReady: false,
+        serverMode: authServerMode,
+        sessionCwd: authSessionCwd,
+        serverVersion: authServerVersion,
+        serverCommit: authServerCommit,
+        streamingMessageId: null,
+        myClientId: myClientId,
+        connectedClients: clients,
+      };
+      if (ctx.isReconnect) {
+        set(connectedState);
+      } else {
+        set({
+          ...connectedState,
+          messages: [],
+          terminalBuffer: '',
+          sessions: [],
+          activeSessionId: null,
+          sessionStates: {},
+        });
+      }
+      ctx.socket.send(JSON.stringify({ type: 'mode', mode: get().viewMode }));
+      // Save for quick reconnect
+      saveConnection(ctx.url, ctx.token);
+      set({ savedConnection: { url: ctx.url, token: ctx.token } });
+      // Register push token (async, non-blocking)
+      void registerPushToken(ctx.socket);
+      break;
+    }
+
+    case 'auth_fail':
+      ctx.socket.close();
+      set({ connectionPhase: 'disconnected', socket: null });
+      if (!ctx.silent) {
+        Alert.alert('Auth Failed', (msg.reason as string) || 'Invalid token');
+      }
+      break;
+
+    case 'server_mode':
+      set({ serverMode: msg.mode as 'cli' | 'terminal' });
+      // Force chat view in CLI mode (no terminal available)
+      if (msg.mode === 'cli' && get().viewMode === 'terminal') {
+        set({ viewMode: 'chat' });
+      }
+      break;
+
+    // --- Multi-session messages ---
+
+    case 'session_list':
+      if (Array.isArray(msg.sessions)) {
+        set({ sessions: msg.sessions as SessionInfo[] });
+      }
+      break;
+
+    case 'session_switched': {
+      const sessionId = msg.sessionId as string;
+      // Only treat as session-switch replay if the user explicitly initiated it
+      // (auth-triggered session_switched on reconnect should use reconnect dedup)
+      if (_pendingSwitchSessionId && _pendingSwitchSessionId === sessionId) {
+        _isSessionSwitchReplay = true;
+      }
+      _pendingSwitchSessionId = null;
+      set((state: ConnectionState) => {
+        // Initialize session state if it doesn't exist
+        const sessionStates = { ...state.sessionStates };
+        if (!sessionStates[sessionId]) {
+          sessionStates[sessionId] = createEmptySessionState();
+        }
+        const ss = sessionStates[sessionId];
+        return {
+          activeSessionId: sessionId,
+          sessionStates,
+          // Sync flat state from the switched-to session
+          messages: ss.messages,
+          streamingMessageId: ss.streamingMessageId,
+          claudeReady: ss.claudeReady,
+          activeModel: ss.activeModel,
+          permissionMode: ss.permissionMode,
+          contextUsage: ss.contextUsage,
+          lastResultCost: ss.lastResultCost,
+          lastResultDuration: ss.lastResultDuration,
+          isIdle: ss.isIdle,
+        };
+      });
+      break;
+    }
+
+    case 'session_error': {
+      const errorSessionId = (msg.sessionId as string) || get().activeSessionId;
+      if (msg.category === 'crash' && errorSessionId && get().sessionStates[errorSessionId]) {
+        updateSession(errorSessionId, () => ({ health: 'crashed' as const }));
+      }
+      if (msg.category !== 'crash') {
+        Alert.alert('Session Error', (msg.message as string) || 'Unknown error');
+      }
+      break;
+    }
+
+    case 'discovered_sessions':
+      if (Array.isArray(msg.tmux)) {
+        set({ discoveredSessions: msg.tmux as DiscoveredSession[] });
+        if ((msg.tmux as DiscoveredSession[]).length > 0) {
+          const names = (msg.tmux as DiscoveredSession[]).map((s: DiscoveredSession) => s.sessionName).join(', ');
+          const discoveryMsg: ChatMessage = {
+            id: nextMessageId('discovery'),
+            type: 'system',
+            content: (msg.tmux as DiscoveredSession[]).length === 1
+              ? `New Claude session found: ${names}. Open session picker to attach.`
+              : `${(msg.tmux as DiscoveredSession[]).length} new Claude sessions found: ${names}. Open session picker to attach.`,
+            timestamp: Date.now(),
+          };
+          const activeId = get().activeSessionId;
+          if (activeId && get().sessionStates[activeId]) {
+            updateActiveSession((ss) => ({
+              messages: [...ss.messages, discoveryMsg],
+            }));
+          } else {
+            get().addMessage(discoveryMsg);
+          }
+        }
+      }
+      break;
+
+    // --- History replay ---
+
+    case 'history_replay_start':
+      _receivingHistoryReplay = true;
+      // Clear transient state — these events are not replayed from history,
+      // so any surviving entries are stale from pre-disconnect
+      updateActiveSession((ss) => {
+        const patch: Partial<SessionState> = {};
+        if (ss.activeAgents.length > 0) patch.activeAgents = [];
+        if (ss.isPlanPending) {
+          patch.isPlanPending = false;
+          patch.planAllowedPrompts = [];
+        }
+        return Object.keys(patch).length > 0 ? patch : {};
+      });
+      break;
+
+    case 'history_replay_end':
+      _receivingHistoryReplay = false;
+      _isSessionSwitchReplay = false;
+      // Mark all replayed prompts as answered — any prompt in history
+      // has already been resolved by the server.
+      // Note: replay is always for the active session (connect or switch).
+      updateActiveSession((ss) => {
+        const hasUnansweredPrompts = ss.messages.some(
+          (m) => m.type === 'prompt' && !m.answered
+        );
+        if (!hasUnansweredPrompts) return {};
+        return {
+          messages: ss.messages.map((m) =>
+            m.type === 'prompt' && !m.answered
+              ? { ...m, answered: '(resolved)' }
+              : m
+          ),
+        };
+      });
+      break;
+
+    // --- Existing message handlers (now session-aware) ---
+
+    case 'message': {
+      const msgType = (msg.messageType || msg.type) as string;
+      // Skip server-echoed user_input — we already show it instantly client-side
+      if (msgType === 'user_input') break;
+      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      // During reconnect replay, skip if app already has messages (cache is fresh)
+      if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
+      // During session-switch replay, skip if an equivalent message is already in cache (dedup)
+      if (_receivingHistoryReplay && _isSessionSwitchReplay) {
+        const targetState = targetId ? get().sessionStates[targetId] : null;
+        const cached = targetState ? targetState.messages : get().messages;
+        const isDuplicate = cached.some((m) => {
+          if (m.type !== msgType || m.content !== msg.content) return false;
+          if (m.timestamp !== msg.timestamp) return false;
+          if ((m.tool ?? null) !== (msg.tool ?? null)) return false;
+          return JSON.stringify(m.options ?? null) === JSON.stringify(msg.options ?? null);
+        });
+        if (isDuplicate) break;
+      }
+      const newMsg: ChatMessage = {
+        id: nextMessageId(msgType),
+        type: msgType as ChatMessage['type'],
+        content: msg.content as string,
+        tool: msg.tool as string | undefined,
+        options: msg.options as ChatMessage['options'],
+        timestamp: msg.timestamp as number,
+      };
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, (ss) => ({
+          messages: [
+            ...ss.messages.filter((m) => m.id !== 'thinking' || newMsg.id === 'thinking'),
+            newMsg,
+          ],
+        }));
+      } else {
+        get().addMessage(newMsg);
+      }
+      break;
+    }
+
+    case 'stream_start': {
+      const streamId = msg.messageId as string;
+      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, (ss) => {
+          if (ss.messages.some((m) => m.id === streamId)) {
+            return { streamingMessageId: streamId };
+          }
+          return {
+            streamingMessageId: streamId,
+            messages: [
+              ...filterThinking(ss.messages),
+              { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
+            ],
+          };
+        });
+      } else {
+        set((state: ConnectionState) => {
+          if (state.messages.some((m) => m.id === streamId)) {
+            return { streamingMessageId: streamId };
+          }
+          return {
+            streamingMessageId: streamId,
+            messages: [
+              ...filterThinking(state.messages),
+              { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
+            ],
+          };
+        });
+      }
+      break;
+    }
+
+    case 'stream_delta': {
+      // Batch deltas — accumulate and flush to state periodically.
+      // Use server-provided sessionId so deltas route to the correct session
+      // even for background (non-active) sessions.
+      const deltaId = msg.messageId as string;
+      const existingDelta = pendingDeltas.get(deltaId);
+      const capturedSessionId = (msg.sessionId as string) || get().activeSessionId;
+      pendingDeltas.set(deltaId, {
+        sessionId: capturedSessionId,
+        delta: (existingDelta?.delta || '') + (msg.delta as string),
+      });
+      if (!deltaFlushTimer) {
+        deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
+      }
+      break;
+    }
+
+    case 'stream_end':
+      // Flush any buffered deltas immediately before clearing streaming state
+      if (deltaFlushTimer) {
+        clearTimeout(deltaFlushTimer);
+      }
+      flushPendingDeltas();
+      {
+        const targetId = (msg.sessionId as string) || get().activeSessionId;
+        if (targetId && get().sessionStates[targetId]) {
+          updateSession(targetId, () => ({ streamingMessageId: null }));
+        } else {
+          set({ streamingMessageId: null });
+        }
+      }
+      break;
+
+    case 'tool_start': {
+      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      // During reconnect replay, skip if app already has messages (cache is fresh)
+      if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
+      // Use server messageId as stable identifier for dedup (same ID on live + replay)
+      const toolId = (msg.messageId as string) || nextMessageId('tool');
+      // During session-switch replay, skip if tool already in cache (dedup by stable ID)
+      if (_receivingHistoryReplay && _isSessionSwitchReplay) {
+        const targetState = targetId ? get().sessionStates[targetId] : null;
+        const cached = targetState ? targetState.messages : get().messages;
+        if (cached.some((m) => m.id === toolId)) break;
+      }
+      const toolMsg: ChatMessage = {
+        id: toolId,
+        type: 'tool_use',
+        content: msg.input ? JSON.stringify(msg.input) : (msg.tool as string) || '',
+        tool: msg.tool as string | undefined,
+        timestamp: Date.now(),
+      };
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, (ss) => ({
+          messages: [...ss.messages, toolMsg],
+        }));
+      } else {
+        get().addMessage(toolMsg);
+      }
+      break;
+    }
+
+    case 'result': {
+      // Flush any buffered deltas before clearing streaming state (safety net
+      // for when stream_end was missed — mirrors the stream_end flush logic)
+      if (deltaFlushTimer) {
+        clearTimeout(deltaFlushTimer);
+      }
+      flushPendingDeltas();
+      const usage = msg.usage as Record<string, number> | undefined;
+      const resultPatch = {
+        streamingMessageId: null as string | null,
+        contextUsage: usage
+          ? {
+              inputTokens: usage.input_tokens || 0,
+              outputTokens: usage.output_tokens || 0,
+              cacheCreation: usage.cache_creation_input_tokens || 0,
+              cacheRead: usage.cache_read_input_tokens || 0,
+            }
+          : null,
+        lastResultCost: typeof msg.cost === 'number' ? msg.cost : null,
+        lastResultDuration: typeof msg.duration === 'number' ? msg.duration : null,
+      };
+      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, () => resultPatch);
+      } else {
+        set(resultPatch);
+      }
+      break;
+    }
+
+    case 'model_changed': {
+      const model = (typeof msg.model === 'string' && (msg.model as string).trim()) ? (msg.model as string).trim() : null;
+      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, () => ({ activeModel: model }));
+      } else {
+        set({ activeModel: model });
+      }
+      break;
+    }
+
+    case 'available_models':
+      if (Array.isArray(msg.models)) {
+        const cleaned = (msg.models as unknown[])
+          .map((m: unknown): ModelInfo | null => {
+            // Accept structured {id, label, fullId} objects
+            if (typeof m === 'object' && m !== null) {
+              const { id, label, fullId } = m as ModelInfo;
+              if (
+                typeof id === 'string' && id.trim() !== '' &&
+                typeof label === 'string' && label.trim() !== '' &&
+                typeof fullId === 'string' && fullId.trim() !== ''
+              ) {
+                return { id, label, fullId };
+              }
+            }
+            // Accept legacy string format for backward compatibility
+            if (typeof m === 'string' && m.trim().length > 0) {
+              const s = m.trim();
+              return { id: s, label: s.charAt(0).toUpperCase() + s.slice(1), fullId: s };
+            }
+            return null;
+          })
+          .filter((m: ModelInfo | null): m is ModelInfo => m !== null);
+        set({ availableModels: cleaned });
+      }
+      break;
+
+    case 'permission_mode_changed': {
+      const mode = (typeof msg.mode === 'string' && (msg.mode as string).trim()) ? (msg.mode as string).trim() : null;
+      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, () => ({ permissionMode: mode }));
+      } else {
+        set({ permissionMode: mode });
+      }
+      break;
+    }
+
+    case 'available_permission_modes':
+      if (Array.isArray(msg.modes)) {
+        const cleaned = (msg.modes as unknown[])
+          .filter((m): m is { id: string; label: string } =>
+            typeof m === 'object' && m !== null &&
+            typeof (m as { id: unknown }).id === 'string' &&
+            typeof (m as { label: unknown }).label === 'string'
+          );
+        set({ availablePermissionModes: cleaned });
+      }
+      break;
+
+    case 'status_update': {
+      // Server filters status_update to active session only, but defend
+      // against misrouted messages on the client side too.
+      const statusSid = (msg.sessionId as string) || get().activeSessionId;
+      if (statusSid && statusSid !== get().activeSessionId) break;
+      set({
+        claudeStatus: {
+          cost: msg.cost as number,
+          model: msg.model as string,
+          messageCount: msg.messageCount as number,
+          contextTokens: msg.contextTokens as string,
+          contextPercent: msg.contextPercent as number,
+          compactPercent: (msg.compactPercent as number) ?? null,
+        },
+      });
+      break;
+    }
+
+    case 'raw':
+      get().appendTerminalData(msg.data as string);
+      break;
+
+    case 'claude_ready': {
+      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, () => ({ claudeReady: true }));
+      } else {
+        set({ claudeReady: true });
+      }
+      // Drain queued messages on reconnect
+      const readySocket = get().socket;
+      if (readySocket && readySocket.readyState === WebSocket.OPEN) {
+        drainMessageQueue(readySocket);
+      }
+      break;
+    }
+
+    case 'agent_idle': {
+      const idleTargetId = (msg.sessionId as string) || get().activeSessionId;
+      if (idleTargetId && get().sessionStates[idleTargetId]) {
+        updateSession(idleTargetId, () => ({ isIdle: true }));
+      }
+      break;
+    }
+
+    case 'agent_busy': {
+      const busyTargetId = (msg.sessionId as string) || get().activeSessionId;
+      if (busyTargetId && get().sessionStates[busyTargetId]) {
+        updateSession(busyTargetId, () => ({ isIdle: false }));
+      }
+      break;
+    }
+
+    case 'agent_spawned': {
+      const spawnTargetId = (msg.sessionId as string) || get().activeSessionId;
+      if (spawnTargetId && get().sessionStates[spawnTargetId]) {
+        updateSession(spawnTargetId, (ss) => {
+          // Dedup: skip if agent with same toolUseId already tracked
+          if (ss.activeAgents.some((a) => a.toolUseId === msg.toolUseId)) return {};
+          return {
+            activeAgents: [...ss.activeAgents, {
+              toolUseId: msg.toolUseId as string,
+              description: (msg.description as string) || 'Background task',
+              startedAt: (msg.startedAt as number) || Date.now(),
+            }],
+          };
+        });
+      }
+      break;
+    }
+
+    case 'agent_completed': {
+      const completeTargetId = (msg.sessionId as string) || get().activeSessionId;
+      if (completeTargetId && get().sessionStates[completeTargetId]) {
+        updateSession(completeTargetId, (ss) => {
+          const filtered = ss.activeAgents.filter(
+            (a) => a.toolUseId !== msg.toolUseId
+          );
+          // Skip no-op update if agent wasn't tracked (e.g. duplicate event)
+          if (filtered.length === ss.activeAgents.length) return {};
+          return { activeAgents: filtered };
+        });
+      }
+      break;
+    }
+
+    case 'plan_started': {
+      const planStartTargetId = (msg.sessionId as string) || get().activeSessionId;
+      if (planStartTargetId && get().sessionStates[planStartTargetId]) {
+        updateSession(planStartTargetId, () => ({
+          isPlanPending: false,
+          planAllowedPrompts: [],
+        }));
+      }
+      break;
+    }
+
+    case 'plan_ready': {
+      const planReadyTargetId = (msg.sessionId as string) || get().activeSessionId;
+      const prompts = Array.isArray(msg.allowedPrompts) ? msg.allowedPrompts as { tool: string; prompt: string }[] : [];
+      if (planReadyTargetId && get().sessionStates[planReadyTargetId]) {
+        updateSession(planReadyTargetId, () => ({
+          isPlanPending: true,
+          planAllowedPrompts: prompts,
+        }));
+      }
+      break;
+    }
+
+    case 'raw_background':
+      // Buffer raw data even in chat mode so terminal tab is always up to date
+      get().appendTerminalData(msg.data as string);
+      break;
+
+    case 'permission_request': {
+      const permMsg: ChatMessage = {
+        id: nextMessageId('perm'),
+        type: 'prompt',
+        content: msg.tool ? `${msg.tool}: ${msg.description}` : ((msg.description as string) || 'Permission required'),
+        tool: msg.tool as string | undefined,
+        requestId: msg.requestId as string,
+        toolInput: msg.input && typeof msg.input === 'object' ? msg.input as Record<string, unknown> : undefined,
+        options: [
+          { label: 'Allow', value: 'allow' },
+          { label: 'Deny', value: 'deny' },
+          { label: 'Always Allow', value: 'allowAlways' },
+        ],
+        timestamp: Date.now(),
+      };
+      const permTargetId = (msg.sessionId as string) || get().activeSessionId;
+      if (permTargetId && get().sessionStates[permTargetId]) {
+        updateSession(permTargetId, (ss) => ({
+          messages: [...ss.messages, permMsg],
+        }));
+      } else {
+        get().addMessage(permMsg);
+      }
+      break;
+    }
+
+    case 'user_question': {
+      const questions = msg.questions as unknown[];
+      if (!Array.isArray(questions) || questions.length === 0) break;
+      const q = questions[0] as Record<string, unknown>;
+      if (!q || typeof q !== 'object' || typeof q.question !== 'string') break;
+      const questionMsg: ChatMessage = {
+        id: nextMessageId('question'),
+        type: 'prompt',
+        content: q.question as string,
+        toolUseId: msg.toolUseId as string,
+        options: Array.isArray(q.options)
+          ? (q.options as unknown[])
+              .filter((o: unknown): o is { label: string } => !!o && typeof o === 'object' && typeof (o as Record<string, unknown>).label === 'string')
+              .map((o: { label: string }) => ({
+                label: o.label,
+                value: o.label,
+              }))
+          : [],
+        timestamp: Date.now(),
+      };
+      const questionTargetId = (msg.sessionId as string) || get().activeSessionId;
+      if (questionTargetId && get().sessionStates[questionTargetId]) {
+        updateSession(questionTargetId, (ss) => ({
+          messages: [...ss.messages, questionMsg],
+        }));
+      } else {
+        get().addMessage(questionMsg);
+      }
+      break;
+    }
+
+    case 'server_status': {
+      // Non-error status update (e.g., tunnel recovery notifications).
+      // Global broadcast (no sessionId) — route to active session.
+      const statusMessage: string =
+        typeof msg.message === 'string' && (msg.message as string).trim().length > 0
+          ? stripAnsi(msg.message as string)
+          : 'Status update';
+      // Display as a system message in the chat
+      const statusMsg: ChatMessage = {
+        id: nextMessageId('status'),
+        type: 'system',
+        content: statusMessage,
+        timestamp: Date.now(),
+      };
+      const activeStatusId = get().activeSessionId;
+      if (activeStatusId && get().sessionStates[activeStatusId]) {
+        updateActiveSession((ss) => ({
+          messages: [...ss.messages, statusMsg],
+        }));
+      } else {
+        get().addMessage(statusMsg);
+      }
+      break;
+    }
+
+    // --- Multi-client awareness ---
+
+    case 'client_joined': {
+      if (!msg.client || typeof (msg.client as Record<string, unknown>).clientId !== 'string') break;
+      const client = msg.client as Record<string, unknown>;
+      const newClient: ConnectedClient = {
+        clientId: client.clientId as string,
+        deviceName: typeof client.deviceName === 'string' ? client.deviceName : null,
+        deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(client.deviceType as string) ? client.deviceType : 'unknown') as ConnectedClient['deviceType'],
+        platform: typeof client.platform === 'string' ? client.platform : 'unknown',
+        isSelf: false,
+      };
+      set((state: ConnectionState) => ({
+        connectedClients: [...state.connectedClients.filter((c) => c.clientId !== newClient.clientId), newClient],
+      }));
+      // Add system message
+      const deviceLabel = newClient.deviceName || 'A device';
+      const joinMsg: ChatMessage = {
+        id: nextMessageId('client'),
+        type: 'system',
+        content: `${deviceLabel} connected`,
+        timestamp: Date.now(),
+      };
+      const joinActiveId = get().activeSessionId;
+      if (joinActiveId && get().sessionStates[joinActiveId]) {
+        updateActiveSession((ss) => ({
+          messages: [...ss.messages, joinMsg],
+        }));
+      } else {
+        get().addMessage(joinMsg);
+      }
+      break;
+    }
+
+    case 'client_left': {
+      if (typeof msg.clientId !== 'string') break;
+      const departingClient = get().connectedClients.find((c) => c.clientId === msg.clientId);
+      set((state: ConnectionState) => ({
+        connectedClients: state.connectedClients.filter((c) => c.clientId !== msg.clientId),
+      }));
+      // Add system message
+      const leftLabel = departingClient?.deviceName || 'A device';
+      const leftMsg: ChatMessage = {
+        id: nextMessageId('client'),
+        type: 'system',
+        content: `${leftLabel} disconnected`,
+        timestamp: Date.now(),
+      };
+      const leftActiveId = get().activeSessionId;
+      if (leftActiveId && get().sessionStates[leftActiveId]) {
+        updateActiveSession((ss) => ({
+          messages: [...ss.messages, leftMsg],
+        }));
+      } else {
+        get().addMessage(leftMsg);
+      }
+      break;
+    }
+
+    case 'primary_changed': {
+      const primarySessionId = msg.sessionId as string;
+      const primaryClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
+      if (typeof primarySessionId === 'string' && get().sessionStates[primarySessionId]) {
+        updateSession(primarySessionId, () => ({
+          primaryClientId,
+        }));
+      } else if (!primarySessionId || primarySessionId === 'default') {
+        // Legacy/single-session mode: store at flat state level
+        set({ primaryClientId });
+      }
+      break;
+    }
+
+    case 'server_error': {
+      // Global broadcast (no sessionId) — route to active session.
+      // Validate and coerce untyped JSON fields
+      const allowedCategories = new Set<ServerError['category']>([
+        'tunnel', 'session', 'permission', 'general',
+      ]);
+      const category: ServerError['category'] =
+        typeof msg.category === 'string' && allowedCategories.has(msg.category as ServerError['category'])
+          ? (msg.category as ServerError['category'])
+          : 'general';
+      const message: string =
+        typeof msg.message === 'string' && (msg.message as string).trim().length > 0
+          ? stripAnsi(msg.message as string)
+          : 'Unknown server error';
+      const recoverable: boolean =
+        typeof msg.recoverable === 'boolean' ? msg.recoverable : true;
+
+      const serverError: ServerError = {
+        id: nextMessageId('err'),
+        category,
+        message,
+        recoverable,
+        timestamp: Date.now(),
+      };
+      set((state: ConnectionState) => ({
+        serverErrors: [...state.serverErrors, serverError].slice(-10),
+      }));
+      // Surface server errors into chat stream so they're visible
+      const errorMsg: ChatMessage = {
+        id: nextMessageId('err'),
+        type: 'error',
+        content: serverError.message,
+        timestamp: Date.now(),
+      };
+      const activeErrId = get().activeSessionId;
+      if (activeErrId && get().sessionStates[activeErrId]) {
+        updateActiveSession((ss) => ({
+          messages: filterThinking([...ss.messages, errorMsg]),
+          streamingMessageId: null,
+        }));
+      } else {
+        set({ streamingMessageId: null });
+        get().addMessage(errorMsg);
+      }
+      // Show an alert for non-recoverable errors
+      if (!serverError.recoverable) {
+        Alert.alert('Server Error', serverError.message);
+      }
+      break;
+    }
+  }
+}
+
+/** @internal Exposed for testing only — same pattern as _testQueueInternals */
+export const _testMessageHandler = {
+  handle: handleMessage,
+  setContext: (ctx: ConnectionContext) => { _connectionContext = ctx; },
+  clearContext: () => { _connectionContext = null; },
+};
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectionPhase: 'disconnected',
@@ -750,6 +1530,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       });
     };
 
+    const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket };
+    _connectionContext = socketCtx;
     socket.onmessage = (event) => {
       let msg;
       try {
@@ -757,747 +1539,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       } catch {
         return;
       }
-
-      switch (msg.type) {
-        case 'auth_ok': {
-          // Reset replay flags — fresh auth means clean slate
-          _receivingHistoryReplay = false;
-          _isSessionSwitchReplay = false;
-          _pendingSwitchSessionId = null;
-          // Track this URL as successfully connected
-          lastConnectedUrl = url;
-          // Extract server context from auth_ok
-          const authServerMode =
-            msg.serverMode === 'cli' || msg.serverMode === 'terminal' ? msg.serverMode : null;
-          const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
-          const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
-          const authServerCommit = typeof msg.serverCommit === 'string' ? msg.serverCommit : null;
-          // Parse connected clients list with self-detection via clientId
-          const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
-          const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
-          const clients: ConnectedClient[] = rawClients
-            .filter((c: unknown): c is { clientId: string } => !!c && typeof c === 'object' && typeof (c as Record<string, unknown>).clientId === 'string')
-            .map((c: { clientId: string; deviceName?: string; deviceType?: string; platform?: string }) => ({
-              clientId: c.clientId,
-              deviceName: typeof c.deviceName === 'string' ? c.deviceName : null,
-              deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(c.deviceType ?? '') ? c.deviceType : 'unknown') as ConnectedClient['deviceType'],
-              platform: typeof c.platform === 'string' ? c.platform : 'unknown',
-              isSelf: c.clientId === myClientId,
-            }));
-
-          // On reconnect, preserve messages and terminal buffer
-          const connectedState = {
-            connectionPhase: 'connected' as const,
-            wsUrl: url,
-            apiToken: token,
-            socket,
-            claudeReady: false,
-            serverMode: authServerMode,
-            sessionCwd: authSessionCwd,
-            serverVersion: authServerVersion,
-            serverCommit: authServerCommit,
-            streamingMessageId: null,
-            myClientId: myClientId,
-            connectedClients: clients,
-          };
-          if (isReconnect) {
-            set(connectedState);
-          } else {
-            set({
-              ...connectedState,
-              messages: [],
-              terminalBuffer: '',
-              sessions: [],
-              activeSessionId: null,
-              sessionStates: {},
-            });
-          }
-          socket.send(JSON.stringify({ type: 'mode', mode: get().viewMode }));
-          // Save for quick reconnect
-          saveConnection(url, token);
-          set({ savedConnection: { url, token } });
-          // Register push token (async, non-blocking)
-          void registerPushToken(socket);
-          break;
-        }
-
-        case 'auth_fail':
-          socket.close();
-          set({ connectionPhase: 'disconnected', socket: null });
-          if (!silent) {
-            Alert.alert('Auth Failed', msg.reason || 'Invalid token');
-          }
-          break;
-
-        case 'server_mode':
-          set({ serverMode: msg.mode });
-          // Force chat view in CLI mode (no terminal available)
-          if (msg.mode === 'cli' && get().viewMode === 'terminal') {
-            set({ viewMode: 'chat' });
-          }
-          break;
-
-        // --- Multi-session messages ---
-
-        case 'session_list':
-          if (Array.isArray(msg.sessions)) {
-            set({ sessions: msg.sessions });
-          }
-          break;
-
-        case 'session_switched': {
-          const sessionId = msg.sessionId;
-          // Only treat as session-switch replay if the user explicitly initiated it
-          // (auth-triggered session_switched on reconnect should use reconnect dedup)
-          if (_pendingSwitchSessionId && _pendingSwitchSessionId === sessionId) {
-            _isSessionSwitchReplay = true;
-          }
-          _pendingSwitchSessionId = null;
-          set((state) => {
-            // Initialize session state if it doesn't exist
-            const sessionStates = { ...state.sessionStates };
-            if (!sessionStates[sessionId]) {
-              sessionStates[sessionId] = createEmptySessionState();
-            }
-            const ss = sessionStates[sessionId];
-            return {
-              activeSessionId: sessionId,
-              sessionStates,
-              // Sync flat state from the switched-to session
-              messages: ss.messages,
-              streamingMessageId: ss.streamingMessageId,
-              claudeReady: ss.claudeReady,
-              activeModel: ss.activeModel,
-              permissionMode: ss.permissionMode,
-              contextUsage: ss.contextUsage,
-              lastResultCost: ss.lastResultCost,
-              lastResultDuration: ss.lastResultDuration,
-              isIdle: ss.isIdle,
-            };
-          });
-          break;
-        }
-
-        case 'session_error': {
-          const errorSessionId = msg.sessionId || get().activeSessionId;
-          if (msg.category === 'crash' && errorSessionId && get().sessionStates[errorSessionId]) {
-            updateSession(errorSessionId, () => ({ health: 'crashed' as const }));
-          }
-          if (msg.category !== 'crash') {
-            Alert.alert('Session Error', msg.message || 'Unknown error');
-          }
-          break;
-        }
-
-        case 'discovered_sessions':
-          if (Array.isArray(msg.tmux)) {
-            set({ discoveredSessions: msg.tmux });
-            if (msg.tmux.length > 0) {
-              const names = msg.tmux.map((s: DiscoveredSession) => s.sessionName).join(', ');
-              const discoveryMsg: ChatMessage = {
-                id: nextMessageId('discovery'),
-                type: 'system',
-                content: msg.tmux.length === 1
-                  ? `New Claude session found: ${names}. Open session picker to attach.`
-                  : `${msg.tmux.length} new Claude sessions found: ${names}. Open session picker to attach.`,
-                timestamp: Date.now(),
-              };
-              const activeId = get().activeSessionId;
-              if (activeId && get().sessionStates[activeId]) {
-                updateActiveSession((ss) => ({
-                  messages: [...ss.messages, discoveryMsg],
-                }));
-              } else {
-                get().addMessage(discoveryMsg);
-              }
-            }
-          }
-          break;
-
-        // --- History replay ---
-
-        case 'history_replay_start':
-          _receivingHistoryReplay = true;
-          // Clear transient state — these events are not replayed from history,
-          // so any surviving entries are stale from pre-disconnect
-          updateActiveSession((ss) => {
-            const patch: Partial<SessionState> = {};
-            if (ss.activeAgents.length > 0) patch.activeAgents = [];
-            if (ss.isPlanPending) {
-              patch.isPlanPending = false;
-              patch.planAllowedPrompts = [];
-            }
-            return Object.keys(patch).length > 0 ? patch : {};
-          });
-          break;
-
-        case 'history_replay_end':
-          _receivingHistoryReplay = false;
-          _isSessionSwitchReplay = false;
-          // Mark all replayed prompts as answered — any prompt in history
-          // has already been resolved by the server.
-          // Note: replay is always for the active session (connect or switch).
-          updateActiveSession((ss) => {
-            const hasUnansweredPrompts = ss.messages.some(
-              (m) => m.type === 'prompt' && !m.answered
-            );
-            if (!hasUnansweredPrompts) return {};
-            return {
-              messages: ss.messages.map((m) =>
-                m.type === 'prompt' && !m.answered
-                  ? { ...m, answered: '(resolved)' }
-                  : m
-              ),
-            };
-          });
-          break;
-
-        // --- Existing message handlers (now session-aware) ---
-
-        case 'message': {
-          const msgType = msg.messageType || msg.type;
-          // Skip server-echoed user_input — we already show it instantly client-side
-          if (msgType === 'user_input') break;
-          const targetId = msg.sessionId || get().activeSessionId;
-          // During reconnect replay, skip if app already has messages (cache is fresh)
-          if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
-          // During session-switch replay, skip if an equivalent message is already in cache (dedup)
-          if (_receivingHistoryReplay && _isSessionSwitchReplay) {
-            const targetState = targetId ? get().sessionStates[targetId] : null;
-            const cached = targetState ? targetState.messages : get().messages;
-            const isDuplicate = cached.some((m) => {
-              if (m.type !== msgType || m.content !== msg.content) return false;
-              if (m.timestamp !== msg.timestamp) return false;
-              if ((m.tool ?? null) !== (msg.tool ?? null)) return false;
-              return JSON.stringify(m.options ?? null) === JSON.stringify(msg.options ?? null);
-            });
-            if (isDuplicate) break;
-          }
-          const newMsg: ChatMessage = {
-            id: nextMessageId(msgType),
-            type: msgType,
-            content: msg.content,
-            tool: msg.tool,
-            options: msg.options,
-            timestamp: msg.timestamp,
-          };
-          if (targetId && get().sessionStates[targetId]) {
-            updateSession(targetId, (ss) => ({
-              messages: [
-                ...ss.messages.filter((m) => m.id !== 'thinking' || newMsg.id === 'thinking'),
-                newMsg,
-              ],
-            }));
-          } else {
-            get().addMessage(newMsg);
-          }
-          break;
-        }
-
-        case 'stream_start': {
-          const streamId = msg.messageId;
-          const targetId = msg.sessionId || get().activeSessionId;
-          if (targetId && get().sessionStates[targetId]) {
-            updateSession(targetId, (ss) => {
-              if (ss.messages.some((m) => m.id === streamId)) {
-                return { streamingMessageId: streamId };
-              }
-              return {
-                streamingMessageId: streamId,
-                messages: [
-                  ...filterThinking(ss.messages),
-                  { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
-                ],
-              };
-            });
-          } else {
-            set((state) => {
-              if (state.messages.some((m) => m.id === streamId)) {
-                return { streamingMessageId: streamId };
-              }
-              return {
-                streamingMessageId: streamId,
-                messages: [
-                  ...filterThinking(state.messages),
-                  { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
-                ],
-              };
-            });
-          }
-          break;
-        }
-
-        case 'stream_delta': {
-          // Batch deltas — accumulate and flush to state periodically.
-          // Use server-provided sessionId so deltas route to the correct session
-          // even for background (non-active) sessions.
-          const deltaId = msg.messageId;
-          const existingDelta = pendingDeltas.get(deltaId);
-          const capturedSessionId = msg.sessionId || get().activeSessionId;
-          pendingDeltas.set(deltaId, {
-            sessionId: capturedSessionId,
-            delta: (existingDelta?.delta || '') + msg.delta,
-          });
-          if (!deltaFlushTimer) {
-            deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
-          }
-          break;
-        }
-
-        case 'stream_end':
-          // Flush any buffered deltas immediately before clearing streaming state
-          if (deltaFlushTimer) {
-            clearTimeout(deltaFlushTimer);
-          }
-          flushPendingDeltas();
-          {
-            const targetId = msg.sessionId || get().activeSessionId;
-            if (targetId && get().sessionStates[targetId]) {
-              updateSession(targetId, () => ({ streamingMessageId: null }));
-            } else {
-              set({ streamingMessageId: null });
-            }
-          }
-          break;
-
-        case 'tool_start': {
-          const targetId = msg.sessionId || get().activeSessionId;
-          // During reconnect replay, skip if app already has messages (cache is fresh)
-          if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
-          // Use server messageId as stable identifier for dedup (same ID on live + replay)
-          const toolId = msg.messageId || nextMessageId('tool');
-          // During session-switch replay, skip if tool already in cache (dedup by stable ID)
-          if (_receivingHistoryReplay && _isSessionSwitchReplay) {
-            const targetState = targetId ? get().sessionStates[targetId] : null;
-            const cached = targetState ? targetState.messages : get().messages;
-            if (cached.some((m) => m.id === toolId)) break;
-          }
-          const toolMsg: ChatMessage = {
-            id: toolId,
-            type: 'tool_use',
-            content: msg.input ? JSON.stringify(msg.input) : msg.tool || '',
-            tool: msg.tool,
-            timestamp: Date.now(),
-          };
-          if (targetId && get().sessionStates[targetId]) {
-            updateSession(targetId, (ss) => ({
-              messages: [...ss.messages, toolMsg],
-            }));
-          } else {
-            get().addMessage(toolMsg);
-          }
-          break;
-        }
-
-        case 'result': {
-          // Flush any buffered deltas before clearing streaming state (safety net
-          // for when stream_end was missed — mirrors the stream_end flush logic)
-          if (deltaFlushTimer) {
-            clearTimeout(deltaFlushTimer);
-          }
-          flushPendingDeltas();
-          const resultPatch = {
-            streamingMessageId: null as string | null,
-            contextUsage: msg.usage
-              ? {
-                  inputTokens: msg.usage.input_tokens || 0,
-                  outputTokens: msg.usage.output_tokens || 0,
-                  cacheCreation: msg.usage.cache_creation_input_tokens || 0,
-                  cacheRead: msg.usage.cache_read_input_tokens || 0,
-                }
-              : null,
-            lastResultCost: typeof msg.cost === 'number' ? msg.cost : null,
-            lastResultDuration: typeof msg.duration === 'number' ? msg.duration : null,
-          };
-          const targetId = msg.sessionId || get().activeSessionId;
-          if (targetId && get().sessionStates[targetId]) {
-            updateSession(targetId, () => resultPatch);
-          } else {
-            set(resultPatch);
-          }
-          break;
-        }
-
-        case 'model_changed': {
-          const model = (typeof msg.model === 'string' && msg.model.trim()) ? msg.model.trim() : null;
-          const targetId = msg.sessionId || get().activeSessionId;
-          if (targetId && get().sessionStates[targetId]) {
-            updateSession(targetId, () => ({ activeModel: model }));
-          } else {
-            set({ activeModel: model });
-          }
-          break;
-        }
-
-        case 'available_models':
-          if (Array.isArray(msg.models)) {
-            const cleaned = msg.models
-              .map((m: unknown): ModelInfo | null => {
-                // Accept structured {id, label, fullId} objects
-                if (typeof m === 'object' && m !== null) {
-                  const { id, label, fullId } = m as ModelInfo;
-                  if (
-                    typeof id === 'string' && id.trim() !== '' &&
-                    typeof label === 'string' && label.trim() !== '' &&
-                    typeof fullId === 'string' && fullId.trim() !== ''
-                  ) {
-                    return { id, label, fullId };
-                  }
-                }
-                // Accept legacy string format for backward compatibility
-                if (typeof m === 'string' && m.trim().length > 0) {
-                  const s = m.trim();
-                  return { id: s, label: s.charAt(0).toUpperCase() + s.slice(1), fullId: s };
-                }
-                return null;
-              })
-              .filter((m: ModelInfo | null): m is ModelInfo => m !== null);
-            set({ availableModels: cleaned });
-          }
-          break;
-
-        case 'permission_mode_changed': {
-          const mode = (typeof msg.mode === 'string' && msg.mode.trim()) ? msg.mode.trim() : null;
-          const targetId = msg.sessionId || get().activeSessionId;
-          if (targetId && get().sessionStates[targetId]) {
-            updateSession(targetId, () => ({ permissionMode: mode }));
-          } else {
-            set({ permissionMode: mode });
-          }
-          break;
-        }
-
-        case 'available_permission_modes':
-          if (Array.isArray(msg.modes)) {
-            const cleaned = (msg.modes as unknown[])
-              .filter((m): m is { id: string; label: string } =>
-                typeof m === 'object' && m !== null &&
-                typeof (m as { id: unknown }).id === 'string' &&
-                typeof (m as { label: unknown }).label === 'string'
-              );
-            set({ availablePermissionModes: cleaned });
-          }
-          break;
-
-        case 'status_update': {
-          // Server filters status_update to active session only, but defend
-          // against misrouted messages on the client side too.
-          const statusSid = msg.sessionId || get().activeSessionId;
-          if (statusSid && statusSid !== get().activeSessionId) break;
-          set({
-            claudeStatus: {
-              cost: msg.cost,
-              model: msg.model,
-              messageCount: msg.messageCount,
-              contextTokens: msg.contextTokens,
-              contextPercent: msg.contextPercent,
-              compactPercent: msg.compactPercent ?? null,
-            },
-          });
-          break;
-        }
-
-        case 'raw':
-          get().appendTerminalData(msg.data);
-          break;
-
-        case 'claude_ready': {
-          const targetId = msg.sessionId || get().activeSessionId;
-          if (targetId && get().sessionStates[targetId]) {
-            updateSession(targetId, () => ({ claudeReady: true }));
-          } else {
-            set({ claudeReady: true });
-          }
-          // Drain queued messages on reconnect
-          const readySocket = get().socket;
-          if (readySocket && readySocket.readyState === WebSocket.OPEN) {
-            drainMessageQueue(readySocket);
-          }
-          break;
-        }
-
-        case 'agent_idle': {
-          const idleTargetId = msg.sessionId || get().activeSessionId;
-          if (idleTargetId && get().sessionStates[idleTargetId]) {
-            updateSession(idleTargetId, () => ({ isIdle: true }));
-          }
-          break;
-        }
-
-        case 'agent_busy': {
-          const busyTargetId = msg.sessionId || get().activeSessionId;
-          if (busyTargetId && get().sessionStates[busyTargetId]) {
-            updateSession(busyTargetId, () => ({ isIdle: false }));
-          }
-          break;
-        }
-
-        case 'agent_spawned': {
-          const spawnTargetId = msg.sessionId || get().activeSessionId;
-          if (spawnTargetId && get().sessionStates[spawnTargetId]) {
-            updateSession(spawnTargetId, (ss) => {
-              // Dedup: skip if agent with same toolUseId already tracked
-              if (ss.activeAgents.some((a) => a.toolUseId === msg.toolUseId)) return {};
-              return {
-                activeAgents: [...ss.activeAgents, {
-                  toolUseId: msg.toolUseId,
-                  description: msg.description || 'Background task',
-                  startedAt: msg.startedAt || Date.now(),
-                }],
-              };
-            });
-          }
-          break;
-        }
-
-        case 'agent_completed': {
-          const completeTargetId = msg.sessionId || get().activeSessionId;
-          if (completeTargetId && get().sessionStates[completeTargetId]) {
-            updateSession(completeTargetId, (ss) => {
-              const filtered = ss.activeAgents.filter(
-                (a) => a.toolUseId !== msg.toolUseId
-              );
-              // Skip no-op update if agent wasn't tracked (e.g. duplicate event)
-              if (filtered.length === ss.activeAgents.length) return {};
-              return { activeAgents: filtered };
-            });
-          }
-          break;
-        }
-
-        case 'plan_started': {
-          const planStartTargetId = msg.sessionId || get().activeSessionId;
-          if (planStartTargetId && get().sessionStates[planStartTargetId]) {
-            updateSession(planStartTargetId, () => ({
-              isPlanPending: false,
-              planAllowedPrompts: [],
-            }));
-          }
-          break;
-        }
-
-        case 'plan_ready': {
-          const planReadyTargetId = msg.sessionId || get().activeSessionId;
-          const prompts = Array.isArray(msg.allowedPrompts) ? msg.allowedPrompts : [];
-          if (planReadyTargetId && get().sessionStates[planReadyTargetId]) {
-            updateSession(planReadyTargetId, () => ({
-              isPlanPending: true,
-              planAllowedPrompts: prompts,
-            }));
-          }
-          break;
-        }
-
-        case 'raw_background':
-          // Buffer raw data even in chat mode so terminal tab is always up to date
-          get().appendTerminalData(msg.data);
-          break;
-
-        case 'permission_request': {
-          const permMsg: ChatMessage = {
-            id: nextMessageId('perm'),
-            type: 'prompt',
-            content: msg.tool ? `${msg.tool}: ${msg.description}` : (msg.description || 'Permission required'),
-            tool: msg.tool,
-            requestId: msg.requestId,
-            toolInput: msg.input && typeof msg.input === 'object' ? msg.input as Record<string, unknown> : undefined,
-            options: [
-              { label: 'Allow', value: 'allow' },
-              { label: 'Deny', value: 'deny' },
-              { label: 'Always Allow', value: 'allowAlways' },
-            ],
-            timestamp: Date.now(),
-          };
-          const permTargetId = msg.sessionId || get().activeSessionId;
-          if (permTargetId && get().sessionStates[permTargetId]) {
-            updateSession(permTargetId, (ss) => ({
-              messages: [...ss.messages, permMsg],
-            }));
-          } else {
-            get().addMessage(permMsg);
-          }
-          break;
-        }
-
-        case 'user_question': {
-          const questions = msg.questions;
-          if (!Array.isArray(questions) || questions.length === 0) break;
-          const q = questions[0];
-          if (!q || typeof q !== 'object' || typeof q.question !== 'string') break;
-          const questionMsg: ChatMessage = {
-            id: nextMessageId('question'),
-            type: 'prompt',
-            content: q.question,
-            toolUseId: msg.toolUseId,
-            options: Array.isArray(q.options)
-              ? q.options
-                  .filter((o: unknown): o is { label: string } => !!o && typeof o === 'object' && typeof (o as Record<string, unknown>).label === 'string')
-                  .map((o: { label: string }) => ({
-                    label: o.label,
-                    value: o.label,
-                  }))
-              : [],
-            timestamp: Date.now(),
-          };
-          const questionTargetId = msg.sessionId || get().activeSessionId;
-          if (questionTargetId && get().sessionStates[questionTargetId]) {
-            updateSession(questionTargetId, (ss) => ({
-              messages: [...ss.messages, questionMsg],
-            }));
-          } else {
-            get().addMessage(questionMsg);
-          }
-          break;
-        }
-
-        case 'server_status': {
-          // Non-error status update (e.g., tunnel recovery notifications).
-          // Global broadcast (no sessionId) — route to active session.
-          const statusMessage: string =
-            typeof msg.message === 'string' && msg.message.trim().length > 0
-              ? stripAnsi(msg.message)
-              : 'Status update';
-          // Display as a system message in the chat
-          const statusMsg: ChatMessage = {
-            id: nextMessageId('status'),
-            type: 'system',
-            content: statusMessage,
-            timestamp: Date.now(),
-          };
-          const activeStatusId = get().activeSessionId;
-          if (activeStatusId && get().sessionStates[activeStatusId]) {
-            updateActiveSession((ss) => ({
-              messages: [...ss.messages, statusMsg],
-            }));
-          } else {
-            get().addMessage(statusMsg);
-          }
-          break;
-        }
-
-        // --- Multi-client awareness ---
-
-        case 'client_joined': {
-          if (!msg.client || typeof msg.client.clientId !== 'string') break;
-          const newClient: ConnectedClient = {
-            clientId: msg.client.clientId,
-            deviceName: typeof msg.client.deviceName === 'string' ? msg.client.deviceName : null,
-            deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(msg.client.deviceType) ? msg.client.deviceType : 'unknown') as ConnectedClient['deviceType'],
-            platform: typeof msg.client.platform === 'string' ? msg.client.platform : 'unknown',
-            isSelf: false,
-          };
-          set((state) => ({
-            connectedClients: [...state.connectedClients.filter((c) => c.clientId !== newClient.clientId), newClient],
-          }));
-          // Add system message
-          const deviceLabel = newClient.deviceName || 'A device';
-          const joinMsg: ChatMessage = {
-            id: nextMessageId('client'),
-            type: 'system',
-            content: `${deviceLabel} connected`,
-            timestamp: Date.now(),
-          };
-          const joinActiveId = get().activeSessionId;
-          if (joinActiveId && get().sessionStates[joinActiveId]) {
-            updateActiveSession((ss) => ({
-              messages: [...ss.messages, joinMsg],
-            }));
-          } else {
-            get().addMessage(joinMsg);
-          }
-          break;
-        }
-
-        case 'client_left': {
-          if (typeof msg.clientId !== 'string') break;
-          const departingClient = get().connectedClients.find((c) => c.clientId === msg.clientId);
-          set((state) => ({
-            connectedClients: state.connectedClients.filter((c) => c.clientId !== msg.clientId),
-          }));
-          // Add system message
-          const leftLabel = departingClient?.deviceName || 'A device';
-          const leftMsg: ChatMessage = {
-            id: nextMessageId('client'),
-            type: 'system',
-            content: `${leftLabel} disconnected`,
-            timestamp: Date.now(),
-          };
-          const leftActiveId = get().activeSessionId;
-          if (leftActiveId && get().sessionStates[leftActiveId]) {
-            updateActiveSession((ss) => ({
-              messages: [...ss.messages, leftMsg],
-            }));
-          } else {
-            get().addMessage(leftMsg);
-          }
-          break;
-        }
-
-        case 'primary_changed': {
-          const primarySessionId = msg.sessionId;
-          const primaryClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
-          if (typeof primarySessionId === 'string' && get().sessionStates[primarySessionId]) {
-            updateSession(primarySessionId, () => ({
-              primaryClientId,
-            }));
-          } else if (!primarySessionId || primarySessionId === 'default') {
-            // Legacy/single-session mode: store at flat state level
-            set({ primaryClientId });
-          }
-          break;
-        }
-
-        case 'server_error': {
-          // Global broadcast (no sessionId) — route to active session.
-          // Validate and coerce untyped JSON fields
-          const allowedCategories = new Set<ServerError['category']>([
-            'tunnel', 'session', 'permission', 'general',
-          ]);
-          const category: ServerError['category'] =
-            typeof msg.category === 'string' && allowedCategories.has(msg.category as ServerError['category'])
-              ? (msg.category as ServerError['category'])
-              : 'general';
-          const message: string =
-            typeof msg.message === 'string' && msg.message.trim().length > 0
-              ? stripAnsi(msg.message)
-              : 'Unknown server error';
-          const recoverable: boolean =
-            typeof msg.recoverable === 'boolean' ? msg.recoverable : true;
-
-          const serverError: ServerError = {
-            id: nextMessageId('err'),
-            category,
-            message,
-            recoverable,
-            timestamp: Date.now(),
-          };
-          set((state) => ({
-            serverErrors: [...state.serverErrors, serverError].slice(-10),
-          }));
-          // Surface server errors into chat stream so they're visible
-          const errorMsg: ChatMessage = {
-            id: nextMessageId('err'),
-            type: 'error',
-            content: serverError.message,
-            timestamp: Date.now(),
-          };
-          const activeErrId = get().activeSessionId;
-          if (activeErrId && get().sessionStates[activeErrId]) {
-            updateActiveSession((ss) => ({
-              messages: filterThinking([...ss.messages, errorMsg]),
-              streamingMessageId: null,
-            }));
-          } else {
-            set({ streamingMessageId: null });
-            get().addMessage(errorMsg);
-          }
-          // Show an alert for non-recoverable errors
-          if (!serverError.recoverable) {
-            Alert.alert('Server Error', serverError.message);
-          }
-          break;
-        }
-      }
+      handleMessage(msg, socketCtx);
     };
 
     socket.onclose = () => {

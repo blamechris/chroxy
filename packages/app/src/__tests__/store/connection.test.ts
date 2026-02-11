@@ -8,6 +8,7 @@ import {
   ChatMessage,
   ConnectedClient,
   _testQueueInternals,
+  _testMessageHandler,
 } from '../../store/connection';
 
 // Reset store between tests
@@ -478,33 +479,33 @@ describe('primaryClientId flat state', () => {
   });
 });
 
-// -- Multi-client message handling (integration-style) --
+// -- Multi-client message handling (via handler) --
 
 describe('multi-client message handling', () => {
-  const mockClient1: ConnectedClient = {
-    clientId: 'client-1',
-    deviceName: 'iPhone 15',
-    deviceType: 'phone',
-    platform: 'ios',
-    isSelf: false,
-  };
+  const mockSocket = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket;
+
+  beforeEach(() => {
+    _testMessageHandler.setContext({
+      url: 'wss://test', token: 'tok', isReconnect: false,
+      silent: false, socket: mockSocket,
+    });
+  });
+  afterEach(() => _testMessageHandler.clearContext());
 
   describe('client_joined dedup', () => {
     it('replaces existing client with same clientId', () => {
+      // Seed an existing client
       useConnectionStore.setState({
-        connectedClients: [mockClient1],
+        connectedClients: [{
+          clientId: 'client-1', deviceName: 'iPhone 15',
+          deviceType: 'phone', platform: 'ios', isSelf: false,
+        }],
       });
-      // Simulate a duplicate join (e.g., ghost client from rapid reconnect)
-      const updatedClient: ConnectedClient = {
-        ...mockClient1,
-        deviceName: 'iPhone 15 Pro',
-      };
-      useConnectionStore.setState((state) => ({
-        connectedClients: [
-          ...state.connectedClients.filter((c) => c.clientId !== updatedClient.clientId),
-          updatedClient,
-        ],
-      }));
+      // Simulate a duplicate join via handler
+      _testMessageHandler.handle({
+        type: 'client_joined',
+        client: { clientId: 'client-1', deviceName: 'iPhone 15 Pro', deviceType: 'phone', platform: 'ios' },
+      });
       const clients = useConnectionStore.getState().connectedClients;
       expect(clients).toHaveLength(1);
       expect(clients[0].deviceName).toBe('iPhone 15 Pro');
@@ -512,50 +513,36 @@ describe('multi-client message handling', () => {
   });
 
   describe('client_joined with missing fields', () => {
-    it('handles client with null deviceName', () => {
-      const minimalClient: ConnectedClient = {
-        clientId: 'client-minimal',
-        deviceName: null,
-        deviceType: 'unknown',
-        platform: 'unknown',
-        isSelf: false,
-      };
-      useConnectionStore.setState({ connectedClients: [minimalClient] });
-      expect(useConnectionStore.getState().connectedClients[0].deviceName).toBeNull();
-      expect(useConnectionStore.getState().connectedClients[0].deviceType).toBe('unknown');
+    it('handles client with missing deviceName/deviceType (defaults to unknown)', () => {
+      _testMessageHandler.handle({
+        type: 'client_joined',
+        client: { clientId: 'client-minimal' },
+      });
+      const client = useConnectionStore.getState().connectedClients[0];
+      expect(client.deviceName).toBeNull();
+      expect(client.deviceType).toBe('unknown');
+      expect(client.platform).toBe('unknown');
     });
   });
 
   describe('rapid join/leave', () => {
     it('handles join then immediate leave for same client', () => {
-      // Join
-      useConnectionStore.setState((state) => ({
-        connectedClients: [...state.connectedClients, mockClient1],
-      }));
+      _testMessageHandler.handle({
+        type: 'client_joined',
+        client: { clientId: 'client-1', deviceName: 'iPhone 15', deviceType: 'phone', platform: 'ios' },
+      });
       expect(useConnectionStore.getState().connectedClients).toHaveLength(1);
 
-      // Immediate leave
-      useConnectionStore.setState((state) => ({
-        connectedClients: state.connectedClients.filter((c) => c.clientId !== 'client-1'),
-      }));
+      _testMessageHandler.handle({ type: 'client_left', clientId: 'client-1' });
       expect(useConnectionStore.getState().connectedClients).toHaveLength(0);
     });
 
     it('handles multiple rapid joins', () => {
-      const clients: ConnectedClient[] = Array.from({ length: 5 }, (_, i) => ({
-        clientId: `client-${i}`,
-        deviceName: `Device ${i}`,
-        deviceType: 'phone' as const,
-        platform: 'ios',
-        isSelf: i === 0,
-      }));
-      for (const client of clients) {
-        useConnectionStore.setState((state) => ({
-          connectedClients: [
-            ...state.connectedClients.filter((c) => c.clientId !== client.clientId),
-            client,
-          ],
-        }));
+      for (let i = 0; i < 5; i++) {
+        _testMessageHandler.handle({
+          type: 'client_joined',
+          client: { clientId: `client-${i}`, deviceName: `Device ${i}`, deviceType: 'phone', platform: 'ios' },
+        });
       }
       expect(useConnectionStore.getState().connectedClients).toHaveLength(5);
     });
@@ -568,14 +555,8 @@ describe('multi-client message handling', () => {
         activeSessionId: sessionId,
         sessionStates: { [sessionId]: createEmptySessionState() },
       });
-      // Simulate primary_changed via updateSession pattern
-      const state = useConnectionStore.getState();
-      const current = state.sessionStates[sessionId];
-      useConnectionStore.setState({
-        sessionStates: {
-          ...state.sessionStates,
-          [sessionId]: { ...current, primaryClientId: 'client-1' },
-        },
+      _testMessageHandler.handle({
+        type: 'primary_changed', sessionId, clientId: 'client-1',
       });
       expect(useConnectionStore.getState().sessionStates[sessionId].primaryClientId).toBe('client-1');
     });
@@ -588,45 +569,220 @@ describe('multi-client message handling', () => {
         activeSessionId: sessionId,
         sessionStates: { [sessionId]: sessionState },
       });
-      // Clear primary
-      const state = useConnectionStore.getState();
-      const current = state.sessionStates[sessionId];
-      useConnectionStore.setState({
-        sessionStates: {
-          ...state.sessionStates,
-          [sessionId]: { ...current, primaryClientId: null },
-        },
+      _testMessageHandler.handle({
+        type: 'primary_changed', sessionId, clientId: null,
       });
       expect(useConnectionStore.getState().sessionStates[sessionId].primaryClientId).toBeNull();
     });
   });
 
   describe('primary_changed in legacy mode', () => {
-    it('stores primaryClientId at flat state level when no session state exists', () => {
-      // No sessionStates entries — legacy/single-session mode
-      useConnectionStore.setState({ primaryClientId: 'client-1' });
+    it('stores primaryClientId at flat state level for default session', () => {
+      _testMessageHandler.handle({
+        type: 'primary_changed', sessionId: 'default', clientId: 'client-1',
+      });
+      expect(useConnectionStore.getState().primaryClientId).toBe('client-1');
+    });
+
+    it('stores primaryClientId at flat state level when no sessionId', () => {
+      _testMessageHandler.handle({
+        type: 'primary_changed', clientId: 'client-1',
+      });
       expect(useConnectionStore.getState().primaryClientId).toBe('client-1');
     });
 
     it('clears flat primaryClientId when set to null', () => {
       useConnectionStore.setState({ primaryClientId: 'client-1' });
-      useConnectionStore.setState({ primaryClientId: null });
+      _testMessageHandler.handle({
+        type: 'primary_changed', clientId: null,
+      });
       expect(useConnectionStore.getState().primaryClientId).toBeNull();
     });
   });
 
   describe('primary_changed for unknown session IDs', () => {
     it('does not clobber flat primaryClientId when event is for unknown non-default session', () => {
-      // Scenario: multi-session mode, flat primaryClientId is already set for legacy,
-      // and a primary_changed arrives for a session not yet in sessionStates.
-      // The handler should ignore it (not update flat primaryClientId).
       useConnectionStore.setState({
         primaryClientId: 'client-legacy',
         sessionStates: { 'session-1': createEmptySessionState() },
       });
       // An event for 'session-unknown' should NOT overwrite flat primaryClientId
-      // (the handler gates on !primarySessionId || primarySessionId === 'default')
+      _testMessageHandler.handle({
+        type: 'primary_changed', sessionId: 'session-unknown', clientId: 'client-new',
+      });
       expect(useConnectionStore.getState().primaryClientId).toBe('client-legacy');
+    });
+  });
+});
+
+// -- WS message handler (direct) --
+
+describe('WS message handler (direct)', () => {
+  const mockSocket = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket;
+
+  beforeEach(() => {
+    (mockSocket.send as jest.Mock).mockClear();
+    (mockSocket.close as jest.Mock).mockClear();
+    _testMessageHandler.setContext({
+      url: 'wss://test', token: 'tok', isReconnect: false,
+      silent: false, socket: mockSocket,
+    });
+  });
+  afterEach(() => _testMessageHandler.clearContext());
+
+  describe('auth_ok', () => {
+    it('parses connectedClients with isSelf detection via clientId', () => {
+      _testMessageHandler.handle({
+        type: 'auth_ok',
+        clientId: 'me-123',
+        connectedClients: [
+          { clientId: 'me-123', deviceName: 'My Phone', deviceType: 'phone', platform: 'ios' },
+          { clientId: 'other-456', deviceName: 'Their Tablet', deviceType: 'tablet', platform: 'android' },
+        ],
+        serverMode: 'cli',
+        cwd: '/home/user',
+      });
+      const state = useConnectionStore.getState();
+      expect(state.connectionPhase).toBe('connected');
+      expect(state.myClientId).toBe('me-123');
+      expect(state.connectedClients).toHaveLength(2);
+      expect(state.connectedClients[0].isSelf).toBe(true);
+      expect(state.connectedClients[1].isSelf).toBe(false);
+    });
+
+    it('handles missing connectedClients gracefully', () => {
+      _testMessageHandler.handle({
+        type: 'auth_ok',
+        clientId: 'me-123',
+        serverMode: 'cli',
+      });
+      const state = useConnectionStore.getState();
+      expect(state.connectionPhase).toBe('connected');
+      expect(state.connectedClients).toEqual([]);
+    });
+  });
+
+  describe('client_joined', () => {
+    it('validates fields, deduplicates, generates system message', () => {
+      _testMessageHandler.handle({
+        type: 'client_joined',
+        client: { clientId: 'c1', deviceName: 'Phone', deviceType: 'phone', platform: 'ios' },
+      });
+      expect(useConnectionStore.getState().connectedClients).toHaveLength(1);
+      // System message generated
+      const msgs = useConnectionStore.getState().messages;
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].type).toBe('system');
+      expect(msgs[0].content).toBe('Phone connected');
+    });
+
+    it('handles missing deviceName/deviceType (defaults to unknown)', () => {
+      _testMessageHandler.handle({
+        type: 'client_joined',
+        client: { clientId: 'c2' },
+      });
+      const client = useConnectionStore.getState().connectedClients[0];
+      expect(client.deviceName).toBeNull();
+      expect(client.deviceType).toBe('unknown');
+      // System message uses fallback label
+      expect(useConnectionStore.getState().messages[0].content).toBe('A device connected');
+    });
+
+    it('skips if msg.client.clientId is not a string', () => {
+      _testMessageHandler.handle({
+        type: 'client_joined',
+        client: { clientId: 123 },
+      });
+      expect(useConnectionStore.getState().connectedClients).toHaveLength(0);
+      expect(useConnectionStore.getState().messages).toHaveLength(0);
+    });
+  });
+
+  describe('client_left', () => {
+    it('removes client by ID, generates system message', () => {
+      useConnectionStore.setState({
+        connectedClients: [
+          { clientId: 'c1', deviceName: 'Phone', deviceType: 'phone', platform: 'ios', isSelf: false },
+        ],
+      });
+      _testMessageHandler.handle({ type: 'client_left', clientId: 'c1' });
+      expect(useConnectionStore.getState().connectedClients).toHaveLength(0);
+      const msgs = useConnectionStore.getState().messages;
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].content).toBe('Phone disconnected');
+    });
+
+    it('no-ops for unknown clientId (no crash)', () => {
+      _testMessageHandler.handle({ type: 'client_left', clientId: 'nonexistent' });
+      expect(useConnectionStore.getState().connectedClients).toHaveLength(0);
+      // Still generates a system message with fallback label
+      expect(useConnectionStore.getState().messages[0].content).toBe('A device disconnected');
+    });
+  });
+
+  describe('primary_changed', () => {
+    it('updates session state in multi-session mode', () => {
+      const sessionId = 'sess-1';
+      useConnectionStore.setState({
+        activeSessionId: sessionId,
+        sessionStates: { [sessionId]: createEmptySessionState() },
+      });
+      _testMessageHandler.handle({
+        type: 'primary_changed', sessionId, clientId: 'c1',
+      });
+      expect(useConnectionStore.getState().sessionStates[sessionId].primaryClientId).toBe('c1');
+    });
+
+    it('falls back to flat state for default session', () => {
+      _testMessageHandler.handle({
+        type: 'primary_changed', sessionId: 'default', clientId: 'c1',
+      });
+      expect(useConnectionStore.getState().primaryClientId).toBe('c1');
+    });
+
+    it('ignores unknown session IDs in multi-session mode', () => {
+      useConnectionStore.setState({
+        primaryClientId: 'existing',
+        sessionStates: { 'known-session': createEmptySessionState() },
+      });
+      _testMessageHandler.handle({
+        type: 'primary_changed', sessionId: 'unknown-session', clientId: 'new-client',
+      });
+      // Should not touch flat primaryClientId
+      expect(useConnectionStore.getState().primaryClientId).toBe('existing');
+    });
+  });
+
+  describe('malformed payloads', () => {
+    it('silently skips messages with missing type field', () => {
+      // Should not throw
+      _testMessageHandler.handle({ content: 'no type' });
+      expect(useConnectionStore.getState().messages).toHaveLength(0);
+    });
+
+    it('silently skips messages with unknown type', () => {
+      _testMessageHandler.handle({ type: 'totally_unknown_msg_type' });
+      expect(useConnectionStore.getState().messages).toHaveLength(0);
+    });
+
+    it('skips client_joined with no client object', () => {
+      _testMessageHandler.handle({ type: 'client_joined' });
+      expect(useConnectionStore.getState().connectedClients).toHaveLength(0);
+    });
+
+    it('skips client_left with non-string clientId', () => {
+      _testMessageHandler.handle({ type: 'client_left', clientId: 42 });
+      expect(useConnectionStore.getState().connectedClients).toHaveLength(0);
+      expect(useConnectionStore.getState().messages).toHaveLength(0);
+    });
+  });
+
+  describe('no context', () => {
+    it('silently returns when context is null', () => {
+      _testMessageHandler.clearContext();
+      // Should not throw
+      _testMessageHandler.handle({ type: 'auth_ok', clientId: 'x' });
+      expect(useConnectionStore.getState().connectionPhase).toBe('disconnected');
     });
   });
 });
