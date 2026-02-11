@@ -1322,9 +1322,10 @@ export class WsServer {
 
   /** List directories at a given path, sending a directory_listing response */
   async _listDirectory(ws, requestedPath) {
+    // Resolve path outside try so error responses can include the resolved path
+    let absPath = null
     try {
       // Resolve path: expand ~ to homedir, default to homedir if empty
-      let absPath
       if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
         absPath = homedir()
       } else {
@@ -1352,15 +1353,15 @@ export class WsServer {
         error: null,
       })
     } catch (err) {
-      let errorMessage = 'Unknown error'
+      let errorMessage
       if (err.code === 'ENOENT') errorMessage = 'Directory not found'
       else if (err.code === 'EACCES') errorMessage = 'Permission denied'
       else if (err.code === 'ENOTDIR') errorMessage = 'Not a directory'
-      else errorMessage = err.message
+      else errorMessage = err.message || 'Unknown error'
 
       this._send(ws, {
         type: 'directory_listing',
-        path: requestedPath || null,
+        path: absPath || requestedPath || null,
         parentPath: null,
         entries: [],
         error: errorMessage,
