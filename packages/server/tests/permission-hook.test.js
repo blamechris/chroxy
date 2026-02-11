@@ -2,6 +2,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { writeFileSync, readFileSync } from 'fs'
+import { join } from 'path'
 import { homedir } from 'os'
 
 // The module reads from ~/.claude/settings.json directly. Tests that touch the
