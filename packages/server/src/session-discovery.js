@@ -1,30 +1,67 @@
 import { execSync } from 'child_process'
 
 /**
+ * @typedef {object} DiscoveryExecutor
+ * @property {() => void} whichTmux - Check if tmux is installed (throws on failure)
+ * @property {() => string} listPanes - List all tmux panes as newline-separated "name pid cwd" rows
+ * @property {(pid: number) => string} getChildren - Get child PIDs of a process (newline-separated, throws on failure)
+ * @property {(pid: number) => string} getCommand - Get the command string of a process
+ * @property {(pid: number) => string} getCwd - Get the cwd of a process via lsof (throws on failure)
+ */
+
+/** @type {DiscoveryExecutor} Default executor that runs real shell commands */
+const defaultExecutor = {
+  whichTmux() {
+    execSync('which tmux', { stdio: 'pipe' })
+  },
+  listPanes() {
+    return execSync(
+      "tmux list-panes -a -F '#{session_name} #{pane_pid} #{pane_current_path}'",
+      { stdio: 'pipe', encoding: 'utf-8', timeout: 5000 }
+    ).trim()
+  },
+  getChildren(pid) {
+    return execSync(
+      `pgrep -P ${pid}`,
+      { stdio: 'pipe', encoding: 'utf-8', timeout: 3000 }
+    ).trim()
+  },
+  getCommand(pid) {
+    return execSync(
+      `ps -p ${pid} -o command=`,
+      { stdio: 'pipe', encoding: 'utf-8', timeout: 3000 }
+    ).trim()
+  },
+  getCwd(pid) {
+    return execSync(
+      `lsof -p ${pid} -a -d cwd -Fn 2>/dev/null`,
+      { stdio: 'pipe', encoding: 'utf-8', timeout: 3000 }
+    ).trim()
+  },
+}
+
+/**
  * Discover tmux sessions running Claude Code on the host.
  *
  * Scans all tmux panes, checks their child processes for claude,
  * and returns structured session info for the app to display.
  *
- * @param {{ prefix?: string }} [options] - Optional filter options
+ * @param {{ prefix?: string, executor?: DiscoveryExecutor }} [options]
  * @param {string} [options.prefix] - Only return sessions whose name starts with this prefix (e.g. 'chroxy-')
+ * @param {DiscoveryExecutor} [options.executor] - Injectable executor for testing (defaults to real shell commands)
  * @returns {Array<{ sessionName: string, cwd: string, pid: number }>}
  */
-export function discoverTmuxSessions({ prefix } = {}) {
+export function discoverTmuxSessions({ prefix, executor } = {}) {
+  const exec = executor || defaultExecutor
+
   try {
-    // Check if tmux is available
-    execSync('which tmux', { stdio: 'pipe' })
+    exec.whichTmux()
   } catch {
     return []
   }
 
   try {
-    // List all tmux panes with their session name, pane PID, and current path
-    const raw = execSync(
-      "tmux list-panes -a -F '#{session_name} #{pane_pid} #{pane_current_path}'",
-      { stdio: 'pipe', encoding: 'utf-8', timeout: 5000 }
-    ).trim()
-
+    const raw = exec.listPanes()
     if (!raw) return []
 
     const results = []
@@ -39,11 +76,9 @@ export function discoverTmuxSessions({ prefix } = {}) {
 
       if (isNaN(panePid)) continue
 
-      // Find child processes of this pane's shell
-      const claudePid = _findClaudeChild(panePid)
+      const claudePid = _findClaudeChild(panePid, exec)
       if (claudePid) {
-        // Try to get the actual CWD of the Claude process
-        const cwd = _getProcessCwd(claudePid) || paneCwd
+        const cwd = _getProcessCwd(claudePid, exec) || paneCwd
 
         results.push({
           sessionName,
@@ -68,27 +103,17 @@ export function discoverTmuxSessions({ prefix } = {}) {
  * Walks the process tree (shell → claude, or shell → node → claude).
  * @returns {number | null} PID of the claude process, or null
  */
-function _findClaudeChild(parentPid) {
+function _findClaudeChild(parentPid, exec) {
   try {
-    // Get all child PIDs
-    const childrenRaw = execSync(
-      `pgrep -P ${parentPid}`,
-      { stdio: 'pipe', encoding: 'utf-8', timeout: 3000 }
-    ).trim()
-
+    const childrenRaw = exec.getChildren(parentPid)
     if (!childrenRaw) return null
 
     for (const childPidStr of childrenRaw.split('\n')) {
       const childPid = parseInt(childPidStr.trim(), 10)
       if (isNaN(childPid)) continue
 
-      // Check if this child is claude
       try {
-        const cmd = execSync(
-          `ps -p ${childPid} -o command=`,
-          { stdio: 'pipe', encoding: 'utf-8', timeout: 3000 }
-        ).trim()
-
+        const cmd = exec.getCommand(childPid)
         if (/\bclaude\b/i.test(cmd)) {
           return childPid
         }
@@ -97,7 +122,7 @@ function _findClaudeChild(parentPid) {
       }
 
       // Check grandchildren (claude may be a child of node)
-      const grandchild = _findClaudeChild(childPid)
+      const grandchild = _findClaudeChild(childPid, exec)
       if (grandchild) return grandchild
     }
 
@@ -111,12 +136,9 @@ function _findClaudeChild(parentPid) {
  * Get the current working directory of a process (macOS).
  * @returns {string | null}
  */
-function _getProcessCwd(pid) {
+function _getProcessCwd(pid, exec) {
   try {
-    const raw = execSync(
-      `lsof -p ${pid} -a -d cwd -Fn 2>/dev/null`,
-      { stdio: 'pipe', encoding: 'utf-8', timeout: 3000 }
-    ).trim()
+    const raw = exec.getCwd(pid)
 
     // lsof -Fn outputs lines like "n/path/to/dir"
     for (const line of raw.split('\n')) {
