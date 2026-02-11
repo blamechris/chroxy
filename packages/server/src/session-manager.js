@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
-import { statSync, writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
+import { statSync, writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
@@ -421,7 +421,8 @@ export class SessionManager extends EventEmitter {
 
     const dir = dirname(this._stateFilePath)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    writeFileSync(this._stateFilePath, JSON.stringify(state, null, 2))
+    writeFileSync(this._stateFilePath, JSON.stringify(state, null, 2), { mode: 0o600 })
+    chmodSync(this._stateFilePath, 0o600)
     console.log(`[session-manager] Serialized ${state.sessions.length} session(s) to ${this._stateFilePath}`)
     return state
   }

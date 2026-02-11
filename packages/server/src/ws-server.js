@@ -5,7 +5,31 @@ import { v4 as uuidv4 } from 'uuid'
 import { statSync, readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
+import { timingSafeEqual } from 'crypto'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
+
+/** Constant-time string comparison for auth tokens */
+function safeTokenCompare(a, b) {
+  let valid = true
+  if (typeof a !== 'string' || typeof b !== 'string') {
+    valid = false
+    a = ''
+    b = ''
+  }
+
+  const bufA = Buffer.from(a)
+  const bufB = Buffer.from(b)
+  const maxLen = Math.max(bufA.length, bufB.length)
+
+  // Always compare buffers of equal length to avoid leaking length via timing
+  const paddedA = Buffer.alloc(maxLen)
+  const paddedB = Buffer.alloc(maxLen)
+  bufA.copy(paddedA)
+  bufB.copy(paddedB)
+
+  const equal = maxLen === 0 ? false : timingSafeEqual(paddedA, paddedB)
+  return valid && equal && bufA.length === bufB.length
+}
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -424,7 +448,7 @@ export class WsServer {
 
     // Auth must come first
     if (!client.authenticated) {
-      if (msg.type === 'auth' && (!this.authRequired || msg.token === this.apiToken)) {
+      if (msg.type === 'auth' && (!this.authRequired || safeTokenCompare(msg.token, this.apiToken))) {
         client.authenticated = true
         client.authTime = Date.now()
         // Extract optional device info from auth message
@@ -1199,7 +1223,7 @@ export class WsServer {
     if (this.authRequired) {
       const authHeader = req.headers['authorization'] || ''
       const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
-      if (!token || token !== this.apiToken) {
+      if (!token || !safeTokenCompare(token, this.apiToken)) {
         console.warn('[ws] Rejected unauthenticated POST /permission')
         res.writeHead(403, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'unauthorized' }))

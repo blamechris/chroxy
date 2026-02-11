@@ -457,6 +457,84 @@ describe('WsServer with authRequired: true (default behavior)', () => {
     assert.notEqual(ws.readyState, WebSocket.OPEN, 'Connection should be closed')
   })
 
+  it('rejects null token', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: null })
+
+    const authFail = await waitForMessage(messages, 'auth_fail', 2000)
+    assert.ok(authFail, 'Should receive auth_fail for null token')
+    assert.equal(authFail.reason, 'invalid_token')
+
+    if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+      await Promise.race([
+        once(ws, 'close'),
+        new Promise(resolve => setTimeout(resolve, 1000))
+      ])
+    }
+    assert.notEqual(ws.readyState, WebSocket.OPEN, 'Connection should be closed')
+  })
+
+  it('rejects token with different length', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'x' })
+
+    const authFail = await waitForMessage(messages, 'auth_fail', 2000)
+    assert.ok(authFail, 'Should receive auth_fail for short token')
+    assert.equal(authFail.reason, 'invalid_token')
+
+    if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+      await Promise.race([
+        once(ws, 'close'),
+        new Promise(resolve => setTimeout(resolve, 1000))
+      ])
+    }
+    assert.notEqual(ws.readyState, WebSocket.OPEN, 'Connection should be closed')
+  })
+
+  it('rejects missing token field', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth' })
+
+    const authFail = await waitForMessage(messages, 'auth_fail', 2000)
+    assert.ok(authFail, 'Should receive auth_fail for undefined token')
+    assert.equal(authFail.reason, 'invalid_token')
+
+    if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+      await Promise.race([
+        once(ws, 'close'),
+        new Promise(resolve => setTimeout(resolve, 1000))
+      ])
+    }
+    assert.notEqual(ws.readyState, WebSocket.OPEN, 'Connection should be closed')
+  })
+
   it('tracks unauthenticated client before auth', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
