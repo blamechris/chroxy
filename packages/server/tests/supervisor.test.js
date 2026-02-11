@@ -374,18 +374,48 @@ describe('Supervisor', () => {
 
   describe('standby server', () => {
     it('starts standby server when child crashes', () => {
-      // Use a random high port to avoid EADDRINUSE
-      const port = 19800 + Math.floor(Math.random() * 200)
-      const { supervisor } = setup({ port })
+      const { supervisor } = setup()
+      supervisor._port = 0 // OS-assigned port (bypass constructor falsy-0 default)
       supervisor.startChild()
       supervisor.lastChild.simulateExit(1, null)
 
       assert.ok(supervisor._standbyServer !== null)
     })
 
+    it('serves restarting status on health endpoint', async () => {
+      const { supervisor } = setup()
+
+      // Force port 0 so the OS assigns an available port (bypass the falsy-0 default)
+      supervisor._port = 0
+
+      // Set metrics to verify they appear in the response
+      supervisor._metrics.totalRestarts = 3
+      supervisor._metrics.lastBackoffMs = 5000
+
+      // Start standby manually (avoids child crash path with its restart timers)
+      supervisor._startStandbyServer()
+      assert.ok(supervisor._standbyServer !== null)
+
+      // Wait for the server to start listening
+      await new Promise((resolve) => {
+        if (supervisor._standbyServer.listening) return resolve()
+        supervisor._standbyServer.on('listening', resolve)
+      })
+
+      // Issue a real HTTP GET and verify the health response
+      const addr = supervisor._standbyServer.address()
+      const res = await fetch(`http://127.0.0.1:${addr.port}/`)
+      const body = await res.json()
+
+      assert.equal(res.status, 200)
+      assert.equal(body.status, 'restarting')
+      assert.equal(body.metrics.totalRestarts, 3)
+      assert.equal(body.metrics.lastBackoffMs, 5000)
+    })
+
     it('stops standby server when child becomes ready', () => {
-      const port = 19800 + Math.floor(Math.random() * 200)
-      const { supervisor } = setup({ port })
+      const { supervisor } = setup()
+      supervisor._port = 0
 
       // Start standby manually
       supervisor._startStandbyServer()
