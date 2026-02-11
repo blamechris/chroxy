@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert } from 'react-native';
 import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient } from '../store/connection';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
@@ -25,6 +25,9 @@ export interface SettingsBarProps {
   connectedClients: ConnectedClient[];
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
+  pendingPermissionConfirm?: { mode: string; warning: string } | null;
+  onConfirmPermissionMode?: (mode: string) => void;
+  onCancelPermissionConfirm?: () => void;
 }
 
 // -- Helpers --
@@ -84,6 +87,9 @@ export function SettingsBar({
   connectedClients,
   setModel,
   setPermissionMode,
+  pendingPermissionConfirm,
+  onConfirmPermissionMode,
+  onCancelPermissionConfirm,
 }: SettingsBarProps) {
   // Elapsed time ticker — only runs when expanded with active agents
   const [now, setNow] = useState(Date.now());
@@ -102,6 +108,21 @@ export function SettingsBar({
     const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
     return () => sub.remove();
   }, []);
+
+  // Show confirmation dialog when server challenges auto permission mode
+  useEffect(() => {
+    if (!pendingPermissionConfirm) return;
+    const { mode, warning } = pendingPermissionConfirm;
+    Alert.alert(
+      'Enable Auto Mode?',
+      warning,
+      [
+        { text: 'Cancel', style: 'cancel', onPress: () => onCancelPermissionConfirm?.() },
+        { text: 'Enable', style: 'destructive', onPress: () => onConfirmPermissionMode?.(mode) },
+      ],
+      { cancelable: true, onDismiss: () => onCancelPermissionConfirm?.() },
+    );
+  }, [pendingPermissionConfirm, onConfirmPermissionMode, onCancelPermissionConfirm]);
 
   // Truncate working directory path for collapsed view
   let truncatedCwd: string | null = null;

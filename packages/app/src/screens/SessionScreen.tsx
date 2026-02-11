@@ -119,6 +119,8 @@ export function SessionScreen() {
     claudeStatus,
     setModel,
     setPermissionMode,
+    confirmPermissionMode,
+    cancelPermissionConfirm,
     sendPermissionResponse,
     sendUserQuestionResponse,
     markPromptAnswered,
@@ -147,6 +149,7 @@ export function SessionScreen() {
     return id && s.sessionStates[id] ? s.sessionStates[id].planAllowedPrompts : EMPTY_PROMPTS;
   });
   const connectedClients = useConnectionStore((s) => s.connectedClients);
+  const pendingPermissionConfirm = useConnectionStore((s) => s.pendingPermissionConfirm);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const serverErrors = useConnectionStore((s) => s.serverErrors);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
@@ -369,6 +372,9 @@ export function SessionScreen() {
           connectedClients={connectedClients}
           setModel={setModel}
           setPermissionMode={setPermissionMode}
+          pendingPermissionConfirm={pendingPermissionConfirm}
+          onConfirmPermissionMode={confirmPermissionMode}
+          onCancelPermissionConfirm={cancelPermissionConfirm}
         />
       )}
 

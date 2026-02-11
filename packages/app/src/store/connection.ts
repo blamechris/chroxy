@@ -227,6 +227,9 @@ interface ConnectionState {
   // Server errors forwarded over WebSocket (last 10)
   serverErrors: ServerError[];
 
+  // Pending auto permission mode confirmation from server
+  pendingPermissionConfirm: { mode: string; warning: string } | null;
+
   // View mode
   viewMode: 'chat' | 'terminal';
 
@@ -254,6 +257,8 @@ interface ConnectionState {
   markPromptAnswered: (messageId: string, answer: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
+  confirmPermissionMode: (mode: string) => void;
+  cancelPermissionConfirm: () => void;
   resize: (cols: number, rows: number) => void;
 
   // Session actions
@@ -980,6 +985,17 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       } else {
         set({ permissionMode: mode });
       }
+      // Clear pending confirm if mode change arrived (confirmation was accepted)
+      set({ pendingPermissionConfirm: null });
+      break;
+    }
+
+    case 'confirm_permission_mode': {
+      const confirmMode = typeof msg.mode === 'string' ? msg.mode : null;
+      const warning = typeof msg.warning === 'string' ? msg.warning : 'Are you sure?';
+      if (confirmMode) {
+        set({ pendingPermissionConfirm: { mode: confirmMode, warning } });
+      }
       break;
     }
 
@@ -1348,6 +1364,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectedClients: [],
   primaryClientId: null,
   serverErrors: [],
+  pendingPermissionConfirm: null,
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -1629,6 +1646,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       connectedClients: [],
       primaryClientId: null,
       serverErrors: [],
+      pendingPermissionConfirm: null,
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,
@@ -1810,6 +1828,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'set_permission_mode', mode }));
     }
+  },
+
+  confirmPermissionMode: (mode: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'set_permission_mode', mode, confirmed: true }));
+    }
+    set({ pendingPermissionConfirm: null });
+  },
+
+  cancelPermissionConfirm: () => {
+    set({ pendingPermissionConfirm: null });
   },
 
   resize: (cols, rows) => {

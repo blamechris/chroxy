@@ -140,6 +140,10 @@ export class WsServer {
     this._primaryClients = new Map() // sessionId -> clientId (last-writer-wins)
     this.pushManager = pushManager
 
+    // Auth rate limiting: track failed attempts per IP
+    this._authFailures = new Map() // ip -> { count, firstFailure, blockedUntil }
+    this._authCleanupInterval = null
+
     // Multi-session support: prefer sessionManager, fall back to single cliSession
     this.sessionManager = sessionManager || null
     this.defaultSessionId = defaultSessionId || null
@@ -223,8 +227,12 @@ export class WsServer {
       })
     })
 
-    this.wss.on('connection', (ws) => {
+    this.wss.on('connection', (ws, req) => {
       const clientId = uuidv4().slice(0, 8)
+      const ip = req.headers['cf-connecting-ip']
+        || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+        || req.socket.remoteAddress
+        || 'unknown'
       this.clients.set(ws, {
         id: clientId,
         authenticated: false,
@@ -232,6 +240,7 @@ export class WsServer {
         activeSessionId: null,
         isAlive: true,
         deviceInfo: null,
+        ip,
       })
 
       // Track pong responses for keepalive detection
@@ -316,6 +325,16 @@ export class WsServer {
         try { ws.ping() } catch {}
       }
     }, 30_000)
+
+    // Prune stale auth failure entries every 60s
+    this._authCleanupInterval = setInterval(() => {
+      const cutoff = Date.now() - 5 * 60 * 1000
+      for (const [ip, entry] of this._authFailures) {
+        if (entry.firstFailure < cutoff) {
+          this._authFailures.delete(ip)
+        }
+      }
+    }, 60_000)
 
     console.log(`[ws] Server listening on ${host || '0.0.0.0'}:${this.port} (${this.serverMode} mode)`)
   }
@@ -468,9 +487,23 @@ export class WsServer {
 
     // Auth must come first
     if (!client.authenticated) {
-      if (msg.type === 'auth' && (!this.authRequired || safeTokenCompare(msg.token, this.apiToken))) {
+      if (msg.type !== 'auth') return
+
+      // Check rate limit before processing auth
+      const ip = client.ip
+      const failure = this._authFailures.get(ip)
+      if (failure && failure.blockedUntil > Date.now()) {
+        console.warn(`[ws] Auth rate-limited for IP ${ip} (${failure.count} failures)`)
+        this._send(ws, { type: 'auth_fail', reason: 'rate_limited' })
+        ws.close()
+        return
+      }
+
+      if (!this.authRequired || safeTokenCompare(msg.token, this.apiToken)) {
         client.authenticated = true
         client.authTime = Date.now()
+        // Clear rate limit on successful auth
+        this._authFailures.delete(ip)
         // Extract optional device info from auth message
         if (msg.deviceInfo && typeof msg.deviceInfo === 'object') {
           client.deviceInfo = {
@@ -485,6 +518,15 @@ export class WsServer {
         this._broadcastClientJoined(client, ws)
         console.log(`[ws] Client ${client.id} authenticated`)
       } else {
+        // Track auth failure for rate limiting
+        const now = Date.now()
+        const existing = this._authFailures.get(ip) || { count: 0, firstFailure: now, blockedUntil: 0 }
+        existing.count++
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 60s
+        const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
+        existing.blockedUntil = now + backoff
+        this._authFailures.set(ip, existing)
+        console.warn(`[ws] Auth failure from IP ${ip} (attempt ${existing.count}, blocked for ${backoff}ms)`)
         this._send(ws, { type: 'auth_fail', reason: 'invalid_token' })
         ws.close()
       }
@@ -584,8 +626,19 @@ export class WsServer {
             if (entry.type === 'pty') {
               console.warn(`[ws] Rejected permission mode change on PTY session ${client.activeSessionId} from ${client.id}`)
               this._send(ws, { type: 'session_error', message: 'Cannot change permission mode on PTY sessions' })
+            } else if (msg.mode === 'auto' && !msg.confirmed) {
+              console.log(`[ws] Auto mode requested by ${client.id}, awaiting confirmation`)
+              this._send(ws, {
+                type: 'confirm_permission_mode',
+                mode: 'auto',
+                warning: 'Auto mode bypasses all permission checks. Claude will execute tools without asking.',
+              })
             } else {
-              console.log(`[ws] Permission mode change from ${client.id} on session ${client.activeSessionId}: ${msg.mode}`)
+              if (msg.mode === 'auto') {
+                console.log(`[ws] Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()}`)
+              } else {
+                console.log(`[ws] Permission mode change from ${client.id} on session ${client.activeSessionId}: ${msg.mode}`)
+              }
               entry.session.setPermissionMode(msg.mode)
               this._broadcastToSession(client.activeSessionId, { type: 'permission_mode_changed', mode: msg.mode })
             }
@@ -834,9 +887,22 @@ export class WsServer {
           typeof msg.mode === 'string' &&
           ALLOWED_PERMISSION_MODE_IDS.has(msg.mode)
         ) {
-          console.log(`[ws] Permission mode change from ${client.id}: ${msg.mode}`)
-          this.cliSession.setPermissionMode(msg.mode)
-          this._broadcast({ type: 'permission_mode_changed', mode: msg.mode })
+          if (msg.mode === 'auto' && !msg.confirmed) {
+            console.log(`[ws] Auto mode requested by ${client.id}, awaiting confirmation`)
+            this._send(ws, {
+              type: 'confirm_permission_mode',
+              mode: 'auto',
+              warning: 'Auto mode bypasses all permission checks. Claude will execute tools without asking.',
+            })
+          } else {
+            if (msg.mode === 'auto') {
+              console.log(`[ws] Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()}`)
+            } else {
+              console.log(`[ws] Permission mode change from ${client.id}: ${msg.mode}`)
+            }
+            this.cliSession.setPermissionMode(msg.mode)
+            this._broadcast({ type: 'permission_mode_changed', mode: msg.mode })
+          }
         } else {
           console.warn(`[ws] Rejected invalid permission mode from ${client.id}: ${JSON.stringify(msg.mode)}`)
         }
@@ -1519,6 +1585,10 @@ export class WsServer {
     if (this._pingInterval) {
       clearInterval(this._pingInterval)
       this._pingInterval = null
+    }
+    if (this._authCleanupInterval) {
+      clearInterval(this._authCleanupInterval)
+      this._authCleanupInterval = null
     }
 
     // Auto-deny any pending permission requests
