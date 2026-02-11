@@ -81,6 +81,16 @@ export function FolderBrowser({ visible, initialPath, onSelectPath, onClose }: F
     setLoading(true);
     setError(null);
     requestDirectoryListing(currentPath);
+
+    // Timeout: if server doesn't respond within 8s, show error
+    const timer = setTimeout(() => {
+      if (activeRequestRef.current === id) {
+        activeRequestRef.current = -1;
+        setLoading(false);
+        setError('Request timed out');
+      }
+    }, 8000);
+    return () => clearTimeout(timer);
   }, [visible, currentPath, requestDirectoryListing]);
 
   const navigateTo = useCallback((path: string) => {

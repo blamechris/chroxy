@@ -7,6 +7,7 @@ import {
   useConnectionStore,
   ChatMessage,
   ConnectedClient,
+  DirectoryListing,
   _testQueueInternals,
   _testMessageHandler,
 } from '../../store/connection';
@@ -23,6 +24,7 @@ beforeEach(() => {
     connectionPhase: 'disconnected',
     sessionStates: {},
     activeSessionId: null,
+    _directoryListingCallback: null,
   });
 });
 
@@ -783,6 +785,122 @@ describe('WS message handler (direct)', () => {
       // Should not throw
       _testMessageHandler.handle({ type: 'auth_ok', clientId: 'x' });
       expect(useConnectionStore.getState().connectionPhase).toBe('disconnected');
+    });
+  });
+
+  describe('directory_listing', () => {
+    it('invokes callback with correct data shape', () => {
+      let received: DirectoryListing | null = null;
+      useConnectionStore.getState().setDirectoryListingCallback((listing) => {
+        received = listing;
+      });
+
+      _testMessageHandler.handle({
+        type: 'directory_listing',
+        path: '/Users/test/Projects',
+        parentPath: '/Users/test',
+        entries: [{ name: 'chroxy', isDirectory: true }],
+        error: null,
+      });
+
+      expect(received).not.toBeNull();
+      expect(received!.path).toBe('/Users/test/Projects');
+      expect(received!.parentPath).toBe('/Users/test');
+      expect(received!.entries).toEqual([{ name: 'chroxy', isDirectory: true }]);
+      expect(received!.error).toBeNull();
+    });
+
+    it('does not invoke callback when null', () => {
+      // Ensure no callback is set
+      useConnectionStore.getState().setDirectoryListingCallback(null);
+
+      // Should not throw
+      _testMessageHandler.handle({
+        type: 'directory_listing',
+        path: '/tmp',
+        parentPath: '/',
+        entries: [],
+        error: null,
+      });
+    });
+
+    it('coerces nullable path from server error response', () => {
+      let received: DirectoryListing | null = null;
+      useConnectionStore.getState().setDirectoryListingCallback((listing) => {
+        received = listing;
+      });
+
+      _testMessageHandler.handle({
+        type: 'directory_listing',
+        path: null,
+        parentPath: null,
+        entries: [],
+        error: 'Directory not found',
+      });
+
+      expect(received).not.toBeNull();
+      expect(received!.path).toBeNull();
+      expect(received!.error).toBe('Directory not found');
+    });
+
+    it('guards entries as array', () => {
+      let received: DirectoryListing | null = null;
+      useConnectionStore.getState().setDirectoryListingCallback((listing) => {
+        received = listing;
+      });
+
+      _testMessageHandler.handle({
+        type: 'directory_listing',
+        path: '/tmp',
+        parentPath: '/',
+        entries: 'not-an-array',
+        error: null,
+      });
+
+      expect(received).not.toBeNull();
+      expect(received!.entries).toEqual([]);
+    });
+
+    it('guards error as string', () => {
+      let received: DirectoryListing | null = null;
+      useConnectionStore.getState().setDirectoryListingCallback((listing) => {
+        received = listing;
+      });
+
+      _testMessageHandler.handle({
+        type: 'directory_listing',
+        path: '/tmp',
+        parentPath: '/',
+        entries: [],
+        error: 42,
+      });
+
+      expect(received).not.toBeNull();
+      expect(received!.error).toBeNull();
+    });
+
+    it('callback is cleared on disconnect', () => {
+      let callCount = 0;
+      useConnectionStore.getState().setDirectoryListingCallback(() => {
+        callCount++;
+      });
+
+      useConnectionStore.getState().disconnect();
+
+      _testMessageHandler.setContext({
+        url: 'wss://test', token: 'tok', isReconnect: false,
+        silent: false, socket: mockSocket,
+      });
+
+      _testMessageHandler.handle({
+        type: 'directory_listing',
+        path: '/tmp',
+        parentPath: '/',
+        entries: [],
+        error: null,
+      });
+
+      expect(callCount).toBe(0);
     });
   });
 });
