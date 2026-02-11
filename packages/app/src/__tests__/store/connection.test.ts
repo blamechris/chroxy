@@ -994,7 +994,7 @@ describe('resize store action', () => {
   it('sends resize message over WebSocket', () => {
     const sent: string[] = [];
     const mockSocket = {
-      readyState: WebSocket.OPEN,
+      readyState: 1,
       send: (data: string) => sent.push(data),
     } as unknown as WebSocket;
 
