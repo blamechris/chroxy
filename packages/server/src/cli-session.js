@@ -1,47 +1,11 @@
 import { spawn } from 'child_process'
 import { EventEmitter } from 'events'
 import { createInterface } from 'readline'
-import { readFileSync, writeFileSync, mkdirSync } from 'fs'
-import { resolve, dirname } from 'path'
-import { fileURLToPath } from 'url'
-import { homedir } from 'os'
 import { resolveModelId } from './models.js'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
+import { createPermissionHookManager } from './permission-hook.js'
 
 // Max accumulated size for tool_use input_json_delta chunks (UTF-16 code units, ~256KB for ASCII)
 const MAX_TOOL_INPUT_LENGTH = 262144
-
-// Module-level lock for settings.json read-modify-write operations.
-// Multiple CliSession instances starting/stopping simultaneously can
-// corrupt each other's writes without serialization.
-let _settingsLock = Promise.resolve()
-let _settingsLockHeld = 0
-
-function withSettingsLock(fn) {
-  // Log only when there is contention (another write is already in-flight)
-  if (_settingsLockHeld > 0) {
-    console.log('[config] Settings write queued (lock contended)')
-  }
-
-  _settingsLockHeld++
-
-  const wrapped = () => {
-    if (_settingsLockHeld > 1) {
-      console.log('[config] Settings write proceeding (lock acquired)')
-    }
-    return Promise.resolve(fn()).finally(() => {
-      _settingsLockHeld--
-    })
-  }
-
-  // Serialize regardless of success/failure — then(wrapped, wrapped) ensures
-  // wrapped runs after the previous operation completes
-  const next = _settingsLock.then(wrapped, wrapped)
-  _settingsLock = next.catch(() => {})
-  return next
-}
 
 /**
  * Manages a persistent Claude Code CLI session using headless mode.
@@ -97,10 +61,8 @@ export class CliSession extends EventEmitter {
     this._resultTimeout = null
     this._interruptTimer = null
 
-    // Hook registration retry state
-    this._hookRetryCount = 0
-    this._hookRetryTimer = null
-    this._hookRegistered = false
+    // Hook manager (shared module)
+    this._hookManager = (this._port) ? createPermissionHookManager(this) : null
   }
 
   get sessionId() {
@@ -122,8 +84,8 @@ export class CliSession extends EventEmitter {
    */
   start() {
     // Register permission hook before starting the process (only once, not on respawn)
-    if (this._port && this._respawnCount === 0) {
-      this._registerPermissionHook()
+    if (this._hookManager && this._respawnCount === 0) {
+      this._hookManager.register()
     }
 
     const args = [
@@ -772,158 +734,16 @@ export class CliSession extends EventEmitter {
     }, 5000)
   }
 
-  /**
-   * Register the Chroxy permission hook in ~/.claude/settings.json.
-   * Adds a PreToolUse hook that forwards all tool requests to our HTTP endpoint.
-   *
-   * Serialized via module-level lock to prevent concurrent write races
-   * when multiple sessions start simultaneously.
-   */
-  _registerPermissionHook() {
-    return withSettingsLock(() => this._registerPermissionHookSync())
-  }
-
-  _registerPermissionHookSync() {
-    try {
-      const hookScript = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
-      const settingsPath = resolve(homedir(), '.claude', 'settings.json')
-
-      let settings = {}
-      try {
-        settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
-      } catch (err) {
-        if (err.code === 'ENOENT') {
-          // File doesn't exist — start fresh
-          mkdirSync(resolve(homedir(), '.claude'), { recursive: true })
-        } else {
-          // File exists but contains invalid JSON — schedule retry
-          const errMsg = `Cannot parse ${settingsPath}: ${err.message}. Will retry hook registration.`
-          console.error(`[cli-session] ${errMsg}`)
-          this.emit('error', { message: errMsg })
-          this._scheduleHookRetry()
-          return
-        }
-      }
-
-      if (!settings.hooks) settings.hooks = {}
-      if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = []
-
-      // Remove any existing Chroxy hook entry
-      settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
-        (entry) => !entry._chroxy
-      )
-
-      // Add our hook — script reads CHROXY_PORT and CHROXY_TOKEN from env vars
-      // (inherited by the spawned Claude process). Non-Chroxy sessions don't
-      // have these vars, so the hook falls through to normal permission prompts.
-      settings.hooks.PreToolUse.push({
-        _chroxy: true,
-        matcher: '',  // empty string matches all tools
-        hooks: [
-          {
-            type: 'command',
-            command: hookScript,
-            timeout: 300,
-          },
-        ],
-      })
-
-      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
-      console.log('[cli-session] Registered permission hook in ~/.claude/settings.json')
-
-      // Clear any pending retry timer
-      if (this._hookRetryTimer) {
-        clearTimeout(this._hookRetryTimer)
-        this._hookRetryTimer = null
-      }
-
-      this._hookRegistered = true
-      this._hookRetryCount = 0
-    } catch (err) {
-      const errMsg = `Failed to register permission hook: ${err.message}. Will retry hook registration.`
-      console.error(`[cli-session] ${errMsg}`)
-      this.emit('error', { message: errMsg })
-      this._scheduleHookRetry()
-    }
-  }
-
-  /**
-   * Schedule a retry of hook registration with exponential backoff.
-   * Delays: 2s, 5s, 10s. Max 3 attempts.
-   */
-  _scheduleHookRetry() {
-    if (this._destroying || this._hookRegistered) return
-
-    // If a retry is already scheduled, don't schedule another one
-    if (this._hookRetryTimer) return
-
-    this._hookRetryCount++
-    if (this._hookRetryCount > 3) {
-      const errMsg = 'Hook registration failed after 3 attempts. Please check ~/.claude/settings.json and restart the server. Permissions will not work until this is fixed.'
-      console.error(`[cli-session] ${errMsg}`)
-      this.emit('error', { message: errMsg })
-      return
-    }
-
-    const delays = [2000, 5000, 10000]
-    const delay = delays[this._hookRetryCount - 1]
-    console.log(`[cli-session] Hook registration failed, retrying in ${delay / 1000}s (attempt ${this._hookRetryCount}/3)`)
-
-    this._hookRetryTimer = setTimeout(() => {
-      this._hookRetryTimer = null
-      if (!this._destroying && !this._hookRegistered) {
-        this._registerPermissionHook()
-      }
-    }, delay)
-  }
-
-  /**
-   * Remove the Chroxy permission hook from ~/.claude/settings.json.
-   *
-   * Serialized via module-level lock to prevent concurrent write races
-   * when multiple sessions stop simultaneously.
-   */
-  _unregisterPermissionHook() {
-    return withSettingsLock(() => this._unregisterPermissionHookSync())
-  }
-
-  _unregisterPermissionHookSync() {
-    try {
-      const settingsPath = resolve(homedir(), '.claude', 'settings.json')
-      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
-
-      if (settings.hooks?.PreToolUse) {
-        settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
-          (entry) => !entry._chroxy
-        )
-        // Clean up empty arrays
-        if (settings.hooks.PreToolUse.length === 0) {
-          delete settings.hooks.PreToolUse
-        }
-        if (Object.keys(settings.hooks).length === 0) {
-          delete settings.hooks
-        }
-        writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
-        console.log('[cli-session] Unregistered permission hook from ~/.claude/settings.json')
-      }
-    } catch (err) {
-      console.error(`[cli-session] Failed to unregister permission hook: ${err.message}`)
-    }
-  }
-
   /** Clean up resources */
   destroy() {
     this._destroying = true
 
-    // Clean up hook retry timer
-    if (this._hookRetryTimer) {
-      clearTimeout(this._hookRetryTimer)
-      this._hookRetryTimer = null
-    }
-
-    // Remove permission hook from settings
-    if (this._port) {
-      this._unregisterPermissionHook()
+    // Clean up permission hook — unregister first (fire-and-forget: the hook
+    // falls through harmlessly when env vars are absent, so best-effort is fine),
+    // then destroy to cancel any pending retry timers.
+    if (this._hookManager) {
+      this._hookManager.unregister()
+      this._hookManager.destroy()
     }
 
     if (this._respawnTimer) {

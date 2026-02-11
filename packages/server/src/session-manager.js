@@ -292,6 +292,8 @@ export class SessionManager extends EventEmitter {
       tmuxSession,
       cols: cols || 120,
       rows: rows || 40,
+      port: this._port,
+      apiToken: this._apiToken,
     })
 
     const entry = {
