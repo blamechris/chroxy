@@ -31,7 +31,7 @@ const MAX_TOOL_INPUT_LENGTH = 262144
  *   plan_ready       { allowedPrompts }
  */
 export class CliSession extends EventEmitter {
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode } = {}) {
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.allowedTools = allowedTools || []
@@ -62,7 +62,7 @@ export class CliSession extends EventEmitter {
     this._interruptTimer = null
 
     // Hook manager (shared module)
-    this._hookManager = (this._port) ? createPermissionHookManager(this) : null
+    this._hookManager = (this._port) ? createPermissionHookManager(this, { settingsPath }) : null
   }
 
   get sessionId() {
