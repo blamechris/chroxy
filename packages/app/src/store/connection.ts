@@ -220,7 +220,9 @@ interface ConnectionState {
   claudeStatus: ClaudeStatus | null;
 
   // Connected clients (multi-client awareness)
+  myClientId: string | null;
   connectedClients: ConnectedClient[];
+  primaryClientId: string | null;
 
   // Server errors forwarded over WebSocket (last 10)
   serverErrors: ServerError[];
@@ -562,7 +564,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   availablePermissionModes: [],
   discoveredSessions: null,
   claudeStatus: null,
+  myClientId: null,
   connectedClients: [],
+  primaryClientId: null,
   serverErrors: [],
   contextUsage: null,
   lastResultCost: null,
@@ -793,6 +797,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             serverVersion: authServerVersion,
             serverCommit: authServerCommit,
             streamingMessageId: null,
+            myClientId: myClientId,
             connectedClients: clients,
           };
           if (isReconnect) {
@@ -1435,6 +1440,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             updateSession(primarySessionId, () => ({
               primaryClientId,
             }));
+          } else {
+            // Legacy/single-session mode: store at flat state level
+            set({ primaryClientId });
           }
           break;
         }
@@ -1575,7 +1583,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       availablePermissionModes: [],
       discoveredSessions: null,
       claudeStatus: null,
+      myClientId: null,
       connectedClients: [],
+      primaryClientId: null,
       serverErrors: [],
       contextUsage: null,
       lastResultCost: null,

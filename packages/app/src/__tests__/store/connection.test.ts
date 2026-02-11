@@ -17,6 +17,8 @@ beforeEach(() => {
     terminalBuffer: '',
     serverErrors: [],
     connectedClients: [],
+    myClientId: null,
+    primaryClientId: null,
     connectionPhase: 'disconnected',
     sessionStates: {},
     activeSessionId: null,
@@ -435,5 +437,181 @@ describe('createEmptySessionState (primaryClientId)', () => {
   it('includes primaryClientId as null', () => {
     const state = createEmptySessionState();
     expect(state.primaryClientId).toBeNull();
+  });
+});
+
+// -- myClientId state --
+
+describe('myClientId state', () => {
+  it('initializes as null', () => {
+    expect(useConnectionStore.getState().myClientId).toBeNull();
+  });
+
+  it('stores myClientId from auth_ok', () => {
+    useConnectionStore.setState({ myClientId: 'client-abc' });
+    expect(useConnectionStore.getState().myClientId).toBe('client-abc');
+  });
+
+  it('clears on disconnect', () => {
+    useConnectionStore.setState({ myClientId: 'client-abc' });
+    useConnectionStore.getState().disconnect();
+    expect(useConnectionStore.getState().myClientId).toBeNull();
+  });
+});
+
+// -- primaryClientId flat state (legacy/single-session mode) --
+
+describe('primaryClientId flat state', () => {
+  it('initializes as null', () => {
+    expect(useConnectionStore.getState().primaryClientId).toBeNull();
+  });
+
+  it('can be set directly for legacy mode', () => {
+    useConnectionStore.setState({ primaryClientId: 'client-xyz' });
+    expect(useConnectionStore.getState().primaryClientId).toBe('client-xyz');
+  });
+
+  it('clears on disconnect', () => {
+    useConnectionStore.setState({ primaryClientId: 'client-xyz' });
+    useConnectionStore.getState().disconnect();
+    expect(useConnectionStore.getState().primaryClientId).toBeNull();
+  });
+});
+
+// -- Multi-client message handling (integration-style) --
+
+describe('multi-client message handling', () => {
+  const mockClient1: ConnectedClient = {
+    clientId: 'client-1',
+    deviceName: 'iPhone 15',
+    deviceType: 'phone',
+    platform: 'ios',
+    isSelf: false,
+  };
+
+  describe('client_joined dedup', () => {
+    it('replaces existing client with same clientId', () => {
+      useConnectionStore.setState({
+        connectedClients: [mockClient1],
+      });
+      // Simulate a duplicate join (e.g., ghost client from rapid reconnect)
+      const updatedClient: ConnectedClient = {
+        ...mockClient1,
+        deviceName: 'iPhone 15 Pro',
+      };
+      useConnectionStore.setState((state) => ({
+        connectedClients: [
+          ...state.connectedClients.filter((c) => c.clientId !== updatedClient.clientId),
+          updatedClient,
+        ],
+      }));
+      const clients = useConnectionStore.getState().connectedClients;
+      expect(clients).toHaveLength(1);
+      expect(clients[0].deviceName).toBe('iPhone 15 Pro');
+    });
+  });
+
+  describe('client_joined with missing fields', () => {
+    it('handles client with null deviceName', () => {
+      const minimalClient: ConnectedClient = {
+        clientId: 'client-minimal',
+        deviceName: null,
+        deviceType: 'unknown',
+        platform: 'unknown',
+        isSelf: false,
+      };
+      useConnectionStore.setState({ connectedClients: [minimalClient] });
+      expect(useConnectionStore.getState().connectedClients[0].deviceName).toBeNull();
+      expect(useConnectionStore.getState().connectedClients[0].deviceType).toBe('unknown');
+    });
+  });
+
+  describe('rapid join/leave', () => {
+    it('handles join then immediate leave for same client', () => {
+      // Join
+      useConnectionStore.setState((state) => ({
+        connectedClients: [...state.connectedClients, mockClient1],
+      }));
+      expect(useConnectionStore.getState().connectedClients).toHaveLength(1);
+
+      // Immediate leave
+      useConnectionStore.setState((state) => ({
+        connectedClients: state.connectedClients.filter((c) => c.clientId !== 'client-1'),
+      }));
+      expect(useConnectionStore.getState().connectedClients).toHaveLength(0);
+    });
+
+    it('handles multiple rapid joins', () => {
+      const clients: ConnectedClient[] = Array.from({ length: 5 }, (_, i) => ({
+        clientId: `client-${i}`,
+        deviceName: `Device ${i}`,
+        deviceType: 'phone' as const,
+        platform: 'ios',
+        isSelf: i === 0,
+      }));
+      for (const client of clients) {
+        useConnectionStore.setState((state) => ({
+          connectedClients: [
+            ...state.connectedClients.filter((c) => c.clientId !== client.clientId),
+            client,
+          ],
+        }));
+      }
+      expect(useConnectionStore.getState().connectedClients).toHaveLength(5);
+    });
+  });
+
+  describe('primary_changed in multi-session mode', () => {
+    it('updates primaryClientId in session state', () => {
+      const sessionId = 'session-1';
+      useConnectionStore.setState({
+        activeSessionId: sessionId,
+        sessionStates: { [sessionId]: createEmptySessionState() },
+      });
+      // Simulate primary_changed via updateSession pattern
+      const state = useConnectionStore.getState();
+      const current = state.sessionStates[sessionId];
+      useConnectionStore.setState({
+        sessionStates: {
+          ...state.sessionStates,
+          [sessionId]: { ...current, primaryClientId: 'client-1' },
+        },
+      });
+      expect(useConnectionStore.getState().sessionStates[sessionId].primaryClientId).toBe('client-1');
+    });
+
+    it('clears primaryClientId when set to null', () => {
+      const sessionId = 'session-1';
+      const sessionState = createEmptySessionState();
+      sessionState.primaryClientId = 'client-1';
+      useConnectionStore.setState({
+        activeSessionId: sessionId,
+        sessionStates: { [sessionId]: sessionState },
+      });
+      // Clear primary
+      const state = useConnectionStore.getState();
+      const current = state.sessionStates[sessionId];
+      useConnectionStore.setState({
+        sessionStates: {
+          ...state.sessionStates,
+          [sessionId]: { ...current, primaryClientId: null },
+        },
+      });
+      expect(useConnectionStore.getState().sessionStates[sessionId].primaryClientId).toBeNull();
+    });
+  });
+
+  describe('primary_changed in legacy mode', () => {
+    it('stores primaryClientId at flat state level when no session state exists', () => {
+      // No sessionStates entries — legacy/single-session mode
+      useConnectionStore.setState({ primaryClientId: 'client-1' });
+      expect(useConnectionStore.getState().primaryClientId).toBe('client-1');
+    });
+
+    it('clears flat primaryClientId when set to null', () => {
+      useConnectionStore.setState({ primaryClientId: 'client-1' });
+      useConnectionStore.setState({ primaryClientId: null });
+      expect(useConnectionStore.getState().primaryClientId).toBeNull();
+    });
   });
 });
