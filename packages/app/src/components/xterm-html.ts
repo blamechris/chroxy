@@ -122,6 +122,9 @@ export function buildXtermHtml(): string {
       // Ignore malformed messages
     }
   }
+
+  // Expose handleMsg globally so injectJavaScript can call it from RN
+  window.handleMsg = handleMsg;
 })();
 </script>
 </body>

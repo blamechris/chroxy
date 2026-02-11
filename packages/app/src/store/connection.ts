@@ -1821,6 +1821,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   clearTerminalBuffer: () => {
     set({ terminalBuffer: '', terminalRawBuffer: '' });
+    if (_terminalWriteTimer) {
+      clearTimeout(_terminalWriteTimer);
+      _terminalWriteTimer = null;
+    }
+    _pendingTerminalWrites = '';
   },
 
   setTerminalWriteCallback: (cb) => {
