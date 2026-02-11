@@ -37,6 +37,8 @@ export class PtyManager extends EventEmitter {
     this.sessionName = config.sessionName || "claude-code";
     this.shellCmd = config.shell || process.env.SHELL || "/bin/zsh";
     this.resume = config.resume || false;
+    this.port = config.port || null;
+    this.apiToken = config.apiToken || null;
     this.ptyProcess = null;
     this.cols = config.cols || 120;
     this.rows = config.rows || 40;
@@ -83,6 +85,8 @@ export class PtyManager extends EventEmitter {
           TERM: "xterm-256color",
           FORCE_COLOR: "1",
           COLORTERM: "truecolor",
+          ...(this.port ? { CHROXY_PORT: String(this.port) } : {}),
+          ...(this.apiToken ? { CHROXY_TOKEN: this.apiToken } : {}),
         },
       });
     } catch (err) {

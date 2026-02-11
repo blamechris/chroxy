@@ -845,6 +845,14 @@ export class WsServer {
         this.ptyManager.resize(msg.cols, msg.rows)
         break
 
+      case 'permission_response': {
+        const { requestId, decision } = msg
+        if (requestId && decision) {
+          this._resolvePermission(requestId, decision)
+        }
+        break
+      }
+
       case 'mode':
         // Switch between terminal and chat view
         if (msg.mode === 'terminal' || msg.mode === 'chat') {

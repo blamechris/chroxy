@@ -18,11 +18,13 @@ import { OutputParser } from './output-parser.js'
  *   raw          data (string)  — raw terminal data for terminal view
  */
 export class PtySession extends EventEmitter {
-  constructor({ tmuxSession, cols, rows }) {
+  constructor({ tmuxSession, cols, rows, port, apiToken }) {
     super()
     this.tmuxSession = tmuxSession
     this._cols = cols || 120
     this._rows = rows || 40
+    this._port = port || null
+    this._apiToken = apiToken || null
     this._ptyManager = null
     this._outputParser = null
     this._isReady = false
@@ -51,6 +53,8 @@ export class PtySession extends EventEmitter {
       resume: true, // always attach, never create
       cols: this._cols,
       rows: this._rows,
+      port: this._port,
+      apiToken: this._apiToken,
     })
 
     // For attached sessions, skip the 5s grace period — Claude is already running.

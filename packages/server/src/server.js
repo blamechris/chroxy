@@ -1,9 +1,11 @@
+import { EventEmitter } from "events";
 import { PtyManager } from "./pty-manager.js";
 import { OutputParser } from "./output-parser.js";
 import { WsServer } from "./ws-server.js";
 import { TunnelManager } from "./tunnel.js";
 import { waitForTunnel } from "./tunnel-check.js";
 import { wireTunnelEvents } from "./tunnel-events.js";
+import { createPermissionHookManager } from "./permission-hook.js";
 import qrcode from "qrcode-terminal";
 
 /**
@@ -26,14 +28,24 @@ export async function startServer(config) {
   console.log("╚════════════════════════════════════════╝");
   console.log("");
 
-  // 1. Start the PTY / tmux session
+  // 1. Register permission hook (reuses CLI mode's hook infrastructure)
+  const hookEmitter = new EventEmitter();
+  hookEmitter.on('error', ({ message }) => {
+    console.error(`[server] Permission hook error: ${message}`);
+  });
+  const hookManager = createPermissionHookManager(hookEmitter);
+  hookManager.register();
+
+  // 2. Start the PTY / tmux session
   const ptyManager = new PtyManager({
     sessionName: config.tmuxSession || process.env.TMUX_SESSION || "claude-code",
     shell: config.shell || process.env.SHELL_CMD,
     resume: config.resume || false,
+    port: PORT,
+    apiToken: API_TOKEN,
   });
 
-  // 2. Set up the output parser pipeline
+  // 3. Set up the output parser pipeline
   const outputParser = new OutputParser();
 
   // Wire PTY output into the parser
@@ -64,7 +76,7 @@ export async function startServer(config) {
     setTimeout(() => ptyManager.start(), 2000);
   });
 
-  // 3. Start the WebSocket server
+  // 4. Start the WebSocket server
   const wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
@@ -73,12 +85,12 @@ export async function startServer(config) {
   });
   wsServer.start();
 
-  // 4. Start the Cloudflare tunnel
+  // 5. Start the Cloudflare tunnel
   const tunnel = new TunnelManager({ port: PORT });
 
   const { wsUrl, httpUrl } = await tunnel.start();
 
-  // 5. Wire up tunnel lifecycle events (before waitForTunnel to catch early failures)
+  // 6. Wire up tunnel lifecycle events (before waitForTunnel to catch early failures)
   let currentWsUrl = wsUrl
 
   wireTunnelEvents(tunnel, wsServer)
@@ -108,10 +120,10 @@ export async function startServer(config) {
 
 
 
-  // 6. Wait for tunnel to be fully routable (DNS propagation)
+  // 7. Wait for tunnel to be fully routable (DNS propagation)
   await waitForTunnel(httpUrl);
 
-  // 7. Start the PTY (do this last so tunnel is ready)
+  // 8. Start the PTY (do this last so tunnel is ready)
   await ptyManager.start();
 
   // Generate connection info for the app
@@ -128,6 +140,7 @@ export async function startServer(config) {
   // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`\n[${signal}] Shutting down...`);
+    hookManager.destroy();
     ptyManager.destroy();
     wsServer.close();
     await tunnel.stop();
