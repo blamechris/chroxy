@@ -1,4 +1,4 @@
-import { describe, it, afterEach, beforeEach, mock } from 'node:test'
+import { describe, it, afterEach, mock } from 'node:test'
 import assert from 'node:assert'
 import { EventEmitter } from 'events'
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs'
