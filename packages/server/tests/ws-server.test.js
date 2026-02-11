@@ -316,6 +316,54 @@ describe('WsServer GET /version auth', () => {
   })
 })
 
+describe('WsServer GET /health response shape', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('returns status, mode, hostname, and version fields', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-health-test',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/health`)
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(body.status, 'ok')
+    assert.equal(typeof body.mode, 'string')
+    assert.equal(typeof body.hostname, 'string')
+    assert.ok(body.hostname.length > 0, 'hostname should be non-empty')
+    assert.equal(typeof body.version, 'string')
+    assert.ok(body.version.length > 0, 'version should be non-empty')
+  })
+
+  it('returns same shape for GET / as GET /health', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-health-test',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const healthRes = await fetch(`http://127.0.0.1:${port}/health`)
+    const rootRes = await fetch(`http://127.0.0.1:${port}/`)
+    const healthBody = await healthRes.json()
+    const rootBody = await rootRes.json()
+    assert.deepEqual(Object.keys(healthBody).sort(), Object.keys(rootBody).sort())
+    assert.equal(healthBody.status, rootBody.status)
+  })
+})
+
 describe('WsServer POST /permission with authRequired: false', () => {
   let server
 
