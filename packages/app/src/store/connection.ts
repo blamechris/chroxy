@@ -1382,7 +1382,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             isSelf: false,
           };
           set((state) => ({
-            connectedClients: [...state.connectedClients, newClient],
+            connectedClients: [...state.connectedClients.filter((c) => c.clientId !== newClient.clientId), newClient],
           }));
           // Add system message
           const deviceLabel = newClient.deviceName || 'A device';
