@@ -150,6 +150,7 @@ export function SessionScreen() {
   });
   const connectedClients = useConnectionStore((s) => s.connectedClients);
   const pendingPermissionConfirm = useConnectionStore((s) => s.pendingPermissionConfirm);
+  const customAgents = useConnectionStore((s) => s.customAgents);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const serverErrors = useConnectionStore((s) => s.serverErrors);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
@@ -311,6 +312,11 @@ export function SessionScreen() {
     inputRef.current?.focus();
   }, []);
 
+  const handleInvokeAgent = useCallback((agentName: string) => {
+    setInputText(`@${agentName} `);
+    inputRef.current?.focus();
+  }, []);
+
   // Check if Enter key should send based on current mode and settings
   const enterToSend = viewMode === 'chat'
     ? inputSettings.chatEnterToSend
@@ -399,6 +405,8 @@ export function SessionScreen() {
           isIdle={isIdle}
           activeAgents={activeAgents}
           connectedClients={connectedClients}
+          customAgents={customAgents}
+          onInvokeAgent={handleInvokeAgent}
           setModel={setModel}
           setPermissionMode={setPermissionMode}
           pendingPermissionConfirm={pendingPermissionConfirm}
