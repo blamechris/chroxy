@@ -70,7 +70,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'mode',      mode: 'terminal'|'chat' }   — switch view mode
  *   { type: 'interrupt' }                             — interrupt active session
  *   { type: 'set_model', model: '...' }              — change model on active session
- *   { type: 'set_permission_mode', mode: '...' }     — change permission mode on active session
+ *   { type: 'set_permission_mode', mode: '...', confirmed? } — change permission mode (confirmed: true required for 'auto')
  *   { type: 'permission_response', requestId, decision } — respond to permission prompt
  *   { type: 'list_sessions' }                         — request session list
  *   { type: 'switch_session', sessionId }             — switch to a different session
@@ -100,6 +100,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'model_changed', model: '...' }          — active model updated
  *   { type: 'available_models', models: [...] }       — models the server accepts
  *   { type: 'permission_request', requestId, tool, description, input } — permission prompt
+ *   { type: 'confirm_permission_mode', mode, warning } — server challenges auto mode (client must re-send with confirmed: true)
  *   { type: 'permission_mode_changed', mode: '...' } — permission mode updated
  *   { type: 'available_permission_modes', modes: [...] } — permission modes
  *   { type: 'session_list', sessions: [...] }         — all sessions
