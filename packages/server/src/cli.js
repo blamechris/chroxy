@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, chmodSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
@@ -81,8 +81,9 @@ program
       shell: process.env.SHELL || '/bin/zsh',
     }
 
-    // Write config
+    // Write config with restricted permissions (chmod handles existing files)
     writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 })
+    chmodSync(CONFIG_FILE, 0o600)
 
     console.log('\n✅ Configuration saved to:', CONFIG_FILE)
     console.log('\n📱 Your API token (keep this secret):')
@@ -345,6 +346,7 @@ tunnelCmd
     config.tunnelHostname = hostname
 
     writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 })
+    chmodSync(CONFIG_FILE, 0o600)
 
     console.log('✅ Configuration saved to:', CONFIG_FILE)
     console.log('')
