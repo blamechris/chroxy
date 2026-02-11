@@ -2701,6 +2701,7 @@ describe('primary client tracking', () => {
     assert.equal(primaryMsg.sessionId, 'sess-1', 'primary_changed should include sessionId')
 
     client1.ws.close()
+    await new Promise(r => setTimeout(r, 50))
   })
 
   it('does not re-broadcast primary_changed if client is already primary', async () => {
@@ -2735,6 +2736,7 @@ describe('primary client tracking', () => {
     assert.equal(primaryMsgs2.length, 0, 'Second input from same client should NOT trigger primary_changed')
 
     ws.close()
+    await new Promise(r => setTimeout(r, 50))
   })
 
   it('clears primary when primary client disconnects', async () => {
@@ -2775,5 +2777,6 @@ describe('primary client tracking', () => {
     assert.equal(primaryMsg.sessionId, 'sess-1', 'Should include sessionId')
 
     client2.ws.close()
+    await new Promise(r => setTimeout(r, 50))
   })
 })
