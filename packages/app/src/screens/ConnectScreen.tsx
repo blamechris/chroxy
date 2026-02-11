@@ -64,6 +64,7 @@ export function ConnectScreen() {
   const [scanning, setScanning] = useState(false);
   const [discoveredServers, setDiscoveredServers] = useState<DiscoveredServer[]>([]);
   const [scanProgress, setScanProgress] = useState(0);
+  const [scanPort, setScanPort] = useState('8765');
   const scanAbortRef = useRef<AbortController | null>(null);
 
   const connect = useConnectionStore((state) => state.connect);
@@ -187,7 +188,7 @@ export function ConnectScreen() {
       }
 
       const subnet = deviceIp.split('.').slice(0, 3).join('.');
-      const port = 8765;
+      const port = parseInt(scanPort, 10) || 8765;
       const batchSize = 30;
       let scanned = 0;
 
@@ -237,7 +238,7 @@ export function ConnectScreen() {
       setScanProgress(1);
       setScanning(false);
     }
-  }, [scanning]);
+  }, [scanning, scanPort]);
 
   const handleSelectDiscovered = (server: DiscoveredServer) => {
     setUrl(`ws://${server.ip}:${server.port}`);
@@ -326,10 +327,11 @@ export function ConnectScreen() {
       </TouchableOpacity>
 
       {/* LAN Discovery */}
-      <TouchableOpacity
-        style={[styles.lanButton, scanning && styles.lanButtonScanning]}
-        onPress={handleScanLAN}
-      >
+      <View style={styles.lanRow}>
+        <TouchableOpacity
+          style={[styles.lanButton, styles.lanButtonFlex, scanning && styles.lanButtonScanning]}
+          onPress={handleScanLAN}
+        >
         {scanning ? (
           <View style={styles.lanButtonContent}>
             <ActivityIndicator size="small" color={COLORS.textPrimary} />
@@ -342,7 +344,18 @@ export function ConnectScreen() {
             {ICON_SATELLITE} Scan Local Network
           </Text>
         )}
-      </TouchableOpacity>
+        </TouchableOpacity>
+        <TextInput
+          style={styles.portInput}
+          value={scanPort}
+          onChangeText={setScanPort}
+          keyboardType="number-pad"
+          maxLength={5}
+          placeholder="Port"
+          placeholderTextColor={COLORS.textDim}
+          editable={!scanning}
+        />
+      </View>
 
       {discoveredServers.length > 0 && (
         <View style={styles.discoveredSection}>
@@ -531,18 +544,37 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   // LAN Discovery
+  lanRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 24,
+  },
   lanButton: {
     backgroundColor: COLORS.backgroundCard,
     paddingVertical: 16,
     paddingHorizontal: 32,
     borderRadius: 12,
     alignItems: 'center',
-    marginBottom: 24,
     borderWidth: 1,
     borderColor: COLORS.borderPrimary,
   },
+  lanButtonFlex: {
+    flex: 1,
+  },
   lanButtonScanning: {
     borderColor: COLORS.accentBlueBorder,
+  },
+  portInput: {
+    backgroundColor: COLORS.backgroundCard,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+    paddingHorizontal: 12,
+    paddingVertical: 16,
+    color: COLORS.textPrimary,
+    fontSize: 14,
+    width: 64,
+    textAlign: 'center',
   },
   lanButtonContent: {
     flexDirection: 'row',
