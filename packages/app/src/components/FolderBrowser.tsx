@@ -88,6 +88,8 @@ export function FolderBrowser({ visible, initialPath, onSelectPath, onClose }: F
         activeRequestRef.current = -1;
         setLoading(false);
         setError('Request timed out');
+        setEntries([]);
+        setParentPath(null);
       }
     }, 8000);
     return () => clearTimeout(timer);
