@@ -163,6 +163,24 @@ describe('OutputParser._processAnsi', () => {
     const lines = parser._processAnsi('hello\x1b[1;6H\u{1F680}!\n')
     assert.deepEqual(lines, ['hello\u{1F680}!'])
   })
+
+  it('handles surrogate pair split across two _processAnsi calls', () => {
+    // U+1F680 ROCKET = surrogate pair: high 0xD83D, low 0xDE80
+    const highSurrogate = '\uD83D'
+    const lowSurrogate = '\uDE80'
+    // First call ends with a lone high surrogate — should be saved as pending
+    const lines1 = parser._processAnsi('go' + highSurrogate)
+    assert.deepEqual(lines1, [])
+    // Second call starts with the low surrogate — pair should be reassembled
+    const lines2 = parser._processAnsi(lowSurrogate + 'now\n')
+    assert.deepEqual(lines2, ['go\u{1F680}now'])
+  })
+
+  it('replaces lone low surrogate with U+FFFD', () => {
+    // A low surrogate without a preceding high surrogate is invalid UTF-16
+    const lines = parser._processAnsi('a\uDE80b\n')
+    assert.deepEqual(lines, ['a\uFFFDb'])
+  })
 })
 
 describe('OutputParser._stripAnsi (deprecated)', () => {
