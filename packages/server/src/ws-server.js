@@ -1394,7 +1394,9 @@ export class WsServer {
 
   /**
    * List custom agents from project and user agent directories.
-   * Walks .claude/agents/ in the project cwd and ~/.claude/agents/.
+   * When cwd is provided, walks .claude/agents/ in the project cwd first;
+   * always walks ~/.claude/agents/ for user agents. In PTY mode cwd is
+   * null, so only user agents are returned.
    * Returns { type: 'agent_list', agents: [{ name, description, source }] }
    */
   async _listAgents(ws, cwd) {
@@ -1406,6 +1408,8 @@ export class WsServer {
         const entries = await readdir(dir, { withFileTypes: true })
         for (const entry of entries) {
           if (!entry.isFile() || !entry.name.endsWith('.md')) continue
+          // Guard against names with path separators (defensive)
+          if (entry.name.includes('/') || entry.name.includes('\\')) continue
           const name = entry.name.slice(0, -3) // strip .md
           if (seen.has(name)) continue
           seen.add(name)
@@ -1421,11 +1425,15 @@ export class WsServer {
               description = trimmed.slice(0, 120)
               break
             }
-          } catch {}
+          } catch (err) {
+            console.error(`[ws] Failed to read agent file ${join(dir, entry.name)}:`, err.message)
+          }
 
           agents.push({ name, description, source })
         }
-      } catch {}
+      } catch {
+        // Directory doesn't exist or is unreadable — expected for missing .claude/agents/
+      }
     }
 
     // Project agents take priority (scanned first, so they win in the `seen` set)

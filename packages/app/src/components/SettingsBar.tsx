@@ -517,7 +517,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
     paddingVertical: 4,
-    minHeight: 32,
+    minHeight: 44,
   },
   customAgentInfo: {
     flex: 1,

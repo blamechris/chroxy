@@ -3836,6 +3836,10 @@ describe('agent listing', () => {
 
       assert.ok(result, 'Should receive agent_list')
       assert.ok(Array.isArray(result.agents))
+      // No project agents should exist (temp dir has no .claude/agents/)
+      // User agents from ~/.claude/agents/ may be present on the dev machine
+      const projectAgents = result.agents.filter(a => a.source === 'project')
+      assert.equal(projectAgents.length, 0, 'Should have no project agents from empty temp dir')
 
       ws.close()
     } finally {

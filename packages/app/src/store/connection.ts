@@ -682,6 +682,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
           sessions: [],
           activeSessionId: null,
           sessionStates: {},
+          customAgents: [],
         });
       }
       ctx.socket.send(JSON.stringify({ type: 'mode', mode: get().viewMode }));
