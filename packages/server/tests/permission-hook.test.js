@@ -81,16 +81,16 @@ describe('createPermissionHookManager', () => {
   // the real ~/.claude/settings.json and contaminated other running sessions.
   // These will return once #429 lands a configurable settingsPath parameter.
 
-  it('destroy() cancels pending retry timers', async () => {
+  it('destroy() does not throw when called without register()', async () => {
     const manager = createPermissionHookManager(emitter)
-    // destroy() should be safe to call even without register()
     manager.destroy()
-    // No assertion needed — just verify it doesn't throw
+    // Verifies destroy() is safe to call before any registration
   })
 
-  it('accepts an error listener for registration failures', async () => {
-    // Verify the manager can wire up an error listener (actual retry/failure
-    // testing requires fs mocking — tracked in a follow-up issue)
+  it('supports error listener wiring on the emitter', async () => {
+    // Verify the emitter accepts an error listener without throwing.
+    // Actual error-path testing (retry failures, fs errors) requires
+    // fs mocking — tracked in #430.
     const errors = []
     emitter.on('error', (err) => errors.push(err))
 
