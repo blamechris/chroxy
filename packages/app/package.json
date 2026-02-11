@@ -34,6 +34,7 @@
     "expo-clipboard": "~8.0.8",
     "expo-constants": "~18.0.13",
     "expo-device": "~8.0.10",
+    "expo-network": "~8.0.8",
     "expo-notifications": "~0.32.16",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",

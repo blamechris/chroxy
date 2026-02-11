@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,12 +9,22 @@ import {
   ScrollView,
   Keyboard,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
+import * as Network from 'expo-network';
 import { useConnectionStore } from '../store/connection';
-import { ICON_SATELLITE, ICON_CAMERA, ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT } from '../constants/icons';
+import { ICON_SATELLITE, ICON_CAMERA, ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
 import { COLORS } from '../constants/colors';
+
+interface DiscoveredServer {
+  ip: string;
+  port: number;
+  hostname: string;
+  mode: string;
+  version: string;
+}
 
 
 function parseChroxyUrl(raw: string): { wsUrl: string; token: string } | null {
@@ -50,6 +60,11 @@ export function ConnectScreen() {
   const insets = useSafeAreaInsets();
   const scanLock = useRef(false);
   const scrollRef = useRef<ScrollView>(null);
+
+  const [scanning, setScanning] = useState(false);
+  const [discoveredServers, setDiscoveredServers] = useState<DiscoveredServer[]>([]);
+  const [scanProgress, setScanProgress] = useState(0);
+  const scanAbortRef = useRef<AbortController | null>(null);
 
   const connect = useConnectionStore((state) => state.connect);
   const connectionPhase = useConnectionStore((state) => state.connectionPhase);
@@ -145,6 +160,93 @@ export function ConnectScreen() {
     }, 300);
   };
 
+  // Abort LAN scan on unmount
+  useEffect(() => {
+    return () => { scanAbortRef.current?.abort(); };
+  }, []);
+
+  const handleScanLAN = useCallback(async () => {
+    if (scanning) {
+      scanAbortRef.current?.abort();
+      setScanning(false);
+      return;
+    }
+
+    setScanning(true);
+    setDiscoveredServers([]);
+    setScanProgress(0);
+
+    const abort = new AbortController();
+    scanAbortRef.current = abort;
+
+    try {
+      const deviceIp = await Network.getIpAddressAsync();
+      if (!deviceIp || abort.signal.aborted) {
+        setScanning(false);
+        return;
+      }
+
+      const subnet = deviceIp.split('.').slice(0, 3).join('.');
+      const port = 8765;
+      const batchSize = 30;
+      let scanned = 0;
+
+      for (let start = 1; start <= 254 && !abort.signal.aborted; start += batchSize) {
+        const batch: Promise<DiscoveredServer | null>[] = [];
+        for (let i = start; i < Math.min(start + batchSize, 255); i++) {
+          const targetIp = `${subnet}.${i}`;
+          batch.push(
+            (async (): Promise<DiscoveredServer | null> => {
+              const ctrl = new AbortController();
+              const timeout = setTimeout(() => ctrl.abort(), 1500);
+              // Propagate outer abort signal to cancel in-flight requests immediately
+              const onOuterAbort = () => ctrl.abort();
+              abort.signal.addEventListener('abort', onOuterAbort);
+              try {
+                const res = await fetch(`http://${targetIp}:${port}/health`, { signal: ctrl.signal });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                  return { ip: targetIp, port, hostname: data.hostname || targetIp, mode: data.mode || 'unknown', version: data.version || '' };
+                }
+              } catch {
+                // Expected for most IPs
+              } finally {
+                clearTimeout(timeout);
+                abort.signal.removeEventListener('abort', onOuterAbort);
+              }
+              return null;
+            })()
+          );
+        }
+
+        const results = await Promise.all(batch);
+        if (abort.signal.aborted) break;
+
+        const found = results.filter((r): r is DiscoveredServer => r !== null);
+        if (found.length > 0) {
+          setDiscoveredServers((prev) => [...prev, ...found]);
+        }
+        scanned += batch.length;
+        setScanProgress(Math.min(scanned / 254, 1));
+      }
+    } catch {
+      // Network error (e.g., no WiFi)
+    }
+
+    if (!abort.signal.aborted) {
+      setScanProgress(1);
+      setScanning(false);
+    }
+  }, [scanning]);
+
+  const handleSelectDiscovered = (server: DiscoveredServer) => {
+    setUrl(`ws://${server.ip}:${server.port}`);
+    setShowManual(true);
+    setTimeout(() => {
+      scrollRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+  };
+
   if (autoConnecting) {
     return (
       <View style={styles.autoConnectContainer}>
@@ -222,6 +324,50 @@ export function ConnectScreen() {
       <TouchableOpacity style={styles.qrButton} onPress={handleScanQR}>
         <Text style={styles.qrButtonText}>{ICON_CAMERA} Scan QR Code</Text>
       </TouchableOpacity>
+
+      {/* LAN Discovery */}
+      <TouchableOpacity
+        style={[styles.lanButton, scanning && styles.lanButtonScanning]}
+        onPress={handleScanLAN}
+      >
+        {scanning ? (
+          <View style={styles.lanButtonContent}>
+            <ActivityIndicator size="small" color={COLORS.textPrimary} />
+            <Text style={styles.lanButtonText}>
+              Scanning... {Math.round(scanProgress * 100)}%
+            </Text>
+          </View>
+        ) : (
+          <Text style={styles.lanButtonText}>
+            {ICON_SATELLITE} Scan Local Network
+          </Text>
+        )}
+      </TouchableOpacity>
+
+      {discoveredServers.length > 0 && (
+        <View style={styles.discoveredSection}>
+          <Text style={styles.discoveredTitle}>
+            Found {discoveredServers.length} server{discoveredServers.length !== 1 ? 's' : ''} on LAN
+          </Text>
+          {discoveredServers.map((server) => (
+            <TouchableOpacity
+              key={`${server.ip}:${server.port}`}
+              style={styles.discoveredItem}
+              onPress={() => handleSelectDiscovered(server)}
+              activeOpacity={0.7}
+            >
+              <View style={styles.discoveredInfo}>
+                <Text style={styles.discoveredHostname}>{server.hostname}</Text>
+                <Text style={styles.discoveredDetails}>
+                  {server.ip}:{server.port} {ICON_BULLET} {server.mode}
+                  {server.version ? ` ${ICON_BULLET} v${server.version}` : ''}
+                </Text>
+              </View>
+              <Text style={styles.discoveredArrow}>{ICON_TRIANGLE_RIGHT}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
 
       <TouchableOpacity
         style={styles.manualToggle}
@@ -383,6 +529,71 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontSize: 18,
     fontWeight: '600',
+  },
+  // LAN Discovery
+  lanButton: {
+    backgroundColor: COLORS.backgroundCard,
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+  },
+  lanButtonScanning: {
+    borderColor: COLORS.accentBlueBorder,
+  },
+  lanButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  lanButtonText: {
+    color: COLORS.textPrimary,
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  discoveredSection: {
+    marginBottom: 24,
+    gap: 8,
+  },
+  discoveredTitle: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  discoveredItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.backgroundSecondary,
+    borderRadius: 10,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: COLORS.accentGreenBorder,
+    minHeight: 44,
+  },
+  discoveredInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  discoveredHostname: {
+    color: COLORS.accentGreen,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  discoveredDetails: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  discoveredArrow: {
+    color: COLORS.textDim,
+    fontSize: 12,
+    marginLeft: 8,
   },
   // Scanner styles
   scannerContainer: {

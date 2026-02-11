@@ -4,7 +4,16 @@ import { TunnelManager } from './tunnel.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { wireTunnelEvents } from './tunnel-events.js'
 import { PushManager } from './push.js'
+import { hostname } from 'os'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
 import qrcode from 'qrcode-terminal'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
+const SERVER_VERSION = packageJson.version
 
 /**
  * Start the Chroxy server in CLI headless mode.
@@ -22,7 +31,7 @@ export async function startCliServer(config) {
   }
 
   const modeStr = config.legacyCli ? 'CLI legacy mode' : 'SDK mode'
-  const banner = `Chroxy Server v0.1.0 (${modeStr})`
+  const banner = `Chroxy Server v${SERVER_VERSION} (${modeStr})`
   const pad = Math.max(0, 38 - banner.length)
   const left = Math.floor(pad / 2)
   const right = pad - left
@@ -149,6 +158,25 @@ export async function startCliServer(config) {
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
 
+  // Advertise via mDNS/Bonjour for local network discovery
+  let mdnsService = null
+  let bonjourInstance = null
+  if (!NO_AUTH) {
+    try {
+      const { Bonjour } = await import('bonjour-service')
+      bonjourInstance = new Bonjour()
+      mdnsService = bonjourInstance.publish({
+        name: `Chroxy (${hostname()})`,
+        type: 'chroxy',
+        port: PORT,
+        txt: { version: SERVER_VERSION, auth: API_TOKEN ? 'token' : 'none' },
+      })
+      console.log(`[mdns] Advertising _chroxy._tcp on port ${PORT}`)
+    } catch (err) {
+      console.log(`[mdns] mDNS advertisement unavailable: ${err.message}`)
+    }
+  }
+
   // Determine tunnel mode
   const TUNNEL_MODE = config.tunnel || 'quick'
   const SKIP_TUNNEL = NO_AUTH || TUNNEL_MODE === 'none'
@@ -224,6 +252,12 @@ export async function startCliServer(config) {
   // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`\n[${signal}] Shutting down...`)
+    if (mdnsService) {
+      try { mdnsService.stop?.() } catch {}
+    }
+    if (bonjourInstance) {
+      try { bonjourInstance.destroy?.() } catch {}
+    }
     sessionManager.destroyAll()
     wsServer.close()
     if (tunnel) await tunnel.stop()
