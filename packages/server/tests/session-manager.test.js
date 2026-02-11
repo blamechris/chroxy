@@ -1,26 +1,17 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs'
+import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
+import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager } from '../src/session-manager.js'
-
-const STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
 /**
  * Tests for SessionManager serialization, restoration, and allIdle.
  *
- * Note: These tests use real filesystem I/O for the state file to
- * validate the complete serialize/restore cycle. The SdkSession
- * constructor is bypassed by setting useLegacyCli and mocking
- * around the session creation where needed.
+ * All filesystem tests use temp directories via stateFilePath to avoid
+ * writing to real ~/.chroxy/session-state.json (see #429).
  */
-
-/** Clean up state file before/after tests */
-function cleanStateFile() {
-  try { unlinkSync(STATE_FILE) } catch {}
-}
 
 describe('SessionManager.allIdle', () => {
   it('returns true when no sessions exist', () => {
@@ -30,7 +21,6 @@ describe('SessionManager.allIdle', () => {
 
   it('returns true when all sessions are idle', () => {
     const mgr = new SessionManager({ maxSessions: 5 })
-    // Manually add mock sessions
     const session1 = new EventEmitter()
     session1.isRunning = false
     session1.destroy = () => {}
@@ -61,13 +51,21 @@ describe('SessionManager.allIdle', () => {
 })
 
 describe('SessionManager.serializeState', () => {
-  beforeEach(cleanStateFile)
-  afterEach(cleanStateFile)
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-session-test-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
 
   it('writes state file with session data', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
 
-    // Create mock sessions with resumeSessionId getter
     const session1 = new EventEmitter()
     session1.model = 'claude-sonnet-4-20250514'
     session1.permissionMode = 'approve'
@@ -84,7 +82,6 @@ describe('SessionManager.serializeState', () => {
 
     const state = mgr.serializeState()
 
-    // Check returned state
     assert.equal(state.sessions.length, 2)
     assert.ok(state.timestamp > 0)
     assert.equal(state.sessions[0].sdkSessionId, 'sdk-abc-123')
@@ -93,14 +90,13 @@ describe('SessionManager.serializeState', () => {
     assert.equal(state.sessions[0].model, 'claude-sonnet-4-20250514')
     assert.equal(state.sessions[1].sdkSessionId, null)
 
-    // Check file was written
-    assert.ok(existsSync(STATE_FILE), 'State file should exist')
-    const fileContents = JSON.parse(readFileSync(STATE_FILE, 'utf-8'))
+    assert.ok(existsSync(stateFile), 'State file should exist')
+    const fileContents = JSON.parse(readFileSync(stateFile, 'utf-8'))
     assert.equal(fileContents.sessions.length, 2)
   })
 
   it('skips PTY sessions', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
 
     const cliSession = new EventEmitter()
     cliSession.model = 'sonnet'
@@ -119,54 +115,58 @@ describe('SessionManager.serializeState', () => {
     assert.equal(state.sessions[0].sdkSessionId, null)
   })
 
-  it('creates .chroxy directory if needed', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
-    // Even with no sessions, it should write without error
+  it('creates directory if needed', () => {
+    const nestedFile = join(tempDir, 'nested', 'session-state.json')
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: nestedFile })
     const state = mgr.serializeState()
     assert.equal(state.sessions.length, 0)
-    assert.ok(existsSync(STATE_FILE), 'State file should be created')
+    assert.ok(existsSync(nestedFile), 'State file should be created')
   })
 })
 
 describe('SessionManager.restoreState', () => {
-  beforeEach(cleanStateFile)
-  afterEach(cleanStateFile)
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-session-test-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
 
   it('returns null when no state file exists', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
     assert.equal(mgr.restoreState(), null)
   })
 
   it('returns null for invalid JSON', () => {
-    mkdirSync(join(homedir(), '.chroxy'), { recursive: true })
-    writeFileSync(STATE_FILE, 'not json')
-    const mgr = new SessionManager({ maxSessions: 5 })
+    writeFileSync(stateFile, 'not json')
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
     assert.equal(mgr.restoreState(), null)
-    // State file should be cleaned up
-    assert.equal(existsSync(STATE_FILE), false, 'Invalid state file should be removed')
+    assert.equal(existsSync(stateFile), false, 'Invalid state file should be removed')
   })
 
   it('returns null for empty sessions array', () => {
-    mkdirSync(join(homedir(), '.chroxy'), { recursive: true })
-    writeFileSync(STATE_FILE, JSON.stringify({ timestamp: Date.now(), sessions: [] }))
-    const mgr = new SessionManager({ maxSessions: 5 })
+    writeFileSync(stateFile, JSON.stringify({ timestamp: Date.now(), sessions: [] }))
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
     assert.equal(mgr.restoreState(), null)
   })
 
   it('returns null for stale state (>5 min)', () => {
-    mkdirSync(join(homedir(), '.chroxy'), { recursive: true })
-    const staleTimestamp = Date.now() - 6 * 60 * 1000 // 6 minutes ago
-    writeFileSync(STATE_FILE, JSON.stringify({
+    const staleTimestamp = Date.now() - 6 * 60 * 1000
+    writeFileSync(stateFile, JSON.stringify({
       timestamp: staleTimestamp,
       sessions: [{ name: 'test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
     }))
-    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp' })
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
     assert.equal(mgr.restoreState(), null, 'Stale state should be rejected')
   })
 
   it('restores sessions from valid state file', () => {
-    mkdirSync(join(homedir(), '.chroxy'), { recursive: true })
-    writeFileSync(STATE_FILE, JSON.stringify({
+    writeFileSync(stateFile, JSON.stringify({
       timestamp: Date.now(),
       sessions: [
         { name: 'Session A', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: 'sdk-resume-1' },
@@ -174,36 +174,32 @@ describe('SessionManager.restoreState', () => {
       ],
     }))
 
-    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp' })
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
     const firstId = mgr.restoreState()
     assert.ok(firstId, 'Should return the first restored session ID')
 
     const sessions = mgr.listSessions()
     assert.equal(sessions.length, 2, 'Should have 2 restored sessions')
 
-    // State file should be cleaned up after restore
-    assert.equal(existsSync(STATE_FILE), false, 'State file should be removed after restore')
+    assert.equal(existsSync(stateFile), false, 'State file should be removed after restore')
 
-    // Clean up created sessions
     mgr.destroyAll()
   })
 
   it('deletes state file after reading', () => {
-    mkdirSync(join(homedir(), '.chroxy'), { recursive: true })
-    writeFileSync(STATE_FILE, JSON.stringify({
+    writeFileSync(stateFile, JSON.stringify({
       timestamp: Date.now(),
       sessions: [{ name: 'Test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
     }))
 
-    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp' })
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
     mgr.restoreState()
-    assert.equal(existsSync(STATE_FILE), false, 'State file should be removed')
+    assert.equal(existsSync(stateFile), false, 'State file should be removed')
     mgr.destroyAll()
   })
 
   it('continues if one session fails to restore', () => {
-    mkdirSync(join(homedir(), '.chroxy'), { recursive: true })
-    writeFileSync(STATE_FILE, JSON.stringify({
+    writeFileSync(stateFile, JSON.stringify({
       timestamp: Date.now(),
       sessions: [
         { name: 'Good', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
@@ -211,7 +207,7 @@ describe('SessionManager.restoreState', () => {
       ],
     }))
 
-    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp' })
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
     const firstId = mgr.restoreState()
     assert.ok(firstId, 'Should return the first successfully restored session')
 

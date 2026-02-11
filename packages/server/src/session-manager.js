@@ -1,14 +1,14 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
 import { statSync, writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from 'fs'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { PtySession } from './pty-session.js'
 import { discoverTmuxSessions } from './session-discovery.js'
 
-const STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
+const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
 /**
  * Base error class for session management operations.
@@ -93,7 +93,7 @@ export class SessionDirectoryError extends SessionError {
  *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
  */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, useLegacyCli = false } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, useLegacyCli = false, stateFilePath } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -102,6 +102,7 @@ export class SessionManager extends EventEmitter {
     this._defaultCwd = defaultCwd || process.cwd()
     this._defaultModel = defaultModel || null
     this._defaultPermissionMode = defaultPermissionMode || 'approve'
+    this._stateFilePath = stateFilePath || DEFAULT_STATE_FILE
     this._sessions = new Map() // sessionId -> { session: CliSession|PtySession, type: 'cli'|'pty', name, cwd, createdAt, tmuxSession? }
     this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
@@ -418,11 +419,11 @@ export class SessionManager extends EventEmitter {
       })
     }
 
-    const dir = join(homedir(), '.chroxy')
+    const dir = dirname(this._stateFilePath)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 })
-    chmodSync(STATE_FILE, 0o600)
-    console.log(`[session-manager] Serialized ${state.sessions.length} session(s) to ${STATE_FILE}`)
+    writeFileSync(this._stateFilePath, JSON.stringify(state, null, 2), { mode: 0o600 })
+    chmodSync(this._stateFilePath, 0o600)
+    console.log(`[session-manager] Serialized ${state.sessions.length} session(s) to ${this._stateFilePath}`)
     return state
   }
 
@@ -433,19 +434,19 @@ export class SessionManager extends EventEmitter {
    * @returns {string|null} The first restored session ID, or null
    */
   restoreState() {
-    if (!existsSync(STATE_FILE)) return null
+    if (!existsSync(this._stateFilePath)) return null
 
     let state
     try {
-      state = JSON.parse(readFileSync(STATE_FILE, 'utf-8'))
+      state = JSON.parse(readFileSync(this._stateFilePath, 'utf-8'))
     } catch (err) {
       console.error(`[session-manager] Failed to parse session state: ${err.message}`)
-      try { unlinkSync(STATE_FILE) } catch {}
+      try { unlinkSync(this._stateFilePath) } catch {}
       return null
     }
 
     // Clean up state file immediately
-    try { unlinkSync(STATE_FILE) } catch {}
+    try { unlinkSync(this._stateFilePath) } catch {}
 
     if (!Array.isArray(state.sessions) || state.sessions.length === 0) {
       console.log('[session-manager] No sessions to restore')

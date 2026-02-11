@@ -6,6 +6,8 @@ import { homedir } from 'os'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
+const DEFAULT_SETTINGS_PATH = resolve(homedir(), '.claude', 'settings.json')
+
 // Module-level, in-process lock for settings.json read-modify-write operations.
 // Shared across all importers of this module in a single Node.js process so CLI
 // and PTY sessions in that process serialize writes (does not prevent concurrent
@@ -35,19 +37,20 @@ export function withSettingsLock(fn) {
 }
 
 /**
- * Register the Chroxy permission hook in ~/.claude/settings.json.
+ * Register the Chroxy permission hook in settings.json.
  * Idempotent — removes any existing Chroxy hook entry before adding.
+ * @param {string} [settingsPath] - Path to settings.json (defaults to ~/.claude/settings.json)
  */
-function registerPermissionHookSync() {
+function registerPermissionHookSync(settingsPath) {
   const hookScript = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
-  const settingsPath = resolve(homedir(), '.claude', 'settings.json')
+  settingsPath = settingsPath || DEFAULT_SETTINGS_PATH
 
   let settings = {}
   try {
     settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
   } catch (err) {
     if (err.code === 'ENOENT') {
-      mkdirSync(resolve(homedir(), '.claude'), { recursive: true })
+      mkdirSync(dirname(settingsPath), { recursive: true })
     } else {
       throw err
     }
@@ -76,14 +79,15 @@ function registerPermissionHookSync() {
 
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 })
   chmodSync(settingsPath, 0o600)
-  console.log('[permission-hook] Registered hook in ~/.claude/settings.json')
+  console.log(`[permission-hook] Registered hook in ${settingsPath}`)
 }
 
 /**
- * Remove the Chroxy permission hook from ~/.claude/settings.json.
+ * Remove the Chroxy permission hook from settings.json.
+ * @param {string} [settingsPath] - Path to settings.json (defaults to ~/.claude/settings.json)
  */
-function unregisterPermissionHookSync() {
-  const settingsPath = resolve(homedir(), '.claude', 'settings.json')
+function unregisterPermissionHookSync(settingsPath) {
+  settingsPath = settingsPath || DEFAULT_SETTINGS_PATH
   const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
 
   if (settings.hooks?.PreToolUse) {
@@ -98,7 +102,7 @@ function unregisterPermissionHookSync() {
     }
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 })
     chmodSync(settingsPath, 0o600)
-    console.log('[permission-hook] Unregistered hook from ~/.claude/settings.json')
+    console.log(`[permission-hook] Unregistered hook from ${settingsPath}`)
   }
 }
 
@@ -106,9 +110,10 @@ function unregisterPermissionHookSync() {
  * Create a permission hook manager that handles registration, retry, and cleanup.
  *
  * @param {EventEmitter} emitter - Used to emit 'error' events on failure
+ * @param {{ settingsPath?: string }} [options] - Optional settings path for test isolation
  * @returns {{ register(): Promise, unregister(): Promise, destroy(): void }}
  */
-export function createPermissionHookManager(emitter) {
+export function createPermissionHookManager(emitter, { settingsPath } = {}) {
   let retryCount = 0
   let retryTimer = null
   let registered = false
@@ -120,7 +125,8 @@ export function createPermissionHookManager(emitter) {
 
     retryCount++
     if (retryCount > 3) {
-      const errMsg = 'Hook registration failed after 3 attempts. Please check ~/.claude/settings.json and restart the server. Permissions will not work until this is fixed.'
+      const effectivePath = settingsPath || DEFAULT_SETTINGS_PATH
+      const errMsg = `Hook registration failed after 3 attempts. Please check ${effectivePath} and restart the server. Permissions will not work until this is fixed.`
       console.error(`[permission-hook] ${errMsg}`)
       emitter.emit('error', { message: errMsg })
       return
@@ -141,7 +147,7 @@ export function createPermissionHookManager(emitter) {
   function register() {
     return withSettingsLock(() => {
       try {
-        registerPermissionHookSync()
+        registerPermissionHookSync(settingsPath)
         if (retryTimer) {
           clearTimeout(retryTimer)
           retryTimer = null
@@ -160,7 +166,7 @@ export function createPermissionHookManager(emitter) {
   function unregister() {
     return withSettingsLock(() => {
       try {
-        unregisterPermissionHookSync()
+        unregisterPermissionHookSync(settingsPath)
       } catch (err) {
         console.error(`[permission-hook] Failed to unregister: ${err.message}`)
       }
