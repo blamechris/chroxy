@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo } from 'react-native';
-import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo } from '../store/connection';
+import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient } from '../store/connection';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
@@ -22,6 +22,7 @@ export interface SettingsBarProps {
   serverMode: 'cli' | 'terminal' | null;
   isIdle: boolean;
   activeAgents: AgentInfo[];
+  connectedClients: ConnectedClient[];
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
 }
@@ -80,6 +81,7 @@ export function SettingsBar({
   serverMode,
   isIdle,
   activeAgents,
+  connectedClients,
   setModel,
   setPermissionMode,
 }: SettingsBarProps) {
@@ -170,6 +172,17 @@ export function SettingsBar({
           >
             <Text style={styles.agentBadgeText}>
               {activeAgents.length} agent{activeAgents.length !== 1 ? 's' : ''}
+            </Text>
+          </View>
+        )}
+        {connectedClients.length > 1 && (
+          <View
+            style={styles.deviceBadge}
+            accessibilityLabel={`${connectedClients.length} devices connected`}
+            accessibilityRole="text"
+          >
+            <Text style={styles.deviceBadgeText}>
+              {connectedClients.length} devices
             </Text>
           </View>
         )}
@@ -281,6 +294,24 @@ export function SettingsBar({
               ))}
             </View>
           )}
+          {connectedClients.length > 1 && (
+            <View style={styles.agentSection}>
+              <Text style={styles.deviceSectionTitle}>
+                Connected Devices ({connectedClients.length})
+              </Text>
+              {connectedClients.map((client) => (
+                <View key={client.clientId} style={styles.agentEntry}>
+                  <View style={[styles.statusDot, { backgroundColor: COLORS.accentBlue }]} />
+                  <Text style={styles.agentDescription} numberOfLines={1}>
+                    {client.deviceName || client.deviceType}{client.isSelf ? ' (this device)' : ''}
+                  </Text>
+                  <Text style={styles.agentElapsed}>
+                    {client.platform}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
         </View>
       )}
     </View>
@@ -360,6 +391,24 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  deviceBadge: {
+    backgroundColor: COLORS.accentBlueSubtle,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginRight: 8,
+  },
+  deviceBadgeText: {
+    color: COLORS.accentBlue,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  deviceSectionTitle: {
+    color: COLORS.accentBlue,
+    fontSize: 10,
+    fontWeight: '600',
+    marginBottom: 2,
   },
   agentBadge: {
     backgroundColor: COLORS.accentPurpleSubtle,

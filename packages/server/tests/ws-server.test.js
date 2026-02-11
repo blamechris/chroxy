@@ -2422,3 +2422,361 @@ describe('WsServer drain behavior (multi-session mode)', () => {
     assert.equal(receivedInput, 'hello after drain', 'Input should be accepted after drain is disabled')
   })
 })
+
+describe('multi-client awareness', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('includes clientId and connectedClients in auth_ok', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.ok(authOk, 'Should receive auth_ok')
+    assert.equal(typeof authOk.clientId, 'string', 'auth_ok should include clientId')
+    assert.ok(authOk.clientId.length > 0, 'clientId should be non-empty')
+    assert.ok(Array.isArray(authOk.connectedClients), 'auth_ok should include connectedClients array')
+    assert.equal(authOk.connectedClients.length, 1, 'Should have one connected client (self)')
+    assert.equal(authOk.connectedClients[0].clientId, authOk.clientId, 'Connected client should match our clientId')
+
+    ws.close()
+  })
+
+  it('stores deviceInfo from auth message', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, {
+      type: 'auth',
+      token: 'test-token',
+      deviceInfo: {
+        deviceId: 'dev-123',
+        deviceName: 'iPhone 15',
+        deviceType: 'phone',
+        platform: 'ios',
+      },
+    })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.ok(authOk)
+    assert.equal(authOk.connectedClients[0].deviceName, 'iPhone 15')
+    assert.equal(authOk.connectedClients[0].deviceType, 'phone')
+    assert.equal(authOk.connectedClients[0].platform, 'ios')
+
+    ws.close()
+  })
+
+  it('defaults deviceInfo for old clients without deviceInfo', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.ok(authOk)
+    const self = authOk.connectedClients[0]
+    assert.equal(self.deviceName, null, 'deviceName should default to null')
+    assert.equal(self.deviceType, 'unknown', 'deviceType should default to unknown')
+    assert.equal(self.platform, 'unknown', 'platform should default to unknown')
+
+    ws.close()
+  })
+
+  it('broadcasts client_joined to existing clients when a new client connects', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect first client
+    const client1 = await createClient(port, false)
+    send(client1.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(client1.messages, 'auth_ok', 2000)
+    client1.messages.length = 0
+
+    // Connect second client with device info
+    const client2 = await createClient(port, false)
+    send(client2.ws, {
+      type: 'auth',
+      token: 'test-token',
+      deviceInfo: {
+        deviceId: 'dev-456',
+        deviceName: 'iPad Pro',
+        deviceType: 'tablet',
+        platform: 'ios',
+      },
+    })
+    await waitForMessage(client2.messages, 'auth_ok', 2000)
+
+    // Client 1 should receive client_joined
+    const joinMsg = await waitForMessage(client1.messages, 'client_joined', 2000)
+    assert.ok(joinMsg, 'Client 1 should receive client_joined')
+    assert.equal(joinMsg.client.deviceName, 'iPad Pro')
+    assert.equal(joinMsg.client.deviceType, 'tablet')
+    assert.equal(joinMsg.client.platform, 'ios')
+    assert.equal(typeof joinMsg.client.clientId, 'string')
+
+    // Client 2 should NOT receive client_joined for itself
+    const selfJoin = client2.messages.find(m => m.type === 'client_joined')
+    assert.ok(!selfJoin, 'Client 2 should NOT receive client_joined for itself')
+
+    // Client 2's auth_ok should include both clients in connectedClients
+    const authOk2 = client2.messages.find(m => m.type === 'auth_ok')
+    assert.equal(authOk2.connectedClients.length, 2, 'auth_ok should list both connected clients')
+
+    client1.ws.close()
+    client2.ws.close()
+  })
+
+  it('broadcasts client_left when a client disconnects', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect two clients
+    const client1 = await createClient(port, false)
+    send(client1.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(client1.messages, 'auth_ok', 2000)
+
+    const client2 = await createClient(port, false)
+    send(client2.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(client2.messages, 'auth_ok', 2000)
+
+    // Get client 2's ID
+    const authOk2 = client2.messages.find(m => m.type === 'auth_ok')
+    const client2Id = authOk2.clientId
+
+    // Clear messages
+    client1.messages.length = 0
+
+    // Disconnect client 2
+    client2.ws.close()
+    await new Promise(r => setTimeout(r, 100))
+
+    // Client 1 should receive client_left
+    const leftMsg = await waitForMessage(client1.messages, 'client_left', 2000)
+    assert.ok(leftMsg, 'Client 1 should receive client_left')
+    assert.equal(leftMsg.clientId, client2Id, 'client_left should include the departing client ID')
+
+    client1.ws.close()
+  })
+
+  it('does not broadcast client_joined/left for unauthenticated clients', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect and authenticate client 1
+    const client1 = await createClient(port, false)
+    send(client1.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(client1.messages, 'auth_ok', 2000)
+    client1.messages.length = 0
+
+    // Connect client 2 without auth and disconnect
+    const client2 = await createClient(port, false)
+    await new Promise(r => setTimeout(r, 100))
+    client2.ws.close()
+    await new Promise(r => setTimeout(r, 100))
+
+    // Client 1 should NOT receive client_joined or client_left
+    const joinMsg = client1.messages.find(m => m.type === 'client_joined')
+    const leftMsg = client1.messages.find(m => m.type === 'client_left')
+    assert.ok(!joinMsg, 'Should not broadcast client_joined for unauthenticated client')
+    assert.ok(!leftMsg, 'Should not broadcast client_left for unauthenticated client')
+
+    client1.ws.close()
+  })
+})
+
+describe('primary client tracking', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  /** Create a mock SessionManager with one session for primary tracking tests */
+  function createPrimarySessionManager() {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+
+    const mockSession = createMockSession()
+    mockSession.cwd = '/tmp/project'
+    mockSession.sendMessage = () => {}
+    sessionsMap.set('sess-1', {
+      session: mockSession,
+      name: 'Session 1',
+      cwd: '/tmp/project',
+      type: 'cli',
+      isBusy: false,
+    })
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    })
+
+    return manager
+  }
+
+  it('broadcasts primary_changed when a client sends input', async () => {
+    const mockManager = createPrimarySessionManager()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const client1 = await createClient(port, false)
+    send(client1.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(client1.messages, 'auth_ok', 2000)
+    const client1Id = client1.messages.find(m => m.type === 'auth_ok').clientId
+    client1.messages.length = 0
+
+    // Send input
+    send(client1.ws, { type: 'input', data: 'hello' })
+    await new Promise(r => setTimeout(r, 100))
+
+    // Should receive primary_changed
+    const primaryMsg = await waitForMessage(client1.messages, 'primary_changed', 1000)
+    assert.ok(primaryMsg, 'Should receive primary_changed')
+    assert.equal(primaryMsg.clientId, client1Id, 'Primary should be the sending client')
+    assert.equal(primaryMsg.sessionId, 'sess-1', 'primary_changed should include sessionId')
+
+    client1.ws.close()
+    await new Promise(r => setTimeout(r, 50))
+  })
+
+  it('does not re-broadcast primary_changed if client is already primary', async () => {
+    const mockManager = createPrimarySessionManager()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    // First input establishes primary
+    send(ws, { type: 'input', data: 'msg1' })
+    await new Promise(r => setTimeout(r, 100))
+
+    const primaryMsgs1 = messages.filter(m => m.type === 'primary_changed')
+    assert.equal(primaryMsgs1.length, 1, 'First input should trigger primary_changed')
+    messages.length = 0
+
+    // Second input from same client should NOT re-trigger
+    send(ws, { type: 'input', data: 'msg2' })
+    await new Promise(r => setTimeout(r, 100))
+
+    const primaryMsgs2 = messages.filter(m => m.type === 'primary_changed')
+    assert.equal(primaryMsgs2.length, 0, 'Second input from same client should NOT trigger primary_changed')
+
+    ws.close()
+    await new Promise(r => setTimeout(r, 50))
+  })
+
+  it('clears primary when primary client disconnects', async () => {
+    const mockManager = createPrimarySessionManager()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect two clients
+    const client1 = await createClient(port, false)
+    send(client1.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(client1.messages, 'auth_ok', 2000)
+
+    const client2 = await createClient(port, false)
+    send(client2.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(client2.messages, 'auth_ok', 2000)
+
+    // Client 1 sends input to become primary
+    send(client1.ws, { type: 'input', data: 'I am primary' })
+    await new Promise(r => setTimeout(r, 100))
+
+    // Clear messages to isolate disconnect broadcast
+    client2.messages.length = 0
+
+    // Client 1 disconnects
+    client1.ws.close()
+    await new Promise(r => setTimeout(r, 100))
+
+    // Client 2 should receive primary_changed with null clientId
+    const primaryMsg = await waitForMessage(client2.messages, 'primary_changed', 2000)
+    assert.ok(primaryMsg, 'Should receive primary_changed on disconnect')
+    assert.equal(primaryMsg.clientId, null, 'Primary should be cleared to null')
+    assert.equal(primaryMsg.sessionId, 'sess-1', 'Should include sessionId')
+
+    client2.ws.close()
+    await new Promise(r => setTimeout(r, 50))
+  })
+})

@@ -6,6 +6,7 @@ import {
   selectShowSession,
   useConnectionStore,
   ChatMessage,
+  ConnectedClient,
   _testQueueInternals,
 } from '../../store/connection';
 
@@ -15,6 +16,7 @@ beforeEach(() => {
     messages: [],
     terminalBuffer: '',
     serverErrors: [],
+    connectedClients: [],
     connectionPhase: 'disconnected',
     sessionStates: {},
     activeSessionId: null,
@@ -370,5 +372,68 @@ describe('message queue internals', () => {
 
     expect(sent).toHaveLength(0);
     expect(_testQueueInternals.getQueue()).toHaveLength(0);
+  });
+});
+
+// -- Connected clients state --
+
+describe('connectedClients state', () => {
+  const mockClient1: ConnectedClient = {
+    clientId: 'client-1',
+    deviceName: 'iPhone 15',
+    deviceType: 'phone',
+    platform: 'ios',
+    isSelf: false,
+  };
+  const mockClient2: ConnectedClient = {
+    clientId: 'client-2',
+    deviceName: 'iPad Pro',
+    deviceType: 'tablet',
+    platform: 'ios',
+    isSelf: true,
+  };
+
+  it('initializes as empty array', () => {
+    expect(useConnectionStore.getState().connectedClients).toEqual([]);
+  });
+
+  it('stores connected clients from auth_ok', () => {
+    useConnectionStore.setState({ connectedClients: [mockClient1, mockClient2] });
+    expect(useConnectionStore.getState().connectedClients).toHaveLength(2);
+    expect(useConnectionStore.getState().connectedClients[0].deviceName).toBe('iPhone 15');
+    expect(useConnectionStore.getState().connectedClients[1].isSelf).toBe(true);
+  });
+
+  it('adds client on client_joined', () => {
+    useConnectionStore.setState({ connectedClients: [mockClient2] });
+    useConnectionStore.setState((state) => ({
+      connectedClients: [...state.connectedClients, mockClient1],
+    }));
+    expect(useConnectionStore.getState().connectedClients).toHaveLength(2);
+  });
+
+  it('removes client on client_left', () => {
+    useConnectionStore.setState({ connectedClients: [mockClient1, mockClient2] });
+    useConnectionStore.setState((state) => ({
+      connectedClients: state.connectedClients.filter((c) => c.clientId !== 'client-1'),
+    }));
+    const remaining = useConnectionStore.getState().connectedClients;
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].clientId).toBe('client-2');
+  });
+
+  it('clears on disconnect', () => {
+    useConnectionStore.setState({ connectedClients: [mockClient1, mockClient2] });
+    useConnectionStore.getState().disconnect();
+    expect(useConnectionStore.getState().connectedClients).toEqual([]);
+  });
+});
+
+// -- createEmptySessionState with primaryClientId --
+
+describe('createEmptySessionState (primaryClientId)', () => {
+  it('includes primaryClientId as null', () => {
+    const state = createEmptySessionState();
+    expect(state.primaryClientId).toBeNull();
   });
 });
