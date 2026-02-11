@@ -1,6 +1,7 @@
 import { create } from 'zustand';
-import { Alert, AppState } from 'react-native';
+import { Alert, AppState, Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import * as Device from 'expo-device';
 import { registerForPushNotifications } from '../notifications';
 
 const STORAGE_KEY_URL = 'chroxy_last_url';
@@ -108,6 +109,14 @@ export interface AgentInfo {
   startedAt: number;
 }
 
+export interface ConnectedClient {
+  clientId: string;
+  deviceName: string | null;
+  deviceType: 'phone' | 'tablet' | 'desktop' | 'unknown';
+  platform: string;
+  isSelf: boolean;
+}
+
 export type SessionHealth = 'healthy' | 'crashed';
 
 export interface SessionState {
@@ -124,6 +133,7 @@ export interface SessionState {
   activeAgents: AgentInfo[];
   isPlanPending: boolean;
   planAllowedPrompts: { tool: string; prompt: string }[];
+  primaryClientId: string | null;
 }
 
 export interface ServerError {
@@ -159,6 +169,7 @@ export function createEmptySessionState(): SessionState {
     activeAgents: [],
     isPlanPending: false,
     planAllowedPrompts: [],
+    primaryClientId: null,
   };
 }
 
@@ -207,6 +218,9 @@ interface ConnectionState {
 
   // Claude Code status bar metadata (PTY mode)
   claudeStatus: ClaudeStatus | null;
+
+  // Connected clients (multi-client awareness)
+  connectedClients: ConnectedClient[];
 
   // Server errors forwarded over WebSocket (last 10)
   serverErrors: ServerError[];
@@ -257,6 +271,44 @@ interface ConnectionState {
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;
+}
+
+// Stable device ID persisted across sessions
+const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
+let _cachedDeviceId: string | null = null;
+
+async function getDeviceId(): Promise<string> {
+  if (_cachedDeviceId) return _cachedDeviceId;
+  try {
+    const stored = await SecureStore.getItemAsync(STORAGE_KEY_DEVICE_ID);
+    if (stored) {
+      _cachedDeviceId = stored;
+      return stored;
+    }
+  } catch {
+    // Storage not available
+  }
+  // Generate a new device ID
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  _cachedDeviceId = id;
+  try {
+    await SecureStore.setItemAsync(STORAGE_KEY_DEVICE_ID, id);
+  } catch {
+    // Storage not available
+  }
+  return id;
+}
+
+function getDeviceInfo(): { deviceName: string | null; deviceType: 'phone' | 'tablet' | 'desktop' | 'unknown'; platform: string } {
+  const deviceType: 'phone' | 'tablet' | 'desktop' | 'unknown' =
+    Device.deviceType === Device.DeviceType.PHONE ? 'phone' :
+    Device.deviceType === Device.DeviceType.TABLET ? 'tablet' :
+    Device.deviceType === Device.DeviceType.DESKTOP ? 'desktop' : 'unknown';
+  return {
+    deviceName: Device.deviceName || null,
+    deviceType,
+    platform: Platform.OS,
+  };
 }
 
 async function saveConnection(url: string, token: string) {
@@ -510,6 +562,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   availablePermissionModes: [],
   discoveredSessions: null,
   claudeStatus: null,
+  connectedClients: [],
   serverErrors: [],
   contextUsage: null,
   lastResultCost: null,
@@ -544,6 +597,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       activeAgents: [],
       isPlanPending: false,
       planAllowedPrompts: [],
+      primaryClientId: null,
     };
   },
 
@@ -679,7 +733,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const socket = new WebSocket(url);
 
     socket.onopen = () => {
-      socket.send(JSON.stringify({ type: 'auth', token }));
+      // Include device info in auth for multi-client awareness
+      const info = getDeviceInfo();
+      void getDeviceId().then((deviceId) => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: 'auth',
+            token,
+            deviceInfo: { deviceId, ...info },
+          }));
+        }
+      });
     };
 
     socket.onmessage = (event) => {
@@ -704,6 +768,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
           const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
           const authServerCommit = typeof msg.serverCommit === 'string' ? msg.serverCommit : null;
+          // Parse connected clients list with self-detection via clientId
+          const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
+          const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
+          const clients: ConnectedClient[] = rawClients
+            .filter((c: unknown): c is { clientId: string } => !!c && typeof c === 'object' && typeof (c as Record<string, unknown>).clientId === 'string')
+            .map((c: { clientId: string; deviceName?: string; deviceType?: string; platform?: string }) => ({
+              clientId: c.clientId,
+              deviceName: typeof c.deviceName === 'string' ? c.deviceName : null,
+              deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(c.deviceType ?? '') ? c.deviceType : 'unknown') as ConnectedClient['deviceType'],
+              platform: typeof c.platform === 'string' ? c.platform : 'unknown',
+              isSelf: c.clientId === myClientId,
+            }));
+
           // On reconnect, preserve messages and terminal buffer
           const connectedState = {
             connectionPhase: 'connected' as const,
@@ -716,6 +793,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             serverVersion: authServerVersion,
             serverCommit: authServerCommit,
             streamingMessageId: null,
+            connectedClients: clients,
           };
           if (isReconnect) {
             set(connectedState);
@@ -1292,6 +1370,75 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           break;
         }
 
+        // --- Multi-client awareness ---
+
+        case 'client_joined': {
+          if (!msg.client || typeof msg.client.clientId !== 'string') break;
+          const newClient: ConnectedClient = {
+            clientId: msg.client.clientId,
+            deviceName: typeof msg.client.deviceName === 'string' ? msg.client.deviceName : null,
+            deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(msg.client.deviceType) ? msg.client.deviceType : 'unknown') as ConnectedClient['deviceType'],
+            platform: typeof msg.client.platform === 'string' ? msg.client.platform : 'unknown',
+            isSelf: false,
+          };
+          set((state) => ({
+            connectedClients: [...state.connectedClients, newClient],
+          }));
+          // Add system message
+          const deviceLabel = newClient.deviceName || 'A device';
+          const joinMsg: ChatMessage = {
+            id: nextMessageId('client'),
+            type: 'system',
+            content: `${deviceLabel} connected`,
+            timestamp: Date.now(),
+          };
+          const joinActiveId = get().activeSessionId;
+          if (joinActiveId && get().sessionStates[joinActiveId]) {
+            updateActiveSession((ss) => ({
+              messages: [...ss.messages, joinMsg],
+            }));
+          } else {
+            get().addMessage(joinMsg);
+          }
+          break;
+        }
+
+        case 'client_left': {
+          if (typeof msg.clientId !== 'string') break;
+          const departingClient = get().connectedClients.find((c) => c.clientId === msg.clientId);
+          set((state) => ({
+            connectedClients: state.connectedClients.filter((c) => c.clientId !== msg.clientId),
+          }));
+          // Add system message
+          const leftLabel = departingClient?.deviceName || 'A device';
+          const leftMsg: ChatMessage = {
+            id: nextMessageId('client'),
+            type: 'system',
+            content: `${leftLabel} disconnected`,
+            timestamp: Date.now(),
+          };
+          const leftActiveId = get().activeSessionId;
+          if (leftActiveId && get().sessionStates[leftActiveId]) {
+            updateActiveSession((ss) => ({
+              messages: [...ss.messages, leftMsg],
+            }));
+          } else {
+            get().addMessage(leftMsg);
+          }
+          break;
+        }
+
+        case 'primary_changed': {
+          const primarySessionId = msg.sessionId;
+          const primaryClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
+          if (typeof primarySessionId === 'string' && get().sessionStates[primarySessionId]) {
+            updateSession(primarySessionId, () => ({
+              primaryClientId,
+            }));
+          }
+          break;
+        }
+
         case 'server_error': {
           // Global broadcast (no sessionId) — route to active session.
           // Validate and coerce untyped JSON fields
@@ -1428,6 +1575,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       availablePermissionModes: [],
       discoveredSessions: null,
       claudeStatus: null,
+      connectedClients: [],
       serverErrors: [],
       contextUsage: null,
       lastResultCost: null,

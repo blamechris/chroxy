@@ -40,7 +40,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  * Protocol (JSON messages over WebSocket):
  *
  * Client -> Server:
- *   { type: 'auth',      token: '...' }              — authenticate
+ *   { type: 'auth',      token: '...', deviceInfo? }   — authenticate (deviceInfo: { deviceId, deviceName, deviceType, platform })
  *   { type: 'input',     data: '...' }               — send text to active session
  *   { type: 'resize',    cols: 120, rows: 40 }       — resize PTY (PTY mode only)
  *   { type: 'mode',      mode: 'terminal'|'chat' }   — switch view mode
@@ -61,7 +61,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
- *   { type: 'auth_ok', serverMode, serverVersion, serverCommit, cwd: string|null } — auth succeeded with server context
+ *   { type: 'auth_ok', clientId, serverMode, serverVersion, serverCommit, cwd, connectedClients } — auth succeeded with server context
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli'|'terminal' }  — which backend mode is active
  *   { type: 'raw',          data: '...' }             — raw PTY output (terminal view)
@@ -96,6 +96,9 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'plan_ready', allowedPrompts }           — plan complete, awaiting approval (transient)
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
+ *   { type: 'client_joined', client: { clientId, deviceName, deviceType, platform } } — new client connected
+ *   { type: 'client_left', clientId }                — client disconnected
+ *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
  */
 export class WsServer {
   constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null }) {
@@ -104,12 +107,13 @@ export class WsServer {
     this.ptyManager = ptyManager || null
     this.outputParser = outputParser || null
     this.authRequired = authRequired
-    this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive }
+    this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
     this.httpServer = null
     this.wss = null
     this._pingInterval = null
     this._pendingPermissions = new Map() // requestId -> { resolve, timer }
     this._permissionCounter = 0
+    this._primaryClients = new Map() // sessionId -> clientId (last-writer-wins)
     this.pushManager = pushManager
 
     // Multi-session support: prefer sessionManager, fall back to single cliSession
@@ -183,6 +187,7 @@ export class WsServer {
         mode: 'chat', // default to chat view
         activeSessionId: null,
         isAlive: true,
+        deviceInfo: null,
       })
 
       // Track pong responses for keepalive detection
@@ -227,6 +232,9 @@ export class WsServer {
         clearTimeout(authTimeout)
         const client = this.clients.get(ws)
         console.log(`[ws] Client ${client?.id} disconnected`)
+        if (client?.authenticated) {
+          this._handleClientDeparture(client)
+        }
         this.clients.delete(ws)
       })
 
@@ -254,6 +262,8 @@ export class WsServer {
         if (ws.readyState !== 1) continue
         if (!client.isAlive) {
           console.log(`[ws] Client ${client.id} unresponsive, terminating`)
+          this._handleClientDeparture(client)
+          this.clients.delete(ws)
           try { ws.terminate() } catch {}
           continue
         }
@@ -293,10 +303,12 @@ export class WsServer {
 
     this._send(ws, {
       type: 'auth_ok',
+      clientId: client.id,
       serverMode: this.serverMode,
       serverVersion: SERVER_VERSION,
       serverCommit: this._gitInfo.commit,
       cwd: sessionInfo.cwd,
+      connectedClients: this._getConnectedClientList(),
     })
     this._send(ws, { type: 'server_mode', mode: this.serverMode })
     this._send(ws, { type: 'status', connected: true })
@@ -414,7 +426,18 @@ export class WsServer {
       if (msg.type === 'auth' && (!this.authRequired || msg.token === this.apiToken)) {
         client.authenticated = true
         client.authTime = Date.now()
+        // Extract optional device info from auth message
+        if (msg.deviceInfo && typeof msg.deviceInfo === 'object') {
+          client.deviceInfo = {
+            deviceId: typeof msg.deviceInfo.deviceId === 'string' ? msg.deviceInfo.deviceId : null,
+            deviceName: typeof msg.deviceInfo.deviceName === 'string' ? msg.deviceInfo.deviceName : null,
+            deviceType: ['phone', 'tablet', 'desktop', 'unknown'].includes(msg.deviceInfo.deviceType) ? msg.deviceInfo.deviceType : 'unknown',
+            platform: typeof msg.deviceInfo.platform === 'string' ? msg.deviceInfo.platform : 'unknown',
+          }
+        }
         this._sendPostAuthInfo(ws)
+        // Broadcast client_joined to other authenticated clients
+        this._broadcastClientJoined(client, ws)
         console.log(`[ws] Client ${client.id} authenticated`)
       } else {
         this._send(ws, { type: 'auth_fail', reason: 'invalid_token' })
@@ -469,6 +492,9 @@ export class WsServer {
           console.log(`[ws] Message from ${client.id} to session ${client.activeSessionId}: "${text.slice(0, 80)}"`)
           entry.session.sendMessage(text.trim())
         }
+
+        // Track last-writer-wins primary for this session
+        this._updatePrimary(client.activeSessionId, client.id)
         break
       }
 
@@ -1302,6 +1328,78 @@ export class WsServer {
         this._send(ws, tagged)
       }
     }
+  }
+
+  /** Get list of connected clients for auth_ok payload */
+  _getConnectedClientList() {
+    const list = []
+    for (const [ws, client] of this.clients) {
+      if (client.authenticated && ws.readyState === 1) {
+        const info = client.deviceInfo || {}
+        list.push({
+          clientId: client.id,
+          deviceName: info.deviceName || null,
+          deviceType: info.deviceType || 'unknown',
+          platform: info.platform || 'unknown',
+        })
+      }
+    }
+    return list
+  }
+
+  /** Broadcast client_joined to all OTHER authenticated clients */
+  _broadcastClientJoined(newClient, excludeWs) {
+    const info = newClient.deviceInfo || {}
+    const message = {
+      type: 'client_joined',
+      client: {
+        clientId: newClient.id,
+        deviceName: info.deviceName || null,
+        deviceType: info.deviceType || 'unknown',
+        platform: info.platform || 'unknown',
+      },
+    }
+    for (const [ws, client] of this.clients) {
+      if (ws !== excludeWs && client.authenticated && ws.readyState === 1) {
+        this._send(ws, message)
+      }
+    }
+  }
+
+  /** Handle cleanup when an authenticated client disconnects or is terminated */
+  _handleClientDeparture(departingClient) {
+    // Clear primary for any sessions this client was primary on
+    for (const [sessionId, primaryClientId] of this._primaryClients) {
+      if (primaryClientId === departingClient.id) {
+        this._primaryClients.delete(sessionId)
+        this._broadcastToSession(sessionId, {
+          type: 'primary_changed',
+          sessionId,
+          clientId: null,
+        })
+      }
+    }
+
+    // Broadcast client_left to remaining authenticated clients
+    const message = { type: 'client_left', clientId: departingClient.id }
+    for (const [ws, client] of this.clients) {
+      if (client.id !== departingClient.id && client.authenticated && ws.readyState === 1) {
+        this._send(ws, message)
+      }
+    }
+  }
+
+  /** Update primary client for a session (last-writer-wins) */
+  _updatePrimary(sessionId, clientId) {
+    if (!sessionId) return
+    const current = this._primaryClients.get(sessionId)
+    if (current === clientId) return // already primary
+    this._primaryClients.set(sessionId, clientId)
+    this._broadcastToSession(sessionId, {
+      type: 'primary_changed',
+      sessionId,
+      clientId,
+    })
   }
 
   /**

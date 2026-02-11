@@ -146,6 +146,7 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].planAllowedPrompts : EMPTY_PROMPTS;
   });
+  const connectedClients = useConnectionStore((s) => s.connectedClients);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const serverErrors = useConnectionStore((s) => s.serverErrors);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
@@ -365,6 +366,7 @@ export function SessionScreen() {
           serverMode={serverMode}
           isIdle={isIdle}
           activeAgents={activeAgents}
+          connectedClients={connectedClients}
           setModel={setModel}
           setPermissionMode={setPermissionMode}
         />
