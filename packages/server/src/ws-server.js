@@ -636,6 +636,7 @@ export class WsServer {
         }
 
         this.sessionManager.destroySession(targetId)
+        this._primaryClients.delete(targetId)
 
         // Auto-switch orphaned clients to the first remaining session
         const firstId = this.sessionManager.firstSessionId
