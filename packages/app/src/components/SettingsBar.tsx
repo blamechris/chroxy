@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert } from 'react-native';
-import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient } from '../store/connection';
+import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient, CustomAgent } from '../store/connection';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
@@ -23,6 +23,8 @@ export interface SettingsBarProps {
   isIdle: boolean;
   activeAgents: AgentInfo[];
   connectedClients: ConnectedClient[];
+  customAgents: CustomAgent[];
+  onInvokeAgent?: (agentName: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
   pendingPermissionConfirm?: { mode: string; warning: string } | null;
@@ -85,6 +87,8 @@ export function SettingsBar({
   isIdle,
   activeAgents,
   connectedClients,
+  customAgents,
+  onInvokeAgent,
   setModel,
   setPermissionMode,
   pendingPermissionConfirm,
@@ -333,6 +337,33 @@ export function SettingsBar({
               ))}
             </View>
           )}
+          {customAgents.length > 0 && (
+            <View style={styles.agentSection}>
+              <Text style={styles.customAgentSectionTitle}>
+                Custom Agents ({customAgents.length})
+              </Text>
+              {customAgents.map((agent) => (
+                <TouchableOpacity
+                  key={agent.name}
+                  style={styles.customAgentEntry}
+                  onPress={() => onInvokeAgent?.(agent.name)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Invoke agent ${agent.name}`}
+                >
+                  <View style={[styles.statusDot, { backgroundColor: COLORS.accentGreen }]} />
+                  <View style={styles.customAgentInfo}>
+                    <Text style={styles.customAgentName}>{agent.name}</Text>
+                    {agent.description ? (
+                      <Text style={styles.customAgentDesc} numberOfLines={1}>{agent.description}</Text>
+                    ) : null}
+                  </View>
+                  {agent.source === 'project' && (
+                    <Text style={styles.customAgentBadge}>project</Text>
+                  )}
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
         </View>
       )}
     </View>
@@ -474,5 +505,41 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginLeft: 8,
+  },
+  customAgentSectionTitle: {
+    color: COLORS.accentGreen,
+    fontSize: 10,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  customAgentEntry: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+    minHeight: 44,
+  },
+  customAgentInfo: {
+    flex: 1,
+  },
+  customAgentName: {
+    color: COLORS.textSecondary,
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontWeight: '600',
+  },
+  customAgentDesc: {
+    color: COLORS.textDim,
+    fontSize: 10,
+    marginTop: 1,
+  },
+  customAgentBadge: {
+    color: COLORS.textDim,
+    fontSize: 9,
+    backgroundColor: COLORS.backgroundCard,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 3,
+    overflow: 'hidden',
   },
 });

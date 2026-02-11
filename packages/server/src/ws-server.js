@@ -86,6 +86,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'user_question_response', answer }         — respond to AskUserQuestion prompt
  *   { type: 'list_directory', path? }                  — request directory listing for file browser
  *   { type: 'list_slash_commands' }                     — request available slash commands
+ *   { type: 'list_agents' }                             — request available custom agents
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
@@ -127,6 +128,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
  *   { type: 'directory_listing', path, parentPath, entries, error } — directory listing response for file browser
  *   { type: 'slash_commands', commands: [{ name, description, source }] } — available slash commands
+ *   { type: 'agent_list', agents: [{ name, description, source }] } — available custom agents
  *   { type: 'client_joined', client: { clientId, deviceName, deviceType, platform } } — new client connected
  *   { type: 'client_left', clientId }                — client disconnected
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
@@ -858,6 +860,13 @@ export class WsServer {
         break
       }
 
+      case 'list_agents': {
+        const entry = this.sessionManager.getSession(client.activeSessionId)
+        const cwd = entry?.cwd || null
+        this._listAgents(ws, cwd)
+        break
+      }
+
       case 'mode':
         if (msg.mode === 'terminal' || msg.mode === 'chat') {
           client.mode = msg.mode
@@ -954,6 +963,12 @@ export class WsServer {
         break
       }
 
+      case 'list_agents': {
+        const cwd = this.cliSession?.cwd || null
+        this._listAgents(ws, cwd)
+        break
+      }
+
       case 'mode':
         if (msg.mode === 'terminal' || msg.mode === 'chat') {
           client.mode = msg.mode
@@ -1001,6 +1016,10 @@ export class WsServer {
 
       case 'list_slash_commands':
         this._listSlashCommands(ws, null)
+        break
+
+      case 'list_agents':
+        this._listAgents(ws, null)
         break
 
       case 'mode':
@@ -1445,6 +1464,61 @@ export class WsServer {
     commands.sort((a, b) => a.name.localeCompare(b.name))
 
     this._send(ws, { type: 'slash_commands', commands })
+  }
+
+  /**
+   * List custom agents from project and user agent directories.
+   * When cwd is provided, walks .claude/agents/ in the project cwd first;
+   * always walks ~/.claude/agents/ for user agents. In PTY mode cwd is
+   * null, so only user agents are returned.
+   * Returns { type: 'agent_list', agents: [{ name, description, source }] }
+   */
+  async _listAgents(ws, cwd) {
+    const agents = []
+    const seen = new Set()
+
+    const scanDir = async (dir, source) => {
+      try {
+        const entries = await readdir(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          if (!entry.isFile() || !entry.name.endsWith('.md')) continue
+          // Guard against names with path separators (defensive)
+          if (entry.name.includes('/') || entry.name.includes('\\')) continue
+          const name = entry.name.slice(0, -3) // strip .md
+          if (seen.has(name)) continue
+          seen.add(name)
+
+          // Read first non-heading, non-empty line as description
+          let description = ''
+          try {
+            const content = await readFile(join(dir, entry.name), 'utf-8')
+            const lines = content.split('\n')
+            for (const line of lines) {
+              const trimmed = line.trim()
+              if (!trimmed || trimmed.startsWith('#')) continue
+              description = trimmed.slice(0, 120)
+              break
+            }
+          } catch (err) {
+            console.error(`[ws] Failed to read agent file ${join(dir, entry.name)}:`, err.message)
+          }
+
+          agents.push({ name, description, source })
+        }
+      } catch {
+        // Directory doesn't exist or is unreadable — expected for missing .claude/agents/
+      }
+    }
+
+    // Project agents take priority (scanned first, so they win in the `seen` set)
+    if (cwd) {
+      await scanDir(join(cwd, '.claude', 'agents'), 'project')
+    }
+    await scanDir(join(homedir(), '.claude', 'agents'), 'user')
+
+    agents.sort((a, b) => a.name.localeCompare(b.name))
+
+    this._send(ws, { type: 'agent_list', agents })
   }
 
   /** Handle POST /permission from the hook script */

@@ -162,6 +162,12 @@ export interface SlashCommand {
   source: 'project' | 'user';
 }
 
+export interface CustomAgent {
+  name: string;
+  description: string;
+  source: 'project' | 'user';
+}
+
 export type ConnectionPhase =
   | 'disconnected'        // Not connected, no auto-reconnect
   | 'connecting'          // Initial connection attempt
@@ -251,6 +257,9 @@ interface ConnectionState {
   // Slash commands from server
   slashCommands: SlashCommand[];
 
+  // Custom agents from server
+  customAgents: CustomAgent[];
+
   // Directory listing callback for file browser
   _directoryListingCallback: ((listing: DirectoryListing) => void) | null;
 
@@ -307,6 +316,9 @@ interface ConnectionState {
 
   // Slash commands
   fetchSlashCommands: () => void;
+
+  // Custom agents
+  fetchCustomAgents: () => void;
 
   // Plan mode actions
   clearPlanState: () => void;
@@ -682,11 +694,14 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
           sessions: [],
           activeSessionId: null,
           sessionStates: {},
+          customAgents: [],
         });
       }
       ctx.socket.send(JSON.stringify({ type: 'mode', mode: get().viewMode }));
       // Fetch slash commands for autocomplete
       ctx.socket.send(JSON.stringify({ type: 'list_slash_commands' }));
+      // Fetch custom agents for agent browser
+      ctx.socket.send(JSON.stringify({ type: 'list_agents' }));
       // Save for quick reconnect
       saveConnection(ctx.url, ctx.token);
       set({ savedConnection: { url: ctx.url, token: ctx.token } });
@@ -751,6 +766,8 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       });
       // Refresh slash commands (project commands may differ per session cwd)
       get().fetchSlashCommands();
+      // Refresh agents (project agents may differ per session cwd)
+      get().fetchCustomAgents();
       break;
     }
 
@@ -1356,6 +1373,13 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       break;
     }
 
+    case 'agent_list': {
+      if (Array.isArray(msg.agents)) {
+        set({ customAgents: msg.agents as CustomAgent[] });
+      }
+      break;
+    }
+
     case 'server_error': {
       // Global broadcast (no sessionId) — route to active session.
       // Validate and coerce untyped JSON fields
@@ -1442,6 +1466,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   serverErrors: [],
   pendingPermissionConfirm: null,
   slashCommands: [],
+  customAgents: [],
   _directoryListingCallback: null,
   contextUsage: null,
   lastResultCost: null,
@@ -1734,6 +1759,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverErrors: [],
       pendingPermissionConfirm: null,
       slashCommands: [],
+      customAgents: [],
       _directoryListingCallback: null,
       _terminalWriteCallback: null,
       contextUsage: null,
@@ -1976,6 +2002,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'list_slash_commands' }));
+    }
+  },
+
+  fetchCustomAgents: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'list_agents' }));
     }
   },
 
