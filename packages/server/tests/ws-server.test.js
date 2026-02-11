@@ -3111,6 +3111,7 @@ describe('auth rate limiting', () => {
     const fail = await waitForMessage(msgs2, 'auth_fail', 2000)
     assert.equal(fail.reason, 'rate_limited', 'Should be rate limited within backoff window')
 
+    ws1.close()
     ws2.close()
   })
 
@@ -3145,7 +3146,9 @@ describe('auth rate limiting', () => {
     const fail = await waitForMessage(msgs3, 'auth_fail', 2000)
     assert.equal(fail.reason, 'invalid_token', 'Should be invalid_token (not rate_limited) after reset')
 
+    ws1.close()
     ws2.close()
+    ws3.close()
     await new Promise(r => setTimeout(r, 50))
   })
 
@@ -3185,6 +3188,9 @@ describe('auth rate limiting', () => {
     // Backoff should be ~2000ms (2s)
     const backoff2 = entry2.blockedUntil - Date.now()
     assert.ok(backoff2 > 1000 && backoff2 <= 2000, `Second backoff should be ~2s, got ${backoff2}ms`)
+
+    ws1.close()
+    ws2.close()
   })
 
   it('cleanup prunes stale entries', async () => {
@@ -3195,7 +3201,7 @@ describe('auth rate limiting', () => {
       cliSession: mockSession,
       authRequired: true,
     })
-    const port = await startServerAndGetPort(server)
+    await startServerAndGetPort(server)
 
     // Manually add a stale entry (6 minutes old)
     server._authFailures.set('1.2.3.4', {
