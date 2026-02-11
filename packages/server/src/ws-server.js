@@ -10,11 +10,25 @@ import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 
 /** Constant-time string comparison for auth tokens */
 function safeTokenCompare(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false
+  let valid = true
+  if (typeof a !== 'string' || typeof b !== 'string') {
+    valid = false
+    a = ''
+    b = ''
+  }
+
   const bufA = Buffer.from(a)
   const bufB = Buffer.from(b)
-  if (bufA.length !== bufB.length) return false
-  return timingSafeEqual(bufA, bufB)
+  const maxLen = Math.max(bufA.length, bufB.length)
+
+  // Always compare buffers of equal length to avoid leaking length via timing
+  const paddedA = Buffer.alloc(maxLen)
+  const paddedB = Buffer.alloc(maxLen)
+  bufA.copy(paddedA)
+  bufB.copy(paddedB)
+
+  const equal = maxLen === 0 ? false : timingSafeEqual(paddedA, paddedB)
+  return valid && equal && bufA.length === bufB.length
 }
 
 const __filename = fileURLToPath(import.meta.url)
