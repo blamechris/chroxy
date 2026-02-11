@@ -4,6 +4,7 @@ import { TunnelManager } from './tunnel.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { wireTunnelEvents } from './tunnel-events.js'
 import { PushManager } from './push.js'
+import { hostname } from 'os'
 import qrcode from 'qrcode-terminal'
 
 /**
@@ -149,6 +150,24 @@ export async function startCliServer(config) {
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
 
+  // Advertise via mDNS/Bonjour for local network discovery
+  let mdnsService = null
+  if (!NO_AUTH) {
+    try {
+      const { Bonjour } = await import('bonjour-service')
+      const bonjour = new Bonjour()
+      mdnsService = bonjour.publish({
+        name: `Chroxy (${hostname()})`,
+        type: 'chroxy',
+        port: PORT,
+        txt: { version: '0.1.0', auth: 'token' },
+      })
+      console.log(`[mdns] Advertising _chroxy._tcp on port ${PORT}`)
+    } catch (err) {
+      console.log(`[mdns] mDNS advertisement unavailable: ${err.message}`)
+    }
+  }
+
   // Determine tunnel mode
   const TUNNEL_MODE = config.tunnel || 'quick'
   const SKIP_TUNNEL = NO_AUTH || TUNNEL_MODE === 'none'
@@ -224,6 +243,9 @@ export async function startCliServer(config) {
   // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`\n[${signal}] Shutting down...`)
+    if (mdnsService) {
+      try { mdnsService.stop?.() } catch {}
+    }
     sessionManager.destroyAll()
     wsServer.close()
     if (tunnel) await tunnel.stop()
