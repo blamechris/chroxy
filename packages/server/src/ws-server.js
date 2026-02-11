@@ -821,10 +821,12 @@ export class WsServer {
       }
 
       case 'resize': {
-        // Forward resize to PTY sessions
+        const cols = msg.cols
+        const rows = msg.rows
+        if (!Number.isInteger(cols) || cols < 1 || !Number.isInteger(rows) || rows < 1) break
         const entry = this.sessionManager.getSession(client.activeSessionId)
         if (entry && entry.type === 'pty' && entry.session.resize) {
-          entry.session.resize(msg.cols, msg.rows)
+          entry.session.resize(cols, rows)
         }
         break
       }
@@ -965,7 +967,9 @@ export class WsServer {
         break
 
       case 'resize':
-        this.ptyManager.resize(msg.cols, msg.rows)
+        if (Number.isInteger(msg.cols) && msg.cols > 0 && Number.isInteger(msg.rows) && msg.rows > 0) {
+          this.ptyManager.resize(msg.cols, msg.rows)
+        }
         break
 
       case 'permission_response': {

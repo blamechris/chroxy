@@ -9,6 +9,9 @@ node_modules/
 dist/
 build/
 
+# Auto-generated xterm bundle (rebuilt by postinstall)
+packages/app/src/components/xterm-bundle.generated.ts
+
 # IDE
 .idea/
 .vscode/
