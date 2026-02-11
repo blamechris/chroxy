@@ -199,6 +199,9 @@ export function ConnectScreen() {
             (async (): Promise<DiscoveredServer | null> => {
               const ctrl = new AbortController();
               const timeout = setTimeout(() => ctrl.abort(), 1500);
+              // Propagate outer abort signal to cancel in-flight requests immediately
+              const onOuterAbort = () => ctrl.abort();
+              abort.signal.addEventListener('abort', onOuterAbort);
               try {
                 const res = await fetch(`http://${targetIp}:${port}/health`, { signal: ctrl.signal });
                 const data = await res.json();
@@ -209,6 +212,7 @@ export function ConnectScreen() {
                 // Expected for most IPs
               } finally {
                 clearTimeout(timeout);
+                abort.signal.removeEventListener('abort', onOuterAbort);
               }
               return null;
             })()
