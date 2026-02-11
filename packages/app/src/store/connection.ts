@@ -109,7 +109,7 @@ export interface DirectoryEntry {
 }
 
 export interface DirectoryListing {
-  path: string;
+  path: string | null;
   parentPath: string | null;
   entries: DirectoryEntry[];
   error: string | null;
@@ -1303,8 +1303,8 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       const cb = get()._directoryListingCallback;
       if (cb) {
         cb({
-          path: msg.path as string,
-          parentPath: (msg.parentPath as string) ?? null,
+          path: typeof msg.path === 'string' ? msg.path : null,
+          parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
           entries: Array.isArray(msg.entries) ? msg.entries as DirectoryEntry[] : [],
           error: typeof msg.error === 'string' ? msg.error : null,
         });
