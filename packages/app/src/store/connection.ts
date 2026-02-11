@@ -1440,7 +1440,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             updateSession(primarySessionId, () => ({
               primaryClientId,
             }));
-          } else {
+          } else if (!primarySessionId || primarySessionId === 'default') {
             // Legacy/single-session mode: store at flat state level
             set({ primaryClientId });
           }

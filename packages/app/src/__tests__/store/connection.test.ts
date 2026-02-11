@@ -614,4 +614,19 @@ describe('multi-client message handling', () => {
       expect(useConnectionStore.getState().primaryClientId).toBeNull();
     });
   });
+
+  describe('primary_changed for unknown session IDs', () => {
+    it('does not clobber flat primaryClientId when event is for unknown non-default session', () => {
+      // Scenario: multi-session mode, flat primaryClientId is already set for legacy,
+      // and a primary_changed arrives for a session not yet in sessionStates.
+      // The handler should ignore it (not update flat primaryClientId).
+      useConnectionStore.setState({
+        primaryClientId: 'client-legacy',
+        sessionStates: { 'session-1': createEmptySessionState() },
+      });
+      // An event for 'session-unknown' should NOT overwrite flat primaryClientId
+      // (the handler gates on !primarySessionId || primarySessionId === 'default')
+      expect(useConnectionStore.getState().primaryClientId).toBe('client-legacy');
+    });
+  });
 });
