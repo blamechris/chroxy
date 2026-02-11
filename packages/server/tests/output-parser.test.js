@@ -18,7 +18,7 @@ function collectEvents(parser, eventName) {
   return events
 }
 
-describe('OutputParser._stripAnsi', () => {
+describe('OutputParser._processAnsi', () => {
   let parser
 
   beforeEach(() => {
@@ -26,47 +26,142 @@ describe('OutputParser._stripAnsi', () => {
   })
 
   it('strips SGR codes', () => {
-    assert.equal(parser._stripAnsi('\x1b[31mred\x1b[0m'), 'red')
+    const lines = parser._processAnsi('\x1b[31mred\x1b[0m\n')
+    assert.deepEqual(lines, ['red'])
   })
 
   it('strips combined SGR codes', () => {
-    assert.equal(parser._stripAnsi('\x1b[1;32mbold green\x1b[0m'), 'bold green')
+    const lines = parser._processAnsi('\x1b[1;32mbold green\x1b[0m\n')
+    assert.deepEqual(lines, ['bold green'])
   })
 
-  it('replaces CUP at column 1 with newline', () => {
-    assert.equal(parser._stripAnsi('\x1b[5;1H'), '\n')
+  it('CUP at column 1 on different row finalizes previous line', () => {
+    const lines = parser._processAnsi('hello\x1b[5;1Hworld\n')
+    assert.deepEqual(lines, ['hello', 'world'])
   })
 
-  it('replaces CUP at column >1 with space', () => {
-    assert.equal(parser._stripAnsi('\x1b[5;10H'), ' ')
+  it('CUP at column >1 on same row positions correctly', () => {
+    parser._screenRow = 0
+    const lines = parser._processAnsi('\x1b[1;1HNice\x1b[1;10Hworld\n')
+    assert.deepEqual(lines, ['Nice     world'])
   })
 
-  it('replaces CUP with no column (defaults to 1) with newline', () => {
-    assert.equal(parser._stripAnsi('\x1b[5H'), '\n')
+  it('CUP with no column defaults to column 1', () => {
+    const lines = parser._processAnsi('hello\x1b[5Hworld\n')
+    assert.deepEqual(lines, ['hello', 'world'])
   })
 
-  it('replaces CUF with space', () => {
-    assert.equal(parser._stripAnsi('\x1b[5C'), ' ')
+  it('CUF advances cursor and pads with spaces', () => {
+    const lines = parser._processAnsi('Name\x1b[5CValue\n')
+    assert.deepEqual(lines, ['Name     Value'])
   })
 
-  it('replaces CHA at column 1 with newline', () => {
-    assert.equal(parser._stripAnsi('\x1b[1G'), '\n')
+  it('CHA at column 1 resets to start', () => {
+    const lines = parser._processAnsi('hello\x1b[1Gworld\n')
+    assert.deepEqual(lines, ['world'])
   })
 
-  it('replaces CHA at column >1 with space', () => {
-    assert.equal(parser._stripAnsi('\x1b[10G'), ' ')
+  it('CHA at column >1 positions within line', () => {
+    // CHA moves cursor but does not erase — 'd' at col 10 remains
+    const lines = parser._processAnsi('hello world\x1b[6GEARTH\n')
+    assert.deepEqual(lines, ['helloEARTHd'])
   })
 
-  it('replaces \\r with \\n', () => {
-    assert.equal(parser._stripAnsi('hello\rworld'), 'hello\nworld')
+  it('CR resets column allowing overwrite', () => {
+    const lines = parser._processAnsi('Hello\rWorld\n')
+    assert.deepEqual(lines, ['World'])
   })
 
-  it('handles split ANSI sequences across chunks', () => {
-    // Simulate split: feed raw buffer with partial sequence
-    parser.buffer = '\x1b[3'
-    parser.buffer += '1mtext\x1b[0m'
-    parser.buffer = parser._stripAnsi(parser.buffer)
-    assert.equal(parser.buffer, 'text')
+  it('handles split ANSI sequences across feed calls via _screenPending', () => {
+    // First chunk ends mid-sequence
+    const lines1 = parser._processAnsi('\x1b[3')
+    assert.deepEqual(lines1, [])
+    assert.equal(parser._screenPending, '\x1b[3')
+    // Second chunk completes the sequence
+    const lines2 = parser._processAnsi('1mtext\x1b[0m\n')
+    assert.deepEqual(lines2, ['text'])
+  })
+
+  it('char-by-char CUP same row assembles correctly', () => {
+    const lines = parser._processAnsi('\x1b[10;1HN\x1b[10;2Hi\x1b[10;3Hc\x1b[10;4He\n')
+    assert.deepEqual(lines, ['Nice'])
+  })
+
+  it('CUP to different row finalizes previous line', () => {
+    const lines = parser._processAnsi('\x1b[1;1HLine one\x1b[2;1HLine two\n')
+    assert.deepEqual(lines, ['Line one', 'Line two'])
+  })
+
+  it('EL (0K) clears from cursor to end of line', () => {
+    const lines = parser._processAnsi('\x1b[1;1HHello World\x1b[1;6H\x1b[K\n')
+    assert.deepEqual(lines, ['Hello'])
+  })
+
+  it('EL (2K) clears entire line', () => {
+    const lines = parser._processAnsi('Hello\x1b[2K\n')
+    assert.deepEqual(lines, [])
+  })
+
+  it('SGR codes are stripped without affecting text', () => {
+    const lines = parser._processAnsi('\x1b[1;31mred bold\x1b[0m\n')
+    assert.deepEqual(lines, ['red bold'])
+  })
+
+  it('\\r\\n produces one line break', () => {
+    const lines = parser._processAnsi('hello\r\nworld\r\n')
+    assert.deepEqual(lines, ['hello', 'world'])
+  })
+
+  it('tmux-style redraw produces correct response', () => {
+    // Simulate tmux redrawing "⏺ Nice work!" character by character with CUP
+    const lines = parser._processAnsi(
+      '\x1b[5;1H\x1b[1;36m⏺\x1b[0m \x1b[5;3HN\x1b[5;4Hi\x1b[5;5Hc\x1b[5;6He\x1b[5;7H ' +
+      '\x1b[5;8Hw\x1b[5;9Ho\x1b[5;10Hr\x1b[5;11Hk\x1b[5;12H!\n'
+    )
+    assert.deepEqual(lines, ['⏺ Nice work!'])
+  })
+
+  it('backspace decrements column', () => {
+    const lines = parser._processAnsi('abc\x08X\n')
+    assert.deepEqual(lines, ['abX'])
+  })
+
+  it('OSC sequences are skipped', () => {
+    const lines = parser._processAnsi('\x1b]0;title\x07text\n')
+    assert.deepEqual(lines, ['text'])
+  })
+
+  it('ED (2J) clears display and finalizes line', () => {
+    parser._screenLine = ['h', 'i']
+    const lines = parser._processAnsi('\x1b[2Jnew\n')
+    assert.deepEqual(lines, ['hi', 'new'])
+  })
+
+  it('CUU finalizes line when row changes', () => {
+    parser._screenRow = 5
+    // CUU moves row up but does NOT reset column — col stays at 6 after 'bottom'
+    // Writing 'top' starts at col 6, so new line is padded
+    const lines = parser._processAnsi('bottom\x1b[2A\x1b[1Gtop\n')
+    assert.deepEqual(lines, ['bottom', 'top'])
+  })
+
+  it('CUD finalizes line when row changes', () => {
+    parser._screenRow = 0
+    // CUD moves row down but does NOT reset column — use CHA to reset
+    const lines = parser._processAnsi('top\x1b[1B\x1b[1Gbottom\n')
+    assert.deepEqual(lines, ['top', 'bottom'])
+  })
+})
+
+describe('OutputParser._stripAnsi (deprecated)', () => {
+  let parser
+
+  beforeEach(() => {
+    parser = createParser()
+  })
+
+  it('still works for backward compatibility', () => {
+    assert.equal(parser._stripAnsi('\x1b[31mred\x1b[0m'), 'red')
   })
 })
 

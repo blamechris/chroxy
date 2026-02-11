@@ -25,8 +25,12 @@ export class OutputParser extends EventEmitter {
   constructor({ assumeReady = false, suppressScrollback = false, flushDelay = 1500 } = {}) {
     super();
     this.state = State.IDLE;
-    this.buffer = "";
     this.currentMessage = null;
+    // Screen state for column-aware ANSI processing
+    this._screenRow = 0;
+    this._screenCol = 0;
+    this._screenLine = [];
+    this._screenPending = '';
     this._flushTimer = null;
     this._flushDelay = flushDelay;
     this._recentEmissions = new Map(); // key -> timestamp
@@ -108,17 +112,9 @@ export class OutputParser extends EventEmitter {
       }, 500);
     }
 
-    // Accumulate raw data into buffer, THEN strip ANSI from the whole buffer.
-    // This handles ANSI sequences that get split across PTY data chunks
-    // (e.g. \x1b[38;5; in one chunk and 255m in the next).
-    this.buffer += rawData;
-    this.buffer = this._stripAnsi(this.buffer);
-
-    // Process complete lines
-    const lines = this.buffer.split("\n");
-    // Keep the last incomplete line in the buffer
-    this.buffer = lines.pop() || "";
-
+    // Column-aware ANSI processing: tracks cursor position so that
+    // tmux CUP-based redraws produce correctly spaced text.
+    const lines = this._processAnsi(rawData);
     for (const line of lines) {
       this._processLine(line);
     }
@@ -437,6 +433,14 @@ export class OutputParser extends EventEmitter {
       clearTimeout(this._flushTimer);
       this._flushTimer = null;
     }
+    // Flush any pending screen line content into the current message
+    if (this._screenLine.length > 0) {
+      const pending = this._screenLine.join('').trimEnd()
+      this._screenLine = []
+      if (pending && this.currentMessage) {
+        this.currentMessage.content += pending + '\n'
+      }
+    }
     if (this.currentMessage && this.currentMessage.content?.trim()) {
       // Scrollback suppression: discard messages during initial burst
       if (this._suppressingScrollback) {
@@ -479,10 +483,222 @@ export class OutputParser extends EventEmitter {
     this.currentMessage = null;
   }
 
-  /** Strip ANSI escape codes for clean pattern matching.
-   *  Cursor-positioning sequences (\x1b[...H) are replaced with \n
-   *  so that tmux screen redraws produce parseable lines instead of
-   *  concatenating everything into one giant buffer line. */
+  /**
+   * Parse an escape sequence starting at index i in data.
+   * Returns { type, cmd, params, consumed } or null if incomplete.
+   */
+  _parseEscape(data, i) {
+    const len = data.length
+    if (i >= len) return null
+
+    const first = data[i]
+
+    // CSI: \x1b[ or \x9b
+    if (first === '\x9b' || (first === '\x1b' && i + 1 < len && data[i + 1] === '[')) {
+      const start = first === '\x9b' ? i + 1 : i + 2
+      if (start > len) return null // incomplete
+
+      // Scan parameter bytes: digits, ;, ?, >, =, !
+      let j = start
+      while (j < len && ((data[j] >= '0' && data[j] <= '9') || data[j] === ';' || data[j] === '?' || data[j] === '>' || data[j] === '=' || data[j] === '!')) {
+        j++
+      }
+      if (j >= len) return null // incomplete — no final byte yet
+
+      const cmd = data[j]
+      const params = data.slice(start, j)
+      const consumed = j - i + 1
+      return { type: 'csi', cmd, params, consumed }
+    }
+
+    // Must be \x1b for remaining sequences
+    if (first !== '\x1b') return null
+    if (i + 1 >= len) return null // incomplete
+
+    const second = data[i + 1]
+
+    // OSC: \x1b]
+    if (second === ']') {
+      let j = i + 2
+      while (j < len) {
+        if (data[j] === '\x07') return { type: 'skip', consumed: j - i + 1 }
+        if (data[j] === '\x1b' && j + 1 < len && data[j + 1] === '\\') {
+          return { type: 'skip', consumed: j - i + 2 }
+        }
+        j++
+      }
+      return null // incomplete — no terminator found
+    }
+
+    // Charset: \x1b( \x1b) \x1b#
+    if (second === '(' || second === ')' || second === '#') {
+      if (i + 2 >= len) return null
+      return { type: 'skip', consumed: 3 }
+    }
+
+    // ESC + letter
+    if ((second >= 'A' && second <= 'Z') || (second >= 'a' && second <= 'z')) {
+      return { type: 'esc', cmd: second, consumed: 2 }
+    }
+
+    // Unknown — skip 2 bytes
+    return { type: 'skip', consumed: 2 }
+  }
+
+  /** Finalize current screen line into the output array */
+  _finalizeScreenLine(lines) {
+    const text = this._screenLine.join('').trimEnd()
+    this._screenLine = []
+    if (text) lines.push(text)
+  }
+
+  /**
+   * Column-aware ANSI processor. Tracks cursor position and writes
+   * characters at their correct column positions.
+   * Returns an array of completed lines.
+   */
+  _processAnsi(rawData) {
+    const lines = []
+    const data = this._screenPending + rawData
+    this._screenPending = ''
+    const len = data.length
+
+    let i = 0
+    while (i < len) {
+      const ch = data[i]
+
+      // Escape sequence
+      if (ch === '\x1b' || ch === '\x9b') {
+        const esc = this._parseEscape(data, i)
+        if (!esc) {
+          // Incomplete — save rest as pending
+          this._screenPending = data.slice(i)
+          break
+        }
+
+        if (esc.type === 'csi') {
+          const cmd = esc.cmd
+          const params = esc.params
+          const parts = params.split(';')
+
+          if (cmd === 'H' || cmd === 'f') {
+            // CUP — Cursor Position
+            const row = (parseInt(parts[0], 10) || 1) - 1
+            const col = (parseInt(parts[1], 10) || 1) - 1
+            if (row !== this._screenRow) {
+              this._finalizeScreenLine(lines)
+              this._screenRow = row
+            }
+            this._screenCol = col
+          } else if (cmd === 'C') {
+            // CUF — Cursor Forward
+            const n = parseInt(params, 10) || 1
+            this._screenCol += n
+          } else if (cmd === 'G') {
+            // CHA — Cursor Horizontal Absolute
+            const col = (parseInt(params, 10) || 1) - 1
+            this._screenCol = col
+          } else if (cmd === 'A') {
+            // CUU — Cursor Up
+            const n = parseInt(params, 10) || 1
+            const newRow = this._screenRow - n
+            if (newRow !== this._screenRow) {
+              this._finalizeScreenLine(lines)
+              this._screenRow = Math.max(0, newRow)
+            }
+          } else if (cmd === 'B') {
+            // CUD — Cursor Down
+            const n = parseInt(params, 10) || 1
+            const newRow = this._screenRow + n
+            if (newRow !== this._screenRow) {
+              this._finalizeScreenLine(lines)
+              this._screenRow = newRow
+            }
+          } else if (cmd === 'K') {
+            // EL — Erase in Line
+            const mode = parseInt(params, 10) || 0
+            if (mode === 0) {
+              // Erase from cursor to end of line
+              this._screenLine.length = Math.min(this._screenLine.length, this._screenCol)
+            } else if (mode === 1) {
+              // Erase from start to cursor
+              for (let c = 0; c <= this._screenCol && c < this._screenLine.length; c++) {
+                this._screenLine[c] = ' '
+              }
+            } else if (mode === 2) {
+              // Erase entire line
+              this._screenLine = []
+            }
+          } else if (cmd === 'J') {
+            // ED — Erase in Display
+            const mode = parseInt(params, 10) || 0
+            if (mode === 2 || mode === 3) {
+              this._finalizeScreenLine(lines)
+              this._screenRow = 0
+              this._screenCol = 0
+            }
+          }
+          // SGR (m) and all other CSI commands: skip
+        }
+        // skip/esc types: no action needed
+
+        i += esc.consumed
+        continue
+      }
+
+      // Carriage return — reset column (VT100 CR, allows overwrite)
+      if (ch === '\r') {
+        this._screenCol = 0
+        i++
+        continue
+      }
+
+      // Newline — finalize line
+      if (ch === '\n') {
+        this._finalizeScreenLine(lines)
+        this._screenRow++
+        this._screenCol = 0
+        i++
+        continue
+      }
+
+      // Backspace
+      if (ch === '\x08') {
+        if (this._screenCol > 0) this._screenCol--
+        i++
+        continue
+      }
+
+      // Other C0 controls (BEL, etc.) — skip
+      if (ch.charCodeAt(0) < 0x20 && ch !== '\t') {
+        i++
+        continue
+      }
+
+      // Tab — advance to next 8-col tab stop
+      if (ch === '\t') {
+        this._screenCol = (Math.floor(this._screenCol / 8) + 1) * 8
+        i++
+        continue
+      }
+
+      // Regular character — write at current column
+      while (this._screenLine.length < this._screenCol) {
+        this._screenLine.push(' ')
+      }
+      if (this._screenCol < this._screenLine.length) {
+        this._screenLine[this._screenCol] = ch
+      } else {
+        this._screenLine.push(ch)
+      }
+      this._screenCol++
+      i++
+    }
+
+    return lines
+  }
+
+  /** @deprecated Kept for backward compatibility — no longer used by feed(). */
   _stripAnsi(str) {
     // First pass: smart cursor positioning (CUP) replacement.
     // CUP format: \x1b[row;colH or \x1b[rowH (col defaults to 1)
