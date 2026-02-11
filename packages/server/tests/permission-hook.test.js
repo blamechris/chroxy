@@ -4,9 +4,9 @@ import { EventEmitter } from 'node:events'
 import { writeFileSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 
-// We need to test the module's behavior with a temporary settings file.
-// The module reads from ~/.claude/settings.json directly, so we mock via
-// environment manipulation and direct function testing.
+// The module reads from ~/.claude/settings.json directly. Tests that touch the
+// real file save/restore its contents and skip gracefully if the file is absent.
+// Lock serialization and manager lifecycle are tested without filesystem access.
 
 // Import the module under test
 import { withSettingsLock, createPermissionHookManager } from '../src/permission-hook.js'
