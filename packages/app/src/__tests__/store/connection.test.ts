@@ -978,4 +978,36 @@ describe('buildXtermHtml', () => {
     const html = buildXtermHtml();
     expect(html).toContain('disableStdin: true');
   });
+
+  it('includes resize notification with debounce', () => {
+    const html = buildXtermHtml();
+    expect(html).toContain("type: 'resize'");
+    expect(html).toContain('notifyResize');
+    // Verify debounce timer (250ms)
+    expect(html).toContain('250');
+  });
+});
+
+// -- resize() store action --
+
+describe('resize store action', () => {
+  it('sends resize message over WebSocket', () => {
+    const sent: string[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => sent.push(data),
+    } as unknown as WebSocket;
+
+    useConnectionStore.setState({ socket: mockSocket });
+    useConnectionStore.getState().resize(120, 40);
+
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0])).toEqual({ type: 'resize', cols: 120, rows: 40 });
+  });
+
+  it('no-ops when socket is not connected', () => {
+    useConnectionStore.setState({ socket: null });
+    // Should not throw
+    useConnectionStore.getState().resize(80, 24);
+  });
 });
