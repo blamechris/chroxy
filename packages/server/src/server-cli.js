@@ -5,7 +5,15 @@ import { waitForTunnel } from './tunnel-check.js'
 import { wireTunnelEvents } from './tunnel-events.js'
 import { PushManager } from './push.js'
 import { hostname } from 'os'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
 import qrcode from 'qrcode-terminal'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
+const SERVER_VERSION = packageJson.version
 
 /**
  * Start the Chroxy server in CLI headless mode.
@@ -23,7 +31,7 @@ export async function startCliServer(config) {
   }
 
   const modeStr = config.legacyCli ? 'CLI legacy mode' : 'SDK mode'
-  const banner = `Chroxy Server v0.1.0 (${modeStr})`
+  const banner = `Chroxy Server v${SERVER_VERSION} (${modeStr})`
   const pad = Math.max(0, 38 - banner.length)
   const left = Math.floor(pad / 2)
   const right = pad - left
@@ -152,15 +160,16 @@ export async function startCliServer(config) {
 
   // Advertise via mDNS/Bonjour for local network discovery
   let mdnsService = null
+  let bonjourInstance = null
   if (!NO_AUTH) {
     try {
       const { Bonjour } = await import('bonjour-service')
-      const bonjour = new Bonjour()
-      mdnsService = bonjour.publish({
+      bonjourInstance = new Bonjour()
+      mdnsService = bonjourInstance.publish({
         name: `Chroxy (${hostname()})`,
         type: 'chroxy',
         port: PORT,
-        txt: { version: '0.1.0', auth: 'token' },
+        txt: { version: SERVER_VERSION, auth: API_TOKEN ? 'token' : 'none' },
       })
       console.log(`[mdns] Advertising _chroxy._tcp on port ${PORT}`)
     } catch (err) {
@@ -245,6 +254,9 @@ export async function startCliServer(config) {
     console.log(`\n[${signal}] Shutting down...`)
     if (mdnsService) {
       try { mdnsService.stop?.() } catch {}
+    }
+    if (bonjourInstance) {
+      try { bonjourInstance.destroy?.() } catch {}
     }
     sessionManager.destroyAll()
     wsServer.close()
