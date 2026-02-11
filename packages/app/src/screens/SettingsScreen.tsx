@@ -26,8 +26,11 @@ export function SettingsScreen() {
     clearSavedConnection,
     wsUrl,
     serverVersion,
+    latestVersion,
     serverMode,
   } = useConnectionStore();
+
+  const updateAvailable = serverVersion && latestVersion && latestVersion !== serverVersion;
 
   const handleClearSessionHistory = () => {
     Alert.alert(
@@ -126,7 +129,14 @@ export function SettingsScreen() {
             <View style={styles.separator} />
             <View style={styles.row}>
               <Text style={styles.rowLabel}>Server Version</Text>
-              <Text style={styles.rowValue}>{serverVersion}</Text>
+              <View style={styles.versionRow}>
+                <Text style={styles.rowValue}>{serverVersion}</Text>
+                {updateAvailable && (
+                  <View style={styles.updateBadge}>
+                    <Text style={styles.updateBadgeText}>{latestVersion} available</Text>
+                  </View>
+                )}
+              </View>
             </View>
           </>
         )}
@@ -216,5 +226,21 @@ const styles = StyleSheet.create({
   destructiveText: {
     color: COLORS.accentRed,
     fontSize: 15,
+  },
+  versionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  updateBadge: {
+    backgroundColor: COLORS.accentOrangeSubtle,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  updateBadgeText: {
+    color: COLORS.accentOrange,
+    fontSize: 11,
+    fontWeight: '600',
   },
 });
