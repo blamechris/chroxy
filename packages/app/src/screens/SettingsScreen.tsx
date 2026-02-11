@@ -30,7 +30,18 @@ export function SettingsScreen() {
     serverMode,
   } = useConnectionStore();
 
-  const updateAvailable = serverVersion && latestVersion && latestVersion !== serverVersion;
+  // Simple semver comparison: check if latest > current (not just different)
+  const updateAvailable = (() => {
+    if (!serverVersion || !latestVersion || latestVersion === serverVersion) return false;
+    const parse = (v: string) => v.replace(/^v/, '').split('.').map(Number);
+    const cur = parse(serverVersion);
+    const lat = parse(latestVersion);
+    for (let i = 0; i < 3; i++) {
+      if ((lat[i] || 0) > (cur[i] || 0)) return true;
+      if ((lat[i] || 0) < (cur[i] || 0)) return false;
+    }
+    return false;
+  })();
 
   const handleClearSessionHistory = () => {
     Alert.alert(
