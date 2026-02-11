@@ -78,7 +78,7 @@ function registerPermissionHookSync(settingsPath) {
   })
 
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
-  console.log('[permission-hook] Registered hook in ~/.claude/settings.json')
+  console.log(`[permission-hook] Registered hook in ${settingsPath}`)
 }
 
 /**
@@ -100,7 +100,7 @@ function unregisterPermissionHookSync(settingsPath) {
       delete settings.hooks
     }
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
-    console.log('[permission-hook] Unregistered hook from ~/.claude/settings.json')
+    console.log(`[permission-hook] Unregistered hook from ${settingsPath}`)
   }
 }
 
@@ -123,7 +123,8 @@ export function createPermissionHookManager(emitter, { settingsPath } = {}) {
 
     retryCount++
     if (retryCount > 3) {
-      const errMsg = 'Hook registration failed after 3 attempts. Please check ~/.claude/settings.json and restart the server. Permissions will not work until this is fixed.'
+      const effectivePath = settingsPath || DEFAULT_SETTINGS_PATH
+      const errMsg = `Hook registration failed after 3 attempts. Please check ${effectivePath} and restart the server. Permissions will not work until this is fixed.`
       console.error(`[permission-hook] ${errMsg}`)
       emitter.emit('error', { message: errMsg })
       return
