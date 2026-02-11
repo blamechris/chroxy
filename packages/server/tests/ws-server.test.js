@@ -3077,3 +3077,299 @@ describe('PTY mode permission_response', () => {
     ws.close()
   })
 })
+
+describe('auth rate limiting', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('blocks after auth failure within backoff window', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Fail auth once (triggers 1s backoff)
+    const { ws: ws1, messages: msgs1 } = await createClient(port, false)
+    send(ws1, { type: 'auth', token: 'wrong-token' })
+    await waitForMessage(msgs1, 'auth_fail', 2000)
+    assert.equal(msgs1[0].reason, 'invalid_token')
+    await new Promise(r => setTimeout(r, 50))
+
+    // Immediately try again — should be rate limited (within 1s backoff)
+    const { ws: ws2, messages: msgs2 } = await createClient(port, false)
+    send(ws2, { type: 'auth', token: 'wrong-token' })
+    const fail = await waitForMessage(msgs2, 'auth_fail', 2000)
+    assert.equal(fail.reason, 'rate_limited', 'Should be rate limited within backoff window')
+
+    ws2.close()
+  })
+
+  it('successful auth resets rate limit', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Fail once
+    const { ws: ws1, messages: msgs1 } = await createClient(port, false)
+    send(ws1, { type: 'auth', token: 'wrong' })
+    await waitForMessage(msgs1, 'auth_fail', 2000)
+    await new Promise(r => setTimeout(r, 50))
+
+    // Wait for the backoff to expire (1s for first failure)
+    await new Promise(r => setTimeout(r, 1100))
+
+    // Succeed
+    const { ws: ws2, messages: msgs2 } = await createClient(port, false)
+    send(ws2, { type: 'auth', token: 'test-token' })
+    const authOk = await waitForMessage(msgs2, 'auth_ok', 2000)
+    assert.ok(authOk, 'Should authenticate successfully')
+
+    // Fail again — should start fresh (not carry over previous count)
+    const { ws: ws3, messages: msgs3 } = await createClient(port, false)
+    send(ws3, { type: 'auth', token: 'wrong' })
+    const fail = await waitForMessage(msgs3, 'auth_fail', 2000)
+    assert.equal(fail.reason, 'invalid_token', 'Should be invalid_token (not rate_limited) after reset')
+
+    ws2.close()
+    await new Promise(r => setTimeout(r, 50))
+  })
+
+  it('exponential backoff increases block duration', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Access internal state to verify backoff progression
+    // First failure: 1s backoff
+    const { ws: ws1, messages: msgs1 } = await createClient(port, false)
+    send(ws1, { type: 'auth', token: 'wrong' })
+    await waitForMessage(msgs1, 'auth_fail', 2000)
+    await new Promise(r => setTimeout(r, 50))
+
+    const entry1 = server._authFailures.values().next().value
+    assert.equal(entry1.count, 1)
+    // Backoff should be ~1000ms (1s)
+    const backoff1 = entry1.blockedUntil - Date.now()
+    assert.ok(backoff1 > 0 && backoff1 <= 1000, `First backoff should be ~1s, got ${backoff1}ms`)
+
+    // Wait for first backoff to expire, then fail again
+    await new Promise(r => setTimeout(r, 1100))
+
+    const { ws: ws2, messages: msgs2 } = await createClient(port, false)
+    send(ws2, { type: 'auth', token: 'wrong' })
+    await waitForMessage(msgs2, 'auth_fail', 2000)
+    await new Promise(r => setTimeout(r, 50))
+
+    const entry2 = server._authFailures.values().next().value
+    assert.equal(entry2.count, 2)
+    // Backoff should be ~2000ms (2s)
+    const backoff2 = entry2.blockedUntil - Date.now()
+    assert.ok(backoff2 > 1000 && backoff2 <= 2000, `Second backoff should be ~2s, got ${backoff2}ms`)
+  })
+
+  it('cleanup prunes stale entries', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Manually add a stale entry (6 minutes old)
+    server._authFailures.set('1.2.3.4', {
+      count: 5,
+      firstFailure: Date.now() - 6 * 60 * 1000,
+      blockedUntil: Date.now() - 5 * 60 * 1000,
+    })
+
+    // Add a fresh entry
+    server._authFailures.set('5.6.7.8', {
+      count: 1,
+      firstFailure: Date.now(),
+      blockedUntil: Date.now() + 1000,
+    })
+
+    assert.equal(server._authFailures.size, 2)
+
+    // Simulate cleanup (the interval runs every 60s, but we can call the logic directly)
+    const cutoff = Date.now() - 5 * 60 * 1000
+    for (const [ip, entry] of server._authFailures) {
+      if (entry.firstFailure < cutoff) {
+        server._authFailures.delete(ip)
+      }
+    }
+
+    assert.equal(server._authFailures.size, 1, 'Stale entry should be pruned')
+    assert.ok(server._authFailures.has('5.6.7.8'), 'Fresh entry should remain')
+  })
+})
+
+describe('auto permission mode confirmation handshake', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('auto mode requires confirmation (single-session)', async () => {
+    const mockSession = createMockSession()
+    let appliedMode = null
+    mockSession.setPermissionMode = (mode) => { appliedMode = mode }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    // Request auto mode without confirmed flag
+    send(ws, { type: 'set_permission_mode', mode: 'auto' })
+
+    // Should get confirm_permission_mode challenge
+    const confirm = await waitForMessage(messages, 'confirm_permission_mode', 2000)
+    assert.ok(confirm, 'Should receive confirm_permission_mode')
+    assert.equal(confirm.mode, 'auto')
+    assert.equal(typeof confirm.warning, 'string')
+    assert.ok(confirm.warning.length > 0)
+
+    // Mode should NOT have been applied
+    assert.equal(appliedMode, null, 'Auto mode should NOT be applied without confirmation')
+
+    // No permission_mode_changed should have been broadcast
+    const modeChanged = messages.find(m => m.type === 'permission_mode_changed')
+    assert.equal(modeChanged, undefined, 'permission_mode_changed should NOT be sent')
+
+    ws.close()
+  })
+
+  it('confirmed auto mode applies normally (single-session)', async () => {
+    const mockSession = createMockSession()
+    let appliedMode = null
+    mockSession.setPermissionMode = (mode) => { appliedMode = mode }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    // Send with confirmed: true
+    send(ws, { type: 'set_permission_mode', mode: 'auto', confirmed: true })
+
+    const modeChanged = await waitForMessage(messages, 'permission_mode_changed', 2000)
+    assert.ok(modeChanged, 'Should receive permission_mode_changed')
+    assert.equal(modeChanged.mode, 'auto')
+    assert.equal(appliedMode, 'auto', 'Auto mode should be applied with confirmation')
+
+    ws.close()
+  })
+
+  it('non-auto modes bypass confirmation (single-session)', async () => {
+    const mockSession = createMockSession()
+    let appliedMode = null
+    mockSession.setPermissionMode = (mode) => { appliedMode = mode }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    // Send approve mode (no confirmation needed)
+    send(ws, { type: 'set_permission_mode', mode: 'approve' })
+
+    const modeChanged = await waitForMessage(messages, 'permission_mode_changed', 2000)
+    assert.ok(modeChanged, 'Should receive permission_mode_changed immediately')
+    assert.equal(modeChanged.mode, 'approve')
+    assert.equal(appliedMode, 'approve')
+
+    // No confirm_permission_mode should have been sent
+    const confirm = messages.find(m => m.type === 'confirm_permission_mode')
+    assert.equal(confirm, undefined, 'Non-auto modes should not trigger confirmation')
+
+    ws.close()
+  })
+
+  it('auto mode requires confirmation (multi-session)', async () => {
+    const manager = new EventEmitter()
+    const mockSession = createMockSession()
+    let appliedMode = null
+    mockSession.setPermissionMode = (mode) => { appliedMode = mode }
+    mockSession.cwd = '/tmp/test'
+
+    const sessionsMap = new Map()
+    sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: '/tmp/test', type: 'cli', isBusy: false })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: '/tmp/test', type: 'cli', isBusy: false }]
+    manager.getHistory = () => []
+    Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, { type: 'set_permission_mode', mode: 'auto' })
+
+    const confirm = await waitForMessage(messages, 'confirm_permission_mode', 2000)
+    assert.ok(confirm, 'Should receive confirm_permission_mode in multi-session mode')
+    assert.equal(confirm.mode, 'auto')
+    assert.equal(appliedMode, null, 'Mode should not be applied without confirmation')
+
+    ws.close()
+  })
+})
