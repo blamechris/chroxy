@@ -8,20 +8,58 @@ Address all PR review comments systematically and respond inline.
 
 ## Instructions
 
+### 0. Wait for Automated Reviews
+
+Copilot review typically takes **3–5 minutes** after PR creation to even begin. If you run `/check-pr` immediately after creating the PR, the review won't exist yet.
+
+**IMPORTANT:** Do NOT skip this step. If no Copilot review exists and the PR was created recently (within 5 min), you MUST wait — otherwise you'll process zero comments and miss the entire review.
+
+```bash
+PR_NUM=${1:-$(gh pr view --json number -q .number)}
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+
+# Check how old the PR is
+PR_AGE_SECONDS=$(gh pr view ${PR_NUM} --json createdAt \
+  --jq "((now - (.createdAt | fromdateiso8601)))")
+
+# Check Copilot review status
+COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
+  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (.[0].state == "PENDING") then "IN_PROGRESS" else "COMPLETED" end')
+
+# If no review exists yet AND PR is less than 5 min old, wait for it to appear
+if [ "$COPILOT_STATUS" = "NOT_FOUND" ] && [ "${PR_AGE_SECONDS%.*}" -lt 300 ]; then
+  echo "PR is ${PR_AGE_SECONDS%.*}s old. Copilot review not yet started. Waiting (polls every 30s, max 5 min)..."
+  for i in $(seq 1 10); do
+    sleep 30
+    COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
+      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (.[0].state == "PENDING") then "IN_PROGRESS" else "COMPLETED" end')
+    [ "$COPILOT_STATUS" != "NOT_FOUND" ] && echo "Copilot review detected (status: $COPILOT_STATUS)" && break
+  done
+fi
+
+# If review is in progress, wait for it to complete
+if [ "$COPILOT_STATUS" = "IN_PROGRESS" ]; then
+  echo "Copilot review in progress. Polling every 30s (max 5 min)..."
+  for i in $(seq 1 10); do
+    sleep 30
+    COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
+      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if (.[0].state == "PENDING") then "IN_PROGRESS" else "COMPLETED" end')
+    [ "$COPILOT_STATUS" != "IN_PROGRESS" ] && break
+  done
+fi
+```
+
 ### 1. Fetch PR Info
 
 ```bash
-# Get PR number for current branch (or use provided arg)
-PR_NUM=${1:-$(gh pr view --json number -q .number)}
-
-# Get repo info
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-
 # Fetch all review comments (inline)
 gh api repos/${REPO}/pulls/${PR_NUM}/comments
 
 # Fetch all reviews
 gh api repos/${REPO}/pulls/${PR_NUM}/reviews
+
+# Fetch issue-level comments (to check if previous check-pr already ran)
+gh api repos/${REPO}/issues/${PR_NUM}/comments
 ```
 
 ### 2. Skip Already-Replied Comments
@@ -147,7 +185,23 @@ Created ${ISSUE_URL} to track this.
 git push
 ```
 
-### 5. Verify All Inline Replies Were Posted
+### 5. Cross-Reference Fixes Against Open Issues
+
+After pushing fixes, check if any open `from-review` issues were resolved by the work in this PR. This commonly happens when Copilot feedback addresses the same problem an agent-review issue was tracking.
+
+```bash
+# List open from-review issues
+gh issue list --label "from-review" --json number,title,body
+
+# For each fix, check if an open issue describes the same problem.
+# If so, close it with a comment linking the PR:
+gh issue comment ${ISSUE_NUM} --body "Addressed in PR #${PR_NUM} — ${DESCRIPTION}."
+gh issue close ${ISSUE_NUM}
+```
+
+**RULE: Every closed issue MUST reference a PR.** The comment is the paper trail. No silent closes.
+
+### 6. Verify All Inline Replies Were Posted
 
 **This step is MANDATORY. Do NOT skip it.**
 
@@ -165,7 +219,7 @@ echo "Root comments: ${ROOT_COUNT}, Replied: ${REPLIED_COUNT}"
 
 If `REPLIED_COUNT < ROOT_COUNT`, you have UNREPLIED comments. Go back to step 3 and post the missing inline replies BEFORE proceeding. **Do NOT post the summary comment until every thread has a reply.**
 
-### 6. Post Summary Comment
+### 7. Post Summary Comment
 
 After addressing ALL comments, post a summary on the PR. Every row MUST have a commit hash, issue URL, or brief justification in the Commit/Issue column.
 
@@ -183,11 +237,12 @@ gh pr comment ${PR_NUM} --body "$(cat <<'EOF'
 - Fixed: Y
 - False positives: Z
 - Follow-up issues created: W
+- Existing issues closed: A
 EOF
 )"
 ```
 
-### 7. Report to User
+### 8. Report to User
 
 Output a final summary:
 - Total comments processed
@@ -200,7 +255,7 @@ Output a final summary:
 
 1. **EVERY comment gets an INLINE reply** — No silent dismissals. The `gh api .../replies` call is the MOST IMPORTANT output. A summary comment WITHOUT inline replies is a FAILURE.
 2. **Reply IMMEDIATELY after each comment** — Process one comment at a time: read → fix/defer → post inline reply → next. Do NOT batch all fixes and try to reply later.
-3. **Verify before summarizing** — Run the verification step (step 5) and confirm all threads have replies BEFORE posting the summary comment. If any are missing, go back and post them.
+3. **Verify before summarizing** — Run the verification step (step 6) and confirm all threads have replies BEFORE posting the summary comment. If any are missing, go back and post them.
 4. **Fix first, defer second** — Default is to fix the issue
 5. **Be specific** — ALWAYS show before/after code diffs in fix replies
 6. **Link commits** — EVERY fix reply MUST include its commit hash
