@@ -952,11 +952,14 @@ describe('buildXtermHtml', () => {
     expect(html).toContain('</html>');
   });
 
-  it('includes xterm.js CDN scripts', () => {
+  it('inlines xterm.js locally (no CDN)', () => {
     const html = buildXtermHtml();
-    expect(html).toContain('xterm.min.js');
-    expect(html).toContain('addon-fit.min.js');
-    expect(html).toContain('xterm.min.css');
+    // Should contain inlined xterm code, not CDN references
+    expect(html).toContain('new Terminal(');
+    expect(html).toContain('FitAddon');
+    expect(html).toContain('.xterm');
+    // Should NOT reference any CDN
+    expect(html).not.toContain('cdn.jsdelivr.net');
   });
 
   it('interpolates theme colors', () => {

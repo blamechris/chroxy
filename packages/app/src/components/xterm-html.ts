@@ -1,9 +1,12 @@
 import { COLORS } from '../constants/colors';
+import { XTERM_CSS, XTERM_JS, FIT_ADDON_JS } from './xterm-bundle.generated';
 
 /**
  * Builds an inline HTML string that hosts xterm.js inside a WebView.
  *
- * xterm.js + FitAddon are loaded from jsdelivr CDN (pinned versions).
+ * xterm.js + FitAddon are bundled locally (inlined from node_modules via
+ * scripts/bundle-xterm.js) so the terminal works offline without CDN access.
+ *
  * The terminal is display-only (disableStdin: true) — input goes through InputBar.
  *
  * Bridge protocol:
@@ -20,31 +23,15 @@ export function buildXtermHtml(): string {
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: ${COLORS.backgroundTerminal}; }
   #terminal { width: 100%; height: 100%; }
-  #error {
-    display: none;
-    color: ${COLORS.textMuted};
-    font-family: monospace;
-    font-size: 14px;
-    padding: 20px;
-    text-align: center;
-  }
 </style>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<style>${XTERM_CSS}</style>
 </head>
 <body>
 <div id="terminal"></div>
-<div id="error">Terminal renderer unavailable. Check your internet connection.</div>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script>${XTERM_JS}<\/script>
+<script>${FIT_ADDON_JS}<\/script>
 <script>
 (function() {
-  // Guard against CDN load failure
-  if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') {
-    document.getElementById('terminal').style.display = 'none';
-    document.getElementById('error').style.display = 'block';
-    return;
-  }
-
   var fitAddon = new FitAddon.FitAddon();
   var term = new Terminal({
     disableStdin: true,
@@ -138,7 +125,7 @@ export function buildXtermHtml(): string {
   // Expose handleMsg globally so injectJavaScript can call it from RN
   window.handleMsg = handleMsg;
 })();
-</script>
+<\/script>
 </body>
 </html>`;
 }

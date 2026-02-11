@@ -3569,3 +3569,184 @@ describe('directory listing', () => {
     ws.close()
   })
 })
+
+describe('resize validation', () => {
+  const TOKEN = 'test-token'
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('forwards valid resize to ptyManager in PTY mode', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    let resizedWith = null
+    mockPty.resize = (cols, rows) => { resizedWith = { cols, rows } }
+
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    send(ws, { type: 'resize', cols: 120, rows: 40 })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.deepStrictEqual(resizedWith, { cols: 120, rows: 40 })
+    ws.close()
+  })
+
+  it('ignores resize with non-integer cols in PTY mode', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    let resizeCalled = false
+    mockPty.resize = () => { resizeCalled = true }
+
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    send(ws, { type: 'resize', cols: 12.5, rows: 40 })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(resizeCalled, false, 'Should not call resize with non-integer cols')
+    ws.close()
+  })
+
+  it('ignores resize with zero cols in PTY mode', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    let resizeCalled = false
+    mockPty.resize = () => { resizeCalled = true }
+
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    send(ws, { type: 'resize', cols: 0, rows: 40 })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(resizeCalled, false, 'Should not call resize with zero cols')
+    ws.close()
+  })
+
+  it('ignores resize with negative rows in PTY mode', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    let resizeCalled = false
+    mockPty.resize = () => { resizeCalled = true }
+
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    send(ws, { type: 'resize', cols: 80, rows: -1 })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(resizeCalled, false, 'Should not call resize with negative rows')
+    ws.close()
+  })
+
+  it('ignores resize with string values in PTY mode', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    let resizeCalled = false
+    mockPty.resize = () => { resizeCalled = true }
+
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    send(ws, { type: 'resize', cols: '80', rows: '40' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(resizeCalled, false, 'Should not call resize with string values')
+    ws.close()
+  })
+
+  it('validates resize in multi-session mode with PTY session', async () => {
+    const manager = new EventEmitter()
+    const mockPtySession = new EventEmitter()
+    mockPtySession.isReady = true
+    mockPtySession.model = null
+    mockPtySession.permissionMode = 'approve'
+    let resizedWith = null
+    mockPtySession.resize = (cols, rows) => { resizedWith = { cols, rows } }
+
+    const sessionsMap = new Map()
+    sessionsMap.set('sess-1', { session: mockPtySession, name: 'PTY', cwd: '/tmp', type: 'pty', isBusy: false })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => [{ id: 'sess-1', name: 'PTY', cwd: '/tmp', type: 'pty', isBusy: false }]
+    manager.getHistory = () => []
+    Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    // Valid resize should be forwarded
+    send(ws, { type: 'resize', cols: 100, rows: 30 })
+    await new Promise(r => setTimeout(r, 100))
+    assert.deepStrictEqual(resizedWith, { cols: 100, rows: 30 })
+
+    // Invalid resize should be ignored
+    resizedWith = null
+    send(ws, { type: 'resize', cols: 0, rows: 30 })
+    await new Promise(r => setTimeout(r, 100))
+    assert.equal(resizedWith, null, 'Should not forward resize with zero cols')
+
+    resizedWith = null
+    send(ws, { type: 'resize', cols: 100, rows: null })
+    await new Promise(r => setTimeout(r, 100))
+    assert.equal(resizedWith, null, 'Should not forward resize with null rows')
+
+    ws.close()
+  })
+})
