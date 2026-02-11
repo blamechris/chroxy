@@ -153,13 +153,12 @@ describe('createPermissionHookManager', () => {
     // No assertion needed — just verify it doesn't throw
   })
 
-  it('emits error after 3 failed registration attempts', async () => {
-    // Create a manager with an emitter that tracks errors
+  it('accepts an error listener for registration failures', async () => {
+    // Verify the manager can wire up an error listener (actual retry/failure
+    // testing requires fs mocking — tracked in a follow-up issue)
     const errors = []
     emitter.on('error', (err) => errors.push(err))
 
-    // We can't easily make registerPermissionHookSync fail without mocking fs,
-    // but we can verify the manager structure is correct
     const manager = createPermissionHookManager(emitter)
     assert.equal(typeof manager.register, 'function')
     assert.equal(typeof manager.destroy, 'function')
