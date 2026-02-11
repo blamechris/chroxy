@@ -6,8 +6,10 @@ import { homedir } from 'os'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
-// Module-level lock for settings.json read-modify-write operations.
-// Shared across all importers so CLI and PTY sessions serialize writes.
+// Module-level, in-process lock for settings.json read-modify-write operations.
+// Shared across all importers of this module in a single Node.js process so CLI
+// and PTY sessions in that process serialize writes (does not prevent concurrent
+// writes from multiple chroxy server processes).
 let _settingsLock = Promise.resolve()
 let _settingsLockHeld = 0
 

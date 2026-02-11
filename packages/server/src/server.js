@@ -34,7 +34,7 @@ export async function startServer(config) {
     console.error(`[server] Permission hook error: ${message}`);
   });
   const hookManager = createPermissionHookManager(hookEmitter);
-  hookManager.register();
+  await hookManager.register();
 
   // 2. Start the PTY / tmux session
   const ptyManager = new PtyManager({

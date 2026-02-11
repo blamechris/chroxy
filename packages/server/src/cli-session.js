@@ -738,10 +738,12 @@ export class CliSession extends EventEmitter {
   destroy() {
     this._destroying = true
 
-    // Clean up permission hook
+    // Clean up permission hook — unregister first (fire-and-forget: the hook
+    // falls through harmlessly when env vars are absent, so best-effort is fine),
+    // then destroy to cancel any pending retry timers.
     if (this._hookManager) {
-      this._hookManager.destroy()
       this._hookManager.unregister()
+      this._hookManager.destroy()
     }
 
     if (this._respawnTimer) {
