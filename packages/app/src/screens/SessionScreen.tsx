@@ -150,6 +150,7 @@ export function SessionScreen() {
   });
   const connectedClients = useConnectionStore((s) => s.connectedClients);
   const pendingPermissionConfirm = useConnectionStore((s) => s.pendingPermissionConfirm);
+  const slashCommands = useConnectionStore((s) => s.slashCommands);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const serverErrors = useConnectionStore((s) => s.serverErrors);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
@@ -528,6 +529,7 @@ export function SessionScreen() {
         bottomPadding={bottomPadding}
         disabled={connectionPhase !== 'connected'}
         disabledPlaceholder={connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
+        slashCommands={slashCommands}
       />
 
       {/* Create session modal */}

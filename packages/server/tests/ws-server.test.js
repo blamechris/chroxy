@@ -3750,3 +3750,148 @@ describe('resize validation', () => {
     ws.close()
   })
 })
+
+describe('slash commands', () => {
+  let server
+  const TOKEN = 'test-token'
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('returns commands from project .claude/commands/ directory', async () => {
+    const { mkdirSync, writeFileSync, rmSync } = await import('fs')
+    const { join } = await import('path')
+    const { tmpdir } = await import('os')
+
+    // Create temp project with .claude/commands/
+    const tmpDir = join(tmpdir(), `chroxy-test-slash-${Date.now()}`)
+    const cmdDir = join(tmpDir, '.claude', 'commands')
+    mkdirSync(cmdDir, { recursive: true })
+    writeFileSync(join(cmdDir, 'deploy.md'), '# /deploy\n\nDeploy to production.\n\n## Steps\n...')
+    writeFileSync(join(cmdDir, 'test.md'), '# /test\n\nRun the test suite.\n')
+
+    try {
+      const mockSession = createMockSession()
+      mockSession.cwd = tmpDir
+
+      server = new WsServer({
+        port: 0,
+        apiToken: TOKEN,
+        cliSession: mockSession,
+        authRequired: true,
+      })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+
+      send(ws, { type: 'list_slash_commands' })
+      const result = await waitForMessage(messages, 'slash_commands', 2000)
+
+      assert.ok(result, 'Should receive slash_commands')
+      assert.ok(Array.isArray(result.commands))
+      assert.ok(result.commands.length >= 2, 'Should find at least 2 commands')
+
+      const deploy = result.commands.find(c => c.name === 'deploy')
+      assert.ok(deploy, 'Should include deploy command')
+      assert.equal(deploy.source, 'project')
+      assert.ok(deploy.description.length > 0, 'Should extract description')
+
+      const test = result.commands.find(c => c.name === 'test')
+      assert.ok(test, 'Should include test command')
+
+      ws.close()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('returns empty array when no commands exist', async () => {
+    const { mkdirSync, rmSync } = await import('fs')
+    const { join } = await import('path')
+    const { tmpdir } = await import('os')
+
+    const tmpDir = join(tmpdir(), `chroxy-test-slash-empty-${Date.now()}`)
+    mkdirSync(tmpDir, { recursive: true })
+
+    try {
+      const mockSession = createMockSession()
+      mockSession.cwd = tmpDir
+
+      server = new WsServer({
+        port: 0,
+        apiToken: TOKEN,
+        cliSession: mockSession,
+        authRequired: true,
+      })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+
+      send(ws, { type: 'list_slash_commands' })
+      const result = await waitForMessage(messages, 'slash_commands', 2000)
+
+      assert.ok(result, 'Should receive slash_commands')
+      assert.ok(Array.isArray(result.commands))
+
+      ws.close()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('works in multi-session mode', async () => {
+    const { mkdirSync, writeFileSync, rmSync } = await import('fs')
+    const { join } = await import('path')
+    const { tmpdir } = await import('os')
+
+    const tmpDir = join(tmpdir(), `chroxy-test-slash-ms-${Date.now()}`)
+    const cmdDir = join(tmpDir, '.claude', 'commands')
+    mkdirSync(cmdDir, { recursive: true })
+    writeFileSync(join(cmdDir, 'build.md'), '# /build\n\nBuild the project.')
+
+    try {
+      const manager = new EventEmitter()
+      const mockSession = createMockSession()
+      mockSession.cwd = tmpDir
+
+      const sessionsMap = new Map()
+      sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: tmpDir, type: 'cli', isBusy: false })
+      manager.getSession = (id) => sessionsMap.get(id)
+      manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: tmpDir, type: 'cli', isBusy: false }]
+      manager.getHistory = () => []
+      Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
+
+      server = new WsServer({
+        port: 0,
+        apiToken: TOKEN,
+        sessionManager: manager,
+        authRequired: true,
+      })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+
+      send(ws, { type: 'list_slash_commands' })
+      const result = await waitForMessage(messages, 'slash_commands', 2000)
+
+      assert.ok(result, 'Should receive slash_commands in multi-session mode')
+      const build = result.commands.find(c => c.name === 'build')
+      assert.ok(build, 'Should include build command')
+      assert.equal(build.source, 'project')
+
+      ws.close()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+})

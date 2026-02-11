@@ -156,6 +156,12 @@ export interface ServerError {
   timestamp: number;
 }
 
+export interface SlashCommand {
+  name: string;
+  description: string;
+  source: 'project' | 'user';
+}
+
 export type ConnectionPhase =
   | 'disconnected'        // Not connected, no auto-reconnect
   | 'connecting'          // Initial connection attempt
@@ -242,6 +248,9 @@ interface ConnectionState {
   // Pending auto permission mode confirmation from server
   pendingPermissionConfirm: { mode: string; warning: string } | null;
 
+  // Slash commands from server
+  slashCommands: SlashCommand[];
+
   // Directory listing callback for file browser
   _directoryListingCallback: ((listing: DirectoryListing) => void) | null;
 
@@ -295,6 +304,9 @@ interface ConnectionState {
   discoverSessions: () => void;
   attachSession: (tmuxSession: string, name?: string) => void;
   forgetSession: () => void;
+
+  // Slash commands
+  fetchSlashCommands: () => void;
 
   // Plan mode actions
   clearPlanState: () => void;
@@ -673,6 +685,8 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         });
       }
       ctx.socket.send(JSON.stringify({ type: 'mode', mode: get().viewMode }));
+      // Fetch slash commands for autocomplete
+      ctx.socket.send(JSON.stringify({ type: 'list_slash_commands' }));
       // Save for quick reconnect
       saveConnection(ctx.url, ctx.token);
       set({ savedConnection: { url: ctx.url, token: ctx.token } });
@@ -735,6 +749,8 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
           isIdle: ss.isIdle,
         };
       });
+      // Refresh slash commands (project commands may differ per session cwd)
+      get().fetchSlashCommands();
       break;
     }
 
@@ -1333,6 +1349,13 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       break;
     }
 
+    case 'slash_commands': {
+      if (Array.isArray(msg.commands)) {
+        set({ slashCommands: msg.commands as SlashCommand[] });
+      }
+      break;
+    }
+
     case 'server_error': {
       // Global broadcast (no sessionId) — route to active session.
       // Validate and coerce untyped JSON fields
@@ -1418,6 +1441,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   primaryClientId: null,
   serverErrors: [],
   pendingPermissionConfirm: null,
+  slashCommands: [],
   _directoryListingCallback: null,
   contextUsage: null,
   lastResultCost: null,
@@ -1709,6 +1733,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       primaryClientId: null,
       serverErrors: [],
       pendingPermissionConfirm: null,
+      slashCommands: [],
       _directoryListingCallback: null,
       _terminalWriteCallback: null,
       contextUsage: null,
@@ -1944,6 +1969,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const msg: Record<string, string> = { type: 'list_directory' };
       if (path) msg.path = path;
       socket.send(JSON.stringify(msg));
+    }
+  },
+
+  fetchSlashCommands: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'list_slash_commands' }));
     }
   },
 

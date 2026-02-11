@@ -3,7 +3,7 @@ import { execFileSync } from 'child_process'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
 import { statSync, readFileSync } from 'fs'
-import { readdir } from 'fs/promises'
+import { readdir, readFile } from 'fs/promises'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve, normalize } from 'path'
 import { homedir } from 'os'
@@ -85,6 +85,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'register_push_token', token }             — register Expo push token for notifications
  *   { type: 'user_question_response', answer }         — respond to AskUserQuestion prompt
  *   { type: 'list_directory', path? }                  — request directory listing for file browser
+ *   { type: 'list_slash_commands' }                     — request available slash commands
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
@@ -125,6 +126,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
  *   { type: 'directory_listing', path, parentPath, entries, error } — directory listing response for file browser
+ *   { type: 'slash_commands', commands: [{ name, description, source }] } — available slash commands
  *   { type: 'client_joined', client: { clientId, deviceName, deviceType, platform } } — new client connected
  *   { type: 'client_left', clientId }                — client disconnected
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
@@ -849,6 +851,13 @@ export class WsServer {
         this._listDirectory(ws, msg.path)
         break
 
+      case 'list_slash_commands': {
+        const entry = this.sessionManager.getSession(client.activeSessionId)
+        const cwd = entry?.cwd || null
+        this._listSlashCommands(ws, cwd)
+        break
+      }
+
       case 'mode':
         if (msg.mode === 'terminal' || msg.mode === 'chat') {
           client.mode = msg.mode
@@ -939,6 +948,12 @@ export class WsServer {
         this._listDirectory(ws, msg.path)
         break
 
+      case 'list_slash_commands': {
+        const cwd = this.cliSession?.cwd || null
+        this._listSlashCommands(ws, cwd)
+        break
+      }
+
       case 'mode':
         if (msg.mode === 'terminal' || msg.mode === 'chat') {
           client.mode = msg.mode
@@ -982,6 +997,10 @@ export class WsServer {
 
       case 'list_directory':
         this._listDirectory(ws, msg.path)
+        break
+
+      case 'list_slash_commands':
+        this._listSlashCommands(ws, null)
         break
 
       case 'mode':
@@ -1371,6 +1390,53 @@ export class WsServer {
         error: errorMessage,
       })
     }
+  }
+
+  /**
+   * List available slash commands from project and user command directories.
+   * Walks .claude/commands/ in the project cwd and ~/.claude/commands/.
+   * Returns { type: 'slash_commands', commands: [{ name, description, source }] }
+   */
+  async _listSlashCommands(ws, cwd) {
+    const commands = []
+    const seen = new Set()
+
+    const scanDir = async (dir, source) => {
+      try {
+        const entries = await readdir(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          if (!entry.isFile() || !entry.name.endsWith('.md')) continue
+          const name = entry.name.slice(0, -3) // strip .md
+          if (seen.has(name)) continue
+          seen.add(name)
+
+          // Read first non-heading, non-empty line as description
+          let description = ''
+          try {
+            const content = await readFile(join(dir, entry.name), 'utf-8')
+            const lines = content.split('\n')
+            for (const line of lines) {
+              const trimmed = line.trim()
+              if (!trimmed || trimmed.startsWith('#')) continue
+              description = trimmed.slice(0, 120)
+              break
+            }
+          } catch {}
+
+          commands.push({ name, description, source })
+        }
+      } catch {}
+    }
+
+    // Project commands take priority (scanned first, so they win in the `seen` set)
+    if (cwd) {
+      await scanDir(join(cwd, '.claude', 'commands'), 'project')
+    }
+    await scanDir(join(homedir(), '.claude', 'commands'), 'user')
+
+    commands.sort((a, b) => a.name.localeCompare(b.name))
+
+    this._send(ws, { type: 'slash_commands', commands })
   }
 
   /** Handle POST /permission from the hook script */

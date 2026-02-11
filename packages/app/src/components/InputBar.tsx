@@ -1,7 +1,8 @@
-import React, { forwardRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import React, { forwardRef, useMemo } from 'react';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, Platform } from 'react-native';
 import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH } from '../constants/icons';
 import { COLORS } from '../constants/colors';
+import type { SlashCommand } from '../store/connection';
 
 
 // -- Props --
@@ -22,6 +23,7 @@ export interface InputBarProps {
   bottomPadding: number;
   disabled?: boolean;
   disabledPlaceholder?: string;
+  slashCommands?: SlashCommand[];
 }
 
 // -- Component --
@@ -42,11 +44,50 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
   bottomPadding,
   disabled,
   disabledPlaceholder,
+  slashCommands = [],
 }, ref) {
   const a11yDisabled = disabled ? { disabled: true as const } : undefined;
 
+  // Filter slash commands based on current input (only when typing `/` at the start)
+  const filteredCommands = useMemo(() => {
+    if (viewMode !== 'chat' || !inputText.startsWith('/') || slashCommands.length === 0) return [];
+    const query = inputText.slice(1).toLowerCase();
+    // Show all commands if user just typed `/`
+    if (!query) return slashCommands;
+    return slashCommands.filter((cmd) => cmd.name.toLowerCase().includes(query));
+  }, [inputText, slashCommands, viewMode]);
+
+  const showDropdown = filteredCommands.length > 0;
+
   return (
     <View style={[styles.inputContainer, { paddingBottom: bottomPadding }]}>
+      {showDropdown && (
+        <ScrollView
+          style={styles.dropdown}
+          keyboardShouldPersistTaps="handled"
+          bounces={false}
+        >
+          {filteredCommands.map((cmd) => (
+            <TouchableOpacity
+              key={cmd.name}
+              style={styles.dropdownItem}
+              onPress={() => onChangeText(`/${cmd.name} `)}
+              accessibilityRole="button"
+              accessibilityLabel={`Slash command ${cmd.name}`}
+            >
+              <View style={styles.dropdownItemHeader}>
+                <Text style={styles.dropdownItemName}>/{cmd.name}</Text>
+                {cmd.source === 'project' && (
+                  <Text style={styles.dropdownItemBadge}>project</Text>
+                )}
+              </View>
+              {cmd.description ? (
+                <Text style={styles.dropdownItemDesc} numberOfLines={1}>{cmd.description}</Text>
+              ) : null}
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      )}
       {viewMode === 'terminal' && hasTerminal && (
         <View style={styles.specialKeys}>
           {['Enter', 'Ctrl+C', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown'].map((key) => (
@@ -130,6 +171,42 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: COLORS.backgroundCard,
     backgroundColor: COLORS.backgroundSecondary,
+  },
+  dropdown: {
+    maxHeight: 200,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.borderPrimary,
+  },
+  dropdownItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.borderPrimary,
+  },
+  dropdownItemHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  dropdownItemName: {
+    color: COLORS.accentBlue,
+    fontSize: 15,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontWeight: '600',
+  },
+  dropdownItemBadge: {
+    color: COLORS.textDim,
+    fontSize: 11,
+    backgroundColor: COLORS.backgroundCard,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  dropdownItemDesc: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    marginTop: 2,
   },
   specialKeys: {
     flexDirection: 'row',
