@@ -210,6 +210,9 @@ describe('Supervisor', () => {
       assert.equal(supervisor._metrics.totalRestarts, 1)
       assert.deepStrictEqual(supervisor._metrics.lastExitReason, { code: 1, signal: null })
 
+      // Verify backoff was computed correctly (first restart uses RESTART_BACKOFFS[0] = 2000ms)
+      assert.equal(supervisor._metrics.lastBackoffMs, 2000)
+
       // Child restart happens on setTimeout — verify state is correct
       assert.equal(supervisor._child, null)
       assert.equal(supervisor._childReady, false)
