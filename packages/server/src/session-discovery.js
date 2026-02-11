@@ -1,6 +1,15 @@
 import { execSync } from 'child_process'
 
-/** Default executor that runs real shell commands */
+/**
+ * @typedef {object} DiscoveryExecutor
+ * @property {() => void} whichTmux - Check if tmux is installed (throws on failure)
+ * @property {() => string} listPanes - List all tmux panes as newline-separated "name pid cwd" rows
+ * @property {(pid: number) => string} getChildren - Get child PIDs of a process (newline-separated, throws on failure)
+ * @property {(pid: number) => string} getCommand - Get the command string of a process
+ * @property {(pid: number) => string} getCwd - Get the cwd of a process via lsof (throws on failure)
+ */
+
+/** @type {DiscoveryExecutor} Default executor that runs real shell commands */
 const defaultExecutor = {
   whichTmux() {
     execSync('which tmux', { stdio: 'pipe' })
@@ -37,9 +46,9 @@ const defaultExecutor = {
  * Scans all tmux panes, checks their child processes for claude,
  * and returns structured session info for the app to display.
  *
- * @param {{ prefix?: string, executor?: object }} [options]
+ * @param {{ prefix?: string, executor?: DiscoveryExecutor }} [options]
  * @param {string} [options.prefix] - Only return sessions whose name starts with this prefix (e.g. 'chroxy-')
- * @param {object} [options.executor] - Injectable executor for testing (defaults to real shell commands)
+ * @param {DiscoveryExecutor} [options.executor] - Injectable executor for testing (defaults to real shell commands)
  * @returns {Array<{ sessionName: string, cwd: string, pid: number }>}
  */
 export function discoverTmuxSessions({ prefix, executor } = {}) {
