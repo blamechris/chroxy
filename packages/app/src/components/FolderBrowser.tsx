@@ -162,9 +162,9 @@ export function FolderBrowser({ visible, initialPath, onSelectPath, onClose }: F
           <Text style={styles.cancelButtonText}>Cancel</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.selectButton, loading && styles.selectButtonDisabled]}
+          style={[styles.selectButton, (loading || !!error) && styles.selectButtonDisabled]}
           onPress={handleSelect}
-          disabled={loading}
+          disabled={loading || !!error}
         >
           <Text style={styles.selectButtonText}>Select This</Text>
         </TouchableOpacity>
