@@ -562,9 +562,12 @@ function updateActiveSession(updater: (session: SessionState) => Partial<Session
  * module-level helpers (updateSession, updateActiveSession, nextMessageId, etc).
  * The few variables that were closured in connect() are accessed via _connectionContext.
  */
-function handleMessage(msg: Record<string, unknown>): void {
-  const ctx = _connectionContext;
+function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
+  const ctx = ctxOverride ?? _connectionContext;
   if (!ctx) return;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+  const msg = raw as Record<string, unknown>;
+  if (typeof msg.type !== 'string') return;
 
   const get = () => useConnectionStore.getState();
   const set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void =
@@ -1527,7 +1530,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       });
     };
 
-    _connectionContext = { url, token, isReconnect, silent, socket };
+    const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket };
+    _connectionContext = socketCtx;
     socket.onmessage = (event) => {
       let msg;
       try {
@@ -1535,7 +1539,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       } catch {
         return;
       }
-      handleMessage(msg);
+      handleMessage(msg, socketCtx);
     };
 
     socket.onclose = () => {
