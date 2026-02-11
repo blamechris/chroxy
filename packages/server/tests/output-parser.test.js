@@ -151,6 +151,18 @@ describe('OutputParser._processAnsi', () => {
     const lines = parser._processAnsi('top\x1b[1B\x1b[1Gbottom\n')
     assert.deepEqual(lines, ['top', 'bottom'])
   })
+
+  it('handles astral-plane Unicode (surrogate pairs) correctly', () => {
+    // U+1F680 ROCKET is a surrogate pair in UTF-16 (2 code units)
+    const lines = parser._processAnsi('go\u{1F680}now\n')
+    assert.deepEqual(lines, ['go\u{1F680}now'])
+  })
+
+  it('positions astral-plane chars correctly with CUP', () => {
+    // Place rocket at col 5, verify column tracking advances by 1 (not 2)
+    const lines = parser._processAnsi('hello\x1b[1;6H\u{1F680}!\n')
+    assert.deepEqual(lines, ['hello\u{1F680}!'])
+  })
 })
 
 describe('OutputParser._stripAnsi (deprecated)', () => {

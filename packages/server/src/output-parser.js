@@ -683,16 +683,20 @@ export class OutputParser extends EventEmitter {
       }
 
       // Regular character — write at current column
+      // Use codePointAt to handle astral-plane characters (surrogate pairs)
+      const cp = data.codePointAt(i)
+      const char = String.fromCodePoint(cp)
+      const charLen = cp > 0xFFFF ? 2 : 1
       while (this._screenLine.length < this._screenCol) {
         this._screenLine.push(' ')
       }
       if (this._screenCol < this._screenLine.length) {
-        this._screenLine[this._screenCol] = ch
+        this._screenLine[this._screenCol] = char
       } else {
-        this._screenLine.push(ch)
+        this._screenLine.push(char)
       }
       this._screenCol++
-      i++
+      i += charLen
     }
 
     return lines
