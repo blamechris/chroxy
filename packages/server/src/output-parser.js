@@ -433,12 +433,12 @@ export class OutputParser extends EventEmitter {
       clearTimeout(this._flushTimer);
       this._flushTimer = null;
     }
-    // Flush any pending screen line content into the current message
+    // Flush any pending screen line content by processing it like a normal line
     if (this._screenLine.length > 0) {
       const pending = this._screenLine.join('').trimEnd()
       this._screenLine = []
-      if (pending && this.currentMessage) {
-        this.currentMessage.content += pending + '\n'
+      if (pending) {
+        this._processLine(pending)
       }
     }
     if (this.currentMessage && this.currentMessage.content?.trim()) {
