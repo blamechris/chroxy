@@ -102,22 +102,22 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
         style={styles.overlay}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
+        {showBrowser ? (
+          <View style={styles.modal}>
+            <Text style={styles.title}>Select Directory</Text>
+            <FolderBrowser
+              visible={showBrowser}
+              initialPath={cwd || '~'}
+              onSelectPath={(path) => {
+                setCwd(path);
+                setShowBrowser(false);
+              }}
+              onClose={() => setShowBrowser(false)}
+            />
+          </View>
+        ) : (
         <ScrollView contentContainerStyle={styles.scrollContent} bounces={false}>
           <View style={styles.modal}>
-            {showBrowser ? (
-              <>
-                <Text style={styles.title}>Select Directory</Text>
-                <FolderBrowser
-                  visible={showBrowser}
-                  initialPath={cwd || '~'}
-                  onSelectPath={(path) => {
-                    setCwd(path);
-                    setShowBrowser(false);
-                  }}
-                  onClose={() => setShowBrowser(false)}
-                />
-              </>
-            ) : (
             <>
             <Text style={styles.title}>New Session</Text>
 
@@ -199,9 +199,9 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
               </View>
             )}
             </>
-            )}
           </View>
         </ScrollView>
+        )}
       </KeyboardAvoidingView>
     </Modal>
   );
