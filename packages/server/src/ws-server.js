@@ -1475,6 +1475,7 @@ export class WsServer {
       try { pending.resolve('deny') } catch {}
     }
     this._pendingPermissions.clear()
+    this._primaryClients.clear()
 
     for (const [ws] of this.clients) {
       ws.close()
