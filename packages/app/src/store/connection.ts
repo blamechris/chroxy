@@ -213,6 +213,7 @@ interface ConnectionState {
   // Server context (from auth_ok)
   sessionCwd: string | null;
   serverVersion: string | null;
+  latestVersion: string | null;
   serverCommit: string | null;
 
   // Multi-session state
@@ -654,6 +655,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         msg.serverMode === 'cli' || msg.serverMode === 'terminal' ? msg.serverMode : null;
       const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
       const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
+      const authLatestVersion = typeof msg.latestVersion === 'string' ? msg.latestVersion : null;
       const authServerCommit = typeof msg.serverCommit === 'string' ? msg.serverCommit : null;
       // Parse connected clients list with self-detection via clientId
       const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
@@ -678,6 +680,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         serverMode: authServerMode,
         sessionCwd: authSessionCwd,
         serverVersion: authServerVersion,
+        latestVersion: authLatestVersion,
         serverCommit: authServerCommit,
         streamingMessageId: null,
         myClientId: myClientId,
@@ -1448,6 +1451,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   serverMode: null,
   sessionCwd: null,
   serverVersion: null,
+  latestVersion: null,
   serverCommit: null,
   sessions: [],
   activeSessionId: null,
@@ -1744,6 +1748,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverMode: null,
       sessionCwd: null,
       serverVersion: null,
+      latestVersion: null,
       serverCommit: null,
       claudeReady: false,
       streamingMessageId: null,
@@ -1784,6 +1789,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverMode: null,
       sessionCwd: null,
       serverVersion: null,
+      latestVersion: null,
       serverCommit: null,
     });
   },

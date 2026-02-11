@@ -38,6 +38,41 @@ const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
 const SERVER_VERSION = packageJson.version
 
+/** Cached latest version from npm registry (null if unavailable) */
+let _latestVersionCache = { version: null, checkedAt: 0 }
+const VERSION_CHECK_TTL = 3600_000 // 1 hour
+
+async function checkLatestVersion(packageName) {
+  const now = Date.now()
+  if (_latestVersionCache.checkedAt > 0 && (now - _latestVersionCache.checkedAt) < VERSION_CHECK_TTL) {
+    return _latestVersionCache.version
+  }
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 5000)
+    try {
+      const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`, {
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json' },
+      })
+      clearTimeout(timeout)
+      if (res.ok) {
+        const data = await res.json()
+        if (data.version) {
+          _latestVersionCache = { version: data.version, checkedAt: now }
+          return data.version
+        }
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
+  } catch {
+    // npm registry unreachable or package not published — expected
+  }
+  _latestVersionCache = { version: null, checkedAt: now }
+  return null
+}
+
 function getGitInfo() {
   try {
     const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim()
@@ -90,7 +125,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
- *   { type: 'auth_ok', clientId, serverMode, serverVersion, serverCommit, cwd, connectedClients } — auth succeeded with server context
+ *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, connectedClients } — auth succeeded with server context
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli'|'terminal' }  — which backend mode is active
  *   { type: 'raw',          data: '...' }             — raw PTY output (terminal view)
@@ -168,6 +203,12 @@ export class WsServer {
     this._gitInfo = getGitInfo()
     this._startedAt = Date.now()
     this._draining = false
+    this._latestVersion = null
+
+    // Background version check (non-blocking, skipped in test/CI)
+    if (process.env.NODE_ENV !== 'test') {
+      checkLatestVersion(packageJson.name).then((v) => { this._latestVersion = v }).catch(() => {})
+    }
   }
 
   _formatStatusLog(status) {
@@ -209,6 +250,7 @@ export class WsServer {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({
           version: SERVER_VERSION,
+          latestVersion: this._latestVersion,
           gitCommit: this._gitInfo.commit,
           gitBranch: this._gitInfo.branch,
           uptime: Math.round((Date.now() - this._startedAt) / 1000),
@@ -379,6 +421,7 @@ export class WsServer {
       clientId: client.id,
       serverMode: this.serverMode,
       serverVersion: SERVER_VERSION,
+      latestVersion: this._latestVersion,
       serverCommit: this._gitInfo.commit,
       cwd: sessionInfo.cwd,
       connectedClients: this._getConnectedClientList(),

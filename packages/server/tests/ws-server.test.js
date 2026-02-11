@@ -163,6 +163,8 @@ describe('WsServer with authRequired: false', () => {
     assert.ok(authOk, 'Should receive auth_ok without sending auth')
     assert.equal(authOk.serverMode, 'cli', 'auth_ok should include serverMode')
     assert.equal(typeof authOk.serverVersion, 'string', 'auth_ok should include serverVersion')
+    assert.ok(authOk.latestVersion === null || typeof authOk.latestVersion === 'string',
+      'auth_ok should include latestVersion (null or string)')
     assert.ok(authOk.cwd === null || typeof authOk.cwd === 'string', 'auth_ok should include cwd (string or null)')
 
     // Should also receive server_mode and status
@@ -280,6 +282,8 @@ describe('WsServer GET /version auth', () => {
     assert.equal(res.status, 200)
     const body = await res.json()
     assert.equal(typeof body.version, 'string')
+    assert.ok(body.latestVersion === null || typeof body.latestVersion === 'string',
+      'latestVersion should be null or string')
     assert.equal(typeof body.uptime, 'number')
   })
 
