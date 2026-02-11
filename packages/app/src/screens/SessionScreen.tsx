@@ -172,6 +172,8 @@ export function SessionScreen() {
     setTerminalWriteCallback(writeCallback);
 
     // Replay raw buffer into xterm.js on mount/view switch
+    // Clear first to avoid duplicate content when switching back to terminal
+    terminalRef.current?.clear();
     const rawBuffer = useConnectionStore.getState().terminalRawBuffer;
     if (rawBuffer) {
       terminalRef.current?.write(rawBuffer);
@@ -180,7 +182,7 @@ export function SessionScreen() {
     return () => {
       setTerminalWriteCallback(null);
     };
-  }, [viewMode, hasTerminal, setTerminalWriteCallback]);
+  }, [viewMode, hasTerminal, activeSessionId, setTerminalWriteCallback]);
 
   // Multi-select state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
