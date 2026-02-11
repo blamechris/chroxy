@@ -450,14 +450,14 @@ describe('Supervisor', () => {
     it('3 crashes within window triggers rollback', () => {
       const { supervisor } = setup({ maxRestarts: 10 })
       supervisor._rollbackResult = false // rollback fails, falls through
+      supervisor._lastDeployTimestamp = Date.now()
 
       for (let i = 0; i < 3; i++) {
-        supervisor._lastDeployTimestamp = Date.now()
-        supervisor._deployFailureCount = i
         supervisor.startChild()
         supervisor.lastChild.simulateExit(1, null)
       }
 
+      assert.equal(supervisor._deployFailureCount, 3, 'counter should naturally reach 3')
       assert.equal(supervisor._rollbackCalls.length, 1, 'rollback should be called once on 3rd failure')
     })
 
