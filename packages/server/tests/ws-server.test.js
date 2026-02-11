@@ -283,6 +283,23 @@ describe('WsServer GET /version auth', () => {
     assert.equal(typeof body.uptime, 'number')
   })
 
+  it('rejects GET /version with wrong Bearer token when authRequired: true', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-version-test',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/version`, {
+      headers: { 'Authorization': 'Bearer wrong-token' },
+    })
+    assert.equal(res.status, 403)
+    const body = await res.json()
+    assert.equal(body.error, 'unauthorized')
+  })
+
   it('allows GET /version without token when authRequired: false', async () => {
     server = new WsServer({
       port: 0,
