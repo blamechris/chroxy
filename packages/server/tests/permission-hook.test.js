@@ -1,9 +1,8 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'fs'
-import { join } from 'path'
-import { tmpdir, homedir } from 'os'
+import { writeFileSync, readFileSync } from 'fs'
+import { homedir } from 'os'
 
 // We need to test the module's behavior with a temporary settings file.
 // The module reads from ~/.claude/settings.json directly, so we mock via
