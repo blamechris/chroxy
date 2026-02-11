@@ -181,13 +181,23 @@ gh issue close ${ISSUE_NUM}
 
 ### 7. Report to User
 
-Output:
-- Review verdict
-- Critical issues count
-- Suggestions count
-- Follow-up issues created (with URLs)
-- Issues closed as already resolved (with URLs)
-- Link to posted review
+Output a **summary table** followed by details. The table is the PRIMARY output — it must be scannable at a glance.
+
+```markdown
+| PR | Verdict | Findings | Issues |
+|----|---------|----------|--------|
+| #XX | Approve / Request Changes | N critical, M suggestions, P nitpicks | Created: #A, #B. Closed: #C |
+```
+
+**Column guide:**
+- **Verdict:** `Approve`, `Request Changes`, or `Comment`
+- **Findings:** Count by severity (omit categories with 0 count)
+- **Issues:** `Created: #X, #Y` for new follow-up issues. `Closed: #Z` for resolved from-review issues. `—` if none.
+
+Then below the table, list:
+- Brief summary of critical issues (if any)
+- URLs for all created/closed issues
+- Link to posted review comment
 
 ## Agent Persona
 
