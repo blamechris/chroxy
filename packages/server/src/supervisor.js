@@ -54,6 +54,7 @@ export class Supervisor extends EventEmitter {
     this._tunnel = null
     this._heartbeatInterval = null
     this._currentWsUrl = null
+    this._signalsRegistered = false
     this._log = createLogger('supervisor')
 
     // Deploy rollback tracking
@@ -102,6 +103,9 @@ export class Supervisor extends EventEmitter {
 
   /** Override point: register process signal handlers */
   _registerSignals() {
+    if (this._signalsRegistered) return
+    this._signalsRegistered = true
+
     process.on('SIGUSR2', () => {
       if (this._draining) {
         this._log.info('SIGUSR2 received but drain already in progress, ignoring')
