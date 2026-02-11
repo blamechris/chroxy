@@ -2780,3 +2780,146 @@ describe('primary client tracking', () => {
     await new Promise(r => setTimeout(r, 50))
   })
 })
+
+describe('PTY mode permission_response', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('resolves pending permission via _handlePtyMessage permission_response', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect a client
+    const { ws, messages } = await createClient(port, true)
+
+    // POST /permission to create a pending permission request
+    const responsePromise = fetch(`http://127.0.0.1:${port}/permission`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tool_name: 'Write',
+        tool_input: { file_path: '/tmp/test.js', content: 'hello' },
+      }),
+    })
+
+    try {
+      // Wait for the permission_request broadcast
+      const permReq = await waitForMessage(messages, 'permission_request', 2000)
+      assert.ok(permReq, 'Should broadcast permission_request to PTY-mode client')
+      assert.equal(permReq.tool, 'Write')
+      assert.ok(permReq.requestId, 'Should have a requestId')
+
+      // Send permission_response (this goes through _handlePtyMessage in PTY mode)
+      send(ws, {
+        type: 'permission_response',
+        requestId: permReq.requestId,
+        decision: 'allow',
+      })
+
+      // The HTTP response should complete with the decision
+      const response = await responsePromise
+      assert.equal(response.status, 200)
+      const data = await response.json()
+      assert.equal(data.decision, 'allow', 'PTY mode permission_response should resolve the pending request')
+    } finally {
+      ws.close()
+      await responsePromise.catch(() => {})
+    }
+  })
+
+  it('resolves with deny decision in PTY mode', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+
+    const responsePromise = fetch(`http://127.0.0.1:${port}/permission`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tool_name: 'Bash',
+        tool_input: { command: 'rm -rf /' },
+      }),
+    })
+
+    try {
+      const permReq = await waitForMessage(messages, 'permission_request', 2000)
+      assert.ok(permReq)
+
+      send(ws, {
+        type: 'permission_response',
+        requestId: permReq.requestId,
+        decision: 'deny',
+      })
+
+      const response = await responsePromise
+      assert.equal(response.status, 200)
+      const data = await response.json()
+      assert.equal(data.decision, 'deny', 'PTY mode should forward deny decision')
+    } finally {
+      ws.close()
+      await responsePromise.catch(() => {})
+    }
+  })
+
+  it('ignores permission_response with missing requestId', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws } = await createClient(port, true)
+
+    // Send permission_response without requestId — should not throw
+    send(ws, {
+      type: 'permission_response',
+      decision: 'allow',
+    })
+
+    // Give the server time to process
+    await new Promise(r => setTimeout(r, 100))
+
+    // No assertion needed — just verifying the server doesn't crash
+    ws.close()
+  })
+})
