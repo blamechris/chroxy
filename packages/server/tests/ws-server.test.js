@@ -3895,3 +3895,100 @@ describe('slash commands', () => {
     }
   })
 })
+
+describe('agent listing', () => {
+  let server
+  const TOKEN = 'test-token'
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('returns agents from project .claude/agents/ directory', async () => {
+    const { mkdirSync, writeFileSync, rmSync } = await import('fs')
+    const { join } = await import('path')
+    const { tmpdir } = await import('os')
+
+    const tmpDir = join(tmpdir(), `chroxy-test-agents-${Date.now()}`)
+    const agentDir = join(tmpDir, '.claude', 'agents')
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(join(agentDir, 'reviewer.md'), '# Reviewer\n\nReviews code changes for quality.\n')
+    writeFileSync(join(agentDir, 'deployer.md'), '# Deployer\n\nDeploys to staging environment.\n')
+
+    try {
+      const mockSession = createMockSession()
+      mockSession.cwd = tmpDir
+
+      server = new WsServer({
+        port: 0,
+        apiToken: TOKEN,
+        cliSession: mockSession,
+        authRequired: true,
+      })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+
+      send(ws, { type: 'list_agents' })
+      const result = await waitForMessage(messages, 'agent_list', 2000)
+
+      assert.ok(result, 'Should receive agent_list')
+      assert.ok(Array.isArray(result.agents))
+      assert.ok(result.agents.length >= 2, 'Should find at least 2 agents')
+
+      const deployer = result.agents.find(a => a.name === 'deployer')
+      assert.ok(deployer, 'Should include deployer agent')
+      assert.equal(deployer.source, 'project')
+      assert.ok(deployer.description.length > 0)
+
+      ws.close()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('returns empty array when no agents exist', async () => {
+    const { mkdirSync, rmSync } = await import('fs')
+    const { join } = await import('path')
+    const { tmpdir } = await import('os')
+
+    const tmpDir = join(tmpdir(), `chroxy-test-agents-empty-${Date.now()}`)
+    mkdirSync(tmpDir, { recursive: true })
+
+    try {
+      const mockSession = createMockSession()
+      mockSession.cwd = tmpDir
+
+      server = new WsServer({
+        port: 0,
+        apiToken: TOKEN,
+        cliSession: mockSession,
+        authRequired: true,
+      })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+
+      send(ws, { type: 'list_agents' })
+      const result = await waitForMessage(messages, 'agent_list', 2000)
+
+      assert.ok(result, 'Should receive agent_list')
+      assert.ok(Array.isArray(result.agents))
+      // No project agents should exist (temp dir has no .claude/agents/)
+      // User agents from ~/.claude/agents/ may be present on the dev machine
+      const projectAgents = result.agents.filter(a => a.source === 'project')
+      assert.equal(projectAgents.length, 0, 'Should have no project agents from empty temp dir')
+
+      ws.close()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+})
