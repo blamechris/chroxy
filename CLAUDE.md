@@ -243,7 +243,7 @@ Server → Client: `auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `strea
 | Component | File | Purpose |
 |-----------|------|---------|
 | ChatView | `src/components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
-| TerminalView | `src/components/TerminalView.tsx` | xterm.js terminal emulator (WebView) |
+| TerminalView | `src/components/TerminalView.tsx` | xterm.js terminal emulator (WebView), resize forwarding, crash recovery |
 | InputBar | `src/components/InputBar.tsx` | Text input with send/interrupt toggle |
 | SettingsBar | `src/components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
 | SessionPicker | `src/components/SessionPicker.tsx` | Horizontal session tab strip |
@@ -320,7 +320,7 @@ node packages/server/src/test-client.js wss://your-url
 | `screens/SessionScreen.tsx` | Session orchestrator (wires components) |
 | `screens/SettingsScreen.tsx` | App settings and version info |
 | `components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
-| `components/TerminalView.tsx` | xterm.js terminal emulator (WebView) |
+| `components/TerminalView.tsx` | xterm.js terminal emulator (WebView), resize forwarding, crash recovery |
 | `components/xterm-html.ts` | Inline HTML template for xterm.js WebView |
 | `components/InputBar.tsx` | Text input with send/interrupt toggle |
 | `components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |

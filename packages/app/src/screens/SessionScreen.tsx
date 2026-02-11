@@ -171,18 +171,24 @@ export function SessionScreen() {
     };
     setTerminalWriteCallback(writeCallback);
 
-    // Replay raw buffer into xterm.js on mount/view switch
-    // Clear first to avoid duplicate content when switching back to terminal
+    return () => {
+      setTerminalWriteCallback(null);
+    };
+  }, [viewMode, hasTerminal, activeSessionId, setTerminalWriteCallback]);
+
+  // Replay raw buffer into xterm.js when it becomes ready (initial mount, view switch, or crash recovery)
+  const handleTerminalReady = useCallback(() => {
     terminalRef.current?.clear();
     const rawBuffer = useConnectionStore.getState().terminalRawBuffer;
     if (rawBuffer) {
       terminalRef.current?.write(rawBuffer);
     }
+  }, []);
 
-    return () => {
-      setTerminalWriteCallback(null);
-    };
-  }, [viewMode, hasTerminal, activeSessionId, setTerminalWriteCallback]);
+  // Forward terminal dimensions to server for PTY resize
+  const handleTerminalResize = useCallback((cols: number, rows: number) => {
+    useConnectionStore.getState().resize(cols, rows);
+  }, []);
 
   // Multi-select state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -498,7 +504,7 @@ export function SessionScreen() {
           onFocusInput={handleFocusInput}
         />
       ) : (
-        <TerminalView ref={terminalRef} />
+        <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
       )}
 
       {/* Input area */}

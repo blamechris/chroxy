@@ -11,9 +11,14 @@ export interface TerminalHandle {
   clear: () => void;
 }
 
+export interface TerminalViewProps {
+  onResize?: (cols: number, rows: number) => void;
+  onReady?: () => void;
+}
+
 // -- Component --
 
-export const TerminalView = forwardRef<TerminalHandle>(function TerminalView(_props, ref) {
+export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(function TerminalView({ onResize, onReady }, ref) {
   const webViewRef = useRef<WebView>(null);
   const readyRef = useRef(false);
   const pendingWritesRef = useRef<string[]>([]);
@@ -63,11 +68,21 @@ export const TerminalView = forwardRef<TerminalHandle>(function TerminalView(_pr
         if (pending.length > 0) {
           injectWrite(pending.join(''));
         }
+        onReady?.();
+      } else if (msg.type === 'resize') {
+        onResize?.(msg.cols, msg.rows);
       }
     } catch {
       // Ignore malformed messages
     }
-  }, [injectWrite]);
+  }, [injectWrite, onReady, onResize]);
+
+  // Crash recovery: reload WebView when the OS kills the content process
+  const handleWebViewCrash = useCallback(() => {
+    readyRef.current = false;
+    pendingWritesRef.current = [];
+    webViewRef.current?.reload();
+  }, []);
 
   return (
     <WebView
@@ -76,6 +91,8 @@ export const TerminalView = forwardRef<TerminalHandle>(function TerminalView(_pr
       style={styles.container}
       originWhitelist={['*']}
       onMessage={handleMessage}
+      onContentProcessDidTerminate={handleWebViewCrash}
+      onRenderProcessGone={handleWebViewCrash}
       scrollEnabled={false}
       bounces={false}
       javaScriptEnabled={true}

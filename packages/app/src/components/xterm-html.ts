@@ -8,7 +8,7 @@ import { COLORS } from '../constants/colors';
  *
  * Bridge protocol:
  *   RN → WebView (postMessage): {type:'write', data:string}, {type:'clear'}, {type:'reset'}
- *   WebView → RN (postMessage): {type:'ready', cols:number, rows:number}
+ *   WebView → RN (postMessage): {type:'ready', cols:number, rows:number}, {type:'resize', cols:number, rows:number}
  */
 export function buildXtermHtml(): string {
   return `<!DOCTYPE html>
@@ -80,11 +80,23 @@ export function buildXtermHtml(): string {
   term.loadAddon(fitAddon);
   term.open(document.getElementById('terminal'));
 
+  // Debounced resize notification (250ms) — avoids flooding during animations/rotations
+  var _resizeTimer = null;
+  function notifyResize() {
+    if (_resizeTimer) clearTimeout(_resizeTimer);
+    _resizeTimer = setTimeout(function() {
+      _resizeTimer = null;
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'resize', cols: term.cols, rows: term.rows
+      }));
+    }, 250);
+  }
+
   // Fit after open and on resize
   try { fitAddon.fit(); } catch(e) {}
 
   var resizeObserver = new ResizeObserver(function() {
-    try { fitAddon.fit(); } catch(e) {}
+    try { fitAddon.fit(); notifyResize(); } catch(e) {}
   });
   resizeObserver.observe(document.getElementById('terminal'));
 
