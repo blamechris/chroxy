@@ -44,27 +44,32 @@ const VERSION_CHECK_TTL = 3600_000 // 1 hour
 
 async function checkLatestVersion(packageName) {
   const now = Date.now()
-  if (_latestVersionCache.version && (now - _latestVersionCache.checkedAt) < VERSION_CHECK_TTL) {
+  if (_latestVersionCache.checkedAt > 0 && (now - _latestVersionCache.checkedAt) < VERSION_CHECK_TTL) {
     return _latestVersionCache.version
   }
   try {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 5000)
-    const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`, {
-      signal: controller.signal,
-      headers: { 'Accept': 'application/json' },
-    })
-    clearTimeout(timeout)
-    if (res.ok) {
-      const data = await res.json()
-      if (data.version) {
-        _latestVersionCache = { version: data.version, checkedAt: now }
-        return data.version
+    try {
+      const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`, {
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json' },
+      })
+      clearTimeout(timeout)
+      if (res.ok) {
+        const data = await res.json()
+        if (data.version) {
+          _latestVersionCache = { version: data.version, checkedAt: now }
+          return data.version
+        }
       }
+    } finally {
+      clearTimeout(timeout)
     }
   } catch {
     // npm registry unreachable or package not published — expected
   }
+  _latestVersionCache = { version: null, checkedAt: now }
   return null
 }
 
@@ -196,8 +201,10 @@ export class WsServer {
     this._draining = false
     this._latestVersion = null
 
-    // Background version check (non-blocking)
-    checkLatestVersion(packageJson.name).then((v) => { this._latestVersion = v })
+    // Background version check (non-blocking, skipped in test/CI)
+    if (process.env.NODE_ENV !== 'test') {
+      checkLatestVersion(packageJson.name).then((v) => { this._latestVersion = v }).catch(() => {})
+    }
   }
 
   _formatStatusLog(status) {
