@@ -82,7 +82,7 @@ program
     }
 
     // Write config
-    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2))
+    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 })
 
     console.log('\n✅ Configuration saved to:', CONFIG_FILE)
     console.log('\n📱 Your API token (keep this secret):')
@@ -275,7 +275,7 @@ tunnelCmd
     console.log('You need: a Cloudflare account + a domain on Cloudflare DNS.\n')
 
     // Check cloudflared is installed
-    const { execSync } = await import('child_process')
+    const { execSync, execFileSync } = await import('child_process')
     try {
       execSync('cloudflared --version', { stdio: 'pipe' })
     } catch {
@@ -306,7 +306,7 @@ tunnelCmd
     const tunnelName = (await prompt('Tunnel name (default \'chroxy\'): ')) || 'chroxy'
 
     try {
-      execSync(`cloudflared tunnel create ${tunnelName}`, { stdio: 'inherit' })
+      execFileSync('cloudflared', ['tunnel', 'create', tunnelName], { stdio: 'inherit' })
     } catch {
       // Tunnel might already exist — try to continue
       console.log(`\nTunnel '${tunnelName}' may already exist. Continuing...\n`)
@@ -323,7 +323,7 @@ tunnelCmd
     }
 
     try {
-      execSync(`cloudflared tunnel route dns ${tunnelName} ${hostname}`, { stdio: 'inherit' })
+      execFileSync('cloudflared', ['tunnel', 'route', 'dns', tunnelName, hostname], { stdio: 'inherit' })
     } catch {
       console.log('\nDNS route may already exist. Continuing...\n')
     }
@@ -344,7 +344,7 @@ tunnelCmd
     config.tunnelName = tunnelName
     config.tunnelHostname = hostname
 
-    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2))
+    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 })
 
     console.log('✅ Configuration saved to:', CONFIG_FILE)
     console.log('')

@@ -74,7 +74,7 @@ function registerPermissionHookSync() {
     ],
   })
 
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 })
   console.log('[permission-hook] Registered hook in ~/.claude/settings.json')
 }
 
@@ -95,7 +95,7 @@ function unregisterPermissionHookSync() {
     if (Object.keys(settings.hooks).length === 0) {
       delete settings.hooks
     }
-    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 })
     console.log('[permission-hook] Unregistered hook from ~/.claude/settings.json')
   }
 }

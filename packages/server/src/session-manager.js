@@ -420,7 +420,7 @@ export class SessionManager extends EventEmitter {
 
     const dir = join(homedir(), '.chroxy')
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
+    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 })
     console.log(`[session-manager] Serialized ${state.sessions.length} session(s) to ${STATE_FILE}`)
     return state
   }
