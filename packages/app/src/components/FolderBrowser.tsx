@@ -28,9 +28,9 @@ export function FolderBrowser({ visible, initialPath, onSelectPath, onClose }: F
   const setDirectoryListingCallback = useConnectionStore((s) => s.setDirectoryListingCallback);
   const requestDirectoryListing = useConnectionStore((s) => s.requestDirectoryListing);
 
-  // Track current path to ignore stale responses
-  const currentPathRef = useRef(currentPath);
-  currentPathRef.current = currentPath;
+  // Monotonic request counter to discard stale responses
+  const requestIdRef = useRef(0);
+  const activeRequestRef = useRef(0);
 
   // Reset state when becoming visible
   useEffect(() => {
@@ -50,16 +50,15 @@ export function FolderBrowser({ visible, initialPath, onSelectPath, onClose }: F
     if (!visible) return;
 
     const handleListing = (listing: DirectoryListing) => {
-      // Ignore stale responses: check that the response path matches what we requested.
-      // The server resolves paths (e.g. ~ -> /Users/chris), so compare resolved path
-      // against currentPathRef. We accept it if it's either the raw request or we're
-      // still loading (first response for current navigation).
+      // Ignore stale responses: only accept if no newer request has been issued
+      if (activeRequestRef.current !== requestIdRef.current) return;
+      activeRequestRef.current = -1; // consumed
       setLoading(false);
       if (listing.error) {
         setError(listing.error);
         setEntries([]);
-        // Still update resolved path and parent for navigation
         if (listing.path) setResolvedPath(listing.path);
+        setParentPath(null);
         return;
       }
       setResolvedPath(listing.path);
@@ -77,6 +76,8 @@ export function FolderBrowser({ visible, initialPath, onSelectPath, onClose }: F
   // Request listing whenever currentPath changes
   useEffect(() => {
     if (!visible) return;
+    const id = ++requestIdRef.current;
+    activeRequestRef.current = id;
     setLoading(true);
     setError(null);
     requestDirectoryListing(currentPath);
