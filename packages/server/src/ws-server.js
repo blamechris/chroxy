@@ -758,6 +758,8 @@ export class WsServer {
         if (!text || !text.trim()) break
         console.log(`[ws] Message from ${client.id}: "${text.slice(0, 80)}"`)
         this.cliSession.sendMessage(text.trim())
+        // Track last-writer-wins primary (uses 'default' as pseudo session ID)
+        this._updatePrimary('default', client.id)
         break
       }
 
@@ -832,6 +834,8 @@ export class WsServer {
         if (typeof msg.data === 'string') {
           if (this.outputParser) this.outputParser.expectEcho(msg.data)
           this.ptyManager.write(msg.data)
+          // Track last-writer-wins primary (uses 'default' as pseudo session ID)
+          this._updatePrimary('default', client.id)
         }
         break
 
