@@ -3379,3 +3379,193 @@ describe('auto permission mode confirmation handshake', () => {
     ws.close()
   })
 })
+
+describe('directory listing', () => {
+  let server
+  const TOKEN = 'test-token'
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('lists directories at a valid path', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    // List /tmp — should always exist and contain directories
+    send(ws, { type: 'list_directory', path: '/tmp' })
+
+    const listing = await waitForMessage(messages, 'directory_listing', 2000)
+    assert.ok(listing, 'Should receive directory_listing')
+    assert.equal(listing.path, '/tmp')
+    assert.equal(listing.error, null)
+    assert.ok(Array.isArray(listing.entries))
+    // parentPath should be the parent of the resolved path
+    assert.ok(listing.parentPath !== null)
+
+    ws.close()
+  })
+
+  it('returns error for non-existent path', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, { type: 'list_directory', path: '/nonexistent/path/that/does/not/exist' })
+
+    const listing = await waitForMessage(messages, 'directory_listing', 2000)
+    assert.ok(listing, 'Should receive directory_listing')
+    assert.equal(listing.error, 'Directory not found')
+    assert.deepEqual(listing.entries, [])
+
+    ws.close()
+  })
+
+  it('returns error for a file path', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    // Use this test file itself as a file path
+    const filePath = new URL(import.meta.url).pathname
+    send(ws, { type: 'list_directory', path: filePath })
+
+    const listing = await waitForMessage(messages, 'directory_listing', 2000)
+    assert.ok(listing, 'Should receive directory_listing')
+    assert.equal(listing.error, 'Not a directory')
+    assert.deepEqual(listing.entries, [])
+
+    ws.close()
+  })
+
+  it('filters hidden directories', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    // List home directory — should have entries but none starting with '.'
+    send(ws, { type: 'list_directory', path: '~' })
+
+    const listing = await waitForMessage(messages, 'directory_listing', 2000)
+    assert.ok(listing, 'Should receive directory_listing')
+    assert.equal(listing.error, null)
+    const hidden = listing.entries.filter(e => e.name.startsWith('.'))
+    assert.equal(hidden.length, 0, 'Should not include hidden directories')
+
+    ws.close()
+  })
+
+  it('requires authentication', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+
+    // Send list_directory before authenticating
+    send(ws, { type: 'list_directory', path: '/tmp' })
+    await new Promise(r => setTimeout(r, 200))
+
+    // Should NOT get any directory_listing back (message is ignored pre-auth)
+    const listing = messages.find(m => m.type === 'directory_listing')
+    assert.equal(listing, undefined, 'Should not respond to unauthenticated requests')
+
+    ws.close()
+  })
+
+  it('defaults to home directory when path is empty', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, { type: 'list_directory' })
+
+    const listing = await waitForMessage(messages, 'directory_listing', 2000)
+    assert.ok(listing, 'Should receive directory_listing')
+    assert.equal(listing.error, null)
+    assert.ok(listing.path, 'Should have a resolved path')
+    assert.ok(listing.entries.length > 0, 'Home directory should have entries')
+
+    ws.close()
+  })
+
+  it('works in multi-session mode', async () => {
+    const manager = new EventEmitter()
+    const mockSession = createMockSession()
+    mockSession.cwd = '/tmp/test'
+
+    const sessionsMap = new Map()
+    sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: '/tmp/test', type: 'cli', isBusy: false })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: '/tmp/test', type: 'cli', isBusy: false }]
+    manager.getHistory = () => []
+    Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, { type: 'list_directory', path: '/tmp' })
+
+    const listing = await waitForMessage(messages, 'directory_listing', 2000)
+    assert.ok(listing, 'Should receive directory_listing in multi-session mode')
+    assert.equal(listing.error, null)
+
+    ws.close()
+  })
+})

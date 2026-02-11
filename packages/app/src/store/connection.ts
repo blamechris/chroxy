@@ -103,6 +103,18 @@ export interface DiscoveredSession {
   pid: number;
 }
 
+export interface DirectoryEntry {
+  name: string;
+  isDirectory: boolean;
+}
+
+export interface DirectoryListing {
+  path: string;
+  parentPath: string | null;
+  entries: DirectoryEntry[];
+  error: string | null;
+}
+
 export interface AgentInfo {
   toolUseId: string;
   description: string;
@@ -230,6 +242,9 @@ interface ConnectionState {
   // Pending auto permission mode confirmation from server
   pendingPermissionConfirm: { mode: string; warning: string } | null;
 
+  // Directory listing callback for file browser
+  _directoryListingCallback: ((listing: DirectoryListing) => void) | null;
+
   // View mode
   viewMode: 'chat' | 'terminal';
 
@@ -260,6 +275,10 @@ interface ConnectionState {
   confirmPermissionMode: (mode: string) => void;
   cancelPermissionConfirm: () => void;
   resize: (cols: number, rows: number) => void;
+
+  // Directory listing
+  setDirectoryListingCallback: (cb: ((listing: DirectoryListing) => void) | null) => void;
+  requestDirectoryListing: (path?: string) => void;
 
   // Session actions
   switchSession: (sessionId: string) => void;
@@ -1280,6 +1299,19 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       break;
     }
 
+    case 'directory_listing': {
+      const cb = get()._directoryListingCallback;
+      if (cb) {
+        cb({
+          path: msg.path as string,
+          parentPath: (msg.parentPath as string) ?? null,
+          entries: Array.isArray(msg.entries) ? msg.entries as DirectoryEntry[] : [],
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
     case 'server_error': {
       // Global broadcast (no sessionId) — route to active session.
       // Validate and coerce untyped JSON fields
@@ -1365,6 +1397,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   primaryClientId: null,
   serverErrors: [],
   pendingPermissionConfirm: null,
+  _directoryListingCallback: null,
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -1647,6 +1680,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       primaryClientId: null,
       serverErrors: [],
       pendingPermissionConfirm: null,
+      _directoryListingCallback: null,
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,
@@ -1846,6 +1880,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'resize', cols, rows }));
+    }
+  },
+
+  // Directory listing
+
+  setDirectoryListingCallback: (cb) => {
+    set({ _directoryListingCallback: cb });
+  },
+
+  requestDirectoryListing: (path?: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const msg: Record<string, string> = { type: 'list_directory' };
+      if (path) msg.path = path;
+      socket.send(JSON.stringify(msg));
     }
   },
 

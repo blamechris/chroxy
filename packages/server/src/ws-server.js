@@ -3,8 +3,10 @@ import { execFileSync } from 'child_process'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
 import { statSync, readFileSync } from 'fs'
+import { readdir } from 'fs/promises'
 import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
+import { dirname, join, resolve, normalize } from 'path'
+import { homedir } from 'os'
 import { timingSafeEqual } from 'crypto'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 
@@ -82,6 +84,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'attach_session', tmuxSession, name? }    — attach to a tmux session
  *   { type: 'register_push_token', token }             — register Expo push token for notifications
  *   { type: 'user_question_response', answer }         — respond to AskUserQuestion prompt
+ *   { type: 'list_directory', path? }                  — request directory listing for file browser
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
@@ -121,6 +124,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'plan_ready', allowedPrompts }           — plan complete, awaiting approval (transient)
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
+ *   { type: 'directory_listing', path, parentPath, entries, error } — directory listing response for file browser
  *   { type: 'client_joined', client: { clientId, deviceName, deviceType, platform } } — new client connected
  *   { type: 'client_left', clientId }                — client disconnected
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
@@ -839,6 +843,10 @@ export class WsServer {
         }
         break
 
+      case 'list_directory':
+        this._listDirectory(ws, msg.path)
+        break
+
       case 'mode':
         if (msg.mode === 'terminal' || msg.mode === 'chat') {
           client.mode = msg.mode
@@ -925,6 +933,10 @@ export class WsServer {
         break
       }
 
+      case 'list_directory':
+        this._listDirectory(ws, msg.path)
+        break
+
       case 'mode':
         if (msg.mode === 'terminal' || msg.mode === 'chat') {
           client.mode = msg.mode
@@ -963,6 +975,10 @@ export class WsServer {
         }
         break
       }
+
+      case 'list_directory':
+        this._listDirectory(ws, msg.path)
+        break
 
       case 'mode':
         // Switch between terminal and chat view
@@ -1302,6 +1318,54 @@ export class WsServer {
       console.log(this._formatStatusLog(status))
       this._broadcast({ type: 'status_update', ...status })
     })
+  }
+
+  /** List directories at a given path, sending a directory_listing response */
+  async _listDirectory(ws, requestedPath) {
+    try {
+      // Resolve path: expand ~ to homedir, default to homedir if empty
+      let absPath
+      if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
+        absPath = homedir()
+      } else {
+        const trimmed = requestedPath.trim()
+        absPath = trimmed.startsWith('~')
+          ? resolve(homedir(), trimmed.slice(1).replace(/^\//, ''))
+          : resolve(trimmed)
+      }
+      absPath = normalize(absPath)
+
+      const dirents = await readdir(absPath, { withFileTypes: true })
+      const entries = dirents
+        .filter(d => d.isDirectory() && !d.name.startsWith('.'))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(d => ({ name: d.name, isDirectory: true }))
+
+      // Compute parent path (null at filesystem root)
+      const parentPath = absPath === '/' ? null : resolve(absPath, '..')
+
+      this._send(ws, {
+        type: 'directory_listing',
+        path: absPath,
+        parentPath,
+        entries,
+        error: null,
+      })
+    } catch (err) {
+      let errorMessage = 'Unknown error'
+      if (err.code === 'ENOENT') errorMessage = 'Directory not found'
+      else if (err.code === 'EACCES') errorMessage = 'Permission denied'
+      else if (err.code === 'ENOTDIR') errorMessage = 'Not a directory'
+      else errorMessage = err.message
+
+      this._send(ws, {
+        type: 'directory_listing',
+        path: requestedPath || null,
+        parentPath: null,
+        entries: [],
+        error: errorMessage,
+      })
+    }
   }
 
   /** Handle POST /permission from the hook script */

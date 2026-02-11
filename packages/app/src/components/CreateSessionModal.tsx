@@ -12,6 +12,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { useConnectionStore, DiscoveredSession } from '../store/connection';
+import { FolderBrowser } from './FolderBrowser';
 import { COLORS } from '../constants/colors';
 
 interface CreateSessionModalProps {
@@ -28,11 +29,13 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const attachSession = useConnectionStore((s) => s.attachSession);
   const discoveredSessions = useConnectionStore((s) => s.discoveredSessions);
   const [isDiscovering, setIsDiscovering] = useState(false);
+  const [showBrowser, setShowBrowser] = useState(false);
 
   // Reset state when modal opens
   useEffect(() => {
     if (visible) {
       setIsDiscovering(false);
+      setShowBrowser(false);
     }
   }, [visible]);
 
@@ -101,6 +104,21 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
       >
         <ScrollView contentContainerStyle={styles.scrollContent} bounces={false}>
           <View style={styles.modal}>
+            {showBrowser ? (
+              <>
+                <Text style={styles.title}>Select Directory</Text>
+                <FolderBrowser
+                  visible={showBrowser}
+                  initialPath={cwd || '~'}
+                  onSelectPath={(path) => {
+                    setCwd(path);
+                    setShowBrowser(false);
+                  }}
+                  onClose={() => setShowBrowser(false)}
+                />
+              </>
+            ) : (
+            <>
             <Text style={styles.title}>New Session</Text>
 
             <Text style={styles.label}>Session Name</Text>
@@ -116,15 +134,20 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
             />
 
             <Text style={styles.label}>Working Directory</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Server default"
-              placeholderTextColor="#555"
-              value={cwd}
-              onChangeText={setCwd}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
+            <View style={styles.cwdRow}>
+              <TextInput
+                style={[styles.input, styles.cwdInput]}
+                placeholder="Server default"
+                placeholderTextColor="#555"
+                value={cwd}
+                onChangeText={setCwd}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity style={styles.browseButton} onPress={() => setShowBrowser(true)}>
+                <Text style={styles.browseButtonText}>Browse</Text>
+              </TouchableOpacity>
+            </View>
             <Text style={styles.hint}>Leave empty to use the server's default directory</Text>
 
             <View style={styles.buttons}>
@@ -174,6 +197,8 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
                   </TouchableOpacity>
                 ))}
               </View>
+            )}
+            </>
             )}
           </View>
         </ScrollView>
@@ -226,6 +251,29 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     borderWidth: 1,
     borderColor: COLORS.borderPrimary,
+  },
+  cwdRow: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'flex-start',
+  },
+  cwdInput: {
+    flex: 1,
+  },
+  browseButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: COLORS.backgroundCard,
+    borderWidth: 1,
+    borderColor: COLORS.borderSecondary,
+    minHeight: 44,
+    justifyContent: 'center',
+  },
+  browseButtonText: {
+    color: COLORS.accentBlue,
+    fontSize: 14,
+    fontWeight: '600',
   },
   hint: {
     color: COLORS.textDisabled,
