@@ -244,11 +244,23 @@ EOF
 
 ### 8. Report to User
 
-Output a final summary:
-- Total comments processed
-- Fixes committed (with full commit hashes)
-- False positives dismissed (with reasons)
-- Follow-up issues created (with URLs)
+Output a **summary table** followed by details. The table is the PRIMARY output — it must be scannable at a glance.
+
+```markdown
+| PR | Comments | Changes | Issues |
+|----|----------|---------|--------|
+| #XX | N → Y fixed, Z false pos | brief change 1, brief change 2 | Created: #A, #B. Closed: #C |
+```
+
+**Column guide:**
+- **Comments:** `N → Y fixed` (and `, Z false pos` / `, W deferred` if any)
+- **Changes:** Comma-separated brief descriptions of what changed (2-5 words each). Works for fixes, features, refactors — keep it generic.
+- **Issues:** `Created: #X, #Y` for new follow-up issues. `Closed: #Z` for resolved from-review issues. `—` if none.
+
+Then below the table, list:
+- Full commit hashes for each fix
+- Reasons for any false positives
+- URLs for created/closed issues
 - PR ready for re-review: Yes/No
 
 ## Critical Rules
