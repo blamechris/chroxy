@@ -69,6 +69,10 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
           injectWrite(pending.join(''));
         }
         onReady?.();
+        // Forward initial dimensions so the PTY is sized correctly on mount/reload
+        if (typeof msg.cols === 'number' && typeof msg.rows === 'number') {
+          onResize?.(msg.cols, msg.rows);
+        }
       } else if (msg.type === 'resize') {
         onResize?.(msg.cols, msg.rows);
       }
