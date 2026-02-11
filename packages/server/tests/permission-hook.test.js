@@ -1,13 +1,11 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { writeFileSync, readFileSync } from 'fs'
-import { join } from 'path'
-import { homedir } from 'os'
 
-// The module reads from ~/.claude/settings.json directly. Tests that touch the
-// real file save/restore its contents and skip gracefully if the file is absent.
 // Lock serialization and manager lifecycle are tested without filesystem access.
+// Tests that exercise register/unregister against settings.json require a
+// configurable settings path to avoid contaminating ~/.claude/settings.json
+// on the host machine (see #429).
 
 // Import the module under test
 import { withSettingsLock, createPermissionHookManager } from '../src/permission-hook.js'
@@ -79,73 +77,9 @@ describe('createPermissionHookManager', () => {
     assert.equal(typeof manager.destroy, 'function')
   })
 
-  it('register() writes hook to settings.json', async () => {
-    // This test verifies register() runs without throwing when
-    // ~/.claude/settings.json exists (which it does in dev environments)
-    const settingsPath = join(homedir(), '.claude', 'settings.json')
-    let settingsBefore
-    try {
-      settingsBefore = readFileSync(settingsPath, 'utf-8')
-    } catch {
-      // settings.json doesn't exist — skip this test
-      return
-    }
-
-    const manager = createPermissionHookManager(emitter)
-    await manager.register()
-
-    // Verify the hook was written
-    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
-    const chroxyHooks = settings.hooks?.PreToolUse?.filter(e => e._chroxy)
-    assert.ok(chroxyHooks?.length > 0, 'Should have at least one _chroxy hook entry')
-    assert.equal(chroxyHooks.length, 1, 'Should have exactly one _chroxy hook entry (idempotent)')
-
-    // Clean up: restore original settings
-    writeFileSync(settingsPath, settingsBefore)
-    manager.destroy()
-  })
-
-  it('register() is idempotent — double register produces single hook entry', async () => {
-    const settingsPath = join(homedir(), '.claude', 'settings.json')
-    let settingsBefore
-    try {
-      settingsBefore = readFileSync(settingsPath, 'utf-8')
-    } catch {
-      return
-    }
-
-    const manager = createPermissionHookManager(emitter)
-    await manager.register()
-    await manager.register()
-
-    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
-    const chroxyHooks = settings.hooks?.PreToolUse?.filter(e => e._chroxy)
-    assert.equal(chroxyHooks.length, 1, 'Double register should still produce exactly one hook')
-
-    writeFileSync(settingsPath, settingsBefore)
-    manager.destroy()
-  })
-
-  it('unregister() removes the hook entry', async () => {
-    const settingsPath = join(homedir(), '.claude', 'settings.json')
-    let settingsBefore
-    try {
-      settingsBefore = readFileSync(settingsPath, 'utf-8')
-    } catch {
-      return
-    }
-
-    const manager = createPermissionHookManager(emitter)
-    await manager.register()
-    await manager.unregister()
-
-    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
-    const chroxyHooks = settings.hooks?.PreToolUse?.filter(e => e._chroxy) ?? []
-    assert.equal(chroxyHooks.length, 0, 'Unregister should remove all _chroxy hook entries')
-
-    writeFileSync(settingsPath, settingsBefore)
-    manager.destroy()
-  })
+  // NOTE: register()/unregister()/idempotency tests removed — they wrote to
+  // the real ~/.claude/settings.json and contaminated other running sessions.
+  // These will return once #429 lands a configurable settingsPath parameter.
 
   it('destroy() cancels pending retry timers', async () => {
     const manager = createPermissionHookManager(emitter)
@@ -166,16 +100,9 @@ describe('createPermissionHookManager', () => {
     manager.destroy()
   })
 
-  it('destroy() prevents retries from firing', async () => {
-    const errors = []
-    emitter.on('error', (err) => errors.push(err))
-
+  it('destroy() is safe to call multiple times', async () => {
     const manager = createPermissionHookManager(emitter)
     manager.destroy()
-
-    // After destroy, register should still work (lock-wise) but scheduleRetry won't fire
-    // This tests the destroying flag prevents new retries
-    await manager.register()
-    manager.destroy()
+    manager.destroy() // should not throw
   })
 })
