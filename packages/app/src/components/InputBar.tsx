@@ -182,6 +182,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.borderPrimary,
+    minHeight: 44,
   },
   dropdownItemHeader: {
     flexDirection: 'row',

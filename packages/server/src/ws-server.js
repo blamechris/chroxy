@@ -1394,7 +1394,9 @@ export class WsServer {
 
   /**
    * List available slash commands from project and user command directories.
-   * Walks .claude/commands/ in the project cwd and ~/.claude/commands/.
+   * When cwd is provided, walks .claude/commands/ in the project cwd first;
+   * always walks ~/.claude/commands/ for user commands. In PTY mode cwd is
+   * null, so only user commands are returned.
    * Returns { type: 'slash_commands', commands: [{ name, description, source }] }
    */
   async _listSlashCommands(ws, cwd) {
@@ -1406,6 +1408,8 @@ export class WsServer {
         const entries = await readdir(dir, { withFileTypes: true })
         for (const entry of entries) {
           if (!entry.isFile() || !entry.name.endsWith('.md')) continue
+          // Guard against names with path separators (defensive — readdir returns filenames only)
+          if (entry.name.includes('/') || entry.name.includes('\\')) continue
           const name = entry.name.slice(0, -3) // strip .md
           if (seen.has(name)) continue
           seen.add(name)
@@ -1421,11 +1425,15 @@ export class WsServer {
               description = trimmed.slice(0, 120)
               break
             }
-          } catch {}
+          } catch (err) {
+            console.error(`[ws] Failed to read command file ${join(dir, entry.name)}:`, err.message)
+          }
 
           commands.push({ name, description, source })
         }
-      } catch {}
+      } catch {
+        // Directory doesn't exist or is unreadable — expected for missing .claude/commands/
+      }
     }
 
     // Project commands take priority (scanned first, so they win in the `seen` set)
