@@ -1,5 +1,5 @@
 import { describe, it } from 'node:test'
-import assert from 'node:assert'
+import assert from 'node:assert/strict'
 import { SessionManager } from '../src/session-manager.js'
 import { discoverTmuxSessions } from '../src/session-discovery.js'
 
