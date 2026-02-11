@@ -173,6 +173,15 @@ export class WsServer {
 
       // Version endpoint — returns server version, git info, and uptime
       if (req.method === 'GET' && req.url === '/version') {
+        if (this.authRequired) {
+          const authHeader = req.headers['authorization'] || ''
+          const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+          if (!token || !safeTokenCompare(token, this.apiToken)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'unauthorized' }))
+            return
+          }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({
           version: SERVER_VERSION,

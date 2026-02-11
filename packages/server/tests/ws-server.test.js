@@ -240,6 +240,65 @@ describe('WsServer with authRequired: false', () => {
   })
 })
 
+describe('WsServer GET /version auth', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('rejects GET /version without token when authRequired: true', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-version-test',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/version`)
+    assert.equal(res.status, 403)
+    const body = await res.json()
+    assert.equal(body.error, 'unauthorized')
+  })
+
+  it('accepts GET /version with correct Bearer token', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-version-test',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/version`, {
+      headers: { 'Authorization': 'Bearer tok-version-test' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(typeof body.version, 'string')
+    assert.equal(typeof body.uptime, 'number')
+  })
+
+  it('allows GET /version without token when authRequired: false', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-version-test',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/version`)
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(typeof body.version, 'string')
+  })
+})
+
 describe('WsServer POST /permission with authRequired: false', () => {
   let server
 
