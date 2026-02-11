@@ -1370,6 +1370,8 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
     }
 
     case 'slash_commands': {
+      // Ignore stale responses from a different session (race during session switch)
+      if (msg.sessionId && msg.sessionId !== get().activeSessionId) break;
       if (Array.isArray(msg.commands)) {
         set({ slashCommands: msg.commands as SlashCommand[] });
       }
@@ -1377,6 +1379,8 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
     }
 
     case 'agent_list': {
+      // Ignore stale responses from a different session (race during session switch)
+      if (msg.sessionId && msg.sessionId !== get().activeSessionId) break;
       if (Array.isArray(msg.agents)) {
         set({ customAgents: msg.agents as CustomAgent[] });
       }
