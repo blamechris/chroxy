@@ -56,6 +56,8 @@ class TestSupervisor extends Supervisor {
     this._mockTunnel = createMockTunnel()
     this._mockChildren = []
     this._exitCalled = null
+    this._rollbackCalls = []
+    this._rollbackResult = false
   }
 
   _fork() {
@@ -83,6 +85,11 @@ class TestSupervisor extends Supervisor {
 
   _registerSignals() {
     // No-op: don't register process signal handlers in tests
+  }
+
+  _rollbackToKnownGood() {
+    this._rollbackCalls.push(Date.now())
+    return this._rollbackResult
   }
 
   /** Get the most recently spawned mock child */
@@ -426,6 +433,88 @@ describe('Supervisor', () => {
       supervisor.lastChild.simulateReady()
 
       assert.equal(supervisor._standbyServer, null)
+    })
+  })
+
+  describe('deploy crash detection', () => {
+    it('crash within deploy window increments failure counter', () => {
+      const { supervisor } = setup()
+      supervisor._lastDeployTimestamp = Date.now()
+
+      supervisor.startChild()
+      supervisor.lastChild.simulateExit(1, null)
+
+      assert.equal(supervisor._deployFailureCount, 1)
+    })
+
+    it('3 crashes within window triggers rollback', () => {
+      const { supervisor } = setup({ maxRestarts: 10 })
+      supervisor._rollbackResult = false // rollback fails, falls through
+
+      for (let i = 0; i < 3; i++) {
+        supervisor._lastDeployTimestamp = Date.now()
+        supervisor._deployFailureCount = i
+        supervisor.startChild()
+        supervisor.lastChild.simulateExit(1, null)
+      }
+
+      assert.equal(supervisor._rollbackCalls.length, 1, 'rollback should be called once on 3rd failure')
+    })
+
+    it('successful rollback resets state', () => {
+      const { supervisor } = setup({ maxRestarts: 10 })
+      supervisor._rollbackResult = true
+      supervisor._lastDeployTimestamp = Date.now()
+      supervisor._deployFailureCount = 2 // next crash will be #3 → trigger rollback
+
+      supervisor.startChild()
+      supervisor.lastChild.simulateExit(1, null)
+
+      assert.equal(supervisor._rollbackCalls.length, 1)
+      assert.equal(supervisor._deployFailureCount, 0, 'deploy failure count should reset')
+      assert.equal(supervisor._lastDeployTimestamp, 0, 'deploy timestamp should reset')
+      assert.equal(supervisor._restartCount, 0, 'restart count should reset')
+    })
+
+    it('failed rollback falls through to normal restart', () => {
+      const { supervisor } = setup({ maxRestarts: 10 })
+      supervisor._rollbackResult = false
+      supervisor._lastDeployTimestamp = Date.now()
+      supervisor._deployFailureCount = 2
+
+      supervisor.startChild()
+      supervisor.lastChild.simulateExit(1, null)
+
+      assert.equal(supervisor._rollbackCalls.length, 1)
+      // Failed rollback → normal restart path with backoff
+      assert.ok(supervisor._metrics.lastBackoffMs > 0, 'backoff should be applied')
+      assert.equal(supervisor._restartCount, 1, 'restart count should increment normally')
+    })
+
+    it('crash outside deploy window does NOT count as deploy failure', () => {
+      const { supervisor } = setup()
+      // Set timestamp to >60s ago (outside DEPLOY_CRASH_WINDOW)
+      supervisor._lastDeployTimestamp = Date.now() - 120_000
+
+      supervisor.startChild()
+      supervisor.lastChild.simulateExit(1, null)
+
+      assert.equal(supervisor._deployFailureCount, 0, 'deploy failure count should stay 0')
+    })
+
+    it('deploy failure count resets after child survives past crash window', () => {
+      const { supervisor } = setup()
+      supervisor._lastDeployTimestamp = Date.now()
+      supervisor._deployFailureCount = 1
+
+      supervisor.startChild()
+      const child = supervisor.lastChild
+
+      // Simulate child becoming ready (starts the deploy reset timer)
+      child.simulateReady()
+
+      // Deploy failure count should still be 1 until timer fires
+      assert.equal(supervisor._deployFailureCount, 1)
     })
   })
 })
