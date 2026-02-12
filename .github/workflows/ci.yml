@@ -32,6 +32,9 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Run E2E tests
+        run: npm run test:e2e
+
   app-tests:
     name: App Tests
     runs-on: ubuntu-24.04
