@@ -626,8 +626,8 @@ export class WsServer {
           entry.session.expectEcho?.(text)
           entry.session.writeRaw(text)
         } else {
-          // CLI sessions: trim and drop empty input
-          if (!text || !text.trim()) break
+          // CLI sessions: trim and drop empty/non-string input
+          if (typeof text !== 'string' || !text.trim()) break
           console.log(`[ws] Message from ${client.id} to session ${client.activeSessionId}: "${text.slice(0, 80)}"`)
           entry.session.sendMessage(text.trim())
         }

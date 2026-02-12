@@ -14,8 +14,8 @@ import { WsServer } from '../../src/ws-server.js'
 
 /**
  * Mock session that implements the CliSession/SdkSession interface.
- * Test code can call helper methods (e.g. emitReady, emitStream) to
- * simulate Claude responses without spawning a real process.
+ * Test code can call helper methods (e.g. emitStream) to simulate Claude
+ * responses without spawning a real process.
  */
 export class MockSession extends EventEmitter {
   constructor({ cwd, model, permissionMode } = {}) {
@@ -31,11 +31,14 @@ export class MockSession extends EventEmitter {
     this._permissionResponses = new Map()
     this._questionAnswer = null
     this.resumeSessionId = null
+    this._startTimer = null
   }
 
   start() {
     // Auto-ready after a tick (simulates process startup)
-    setTimeout(() => {
+    this._startTimer = setTimeout(() => {
+      this._startTimer = null
+      if (this.destroyed) return
       this.isReady = true
       this.emit('ready', { sessionId: randomUUID().slice(0, 8), model: this.model })
     }, 10)
@@ -44,6 +47,10 @@ export class MockSession extends EventEmitter {
   destroy() {
     this.destroyed = true
     this.isReady = false
+    if (this._startTimer) {
+      clearTimeout(this._startTimer)
+      this._startTimer = null
+    }
   }
 
   sendMessage(text) {
@@ -73,12 +80,6 @@ export class MockSession extends EventEmitter {
   resize() {}
 
   // ── Helpers for tests to trigger events ──
-
-  /** Simulate Claude becoming ready */
-  emitReady() {
-    this.isReady = true
-    this.emit('ready', { sessionId: randomUUID().slice(0, 8), model: this.model })
-  }
 
   /** Simulate a full streaming response */
   emitStream(text) {
@@ -492,9 +493,18 @@ export function getMockSession(sessionManager, sessionId) {
 export async function closeClient(ws) {
   if (ws.readyState === WebSocket.CLOSED) return
   return new Promise((resolve) => {
-    ws.on('close', resolve)
+    const forceTimer = setTimeout(() => resolve(), 500)
+    ws.on('close', () => {
+      clearTimeout(forceTimer)
+      resolve()
+    })
     ws.close()
-    // Force-close after 500ms
-    setTimeout(() => resolve(), 500)
   })
+}
+
+/**
+ * Close an array of WebSocket clients. Used in afterEach for cleanup.
+ */
+export async function closeAllClients(clients) {
+  await Promise.all(clients.map((c) => closeClient(c.ws || c)))
 }
