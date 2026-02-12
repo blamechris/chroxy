@@ -3937,9 +3937,46 @@ describe('slash commands', () => {
       const result = await waitForMessage(messages, 'slash_commands', 2000)
 
       assert.ok(result, 'Should receive slash_commands in multi-session mode')
+      assert.equal(result.sessionId, 'sess-1', 'slash_commands should include sessionId in multi-session mode')
       const build = result.commands.find(c => c.name === 'build')
       assert.ok(build, 'Should include build command')
       assert.equal(build.source, 'project')
+
+      ws.close()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('omits sessionId in single-session CLI mode', async () => {
+    const { mkdirSync, rmSync } = await import('fs')
+    const { join } = await import('path')
+    const { tmpdir } = await import('os')
+
+    const tmpDir = join(tmpdir(), `chroxy-test-slash-cli-${Date.now()}`)
+    mkdirSync(tmpDir, { recursive: true })
+
+    try {
+      const mockSession = createMockSession()
+      mockSession.cwd = tmpDir
+
+      server = new WsServer({
+        port: 0,
+        apiToken: TOKEN,
+        cliSession: mockSession,
+        authRequired: true,
+      })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+
+      send(ws, { type: 'list_slash_commands' })
+      const result = await waitForMessage(messages, 'slash_commands', 2000)
+
+      assert.ok(result, 'Should receive slash_commands')
+      assert.equal(result.sessionId, undefined, 'slash_commands should NOT include sessionId in single-session mode')
 
       ws.close()
     } finally {
@@ -4037,6 +4074,90 @@ describe('agent listing', () => {
       // User agents from ~/.claude/agents/ may be present on the dev machine
       const projectAgents = result.agents.filter(a => a.source === 'project')
       assert.equal(projectAgents.length, 0, 'Should have no project agents from empty temp dir')
+
+      ws.close()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('includes sessionId in multi-session mode', async () => {
+    const { mkdirSync, writeFileSync, rmSync } = await import('fs')
+    const { join } = await import('path')
+    const { tmpdir } = await import('os')
+
+    const tmpDir = join(tmpdir(), `chroxy-test-agents-ms-${Date.now()}`)
+    const agentDir = join(tmpDir, '.claude', 'agents')
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(join(agentDir, 'helper.md'), '# Helper\n\nHelps with tasks.\n')
+
+    try {
+      const manager = new EventEmitter()
+      const mockSession = createMockSession()
+      mockSession.cwd = tmpDir
+
+      const sessionsMap = new Map()
+      sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: tmpDir, type: 'cli', isBusy: false })
+      manager.getSession = (id) => sessionsMap.get(id)
+      manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: tmpDir, type: 'cli', isBusy: false }]
+      manager.getHistory = () => []
+      Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
+
+      server = new WsServer({
+        port: 0,
+        apiToken: TOKEN,
+        sessionManager: manager,
+        authRequired: true,
+      })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+
+      send(ws, { type: 'list_agents' })
+      const result = await waitForMessage(messages, 'agent_list', 2000)
+
+      assert.ok(result, 'Should receive agent_list in multi-session mode')
+      assert.equal(result.sessionId, 'sess-1', 'agent_list should include sessionId in multi-session mode')
+      const helper = result.agents.find(a => a.name === 'helper')
+      assert.ok(helper, 'Should include helper agent')
+
+      ws.close()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('omits sessionId in single-session CLI mode', async () => {
+    const { mkdirSync, rmSync } = await import('fs')
+    const { join } = await import('path')
+    const { tmpdir } = await import('os')
+
+    const tmpDir = join(tmpdir(), `chroxy-test-agents-cli-${Date.now()}`)
+    mkdirSync(tmpDir, { recursive: true })
+
+    try {
+      const mockSession = createMockSession()
+      mockSession.cwd = tmpDir
+
+      server = new WsServer({
+        port: 0,
+        apiToken: TOKEN,
+        cliSession: mockSession,
+        authRequired: true,
+      })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+
+      send(ws, { type: 'list_agents' })
+      const result = await waitForMessage(messages, 'agent_list', 2000)
+
+      assert.ok(result, 'Should receive agent_list')
+      assert.equal(result.sessionId, undefined, 'agent_list should NOT include sessionId in single-session mode')
 
       ws.close()
     } finally {
