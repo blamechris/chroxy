@@ -1459,7 +1459,10 @@ export class WsServer {
    * When cwd is provided, walks .claude/commands/ in the project cwd first;
    * always walks ~/.claude/commands/ for user commands. In PTY mode cwd is
    * null, so only user commands are returned.
-   * Returns { type: 'slash_commands', commands: [{ name, description, source }] }
+   * @param {WebSocket} ws - Client socket to send the response on
+   * @param {string|null} cwd - Project working directory (null in PTY mode)
+   * @param {string|null} sessionId - Session ID to tag on the response (multi-session mode)
+   * Returns { type: 'slash_commands', commands: [{ name, description, source }], sessionId? }
    */
   async _listSlashCommands(ws, cwd, sessionId) {
     const commands = []
@@ -1516,7 +1519,10 @@ export class WsServer {
    * When cwd is provided, walks .claude/agents/ in the project cwd first;
    * always walks ~/.claude/agents/ for user agents. In PTY mode cwd is
    * null, so only user agents are returned.
-   * Returns { type: 'agent_list', agents: [{ name, description, source }] }
+   * @param {WebSocket} ws - Client socket to send the response on
+   * @param {string|null} cwd - Project working directory (null in PTY mode)
+   * @param {string|null} sessionId - Session ID to tag on the response (multi-session mode)
+   * Returns { type: 'agent_list', agents: [{ name, description, source }], sessionId? }
    */
   async _listAgents(ws, cwd, sessionId) {
     const agents = []
