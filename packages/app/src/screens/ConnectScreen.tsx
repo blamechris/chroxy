@@ -18,6 +18,8 @@ import { useConnectionStore } from '../store/connection';
 import { ICON_SATELLITE, ICON_CAMERA, ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
+const DEFAULT_PORT = 8765;
+
 interface DiscoveredServer {
   ip: string;
   port: number;
@@ -64,7 +66,7 @@ export function ConnectScreen() {
   const [scanning, setScanning] = useState(false);
   const [discoveredServers, setDiscoveredServers] = useState<DiscoveredServer[]>([]);
   const [scanProgress, setScanProgress] = useState(0);
-  const [scanPort, setScanPort] = useState('8765');
+  const [scanPort, setScanPort] = useState(String(DEFAULT_PORT));
   const scanAbortRef = useRef<AbortController | null>(null);
 
   const connect = useConnectionStore((state) => state.connect);
@@ -188,7 +190,14 @@ export function ConnectScreen() {
       }
 
       const subnet = deviceIp.split('.').slice(0, 3).join('.');
-      const port = parseInt(scanPort, 10) || 8765;
+      const parsed = parseInt(scanPort, 10);
+      if (isNaN(parsed) || parsed < 1 || parsed > 65535) {
+        Alert.alert('Invalid Port', `Port must be between 1 and 65535. Using default (${DEFAULT_PORT}).`);
+        setScanPort(String(DEFAULT_PORT));
+        setScanning(false);
+        return;
+      }
+      const port = parsed;
       const batchSize = 30;
       let scanned = 0;
 
