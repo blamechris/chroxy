@@ -51,6 +51,8 @@ function registerPermissionHookSync(settingsPath) {
   } catch (err) {
     if (err.code === 'ENOENT') {
       mkdirSync(dirname(settingsPath), { recursive: true })
+    } else if (err instanceof SyntaxError) {
+      throw new Error(`${settingsPath} contains invalid JSON and could not be parsed. Please fix or delete the file. Permissions will not work until this is resolved. (${err.message})`)
     } else {
       throw err
     }
@@ -88,7 +90,16 @@ function registerPermissionHookSync(settingsPath) {
  */
 function unregisterPermissionHookSync(settingsPath) {
   settingsPath = settingsPath || DEFAULT_SETTINGS_PATH
-  const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+  let settings
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      console.warn(`[permission-hook] Cannot unregister: ${settingsPath} contains invalid JSON. Skipping cleanup.`)
+      return
+    }
+    throw err
+  }
 
   if (settings.hooks?.PreToolUse) {
     settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
