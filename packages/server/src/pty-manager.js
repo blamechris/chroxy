@@ -2,18 +2,19 @@ import pty from "node-pty";
 import { execFileSync } from "child_process";
 import { EventEmitter } from "events";
 
-/** Resolve the tmux binary path at startup (searches PATH, no hardcoded locations) */
-function findTmuxPath() {
+/** Lazily resolve the tmux binary path (cached after first call) */
+let _tmuxPath = null
+function getTmuxPath() {
+  if (_tmuxPath) return _tmuxPath
   try {
-    return execFileSync('which', ['tmux'], {
+    _tmuxPath = execFileSync('which', ['tmux'], {
       encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
   } catch {
-    return 'tmux' // fall back to bare command (let execFileSync search PATH)
+    _tmuxPath = 'tmux' // fall back to bare command (let execFileSync search PATH)
   }
+  return _tmuxPath
 }
-
-const TMUX_PATH = findTmuxPath()
 
 /** Validate a tmux session name (alphanumeric, underscore, hyphen, dot only) */
 function validateSessionName(name) {
@@ -26,20 +27,20 @@ export function createDefaultTmuxExecutor() {
   return {
     hasTmuxSession(name) {
       try {
-        execFileSync(TMUX_PATH, ['has-session', '-t', name], {
+        execFileSync(getTmuxPath(), ['has-session', '-t', name], {
           stdio: 'ignore', timeout: 5000,
         })
         return true
       } catch { return false }
     },
     checkPaneStatus(name) {
-      return execFileSync(TMUX_PATH,
+      return execFileSync(getTmuxPath(),
         ['list-panes', '-t', name, '-F', '#{pane_dead}'],
         { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
       ).trim()
     },
     getCurrentCommands(name) {
-      return execFileSync(TMUX_PATH,
+      return execFileSync(getTmuxPath(),
         ['list-panes', '-t', name, '-F', '#{pane_current_command}'],
         { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
       ).trim()
@@ -81,7 +82,7 @@ export class PtyManager extends EventEmitter {
       // Fresh start — kill the old session so there's no scrollback
       console.log(`[pty] Killing old tmux session: ${this.sessionName}`);
       try {
-        execFileSync(TMUX_PATH, ['kill-session', '-t', this.sessionName], {
+        execFileSync(getTmuxPath(), ['kill-session', '-t', this.sessionName], {
           stdio: 'ignore',
           timeout: 5000,
         });
@@ -92,8 +93,8 @@ export class PtyManager extends EventEmitter {
 
     const shouldCreate = !this._hasTmuxSession();
     const tmuxCmd = shouldCreate
-      ? [TMUX_PATH, "new-session", "-s", this.sessionName]
-      : [TMUX_PATH, "attach-session", "-t", this.sessionName];
+      ? [getTmuxPath(), "new-session", "-s", this.sessionName]
+      : [getTmuxPath(), "attach-session", "-t", this.sessionName];
 
     try {
       this.ptyProcess = pty.spawn(tmuxCmd[0], tmuxCmd.slice(1), {
