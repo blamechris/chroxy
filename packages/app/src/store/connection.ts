@@ -1588,7 +1588,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       existing.close();
     }
     const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
-    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, connectionError: null });
+    // Only clear connectionError on fresh user-initiated connections (not retries/reconnects)
+    // so the error reason remains visible in the banner during retry sequences
+    const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
+    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, ...errorPatch });
 
     if (_retryCount > 0) {
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
