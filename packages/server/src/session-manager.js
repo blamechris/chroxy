@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
-import { statSync, writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from 'fs'
+import { statSync, writeFileSync, readFileSync, unlinkSync, renameSync, existsSync, mkdirSync, chmodSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
@@ -93,7 +93,7 @@ export class SessionDirectoryError extends SessionError {
  *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
  */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, useLegacyCli = false, stateFilePath } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, useLegacyCli = false, stateFilePath, stateTtlMs } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -103,10 +103,12 @@ export class SessionManager extends EventEmitter {
     this._defaultModel = defaultModel || null
     this._defaultPermissionMode = defaultPermissionMode || 'approve'
     this._stateFilePath = stateFilePath || DEFAULT_STATE_FILE
+    this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000 // 24 hours
     this._sessions = new Map() // sessionId -> { session: CliSession|PtySession, type: 'cli'|'pty', name, cwd, createdAt, tmuxSession? }
     this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
     this._maxHistory = 100
+    this._persistTimer = null
     this._autoDiscovery = autoDiscovery
     this._discoveryIntervalMs = discoveryIntervalMs
     this._discoveryTimer = null
@@ -172,6 +174,7 @@ export class SessionManager extends EventEmitter {
 
     console.log(`[session-manager] Created session ${sessionId} "${sessionName}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_created', { sessionId, name: sessionName, cwd: resolvedCwd })
+    this._schedulePersist()
     return sessionId
   }
 
@@ -242,6 +245,7 @@ export class SessionManager extends EventEmitter {
       }
     }
     this.emit('session_destroyed', { sessionId })
+    this._schedulePersist()
     return true
   }
 
@@ -250,6 +254,9 @@ export class SessionManager extends EventEmitter {
    */
   destroyAll() {
     this.stopAutoDiscovery()
+    clearTimeout(this._persistTimer)
+    this._persistTimer = null
+    this.serializeState()
     for (const [sessionId, entry] of this._sessions) {
       entry.session.destroy()
       this.emit('session_destroyed', { sessionId })
@@ -407,21 +414,25 @@ export class SessionManager extends EventEmitter {
    * @returns {object} The serialized state
    */
   serializeState() {
-    const state = { timestamp: Date.now(), sessions: [] }
+    const state = { version: 1, timestamp: Date.now(), sessions: [] }
     for (const [id, entry] of this._sessions) {
       if (entry.type === 'pty') continue // PTY sessions can't be serialized
+      const history = (this._messageHistory.get(id) || []).map(e => this._truncateEntry(e))
       state.sessions.push({
         sdkSessionId: (typeof entry.session.resumeSessionId !== 'undefined' ? entry.session.resumeSessionId : null),
         cwd: entry.cwd,
         model: entry.session.model,
         permissionMode: entry.session.permissionMode,
         name: entry.name,
+        history,
       })
     }
 
     const dir = dirname(this._stateFilePath)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    writeFileSync(this._stateFilePath, JSON.stringify(state, null, 2), { mode: 0o600 })
+    const tmpPath = this._stateFilePath + '.tmp'
+    writeFileSync(tmpPath, JSON.stringify(state, null, 2), { mode: 0o600 })
+    renameSync(tmpPath, this._stateFilePath)
     chmodSync(this._stateFilePath, 0o600)
     console.log(`[session-manager] Serialized ${state.sessions.length} session(s) to ${this._stateFilePath}`)
     return state
@@ -445,19 +456,18 @@ export class SessionManager extends EventEmitter {
       return null
     }
 
-    // Clean up state file immediately
-    try { unlinkSync(this._stateFilePath) } catch {}
-
     if (!Array.isArray(state.sessions) || state.sessions.length === 0) {
       console.log('[session-manager] No sessions to restore')
       return null
     }
 
-    // Reject stale state (older than 5 minutes)
-    if (state.timestamp && Date.now() - state.timestamp > 5 * 60 * 1000) {
-      console.log('[session-manager] Session state is stale (>5min), starting fresh')
+    // Reject stale state (older than TTL, default 24h)
+    if (state.timestamp && Date.now() - state.timestamp > this._stateTtlMs) {
+      console.log(`[session-manager] Session state is stale (>${Math.round(this._stateTtlMs / 60000)}min), starting fresh`)
       return null
     }
+
+    const hasVersion = typeof state.version === 'number'
 
     let firstId = null
     for (const saved of state.sessions) {
@@ -469,6 +479,10 @@ export class SessionManager extends EventEmitter {
           permissionMode: saved.permissionMode,
           resumeSessionId: saved.sdkSessionId,
         })
+        // Restore message history if present (v1+)
+        if (hasVersion && Array.isArray(saved.history) && saved.history.length > 0) {
+          this._messageHistory.set(sessionId, saved.history)
+        }
         if (!firstId) firstId = sessionId
         console.log(`[session-manager] Restored session "${saved.name}" (SDK resume: ${saved.sdkSessionId || 'none'})`)
       } catch (err) {
@@ -539,6 +553,7 @@ export class SessionManager extends EventEmitter {
             timestamp: Date.now(),
           })
         }
+        this._schedulePersist()
         break
       }
 
@@ -551,6 +566,7 @@ export class SessionManager extends EventEmitter {
           options: data.options,
           timestamp: data.timestamp,
         })
+        this._schedulePersist()
         break
 
       case 'tool_start':
@@ -571,6 +587,7 @@ export class SessionManager extends EventEmitter {
           usage: data.usage,
           timestamp: Date.now(),
         })
+        this._schedulePersist()
         break
 
       case 'user_question':
@@ -592,6 +609,33 @@ export class SessionManager extends EventEmitter {
     while (history.length > this._maxHistory) {
       history.shift()
     }
+  }
+
+  /**
+   * Schedule a debounced persist (5s delay). Multiple rapid calls reset the timer.
+   */
+  _schedulePersist() {
+    clearTimeout(this._persistTimer)
+    this._persistTimer = setTimeout(() => {
+      this._persistTimer = null
+      this.serializeState()
+    }, 5000)
+  }
+
+  /**
+   * Deep-clone and truncate a history entry for serialization.
+   * Content/input fields >50KB are truncated to avoid bloated state files.
+   */
+  _truncateEntry(entry) {
+    const MAX = 50 * 1024
+    const clone = { ...entry }
+    if (typeof clone.content === 'string' && clone.content.length > MAX) {
+      clone.content = clone.content.slice(0, MAX) + '[truncated]'
+    }
+    if (typeof clone.input === 'string' && clone.input.length > MAX) {
+      clone.input = clone.input.slice(0, MAX) + '[truncated]'
+    }
+    return clone
   }
 
   /**

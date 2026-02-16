@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
@@ -95,6 +95,87 @@ describe('SessionManager.serializeState', () => {
     assert.equal(fileContents.sessions.length, 2)
   })
 
+  it('includes version field', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+    const state = mgr.serializeState()
+    assert.equal(state.version, 1)
+    const fileContents = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(fileContents.version, 1)
+  })
+
+  it('includes message history per session', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+
+    const session = new EventEmitter()
+    session.model = 'sonnet'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+    mgr._messageHistory.set('s1', [
+      { type: 'message', messageType: 'user', content: 'hello', timestamp: 1000 },
+      { type: 'message', messageType: 'response', content: 'world', timestamp: 2000 },
+    ])
+
+    const state = mgr.serializeState()
+    assert.equal(state.sessions[0].history.length, 2)
+    assert.equal(state.sessions[0].history[0].content, 'hello')
+    assert.equal(state.sessions[0].history[1].content, 'world')
+  })
+
+  it('truncates large content in serialized history', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+
+    const session = new EventEmitter()
+    session.model = 'sonnet'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+
+    const largeContent = 'x'.repeat(100 * 1024) // 100KB
+    mgr._messageHistory.set('s1', [
+      { type: 'message', messageType: 'response', content: largeContent, timestamp: 1000 },
+    ])
+
+    const state = mgr.serializeState()
+
+    // Serialized version should be truncated
+    assert.ok(state.sessions[0].history[0].content.length < 60 * 1024)
+    assert.ok(state.sessions[0].history[0].content.endsWith('[truncated]'))
+
+    // In-memory original should be untouched
+    const inMemory = mgr._messageHistory.get('s1')
+    assert.equal(inMemory[0].content.length, 100 * 1024)
+  })
+
+  it('truncates large input in tool_start entries', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+
+    const session = new EventEmitter()
+    session.model = 'sonnet'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+
+    const largeInput = 'y'.repeat(100 * 1024)
+    mgr._messageHistory.set('s1', [
+      { type: 'tool_start', tool: 'Read', input: largeInput, timestamp: 1000 },
+    ])
+
+    const state = mgr.serializeState()
+    assert.ok(state.sessions[0].history[0].input.endsWith('[truncated]'))
+    assert.equal(mgr._messageHistory.get('s1')[0].input.length, 100 * 1024)
+  })
+
+  it('uses atomic write (no .tmp file remains)', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+    mgr.serializeState()
+    assert.ok(existsSync(stateFile), 'State file should exist')
+    assert.equal(existsSync(stateFile + '.tmp'), false, '.tmp file should not remain')
+  })
+
   it('skips PTY sessions', () => {
     const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
 
@@ -155,18 +236,44 @@ describe('SessionManager.restoreState', () => {
     assert.equal(mgr.restoreState(), null)
   })
 
-  it('returns null for stale state (>5 min)', () => {
-    const staleTimestamp = Date.now() - 6 * 60 * 1000
+  it('returns null for state older than TTL', () => {
+    const staleTimestamp = Date.now() - 25 * 60 * 60 * 1000 // 25 hours
     writeFileSync(stateFile, JSON.stringify({
+      version: 1,
       timestamp: staleTimestamp,
       sessions: [{ name: 'test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
     }))
     const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
-    assert.equal(mgr.restoreState(), null, 'Stale state should be rejected')
+    assert.equal(mgr.restoreState(), null, 'State older than 24h should be rejected')
+  })
+
+  it('accepts state within TTL (23h old)', () => {
+    const recentTimestamp = Date.now() - 23 * 60 * 60 * 1000 // 23 hours
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: recentTimestamp,
+      sessions: [{ name: 'test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
+    }))
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    const firstId = mgr.restoreState()
+    assert.ok(firstId, '23h old state should be accepted (within 24h TTL)')
+    mgr.destroyAll()
+  })
+
+  it('respects custom stateTtlMs', () => {
+    const staleTimestamp = Date.now() - 6 * 60 * 1000 // 6 minutes
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: staleTimestamp,
+      sessions: [{ name: 'test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
+    }))
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile, stateTtlMs: 5 * 60 * 1000 })
+    assert.equal(mgr.restoreState(), null, 'State older than custom 5min TTL should be rejected')
   })
 
   it('restores sessions from valid state file', () => {
     writeFileSync(stateFile, JSON.stringify({
+      version: 1,
       timestamp: Date.now(),
       sessions: [
         { name: 'Session A', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: 'sdk-resume-1' },
@@ -181,25 +288,66 @@ describe('SessionManager.restoreState', () => {
     const sessions = mgr.listSessions()
     assert.equal(sessions.length, 2, 'Should have 2 restored sessions')
 
-    assert.equal(existsSync(stateFile), false, 'State file should be removed after restore')
-
     mgr.destroyAll()
   })
 
-  it('deletes state file after reading', () => {
+  it('keeps state file after restore', () => {
     writeFileSync(stateFile, JSON.stringify({
+      version: 1,
       timestamp: Date.now(),
       sessions: [{ name: 'Test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
     }))
 
     const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
     mgr.restoreState()
-    assert.equal(existsSync(stateFile), false, 'State file should be removed')
+    assert.ok(existsSync(stateFile), 'State file should be kept after restore')
+    mgr.destroyAll()
+  })
+
+  it('restores message history from v1 state', () => {
+    const history = [
+      { type: 'message', messageType: 'user', content: 'hello', timestamp: 1000 },
+      { type: 'message', messageType: 'response', content: 'world', timestamp: 2000 },
+      { type: 'result', cost: 0.01, duration: 500, timestamp: 3000 },
+    ]
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [{ name: 'Test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history }],
+    }))
+
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    const firstId = mgr.restoreState()
+    assert.ok(firstId)
+
+    const restored = mgr.getHistory(firstId)
+    assert.equal(restored.length, 3)
+    assert.equal(restored[0].content, 'hello')
+    assert.equal(restored[1].content, 'world')
+    assert.equal(restored[2].cost, 0.01)
+
+    mgr.destroyAll()
+  })
+
+  it('handles legacy state without version (skips history)', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      timestamp: Date.now(),
+      sessions: [{ name: 'Legacy', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history: [{ type: 'message', content: 'old' }] }],
+    }))
+
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    const firstId = mgr.restoreState()
+    assert.ok(firstId, 'Legacy state should still restore metadata')
+
+    const history = mgr.getHistory(firstId)
+    assert.equal(history.length, 0, 'History should not be restored from legacy (versionless) state')
+
     mgr.destroyAll()
   })
 
   it('continues if one session fails to restore', () => {
     writeFileSync(stateFile, JSON.stringify({
+      version: 1,
       timestamp: Date.now(),
       sessions: [
         { name: 'Good', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
@@ -215,5 +363,73 @@ describe('SessionManager.restoreState', () => {
     assert.equal(sessions.length, 1, 'Only the good session should be restored')
 
     mgr.destroyAll()
+  })
+})
+
+describe('SessionManager auto-persist', () => {
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-session-test-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('debounces rapid _schedulePersist calls into a single write', async () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+
+    const session = new EventEmitter()
+    session.model = 'sonnet'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+
+    let writeCount = 0
+    const origSerialize = mgr.serializeState.bind(mgr)
+    mgr.serializeState = () => {
+      writeCount++
+      return origSerialize()
+    }
+
+    // Rapid-fire 5 persist requests
+    mgr._schedulePersist()
+    mgr._schedulePersist()
+    mgr._schedulePersist()
+    mgr._schedulePersist()
+    mgr._schedulePersist()
+
+    // Should not have written yet (debounce delay)
+    assert.equal(writeCount, 0)
+
+    // Wait for debounce to fire (5s + buffer)
+    await new Promise(resolve => setTimeout(resolve, 5500))
+
+    assert.equal(writeCount, 1, 'Should have written exactly once after debounce')
+    clearTimeout(mgr._persistTimer)
+  })
+
+  it('destroyAll writes final state synchronously', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+
+    const session = new EventEmitter()
+    session.model = 'sonnet'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Final', cwd: '/tmp' })
+
+    mgr.destroyAll()
+
+    assert.ok(existsSync(stateFile), 'State file should exist immediately after destroyAll')
+    const state = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(state.version, 1)
+    // Sessions were serialized before clear
+    assert.equal(state.sessions.length, 1)
+    assert.equal(state.sessions[0].name, 'Final')
   })
 })

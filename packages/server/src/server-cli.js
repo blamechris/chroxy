@@ -47,9 +47,6 @@ export async function startCliServer(config) {
     console.log('')
   }
 
-  // Check for saved session state (from graceful restart via drain protocol)
-  const isSupervised = process.env.CHROXY_SUPERVISED === '1'
-
   // 1. Create session manager
   const discoveryIntervalMs = config.discoveryInterval ? config.discoveryInterval * 1000 : 45000
   const useLegacyCli = !!config.legacyCli
@@ -64,13 +61,11 @@ export async function startCliServer(config) {
     useLegacyCli,
   })
 
-  // 2. Try restoring session state from a previous graceful restart
+  // 2. Try restoring session state from a previous instance
   let defaultSessionId
-  if (isSupervised) {
-    defaultSessionId = sessionManager.restoreState()
-    if (defaultSessionId) {
-      console.log(`[cli] Restored sessions from previous server instance`)
-    }
+  defaultSessionId = sessionManager.restoreState()
+  if (defaultSessionId) {
+    console.log(`[cli] Restored sessions from previous server instance`)
   }
 
   // 3. Auto-discover tmux sessions running Claude (if no restore)
