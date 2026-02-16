@@ -14,7 +14,7 @@ name: Ensure ConnectScreen
 # - "Connecting" (auto-connect spinner)
 - extendedWaitUntil:
     visible:
-      text: ".*Session|Chroxy|Connect.*"
+      text: ".*(Session|Chroxy|Connect).*"
     timeout: 15000
 
 # Dismiss Expo dev menu if it appeared (X button on modal card)
