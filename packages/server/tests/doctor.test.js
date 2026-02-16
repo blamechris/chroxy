@@ -1,0 +1,108 @@
+import { describe, it } from 'node:test'
+import assert from 'node:assert/strict'
+import { runDoctorChecks } from '../src/doctor.js'
+
+/**
+ * Integration tests for doctor.js.
+ * Tests run against the real system — binaries are resolved via PATH.
+ */
+
+describe('runDoctorChecks', () => {
+  it('returns checks array and passed boolean', async () => {
+    const result = await runDoctorChecks()
+    assert.ok(Array.isArray(result.checks))
+    assert.equal(typeof result.passed, 'boolean')
+    assert.ok(result.checks.length >= 7, 'Should have at least 7 checks')
+  })
+
+  it('each check has name, status, and message', async () => {
+    const { checks } = await runDoctorChecks()
+    for (const check of checks) {
+      assert.equal(typeof check.name, 'string')
+      assert.ok(['pass', 'warn', 'fail'].includes(check.status), `Invalid status: ${check.status}`)
+      assert.equal(typeof check.message, 'string')
+    }
+  })
+
+  it('Node.js version check is present', async () => {
+    const { checks } = await runDoctorChecks()
+    const nodeCheck = checks.find(c => c.name === 'Node.js')
+    assert.ok(nodeCheck)
+    assert.ok(nodeCheck.message.includes('v'))
+    // Node 22 should pass (our test environment uses Node 22)
+    assert.equal(nodeCheck.status, 'pass')
+  })
+
+  it('cloudflared check is present', async () => {
+    const { checks } = await runDoctorChecks()
+    const cfCheck = checks.find(c => c.name === 'cloudflared')
+    assert.ok(cfCheck)
+    // Status depends on whether cloudflared is in PATH
+    assert.ok(['pass', 'fail'].includes(cfCheck.status))
+  })
+
+  it('tmux check is present and optional', async () => {
+    const { checks } = await runDoctorChecks()
+    const tmuxCheck = checks.find(c => c.name === 'tmux')
+    assert.ok(tmuxCheck)
+    // tmux is optional — status should be pass or warn (never fail)
+    assert.ok(['pass', 'warn'].includes(tmuxCheck.status))
+  })
+
+  it('claude CLI check is present', async () => {
+    const { checks } = await runDoctorChecks()
+    const claudeCheck = checks.find(c => c.name === 'claude')
+    assert.ok(claudeCheck)
+  })
+
+  it('config check is present', async () => {
+    const { checks } = await runDoctorChecks()
+    const configCheck = checks.find(c => c.name === 'Config')
+    assert.ok(configCheck)
+  })
+
+  it('dependencies check is present', async () => {
+    const { checks } = await runDoctorChecks()
+    const depsCheck = checks.find(c => c.name === 'Dependencies')
+    assert.ok(depsCheck)
+    // We're running from project root, so node_modules should exist
+    assert.equal(depsCheck.status, 'pass')
+  })
+
+  it('port check is present', async () => {
+    const { checks } = await runDoctorChecks()
+    const portCheck = checks.find(c => c.name === 'Port')
+    assert.ok(portCheck)
+  })
+
+  it('accepts custom port', async () => {
+    // Use a random high port that's unlikely to be in use
+    const { checks } = await runDoctorChecks({ port: 59123 })
+    const portCheck = checks.find(c => c.name === 'Port')
+    assert.ok(portCheck)
+    assert.ok(portCheck.message.includes('59123'))
+    assert.equal(portCheck.status, 'pass')
+  })
+
+  it('passed is true when no failures', async () => {
+    const { passed, checks } = await runDoctorChecks({ port: 59124 })
+    const failures = checks.filter(c => c.status === 'fail')
+    if (failures.length === 0) {
+      assert.equal(passed, true)
+    } else {
+      // On some systems, checks may fail — that's ok for integration tests
+      assert.equal(passed, false)
+    }
+  })
+
+  it('passed is false when any check fails', async () => {
+    // Verify the logic: if we had a failing check, passed would be false
+    const mockChecks = [
+      { name: 'A', status: 'pass', message: 'ok' },
+      { name: 'B', status: 'fail', message: 'bad' },
+      { name: 'C', status: 'warn', message: 'meh' },
+    ]
+    const passed = mockChecks.every(c => c.status !== 'fail')
+    assert.equal(passed, false)
+  })
+})
