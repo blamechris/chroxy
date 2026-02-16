@@ -77,8 +77,9 @@ After=network.target
 Type=simple
 User=youruser
 WorkingDirectory=/home/youruser/chroxy
-Environment=PATH=/usr/local/bin:/usr/bin
-ExecStart=/usr/local/bin/node ./node_modules/.bin/chroxy start --tunnel named
+# Update this path to your Node 22 installation (nvm, fnm, etc.)
+Environment=PATH=/home/youruser/.nvm/versions/node/v22/bin:/usr/local/bin:/usr/bin
+ExecStart=node ./node_modules/.bin/chroxy start --tunnel named
 Restart=on-failure
 RestartSec=5
 
@@ -159,9 +160,11 @@ nvm use 22 && npm install
 # macOS
 brew install cloudflared
 
-# Linux (Debian/Ubuntu)
-curl -L https://pkg.cloudflare.com/cloudflared-stable-linux-amd64.deb -o cloudflared.deb
-sudo dpkg -i cloudflared.deb
+# Linux (Debian/Ubuntu) — official signed repository
+sudo mkdir -p --mode=0755 /usr/share/keyrings
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt-get update && sudo apt-get install cloudflared
 ```
 
 ### Server starts but no QR code appears
