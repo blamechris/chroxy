@@ -1,0 +1,25 @@
+services:
+  chroxy:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8765}:${PORT:-8765}"
+    environment:
+      - ANTHROPIC_API_KEY          # REQUIRED — set in .env or shell
+      - PORT=${PORT:-8765}
+      - API_TOKEN                  # optional, auto-generated if missing
+      - CHROXY_CWD=/workspace
+      - CHROXY_MODEL               # optional, e.g. claude-sonnet-4-5-20250929
+      - CHROXY_TUNNEL=${CHROXY_TUNNEL:-quick}
+      - CHROXY_TUNNEL_NAME         # for named tunnel
+      - CHROXY_TUNNEL_HOSTNAME     # for named tunnel
+    volumes:
+      - chroxy-data:/home/chroxy/.chroxy      # config + session state
+      - chroxy-claude:/home/chroxy/.claude     # Claude settings
+      - ${WORKSPACE_PATH:-.}:/workspace       # project files to work on
+      # Named tunnel credentials (uncomment if using named tunnel):
+      # - ${HOME}/.cloudflared:/home/chroxy/.cloudflared:ro
+
+volumes:
+  chroxy-data:
+  chroxy-claude:
