@@ -4319,6 +4319,34 @@ describe('permission/question routing to originating session', () => {
     ws.close()
   })
 
+  it('cleans up routing maps after question response', async () => {
+    const { manager, sessionsMap } = createTwoSessionManager()
+    sessionsMap.get('sess-a').session.respondToQuestion = () => {}
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      defaultSessionId: 'sess-a',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    // Populate routing map
+    server._questionSessionMap.set('q-cleanup-1', 'sess-a')
+    assert.equal(server._questionSessionMap.size, 1)
+
+    // Respond
+    send(ws, { type: 'user_question_response', toolUseId: 'q-cleanup-1', answer: 'yes' })
+    await new Promise(r => setTimeout(r, 100))
+
+    // Map entry should be deleted
+    assert.equal(server._questionSessionMap.size, 0, 'Question routing map should be cleaned up')
+
+    ws.close()
+  })
+
   it('falls back to activeSessionId for unknown permission requestId', async () => {
     const { manager, sessionsMap } = createTwoSessionManager()
 
@@ -4345,6 +4373,36 @@ describe('permission/question routing to originating session', () => {
     await new Promise(r => setTimeout(r, 100))
 
     assert.equal(sessionBGotPermission, true, 'Should fall back to activeSessionId when requestId not in routing map')
+
+    ws.close()
+  })
+
+  it('falls back to activeSessionId for unknown question toolUseId', async () => {
+    const { manager, sessionsMap } = createTwoSessionManager()
+
+    let sessionBGotQuestion = false
+    sessionsMap.get('sess-b').session.respondToQuestion = () => { sessionBGotQuestion = true }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      defaultSessionId: 'sess-a',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    // Switch to Session B
+    send(ws, { type: 'switch_session', sessionId: 'sess-b' })
+    await waitForMessage(messages, 'session_switched', 2000)
+
+    // Send question response with unknown toolUseId — no entry in routing map
+    // Should fall back to activeSessionId (sess-b)
+    send(ws, { type: 'user_question_response', toolUseId: 'unknown-tool-use-id', answer: 'yes' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(sessionBGotQuestion, true, 'Should fall back to activeSessionId when toolUseId not in routing map')
 
     ws.close()
   })
