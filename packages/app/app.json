@@ -39,6 +39,13 @@
         {
           "cameraPermission": "Allow Chroxy to scan QR codes"
         }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow Chroxy to use the microphone for voice input.",
+          "speechRecognitionPermission": "Allow Chroxy to use speech recognition for voice input."
+        }
       ]
     ]
   }

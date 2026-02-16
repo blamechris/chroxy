@@ -18,3 +18,4 @@ export const ICON_CAMERA = '\uD83D\uDCF7'; // Camera 📷
 export const ICON_TRIANGLE_DOWN = '\u25BC'; // Down-pointing triangle ▼
 export const ICON_TRIANGLE_RIGHT = '\u25B6'; // Right-pointing triangle ▶
 export const ICON_GEAR = '\u2699';            // Gear ⚙
+export const ICON_MICROPHONE = '\uD83C\uDF99'; // Studio microphone 🎙

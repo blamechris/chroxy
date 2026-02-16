@@ -1,6 +1,6 @@
-import React, { forwardRef, useMemo } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, Platform } from 'react-native';
-import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH } from '../constants/icons';
+import React, { forwardRef, useMemo, useRef, useEffect } from 'react';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, Platform, Animated } from 'react-native';
+import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH, ICON_MICROPHONE } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 import type { SlashCommand } from '../store/connection';
 
@@ -24,6 +24,8 @@ export interface InputBarProps {
   disabled?: boolean;
   disabledPlaceholder?: string;
   slashCommands?: SlashCommand[];
+  isRecognizing?: boolean;
+  onMicPress?: () => void;
 }
 
 // -- Component --
@@ -45,8 +47,28 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
   disabled,
   disabledPlaceholder,
   slashCommands = [],
+  isRecognizing,
+  onMicPress,
 }, ref) {
   const a11yDisabled = disabled ? { disabled: true as const } : undefined;
+
+  // Pulsing animation for recording state
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (isRecognizing) {
+      const animation = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 0.4, duration: 600, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
+        ]),
+      );
+      animation.start();
+      return () => animation.stop();
+    }
+    pulseAnim.setValue(1);
+  }, [isRecognizing, pulseAnim]);
+
+  const showMicButton = viewMode === 'chat' && !isStreaming && !disabled && onMicPress;
 
   // Filter slash commands based on current input (only when typing `/` at the start)
   const filteredCommands = useMemo(() => {
@@ -136,6 +158,23 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
           editable={!disabled}
           accessibilityState={a11yDisabled}
         />
+        {showMicButton && (
+          <TouchableOpacity
+            onPress={onMicPress}
+            accessibilityRole="button"
+            accessibilityLabel={isRecognizing ? 'Stop voice input' : 'Start voice input'}
+          >
+            <Animated.View
+              style={[
+                styles.micButton,
+                { backgroundColor: isRecognizing ? COLORS.accentRed : COLORS.accentGreen },
+                isRecognizing ? { opacity: pulseAnim } : undefined,
+              ]}
+            >
+              <Text style={styles.micButtonText}>{ICON_MICROPHONE}</Text>
+            </Animated.View>
+          </TouchableOpacity>
+        )}
         {isStreaming ? (
           <TouchableOpacity
             style={[styles.interruptButton, disabled && styles.interruptButtonDisabled]}
@@ -288,5 +327,15 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  micButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  micButtonText: {
+    fontSize: 18,
   },
 });

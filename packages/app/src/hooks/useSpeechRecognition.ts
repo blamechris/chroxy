@@ -1,0 +1,86 @@
+import { useState, useEffect, useCallback } from 'react';
+import { Alert } from 'react-native';
+import {
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from 'expo-speech-recognition';
+
+export interface UseSpeechRecognitionReturn {
+  isRecognizing: boolean;
+  transcript: string;
+  error: string | null;
+  isAvailable: boolean;
+  startListening: () => Promise<void>;
+  stopListening: () => void;
+}
+
+export function useSpeechRecognition(): UseSpeechRecognitionReturn {
+  const [isRecognizing, setIsRecognizing] = useState(false);
+  const [transcript, setTranscript] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [isAvailable, setIsAvailable] = useState(true);
+
+  useEffect(() => {
+    setIsAvailable(ExpoSpeechRecognitionModule.isRecognitionAvailable());
+  }, []);
+
+  useSpeechRecognitionEvent('result', (event) => {
+    const text = event.results[0]?.transcript;
+    if (text) {
+      setTranscript(text);
+    }
+  });
+
+  useSpeechRecognitionEvent('end', () => {
+    setIsRecognizing(false);
+  });
+
+  useSpeechRecognitionEvent('error', (event) => {
+    // Don't treat abort as a user-visible error
+    if (event.error !== 'aborted') {
+      setError(event.message || event.error);
+    }
+    setIsRecognizing(false);
+  });
+
+  // Abort on unmount
+  useEffect(() => {
+    return () => {
+      ExpoSpeechRecognitionModule.abort();
+    };
+  }, []);
+
+  const startListening = useCallback(async () => {
+    setError(null);
+    setTranscript('');
+
+    const { granted } = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (!granted) {
+      Alert.alert(
+        'Permissions Required',
+        'Microphone and speech recognition permissions are needed for voice input. Please enable them in Settings.',
+      );
+      return;
+    }
+
+    ExpoSpeechRecognitionModule.start({
+      lang: 'en-US',
+      interimResults: true,
+      contextualStrings: ['Claude', 'Chroxy'],
+    });
+    setIsRecognizing(true);
+  }, []);
+
+  const stopListening = useCallback(() => {
+    ExpoSpeechRecognitionModule.stop();
+  }, []);
+
+  return {
+    isRecognizing,
+    transcript,
+    error,
+    isAvailable,
+    startListening,
+    stopListening,
+  };
+}
