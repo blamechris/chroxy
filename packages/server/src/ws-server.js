@@ -272,7 +272,7 @@ export class WsServer {
     })
 
     // WebSocket server in noServer mode — we handle the upgrade manually
-    this.wss = new WebSocketServer({ noServer: true })
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
 
     this.httpServer.on('upgrade', (req, socket, head) => {
       this.wss.handleUpgrade(req, socket, head, (ws) => {
@@ -1423,15 +1423,28 @@ export class WsServer {
     let absPath = null
     try {
       // Resolve path: expand ~ to homedir, default to homedir if empty
+      const home = homedir()
       if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
-        absPath = homedir()
+        absPath = home
       } else {
         const trimmed = requestedPath.trim()
         absPath = trimmed.startsWith('~')
-          ? resolve(homedir(), trimmed.slice(1).replace(/^\//, ''))
+          ? resolve(home, trimmed.slice(1).replace(/^\//, ''))
           : resolve(trimmed)
       }
       absPath = normalize(absPath)
+
+      // Restrict directory listing to the user's home directory
+      if (!absPath.startsWith(home + '/') && absPath !== home) {
+        this._send(ws, {
+          type: 'directory_listing',
+          path: absPath,
+          parentPath: null,
+          entries: [],
+          error: 'Access denied: directory listing is restricted to the home directory',
+        })
+        return
+      }
 
       const dirents = await readdir(absPath, { withFileTypes: true })
       const entries = dirents
