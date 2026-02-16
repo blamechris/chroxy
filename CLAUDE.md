@@ -21,7 +21,8 @@ chroxy/
 
 **Current Status (v0.1.0):**
 - Server works: CLI headless mode (default), PTY/tmux mode, WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, session management, model switching, auto-discovery, plan mode detection, background agent tracking
-- App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal, xterm.js terminal emulation (WebView), plan approval UI, agent monitoring, settings screen
+- App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal, xterm.js terminal emulation (WebView), plan approval UI, agent monitoring, settings screen, voice-to-text input
+- **Dev build required** — `expo-speech-recognition` native module means Expo Go no longer works. Use `npx expo run:ios` or `npx expo run:android`.
 - Priority: permission handling UI improvements
 
 ## Critical Dev Notes
@@ -189,8 +190,8 @@ npm run app:android
 # Server (packages/server/)
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dev
 
-# App (packages/app/)
-npx expo start
+# App (packages/app/) — requires dev build (native modules)
+npx expo run:ios    # or npx expo run:android
 
 # Test client (validate server without mobile app)
 node packages/server/src/test-client.js wss://your-url
