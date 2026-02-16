@@ -104,7 +104,17 @@ function loadAndMergeConfig(options, extraOverrides = {}) {
   // Load config file
   let fileConfig = {}
   if (existsSync(options.config)) {
-    fileConfig = JSON.parse(readFileSync(options.config, 'utf-8'))
+    try {
+      fileConfig = JSON.parse(readFileSync(options.config, 'utf-8'))
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        console.error(`❌ Config file contains invalid JSON: ${options.config}`)
+        console.error(`   ${err.message}`)
+        console.error(`   Fix the file or delete it and run 'npx chroxy init' to recreate.`)
+        process.exit(1)
+      }
+      throw err
+    }
   } else if (options.config !== CONFIG_FILE) {
     console.error(`❌ Config file not found: ${options.config}`)
     process.exit(1)
@@ -147,8 +157,17 @@ function loadAndMergeConfig(options, extraOverrides = {}) {
   })
 
   const validation = validateConfig(config, options.verbose)
-  if (!validation.valid && options.verbose) {
-    console.log('[config] Continuing despite warnings...\n')
+  if (!validation.valid) {
+    // Type errors are fatal; unknown-key warnings are non-fatal
+    const typeErrors = validation.warnings.filter(w => w.startsWith('Invalid type'))
+    if (typeErrors.length > 0) {
+      console.error('❌ Configuration has type errors:')
+      for (const err of typeErrors) {
+        console.error(`   ${err}`)
+      }
+      console.error('   Fix your config file or CLI flags and try again.')
+      process.exit(1)
+    }
   }
 
   // Set environment variables for backward compatibility with server code
@@ -189,11 +208,13 @@ program
   .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
   .option('--no-supervisor', 'Disable supervisor mode (direct server, no auto-restart)')
   .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
+  .option('--max-payload <bytes>', 'WebSocket max message size in bytes (default: 1048576)')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
     // Build start-specific overrides
     const extraOverrides = {}
     if (options.terminal !== undefined) extraOverrides.terminal = options.terminal
+    if (options.maxPayload !== undefined) extraOverrides.maxPayload = parseInt(options.maxPayload, 10)
     if (options.discoveryInterval !== undefined) {
       extraOverrides.discoveryInterval = parseInt(options.discoveryInterval, 10)
     }
@@ -446,9 +467,12 @@ program
   .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
   .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
   .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
+  .option('--max-payload <bytes>', 'WebSocket max message size in bytes (default: 1048576)')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
-    const config = loadAndMergeConfig(options)
+    const extraOverrides = {}
+    if (options.maxPayload !== undefined) extraOverrides.maxPayload = parseInt(options.maxPayload, 10)
+    const config = loadAndMergeConfig(options, extraOverrides)
 
     // Dev mode does not support terminal (PTY) mode
     if (config.terminal) {

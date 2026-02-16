@@ -169,9 +169,10 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
  */
 export class WsServer {
-  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null }) {
+  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload } = {}) {
     this.port = port
     this.apiToken = apiToken
+    this._maxPayload = maxPayload || 1024 * 1024 // default 1MB
     this.ptyManager = ptyManager || null
     this.outputParser = outputParser || null
     this.authRequired = authRequired
@@ -272,7 +273,7 @@ export class WsServer {
     })
 
     // WebSocket server in noServer mode — we handle the upgrade manually
-    this.wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: this._maxPayload })
 
     this.httpServer.on('upgrade', (req, socket, head) => {
       this.wss.handleUpgrade(req, socket, head, (ws) => {

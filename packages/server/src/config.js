@@ -27,6 +27,7 @@ const CONFIG_SCHEMA = {
   tunnelName: 'string',
   tunnelHostname: 'string',
   legacyCli: 'boolean',
+  maxPayload: 'number',
 }
 
 /**
@@ -171,6 +172,7 @@ function envKeyForConfig(key) {
     tunnelName: 'CHROXY_TUNNEL_NAME',
     tunnelHostname: 'CHROXY_TUNNEL_HOSTNAME',
     legacyCli: 'CHROXY_LEGACY_CLI',
+    maxPayload: 'CHROXY_MAX_PAYLOAD',
   }
   return envMap[key] || key.toUpperCase()
 }
