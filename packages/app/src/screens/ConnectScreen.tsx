@@ -71,6 +71,7 @@ export function ConnectScreen() {
 
   const connect = useConnectionStore((state) => state.connect);
   const connectionPhase = useConnectionStore((state) => state.connectionPhase);
+  const connectionError = useConnectionStore((state) => state.connectionError);
   const savedConnection = useConnectionStore((state) => state.savedConnection);
   const loadSavedConnection = useConnectionStore((state) => state.loadSavedConnection);
   const clearSavedConnection = useConnectionStore((state) => state.clearSavedConnection);
@@ -318,6 +319,13 @@ export function ConnectScreen() {
         </Text>
       </View>
 
+      {/* Connection error banner */}
+      {connectionError && connectionPhase === 'disconnected' && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorBannerText}>{connectionError}</Text>
+        </View>
+      )}
+
       {/* Quick reconnect */}
       {savedConnection && (
         <View style={styles.savedSection}>
@@ -466,6 +474,19 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     textAlign: 'center',
     lineHeight: 22,
+  },
+  // Connection error
+  errorBanner: {
+    backgroundColor: COLORS.accentRedSubtle,
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 24,
+    alignItems: 'center',
+  },
+  errorBannerText: {
+    color: COLORS.accentRed,
+    fontSize: 14,
+    fontWeight: '600',
   },
   // Saved connection / reconnect
   savedSection: {

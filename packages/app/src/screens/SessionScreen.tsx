@@ -153,6 +153,8 @@ export function SessionScreen() {
   const slashCommands = useConnectionStore((s) => s.slashCommands);
   const customAgents = useConnectionStore((s) => s.customAgents);
   const destroySession = useConnectionStore((s) => s.destroySession);
+  const connectionError = useConnectionStore((s) => s.connectionError);
+  const connectionRetryCount = useConnectionStore((s) => s.connectionRetryCount);
   const serverErrors = useConnectionStore((s) => s.serverErrors);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
   const setTerminalWriteCallback = useConnectionStore((s) => s.setTerminalWriteCallback);
@@ -420,8 +422,15 @@ export function SessionScreen() {
       {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting') && (
         <View style={styles.reconnectingBanner}>
           <Text style={styles.reconnectingText}>
-            {connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
+            {connectionPhase === 'server_restarting'
+              ? 'Server restarting...'
+              : connectionRetryCount > 0
+                ? `Reconnecting (attempt ${connectionRetryCount + 1})...`
+                : 'Reconnecting...'}
           </Text>
+          {connectionError && (
+            <Text style={styles.reconnectingDetail}>{connectionError}</Text>
+          )}
         </View>
       )}
 
@@ -647,6 +656,12 @@ const styles = StyleSheet.create({
     color: COLORS.accentOrange,
     fontSize: 13,
     fontWeight: '600',
+  },
+  reconnectingDetail: {
+    color: COLORS.accentOrange,
+    fontSize: 11,
+    opacity: 0.7,
+    marginTop: 2,
   },
   warningBanner: {
     backgroundColor: COLORS.accentOrangeSubtle,

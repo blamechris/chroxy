@@ -249,6 +249,10 @@ interface ConnectionState {
   connectedClients: ConnectedClient[];
   primaryClientId: string | null;
 
+  // Connection error feedback
+  connectionError: string | null;
+  connectionRetryCount: number;
+
   // Server errors forwarded over WebSocket (last 10)
   serverErrors: ServerError[];
 
@@ -685,6 +689,8 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         streamingMessageId: null,
         myClientId: myClientId,
         connectedClients: clients,
+        connectionError: null as string | null,
+        connectionRetryCount: 0,
       };
       if (ctx.isReconnect) {
         set(connectedState);
@@ -1475,6 +1481,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   myClientId: null,
   connectedClients: [],
   primaryClientId: null,
+  connectionError: null,
+  connectionRetryCount: 0,
   serverErrors: [],
   pendingPermissionConfirm: null,
   slashCommands: [],
@@ -1580,7 +1588,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       existing.close();
     }
     const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
-    set({ socket: null, connectionPhase: phase });
+    // Only clear connectionError on fresh user-initiated connections (not retries/reconnects)
+    // so the error reason remains visible in the banner during retry sequences
+    const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
+    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, ...errorPatch });
 
     if (_retryCount > 0) {
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
@@ -1610,6 +1621,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
                 if (myAttemptId !== connectionAttemptId) return;
                 get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
               }, delay);
+            } else {
+              set({ connectionPhase: 'disconnected', connectionError: 'Server restart timed out' });
+              if (!silent) {
+                Alert.alert(
+                  'Connection Failed',
+                  'The server is still restarting. Try again later.',
+                  [
+                    { text: 'OK' },
+                    { text: 'Retry', onPress: () => get().connect(url, token) },
+                  ],
+                );
+              }
             }
             return;
           }
@@ -1623,6 +1646,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       .catch((err) => {
         if (myAttemptId !== connectionAttemptId) return;
         console.log(`[ws] Health check failed: ${err.message}`);
+        // Categorize the error for user display
+        const reason = err.name === 'AbortError' ? 'Server not responding'
+          : err.message?.startsWith('HTTP ') ? err.message
+          : 'Network error';
+        set({ connectionError: reason });
         // Tunnel not ready yet — retry
         if (_retryCount < MAX_RETRIES) {
           const delay = RETRY_DELAYS[_retryCount];
@@ -1632,7 +1660,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
           }, delay);
         } else {
-          set({ connectionPhase: 'disconnected' });
+          set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });
           if (!silent) {
             Alert.alert(
               'Connection Failed',
@@ -1688,7 +1716,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // at connect() definition for rationale.
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] Connection lost, auto-reconnecting...');
-        set({ connectionPhase: 'reconnecting' });
+        set({ connectionPhase: 'reconnecting', connectionError: 'Connection lost', connectionRetryCount: 0 });
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
@@ -1710,7 +1738,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Auto-reconnect on unexpected WS error
       if (disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] WebSocket error, reconnecting...');
-        set({ connectionPhase: 'reconnecting' });
+        set({ connectionPhase: 'reconnecting', connectionError: 'Connection error', connectionRetryCount: 0 });
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
@@ -1769,6 +1797,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       myClientId: null,
       connectedClients: [],
       primaryClientId: null,
+      connectionError: null,
+      connectionRetryCount: 0,
       serverErrors: [],
       pendingPermissionConfirm: null,
       slashCommands: [],
