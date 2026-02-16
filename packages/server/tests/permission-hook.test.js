@@ -208,4 +208,103 @@ describe('createPermissionHookManager', () => {
     manager.destroy()
     manager.destroy()
   })
+
+  it('crash recovery: new register cleans up stale hook from crashed session', async () => {
+    const settingsPath = join(tempDir, 'settings.json')
+
+    // Simulate a crashed session: hook registered but never unregistered
+    const crashed = createPermissionHookManager(emitter, { settingsPath })
+    await crashed.register()
+    // "crash" — destroy without unregister
+    crashed.destroy()
+
+    // Verify stale hook exists
+    let settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    assert.equal(settings.hooks.PreToolUse.length, 1)
+
+    // New session registers — should replace stale hook (not duplicate)
+    const fresh = createPermissionHookManager(emitter, { settingsPath })
+    await fresh.register()
+
+    settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    assert.equal(settings.hooks.PreToolUse.length, 1, 'Stale hook should be replaced, not duplicated')
+    assert.equal(settings.hooks.PreToolUse[0]._chroxy, true)
+
+    await fresh.unregister()
+    fresh.destroy()
+  })
+
+  it('concurrent sessions: two managers share same settings file safely', async () => {
+    const settingsPath = join(tempDir, 'settings.json')
+
+    const managerA = createPermissionHookManager(emitter, { settingsPath })
+    const managerB = createPermissionHookManager(emitter, { settingsPath })
+
+    // Both register — second should replace first (idempotent by _chroxy flag)
+    await managerA.register()
+    await managerB.register()
+
+    let settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    assert.equal(settings.hooks.PreToolUse.length, 1, 'Only one chroxy hook should exist')
+
+    // First unregisters — hook removed
+    await managerA.unregister()
+
+    settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    assert.equal(settings.hooks, undefined, 'Hook should be fully removed')
+
+    // Second unregisters — no-op (already gone)
+    await managerB.unregister()
+
+    settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    assert.equal(settings.hooks, undefined, 'Should still be clean')
+
+    managerA.destroy()
+    managerB.destroy()
+  })
+
+  it('concurrent sessions: unregister preserves non-chroxy hooks', async () => {
+    const settingsPath = join(tempDir, 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo hi' }] },
+        ],
+      },
+    }))
+
+    const manager = createPermissionHookManager(emitter, { settingsPath })
+    await manager.register()
+    await manager.unregister()
+
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    assert.ok(settings.hooks, 'hooks key should remain for non-chroxy hooks')
+    assert.equal(settings.hooks.PreToolUse.length, 1)
+    assert.equal(settings.hooks.PreToolUse[0].matcher, 'Bash')
+
+    manager.destroy()
+  })
+
+  it('preserves non-hooks settings keys during register/unregister', async () => {
+    const settingsPath = join(tempDir, 'settings.json')
+    writeFileSync(settingsPath, JSON.stringify({
+      theme: 'dark',
+      fontSize: 14,
+    }))
+
+    const manager = createPermissionHookManager(emitter, { settingsPath })
+    await manager.register()
+
+    let settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    assert.equal(settings.theme, 'dark', 'Other settings preserved after register')
+    assert.equal(settings.fontSize, 14)
+
+    await manager.unregister()
+
+    settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    assert.equal(settings.theme, 'dark', 'Other settings preserved after unregister')
+    assert.equal(settings.fontSize, 14)
+
+    manager.destroy()
+  })
 })

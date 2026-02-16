@@ -1,0 +1,483 @@
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
+import assert from 'node:assert/strict'
+import { Readable, Writable } from 'node:stream'
+import { EventEmitter } from 'node:events'
+import { CliSession } from '../src/cli-session.js'
+
+/**
+ * Tests for CliSession lifecycle: process management, respawn,
+ * model switching, sendMessage, interrupt, and destroy.
+ *
+ * We do NOT call start() in most tests — instead we manipulate
+ * internal state to test behaviors in isolation without spawning
+ * real child processes.
+ */
+
+function createSession(opts = {}) {
+  return new CliSession({ cwd: '/tmp', ...opts })
+}
+
+// Simulate a session that's ready (post-start) without actually spawning
+function createReadySession(opts = {}) {
+  const session = createSession(opts)
+  session._processReady = true
+  session._child = createMockChild()
+  return session
+}
+
+function createMockChild() {
+  const child = new EventEmitter()
+  child.stdin = new Writable({ write(chunk, enc, cb) { cb() } })
+  child.stdout = new Readable({ read() {} })
+  child.stderr = new Readable({ read() {} })
+  child.pid = 12345
+  child.kill = mock.fn(() => true)
+  child.killed = false
+  return child
+}
+
+describe('CliSession constructor', () => {
+  it('sets defaults from options', () => {
+    const session = createSession({ cwd: '/home/user', model: 'opus' })
+    assert.equal(session.cwd, '/home/user')
+    assert.equal(session.model, 'opus')
+    assert.equal(session.permissionMode, 'approve')
+    assert.equal(session._isBusy, false)
+    assert.equal(session._processReady, false)
+  })
+
+  it('creates hook manager when port is provided', () => {
+    const session = createSession({ port: 8765 })
+    assert.ok(session._hookManager)
+    assert.equal(typeof session._hookManager.register, 'function')
+    session._hookManager.destroy()
+  })
+
+  it('does not create hook manager without port', () => {
+    const session = createSession()
+    assert.equal(session._hookManager, null)
+  })
+})
+
+describe('CliSession.sendMessage', () => {
+  it('rejects when busy', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    session.sendMessage('hello')
+    assert.equal(errors.length, 1)
+    assert.ok(errors[0].message.includes('Already processing'))
+  })
+
+  it('queues message when process not ready', () => {
+    const session = createSession()
+    session._processReady = false
+    session.sendMessage('queued message')
+    assert.equal(session._pendingMessage, 'queued message')
+    assert.equal(session._isBusy, false)
+  })
+
+  it('writes NDJSON to stdin and sets busy state', () => {
+    const session = createReadySession()
+    const written = []
+    session._child.stdin = new Writable({
+      write(chunk, enc, cb) { written.push(chunk.toString()); cb() },
+    })
+
+    session.sendMessage('test prompt')
+
+    assert.equal(session._isBusy, true)
+    assert.equal(session._currentMessageId, 'msg-1')
+    assert.equal(written.length, 1)
+    const parsed = JSON.parse(written[0].trim())
+    assert.equal(parsed.type, 'user')
+    assert.equal(parsed.message.content[0].text, 'test prompt')
+    // Clean up timer
+    clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+  })
+
+  it('sets result timeout on send', () => {
+    const session = createReadySession()
+    session.sendMessage('test')
+    assert.ok(session._resultTimeout)
+    // Clean up to prevent test hanging
+    clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+    session._isBusy = false
+  })
+})
+
+describe('CliSession._clearMessageState', () => {
+  it('resets busy state and clears result timeout', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentMessageId = 'msg-1'
+    session._resultTimeout = setTimeout(() => {}, 10000)
+    session._currentCtx = { hasStreamStarted: false, didStreamText: false }
+
+    session._clearMessageState()
+
+    assert.equal(session._isBusy, false)
+    assert.equal(session._currentMessageId, null)
+    assert.equal(session._currentCtx, null)
+    assert.equal(session._resultTimeout, null)
+  })
+
+  it('emits agent_completed for all tracked agents', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentCtx = { hasStreamStarted: false, didStreamText: false }
+    session._activeAgents.set('agent-1', { toolUseId: 'agent-1' })
+    session._activeAgents.set('agent-2', { toolUseId: 'agent-2' })
+
+    const completed = []
+    session.on('agent_completed', (data) => completed.push(data))
+    session._clearMessageState()
+
+    assert.equal(completed.length, 2)
+    assert.equal(session._activeAgents.size, 0)
+  })
+
+  it('preserves _inPlanMode flag', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._inPlanMode = true
+    session._currentCtx = { hasStreamStarted: false, didStreamText: false }
+
+    session._clearMessageState()
+    assert.equal(session._inPlanMode, true)
+  })
+})
+
+describe('CliSession._scheduleRespawn', () => {
+  let session
+
+  afterEach(() => {
+    if (session) {
+      session._destroying = true
+      if (session._respawnTimer) {
+        clearTimeout(session._respawnTimer)
+        session._respawnTimer = null
+      }
+    }
+  })
+
+  it('schedules respawn with increasing delay', () => {
+    session = createSession()
+    session._respawnCount = 0
+    session._scheduleRespawn()
+    assert.equal(session._respawnCount, 1)
+    assert.ok(session._respawnTimer)
+  })
+
+  it('gives up after 5 attempts', () => {
+    session = createSession()
+    session._respawnCount = 5
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    session._scheduleRespawn()
+    assert.equal(session._respawnCount, 6)
+    assert.equal(session._respawnTimer, null)
+    assert.equal(errors.length, 1)
+    assert.ok(errors[0].message.includes('5 attempts'))
+  })
+
+  it('does not schedule when destroying', () => {
+    session = createSession()
+    session._destroying = true
+    session._scheduleRespawn()
+    assert.equal(session._respawnTimer, null)
+  })
+})
+
+describe('CliSession.interrupt', () => {
+  it('sends SIGINT to child process', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session.interrupt()
+    assert.equal(session._child.kill.mock.calls.length, 1)
+    assert.equal(session._child.kill.mock.calls[0].arguments[0], 'SIGINT')
+    // Cleanup safety timer to prevent test hanging
+    clearTimeout(session._interruptTimer)
+    session._interruptTimer = null
+  })
+
+  it('sends SIGINT even when not busy (unconditional)', () => {
+    const session = createReadySession()
+    session._isBusy = false
+    session.interrupt()
+    // interrupt() sends SIGINT regardless of busy state (only checks _child)
+    assert.equal(session._child.kill.mock.calls.length, 1)
+    clearTimeout(session._interruptTimer)
+    session._interruptTimer = null
+  })
+
+  it('does nothing when no child process', () => {
+    const session = createSession()
+    session._isBusy = true
+    session._child = null
+    // Should not throw
+    session.interrupt()
+  })
+})
+
+describe('CliSession.destroy', () => {
+  it('sets destroying flag and nulls child', () => {
+    const session = createReadySession()
+    const child = session._child
+    session.destroy()
+    assert.equal(session._destroying, true)
+    // destroy() sets _child = null after calling stdin.end()
+    assert.equal(session._child, null)
+  })
+
+  it('clears all timers', () => {
+    const session = createReadySession()
+    session._respawnTimer = setTimeout(() => {}, 10000)
+    session._resultTimeout = setTimeout(() => {}, 10000)
+    session._interruptTimer = setTimeout(() => {}, 10000)
+
+    session.destroy()
+
+    assert.equal(session._respawnTimer, null)
+    assert.equal(session._resultTimeout, null)
+    assert.equal(session._interruptTimer, null)
+  })
+
+  it('emits agent_completed for tracked agents', () => {
+    const session = createReadySession()
+    session._activeAgents.set('a1', { toolUseId: 'a1' })
+    const completed = []
+    session.on('agent_completed', (d) => completed.push(d))
+
+    session.destroy()
+    assert.equal(completed.length, 1)
+    assert.equal(completed[0].toolUseId, 'a1')
+  })
+
+  it('is safe to call multiple times', () => {
+    const session = createReadySession()
+    session.destroy()
+    session.destroy() // should not throw
+  })
+})
+
+describe('CliSession.respondToQuestion', () => {
+  it('writes answer to stdin when waiting', () => {
+    const session = createReadySession()
+    const written = []
+    session._child.stdin = new Writable({
+      write(chunk, enc, cb) { written.push(chunk.toString()); cb() },
+    })
+    session._waitingForAnswer = true
+
+    session.respondToQuestion('My answer')
+    assert.equal(session._waitingForAnswer, false)
+    assert.equal(written.length, 1)
+    const parsed = JSON.parse(written[0].trim())
+    assert.equal(parsed.type, 'user')
+    assert.equal(parsed.message.content[0].text, 'My answer')
+  })
+
+  it('ignores when not waiting', () => {
+    const session = createReadySession()
+    const written = []
+    session._child.stdin = new Writable({
+      write(chunk, enc, cb) { written.push(chunk.toString()); cb() },
+    })
+    session._waitingForAnswer = false
+    session.respondToQuestion('Ignored')
+    assert.equal(written.length, 0)
+  })
+})
+
+describe('CliSession properties', () => {
+  it('isRunning reflects busy state', () => {
+    const session = createSession()
+    assert.equal(session.isRunning, false)
+    session._isBusy = true
+    assert.equal(session.isRunning, true)
+  })
+
+  it('isReady requires both processReady and not busy', () => {
+    const session = createSession()
+    assert.equal(session.isReady, false)
+    session._processReady = true
+    assert.equal(session.isReady, true)
+    session._isBusy = true
+    assert.equal(session.isReady, false)
+  })
+
+  it('sessionId returns internal ID', () => {
+    const session = createSession()
+    assert.equal(session.sessionId, null)
+    session._sessionId = 'test-123'
+    assert.equal(session.sessionId, 'test-123')
+  })
+})
+
+describe('CliSession agent tracking', () => {
+  it('tracks Task tool as agent_spawned', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._messageCounter = 1
+    session._currentMessageId = 'msg-1'
+    session._currentCtx = {
+      hasStreamStarted: false, didStreamText: false,
+      currentContentBlockType: null, currentToolName: null,
+      currentToolUseId: null, toolInputChunks: '', toolInputOverflow: false,
+    }
+
+    const spawned = []
+    session.on('agent_spawned', (d) => spawned.push(d))
+
+    session._handleEvent({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        content_block: { type: 'tool_use', name: 'Task', id: 'toolu_task1' },
+      },
+    })
+
+    // Provide description via input_json_delta
+    session._handleEvent({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        delta: { type: 'input_json_delta', partial_json: '{"description":"Run tests"}' },
+      },
+    })
+    session._handleEvent({
+      type: 'stream_event',
+      event: { type: 'content_block_stop' },
+    })
+
+    assert.equal(spawned.length, 1)
+    assert.equal(spawned[0].toolUseId, 'toolu_task1')
+    assert.ok(spawned[0].description.includes('Run tests'))
+    assert.ok(session._activeAgents.has('toolu_task1'))
+  })
+
+  it('truncates agent description to 200 chars', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._messageCounter = 1
+    session._currentMessageId = 'msg-1'
+    session._currentCtx = {
+      hasStreamStarted: false, didStreamText: false,
+      currentContentBlockType: null, currentToolName: null,
+      currentToolUseId: null, toolInputChunks: '', toolInputOverflow: false,
+    }
+
+    const spawned = []
+    session.on('agent_spawned', (d) => spawned.push(d))
+
+    session._handleEvent({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        content_block: { type: 'tool_use', name: 'Task', id: 'toolu_task2' },
+      },
+    })
+
+    const longDesc = 'x'.repeat(300)
+    session._handleEvent({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        delta: { type: 'input_json_delta', partial_json: JSON.stringify({ description: longDesc }) },
+      },
+    })
+    session._handleEvent({
+      type: 'stream_event',
+      event: { type: 'content_block_stop' },
+    })
+
+    assert.equal(spawned.length, 1)
+    assert.ok(spawned[0].description.length <= 200) // truncated to 200 chars
+  })
+})
+
+describe('CliSession plan mode', () => {
+  function setupWithCtx() {
+    const session = createReadySession()
+    session._isBusy = true
+    session._messageCounter = 1
+    session._currentMessageId = 'msg-1'
+    session._currentCtx = {
+      hasStreamStarted: false, didStreamText: false,
+      currentContentBlockType: null, currentToolName: null,
+      currentToolUseId: null, toolInputChunks: '', toolInputOverflow: false,
+    }
+    return session
+  }
+
+  it('detects EnterPlanMode tool', () => {
+    const session = setupWithCtx()
+    const events = []
+    session.on('plan_started', (d) => events.push(d))
+
+    session._handleEvent({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        content_block: { type: 'tool_use', name: 'EnterPlanMode', id: 'toolu_plan1' },
+      },
+    })
+    session._handleEvent({
+      type: 'stream_event',
+      event: { type: 'content_block_stop' },
+    })
+
+    assert.equal(session._inPlanMode, true)
+    assert.equal(events.length, 1)
+  })
+
+  it('detects ExitPlanMode tool and emits plan_ready on result', () => {
+    const session = setupWithCtx()
+    session._inPlanMode = true
+    const events = []
+    session.on('plan_ready', (d) => events.push(d))
+
+    session._handleEvent({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        content_block: { type: 'tool_use', name: 'ExitPlanMode', id: 'toolu_exit1' },
+      },
+    })
+
+    const input = JSON.stringify({ allowedPrompts: [{ tool: 'Bash', prompt: 'run tests' }] })
+    session._handleEvent({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        delta: { type: 'input_json_delta', partial_json: input },
+      },
+    })
+    session._handleEvent({
+      type: 'stream_event',
+      event: { type: 'content_block_stop' },
+    })
+
+    // plan_ready fires when the result event arrives (end of turn)
+    assert.equal(events.length, 0)
+    assert.ok(session._planAllowedPrompts)
+
+    // Simulate result event
+    session._handleEvent({
+      type: 'result',
+      session_id: 'test-session',
+      total_cost_usd: 0.01,
+      duration_ms: 1000,
+      usage: {},
+    })
+
+    assert.equal(events.length, 1)
+    assert.ok(events[0].allowedPrompts)
+    assert.equal(events[0].allowedPrompts.length, 1)
+    assert.equal(session._inPlanMode, false)
+  })
+})
