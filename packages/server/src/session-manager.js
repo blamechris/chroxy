@@ -5,7 +5,6 @@ import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
-import { PtySession } from './pty-session.js'
 import { discoverTmuxSessions } from './session-discovery.js'
 
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
@@ -296,6 +295,8 @@ export class SessionManager extends EventEmitter {
     const sessionId = randomUUID().slice(0, 8)
     const sessionName = name || tmuxSession
 
+    // Dynamic import: node-pty is a native module that may not be available (e.g. Docker)
+    const { PtySession } = await import('./pty-session.js')
     const session = new PtySession({
       tmuxSession,
       cols: cols || 120,

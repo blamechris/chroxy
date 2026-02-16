@@ -29,14 +29,16 @@ prepare_config() {
       echo ""
     fi
 
-    # Build config JSON
-    cat > "$CONFIG_FILE" <<EOF
-{
-  "apiToken": "$API_TOKEN",
-  "port": ${PORT:-8765},
-  "shell": "/bin/bash"
-}
-EOF
+    # Build config JSON (use node to safely serialize values)
+    node -e "
+      const fs = require('fs');
+      const config = {
+        apiToken: process.env.API_TOKEN,
+        port: parseInt(process.env.PORT || '8765', 10),
+        shell: '/bin/bash'
+      };
+      fs.writeFileSync(process.argv[1], JSON.stringify(config, null, 2));
+    " "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
     echo "[entrypoint] Config written to $CONFIG_FILE"
   fi
