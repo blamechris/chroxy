@@ -283,6 +283,60 @@ npx expo start
 node packages/server/src/test-client.js wss://your-url
 ```
 
+## UI Verification with Maestro
+
+Maestro E2E flows let agents verify app UI after code changes. Flows live in `packages/app/.maestro/`.
+
+### Prerequisites
+
+```bash
+# Install Maestro (one-time)
+curl -Ls "https://get.maestro.mobile.dev" | bash
+
+# Boot a simulator
+xcrun simctl boot <device-id>   # e.g. xcrun simctl list devices available
+
+# Start Metro dev server (from packages/app/)
+npx expo start
+```
+
+### Running Flows
+
+```bash
+# Run all flows sequentially (recommended)
+export PATH="$PATH:$HOME/.maestro/bin"
+maestro test --device <device-id> packages/app/.maestro/run-all.yaml
+
+# Run a single flow
+maestro test --device <device-id> packages/app/.maestro/connect-screen.yaml
+```
+
+### After App Changes — Verification Workflow
+
+When you modify app components (screens, UI elements, styling), verify with Maestro:
+
+1. Ensure a simulator is booted and Metro is running
+2. Run the relevant flow(s) — screenshots are saved to `packages/app/`
+3. Read the screenshot PNGs with the Read tool to visually verify correctness
+4. Delete screenshots when done (they're gitignored)
+
+### Available Flows
+
+| Flow | What it verifies |
+|------|------------------|
+| `connect-screen.yaml` | ConnectScreen elements: title, QR button, LAN scan, manual entry, port |
+| `manual-connect.yaml` | Manual entry form expansion, URL input, Connect button, SessionScreen transition |
+| `lan-scan.yaml` | LAN scan trigger, scanning state with spinner |
+| `run-all.yaml` | Runs all flows sequentially |
+
+### Gotchas
+
+- **Always use `run-all.yaml`** for multiple flows — passing multiple `.yaml` files runs them in parallel (breaks on one simulator)
+- **Expo dev menu** appears on every `openLink` call — the setup flow dismisses it automatically
+- **`wait` is not a valid command** — use `waitForAnimationToEnd` or `extendedWaitUntil`
+- **Emoji text matching** requires regex: `text: ".*Scan QR Code.*"` (not literal match)
+- **Screenshots save to CWD** — always clean up after verification
+
 ## Project Files Reference
 
 ### Server (`packages/server/src/`)
