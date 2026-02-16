@@ -1726,7 +1726,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Auto-reconnect on unexpected WS error
       if (disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] WebSocket error, reconnecting...');
-        set({ connectionPhase: 'reconnecting', connectionError: 'Connection error' });
+        set({ connectionPhase: 'reconnecting', connectionError: 'Connection error', connectionRetryCount: 0 });
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
