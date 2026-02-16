@@ -92,7 +92,7 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 - `server_status` for non-error updates; `server_error` for error conditions
 - `discovered_sessions` sent proactively when auto-discovery finds new tmux sessions (configurable via `--discovery-interval`, default 45s)
 - `trigger_discovery` requests an immediate discovery scan
-- `permission_request` includes an `input` field (always present, defaults to `{}`) with structured tool input for rich UI rendering; `expiresAt` (epoch ms) indicates when the server will auto-deny
+- `permission_request` includes an `input` field (always present, defaults to `{}`) with structured tool input for rich UI rendering; `remainingMs` (milliseconds until auto-deny) lets the client compute a local deadline without clock skew
 - `user_question` forwards `AskUserQuestion` prompts from plan mode; `user_question_response` sends the user's answer back
 - `agent_spawned` fires when the Task tool is detected (description truncated to 200 chars); `agent_completed` fires per-agent when the turn's `result` arrives or on process crash/destroy
 - `plan_started` fires on `EnterPlanMode` tool; `plan_ready` fires on `ExitPlanMode`, includes `allowedPrompts` payload — both are transient events (not recorded in history or replayed)
