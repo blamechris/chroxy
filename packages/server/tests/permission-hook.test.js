@@ -173,6 +173,21 @@ describe('createPermissionHookManager', () => {
     manager.destroy()
   })
 
+  it('unregister() does not throw on corrupt settings.json', async () => {
+    const settingsPath = join(tempDir, 'settings.json')
+    writeFileSync(settingsPath, 'not valid json {{{')
+
+    const manager = createPermissionHookManager(emitter, { settingsPath })
+    // Should not throw — just logs a warning and skips cleanup
+    await manager.unregister()
+
+    // File should remain untouched (not deleted or modified)
+    const content = readFileSync(settingsPath, 'utf-8')
+    assert.equal(content, 'not valid json {{{')
+
+    manager.destroy()
+  })
+
   it('destroy() does not throw when called without register()', async () => {
     const manager = createPermissionHookManager(emitter)
     manager.destroy()
