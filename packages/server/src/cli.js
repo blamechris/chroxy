@@ -214,9 +214,13 @@ program
     // Build start-specific overrides
     const extraOverrides = {}
     if (options.terminal !== undefined) extraOverrides.terminal = options.terminal
-    if (options.maxPayload !== undefined) extraOverrides.maxPayload = parseInt(options.maxPayload, 10)
+    if (options.maxPayload !== undefined) {
+      const parsed = parseInt(options.maxPayload, 10)
+      extraOverrides.maxPayload = Number.isNaN(parsed) ? options.maxPayload : parsed
+    }
     if (options.discoveryInterval !== undefined) {
-      extraOverrides.discoveryInterval = parseInt(options.discoveryInterval, 10)
+      const parsed = parseInt(options.discoveryInterval, 10)
+      extraOverrides.discoveryInterval = Number.isNaN(parsed) ? options.discoveryInterval : parsed
     }
     if (options.auth === false) extraOverrides.noAuth = true
 
@@ -471,7 +475,10 @@ program
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
     const extraOverrides = {}
-    if (options.maxPayload !== undefined) extraOverrides.maxPayload = parseInt(options.maxPayload, 10)
+    if (options.maxPayload !== undefined) {
+      const parsed = parseInt(options.maxPayload, 10)
+      extraOverrides.maxPayload = Number.isNaN(parsed) ? options.maxPayload : parsed
+    }
     const config = loadAndMergeConfig(options, extraOverrides)
 
     // Dev mode does not support terminal (PTY) mode
