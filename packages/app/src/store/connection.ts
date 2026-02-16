@@ -294,7 +294,7 @@ interface ConnectionState {
   sendInput: (input: string) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
-  sendUserQuestionResponse: (answer: string) => 'sent' | 'queued' | false;
+  sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
@@ -1936,9 +1936,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return enqueueMessage('permission_response', payload);
   },
 
-  sendUserQuestionResponse: (answer: string) => {
+  sendUserQuestionResponse: (answer: string, toolUseId?: string) => {
     const { socket } = get();
-    const payload = { type: 'user_question_response', answer };
+    const payload: Record<string, string> = { type: 'user_question_response', answer };
+    if (toolUseId) payload.toolUseId = toolUseId;
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(payload));
       return 'sent';
