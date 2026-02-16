@@ -23,8 +23,9 @@ prepare_config() {
       API_TOKEN="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)"
       echo ""
       echo "================================================"
-      echo "  Generated API token (save this for your app):"
-      echo "  $API_TOKEN"
+      echo "  Generated API token."
+      echo "  Prefix: ${API_TOKEN:0:8}..."
+      echo "  Full token stored in $CONFIG_FILE"
       echo "================================================"
       echo ""
     fi
@@ -45,11 +46,26 @@ prepare_config() {
 }
 
 # --- Route command ---
-CMD="${1:-start}"
-shift || true
+# If the first arg starts with '-', treat it as flags for the default 'start' command
+if [ "${1:0:1}" = "-" ] 2>/dev/null; then
+  CMD="start"
+else
+  CMD="${1:-start}"
+  shift || true
+fi
 
 case "$CMD" in
   start)
+    # Docker image is headless-only: no tmux, node-pty not compiled.
+    # Fail fast if --terminal is requested.
+    for arg in "$@"; do
+      if [ "$arg" = "--terminal" ] || [ "$arg" = "-t" ]; then
+        echo "ERROR: Terminal mode (--terminal) is not supported in Docker."
+        echo "This container runs in headless mode only (no tmux/node-pty)."
+        echo "Remove --terminal to use the default SDK mode."
+        exit 1
+      fi
+    done
     prepare_config
     exec node /app/packages/server/src/cli.js start "$@"
     ;;

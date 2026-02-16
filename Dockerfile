@@ -38,6 +38,7 @@ RUN useradd -m -s /bin/bash chroxy && \
     chown -R chroxy:chroxy /home/chroxy /workspace /app
 
 USER chroxy
+ENV HOME=/home/chroxy
 
 EXPOSE 8765
 
