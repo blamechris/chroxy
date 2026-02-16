@@ -290,7 +290,7 @@ export function SessionScreen() {
   const handleSelectOption = (value: string, messageId: string, requestId?: string, toolUseId?: string) => {
     let sent: 'sent' | 'queued' | false = false;
     if (toolUseId) {
-      sent = sendUserQuestionResponse(value);
+      sent = sendUserQuestionResponse(value, toolUseId);
     } else if (requestId) {
       sent = sendPermissionResponse(requestId, value);
     } else {

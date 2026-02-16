@@ -181,6 +181,8 @@ export class WsServer {
     this._pingInterval = null
     this._pendingPermissions = new Map() // requestId -> { resolve, timer }
     this._permissionCounter = 0
+    this._permissionSessionMap = new Map() // requestId -> sessionId (for routing responses to correct session)
+    this._questionSessionMap = new Map() // toolUseId -> sessionId (for routing question responses)
     this._primaryClients = new Map() // sessionId -> clientId (last-writer-wins)
     this.pushManager = pushManager
 
@@ -705,9 +707,13 @@ export class WsServer {
         const { requestId, decision } = msg
         if (!requestId || !decision) break
 
+        // Route to the session that originated the permission request
+        const originSessionId = this._permissionSessionMap.get(requestId) || client.activeSessionId
+        this._permissionSessionMap.delete(requestId)
+
         // Try SDK-mode first (in-process permission)
-        if (client.activeSessionId && this.sessionManager) {
-          const entry = this.sessionManager.getSession(client.activeSessionId)
+        if (originSessionId && this.sessionManager) {
+          const entry = this.sessionManager.getSession(originSessionId)
           if (entry && typeof entry.session.respondToPermission === 'function') {
             entry.session.respondToPermission(requestId, decision)
             break
@@ -879,7 +885,11 @@ export class WsServer {
       }
 
       case 'user_question_response': {
-        const entry = this.sessionManager.getSession(client.activeSessionId)
+        // Route to the session that originated the question
+        const questionSessionId = (msg.toolUseId && this._questionSessionMap.get(msg.toolUseId))
+          || client.activeSessionId
+        if (msg.toolUseId) this._questionSessionMap.delete(msg.toolUseId)
+        const entry = this.sessionManager.getSession(questionSessionId)
         if (entry && entry.type === 'cli' && typeof msg.answer === 'string') {
           entry.session.respondToQuestion(msg.answer)
         }
@@ -1212,6 +1222,7 @@ export class WsServer {
           break
 
         case 'user_question':
+          this._questionSessionMap.set(data.toolUseId, sessionId)
           this._broadcastToSession(sessionId, {
             type: 'user_question',
             toolUseId: data.toolUseId,
@@ -1220,6 +1231,7 @@ export class WsServer {
           break
 
         case 'permission_request':
+          this._permissionSessionMap.set(data.requestId, sessionId)
           this._broadcastToSession(sessionId, {
             type: 'permission_request',
             requestId: data.requestId,
@@ -1868,6 +1880,8 @@ export class WsServer {
       try { pending.resolve('deny') } catch {}
     }
     this._pendingPermissions.clear()
+    this._permissionSessionMap.clear()
+    this._questionSessionMap.clear()
     this._primaryClients.clear()
 
     for (const [ws] of this.clients) {
