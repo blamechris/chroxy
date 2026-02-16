@@ -18,7 +18,10 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.blamechris.chroxy",
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "Chroxy scans your local network to discover running Chroxy servers"
+        "NSLocalNetworkUsageDescription": "Chroxy scans your local network to discover running Chroxy servers",
+        "NSSpeechRecognitionUsageDescription": "Allow Chroxy to use speech recognition for voice input.",
+        "NSMicrophoneUsageDescription": "Allow Chroxy to use the microphone for voice input.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
@@ -27,7 +30,11 @@
         "backgroundColor": "#0f0f1a"
       },
       "package": "com.blamechris.chroxy",
-      "softwareKeyboardLayoutMode": "adjustResize"
+      "softwareKeyboardLayoutMode": "adjustResize",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -46,7 +53,13 @@
           "microphonePermission": "Allow Chroxy to use the microphone for voice input.",
           "speechRecognitionPermission": "Allow Chroxy to use speech recognition for voice input."
         }
-      ]
-    ]
+      ],
+      "expo-secure-store"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "5747b2cd-e15a-4742-9562-de949408f896"
+      }
+    }
   }
 }
