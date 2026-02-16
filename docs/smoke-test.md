@@ -105,6 +105,7 @@ Test when: `ws-server.js`, `server-cli.js`, `cli.js`, `tunnel.js`, `tunnel-check
 - [ ] Tap "Forget" → saved connection removed, "Reconnect" button disappears
 - [ ] Kill tunnel process while connected → "Reconnecting..." banner appears → auto-reconnects
 - [ ] Kill server while connected → "Reconnecting..." banner → retries then fails gracefully
+- [ ] Supervisor standby health check with `restartEtaMs` → app shows "Server Restarting" with ETA
 
 ### Auth Timeout
 - [ ] Connect but send no auth within 10s → server disconnects client (check server logs: no crash)
@@ -165,6 +166,8 @@ Test when: `ws-server.js`, `sdk-session.js`, `cli-session.js`, `connection.ts`, 
 ### Permission Timeout
 - [ ] Trigger a permission prompt → do NOT respond for 5 minutes
 - [ ] After timeout, permission auto-denies (check server logs for "timed out, auto-denying")
+- [ ] Permission card shows countdown timer (derived from `remainingMs` in wire format)
+- [ ] Countdown matches server-side 5-minute deadline (no clock skew drift)
 
 ### Permission Modes
 _Requires permission mode UI (if implemented). Otherwise test via server restart with env vars._
@@ -310,10 +313,13 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start --terminal
 ## Shutdown and Cleanup
 
 - [ ] Ctrl+C server → "[SIGINT] Shutting down..." message
+- [ ] `server_shutdown` message sent to connected clients with `reason` and `restartEtaMs`
+- [ ] App shows "Server Restarting" banner with ETA countdown (named tunnel + supervisor mode)
 - [ ] Server exits cleanly (no hanging processes: `ps aux | grep claude | grep -v grep`)
 - [ ] `~/.claude/settings.json` — `_chroxy` hook entry removed
 - [ ] No orphaned cloudflared processes: `ps aux | grep cloudflared | grep -v grep`
 - [ ] Restart server → starts cleanly, new tunnel URL, new QR code
+- [ ] Supervisor standby health check returns `{"status":"restarting","restartEtaMs":...}` during restart
 
 ---
 
