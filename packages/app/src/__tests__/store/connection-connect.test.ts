@@ -40,6 +40,8 @@ function deferred<T>() {
 // ---------------------------------------------------------------------------
 // Store reset
 // ---------------------------------------------------------------------------
+const originalFetch = global.fetch;
+
 beforeEach(() => {
   jest.useFakeTimers();
   mockAlert.mockClear();
@@ -68,6 +70,7 @@ beforeEach(() => {
 
 afterEach(() => {
   useConnectionStore.getState().disconnect();
+  global.fetch = originalFetch;
   jest.useRealTimers();
 });
 
@@ -189,7 +192,7 @@ describe('connect() WebSocket setup', () => {
   it('transitions through connecting phase', () => {
     global.fetch = jest.fn().mockReturnValue(new Promise(() => {}));
 
-    useConnectionStore.getState().connect('wss://example.com', 'tok');
+    useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
 
     expect(useConnectionStore.getState().connectionPhase).toBe('connecting');
   });
