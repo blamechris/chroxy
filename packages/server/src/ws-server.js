@@ -1239,6 +1239,7 @@ export class WsServer {
             tool: data.tool,
             description: data.description,
             input: data.input,
+            expiresAt: data.expiresAt,
           })
           // Push notification
           if (this.pushManager) {
