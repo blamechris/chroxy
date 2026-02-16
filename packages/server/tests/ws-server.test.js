@@ -4165,3 +4165,187 @@ describe('agent listing', () => {
     }
   })
 })
+
+describe('permission/question routing to originating session', () => {
+  const TOKEN = 'test-token'
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  function createTwoSessionManager() {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+
+    const sessionA = createMockSession()
+    sessionA.cwd = '/tmp/a'
+    sessionA.respondToPermission = () => {}
+    sessionA.respondToQuestion = () => {}
+    sessionsMap.set('sess-a', {
+      session: sessionA,
+      name: 'Session A',
+      cwd: '/tmp/a',
+      type: 'cli',
+      isBusy: false,
+    })
+
+    const sessionB = createMockSession()
+    sessionB.cwd = '/tmp/b'
+    sessionB.respondToPermission = () => {}
+    sessionB.respondToQuestion = () => {}
+    sessionsMap.set('sess-b', {
+      session: sessionB,
+      name: 'Session B',
+      cwd: '/tmp/b',
+      type: 'cli',
+      isBusy: false,
+    })
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => 'sess-a'
+    })
+
+    return { manager, sessionsMap }
+  }
+
+  it('routes permission_response to the originating session, not activeSessionId', async () => {
+    const { manager, sessionsMap } = createTwoSessionManager()
+
+    let sessionAGotPermission = false
+    let sessionBGotPermission = false
+    sessionsMap.get('sess-a').session.respondToPermission = () => { sessionAGotPermission = true }
+    sessionsMap.get('sess-b').session.respondToPermission = () => { sessionBGotPermission = true }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      defaultSessionId: 'sess-a',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    // Simulate permission request from Session A (populates _permissionSessionMap)
+    server._permissionSessionMap.set('perm-routing-1', 'sess-a')
+
+    // Switch client to Session B
+    send(ws, { type: 'switch_session', sessionId: 'sess-b' })
+    await waitForMessage(messages, 'session_switched', 2000)
+
+    // Respond to the permission — should route to Session A despite active being B
+    send(ws, { type: 'permission_response', requestId: 'perm-routing-1', decision: 'allow' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(sessionAGotPermission, true, 'Session A should receive the permission response')
+    assert.equal(sessionBGotPermission, false, 'Session B should NOT receive the permission response')
+
+    ws.close()
+  })
+
+  it('routes user_question_response to the originating session, not activeSessionId', async () => {
+    const { manager, sessionsMap } = createTwoSessionManager()
+
+    let sessionAGotQuestion = false
+    let sessionBGotQuestion = false
+    sessionsMap.get('sess-a').session.respondToQuestion = () => { sessionAGotQuestion = true }
+    sessionsMap.get('sess-b').session.respondToQuestion = () => { sessionBGotQuestion = true }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      defaultSessionId: 'sess-a',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    // Simulate question from Session A (populates _questionSessionMap)
+    server._questionSessionMap.set('q-routing-1', 'sess-a')
+
+    // Switch client to Session B
+    send(ws, { type: 'switch_session', sessionId: 'sess-b' })
+    await waitForMessage(messages, 'session_switched', 2000)
+
+    // Respond to the question — should route to Session A
+    send(ws, { type: 'user_question_response', toolUseId: 'q-routing-1', answer: 'yes' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(sessionAGotQuestion, true, 'Session A should receive the question response')
+    assert.equal(sessionBGotQuestion, false, 'Session B should NOT receive the question response')
+
+    ws.close()
+  })
+
+  it('cleans up routing maps after permission response', async () => {
+    const { manager, sessionsMap } = createTwoSessionManager()
+    sessionsMap.get('sess-a').session.respondToPermission = () => {}
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      defaultSessionId: 'sess-a',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    // Populate routing map
+    server._permissionSessionMap.set('perm-cleanup-1', 'sess-a')
+    assert.equal(server._permissionSessionMap.size, 1)
+
+    // Respond
+    send(ws, { type: 'permission_response', requestId: 'perm-cleanup-1', decision: 'allow' })
+    await new Promise(r => setTimeout(r, 100))
+
+    // Map entry should be deleted
+    assert.equal(server._permissionSessionMap.size, 0, 'Permission routing map should be cleaned up')
+
+    ws.close()
+  })
+
+  it('falls back to activeSessionId for unknown permission requestId', async () => {
+    const { manager, sessionsMap } = createTwoSessionManager()
+
+    let sessionBGotPermission = false
+    sessionsMap.get('sess-b').session.respondToPermission = () => { sessionBGotPermission = true }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      defaultSessionId: 'sess-a',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    // Switch to Session B
+    send(ws, { type: 'switch_session', sessionId: 'sess-b' })
+    await waitForMessage(messages, 'session_switched', 2000)
+
+    // Send permission response with unknown requestId — no entry in routing map
+    // Should fall back to activeSessionId (sess-b)
+    send(ws, { type: 'permission_response', requestId: 'unknown-id', decision: 'allow' })
+    await new Promise(r => setTimeout(r, 100))
+
+    assert.equal(sessionBGotPermission, true, 'Should fall back to activeSessionId when requestId not in routing map')
+
+    ws.close()
+  })
+})

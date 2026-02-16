@@ -90,6 +90,23 @@ describe('SdkSession', () => {
       assert.equal(result.behavior, 'deny')
     })
 
+    it('resolves with allowAlways on respondToPermission (allowAlways)', async () => {
+      const events = []
+      session.on('permission_request', (data) => events.push(data))
+
+      const promise = session._handlePermission('Bash', { command: 'npm test' }, null)
+      const requestId = events[0].requestId
+      assert.ok(session._permissionTimers.has(requestId))
+
+      session.respondToPermission(requestId, 'allowAlways')
+
+      const result = await promise
+      assert.equal(result.behavior, 'allowAlways')
+      assert.equal(result.updatedInput, undefined)
+      assert.ok(!session._pendingPermissions.has(requestId))
+      assert.ok(!session._permissionTimers.has(requestId))
+    })
+
     it('auto-denies on abort signal', async () => {
       const controller = new AbortController()
       const promise = session._handlePermission('Bash', {}, controller.signal)
