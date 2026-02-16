@@ -1230,7 +1230,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
           { label: 'Deny', value: 'deny' },
           { label: 'Always Allow', value: 'allowAlways' },
         ],
-        expiresAt: typeof msg.expiresAt === 'number' ? msg.expiresAt : undefined,
+        expiresAt: typeof msg.remainingMs === 'number' ? Date.now() + msg.remainingMs : undefined,
         timestamp: Date.now(),
       };
       const permTargetId = (msg.sessionId as string) || get().activeSessionId;

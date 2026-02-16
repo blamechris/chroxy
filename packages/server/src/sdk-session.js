@@ -321,7 +321,7 @@ export class SdkSession extends EventEmitter {
         tool: toolName,
         description,
         input: toolInput,
-        expiresAt: Date.now() + 300_000,
+        remainingMs: 300_000,
       })
 
       // Auto-deny on abort signal (user interrupted)
