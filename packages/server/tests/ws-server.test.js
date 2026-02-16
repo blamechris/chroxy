@@ -3456,16 +3456,13 @@ describe('directory listing', () => {
     await waitForMessage(messages, 'auth_ok', 2000)
     messages.length = 0
 
-    // List /tmp — should always exist and contain directories
-    send(ws, { type: 'list_directory', path: '/tmp' })
+    // List home directory — should always exist and contain directories
+    send(ws, { type: 'list_directory', path: '~' })
 
     const listing = await waitForMessage(messages, 'directory_listing', 2000)
     assert.ok(listing, 'Should receive directory_listing')
-    assert.equal(listing.path, '/tmp')
     assert.equal(listing.error, null)
     assert.ok(Array.isArray(listing.entries))
-    // parentPath should be the parent of the resolved path
-    assert.ok(listing.parentPath !== null)
 
     ws.close()
   })
@@ -3483,7 +3480,10 @@ describe('directory listing', () => {
     await waitForMessage(messages, 'auth_ok', 2000)
     messages.length = 0
 
-    send(ws, { type: 'list_directory', path: '/nonexistent/path/that/does/not/exist' })
+    // Use a path inside the home directory that doesn't exist
+    const os = await import('os')
+    const nonexistent = `${os.homedir()}/nonexistent_path_that_does_not_exist_12345`
+    send(ws, { type: 'list_directory', path: nonexistent })
 
     const listing = await waitForMessage(messages, 'directory_listing', 2000)
     assert.ok(listing, 'Should receive directory_listing')
@@ -3554,7 +3554,7 @@ describe('directory listing', () => {
     const { ws, messages } = await createClient(port, false)
 
     // Send list_directory before authenticating
-    send(ws, { type: 'list_directory', path: '/tmp' })
+    send(ws, { type: 'list_directory', path: '~' })
     await new Promise(r => setTimeout(r, 200))
 
     // Should NOT get any directory_listing back (message is ignored pre-auth)
@@ -3612,11 +3612,35 @@ describe('directory listing', () => {
     await waitForMessage(messages, 'auth_ok', 2000)
     messages.length = 0
 
-    send(ws, { type: 'list_directory', path: '/tmp' })
+    send(ws, { type: 'list_directory', path: '~' })
 
     const listing = await waitForMessage(messages, 'directory_listing', 2000)
     assert.ok(listing, 'Should receive directory_listing in multi-session mode')
     assert.equal(listing.error, null)
+
+    ws.close()
+  })
+
+  it('restricts listing to home directory', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    // Try listing /tmp — should be denied (outside home directory)
+    send(ws, { type: 'list_directory', path: '/tmp' })
+
+    const listing = await waitForMessage(messages, 'directory_listing', 2000)
+    assert.ok(listing, 'Should receive directory_listing')
+    assert.ok(listing.error.includes('restricted'), 'Should get access denied error')
+    assert.deepEqual(listing.entries, [])
 
     ws.close()
   })
