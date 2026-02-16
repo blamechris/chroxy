@@ -148,6 +148,11 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.backgroundTerminal,
   },
   recoveryBanner: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 1,
     backgroundColor: COLORS.accentOrangeMedium,
     paddingVertical: 6,
     alignItems: 'center',
