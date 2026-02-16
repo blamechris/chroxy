@@ -34,3 +34,8 @@ name: Manual entry flow
 
 # Take screenshot of connection attempt
 - takeScreenshot: manual-connect-attempt
+
+# After failed connection, verify we return to ConnectScreen
+- extendedWaitUntil:
+    visible: "Connect to Chroxy"
+    timeout: 10000
