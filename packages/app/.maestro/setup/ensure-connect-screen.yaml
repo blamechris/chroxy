@@ -2,6 +2,9 @@ appId: host.exp.Exponent
 name: Ensure ConnectScreen
 ---
 
+# Tested devices: iPhone 15 Pro (iOS 17), iPhone SE 3 (iOS 17), portrait orientation
+# iPad is untested — tap coordinates may differ in landscape / larger screens
+#
 # Shared setup: ensure we're on ConnectScreen regardless of initial state
 # Usage: - runFlow: setup/ensure-connect-screen.yaml
 

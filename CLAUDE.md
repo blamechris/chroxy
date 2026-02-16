@@ -249,6 +249,7 @@ When you modify app components (screens, UI elements, styling), verify with Maes
 - **`wait` is not a valid command** — use `waitForAnimationToEnd` or `extendedWaitUntil`
 - **Emoji text matching** requires regex: `text: ".*Scan QR Code.*"` (not literal match)
 - **Screenshots save to CWD** — always clean up after verification
+- **Device compatibility** — tested on iPhone 15 Pro and iPhone SE 3 (iOS 17+), portrait only; iPad and Android are untested (tap coordinates may differ)
 
 ## Reference
 
