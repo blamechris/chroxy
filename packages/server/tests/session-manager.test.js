@@ -379,38 +379,43 @@ describe('SessionManager auto-persist', () => {
     rmSync(tempDir, { recursive: true, force: true })
   })
 
-  it('debounces rapid _schedulePersist calls into a single write', async () => {
-    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+  it('debounces rapid _schedulePersist calls into a single write', () => {
+    mock.timers.enable()
+    try {
+      const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
 
-    const session = new EventEmitter()
-    session.model = 'sonnet'
-    session.permissionMode = 'approve'
-    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
-    session.destroy = () => {}
-    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+      const session = new EventEmitter()
+      session.model = 'sonnet'
+      session.permissionMode = 'approve'
+      Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+      session.destroy = () => {}
+      mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
 
-    let writeCount = 0
-    const origSerialize = mgr.serializeState.bind(mgr)
-    mgr.serializeState = () => {
-      writeCount++
-      return origSerialize()
+      let writeCount = 0
+      const origSerialize = mgr.serializeState.bind(mgr)
+      mgr.serializeState = () => {
+        writeCount++
+        return origSerialize()
+      }
+
+      // Rapid-fire 5 persist requests
+      mgr._schedulePersist()
+      mgr._schedulePersist()
+      mgr._schedulePersist()
+      mgr._schedulePersist()
+      mgr._schedulePersist()
+
+      // Should not have written yet (debounce delay)
+      assert.equal(writeCount, 0)
+
+      // Advance mocked time past the 5s debounce
+      mock.timers.tick(5500)
+
+      assert.equal(writeCount, 1, 'Should have written exactly once after debounce')
+      clearTimeout(mgr._persistTimer)
+    } finally {
+      mock.timers.reset()
     }
-
-    // Rapid-fire 5 persist requests
-    mgr._schedulePersist()
-    mgr._schedulePersist()
-    mgr._schedulePersist()
-    mgr._schedulePersist()
-    mgr._schedulePersist()
-
-    // Should not have written yet (debounce delay)
-    assert.equal(writeCount, 0)
-
-    // Wait for debounce to fire (5s + buffer)
-    await new Promise(resolve => setTimeout(resolve, 5500))
-
-    assert.equal(writeCount, 1, 'Should have written exactly once after debounce')
-    clearTimeout(mgr._persistTimer)
   })
 
   it('destroyAll writes final state synchronously', () => {

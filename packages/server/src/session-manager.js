@@ -618,12 +618,16 @@ export class SessionManager extends EventEmitter {
     clearTimeout(this._persistTimer)
     this._persistTimer = setTimeout(() => {
       this._persistTimer = null
-      this.serializeState()
+      try {
+        this.serializeState()
+      } catch (err) {
+        console.error('[session-manager] Failed to persist session state:', err)
+      }
     }, 5000)
   }
 
   /**
-   * Deep-clone and truncate a history entry for serialization.
+   * Shallow-clone and truncate a history entry for serialization.
    * Content/input fields >50KB are truncated to avoid bloated state files.
    */
   _truncateEntry(entry) {
