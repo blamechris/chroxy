@@ -7,10 +7,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-# Install cloudflared (multi-arch)
+# Install cloudflared (multi-arch, pinned version + checksum verification)
+ARG CLOUDFLARED_VERSION=2026.2.0
+ARG CLOUDFLARED_SHA256_AMD64=176746db3be7dc7bd48f3dd287c8930a4645ebb6e6700f883fddda5a4c307c16
+ARG CLOUDFLARED_SHA256_ARM64=03c5d58e283f521d752dc4436014eb341092edf076eb1095953ab82debe54a8e
 RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}" \
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${ARCH}" \
       -o /usr/local/bin/cloudflared && \
+    EXPECTED=$(eval echo "\$CLOUDFLARED_SHA256_$(echo $ARCH | tr a-z A-Z | tr - _)") && \
+    echo "${EXPECTED}  /usr/local/bin/cloudflared" | sha256sum -c - && \
     chmod +x /usr/local/bin/cloudflared
 
 WORKDIR /app

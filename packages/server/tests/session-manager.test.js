@@ -382,7 +382,7 @@ describe('SessionManager auto-persist', () => {
   it('debounces rapid _schedulePersist calls into a single write', () => {
     mock.timers.enable()
     try {
-      const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+      const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile, persistDebounceMs: 100 })
 
       const session = new EventEmitter()
       session.model = 'sonnet'
@@ -408,8 +408,8 @@ describe('SessionManager auto-persist', () => {
       // Should not have written yet (debounce delay)
       assert.equal(writeCount, 0)
 
-      // Advance mocked time past the 5s debounce
-      mock.timers.tick(5500)
+      // Advance mocked time past the debounce
+      mock.timers.tick(150)
 
       assert.equal(writeCount, 1, 'Should have written exactly once after debounce')
       clearTimeout(mgr._persistTimer)
