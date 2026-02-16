@@ -1,8 +1,9 @@
 import { execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
+import { homedir, platform } from 'os'
 import { createServer } from 'net'
+import { validateConfig } from './config.js'
 
 const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
 
@@ -13,6 +14,8 @@ const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
  */
 export async function runDoctorChecks({ port, verbose } = {}) {
   const checks = []
+  const isMac = platform() === 'darwin'
+  const isLinux = platform() === 'linux'
 
   // 1. Node.js version
   const nodeVersion = process.versions.node
@@ -26,40 +29,40 @@ export async function runDoctorChecks({ port, verbose } = {}) {
   }
 
   // 2. cloudflared
-  try {
-    const version = execFileSync('cloudflared', ['--version'], {
-      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim().split('\n')[0]
-    checks.push({ name: 'cloudflared', status: 'pass', message: version })
-  } catch {
-    checks.push({ name: 'cloudflared', status: 'fail', message: 'Not found — install with: brew install cloudflared' })
-  }
+  checks.push(checkBinary('cloudflared', ['--version'], {
+    parseVersion: (out) => out.trim().split('\n')[0],
+    required: true,
+    installHint: isMac ? 'brew install cloudflared'
+      : isLinux ? 'see https://pkg.cloudflare.com/ for installation'
+      : 'see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/',
+  }))
 
   // 3. tmux (optional — only needed for PTY mode)
-  try {
-    const version = execFileSync('tmux', ['-V'], {
-      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim()
-    checks.push({ name: 'tmux', status: 'pass', message: `${version} (optional — PTY mode only)` })
-  } catch {
-    checks.push({ name: 'tmux', status: 'warn', message: 'Not found — only needed for --terminal mode (brew install tmux)' })
-  }
+  checks.push(checkBinary('tmux', ['-V'], {
+    parseVersion: (out) => `${out.trim()} (optional — PTY mode only)`,
+    required: false,
+    installHint: isMac ? 'brew install tmux'
+      : isLinux ? 'install via your package manager (e.g. apt install tmux)'
+      : 'install tmux for your platform',
+  }))
 
   // 4. claude CLI
-  try {
-    const version = execFileSync('claude', ['--version'], {
-      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim().split('\n')[0]
-    checks.push({ name: 'claude', status: 'pass', message: version })
-  } catch {
-    checks.push({ name: 'claude', status: 'fail', message: 'Not found — install Claude Code CLI' })
-  }
+  checks.push(checkBinary('claude', ['--version'], {
+    parseVersion: (out) => out.trim().split('\n')[0],
+    required: true,
+    installHint: 'install Claude Code CLI',
+  }))
 
   // 5. Config file
   if (existsSync(CONFIG_FILE)) {
     try {
-      JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
-      checks.push({ name: 'Config', status: 'pass', message: CONFIG_FILE })
+      const config = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
+      const { valid, warnings } = validateConfig(config)
+      if (valid) {
+        checks.push({ name: 'Config', status: 'pass', message: CONFIG_FILE })
+      } else {
+        checks.push({ name: 'Config', status: 'warn', message: `${CONFIG_FILE} — ${warnings.join('; ')}` })
+      }
     } catch (err) {
       if (err instanceof SyntaxError) {
         checks.push({ name: 'Config', status: 'fail', message: `${CONFIG_FILE} — invalid JSON: ${err.message}` })
@@ -71,7 +74,15 @@ export async function runDoctorChecks({ port, verbose } = {}) {
     checks.push({ name: 'Config', status: 'warn', message: `Not found — run 'npx chroxy init' to create` })
   }
 
-  // 6. Port availability
+  // 6. node_modules
+  const nodeModulesPath = join(process.cwd(), 'node_modules')
+  if (existsSync(nodeModulesPath)) {
+    checks.push({ name: 'Dependencies', status: 'pass', message: 'node_modules found' })
+  } else {
+    checks.push({ name: 'Dependencies', status: 'fail', message: 'node_modules not found — run npm install' })
+  }
+
+  // 7. Port availability
   const checkPort = port || 8765
   try {
     await checkPortAvailable(checkPort)
@@ -84,12 +95,38 @@ export async function runDoctorChecks({ port, verbose } = {}) {
   return { checks, passed }
 }
 
+/**
+ * Check if a binary is available and return its version.
+ * Differentiates between not-found and timeout errors.
+ */
+function checkBinary(name, args, { parseVersion, required, installHint }) {
+  try {
+    const output = execFileSync(name, args, {
+      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return { name, status: 'pass', message: parseVersion(output) }
+  } catch (err) {
+    if (err.killed || err.signal === 'SIGTERM') {
+      // Timeout — binary exists but hung
+      return {
+        name,
+        status: required ? 'fail' : 'warn',
+        message: `Timed out — ${name} may be hanging or misconfigured`,
+      }
+    }
+    return {
+      name,
+      status: required ? 'fail' : 'warn',
+      message: `Not found — ${installHint}`,
+    }
+  }
+}
+
 function checkPortAvailable(port) {
   return new Promise((resolve, reject) => {
     const server = createServer()
     server.once('error', (err) => {
-      if (err.code === 'EADDRINUSE') reject(err)
-      else resolve()
+      reject(err)
     })
     server.once('listening', () => {
       server.close(() => resolve())
