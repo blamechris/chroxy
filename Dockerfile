@@ -7,9 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-# Install cloudflared (multi-arch)
+# Install cloudflared (multi-arch, pinned version)
+ARG CLOUDFLARED_VERSION=2026.2.0
 RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}" \
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${ARCH}" \
       -o /usr/local/bin/cloudflared && \
     chmod +x /usr/local/bin/cloudflared
 

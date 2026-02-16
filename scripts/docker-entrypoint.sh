@@ -14,11 +14,14 @@ prepare_config() {
     exit 1
   fi
 
-  # Generate config.json if it doesn't exist
-  if [ ! -f "$CONFIG_FILE" ]; then
-    mkdir -p "$CONFIG_DIR"
+  mkdir -p "$CONFIG_DIR"
 
-    # Generate or use provided API token
+  # Resolve API token: env var > existing config > generate new
+  if [ -z "${API_TOKEN:-}" ]; then
+    if [ -f "$CONFIG_FILE" ]; then
+      # Preserve existing token across restarts
+      API_TOKEN="$(node -e "const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(c.apiToken||'')" "$CONFIG_FILE")"
+    fi
     if [ -z "${API_TOKEN:-}" ]; then
       API_TOKEN="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)"
       echo ""
@@ -29,20 +32,21 @@ prepare_config() {
       echo "================================================"
       echo ""
     fi
-
-    # Build config JSON (use node to safely serialize values)
-    node -e "
-      const fs = require('fs');
-      const config = {
-        apiToken: process.env.API_TOKEN,
-        port: parseInt(process.env.PORT || '8765', 10),
-        shell: '/bin/bash'
-      };
-      fs.writeFileSync(process.argv[1], JSON.stringify(config, null, 2));
-    " "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"
-    echo "[entrypoint] Config written to $CONFIG_FILE"
   fi
+  export API_TOKEN
+
+  # Always write config from current env vars + resolved token
+  node -e "
+    const fs = require('fs');
+    const config = {
+      apiToken: process.env.API_TOKEN,
+      port: parseInt(process.env.PORT || '8765', 10),
+      shell: '/bin/bash'
+    };
+    fs.writeFileSync(process.argv[1], JSON.stringify(config, null, 2));
+  " "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
+  echo "[entrypoint] Config written to $CONFIG_FILE"
 }
 
 # --- Route command ---

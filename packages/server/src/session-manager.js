@@ -92,7 +92,7 @@ export class SessionDirectoryError extends SessionError {
  *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
  */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, useLegacyCli = false, stateFilePath, stateTtlMs } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, useLegacyCli = false, stateFilePath, stateTtlMs, persistDebounceMs = 5000 } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -103,6 +103,7 @@ export class SessionManager extends EventEmitter {
     this._defaultPermissionMode = defaultPermissionMode || 'approve'
     this._stateFilePath = stateFilePath || DEFAULT_STATE_FILE
     this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000 // 24 hours
+    this._persistDebounceMs = persistDebounceMs
     this._sessions = new Map() // sessionId -> { session: CliSession|PtySession, type: 'cli'|'pty', name, cwd, createdAt, tmuxSession? }
     this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
@@ -613,7 +614,7 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Schedule a debounced persist (5s delay). Multiple rapid calls reset the timer.
+   * Schedule a debounced persist. Multiple rapid calls reset the timer.
    */
   _schedulePersist() {
     clearTimeout(this._persistTimer)
@@ -624,7 +625,7 @@ export class SessionManager extends EventEmitter {
       } catch (err) {
         console.error('[session-manager] Failed to persist session state:', err)
       }
-    }, 5000)
+    }, this._persistDebounceMs)
   }
 
   /**
