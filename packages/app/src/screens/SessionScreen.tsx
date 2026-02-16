@@ -176,6 +176,7 @@ export function SessionScreen() {
       const elapsed = Date.now() - restartingSince;
       const remaining = Math.max(0, Math.ceil((restartEtaMs - elapsed) / 1000));
       setRestartCountdown(remaining);
+      if (remaining <= 0) clearInterval(interval);
     };
     update();
     const interval = setInterval(update, 1000);

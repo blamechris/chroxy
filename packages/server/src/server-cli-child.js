@@ -66,8 +66,8 @@ async function main() {
 
 /**
  * Handle drain request from supervisor.
- * 1. Set draining flag on WsServer (reject new input)
- * 2. Broadcast server_status to connected clients
+ * 1. Broadcast server_shutdown to connected clients (reason + ETA)
+ * 2. Set draining flag on WsServer (reject new input)
  * 3. Wait for all sessions to idle
  * 4. Serialize session state to disk
  * 5. Send drain_complete back to supervisor
