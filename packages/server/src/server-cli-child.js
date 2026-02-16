@@ -75,10 +75,11 @@ async function main() {
 async function handleDrain(timeout) {
   console.log(`[child] Drain requested (timeout: ${timeout}ms)`)
 
-  // Broadcast restarting status to connected clients
+  // Broadcast structured shutdown event before draining
+  // ETA: drain timeout (~30s) + ~5s for child startup
   if (_wsServer) {
+    _wsServer.broadcastShutdown('restart', timeout + 5000)
     _wsServer.setDraining(true)
-    _wsServer.broadcastStatus('Server restarting...')
   }
 
   // Wait for busy sessions to idle

@@ -338,9 +338,15 @@ export class Supervisor extends EventEmitter {
 
     this._standbyServer = createServer((req, res) => {
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
+        // Calculate restart ETA from backoff schedule + estimated child startup (~5s)
+        const backoffIdx = Math.min(this._restartCount - 1, RESTART_BACKOFFS.length - 1)
+        const nextBackoff = backoffIdx >= 0 ? RESTART_BACKOFFS[backoffIdx] : 2000
+        const restartEtaMs = nextBackoff + 5000
+
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({
           status: 'restarting',
+          restartEtaMs,
           metrics: {
             supervisorUptimeS: Math.round((Date.now() - this._metrics.startedAt) / 1000),
             totalRestarts: this._metrics.totalRestarts,

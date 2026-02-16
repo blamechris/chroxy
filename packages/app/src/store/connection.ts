@@ -257,6 +257,11 @@ interface ConnectionState {
   // Server errors forwarded over WebSocket (last 10)
   serverErrors: ServerError[];
 
+  // Shutdown state (reason + ETA for restarting banner countdown)
+  shutdownReason: 'restart' | 'shutdown' | null;
+  restartEtaMs: number | null;
+  restartingSince: number | null;
+
   // Pending auto permission mode confirmation from server
   pendingPermissionConfirm: { mode: string; warning: string } | null;
 
@@ -692,6 +697,10 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         connectedClients: clients,
         connectionError: null as string | null,
         connectionRetryCount: 0,
+        // Clear shutdown state on successful connect
+        shutdownReason: null as 'restart' | 'shutdown' | null,
+        restartEtaMs: null as number | null,
+        restartingSince: null as number | null,
       };
       if (ctx.isReconnect) {
         set(connectedState);
@@ -1291,6 +1300,17 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       break;
     }
 
+    case 'server_shutdown': {
+      const reason = msg.reason === 'restart' || msg.reason === 'shutdown' ? msg.reason : 'shutdown';
+      const eta = typeof msg.restartEtaMs === 'number' ? msg.restartEtaMs : 0;
+      set({
+        shutdownReason: reason as 'restart' | 'shutdown',
+        restartEtaMs: eta,
+        restartingSince: Date.now(),
+      });
+      break;
+    }
+
     // --- Multi-client awareness ---
 
     case 'client_joined': {
@@ -1486,6 +1506,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectionError: null,
   connectionRetryCount: 0,
   serverErrors: [],
+  shutdownReason: null,
+  restartEtaMs: null,
+  restartingSince: null,
   pendingPermissionConfirm: null,
   slashCommands: [],
   customAgents: [],
@@ -1615,7 +1638,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           console.log('[ws] Health check response:', body.status ?? 'no status field');
           if (body.status === 'restarting') {
             console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${MAX_RETRIES + 1})`);
-            set({ connectionPhase: 'server_restarting' });
+            // Extract ETA from standby health check (crash recovery — no prior server_shutdown)
+            const healthEta = typeof body.restartEtaMs === 'number' ? body.restartEtaMs : null;
+            const currentState = get();
+            set({
+              connectionPhase: 'server_restarting',
+              // Only set shutdown state if we don't already have it from a server_shutdown message
+              ...(currentState.shutdownReason ? {} : {
+                shutdownReason: 'restart' as const,
+                restartEtaMs: healthEta,
+                restartingSince: currentState.restartingSince || Date.now(),
+              }),
+            });
             // Retry — the server will come back
             if (_retryCount < MAX_RETRIES) {
               const delay = RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)];
@@ -1802,6 +1836,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       connectionError: null,
       connectionRetryCount: 0,
       serverErrors: [],
+      shutdownReason: null,
+      restartEtaMs: null,
+      restartingSince: null,
       pendingPermissionConfirm: null,
       slashCommands: [],
       customAgents: [],

@@ -155,12 +155,32 @@ export function SessionScreen() {
   const destroySession = useConnectionStore((s) => s.destroySession);
   const connectionError = useConnectionStore((s) => s.connectionError);
   const connectionRetryCount = useConnectionStore((s) => s.connectionRetryCount);
+  const shutdownReason = useConnectionStore((s) => s.shutdownReason);
+  const restartEtaMs = useConnectionStore((s) => s.restartEtaMs);
+  const restartingSince = useConnectionStore((s) => s.restartingSince);
   const serverErrors = useConnectionStore((s) => s.serverErrors);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
   const setTerminalWriteCallback = useConnectionStore((s) => s.setTerminalWriteCallback);
   const isCliMode = serverMode === 'cli';
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
+
+  // Countdown for server restart ETA
+  const [restartCountdown, setRestartCountdown] = useState<number | null>(null);
+  useEffect(() => {
+    if (connectionPhase !== 'server_restarting' || !restartEtaMs || restartEtaMs <= 0 || !restartingSince) {
+      setRestartCountdown(null);
+      return;
+    }
+    const update = () => {
+      const elapsed = Date.now() - restartingSince;
+      const remaining = Math.max(0, Math.ceil((restartEtaMs - elapsed) / 1000));
+      setRestartCountdown(remaining);
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, [connectionPhase, restartEtaMs, restartingSince]);
 
   // Determine if the active session has a terminal (PTY sessions do, CLI sessions don't)
   const activeSession = sessions.find((s) => s.sessionId === activeSessionId);
@@ -423,12 +443,22 @@ export function SessionScreen() {
         <View style={styles.reconnectingBanner}>
           <Text style={styles.reconnectingText}>
             {connectionPhase === 'server_restarting'
-              ? 'Server restarting...'
+              ? shutdownReason === 'shutdown'
+                ? 'Server shut down'
+                : restartCountdown != null && restartCountdown > 0
+                  ? `Server restarting... ~${Math.floor(restartCountdown / 60)}:${String(restartCountdown % 60).padStart(2, '0')}`
+                  : 'Server restarting...'
               : connectionRetryCount > 0
                 ? `Reconnecting (attempt ${connectionRetryCount + 1})...`
                 : 'Reconnecting...'}
           </Text>
-          {connectionError && (
+          {connectionPhase === 'server_restarting' && shutdownReason === 'restart' && (
+            <Text style={styles.reconnectingDetail}>Graceful restart</Text>
+          )}
+          {connectionPhase === 'server_restarting' && !shutdownReason && (
+            <Text style={styles.reconnectingDetail}>Recovering from crash</Text>
+          )}
+          {connectionPhase === 'reconnecting' && connectionError && (
             <Text style={styles.reconnectingDetail}>{connectionError}</Text>
           )}
         </View>
