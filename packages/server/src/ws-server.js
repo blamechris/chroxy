@@ -1853,6 +1853,10 @@ export class WsServer {
   /**
    * Broadcast a shutdown notification to all authenticated clients.
    * Sent before the server goes down so the app can show reason + ETA.
+   *
+   * Note: This is a global broadcast (not per-session), so server_shutdown
+   * is intentionally not listed in TRANSIENT_EVENTS in session-manager.js.
+   *
    * @param {'restart'|'shutdown'} reason - Why the server is going down
    * @param {number} restartEtaMs - Estimated ms until server is back (0 = not coming back)
    */
