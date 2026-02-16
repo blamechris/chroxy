@@ -1704,7 +1704,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // at connect() definition for rationale.
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] Connection lost, auto-reconnecting...');
-        set({ connectionPhase: 'reconnecting', connectionError: 'Connection lost' });
+        set({ connectionPhase: 'reconnecting', connectionError: 'Connection lost', connectionRetryCount: 0 });
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
