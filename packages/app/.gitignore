@@ -11,4 +11,4 @@ web-build/
 .env
 
 # Maestro E2E test screenshots (generated at runtime)
-*.png
+.maestro/**/*.png
