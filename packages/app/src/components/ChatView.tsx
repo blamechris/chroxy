@@ -457,7 +457,7 @@ function PermissionCountdown({ expiresAt, onExpire }: { expiresAt: number; onExp
   }, [expiresAt, remaining <= 0]);
 
   if (remaining <= 0) {
-    return <Text style={styles.countdownExpired}>Timed out</Text>;
+    return <Text style={styles.countdownExpired} accessibilityRole="timer">Timed out</Text>;
   }
 
   const minutes = Math.floor(remaining / 60);
@@ -466,7 +466,12 @@ function PermissionCountdown({ expiresAt, onExpire }: { expiresAt: number; onExp
   const isUrgent = remaining <= 30;
 
   return (
-    <Text style={[styles.countdownText, isUrgent && styles.countdownUrgent]}>
+    <Text
+      style={[styles.countdownText, isUrgent && styles.countdownUrgent]}
+      accessibilityRole="timer"
+      accessibilityLabel={`Permission expires in ${minutes} minutes ${seconds} seconds`}
+      accessibilityLiveRegion="polite"
+    >
       {label}
     </Text>
   );
@@ -873,6 +878,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: 4,
   },
   countdownText: {
     color: COLORS.accentOrange,
