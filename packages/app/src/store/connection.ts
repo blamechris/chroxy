@@ -50,6 +50,7 @@ export interface ChatMessage {
   toolInput?: Record<string, unknown>;
   toolUseId?: string;
   answered?: string;
+  expiresAt?: number;
   timestamp: number;
 }
 
@@ -1220,6 +1221,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
           { label: 'Deny', value: 'deny' },
           { label: 'Always Allow', value: 'allowAlways' },
         ],
+        expiresAt: typeof msg.expiresAt === 'number' ? msg.expiresAt as number : undefined,
         timestamp: Date.now(),
       };
       const permTargetId = (msg.sessionId as string) || get().activeSessionId;
