@@ -1,5 +1,5 @@
-import React, { forwardRef, useCallback, useImperativeHandle, useMemo, useRef } from 'react';
-import { StyleSheet } from 'react-native';
+import React, { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState, useEffect } from 'react';
+import { View, Text, StyleSheet } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import { buildXtermHtml } from './xterm-html';
 import { COLORS } from '../constants/colors';
@@ -22,8 +22,17 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
   const webViewRef = useRef<WebView>(null);
   const readyRef = useRef(false);
   const pendingWritesRef = useRef<string[]>([]);
+  const [recovering, setRecovering] = useState(false);
+  const recoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const html = useMemo(() => buildXtermHtml(), []);
+
+  // Cleanup safety timer on unmount
+  useEffect(() => {
+    return () => {
+      if (recoverTimerRef.current) clearTimeout(recoverTimerRef.current);
+    };
+  }, []);
 
   const injectWrite = useCallback((data: string) => {
     if (!webViewRef.current) return;
@@ -62,6 +71,11 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
       const msg = JSON.parse(event.nativeEvent.data);
       if (msg.type === 'ready') {
         readyRef.current = true;
+        setRecovering(false);
+        if (recoverTimerRef.current) {
+          clearTimeout(recoverTimerRef.current);
+          recoverTimerRef.current = null;
+        }
         // Flush any pending writes
         const pending = pendingWritesRef.current;
         pendingWritesRef.current = [];
@@ -85,38 +99,62 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
   const handleWebViewCrash = useCallback(() => {
     readyRef.current = false;
     pendingWritesRef.current = [];
+    setRecovering(true);
+    // Safety timeout: auto-clear in case reload fails silently
+    if (recoverTimerRef.current) clearTimeout(recoverTimerRef.current);
+    recoverTimerRef.current = setTimeout(() => setRecovering(false), 10000);
     webViewRef.current?.reload();
   }, []);
 
   return (
-    <WebView
-      ref={webViewRef}
-      source={{ html }}
-      style={styles.container}
-      originWhitelist={['*']}
-      onMessage={handleMessage}
-      onContentProcessDidTerminate={handleWebViewCrash}
-      onRenderProcessGone={handleWebViewCrash}
-      scrollEnabled={false}
-      bounces={false}
-      javaScriptEnabled={true}
-      androidLayerType="hardware"
-      overScrollMode="never"
-      showsVerticalScrollIndicator={false}
-      showsHorizontalScrollIndicator={false}
-      allowsInlineMediaPlayback={true}
-      mediaPlaybackRequiresUserAction={false}
-      // Prevent text selection in WebView (display-only terminal)
-      textInteractionEnabled={false}
-    />
+    <View style={styles.wrapper}>
+      {recovering && (
+        <View style={styles.recoveryBanner}>
+          <Text style={styles.recoveryText}>Terminal recovering...</Text>
+        </View>
+      )}
+      <WebView
+        ref={webViewRef}
+        source={{ html }}
+        style={styles.container}
+        originWhitelist={['*']}
+        onMessage={handleMessage}
+        onContentProcessDidTerminate={handleWebViewCrash}
+        onRenderProcessGone={handleWebViewCrash}
+        scrollEnabled={false}
+        bounces={false}
+        javaScriptEnabled={true}
+        androidLayerType="hardware"
+        overScrollMode="never"
+        showsVerticalScrollIndicator={false}
+        showsHorizontalScrollIndicator={false}
+        allowsInlineMediaPlayback={true}
+        mediaPlaybackRequiresUserAction={false}
+        // Prevent text selection in WebView (display-only terminal)
+        textInteractionEnabled={false}
+      />
+    </View>
   );
 });
 
 // -- Styles --
 
 const styles = StyleSheet.create({
+  wrapper: {
+    flex: 1,
+  },
   container: {
     flex: 1,
     backgroundColor: COLORS.backgroundTerminal,
+  },
+  recoveryBanner: {
+    backgroundColor: COLORS.accentOrangeMedium,
+    paddingVertical: 6,
+    alignItems: 'center',
+  },
+  recoveryText: {
+    color: COLORS.accentOrange,
+    fontSize: 13,
+    fontWeight: '600',
   },
 });

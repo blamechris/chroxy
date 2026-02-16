@@ -19,6 +19,8 @@ beforeEach(() => {
     terminalBuffer: '',
     terminalRawBuffer: '',
     _terminalWriteCallback: null,
+    connectionError: null,
+    connectionRetryCount: 0,
     serverErrors: [],
     connectedClients: [],
     myClientId: null,
@@ -494,6 +496,37 @@ describe('myClientId state', () => {
     useConnectionStore.setState({ myClientId: 'client-abc' });
     useConnectionStore.getState().disconnect();
     expect(useConnectionStore.getState().myClientId).toBeNull();
+  });
+});
+
+// -- connectionError + connectionRetryCount state --
+
+describe('connectionError and connectionRetryCount state', () => {
+  it('initializes with null error and zero retry count', () => {
+    const state = useConnectionStore.getState();
+    expect(state.connectionError).toBeNull();
+    expect(state.connectionRetryCount).toBe(0);
+  });
+
+  it('clears both on disconnect', () => {
+    useConnectionStore.setState({ connectionError: 'Connection lost', connectionRetryCount: 3 });
+    useConnectionStore.getState().disconnect();
+    expect(useConnectionStore.getState().connectionError).toBeNull();
+    expect(useConnectionStore.getState().connectionRetryCount).toBe(0);
+  });
+
+  it('auth_ok clears both fields', () => {
+    const mockSocket = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket;
+    _testMessageHandler.setContext({
+      url: 'wss://test', token: 'tok', isReconnect: false,
+      silent: false, socket: mockSocket,
+    });
+    useConnectionStore.setState({ connectionError: 'Network error', connectionRetryCount: 2 });
+    _testMessageHandler.handle({ type: 'auth_ok', serverMode: 'cli' });
+    const state = useConnectionStore.getState();
+    expect(state.connectionError).toBeNull();
+    expect(state.connectionRetryCount).toBe(0);
+    _testMessageHandler.clearContext();
   });
 });
 
