@@ -890,7 +890,7 @@ export class WsServer {
           || client.activeSessionId
         if (msg.toolUseId) this._questionSessionMap.delete(msg.toolUseId)
         const entry = this.sessionManager.getSession(questionSessionId)
-        if (entry && entry.type === 'cli' && typeof msg.answer === 'string') {
+        if (entry && entry.type !== 'pty' && typeof entry.session.respondToQuestion === 'function' && typeof msg.answer === 'string') {
           entry.session.respondToQuestion(msg.answer)
         }
         break
@@ -1655,6 +1655,7 @@ export class WsServer {
       const cleanup = () => {
         if (timer) clearTimeout(timer)
         this._pendingPermissions.delete(requestId)
+        this._permissionSessionMap.delete(requestId)
       }
 
       const onClose = () => {
