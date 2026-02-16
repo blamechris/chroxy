@@ -1643,12 +1643,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             const currentState = get();
             set({
               connectionPhase: 'server_restarting',
-              // Only set shutdown state if we don't already have it from a server_shutdown message
-              ...(currentState.shutdownReason ? {} : {
-                shutdownReason: 'restart' as const,
-                restartEtaMs: healthEta,
-                restartingSince: currentState.restartingSince || Date.now(),
-              }),
+              // Preserve shutdownReason from server_shutdown if we have it, otherwise default to 'restart'
+              shutdownReason: currentState.shutdownReason ?? 'restart',
+              // Always refresh ETA from health check — it's computed at request time so it's
+              // more accurate than a stale server_shutdown ETA from before the connection dropped
+              restartEtaMs: healthEta,
+              restartingSince: currentState.restartingSince || Date.now(),
             });
             // Retry — the server will come back
             if (_retryCount < MAX_RETRIES) {
