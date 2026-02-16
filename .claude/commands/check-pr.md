@@ -94,6 +94,53 @@ For each review comment (Copilot or human) that has NOT been replied to, you MUS
 
 **There is NO "acknowledge and move on" option.** If a suggestion is valid but out of scope, you MUST create a follow-up issue. Never reply with "good idea, maybe later" without an issue link.
 
+**REPLY FORMAT IS NON-NEGOTIABLE.** Every reply MUST start with the bold label (`**FIX**`, `**FALSE POSITIVE**`, or `**FOLLOW-UP ISSUE**`) on its own line. Replies without this label are malformed and will be rejected.
+
+### Reply Format Examples
+
+Study these examples. Your replies must match this structure exactly.
+
+#### Example: FIX reply
+
+> **FIX**
+>
+> Fixed in `7bab8be4`
+>
+> **Change:** Added `marginBottom: 4` to `promptHeaderRow` so spacing is owned by the row container.
+>
+> ```diff
+> - promptHeaderRow: {
+> -   flexDirection: 'row',
+> -   justifyContent: 'space-between',
+> -   alignItems: 'center',
+> - },
+> + promptHeaderRow: {
+> +   flexDirection: 'row',
+> +   justifyContent: 'space-between',
+> +   alignItems: 'center',
+> +   marginBottom: 4,
+> + },
+> ```
+
+#### Example: FALSE POSITIVE reply
+
+> **FALSE POSITIVE**
+>
+> **Reason:** The `remaining <= 0` in the dependency array is intentional — it acts as a boolean gate that prevents the effect from re-creating an interval once the countdown reaches zero.
+>
+> **Evidence:**
+> - Without it, the effect would restart on every `expiresAt` change even after expiry
+> - Same pattern used in React docs for "run once then stop" effects
+> - The expression evaluates to a stable `true`/`false`, not a changing number
+
+#### Example: FOLLOW-UP ISSUE reply
+
+> **FOLLOW-UP ISSUE**
+>
+> Created https://github.com/blamechris/chroxy/issues/525 to track this.
+>
+> **Reason for deferral:** Switching from absolute `expiresAt` to relative `remainingMs` requires changing the WS protocol contract and both server broadcast paths — out of scope for this countdown UI PR.
+
 #### Outcome 1: FIX IMMEDIATELY (default)
 
 1. Make the code fix

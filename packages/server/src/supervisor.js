@@ -55,6 +55,8 @@ export class Supervisor extends EventEmitter {
     this._heartbeatInterval = null
     this._currentWsUrl = null
     this._signalsRegistered = false
+    this._restartScheduledAt = null
+    this._restartDelayMs = null
     this._log = createLogger('supervisor')
 
     // Deploy rollback tracking
@@ -246,6 +248,8 @@ export class Supervisor extends EventEmitter {
         this._log.info('Server child is ready')
         this._childReady = true
         this._restartCount = 0
+        this._restartScheduledAt = null
+        this._restartDelayMs = null
         this._metrics.consecutiveRestarts = 0
         this._stopStandbyServer()
         this.emit('child_ready')
@@ -301,6 +305,8 @@ export class Supervisor extends EventEmitter {
             this._lastDeployTimestamp = 0
             this._restartCount = 0
             this._startStandbyServer()
+            this._restartScheduledAt = Date.now()
+            this._restartDelayMs = 2000
             setTimeout(() => this.startChild(), 2000)
             return
           }
@@ -320,6 +326,8 @@ export class Supervisor extends EventEmitter {
 
       const delay = RESTART_BACKOFFS[Math.min(this._restartCount - 1, RESTART_BACKOFFS.length - 1)]
       this._metrics.lastBackoffMs = delay
+      this._restartScheduledAt = Date.now()
+      this._restartDelayMs = delay
       this._log.info(`Child ran for ${Math.round(childUptimeMs / 1000)}s | total restarts: ${this._metrics.totalRestarts} | next backoff: ${delay}ms`)
       setTimeout(() => this.startChild(), delay)
     })
@@ -338,9 +346,25 @@ export class Supervisor extends EventEmitter {
 
     this._standbyServer = createServer((req, res) => {
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
+        // Calculate restart ETA: remaining backoff time + estimated child startup (~5s)
+        // Uses actual scheduled time to account for elapsed wait since the restart was queued
+        const STARTUP_ESTIMATE = 5000
+        let restartEtaMs
+        if (this._restartScheduledAt && this._restartDelayMs != null) {
+          const elapsed = Date.now() - this._restartScheduledAt
+          const remaining = Math.max(0, this._restartDelayMs - elapsed)
+          restartEtaMs = remaining + STARTUP_ESTIMATE
+        } else {
+          // Fallback: estimate from backoff schedule (first request before tracking is set)
+          const backoffIdx = Math.min(this._restartCount - 1, RESTART_BACKOFFS.length - 1)
+          const nextBackoff = backoffIdx >= 0 ? RESTART_BACKOFFS[backoffIdx] : 2000
+          restartEtaMs = nextBackoff + STARTUP_ESTIMATE
+        }
+
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({
           status: 'restarting',
+          restartEtaMs,
           metrics: {
             supervisorUptimeS: Math.round((Date.now() - this._metrics.startedAt) / 1000),
             totalRestarts: this._metrics.totalRestarts,

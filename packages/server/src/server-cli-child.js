@@ -66,8 +66,8 @@ async function main() {
 
 /**
  * Handle drain request from supervisor.
- * 1. Set draining flag on WsServer (reject new input)
- * 2. Broadcast server_status to connected clients
+ * 1. Broadcast server_shutdown to connected clients (reason + ETA)
+ * 2. Set draining flag on WsServer (reject new input)
  * 3. Wait for all sessions to idle
  * 4. Serialize session state to disk
  * 5. Send drain_complete back to supervisor
@@ -75,10 +75,11 @@ async function main() {
 async function handleDrain(timeout) {
   console.log(`[child] Drain requested (timeout: ${timeout}ms)`)
 
-  // Broadcast restarting status to connected clients
+  // Broadcast structured shutdown event before draining
+  // ETA: drain timeout (~30s) + ~5s for child startup
   if (_wsServer) {
+    _wsServer.broadcastShutdown('restart', timeout + 5000)
     _wsServer.setDraining(true)
-    _wsServer.broadcastStatus('Server restarting...')
   }
 
   // Wait for busy sessions to idle

@@ -253,6 +253,8 @@ export async function startCliServer(config) {
   // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`\n[${signal}] Shutting down...`)
+    // Notify connected clients (ETA 0 = not coming back unless supervised)
+    wsServer.broadcastShutdown('shutdown', 0)
     if (mdnsService) {
       try { mdnsService.stop?.() } catch {}
     }

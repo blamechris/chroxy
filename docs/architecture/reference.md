@@ -83,11 +83,12 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 
 ### Server → Client
 
-`auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `stream_delta`, `stream_end`, `raw`, `message`, `status`, `model_changed`, `status_update`, `available_models`, `permission_request`, `confirm_permission_mode`, `permission_mode_changed`, `available_permission_modes`, `session_list`, `session_switched`, `session_created`, `session_destroyed`, `session_error`, `discovered_sessions`, `discovery_triggered`, `history_replay_start`, `history_replay_end`, `raw_background`, `claude_ready`, `tool_start`, `result`, `agent_busy`, `agent_idle`, `agent_spawned`, `agent_completed`, `server_status`, `server_error`, `user_question`, `plan_started`, `plan_ready`, `client_joined`, `client_left`, `primary_changed`, `directory_listing`
+`auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `stream_delta`, `stream_end`, `raw`, `message`, `status`, `model_changed`, `status_update`, `available_models`, `permission_request`, `confirm_permission_mode`, `permission_mode_changed`, `available_permission_modes`, `session_list`, `session_switched`, `session_created`, `session_destroyed`, `session_error`, `discovered_sessions`, `discovery_triggered`, `history_replay_start`, `history_replay_end`, `raw_background`, `claude_ready`, `tool_start`, `result`, `agent_busy`, `agent_idle`, `agent_spawned`, `agent_completed`, `server_shutdown`, `server_status`, `server_error`, `user_question`, `plan_started`, `plan_ready`, `client_joined`, `client_left`, `primary_changed`, `directory_listing`
 
 ### Protocol Details
 
 - `list_directory` requests a directory listing; `directory_listing` returns sorted non-hidden subdirectories (or error)
+- `server_shutdown` sent before server goes down; `reason` is `'restart'` (coming back) or `'shutdown'` (not coming back); `restartEtaMs` is estimated ms until server is available (0 for permanent shutdown); supervisor standby health check also includes `restartEtaMs` for crash recovery
 - `server_status` for non-error updates; `server_error` for error conditions
 - `discovered_sessions` sent proactively when auto-discovery finds new tmux sessions (configurable via `--discovery-interval`, default 45s)
 - `trigger_discovery` requests an immediate discovery scan

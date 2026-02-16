@@ -159,6 +159,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'agent_idle' }                           — agent finished processing (per-session)
  *   { type: 'plan_started' }                         — Claude entered plan mode (transient)
  *   { type: 'plan_ready', allowedPrompts }           — plan complete, awaiting approval (transient)
+ *   { type: 'server_shutdown', reason, restartEtaMs } — server shutting down (reason: 'restart'|'shutdown')
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
  *   { type: 'directory_listing', path, parentPath, entries, error } — directory listing response for file browser
@@ -1846,6 +1847,25 @@ export class WsServer {
     this._broadcast({
       type: 'server_status',
       message,
+    })
+  }
+
+  /**
+   * Broadcast a shutdown notification to all authenticated clients.
+   * Sent before the server goes down so the app can show reason + ETA.
+   *
+   * Note: This is a global broadcast (not per-session), so server_shutdown
+   * is intentionally not listed in TRANSIENT_EVENTS in session-manager.js.
+   *
+   * @param {'restart'|'shutdown'} reason - Why the server is going down
+   * @param {number} restartEtaMs - Estimated ms until server is back (0 = not coming back)
+   */
+  broadcastShutdown(reason, restartEtaMs) {
+    console.log(`[ws] Broadcasting server_shutdown: ${reason} (ETA: ${restartEtaMs}ms)`)
+    this._broadcast({
+      type: 'server_shutdown',
+      reason,
+      restartEtaMs,
     })
   }
 
