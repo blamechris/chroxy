@@ -698,9 +698,9 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         connectionError: null as string | null,
         connectionRetryCount: 0,
         // Clear shutdown state on successful connect
-        shutdownReason: null as 'restart' | 'shutdown' | null,
-        restartEtaMs: null as number | null,
-        restartingSince: null as number | null,
+        shutdownReason: null,
+        restartEtaMs: null,
+        restartingSince: null,
       };
       if (ctx.isReconnect) {
         set(connectedState);
@@ -1304,7 +1304,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       const reason = msg.reason === 'restart' || msg.reason === 'shutdown' ? msg.reason : 'shutdown';
       const eta = typeof msg.restartEtaMs === 'number' ? msg.restartEtaMs : 0;
       set({
-        shutdownReason: reason as 'restart' | 'shutdown',
+        shutdownReason: reason,
         restartEtaMs: eta,
         restartingSince: Date.now(),
       });
