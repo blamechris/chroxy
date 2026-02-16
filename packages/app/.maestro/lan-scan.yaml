@@ -12,6 +12,10 @@ name: LAN scan flow
 - tapOn:
     text: ".*Scan Local Network.*"
 
+# Verify scanning indicator appears
+- assertVisible:
+    text: ".*Scanning.*"
+
 # Take screenshot during scan
 - takeScreenshot: lan-scan-active
 
