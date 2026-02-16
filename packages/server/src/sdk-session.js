@@ -429,6 +429,8 @@ export class SdkSession extends EventEmitter {
 
     if (decision === 'allow') {
       resolve({ behavior: 'allow', updatedInput: undefined })
+    } else if (decision === 'allowAlways') {
+      resolve({ behavior: 'allowAlways', updatedInput: undefined })
     } else {
       resolve({ behavior: 'deny', message: 'User denied' })
     }
