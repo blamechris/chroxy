@@ -1,0 +1,17 @@
+# Whitelist-based: exclude everything, then include what's needed
+*
+
+# Root package files (needed for workspace resolution)
+!package.json
+!package-lock.json
+
+# Server package
+!packages/server/
+
+# Entrypoint script
+!scripts/docker-entrypoint.sh
+
+# Exclude server artifacts that slipped through
+packages/server/node_modules
+packages/server/tests
+packages/server/coverage
