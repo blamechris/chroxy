@@ -396,7 +396,7 @@ describe('CliSession agent tracking', () => {
     })
 
     assert.equal(spawned.length, 1)
-    assert.ok(spawned[0].description.length <= 203) // 200 + "..."
+    assert.ok(spawned[0].description.length <= 200) // truncated to 200 chars
   })
 })
 
