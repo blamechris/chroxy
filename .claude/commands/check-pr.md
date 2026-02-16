@@ -216,7 +216,8 @@ What needs to be done and why.
 EOF
 )")
 
-# 2. Reply inline referencing the issue — MUST include the issue URL
+# 2. Reply inline referencing the issue — MUST include the FULL issue URL
+# NEVER write "Created a follow-up issue" without the URL. The URL is the whole point.
 gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
   --method POST \
   -f body="**FOLLOW-UP ISSUE**

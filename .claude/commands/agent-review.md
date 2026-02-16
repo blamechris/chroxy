@@ -106,7 +106,7 @@ Brief overview of changes and their purpose.
 
 | Suggestion | Issue | Rationale for deferral |
 |------------|-------|------------------------|
-| ... | #XX | ... |
+| ... | [#XX](issue_url) | ... |
 
 ### Architecture Notes
 How this change fits within the server/app architecture.
@@ -162,7 +162,7 @@ EOF
 )")
 ```
 
-Include created issue URLs in the review summary table.
+**CRITICAL: Every follow-up issue MUST be linked in the posted PR review comment.** The Deferred Items table must contain the full issue URL (e.g., `https://github.com/blamechris/chroxy/issues/123`) or `#123` shorthand — never "Created a follow-up issue" without a link. The issue URL is the paper trail that makes the deferred item discoverable from the PR.
 
 ### 6. Reconcile Issues Resolved in This PR
 
