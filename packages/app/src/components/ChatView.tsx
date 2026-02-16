@@ -436,6 +436,47 @@ function PermissionDetailOrFallback({ tool, toolInput, fallback }: { tool?: stri
   return <Text selectable style={styles.messageText}>{fallback}</Text>;
 }
 
+// -- Permission countdown timer --
+
+function PermissionCountdown({ expiresAt, onExpire }: { expiresAt: number; onExpire?: () => void }) {
+  const [remaining, setRemaining] = useState(() => Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000)));
+  const onExpireRef = useRef(onExpire);
+  onExpireRef.current = onExpire;
+
+  useEffect(() => {
+    if (remaining <= 0) return;
+    const id = setInterval(() => {
+      const left = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+      setRemaining(left);
+      if (left <= 0) {
+        clearInterval(id);
+        onExpireRef.current?.();
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [expiresAt, remaining <= 0]);
+
+  if (remaining <= 0) {
+    return <Text style={styles.countdownExpired} accessibilityRole="timer">Timed out</Text>;
+  }
+
+  const minutes = Math.floor(remaining / 60);
+  const seconds = remaining % 60;
+  const label = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  const isUrgent = remaining <= 30;
+
+  return (
+    <Text
+      style={[styles.countdownText, isUrgent && styles.countdownUrgent]}
+      accessibilityRole="timer"
+      accessibilityLabel={`Permission expires in ${minutes} minutes ${seconds} seconds`}
+      accessibilityLiveRegion="polite"
+    >
+      {label}
+    </Text>
+  );
+}
+
 // -- Single message bubble --
 
 function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress, onOpenDetail }: {
@@ -448,6 +489,9 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   onOpenDetail: (toolName: string, content: string) => void;
 }) {
   const longPressedRef = useRef(false);
+  const [isExpired, setIsExpired] = useState(() =>
+    message.expiresAt != null && message.expiresAt <= Date.now()
+  );
   const isUser = message.type === 'user_input';
   const isTool = message.type === 'tool_use';
   const isThinking = message.type === 'thinking';
@@ -491,9 +535,14 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
       onLongPress={isSelecting ? undefined : handleLongPress}
       style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isError && styles.errorBubble, isSystem && styles.systemBubble, isSelected && styles.selectedBubble]}
     >
-      <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : isError ? styles.senderLabelError : isSystem ? styles.senderLabelSystem : styles.senderLabelClaude}>
-        {isUser ? 'You' : isPrompt ? (message.tool || 'Action Required') : isError ? 'Error' : isSystem ? 'System' : 'Claude'}
-      </Text>
+      <View style={isPrompt && message.expiresAt && !message.answered ? styles.promptHeaderRow : undefined}>
+        <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : isError ? styles.senderLabelError : isSystem ? styles.senderLabelSystem : styles.senderLabelClaude}>
+          {isUser ? 'You' : isPrompt ? (message.tool || 'Action Required') : isError ? 'Error' : isSystem ? 'System' : 'Claude'}
+        </Text>
+        {isPrompt && !message.answered && message.expiresAt && (
+          <PermissionCountdown expiresAt={message.expiresAt} onExpire={() => setIsExpired(true)} />
+        )}
+      </View>
       {isPrompt && message.toolInput ? (
         <PermissionDetailOrFallback tool={message.tool} toolInput={message.toolInput} fallback={message.content?.trim() || ''} />
       ) : !isUser && !isPrompt && !isError && !isSystem ? (
@@ -507,21 +556,22 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
         <View style={styles.promptOptions}>
           {message.options.map((opt, i) => {
             const isAnswered = message.answered != null;
+            const isDisabled = isAnswered || isExpired;
             const isChosen = message.answered === opt.value;
             return (
               <TouchableOpacity
                 key={i}
                 style={[
                   styles.promptOptionButton,
-                  isAnswered && !isChosen && styles.promptOptionDisabled,
+                  isDisabled && !isChosen && styles.promptOptionDisabled,
                   isChosen && styles.promptOptionChosen,
                 ]}
-                disabled={isAnswered}
+                disabled={isDisabled}
                 onPress={() => onSelectOption?.(opt.value, message.id, message.requestId, message.toolUseId)}
               >
                 <Text style={[
                   styles.promptOptionText,
-                  isAnswered && !isChosen && styles.promptOptionTextDisabled,
+                  isDisabled && !isChosen && styles.promptOptionTextDisabled,
                   isChosen && styles.promptOptionTextChosen,
                 ]}>{opt.label}</Text>
               </TouchableOpacity>
@@ -823,6 +873,25 @@ const styles = StyleSheet.create({
     borderColor: COLORS.accentOrangeBorder,
     borderWidth: 1,
     maxWidth: '95%',
+  },
+  promptHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  countdownText: {
+    color: COLORS.accentOrange,
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  countdownUrgent: {
+    color: COLORS.accentRed,
+    fontWeight: 'bold',
+  },
+  countdownExpired: {
+    color: COLORS.accentRed,
+    fontSize: 12,
   },
   promptOptions: {
     flexDirection: 'row',
