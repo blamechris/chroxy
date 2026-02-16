@@ -1621,6 +1621,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
                 if (myAttemptId !== connectionAttemptId) return;
                 get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
               }, delay);
+            } else {
+              set({ connectionPhase: 'disconnected', connectionError: 'Server restart timed out' });
+              if (!silent) {
+                Alert.alert(
+                  'Connection Failed',
+                  'The server is still restarting. Try again later.',
+                  [
+                    { text: 'OK' },
+                    { text: 'Retry', onPress: () => get().connect(url, token) },
+                  ],
+                );
+              }
             }
             return;
           }
