@@ -1,0 +1,36 @@
+appId: host.exp.Exponent
+name: Manual entry flow
+---
+
+# Navigate to ConnectScreen from any state
+- runFlow: setup/ensure-connect-screen.yaml
+
+# Start from ConnectScreen
+- assertVisible: "Connect to Chroxy"
+
+# Expand manual entry form
+- tapOn:
+    text: ".*Enter manually.*"
+
+# Verify form fields appear
+- assertVisible: "Server URL"
+- assertVisible:
+    text: "API Token.*"
+
+# Take screenshot of expanded form
+- takeScreenshot: manual-connect-form
+
+# Tap the Server URL input field and type
+- tapOn: "Server URL"
+- eraseText: 50
+- inputText: "ws://localhost:9999"
+
+# Take screenshot after entering URL
+- takeScreenshot: manual-connect-filled
+
+# Tap Connect button
+- tapOn:
+    text: "^Connect$"
+
+# Take screenshot of connection attempt
+- takeScreenshot: manual-connect-attempt

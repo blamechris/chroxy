@@ -1,0 +1,23 @@
+appId: host.exp.Exponent
+name: LAN scan flow
+---
+
+# Navigate to ConnectScreen from any state
+- runFlow: setup/ensure-connect-screen.yaml
+
+# Start from ConnectScreen
+- assertVisible: "Connect to Chroxy"
+
+# Tap LAN scan button
+- tapOn:
+    text: ".*Scan Local Network.*"
+
+# Take screenshot during scan
+- takeScreenshot: lan-scan-active
+
+# Wait for scan to make progress
+- waitForAnimationToEnd:
+    timeout: 8000
+
+# Take screenshot of results (may show servers or empty)
+- takeScreenshot: lan-scan-results

@@ -1,0 +1,15 @@
+appId: host.exp.Exponent
+name: All Phase 1 flows
+---
+
+# Run all Phase 1 flows sequentially on one device.
+# This avoids the parallelism issue when passing multiple files to `maestro test`.
+
+# Flow 1: ConnectScreen renders correctly
+- runFlow: connect-screen.yaml
+
+# Flow 2: Manual entry flow
+- runFlow: manual-connect.yaml
+
+# Flow 3: LAN scan flow
+- runFlow: lan-scan.yaml
