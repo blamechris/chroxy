@@ -166,6 +166,12 @@ export function createPermissionHookManager(emitter, { settingsPath } = {}) {
         registered = true
         retryCount = 0
       } catch (err) {
+        // Corrupt JSON is non-retryable — retrying won't fix the file
+        if (err.message.includes('invalid JSON')) {
+          console.error(`[permission-hook] ${err.message}`)
+          emitter.emit('error', { message: err.message })
+          return
+        }
         const errMsg = `Failed to register permission hook: ${err.message}. Will retry hook registration.`
         console.error(`[permission-hook] ${errMsg}`)
         emitter.emit('error', { message: errMsg })
