@@ -9,3 +9,6 @@ web-build/
 *.mobileprovision
 *.orig.*
 .env
+
+# Maestro E2E test screenshots (generated at runtime)
+.maestro/**/*.png

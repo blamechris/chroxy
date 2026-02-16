@@ -1,0 +1,24 @@
+appId: host.exp.Exponent
+name: ConnectScreen renders correctly
+---
+
+# Navigate to ConnectScreen from any state
+- runFlow: setup/ensure-connect-screen.yaml
+
+# Verify the ConnectScreen loads with all expected elements
+- assertVisible: "Connect to Chroxy"
+
+- assertVisible:
+    text: ".*Scan QR Code.*"
+
+- assertVisible:
+    text: ".*Scan Local Network.*"
+
+- assertVisible:
+    text: ".*Enter manually.*"
+
+# Port input should show default port
+- assertVisible: "8765"
+
+# Take screenshot for verification
+- takeScreenshot: connect-screen

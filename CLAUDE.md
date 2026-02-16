@@ -161,101 +161,14 @@ type(scope): Short summary in present tense
 
 ## Architecture
 
-### Server Modes
+Two server modes, both stream through `ws-server.js` → Cloudflare tunnel → mobile app:
 
-Chroxy server operates in two modes:
+- **CLI Headless (default):** `server-cli.js` → `cli-session.js` wraps `claude -p --output-format stream-json`. No tmux/node-pty needed. Conversation state maintained internally (no `--resume`).
+- **PTY/tmux (`--terminal`):** `server.js` → `pty-manager.js` + `output-parser.js`. Spawns tmux session, parses raw ANSI output.
+- **Shared:** `ws-server.js` (WebSocket + auth), `tunnel.js` (Cloudflare), `session-manager.js`, `config.js`, `push.js`
+- **App:** ConnectScreen → SessionScreen (ChatView + TerminalView), Zustand store (`connection.ts`)
 
-**CLI Headless Mode (default):**
-- Uses `server-cli.js` + `cli-session.js`
-- Wraps `claude -p --input-format stream-json --output-format stream-json`
-- No tmux or node-pty required
-- Maintains conversation state internally via persistent process (does not use `--resume` flag)
-- Processes streaming JSON events
-
-**PTY/tmux Mode (opt-in with `--terminal`):**
-- Uses `server.js` + `pty-manager.js` + `output-parser.js`
-- Spawns tmux session running Claude Code
-- Requires node-pty and tmux
-- Parses raw terminal output with ANSI handling
-
-### Server Components
-
-| Component | File | Purpose |
-|-----------|------|---------|
-| CLI | `src/cli.js` | `init`, `start`, `config`, `tunnel setup` commands |
-| Config | `src/config.js` | Schema validation + merge (CLI > ENV > file > defaults) |
-| Supervisor | `src/supervisor.js` | Tunnel owner + child auto-restart (named tunnel mode) |
-| ServerCLI | `src/server-cli.js` | CLI mode orchestrator |
-| CliSession | `src/cli-session.js` | Claude Code headless executor (stream-json) |
-| SdkSession | `src/sdk-session.js` | Claude Agent SDK executor |
-| Server | `src/server.js` | PTY mode orchestrator |
-| WsServer | `src/ws-server.js` | WebSocket protocol with auth |
-| PushManager | `src/push.js` | Push notifications via Expo Push API (CLI mode) |
-| PtyManager | `src/pty-manager.js` | tmux session management (PTY mode) |
-| OutputParser | `src/output-parser.js` | Terminal output parser (PTY mode) |
-| NoisePatterns | `src/noise-patterns.js` | Terminal noise filter patterns (PTY mode) |
-| TunnelManager | `src/tunnel.js` | Cloudflare tunnel lifecycle (quick/named/none) |
-| TunnelEvents | `src/tunnel-events.js` | Tunnel event wiring helpers |
-| SessionManager | `src/session-manager.js` | Session lifecycle management + auto-discovery |
-| SessionDiscovery | `src/session-discovery.js` | tmux session discovery utilities |
-| Models | `src/models.js` | Model switching utilities |
-| Logger | `src/logger.js` | Shared logging utility |
-
-### Data Flow
-
-**CLI Headless Mode:**
-```
-[Mobile App] ←WebSocket→ [Cloudflare] ←→ [WsServer]
-                                            ↕
-                                      [CliSession]
-                                            ↕
-                              [claude -p --output-format stream-json]
-                                            ↕
-                                    [Streaming JSON Events]
-```
-
-**PTY/tmux Mode:**
-```
-[Mobile App] ←WebSocket→ [Cloudflare] ←→ [WsServer]
-                                            ↕
-                                  [PtyManager] → [OutputParser]
-                                       ↕              ↕
-                                  [tmux/Claude]   [Parsed Messages]
-```
-
-### WebSocket Protocol
-
-Client → Server: `auth`, `input`, `resize`, `mode`, `interrupt`, `set_model`, `set_permission_mode`, `permission_response`, `list_sessions`, `switch_session`, `create_session`, `destroy_session`, `rename_session`, `discover_sessions`, `attach_session`, `trigger_discovery`, `register_push_token`, `user_question_response`, `list_directory`
-Server → Client: `auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `stream_delta`, `stream_end`, `raw`, `message`, `status`, `model_changed`, `status_update`, `available_models`, `permission_request`, `confirm_permission_mode`, `permission_mode_changed`, `available_permission_modes`, `session_list`, `session_switched`, `session_created`, `session_destroyed`, `session_error`, `discovered_sessions`, `discovery_triggered`, `history_replay_start`, `history_replay_end`, `raw_background`, `claude_ready`, `tool_start`, `result`, `agent_busy`, `agent_idle`, `agent_spawned`, `agent_completed`, `server_status`, `server_error`, `user_question`, `plan_started`, `plan_ready`, `client_joined`, `client_left`, `primary_changed`, `directory_listing`
-
-`list_directory` requests a directory listing for the file browser; `directory_listing` returns sorted non-hidden subdirectories (or an error). `server_status` is used for non-error status updates, while `server_error` is reserved for error conditions. `discovered_sessions` can be sent proactively when auto-discovery finds new tmux sessions (configurable via `--discovery-interval`, default 45s). `trigger_discovery` requests an immediate discovery scan. `permission_request` includes an `input` field (always present, defaults to `{}`) with structured tool input for rich UI rendering. `user_question` forwards `AskUserQuestion` prompts from plan mode; `user_question_response` sends the user's answer back. `agent_spawned` fires when the Task tool is detected (description truncated to 200 chars); `agent_completed` fires per-agent when the turn's `result` arrives or on process crash/destroy. `plan_started` fires when Claude enters plan mode (`EnterPlanMode` tool); `plan_ready` fires when the plan is complete and awaiting approval (`ExitPlanMode` tool), includes `allowedPrompts` payload. These are transient events (not recorded in history or replayed). `auth` accepts optional `deviceInfo: { deviceId, deviceName, deviceType, platform }` for multi-client awareness. `auth_ok` includes `clientId` (assigned ID) and `connectedClients` (list of all connected clients). `client_joined` broadcasts to existing clients when a new client authenticates. `client_left` broadcasts when a client disconnects. `primary_changed` broadcasts last-writer-wins primary status per session (fires on `input`). `set_permission_mode` accepts optional `confirmed: true` (required for `auto` mode); without it, server responds with `confirm_permission_mode` challenge containing a `warning` string. App must show the warning and re-send with `confirmed: true` to apply.
-
-### App Screens
-
-| Screen | Purpose |
-|--------|---------|
-| ConnectScreen | QR scan or manual URL/token entry |
-| SessionScreen | Dual-view: chat mode + terminal mode |
-| SettingsScreen | App version, server URL, tap-to-copy |
-
-### App Components
-
-| Component | File | Purpose |
-|-----------|------|---------|
-| ChatView | `src/components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
-| TerminalView | `src/components/TerminalView.tsx` | xterm.js terminal emulator (WebView), resize forwarding, crash recovery |
-| InputBar | `src/components/InputBar.tsx` | Text input with send/interrupt toggle |
-| SettingsBar | `src/components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
-| SessionPicker | `src/components/SessionPicker.tsx` | Horizontal session tab strip |
-| MarkdownRenderer | `src/components/MarkdownRenderer.tsx` | Markdown parsing + inline code highlighting |
-| CreateSessionModal | `src/components/CreateSessionModal.tsx` | New session creation dialog |
-
-### State Management (Zustand)
-
-Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewMode`, `messages[]`, `terminalBuffer`
-
-`ConnectionPhase`: `disconnected` → `connecting` → `connected` / `reconnecting` / `server_restarting`
-`selectShowSession`: stays on SessionScreen during transient disconnects (reconnecting/server_restarting)
+For component tables, WS protocol messages, data flow diagrams, and file listings: see `docs/architecture/reference.md`
 
 ## Dev Commands
 
@@ -283,66 +196,65 @@ npx expo start
 node packages/server/src/test-client.js wss://your-url
 ```
 
-## Project Files Reference
+## UI Verification with Maestro
 
-### Server (`packages/server/src/`)
+Maestro E2E flows let agents verify app UI after code changes. Flows live in `packages/app/.maestro/`.
 
-| File | Purpose |
-|------|---------|
-| `cli.js` | CLI commands (init, start, config, tunnel setup) |
-| `config.js` | Config schema validation + merge precedence |
-| `supervisor.js` | Supervisor: tunnel owner + child auto-restart |
-| `server-cli-child.js` | Supervised child entry point |
-| `server-cli.js` | CLI mode orchestrator |
-| `cli-session.js` | Claude Code headless executor (stream-json) |
-| `sdk-session.js` | Claude Agent SDK executor |
-| `push.js` | Push notifications via Expo Push API |
-| `server.js` | PTY mode orchestrator |
-| `pty-manager.js` | PTY/tmux management |
-| `pty-session.js` | PTY session state + I/O handling |
-| `output-parser.js` | Terminal output parser |
-| `noise-patterns.js` | Terminal noise filter patterns |
-| `ws-server.js` | WebSocket protocol with auth |
-| `tunnel.js` | Cloudflare tunnel manager (quick/named/none) |
-| `tunnel-check.js` | Tunnel health verification |
-| `tunnel-events.js` | Tunnel event wiring helpers |
-| `session-manager.js` | Session lifecycle management |
-| `session-discovery.js` | Session discovery utilities |
-| `models.js` | Model switching utilities |
-| `logger.js` | Shared logging utility |
+### Prerequisites
 
-### App (`packages/app/src/`)
+```bash
+# Install Maestro (one-time)
+curl -Ls "https://get.maestro.mobile.dev" | bash
 
-| File | Purpose |
-|------|---------|
-| `App.tsx` | App root with navigation |
-| `screens/ConnectScreen.tsx` | QR scan + manual connection UI |
-| `screens/SessionScreen.tsx` | Session orchestrator (wires components) |
-| `screens/SettingsScreen.tsx` | App settings and version info |
-| `components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
-| `components/TerminalView.tsx` | xterm.js terminal emulator (WebView), resize forwarding, crash recovery |
-| `components/xterm-html.ts` | Inline HTML template for xterm.js WebView |
-| `components/InputBar.tsx` | Text input with send/interrupt toggle |
-| `components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
-| `components/SessionPicker.tsx` | Horizontal session tab strip |
-| `components/MarkdownRenderer.tsx` | Markdown parsing + inline code highlighting |
-| `components/CreateSessionModal.tsx` | New session creation dialog |
-| `store/connection.ts` | Zustand state store (ConnectionPhase) |
-| `notifications.ts` | Push notification registration |
-| `constants/colors.ts` | Shared color palette |
-| `constants/icons.ts` | Shared icon constants |
+# Boot a simulator
+xcrun simctl boot <device-id>   # e.g. xcrun simctl list devices available
 
-### Docs
+# Start Metro dev server (from packages/app/)
+npx expo start
+```
 
-| File | Purpose |
-|------|---------|
-| `CLAUDE.md` | This file |
-| `docs/qa-log.md` | QA audit log with coverage matrix |
-| `docs/smoke-test.md` | Manual smoke test checklist |
-| `docs/named-tunnel-guide.md` | Named tunnel setup guide |
-| `docs/architecture/in-app-dev.md` | In-app iterative development design |
+### Running Flows
+
+```bash
+# Run all flows sequentially (recommended)
+export PATH="$PATH:$HOME/.maestro/bin"
+maestro test --device <device-id> packages/app/.maestro/run-all.yaml
+
+# Run a single flow
+maestro test --device <device-id> packages/app/.maestro/connect-screen.yaml
+```
+
+### After App Changes — Verification Workflow
+
+When you modify app components (screens, UI elements, styling), verify with Maestro:
+
+1. Ensure a simulator is booted and Metro is running
+2. Run the relevant flow(s) — screenshots are saved to `packages/app/`
+3. Read the screenshot PNGs with the Read tool to visually verify correctness
+4. Delete screenshots when done (they're gitignored)
+
+### Available Flows
+
+| Flow | What it verifies |
+|------|------------------|
+| `connect-screen.yaml` | ConnectScreen elements: title, QR button, LAN scan, manual entry, port |
+| `manual-connect.yaml` | Manual entry form expansion, URL input, Connect button, SessionScreen transition |
+| `lan-scan.yaml` | LAN scan trigger, scanning state with spinner |
+| `run-all.yaml` | Runs all flows sequentially |
+
+### Gotchas
+
+- **Always use `run-all.yaml`** for multiple flows — passing multiple `.yaml` files runs them in parallel (breaks on one simulator)
+- **Expo dev menu** appears on every `openLink` call — the setup flow dismisses it automatically
+- **`wait` is not a valid command** — use `waitForAnimationToEnd` or `extendedWaitUntil`
+- **Emoji text matching** requires regex: `text: ".*Scan QR Code.*"` (not literal match)
+- **Screenshots save to CWD** — always clean up after verification
+
+## Reference
+
+For detailed component tables, WebSocket protocol messages, file listings, and state management details: see [`docs/architecture/reference.md`](docs/architecture/reference.md)
 
 ---
 
-*Last Updated: 2026-02-10*
+*Last Updated: 2026-02-15*
 *Version: 0.1.0*

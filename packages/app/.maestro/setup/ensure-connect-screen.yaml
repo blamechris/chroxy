@@ -1,0 +1,46 @@
+appId: host.exp.Exponent
+name: Ensure ConnectScreen
+---
+
+# Shared setup: ensure we're on ConnectScreen regardless of initial state
+# Usage: - runFlow: setup/ensure-connect-screen.yaml
+
+# Open the Expo project via deep link
+- openLink: exp://localhost:8081
+
+# Wait for the app to load — could show any of:
+# - "Session" (auto-connected from saved state)
+# - "Chroxy" (ConnectScreen title or dev menu)
+# - "Connecting" (auto-connect spinner)
+- extendedWaitUntil:
+    visible:
+      text: ".*(Session|Chroxy|Connect).*"
+    timeout: 15000
+
+# Dismiss Expo dev menu if it appeared (X button on modal card)
+- tapOn:
+    point: "93%,43%"
+    optional: true
+
+# If on SessionScreen (auto-connected), tap the red X to disconnect
+- runFlow:
+    when:
+      visible: "Session"
+    commands:
+      - tapOn: "\u2715"
+      - waitForAnimationToEnd
+
+# If on auto-connect spinner, tap Cancel
+- runFlow:
+    when:
+      visible:
+        text: "^Cancel$"
+    commands:
+      - tapOn:
+          text: "^Cancel$"
+      - waitForAnimationToEnd
+
+# Verify we're now on ConnectScreen
+- extendedWaitUntil:
+    visible: "Connect to Chroxy"
+    timeout: 5000
