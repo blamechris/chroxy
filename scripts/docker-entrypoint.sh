@@ -20,7 +20,7 @@ prepare_config() {
   if [ -z "${API_TOKEN:-}" ]; then
     if [ -f "$CONFIG_FILE" ]; then
       # Preserve existing token across restarts
-      API_TOKEN="$(node -e "const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(c.apiToken||'')" "$CONFIG_FILE")"
+      API_TOKEN="$(node -e "const fs=require('fs');let c={};try{c=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));}catch(e){}process.stdout.write(c.apiToken||'');" "$CONFIG_FILE")"
     fi
     if [ -z "${API_TOKEN:-}" ]; then
       API_TOKEN="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)"
