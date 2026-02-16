@@ -167,8 +167,15 @@ export function SessionScreen() {
   const [settingsExpanded, setSettingsExpanded] = useState(false);
 
   // Speech recognition
-  const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening } = useSpeechRecognition();
+  const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition();
   const dictationStartRef = useRef(inputText.length);
+
+  // Surface speech recognition errors to the user
+  useEffect(() => {
+    if (speechError) {
+      Alert.alert('Voice Input Error', speechError);
+    }
+  }, [speechError]);
 
   // Countdown for server restart ETA
   const [restartCountdown, setRestartCountdown] = useState<number | null>(null);
@@ -346,6 +353,19 @@ export function SessionScreen() {
     inputRef.current?.focus();
   }, []);
 
+  // Track whether the latest inputText change came from dictation (vs manual edit)
+  const isDictationUpdateRef = useRef(false);
+
+  // Wrap setInputText to detect manual edits during dictation
+  const handleChangeText = useCallback((text: string) => {
+    if (!isDictationUpdateRef.current && isRecognizing) {
+      // User manually edited text during dictation — update anchor point
+      dictationStartRef.current = text.length;
+    }
+    isDictationUpdateRef.current = false;
+    setInputText(text);
+  }, [isRecognizing]);
+
   // Voice input: toggle start/stop and merge transcript into input text
   const handleMicPress = useCallback(() => {
     if (isRecognizing) {
@@ -360,6 +380,7 @@ export function SessionScreen() {
     if (isRecognizing && transcript) {
       const prefix = inputText.slice(0, dictationStartRef.current);
       const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : '';
+      isDictationUpdateRef.current = true;
       setInputText(prefix + separator + transcript);
     }
   }, [transcript]); // eslint-disable-line react-hooks/exhaustive-deps -- only react to transcript changes
@@ -583,7 +604,7 @@ export function SessionScreen() {
       <InputBar
         ref={inputRef}
         inputText={inputText}
-        onChangeText={setInputText}
+        onChangeText={handleChangeText}
         onSend={handleSend}
         onInterrupt={sendInterrupt}
         onClearTerminal={() => { clearTerminalBuffer(); terminalRef.current?.clear(); }}

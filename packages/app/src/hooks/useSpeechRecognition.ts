@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Alert } from 'react-native';
 import {
   ExpoSpeechRecognitionModule,
@@ -50,9 +50,13 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
     };
   }, []);
 
+  // Track whether a stop was requested during async permission flow
+  const stopRequestedRef = useRef(false);
+
   const startListening = useCallback(async () => {
     setError(null);
     setTranscript('');
+    stopRequestedRef.current = false;
 
     const { granted } = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
     if (!granted) {
@@ -63,6 +67,9 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
       return;
     }
 
+    // If stopListening was called while we were awaiting permission, don't start
+    if (stopRequestedRef.current) return;
+
     ExpoSpeechRecognitionModule.start({
       lang: 'en-US',
       interimResults: true,
@@ -72,6 +79,7 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
   }, []);
 
   const stopListening = useCallback(() => {
+    stopRequestedRef.current = true;
     ExpoSpeechRecognitionModule.stop();
   }, []);
 

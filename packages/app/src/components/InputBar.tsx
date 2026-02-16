@@ -163,6 +163,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
             onPress={onMicPress}
             accessibilityRole="button"
             accessibilityLabel={isRecognizing ? 'Stop voice input' : 'Start voice input'}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
             <Animated.View
               style={[
