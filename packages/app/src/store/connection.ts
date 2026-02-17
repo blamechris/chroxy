@@ -776,35 +776,33 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         _isSessionSwitchReplay = true;
       }
       _pendingSwitchSessionId = null;
-      {
-        const switchConvId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
-        set((state: ConnectionState) => {
-          // Initialize session state if it doesn't exist
-          const sessionStates = { ...state.sessionStates };
-          if (!sessionStates[sessionId]) {
-            sessionStates[sessionId] = createEmptySessionState();
-          }
-          // Update conversationId if provided
-          if (switchConvId) {
-            sessionStates[sessionId] = { ...sessionStates[sessionId], conversationId: switchConvId };
-          }
-          const ss = sessionStates[sessionId];
-          return {
-            activeSessionId: sessionId,
-            sessionStates,
-            // Sync flat state from the switched-to session
-            messages: ss.messages,
-            streamingMessageId: ss.streamingMessageId,
-            claudeReady: ss.claudeReady,
-            activeModel: ss.activeModel,
-            permissionMode: ss.permissionMode,
-            contextUsage: ss.contextUsage,
-            lastResultCost: ss.lastResultCost,
-            lastResultDuration: ss.lastResultDuration,
-            isIdle: ss.isIdle,
-          };
-        });
-      }
+      const switchConvId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
+      set((state: ConnectionState) => {
+        // Initialize session state if it doesn't exist
+        const sessionStates = { ...state.sessionStates };
+        if (!sessionStates[sessionId]) {
+          sessionStates[sessionId] = createEmptySessionState();
+        }
+        // Update conversationId if provided
+        if (switchConvId) {
+          sessionStates[sessionId] = { ...sessionStates[sessionId], conversationId: switchConvId };
+        }
+        const ss = sessionStates[sessionId];
+        return {
+          activeSessionId: sessionId,
+          sessionStates,
+          // Sync flat state from the switched-to session
+          messages: ss.messages,
+          streamingMessageId: ss.streamingMessageId,
+          claudeReady: ss.claudeReady,
+          activeModel: ss.activeModel,
+          permissionMode: ss.permissionMode,
+          contextUsage: ss.contextUsage,
+          lastResultCost: ss.lastResultCost,
+          lastResultDuration: ss.lastResultDuration,
+          isIdle: ss.isIdle,
+        };
+      });
       // Refresh slash commands (project commands may differ per session cwd)
       get().fetchSlashCommands();
       // Refresh agents (project agents may differ per session cwd)

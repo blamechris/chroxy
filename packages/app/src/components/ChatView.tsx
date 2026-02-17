@@ -652,7 +652,10 @@ export function ChatView({
   const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string } | null>(null);
 
   // Pause auto-scroll when an unanswered prompt is visible — user needs to read context
-  const hasUnansweredPrompt = messages.some((m) => m.type === 'prompt' && !m.answered);
+  const hasUnansweredPrompt = useMemo(
+    () => messages.some((m) => m.type === 'prompt' && !m.answered),
+    [messages],
+  );
 
   // Auto-scroll when plan approval card appears
   useEffect(() => {

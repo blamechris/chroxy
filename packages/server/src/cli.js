@@ -765,7 +765,7 @@ program
   .command('resume')
   .description('Resume a Chroxy session in your terminal')
   .argument('[session]', 'Session name or number (default: most recent)')
-  .option('--skip-permissions', 'Add --dangerously-skip-permissions to claude')
+  .option('--dangerously-skip-permissions', 'Pass --dangerously-skip-permissions to claude')
   .action(async (sessionArg, options) => {
     const { execFileSync } = await import('child_process')
     const stateFile = join(CONFIG_DIR, 'session-state.json')
@@ -838,7 +838,7 @@ program
     console.log(`Conversation: ${target.convId}\n`)
 
     const args = ['--resume', target.convId]
-    if (options.skipPermissions) {
+    if (options.dangerouslySkipPermissions) {
       args.push('--dangerously-skip-permissions')
     }
 
