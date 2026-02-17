@@ -336,7 +336,9 @@ export class WsServer {
         } catch {
           return // ignore non-JSON
         }
-        this._handleMessage(ws, msg)
+        this._handleMessage(ws, msg).catch((err) => {
+          console.error('[ws] Unhandled error in message handler:', err)
+        })
       })
 
       ws.on('close', () => {

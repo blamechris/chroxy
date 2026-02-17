@@ -3963,8 +3963,8 @@ describe('slash commands', () => {
       manager.getSession = (id) => sessionsMap.get(id)
       manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: tmpDir, type: 'cli', isBusy: false }]
       manager.getHistory = () => []
-    manager.recordUserInput = () => {}
-    manager.getFullHistoryAsync = async () => []
+      manager.recordUserInput = () => {}
+      manager.getFullHistoryAsync = async () => []
       Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
       server = new WsServer({
@@ -4147,8 +4147,8 @@ describe('agent listing', () => {
       manager.getSession = (id) => sessionsMap.get(id)
       manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: tmpDir, type: 'cli', isBusy: false }]
       manager.getHistory = () => []
-    manager.recordUserInput = () => {}
-    manager.getFullHistoryAsync = async () => []
+      manager.recordUserInput = () => {}
+      manager.getFullHistoryAsync = async () => []
       Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
       server = new WsServer({
