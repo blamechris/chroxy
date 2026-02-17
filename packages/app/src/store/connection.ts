@@ -1310,8 +1310,19 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
             clearTimeout(deltaFlushTimer);
           }
           flushPendingDeltas();
+          // Resolve back to the original server messageId so `_postPermissionSplits`
+          // is always keyed by the ID that incoming `stream_delta` messages use.
+          // After a prior split, `streamingMessageId` is the remapped client-side ID
+          // but deltas still arrive with the original server ID.
+          let serverStreamId = currentStreamId;
+          for (const [origId, remappedId] of _deltaIdRemaps) {
+            if (remappedId === currentStreamId) {
+              serverStreamId = origId;
+              break;
+            }
+          }
           // Mark for split — next delta for this messageId creates a new bubble
-          _postPermissionSplits.add(currentStreamId);
+          _postPermissionSplits.add(serverStreamId);
           // Clear streaming state so the permission card isn't appended mid-stream
           if (permTargetId && get().sessionStates[permTargetId]) {
             updateSession(permTargetId, () => ({ streamingMessageId: null }));
