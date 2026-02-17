@@ -560,7 +560,8 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
 
   // Answered permission prompts (with requestId) collapse to a compact pill.
   // user_question prompts (no requestId) are NOT collapsed.
-  const showAsPill = isPrompt && message.requestId && message.answered && !permissionExpanded;
+  // Disable pill mode during selection so pills participate in multi-select.
+  const showAsPill = isPrompt && message.requestId && message.answered && !permissionExpanded && !isSelecting;
 
   const handlePress = () => {
     if (longPressedRef.current) {
