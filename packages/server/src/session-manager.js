@@ -6,6 +6,7 @@ import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { discoverTmuxSessions } from './session-discovery.js'
+import { resolveJsonlPath, readConversationHistory } from './jsonl-reader.js'
 
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
@@ -203,6 +204,7 @@ export class SessionManager extends EventEmitter {
         permissionMode: entry.type === 'pty' ? null : (entry.session.permissionMode || 'approve'),
         isBusy: entry.session.isRunning,
         createdAt: entry.createdAt,
+        conversationId: entry.session.resumeSessionId || null,
       })
     }
     return list
@@ -325,7 +327,6 @@ export class SessionManager extends EventEmitter {
     } catch (err) {
       // Clean up failed session entry before rethrowing
       this._sessions.delete(sessionId)
-      console.error(`[session-manager] Attach failed for session ${sessionId} (tmux: '${tmuxSession}'):`, err)
       throw new SessionAttachError(`Failed to attach to tmux session '${tmuxSession}': ${err.message}`, { tmuxSession, sessionId, originalError: err })
     }
 
@@ -422,6 +423,7 @@ export class SessionManager extends EventEmitter {
       const history = (this._messageHistory.get(id) || []).map(e => this._truncateEntry(e))
       state.sessions.push({
         sdkSessionId: (typeof entry.session.resumeSessionId !== 'undefined' ? entry.session.resumeSessionId : null),
+        conversationId: entry.session.resumeSessionId || null,
         cwd: entry.cwd,
         model: entry.session.model,
         permissionMode: entry.session.permissionMode,
@@ -513,6 +515,36 @@ export class SessionManager extends EventEmitter {
    */
   getHistory(sessionId) {
     return this._messageHistory.get(sessionId) || []
+  }
+
+  /**
+   * Get the conversation ID (SDK session ID) for a session.
+   * @returns {string|null}
+   */
+  getConversationId(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry) return null
+    return entry.session.resumeSessionId || null
+  }
+
+  /**
+   * Get full conversation history by reading the JSONL file.
+   * Falls back to the ring buffer if JSONL is unavailable.
+   * @returns {Array<{ type, content, tool?, timestamp, messageId? }>}
+   */
+  getFullHistory(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry) return []
+
+    const conversationId = entry.session.resumeSessionId
+    if (conversationId) {
+      const filePath = resolveJsonlPath(entry.cwd, conversationId)
+      const history = readConversationHistory(filePath)
+      if (history.length > 0) return history
+    }
+
+    // Fallback to ring buffer
+    return this.getHistory(sessionId)
   }
 
   /**
@@ -654,6 +686,15 @@ export class SessionManager extends EventEmitter {
       session.on(event, (data) => {
         this._recordHistory(sessionId, event, data)
         this.emit('session_event', { sessionId, event, data })
+
+        // When SDK session reports ready, emit conversation_id if available
+        if (event === 'ready' && session.resumeSessionId) {
+          this.emit('session_event', {
+            sessionId,
+            event: 'conversation_id',
+            data: { conversationId: session.resumeSessionId },
+          })
+        }
       })
     }
 

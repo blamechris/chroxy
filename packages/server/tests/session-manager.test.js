@@ -438,3 +438,89 @@ describe('SessionManager auto-persist', () => {
     assert.equal(state.sessions[0].name, 'Final')
   })
 })
+
+describe('SessionManager.getConversationId', () => {
+  it('returns resumeSessionId when available', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    const session = new EventEmitter()
+    Object.defineProperty(session, 'resumeSessionId', { get: () => 'conv-uuid-123' })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+
+    assert.equal(mgr.getConversationId('s1'), 'conv-uuid-123')
+  })
+
+  it('returns null when resumeSessionId is not set', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    const session = new EventEmitter()
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+
+    assert.equal(mgr.getConversationId('s1'), null)
+  })
+
+  it('returns null for nonexistent session', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    assert.equal(mgr.getConversationId('nonexistent'), null)
+  })
+})
+
+describe('SessionManager.listSessions includes conversationId', () => {
+  it('includes conversationId in session list entries', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    const session1 = new EventEmitter()
+    session1.isRunning = false
+    Object.defineProperty(session1, 'resumeSessionId', { get: () => 'conv-aaa' })
+    session1.destroy = () => {}
+    mgr._sessions.set('s1', { session: session1, type: 'cli', name: 'A', cwd: '/tmp/a', createdAt: Date.now() })
+
+    const session2 = new EventEmitter()
+    session2.isRunning = false
+    Object.defineProperty(session2, 'resumeSessionId', { get: () => null })
+    session2.destroy = () => {}
+    mgr._sessions.set('s2', { session: session2, type: 'cli', name: 'B', cwd: '/tmp/b', createdAt: Date.now() })
+
+    const sessions = mgr.listSessions()
+    assert.equal(sessions.length, 2)
+
+    const s1 = sessions.find(s => s.name === 'A')
+    assert.equal(s1.conversationId, 'conv-aaa')
+
+    const s2 = sessions.find(s => s.name === 'B')
+    assert.equal(s2.conversationId, null)
+  })
+})
+
+describe('SessionManager.serializeState includes conversationId', () => {
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-session-test-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('persists conversationId in serialized state', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+
+    const session = new EventEmitter()
+    session.model = 'sonnet'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => 'conv-persist-123' })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Persist Test', cwd: '/tmp' })
+
+    const state = mgr.serializeState()
+    assert.equal(state.sessions[0].conversationId, 'conv-persist-123')
+
+    // Also verify the file
+    const fileContents = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(fileContents.sessions[0].conversationId, 'conv-persist-123')
+  })
+})

@@ -45,7 +45,7 @@ export class SdkSession extends EventEmitter {
     this._destroying = false
 
     // Permission handling
-    this._pendingPermissions = new Map() // requestId -> resolve
+    this._pendingPermissions = new Map() // requestId -> { resolve, input }
     this._permissionTimers = new Map() // requestId -> timer
     this._permissionCounter = 0
 
@@ -304,7 +304,7 @@ export class SdkSession extends EventEmitter {
 
     return new Promise((resolve) => {
       const requestId = `perm-${++this._permissionCounter}-${Date.now()}`
-      this._pendingPermissions.set(requestId, resolve)
+      this._pendingPermissions.set(requestId, { resolve, input: input || {} })
 
       const toolInput = input || {}
       const description = toolInput.description
@@ -418,8 +418,8 @@ export class SdkSession extends EventEmitter {
    * the app sends permission_response).
    */
   respondToPermission(requestId, decision) {
-    const resolve = this._pendingPermissions.get(requestId)
-    if (!resolve) {
+    const pending = this._pendingPermissions.get(requestId)
+    if (!pending) {
       console.warn(`[sdk-session] No pending permission for ${requestId}`)
       return
     }
@@ -429,11 +429,11 @@ export class SdkSession extends EventEmitter {
     console.log(`[sdk-session] Permission ${requestId} resolved: ${decision}`)
 
     if (decision === 'allow') {
-      resolve({ behavior: 'allow', updatedInput: undefined })
+      pending.resolve({ behavior: 'allow', updatedInput: pending.input })
     } else if (decision === 'allowAlways') {
-      resolve({ behavior: 'allowAlways', updatedInput: undefined })
+      pending.resolve({ behavior: 'allowAlways', updatedInput: pending.input })
     } else {
-      resolve({ behavior: 'deny', message: 'User denied' })
+      pending.resolve({ behavior: 'deny', message: 'User denied' })
     }
   }
 
@@ -562,9 +562,9 @@ export class SdkSession extends EventEmitter {
     }
 
     // Auto-deny any pending permissions and clear their timers
-    for (const [requestId, resolve] of this._pendingPermissions) {
+    for (const [requestId, pending] of this._pendingPermissions) {
       this._clearPermissionTimer(requestId)
-      resolve({ behavior: 'deny', message: 'Message completed' })
+      pending.resolve({ behavior: 'deny', message: 'Message completed' })
     }
     this._pendingPermissions.clear()
 

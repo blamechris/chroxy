@@ -24,11 +24,17 @@ export function SettingsScreen() {
     forgetSession,
     disconnect,
     clearSavedConnection,
+    requestFullHistory,
     wsUrl,
     serverVersion,
     latestVersion,
     serverMode,
   } = useConnectionStore();
+
+  const conversationId = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].conversationId : null;
+  });
 
   // Simple semver comparison: check if latest > current (not just different)
   const updateAvailable = (() => {
@@ -105,6 +111,44 @@ export function SettingsScreen() {
           <Text style={styles.destructiveText}>Clear Saved Connection</Text>
         </TouchableOpacity>
       </View>
+
+      {/* PORTABILITY */}
+      {conversationId != null && (
+        <>
+          <Text style={styles.sectionHeader}>PORTABILITY</Text>
+          <View style={styles.section}>
+            <TouchableOpacity
+              style={styles.row}
+              onPress={async () => {
+                try {
+                  await Clipboard.setStringAsync(conversationId);
+                  Alert.alert(
+                    'Copied',
+                    `Resume from terminal:\n\nclaude --resume ${conversationId}`,
+                  );
+                } catch {
+                  Alert.alert('Error', 'Failed to copy.');
+                }
+              }}
+            >
+              <Text style={styles.rowLabel}>Conversation ID</Text>
+              <Text style={[styles.rowValue, styles.rowValueSmall]} numberOfLines={1}>
+                {conversationId.slice(0, 8)}...
+              </Text>
+            </TouchableOpacity>
+            <View style={styles.separator} />
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => {
+                requestFullHistory();
+                Alert.alert('Syncing', 'Full conversation history requested from server.');
+              }}
+            >
+              <Text style={styles.actionText}>Sync Full History</Text>
+            </TouchableOpacity>
+          </View>
+        </>
+      )}
 
       {/* INPUT */}
       <Text style={styles.sectionHeader}>INPUT</Text>
@@ -236,6 +280,10 @@ const styles = StyleSheet.create({
   },
   destructiveText: {
     color: COLORS.accentRed,
+    fontSize: 15,
+  },
+  actionText: {
+    color: COLORS.accentBlue,
     fontSize: 15,
   },
   versionRow: {

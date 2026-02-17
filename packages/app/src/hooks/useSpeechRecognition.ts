@@ -1,9 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Alert } from 'react-native';
-import {
-  ExpoSpeechRecognitionModule,
-  useSpeechRecognitionEvent,
-} from 'expo-speech-recognition';
+
+// Dynamically resolve the native module — returns null in Expo Go
+let SpeechModule: typeof import('expo-speech-recognition').ExpoSpeechRecognitionModule | null = null;
+let useSpeechEvent: typeof import('expo-speech-recognition').useSpeechRecognitionEvent = (() => {}) as any;
+
+try {
+  const mod = require('expo-speech-recognition');
+  SpeechModule = mod.ExpoSpeechRecognitionModule;
+  useSpeechEvent = mod.useSpeechRecognitionEvent;
+} catch {
+  // Native module not available (Expo Go) — speech features disabled
+}
 
 export interface UseSpeechRecognitionReturn {
   isRecognizing: boolean;
@@ -18,24 +26,30 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
   const [isRecognizing, setIsRecognizing] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [isAvailable, setIsAvailable] = useState(true);
+  const [isAvailable, setIsAvailable] = useState(false);
 
   useEffect(() => {
-    setIsAvailable(ExpoSpeechRecognitionModule.isRecognitionAvailable());
+    if (SpeechModule) {
+      try {
+        setIsAvailable(SpeechModule.isRecognitionAvailable());
+      } catch {
+        setIsAvailable(false);
+      }
+    }
   }, []);
 
-  useSpeechRecognitionEvent('result', (event) => {
+  useSpeechEvent('result', (event: any) => {
     const text = event.results[0]?.transcript;
     if (text) {
       setTranscript(text);
     }
   });
 
-  useSpeechRecognitionEvent('end', () => {
+  useSpeechEvent('end', () => {
     setIsRecognizing(false);
   });
 
-  useSpeechRecognitionEvent('error', (event) => {
+  useSpeechEvent('error', (event: any) => {
     // Don't treat abort as a user-visible error
     if (event.error !== 'aborted') {
       setError(event.message || event.error);
@@ -46,7 +60,7 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
   // Abort on unmount
   useEffect(() => {
     return () => {
-      ExpoSpeechRecognitionModule.abort();
+      SpeechModule?.abort();
     };
   }, []);
 
@@ -54,11 +68,13 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
   const stopRequestedRef = useRef(false);
 
   const startListening = useCallback(async () => {
+    if (!SpeechModule) return;
+
     setError(null);
     setTranscript('');
     stopRequestedRef.current = false;
 
-    const { granted } = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    const { granted } = await SpeechModule.requestPermissionsAsync();
     if (!granted) {
       Alert.alert(
         'Permissions Required',
@@ -70,7 +86,7 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
     // If stopListening was called while we were awaiting permission, don't start
     if (stopRequestedRef.current) return;
 
-    ExpoSpeechRecognitionModule.start({
+    SpeechModule.start({
       lang: 'en-US',
       interimResults: true,
       contextualStrings: ['Claude', 'Chroxy'],
@@ -80,7 +96,7 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
 
   const stopListening = useCallback(() => {
     stopRequestedRef.current = true;
-    ExpoSpeechRecognitionModule.stop();
+    SpeechModule?.stop();
   }, []);
 
   return {

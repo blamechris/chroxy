@@ -77,6 +77,7 @@ describe('SdkSession', () => {
       session.respondToPermission(events[0].requestId, 'allow')
       const result = await promise
       assert.equal(result.behavior, 'allow')
+      assert.deepEqual(result.updatedInput, { command: 'ls' })
     })
 
     it('resolves with deny on respondToPermission (deny)', async () => {
@@ -102,7 +103,7 @@ describe('SdkSession', () => {
 
       const result = await promise
       assert.equal(result.behavior, 'allowAlways')
-      assert.equal(result.updatedInput, undefined)
+      assert.deepEqual(result.updatedInput, { command: 'npm test' })
       assert.ok(!session._pendingPermissions.has(requestId))
       assert.ok(!session._permissionTimers.has(requestId))
     })

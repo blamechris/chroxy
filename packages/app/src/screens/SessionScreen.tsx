@@ -150,6 +150,10 @@ export function SessionScreen() {
     return id && s.sessionStates[id] ? s.sessionStates[id].planAllowedPrompts : EMPTY_PROMPTS;
   });
   const connectedClients = useConnectionStore((s) => s.connectedClients);
+  const conversationId = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].conversationId : null;
+  });
   const pendingPermissionConfirm = useConnectionStore((s) => s.pendingPermissionConfirm);
   const slashCommands = useConnectionStore((s) => s.slashCommands);
   const customAgents = useConnectionStore((s) => s.customAgents);
@@ -480,6 +484,7 @@ export function SessionScreen() {
           pendingPermissionConfirm={pendingPermissionConfirm}
           onConfirmPermissionMode={confirmPermissionMode}
           onCancelPermissionConfirm={cancelPermissionConfirm}
+          conversationId={conversationId}
         />
       )}
 
