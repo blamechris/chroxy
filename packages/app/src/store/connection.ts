@@ -1827,6 +1827,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Bump attempt ID to cancel any pending health checks / retry timers
     connectionAttemptId++;
     disconnectedAttemptId = connectionAttemptId;
+    // Clear saved connection so ConnectScreen doesn't auto-reconnect
+    lastConnectedUrl = null;
     const { socket } = get();
     if (socket) {
       socket.onclose = null;
@@ -1886,8 +1888,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,
+      savedConnection: null,
     });
-    // Keep wsUrl, apiToken, messages, terminalBuffer, terminalRawBuffer, sessions, sessionStates, savedConnection
+    // Keep wsUrl, apiToken, messages, terminalBuffer, terminalRawBuffer, sessions, sessionStates
   },
 
   forgetSession: () => {
