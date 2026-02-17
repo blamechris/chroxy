@@ -539,7 +539,7 @@ export class WsServer {
   }
 
   /** Route incoming client messages */
-  _handleMessage(ws, msg) {
+  async _handleMessage(ws, msg) {
     const client = this.clients.get(ws)
     if (!client) return
 
@@ -636,11 +636,7 @@ export class WsServer {
           if (!text || !text.trim()) break
           console.log(`[ws] Message from ${client.id} to session ${client.activeSessionId}: "${text.slice(0, 80)}"`)
           // Record user input in history so it survives reconnect replay
-          if (this.sessionManager._recordHistory) this.sessionManager._recordHistory(client.activeSessionId, 'message', {
-            type: 'user_input',
-            content: text.trim(),
-            timestamp: Date.now(),
-          })
+          this.sessionManager.recordUserInput(client.activeSessionId, text.trim())
           entry.session.sendMessage(text.trim())
         }
 
@@ -936,7 +932,7 @@ export class WsServer {
           this._send(ws, { type: 'session_error', message: 'No active session' })
           break
         }
-        const fullHistory = this.sessionManager.getFullHistory(targetId)
+        const fullHistory = await this.sessionManager.getFullHistoryAsync(targetId)
         this._send(ws, { type: 'history_replay_start', sessionId: targetId, fullHistory: true })
         for (const entry of fullHistory) {
           // Convert JSONL format to WS message format

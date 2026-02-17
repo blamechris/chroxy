@@ -1129,6 +1129,8 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
       return list
     }
     manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
 
     // Add firstSessionId getter
     Object.defineProperty(manager, 'firstSessionId', {
@@ -1408,6 +1410,8 @@ describe('WsServer attach_session message flow', () => {
       return list
     }
     manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
 
     // Mock attachSession behavior
     manager.attachSession = async ({ tmuxSession, name }) => {
@@ -1901,6 +1905,8 @@ describe('user_question_response forwarding (multi-session)', () => {
       return list
     }
     manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
     })
@@ -2064,6 +2070,8 @@ describe('background session sync (_broadcastToSession)', () => {
       return list
     }
     manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.keys().next().value
     })
@@ -2311,6 +2319,8 @@ describe('agent idle/busy notifications', () => {
       return list
     }
     manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.keys().next().value
     })
@@ -2477,6 +2487,8 @@ describe('WsServer drain behavior (multi-session mode)', () => {
       return list
     }
     manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
     })
@@ -2872,6 +2884,8 @@ describe('primary client tracking', () => {
       return list
     }
     manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
     })
@@ -3406,6 +3420,8 @@ describe('auto permission mode confirmation handshake', () => {
     manager.getSession = (id) => sessionsMap.get(id)
     manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: '/tmp/test', type: 'cli', isBusy: false }]
     manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
     Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
     server = new WsServer({
@@ -3598,6 +3614,8 @@ describe('directory listing', () => {
     manager.getSession = (id) => sessionsMap.get(id)
     manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: '/tmp/test', type: 'cli', isBusy: false }]
     manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
     Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
     server = new WsServer({
@@ -3796,6 +3814,8 @@ describe('resize validation', () => {
     manager.getSession = (id) => sessionsMap.get(id)
     manager.listSessions = () => [{ id: 'sess-1', name: 'PTY', cwd: '/tmp', type: 'pty', isBusy: false }]
     manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
     Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
     server = new WsServer({
@@ -3943,6 +3963,8 @@ describe('slash commands', () => {
       manager.getSession = (id) => sessionsMap.get(id)
       manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: tmpDir, type: 'cli', isBusy: false }]
       manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
       Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
       server = new WsServer({
@@ -4125,6 +4147,8 @@ describe('agent listing', () => {
       manager.getSession = (id) => sessionsMap.get(id)
       manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: tmpDir, type: 'cli', isBusy: false }]
       manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
       Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
       server = new WsServer({
@@ -4238,6 +4262,8 @@ describe('permission/question routing to originating session', () => {
       return list
     }
     manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => 'sess-a'
     })

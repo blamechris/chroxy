@@ -6,7 +6,7 @@ import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { discoverTmuxSessions } from './session-discovery.js'
-import { resolveJsonlPath, readConversationHistory } from './jsonl-reader.js'
+import { resolveJsonlPath, readConversationHistory, readConversationHistoryAsync } from './jsonl-reader.js'
 
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
@@ -545,6 +545,39 @@ export class SessionManager extends EventEmitter {
 
     // Fallback to ring buffer
     return this.getHistory(sessionId)
+  }
+
+  /**
+   * Get full conversation history asynchronously by reading the JSONL file.
+   * Avoids blocking the event loop for large files (use in WS handlers).
+   * Falls back to the ring buffer if JSONL is unavailable.
+   * @returns {Promise<Array<{ type, content, tool?, timestamp, messageId? }>>}
+   */
+  async getFullHistoryAsync(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry) return []
+
+    const conversationId = entry.session.resumeSessionId
+    if (conversationId) {
+      const filePath = resolveJsonlPath(entry.cwd, conversationId)
+      const history = await readConversationHistoryAsync(filePath)
+      if (history.length > 0) return history
+    }
+
+    // Fallback to ring buffer
+    return this.getHistory(sessionId)
+  }
+
+  /**
+   * Record a user input message in the session's history ring buffer.
+   * Public API for ws-server to record user messages so they survive reconnect replay.
+   */
+  recordUserInput(sessionId, text) {
+    this._recordHistory(sessionId, 'message', {
+      type: 'user_input',
+      content: text,
+      timestamp: Date.now(),
+    })
   }
 
   /**
