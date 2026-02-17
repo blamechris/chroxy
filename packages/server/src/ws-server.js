@@ -122,6 +122,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'list_directory', path? }                  — request directory listing for file browser
  *   { type: 'list_slash_commands' }                     — request available slash commands
  *   { type: 'list_agents' }                             — request available custom agents
+ *   { type: 'request_full_history', sessionId? }         — request full JSONL history for a session
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
@@ -144,14 +145,15 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'permission_mode_changed', mode: '...' } — permission mode updated
  *   { type: 'available_permission_modes', modes: [...] } — permission modes
  *   { type: 'session_list', sessions: [...] }         — all sessions
- *   { type: 'session_switched', sessionId, name, cwd } — switched active session
+ *   { type: 'session_switched', sessionId, name, cwd, conversationId? } — switched active session
  *   { type: 'session_created', sessionId, name }      — new session created
  *   { type: 'session_destroyed', sessionId }          — session removed
  *   { type: 'session_error', message, category?, sessionId?, recoverable? } — session operation error
  *   { type: 'discovered_sessions', tmux: [...] }     — host tmux session scan results
  *   { type: 'discovery_triggered' }                  — ack that on-demand discovery started
- *   { type: 'history_replay_start', sessionId }      — beginning of history replay
+ *   { type: 'history_replay_start', sessionId, fullHistory? } — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
+ *   { type: 'conversation_id', sessionId, conversationId } — SDK conversation ID for session portability
  *   { type: 'raw_background', data: '...' }           — raw PTY data for chat-mode clients
  *   { type: 'status_update', model, cost, ... }       — Claude Code status bar metadata
  *   { type: 'user_question', toolUseId, questions }   — AskUserQuestion prompt from Claude
@@ -449,7 +451,7 @@ export class WsServer {
       client.activeSessionId = activeId
 
       if (entry) {
-        this._send(ws, { type: 'session_switched', sessionId: activeId, name: entry.name, cwd: entry.cwd })
+        this._send(ws, { type: 'session_switched', sessionId: activeId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
         this._sendSessionInfo(ws, activeId)
         this._replayHistory(ws, activeId)
       }
@@ -633,6 +635,12 @@ export class WsServer {
           // CLI sessions: trim and drop empty input
           if (!text || !text.trim()) break
           console.log(`[ws] Message from ${client.id} to session ${client.activeSessionId}: "${text.slice(0, 80)}"`)
+          // Record user input in history so it survives reconnect replay
+          this.sessionManager._recordHistory(client.activeSessionId, 'message', {
+            type: 'user_input',
+            content: text.trim(),
+            timestamp: Date.now(),
+          })
           entry.session.sendMessage(text.trim())
         }
 
@@ -740,7 +748,7 @@ export class WsServer {
         }
         client.activeSessionId = targetId
         console.log(`[ws] Client ${client.id} switched to session ${targetId}`)
-        this._send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd })
+        this._send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
         this._sendSessionInfo(ws, targetId)
         this._replayHistory(ws, targetId)
         break
@@ -769,7 +777,7 @@ export class WsServer {
           // Auto-switch the creating client to the new session
           client.activeSessionId = sessionId
           const entry = this.sessionManager.getSession(sessionId)
-          this._send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd })
+          this._send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
           this._sendSessionInfo(ws, sessionId)
           // Broadcast updated session list to all clients
           this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
@@ -802,7 +810,7 @@ export class WsServer {
             c.activeSessionId = firstId
             const entry = this.sessionManager.getSession(firstId)
             if (entry) {
-              this._send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd })
+              this._send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
               this._sendSessionInfo(clientWs, firstId)
             }
           }
@@ -864,7 +872,7 @@ export class WsServer {
           // Auto-switch the attaching client to the new session
           client.activeSessionId = sessionId
           const entry = this.sessionManager.getSession(sessionId)
-          this._send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd })
+          this._send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session?.resumeSessionId || null })
           this._sendSessionInfo(ws, sessionId)
           // Broadcast updated session list to all clients
           this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
@@ -919,6 +927,34 @@ export class WsServer {
         const entry = this.sessionManager.getSession(client.activeSessionId)
         const cwd = entry?.cwd || null
         this._listAgents(ws, cwd, client.activeSessionId)
+        break
+      }
+
+      case 'request_full_history': {
+        const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
+        if (!targetId || !this.sessionManager.getSession(targetId)) {
+          this._send(ws, { type: 'session_error', message: 'No active session' })
+          break
+        }
+        const fullHistory = this.sessionManager.getFullHistory(targetId)
+        this._send(ws, { type: 'history_replay_start', sessionId: targetId, fullHistory: true })
+        for (const entry of fullHistory) {
+          // Convert JSONL format to WS message format
+          if (entry.type === 'user_input' || entry.type === 'response' || entry.type === 'tool_use') {
+            this._send(ws, {
+              type: 'message',
+              messageType: entry.type,
+              content: entry.content,
+              tool: entry.tool,
+              timestamp: entry.timestamp,
+              sessionId: targetId,
+            })
+          } else {
+            // Ring buffer entries already have WS format
+            this._send(ws, { ...entry, sessionId: targetId })
+          }
+        }
+        this._send(ws, { type: 'history_replay_end', sessionId: targetId })
         break
       }
 
@@ -1121,6 +1157,16 @@ export class WsServer {
           }
           break
         }
+
+        case 'conversation_id':
+          this._broadcastToSession(sessionId, {
+            type: 'conversation_id',
+            sessionId,
+            conversationId: data.conversationId,
+          })
+          // Broadcast updated session list (conversationId now available)
+          this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
+          break
 
         case 'stream_start':
           console.log(`[ws] Broadcasting stream_start: ${data.messageId} (session ${sessionId})`)

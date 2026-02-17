@@ -96,6 +96,7 @@ export interface SessionInfo {
   permissionMode: string | null;
   isBusy: boolean;
   createdAt: number;
+  conversationId: string | null;
 }
 
 export interface DiscoveredSession {
@@ -147,6 +148,7 @@ export interface SessionState {
   isPlanPending: boolean;
   planAllowedPrompts: { tool: string; prompt: string }[];
   primaryClientId: string | null;
+  conversationId: string | null;
 }
 
 export interface ServerError {
@@ -195,6 +197,7 @@ export function createEmptySessionState(): SessionState {
     isPlanPending: false,
     planAllowedPrompts: [],
     primaryClientId: null,
+    conversationId: null,
   };
 }
 
@@ -330,6 +333,9 @@ interface ConnectionState {
 
   // Custom agents
   fetchCustomAgents: () => void;
+
+  // Full history sync (session portability)
+  requestFullHistory: (sessionId?: string) => void;
 
   // Plan mode actions
   clearPlanState: () => void;
@@ -749,7 +755,16 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
 
     case 'session_list':
       if (Array.isArray(msg.sessions)) {
-        set({ sessions: msg.sessions as SessionInfo[] });
+        const sessionList = msg.sessions as SessionInfo[];
+        set({ sessions: sessionList });
+        // Sync conversationId from session list into session states
+        for (const s of sessionList) {
+          if (s.conversationId && get().sessionStates[s.sessionId]) {
+            updateSession(s.sessionId, (ss) =>
+              ss.conversationId !== s.conversationId ? { conversationId: s.conversationId } : {}
+            );
+          }
+        }
       }
       break;
 
@@ -761,32 +776,48 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         _isSessionSwitchReplay = true;
       }
       _pendingSwitchSessionId = null;
-      set((state: ConnectionState) => {
-        // Initialize session state if it doesn't exist
-        const sessionStates = { ...state.sessionStates };
-        if (!sessionStates[sessionId]) {
-          sessionStates[sessionId] = createEmptySessionState();
-        }
-        const ss = sessionStates[sessionId];
-        return {
-          activeSessionId: sessionId,
-          sessionStates,
-          // Sync flat state from the switched-to session
-          messages: ss.messages,
-          streamingMessageId: ss.streamingMessageId,
-          claudeReady: ss.claudeReady,
-          activeModel: ss.activeModel,
-          permissionMode: ss.permissionMode,
-          contextUsage: ss.contextUsage,
-          lastResultCost: ss.lastResultCost,
-          lastResultDuration: ss.lastResultDuration,
-          isIdle: ss.isIdle,
-        };
-      });
+      {
+        const switchConvId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
+        set((state: ConnectionState) => {
+          // Initialize session state if it doesn't exist
+          const sessionStates = { ...state.sessionStates };
+          if (!sessionStates[sessionId]) {
+            sessionStates[sessionId] = createEmptySessionState();
+          }
+          // Update conversationId if provided
+          if (switchConvId) {
+            sessionStates[sessionId] = { ...sessionStates[sessionId], conversationId: switchConvId };
+          }
+          const ss = sessionStates[sessionId];
+          return {
+            activeSessionId: sessionId,
+            sessionStates,
+            // Sync flat state from the switched-to session
+            messages: ss.messages,
+            streamingMessageId: ss.streamingMessageId,
+            claudeReady: ss.claudeReady,
+            activeModel: ss.activeModel,
+            permissionMode: ss.permissionMode,
+            contextUsage: ss.contextUsage,
+            lastResultCost: ss.lastResultCost,
+            lastResultDuration: ss.lastResultDuration,
+            isIdle: ss.isIdle,
+          };
+        });
+      }
       // Refresh slash commands (project commands may differ per session cwd)
       get().fetchSlashCommands();
       // Refresh agents (project agents may differ per session cwd)
       get().fetchCustomAgents();
+      break;
+    }
+
+    case 'conversation_id': {
+      const convSessionId = msg.sessionId as string;
+      const conversationId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
+      if (convSessionId && get().sessionStates[convSessionId]) {
+        updateSession(convSessionId, () => ({ conversationId }));
+      }
       break;
     }
 
@@ -830,6 +861,14 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
 
     case 'history_replay_start':
       _receivingHistoryReplay = true;
+      // Full history replay (from request_full_history): clear messages before replay
+      if (msg.fullHistory === true) {
+        _isSessionSwitchReplay = true; // Use session-switch dedup path (replace, don't skip)
+        const targetId = (msg.sessionId as string) || get().activeSessionId;
+        if (targetId && get().sessionStates[targetId]) {
+          updateSession(targetId, () => ({ messages: [] }));
+        }
+      }
       // Clear transient state — these events are not replayed from history,
       // so any surviving entries are stale from pre-disconnect
       updateActiveSession((ss) => {
@@ -869,7 +908,8 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
     case 'message': {
       const msgType = (msg.messageType || msg.type) as string;
       // Skip server-echoed user_input — we already show it instantly client-side
-      if (msgType === 'user_input') break;
+      // But allow user_input during full history sync (messages came from terminal)
+      if (msgType === 'user_input' && !(_receivingHistoryReplay && _isSessionSwitchReplay)) break;
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       // During reconnect replay, skip if app already has messages (cache is fresh)
       if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
@@ -1549,6 +1589,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       isPlanPending: false,
       planAllowedPrompts: [],
       primaryClientId: null,
+      conversationId: null,
     };
   },
 
@@ -2166,6 +2207,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, string> = { type: 'attach_session', tmuxSession };
       if (name) msg.name = name;
+      socket.send(JSON.stringify(msg));
+    }
+  },
+
+  requestFullHistory: (sessionId?: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const msg: Record<string, string> = { type: 'request_full_history' };
+      if (sessionId) msg.sessionId = sessionId;
       socket.send(JSON.stringify(msg));
     }
   },

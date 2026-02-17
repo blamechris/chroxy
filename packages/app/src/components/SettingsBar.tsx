@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient, CustomAgent } from '../store/connection';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
@@ -30,6 +31,7 @@ export interface SettingsBarProps {
   pendingPermissionConfirm?: { mode: string; warning: string } | null;
   onConfirmPermissionMode?: (mode: string) => void;
   onCancelPermissionConfirm?: () => void;
+  conversationId?: string | null;
 }
 
 // -- Helpers --
@@ -94,6 +96,7 @@ export function SettingsBar({
   pendingPermissionConfirm,
   onConfirmPermissionMode,
   onCancelPermissionConfirm,
+  conversationId,
 }: SettingsBarProps) {
   // Elapsed time ticker — only runs when expanded with active agents
   const [now, setNow] = useState(Date.now());
@@ -300,6 +303,29 @@ export function SettingsBar({
                 </View>
               )}
             </>
+          )}
+          {conversationId && (
+            <TouchableOpacity
+              style={styles.conversationIdRow}
+              onPress={async () => {
+                try {
+                  await Clipboard.setStringAsync(conversationId);
+                  Alert.alert(
+                    'Copied',
+                    `Resume this conversation from your terminal:\n\nclaude --resume ${conversationId}`,
+                  );
+                } catch {
+                  Alert.alert('Error', 'Failed to copy conversation ID.');
+                }
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Copy conversation ID"
+            >
+              <Text style={styles.conversationIdLabel}>Conversation ID</Text>
+              <Text style={styles.conversationIdValue} numberOfLines={1}>
+                {conversationId.slice(0, 8)}...
+              </Text>
+            </TouchableOpacity>
           )}
           {activeAgents.length > 0 && (
             <View style={styles.agentSection}>
@@ -541,5 +567,23 @@ const styles = StyleSheet.create({
     paddingVertical: 1,
     borderRadius: 3,
     overflow: 'hidden',
+  },
+  conversationIdRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+    minHeight: 32,
+  },
+  conversationIdLabel: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  conversationIdValue: {
+    color: COLORS.accentBlue,
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginLeft: 8,
   },
 });

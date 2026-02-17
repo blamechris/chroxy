@@ -21,6 +21,7 @@ const CONFIG_SCHEMA = {
   allowedTools: 'array',
   resume: 'boolean',
   noAuth: 'boolean',
+  noDiscovery: 'boolean',
   discoveryInterval: 'number',
   maxRestarts: 'number',
   tunnel: 'string',

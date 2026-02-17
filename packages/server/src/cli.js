@@ -206,6 +206,7 @@ program
   .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
   .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
   .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
+  .option('--no-discovery', 'Skip tmux auto-discovery on startup')
   .option('--no-supervisor', 'Disable supervisor mode (direct server, no auto-restart)')
   .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
   .option('--max-payload <bytes>', 'WebSocket max message size in bytes (default: 1048576)')
@@ -223,6 +224,7 @@ program
       extraOverrides.discoveryInterval = Number.isNaN(parsed) ? options.discoveryInterval : parsed
     }
     if (options.auth === false) extraOverrides.noAuth = true
+    if (options.discovery === false) extraOverrides.noDiscovery = true
 
     const config = loadAndMergeConfig(options, extraOverrides)
 
@@ -698,6 +700,157 @@ program
       if (lockAcquired) {
         try { unlinkSync(LOCK_FILE) } catch {}
       }
+    }
+  })
+
+/**
+ * chroxy sessions — List saved sessions with conversation IDs
+ *
+ * Reads ~/.chroxy/session-state.json directly (works when server is stopped).
+ * Shows each session with name, cwd, conversation ID, and resume command.
+ */
+program
+  .command('sessions')
+  .description('List saved sessions with conversation IDs for terminal handoff')
+  .action(() => {
+    const stateFile = join(CONFIG_DIR, 'session-state.json')
+
+    if (!existsSync(stateFile)) {
+      console.log('\nNo saved sessions found.')
+      console.log('Sessions are saved when the server runs.\n')
+      process.exit(0)
+    }
+
+    let state
+    try {
+      state = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    } catch (err) {
+      console.error(`Failed to read session state: ${err.message}`)
+      process.exit(1)
+    }
+
+    if (!Array.isArray(state.sessions) || state.sessions.length === 0) {
+      console.log('\nNo saved sessions.\n')
+      process.exit(0)
+    }
+
+    console.log(`\nSaved Sessions (${state.sessions.length})\n`)
+
+    for (const session of state.sessions) {
+      const convId = session.conversationId || session.sdkSessionId || null
+      console.log(`  ${session.name}`)
+      console.log(`    cwd: ${session.cwd}`)
+      if (convId) {
+        console.log(`    conversation: ${convId}`)
+        console.log(`    resume: claude --resume ${convId}`)
+      } else {
+        console.log(`    conversation: (none — no messages sent yet)`)
+      }
+      console.log('')
+    }
+
+    if (state.timestamp) {
+      const age = Math.round((Date.now() - state.timestamp) / 60000)
+      console.log(`  Last saved: ${age} minute(s) ago\n`)
+    }
+  })
+
+/**
+ * chroxy resume — Resume a Chroxy session in your terminal
+ *
+ * Reads session state, picks the session, and launches `claude --resume <id>`
+ * directly in your terminal. One command to hand off from phone to terminal.
+ */
+program
+  .command('resume')
+  .description('Resume a Chroxy session in your terminal')
+  .argument('[session]', 'Session name or number (default: most recent)')
+  .option('--skip-permissions', 'Add --dangerously-skip-permissions to claude')
+  .action(async (sessionArg, options) => {
+    const { execFileSync } = await import('child_process')
+    const stateFile = join(CONFIG_DIR, 'session-state.json')
+
+    if (!existsSync(stateFile)) {
+      console.error('No saved sessions found. Start the server first.')
+      process.exit(1)
+    }
+
+    let state
+    try {
+      state = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    } catch (err) {
+      console.error(`Failed to read session state: ${err.message}`)
+      process.exit(1)
+    }
+
+    if (!Array.isArray(state.sessions) || state.sessions.length === 0) {
+      console.error('No saved sessions.')
+      process.exit(1)
+    }
+
+    // Find sessions with conversation IDs
+    const resumable = state.sessions
+      .map((s, i) => ({ ...s, index: i, convId: s.conversationId || s.sdkSessionId }))
+      .filter(s => s.convId)
+
+    if (resumable.length === 0) {
+      console.error('No sessions have conversation IDs yet. Send a message first.')
+      process.exit(1)
+    }
+
+    let target
+    if (sessionArg) {
+      // Match by name (case-insensitive) or by 1-based number
+      const num = parseInt(sessionArg, 10)
+      if (!isNaN(num) && num >= 1 && num <= resumable.length) {
+        target = resumable[num - 1]
+      } else {
+        target = resumable.find(s => s.name.toLowerCase() === sessionArg.toLowerCase())
+      }
+      if (!target) {
+        console.error(`Session "${sessionArg}" not found. Available:`)
+        resumable.forEach((s, i) => console.error(`  ${i + 1}. ${s.name}`))
+        process.exit(1)
+      }
+    } else if (resumable.length === 1) {
+      target = resumable[0]
+    } else {
+      // Multiple sessions — show picker
+      const readline = await import('readline')
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+      console.log('\nAvailable sessions:\n')
+      resumable.forEach((s, i) => {
+        console.log(`  ${i + 1}. ${s.name} (${s.cwd})`)
+      })
+      const answer = await new Promise(resolve => {
+        rl.question(`\nPick session [1]: `, resolve)
+      })
+      rl.close()
+      const pick = parseInt(answer, 10) || 1
+      if (pick < 1 || pick > resumable.length) {
+        console.error('Invalid selection.')
+        process.exit(1)
+      }
+      target = resumable[pick - 1]
+    }
+
+    console.log(`\nResuming "${target.name}" in ${target.cwd}`)
+    console.log(`Conversation: ${target.convId}\n`)
+
+    const args = ['--resume', target.convId]
+    if (options.skipPermissions) {
+      args.push('--dangerously-skip-permissions')
+    }
+
+    try {
+      execFileSync('claude', args, {
+        stdio: 'inherit',
+        cwd: target.cwd,
+      })
+    } catch (err) {
+      // claude exiting with non-zero is normal (user Ctrl+C, etc.)
+      if (err.status != null) process.exit(err.status)
+      throw err
     }
   })
 
