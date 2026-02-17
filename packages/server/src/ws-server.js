@@ -636,7 +636,7 @@ export class WsServer {
           if (!text || !text.trim()) break
           console.log(`[ws] Message from ${client.id} to session ${client.activeSessionId}: "${text.slice(0, 80)}"`)
           // Record user input in history so it survives reconnect replay
-          this.sessionManager._recordHistory(client.activeSessionId, 'message', {
+          if (this.sessionManager._recordHistory) this.sessionManager._recordHistory(client.activeSessionId, 'message', {
             type: 'user_input',
             content: text.trim(),
             timestamp: Date.now(),
