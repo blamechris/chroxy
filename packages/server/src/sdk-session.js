@@ -416,6 +416,11 @@ export class SdkSession extends EventEmitter {
   /**
    * Resolve a pending permission request (called by WsServer when
    * the app sends permission_response).
+   *
+   * Note: Claude does NOT see the user's allow/deny decision directly.
+   * The SDK invokes the tool (or skips it) based on the decision, and
+   * Claude only sees the tool's result (or an error if denied). This
+   * is why Claude doesn't explicitly acknowledge "thanks for approving".
    */
   respondToPermission(requestId, decision) {
     const pending = this._pendingPermissions.get(requestId)

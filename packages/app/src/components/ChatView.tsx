@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import { ChatMessage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
-import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOSE } from '../constants/icons';
+import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOSE, ICON_CHECK } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 
@@ -477,6 +477,64 @@ function PermissionCountdown({ expiresAt, onExpire }: { expiresAt: number; onExp
   );
 }
 
+// -- Permission summary for compact pill --
+
+function getPermissionSummary(tool?: string, toolInput?: Record<string, unknown>): string {
+  if (!tool) return 'Permission';
+  const name = tool.toLowerCase();
+  if (name === 'bash' && typeof toolInput?.command === 'string') {
+    const cmd = toolInput.command.length > 40
+      ? toolInput.command.slice(0, 40) + '...'
+      : toolInput.command;
+    return `Bash(${cmd})`;
+  }
+  if ((name === 'edit' || name === 'write' || name === 'read') && typeof toolInput?.file_path === 'string') {
+    const parts = (toolInput.file_path as string).split('/');
+    return `${tool}(${parts[parts.length - 1]})`;
+  }
+  if ((name === 'glob' || name === 'grep') && typeof toolInput?.pattern === 'string') {
+    return `${tool}(${toolInput.pattern})`;
+  }
+  return tool;
+}
+
+// -- Compact permission pill for answered prompts --
+
+function PermissionPill({ message, onExpand }: {
+  message: ChatMessage;
+  onExpand: () => void;
+}) {
+  const answer = message.answered || '';
+  const isAllowed = answer === 'allow' || answer === 'allowAlways';
+  const isDenied = answer === 'deny';
+  const summary = getPermissionSummary(message.tool, message.toolInput);
+
+  const pillStyle = isAllowed
+    ? styles.permissionPillAllowed
+    : isDenied
+      ? styles.permissionPillDenied
+      : styles.permissionPillResolved;
+  const textStyle = isAllowed
+    ? styles.permissionPillTextAllowed
+    : isDenied
+      ? styles.permissionPillTextDenied
+      : styles.permissionPillTextResolved;
+  const icon = isAllowed ? ICON_CHECK : isDenied ? ICON_CLOSE : ICON_CHECK;
+  const label = isAllowed ? 'Allowed' : isDenied ? 'Denied' : 'Resolved';
+
+  return (
+    <TouchableOpacity
+      onPress={onExpand}
+      activeOpacity={0.7}
+      style={[styles.permissionPill, pillStyle]}
+      accessibilityRole="button"
+      accessibilityLabel={`${label}: ${summary}. Tap to expand.`}
+    >
+      <Text style={textStyle}>{icon} {label}: {summary}</Text>
+    </TouchableOpacity>
+  );
+}
+
 // -- Single message bubble --
 
 function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress, onOpenDetail }: {
@@ -492,12 +550,17 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   const [isExpired, setIsExpired] = useState(() =>
     message.expiresAt != null && message.expiresAt <= Date.now()
   );
+  const [permissionExpanded, setPermissionExpanded] = useState(false);
   const isUser = message.type === 'user_input';
   const isTool = message.type === 'tool_use';
   const isThinking = message.type === 'thinking';
   const isPrompt = message.type === 'prompt';
   const isError = message.type === 'error';
   const isSystem = message.type === 'system';
+
+  // Answered permission prompts (with requestId) collapse to a compact pill.
+  // user_question prompts (no requestId) are NOT collapsed.
+  const showAsPill = isPrompt && message.requestId && message.answered && !permissionExpanded;
 
   const handlePress = () => {
     if (longPressedRef.current) {
@@ -524,6 +587,18 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
         isSelecting={isSelecting}
         onToggleSelection={onPress}
         onOpenDetail={onOpenDetail}
+      />
+    );
+  }
+
+  if (showAsPill) {
+    return (
+      <PermissionPill
+        message={message}
+        onExpand={() => {
+          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+          setPermissionExpanded(true);
+        }}
       />
     );
   }
@@ -578,6 +653,22 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
             );
           })}
         </View>
+      )}
+      {isPrompt && message.requestId && message.answered && permissionExpanded && (
+        <Text style={styles.permissionInfoNote}>
+          Claude sees the tool result, not your approval decision.
+        </Text>
+      )}
+      {isPrompt && message.requestId && message.answered && permissionExpanded && (
+        <TouchableOpacity
+          onPress={() => {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            setPermissionExpanded(false);
+          }}
+          style={styles.collapseLink}
+        >
+          <Text style={styles.collapseLinkText}>Collapse</Text>
+        </TouchableOpacity>
       )}
     </TouchableOpacity>
   );
@@ -1229,5 +1320,58 @@ const styles = StyleSheet.create({
     color: COLORS.accentGreen,
     fontSize: 14,
     fontWeight: '600',
+  },
+  // -- Permission pill (collapsed answered prompts) --
+  permissionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginBottom: 8,
+    minHeight: 44,
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+  },
+  permissionPillAllowed: {
+    backgroundColor: COLORS.accentGreenLight,
+    borderColor: COLORS.accentGreenBorder,
+  },
+  permissionPillDenied: {
+    backgroundColor: COLORS.accentRedLight,
+    borderColor: COLORS.accentRedBorder,
+  },
+  permissionPillResolved: {
+    backgroundColor: COLORS.accentGrayLight,
+    borderColor: COLORS.accentGrayBorder,
+  },
+  permissionPillTextAllowed: {
+    color: COLORS.accentGreen,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  permissionPillTextDenied: {
+    color: COLORS.accentRed,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  permissionPillTextResolved: {
+    color: COLORS.accentGray,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  collapseLink: {
+    marginTop: 8,
+    alignSelf: 'flex-end',
+  },
+  collapseLinkText: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+  },
+  permissionInfoNote: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontStyle: 'italic',
+    marginTop: 8,
   },
 });

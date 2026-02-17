@@ -477,6 +477,12 @@ let _isSessionSwitchReplay = false;
 // Track user-initiated switch_session so we can distinguish it from auth-triggered session_switched
 let _pendingSwitchSessionId: string | null = null;
 
+// Permission boundary message splitting (#554):
+// When a permission_request arrives mid-stream, we split the response so
+// post-permission text becomes a new bubble.
+const _postPermissionSplits = new Set<string>(); // messageIds split at permission boundary
+const _deltaIdRemaps = new Map<string, string>(); // original messageId → new post-permission messageId
+
 // Terminal write batching: coalesce rapid writes into single injectJavaScript calls (~20/sec max)
 let _pendingTerminalWrites = '';
 let _terminalWriteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -981,9 +987,40 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       // Batch deltas — accumulate and flush to state periodically.
       // Use server-provided sessionId so deltas route to the correct session
       // even for background (non-active) sessions.
-      const deltaId = msg.messageId as string;
-      const existingDelta = pendingDeltas.get(deltaId);
+      let deltaId = msg.messageId as string;
       const capturedSessionId = (msg.sessionId as string) || get().activeSessionId;
+
+      // Permission boundary split: first delta after a split creates a new message
+      if (_postPermissionSplits.has(deltaId)) {
+        _postPermissionSplits.delete(deltaId);
+        const newId = `${deltaId}-post-${Date.now()}`;
+        _deltaIdRemaps.set(deltaId, newId);
+        // Create the new response message and set it as streaming target
+        const newMsg: ChatMessage = {
+          id: newId,
+          type: 'response',
+          content: '',
+          timestamp: Date.now(),
+        };
+        const targetId = capturedSessionId;
+        if (targetId && get().sessionStates[targetId]) {
+          updateSession(targetId, (ss) => ({
+            streamingMessageId: newId,
+            messages: [...ss.messages, newMsg],
+          }));
+        } else {
+          set((state: ConnectionState) => ({
+            streamingMessageId: newId,
+            messages: [...state.messages, newMsg],
+          }));
+        }
+        deltaId = newId;
+      } else if (_deltaIdRemaps.has(deltaId)) {
+        // Subsequent deltas for a remapped message route to the new ID
+        deltaId = _deltaIdRemaps.get(deltaId)!;
+      }
+
+      const existingDelta = pendingDeltas.get(deltaId);
       pendingDeltas.set(deltaId, {
         sessionId: capturedSessionId,
         delta: (existingDelta?.delta || '') + (msg.delta as string),
@@ -1000,6 +1037,9 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         clearTimeout(deltaFlushTimer);
       }
       flushPendingDeltas();
+      // Clean up permission boundary split tracking
+      _postPermissionSplits.delete(msg.messageId as string);
+      _deltaIdRemaps.delete(msg.messageId as string);
       {
         const targetId = (msg.sessionId as string) || get().activeSessionId;
         if (targetId && get().sessionStates[targetId]) {
@@ -1256,6 +1296,30 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       break;
 
     case 'permission_request': {
+      // Split streaming response at permission boundary (#554):
+      // If we're mid-stream, flush pending deltas and mark the message for split
+      // so post-permission text becomes a new bubble.
+      {
+        const permTargetId = (msg.sessionId as string) || get().activeSessionId;
+        const currentStreamId = permTargetId && get().sessionStates[permTargetId]
+          ? get().sessionStates[permTargetId].streamingMessageId
+          : get().streamingMessageId;
+        if (currentStreamId && currentStreamId !== 'pending') {
+          // Flush any buffered deltas for the current message
+          if (deltaFlushTimer) {
+            clearTimeout(deltaFlushTimer);
+          }
+          flushPendingDeltas();
+          // Mark for split — next delta for this messageId creates a new bubble
+          _postPermissionSplits.add(currentStreamId);
+          // Clear streaming state so the permission card isn't appended mid-stream
+          if (permTargetId && get().sessionStates[permTargetId]) {
+            updateSession(permTargetId, () => ({ streamingMessageId: null }));
+          } else {
+            set({ streamingMessageId: null });
+          }
+        }
+      }
       const permMsg: ChatMessage = {
         id: nextMessageId('perm'),
         type: 'prompt',
@@ -1844,6 +1908,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       deltaFlushTimer = null;
     }
     pendingDeltas.clear();
+    // Clear permission boundary split tracking
+    _postPermissionSplits.clear();
+    _deltaIdRemaps.clear();
     // Clear terminal write batching
     if (_terminalWriteTimer) {
       clearTimeout(_terminalWriteTimer);
