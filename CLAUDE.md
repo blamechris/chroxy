@@ -174,28 +174,49 @@ For component tables, WS protocol messages, data flow diagrams, and file listing
 ## Dev Commands
 
 ```bash
-# From project root:
-
 # Server (use Node 22!)
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run server:dev
 
-# App (iOS)
-npm run app:ios
-
-# App (Android)
-npm run app:android
-
-# Or from individual packages:
-
-# Server (packages/server/)
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dev
-
-# App (packages/app/) — requires dev build (native modules)
-npx expo run:ios    # or npx expo run:android
+# App — start Metro dev server (from packages/app/)
+npx expo start
 
 # Test client (validate server without mobile app)
 node packages/server/src/test-client.js wss://your-url
 ```
+
+### App Dev Builds (EAS)
+
+The app requires a **custom dev build** (not Expo Go) because `expo-speech-recognition` and `expo-secure-store` include native code. Dev builds are configured via `eas.json` and built in the cloud with [EAS Build](https://expo.dev/eas).
+
+**One-time setup:**
+```bash
+npm install -g eas-cli
+eas login                    # create account at expo.dev if needed
+cd packages/app
+eas build:configure          # already done — created eas.json
+```
+
+**Building the dev client:**
+```bash
+# Build for Android (or --platform ios, or --platform all)
+eas build --profile development --platform android
+```
+
+This uploads to EAS cloud, builds (~10-15 min), and provides a download URL/QR code. Install the APK on your phone. The dev client app ("Chroxy") replaces Expo Go.
+
+**Only rebuild when native dependencies change** (new native modules, SDK upgrades). For normal code changes (components, hooks, styles), hot reload works instantly — same as Expo Go.
+
+**Daily development workflows:**
+
+| Scenario | Command | Notes |
+|----------|---------|-------|
+| Developing at home | `npx expo start` | LAN mode, phone + Mac on same wifi, hot reload |
+| Testing on the go | `eas build --profile preview` | Standalone APK with bundled JS, no Metro needed |
+| Local emulator | `npx expo run:android` or `npx expo run:ios` | Requires local SDK, builds locally |
+
+**Known issues:**
+- `npx expo start --tunnel` fails on Android (ngrok URL triggers `IDN.toASCII` SSL error). Use LAN mode or preview builds instead.
+- First time opening the dev client, enter the Metro URL shown in terminal (e.g., `exp://192.168.x.x:8081`).
 
 ## UI Verification with Maestro
 
