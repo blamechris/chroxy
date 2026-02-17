@@ -651,6 +651,9 @@ export function ChatView({
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string } | null>(null);
 
+  // Pause auto-scroll when an unanswered prompt is visible — user needs to read context
+  const hasUnansweredPrompt = messages.some((m) => m.type === 'prompt' && !m.answered);
+
   // Auto-scroll when plan approval card appears
   useEffect(() => {
     if (isPlanPending && !isSelectingRef.current) {
@@ -699,7 +702,7 @@ export function ChatView({
         style={styles.scrollView}
         contentContainerStyle={styles.chatContent}
         onContentSizeChange={() => {
-          if (!isSelectingRef.current) scrollViewRef.current?.scrollToEnd();
+          if (!isSelectingRef.current && !hasUnansweredPrompt) scrollViewRef.current?.scrollToEnd();
         }}
         onScroll={handleScroll}
         scrollEventThrottle={16}
