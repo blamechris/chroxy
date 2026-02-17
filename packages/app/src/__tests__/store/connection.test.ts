@@ -1047,3 +1047,189 @@ describe('resize store action', () => {
     useConnectionStore.getState().resize(80, 24);
   });
 });
+
+// -- Permission boundary splitting --
+
+describe('permission boundary splitting', () => {
+  const mockSocket = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    // Clear module-level split state via disconnect (resets _postPermissionSplits,
+    // _deltaIdRemaps, pendingDeltas, deltaFlushTimer)
+    useConnectionStore.getState().disconnect();
+    useConnectionStore.setState({
+      messages: [],
+      streamingMessageId: null,
+      connectionPhase: 'disconnected',
+    });
+    (mockSocket.send as jest.Mock).mockClear();
+    (mockSocket.close as jest.Mock).mockClear();
+    _testMessageHandler.setContext({
+      url: 'wss://test', token: 'tok', isReconnect: false,
+      silent: false, socket: mockSocket,
+    });
+  });
+
+  afterEach(() => {
+    _testMessageHandler.clearContext();
+    jest.useRealTimers();
+  });
+
+  it('flushes pending deltas and splits on permission_request mid-stream', () => {
+    // Start a stream
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'srv-1' });
+    expect(useConnectionStore.getState().streamingMessageId).toBe('srv-1');
+
+    // Send a delta (buffered, not yet flushed)
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'Hello ' });
+
+    // Permission request arrives mid-stream — should flush buffered deltas
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'req-1',
+      tool: 'Write', description: 'Write to file',
+    });
+
+    // streamingMessageId should be cleared
+    expect(useConnectionStore.getState().streamingMessageId).toBeNull();
+
+    // The buffered delta should have been flushed (the response message has content)
+    const msgs = useConnectionStore.getState().messages;
+    const response = msgs.find((m) => m.id === 'srv-1');
+    expect(response).toBeDefined();
+    expect(response!.content).toBe('Hello ');
+
+    // Permission prompt should be present
+    const perm = msgs.find((m) => m.type === 'prompt');
+    expect(perm).toBeDefined();
+    expect(perm!.requestId).toBe('req-1');
+  });
+
+  it('creates a new message on first post-permission delta', () => {
+    // Start stream, send delta, flush it, then permission
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'srv-1' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'Before' });
+    jest.advanceTimersByTime(200); // flush
+
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'req-1',
+      tool: 'Write', description: 'Write file',
+    });
+
+    // First delta after permission should create a new message
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'After' });
+    jest.advanceTimersByTime(200); // flush
+
+    const msgs = useConnectionStore.getState().messages;
+
+    // Should have: original response, permission prompt, new response
+    const responses = msgs.filter((m) => m.type === 'response');
+    expect(responses).toHaveLength(2);
+    expect(responses[0].id).toBe('srv-1');
+    expect(responses[0].content).toBe('Before');
+    expect(responses[1].id).toMatch(/^srv-1-post-/);
+    expect(responses[1].content).toBe('After');
+
+    // streamingMessageId should point to the new message
+    expect(useConnectionStore.getState().streamingMessageId).toBe(responses[1].id);
+  });
+
+  it('remaps subsequent deltas to the new post-permission message', () => {
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'srv-1' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'X' });
+    jest.advanceTimersByTime(200);
+
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'req-1',
+      tool: 'Read', description: 'Read file',
+    });
+
+    // First post-permission delta creates new message
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'A' });
+    jest.advanceTimersByTime(200);
+
+    // Subsequent delta should be remapped to the same new message
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'B' });
+    jest.advanceTimersByTime(200);
+
+    const msgs = useConnectionStore.getState().messages;
+    const postPermResponse = msgs.filter((m) => m.type === 'response')[1];
+    expect(postPermResponse.content).toBe('AB');
+  });
+
+  it('handles multiple permission splits in the same stream', () => {
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'srv-1' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'Part1' });
+    jest.advanceTimersByTime(200);
+
+    // First permission
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'req-1',
+      tool: 'Write', description: 'Write file 1',
+    });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'Part2' });
+    jest.advanceTimersByTime(200);
+
+    // Second permission
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'req-2',
+      tool: 'Write', description: 'Write file 2',
+    });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'Part3' });
+    jest.advanceTimersByTime(200);
+
+    const msgs = useConnectionStore.getState().messages;
+    const responses = msgs.filter((m) => m.type === 'response');
+    expect(responses).toHaveLength(3);
+    expect(responses[0].content).toBe('Part1');
+    expect(responses[1].content).toBe('Part2');
+    expect(responses[2].content).toBe('Part3');
+
+    const prompts = msgs.filter((m) => m.type === 'prompt');
+    expect(prompts).toHaveLength(2);
+  });
+
+  it('cleans up split state on stream_end', () => {
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'srv-1' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'text' });
+    jest.advanceTimersByTime(200);
+
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'req-1',
+      tool: 'Write', description: 'Write',
+    });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'more' });
+    jest.advanceTimersByTime(200);
+
+    // stream_end should clean up
+    _testMessageHandler.handle({ type: 'stream_end', messageId: 'srv-1' });
+    expect(useConnectionStore.getState().streamingMessageId).toBeNull();
+
+    // Starting a new stream with the same messageId should not trigger a split
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'srv-1' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'fresh' });
+    jest.advanceTimersByTime(200);
+
+    // The original srv-1 message should be updated (not split)
+    const responses = useConnectionStore.getState().messages.filter((m) => m.type === 'response');
+    // Last response should have content appended (fresh is appended to existing)
+    const srv1 = responses.find((m) => m.id === 'srv-1');
+    expect(srv1).toBeDefined();
+    expect(srv1!.content).toContain('fresh');
+  });
+
+  it('cleans up split state on result (safety net)', () => {
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'srv-1' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'text' });
+    jest.advanceTimersByTime(200);
+
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'req-1',
+      tool: 'Write', description: 'Write',
+    });
+
+    // Result arrives without stream_end (missed stream_end scenario)
+    _testMessageHandler.handle({ type: 'result', cost: 0.01, duration: 100 });
+    expect(useConnectionStore.getState().streamingMessageId).toBeNull();
+  });
+});
