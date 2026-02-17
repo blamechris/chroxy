@@ -1364,6 +1364,8 @@ const styles = StyleSheet.create({
   collapseLink: {
     marginTop: 8,
     alignSelf: 'flex-end',
+    minHeight: 44,
+    justifyContent: 'center',
   },
   collapseLinkText: {
     color: COLORS.textMuted,

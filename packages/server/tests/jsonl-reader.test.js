@@ -8,6 +8,7 @@ import {
   resolveJsonlPath,
   getJsonlMtime,
   readConversationHistory,
+  readConversationHistoryAsync,
 } from '../src/jsonl-reader.js'
 
 describe('encodeProjectPath', () => {
@@ -450,5 +451,83 @@ describe('readConversationHistory', () => {
         teardown()
       }
     })
+  })
+})
+
+describe('readConversationHistoryAsync', () => {
+  let tempDir
+
+  function writeJsonl(filename, entries) {
+    const filePath = join(tempDir, filename)
+    const content = entries.map(e => JSON.stringify(e)).join('\n')
+    writeFileSync(filePath, content)
+    return filePath
+  }
+
+  function setup() {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-jsonl-async-'))
+  }
+
+  function teardown() {
+    rmSync(tempDir, { recursive: true, force: true })
+  }
+
+  it('returns empty array for nonexistent file', async () => {
+    const result = await readConversationHistoryAsync('/nonexistent/path/file.jsonl')
+    assert.deepEqual(result, [])
+  })
+
+  it('produces identical output to sync variant', async () => {
+    setup()
+    try {
+      const filePath = writeJsonl('test.jsonl', [
+        {
+          type: 'user',
+          uuid: 'u1',
+          timestamp: '2026-01-15T10:00:00.000Z',
+          message: { content: [{ type: 'text', text: 'Hello Claude' }] },
+        },
+        {
+          type: 'assistant',
+          uuid: 'a1',
+          timestamp: '2026-01-15T10:01:00.000Z',
+          message: {
+            content: [
+              { type: 'text', text: 'Hi there!' },
+              { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: '/tmp/x' } },
+            ],
+          },
+        },
+        { type: 'queue-operation', data: {} },
+      ])
+
+      const syncResult = readConversationHistory(filePath)
+      const asyncResult = await readConversationHistoryAsync(filePath)
+
+      assert.deepEqual(asyncResult, syncResult)
+      assert.equal(asyncResult.length, 3)
+      assert.equal(asyncResult[0].type, 'user_input')
+      assert.equal(asyncResult[1].type, 'response')
+      assert.equal(asyncResult[2].type, 'tool_use')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('handles malformed JSON lines', async () => {
+    setup()
+    try {
+      const filePath = join(tempDir, 'malformed.jsonl')
+      writeFileSync(filePath, [
+        '{"type":"user","uuid":"u1","message":{"content":[{"type":"text","text":"ok"}]}}',
+        'NOT JSON',
+        '{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"also ok"}]}}',
+      ].join('\n'))
+
+      const result = await readConversationHistoryAsync(filePath)
+      assert.equal(result.length, 2)
+    } finally {
+      teardown()
+    }
   })
 })

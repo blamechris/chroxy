@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from 'fs'
+import { readFile } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 
@@ -38,26 +39,10 @@ export function getJsonlMtime(filePath) {
 }
 
 /**
- * Read a Claude Code conversation JSONL file and convert entries to Chroxy's message format.
- *
- * JSONL entry types:
- *   - type: "user" with message.content[].type === "text" -> { type: 'user_input', content }
- *   - type: "assistant" with text blocks -> { type: 'response', content }
- *   - type: "assistant" with tool_use blocks -> { type: 'tool_use', tool, content }
- *   - type: "queue-operation", "file-history-snapshot" -> skipped
- *   - type: "user" with tool_result content -> skipped (displayed as part of tool flow)
- *
- * @param {string} filePath - Absolute path to the JSONL file
- * @returns {Array<{ type: string, content: string, tool?: string, timestamp: number, messageId?: string }>}
+ * Parse raw JSONL text into Chroxy message format.
+ * Shared by both sync and async readers.
  */
-export function readConversationHistory(filePath) {
-  let raw
-  try {
-    raw = readFileSync(filePath, 'utf-8')
-  } catch {
-    return []
-  }
-
+function parseJsonlContent(raw) {
   const lines = raw.split('\n').filter(Boolean)
   const messages = []
 
@@ -144,4 +129,46 @@ export function readConversationHistory(filePath) {
   }
 
   return messages
+}
+
+/**
+ * Read a Claude Code conversation JSONL file and convert entries to Chroxy's message format.
+ *
+ * JSONL entry types:
+ *   - type: "user" with message.content[].type === "text" -> { type: 'user_input', content }
+ *   - type: "assistant" with text blocks -> { type: 'response', content }
+ *   - type: "assistant" with tool_use blocks -> { type: 'tool_use', tool, content }
+ *   - type: "queue-operation", "file-history-snapshot" -> skipped
+ *   - type: "user" with tool_result content -> skipped (displayed as part of tool flow)
+ *
+ * @param {string} filePath - Absolute path to the JSONL file
+ * @returns {Array<{ type: string, content: string, tool?: string, timestamp: number, messageId?: string }>}
+ */
+export function readConversationHistory(filePath) {
+  let raw
+  try {
+    raw = readFileSync(filePath, 'utf-8')
+  } catch {
+    return []
+  }
+
+  return parseJsonlContent(raw)
+}
+
+/**
+ * Async variant of readConversationHistory.
+ * Uses fs.promises.readFile to avoid blocking the event loop for large JSONL files.
+ *
+ * @param {string} filePath - Absolute path to the JSONL file
+ * @returns {Promise<Array<{ type: string, content: string, tool?: string, timestamp: number, messageId?: string }>>}
+ */
+export async function readConversationHistoryAsync(filePath) {
+  let raw
+  try {
+    raw = await readFile(filePath, 'utf-8')
+  } catch {
+    return []
+  }
+
+  return parseJsonlContent(raw)
 }
