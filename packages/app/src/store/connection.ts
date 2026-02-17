@@ -1086,6 +1086,10 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         clearTimeout(deltaFlushTimer);
       }
       flushPendingDeltas();
+      // Clean up permission boundary split tracking (safety net for missed
+      // stream_end — prevents unbounded growth of remap state)
+      _postPermissionSplits.clear();
+      _deltaIdRemaps.clear();
       const usage = msg.usage as Record<string, number> | undefined;
       const resultPatch = {
         streamingMessageId: null as string | null,
