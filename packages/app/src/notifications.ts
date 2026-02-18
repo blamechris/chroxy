@@ -1,7 +1,7 @@
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
-import { Platform } from 'react-native';
+import { Alert, Platform } from 'react-native';
 import { useConnectionStore } from './store/connection';
 import { loadConnection } from './store/connection';
 
@@ -224,6 +224,10 @@ export function setupNotificationResponseListener(): Notifications.EventSubscrip
       useConnectionStore.getState().markPromptAnsweredByRequestId(requestId, decision);
     } else {
       console.warn(`[push] Permission ${requestId} could not be delivered — UI not updated`);
+      Alert.alert(
+        'Permission Response Failed',
+        'Could not deliver your response. Open the app to respond manually.',
+      );
     }
   });
 }
