@@ -138,7 +138,7 @@ export const COLORS = {
   /** Syntax: string literals */
   syntaxString: '#4eca6a',
   /** Syntax: comments */
-  syntaxComment: '#666666',
+  syntaxComment: '#7a7a7a',
   /** Syntax: numeric literals */
   syntaxNumber: '#ff9a52',
   /** Syntax: function names / calls */
