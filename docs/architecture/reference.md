@@ -100,7 +100,7 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 - `user_question` forwards `AskUserQuestion` prompts from plan mode; `user_question_response` sends the user's answer back
 - `agent_spawned` fires when the Task tool is detected (description truncated to 200 chars); `agent_completed` fires per-agent when the turn's `result` arrives or on process crash/destroy
 - `plan_started` fires on `EnterPlanMode` tool; `plan_ready` fires on `ExitPlanMode`, includes `allowedPrompts` payload — both are transient events (not recorded in history or replayed)
-- `key_exchange` implements ECDH key exchange for end-to-end encryption; after `auth_ok`, client and server exchange public keys, derive a shared secret, and encrypt all subsequent messages; `auth_ok` includes `encryption: true` when server supports encryption; disable with `--no-encrypt`
+- `key_exchange` implements ECDH key exchange for end-to-end encryption; after `auth_ok`, client and server exchange public keys, derive a shared secret, and encrypt all subsequent messages; `auth_ok` includes `encryption: 'required'` when encryption is enabled or `encryption: 'disabled'` when turned off; disable with `--no-encrypt`
 - `session_list` includes `provider` (provider name) and `capabilities` (feature flags from the provider adapter interface) per session
 - `auth` accepts optional `deviceInfo: { deviceId, deviceName, deviceType, platform }` for multi-client awareness
 - `auth_ok` includes `clientId` (assigned ID) and `connectedClients` (list of all connected clients)
