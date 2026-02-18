@@ -71,6 +71,11 @@ ws.on("message", (raw) => {
 
     case "key_exchange_ok":
       if (pendingKeyPair) {
+        if (typeof msg.publicKey !== "string") {
+          console.error("[crypto] Invalid key_exchange_ok message: missing or non-string publicKey");
+          ws.close();
+          process.exit(1);
+        }
         const sharedKey = deriveSharedKey(msg.publicKey, pendingKeyPair.secretKey);
         encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 };
         pendingKeyPair = null;

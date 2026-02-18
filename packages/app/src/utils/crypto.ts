@@ -36,7 +36,18 @@ export function createKeyPair(): KeyPair {
  * Derive a shared symmetric key from the other side's public key and our secret key.
  */
 export function deriveSharedKey(theirPubBase64: string, mySecretKey: Uint8Array): Uint8Array {
-  const theirPub = decodeBase64(theirPubBase64)
+  if (typeof theirPubBase64 !== 'string' || theirPubBase64.trim().length === 0) {
+    throw new Error('Invalid peer public key: expected a non-empty base64 string')
+  }
+  let theirPub: Uint8Array
+  try {
+    theirPub = decodeBase64(theirPubBase64)
+  } catch {
+    throw new Error('Invalid peer public key: not valid base64')
+  }
+  if (theirPub.length !== nacl.box.publicKeyLength) {
+    throw new Error(`Invalid peer public key: expected length ${nacl.box.publicKeyLength}, got ${theirPub.length}`)
+  }
   return nacl.box.before(theirPub, mySecretKey)
 }
 
@@ -73,6 +84,12 @@ export function encrypt(jsonString: string, sharedKey: Uint8Array, nonceCounter:
  * Decrypt an encrypted envelope and return the parsed JSON object.
  */
 export function decrypt(envelope: EncryptedEnvelope, sharedKey: Uint8Array, expectedNonce: number, direction: number): Record<string, unknown> {
+  if (typeof envelope.d !== 'string') {
+    throw new TypeError('decrypt: envelope.d must be a base64 string')
+  }
+  if (typeof envelope.n !== 'number') {
+    throw new TypeError('decrypt: envelope.n must be a number')
+  }
   if (envelope.n !== expectedNonce) {
     throw new Error(`Unexpected nonce: got ${envelope.n}, expected ${expectedNonce}`)
   }

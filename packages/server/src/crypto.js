@@ -21,7 +21,18 @@ export function createKeyPair() {
  * @returns {Uint8Array} 32-byte shared key
  */
 export function deriveSharedKey(theirPubBase64, mySecretKey) {
-  const theirPub = decodeBase64(theirPubBase64)
+  if (typeof theirPubBase64 !== 'string' || theirPubBase64.trim().length === 0) {
+    throw new TypeError('deriveSharedKey: theirPubBase64 must be a non-empty base64 string')
+  }
+  let theirPub
+  try {
+    theirPub = decodeBase64(theirPubBase64)
+  } catch (err) {
+    throw new Error('deriveSharedKey: failed to decode peer public key from base64')
+  }
+  if (!theirPub || theirPub.length !== nacl.box.publicKeyLength) {
+    throw new Error(`deriveSharedKey: invalid public key length (expected ${nacl.box.publicKeyLength} bytes)`)
+  }
   return nacl.box.before(theirPub, mySecretKey)
 }
 
@@ -78,6 +89,12 @@ export function encrypt(jsonString, sharedKey, nonceCounter, direction) {
  * @throws {Error} On tamper, wrong nonce, or decryption failure
  */
 export function decrypt(envelope, sharedKey, expectedNonce, direction) {
+  if (typeof envelope.d !== 'string') {
+    throw new TypeError('decrypt: envelope.d must be a base64 string')
+  }
+  if (typeof envelope.n !== 'number') {
+    throw new TypeError('decrypt: envelope.n must be a number')
+  }
   if (envelope.n !== expectedNonce) {
     throw new Error(`Unexpected nonce: got ${envelope.n}, expected ${expectedNonce}`)
   }

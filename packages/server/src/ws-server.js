@@ -391,6 +391,11 @@ export class WsServer {
         // Decrypt incoming encrypted messages
         const client = this.clients.get(ws)
         if (msg.type === 'encrypted' && client?.encryptionState) {
+          if (typeof msg.d !== 'string' || typeof msg.n !== 'number') {
+            console.error(`[ws] Invalid encrypted message envelope from ${client.id}`)
+            ws.close()
+            return
+          }
           try {
             msg = decrypt(msg, client.encryptionState.sharedKey, client.encryptionState.recvNonce, DIRECTION_CLIENT)
             client.encryptionState.recvNonce++
@@ -685,6 +690,16 @@ export class WsServer {
     if (client.encryptionPending) {
       if (msg.type === 'key_exchange') {
         clearTimeout(client._keyExchangeTimeout)
+        if (!msg.publicKey || typeof msg.publicKey !== 'string') {
+          console.warn(`[ws] Invalid key_exchange message from ${client.id}: missing or non-string publicKey`)
+          try {
+            ws.send(JSON.stringify({ type: 'error', error: 'Invalid key_exchange message: publicKey is required and must be a string' }))
+          } catch (err) {
+            console.error('[ws] Failed to send key_exchange error:', err.message)
+          }
+          ws.close(1008, 'Invalid key_exchange message')
+          return
+        }
         const serverKp = createKeyPair()
         const sharedKey = deriveSharedKey(msg.publicKey, serverKp.secretKey)
         client.encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 }

@@ -792,7 +792,14 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
 
     case 'key_exchange_ok': {
       if (_pendingKeyPair) {
-        const sharedKey = deriveSharedKey(msg.publicKey as string, _pendingKeyPair.secretKey);
+        if (!msg.publicKey || typeof msg.publicKey !== 'string') {
+          console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
+          ctx.socket.close();
+          set({ connectionPhase: 'disconnected', socket: null });
+          _pendingKeyPair = null;
+          break;
+        }
+        const sharedKey = deriveSharedKey(msg.publicKey, _pendingKeyPair.secretKey);
         _encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 };
         _pendingKeyPair = null;
         console.log('[crypto] E2E encryption established');
@@ -1923,6 +1930,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }
       // Decrypt incoming encrypted messages
       if (msg.type === 'encrypted' && _encryptionState) {
+        if (typeof msg.d !== 'string' || typeof msg.n !== 'number') {
+          console.error('[crypto] Invalid encrypted envelope structure:', msg);
+          socket.close();
+          return;
+        }
         try {
           msg = decrypt(msg as EncryptedEnvelope, _encryptionState.sharedKey, _encryptionState.recvNonce, DIRECTION_SERVER);
           _encryptionState.recvNonce++;
