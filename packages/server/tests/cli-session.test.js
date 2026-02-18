@@ -343,7 +343,7 @@ describe('CliSession agent tracking', () => {
     session._currentCtx = {
       hasStreamStarted: false, didStreamText: false,
       currentContentBlockType: null, currentToolName: null,
-      currentToolUseId: null, toolInputChunks: '', toolInputOverflow: false,
+      currentToolUseId: null, toolInputChunks: '', toolInputBytes: 0, toolInputOverflow: false,
     }
 
     const spawned = []
@@ -384,7 +384,7 @@ describe('CliSession agent tracking', () => {
     session._currentCtx = {
       hasStreamStarted: false, didStreamText: false,
       currentContentBlockType: null, currentToolName: null,
-      currentToolUseId: null, toolInputChunks: '', toolInputOverflow: false,
+      currentToolUseId: null, toolInputChunks: '', toolInputBytes: 0, toolInputOverflow: false,
     }
 
     const spawned = []
@@ -425,7 +425,7 @@ describe('CliSession plan mode', () => {
     session._currentCtx = {
       hasStreamStarted: false, didStreamText: false,
       currentContentBlockType: null, currentToolName: null,
-      currentToolUseId: null, toolInputChunks: '', toolInputOverflow: false,
+      currentToolUseId: null, toolInputChunks: '', toolInputBytes: 0, toolInputOverflow: false,
     }
     return session
   }

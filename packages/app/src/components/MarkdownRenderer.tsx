@@ -2,6 +2,8 @@ import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, Platform, Linking, StyleProp, TextStyle, ScrollView } from 'react-native';
 import { ICON_BULLET, ICON_CHECKBOX_CHECKED, ICON_CHECKBOX_UNCHECKED } from '../constants/icons';
 import { COLORS } from '../constants/colors';
+import { tokenize, SYNTAX_COLORS } from '../utils/syntax';
+import type { TokenType } from '../utils/syntax';
 
 
 // -- Constants --
@@ -534,6 +536,37 @@ export function FormattedTextBlock({ text, keyBase, messageTextStyle }: { text: 
   );
 }
 
+/** Pre-built StyleSheet for syntax token colors — avoids creating inline style objects on every render. */
+const syntaxStyles = StyleSheet.create(
+  (Object.keys(SYNTAX_COLORS) as TokenType[]).reduce<Record<string, TextStyle>>(
+    (acc, type) => {
+      acc[type] = { color: SYNTAX_COLORS[type] };
+      return acc;
+    },
+    {},
+  ),
+);
+
+/** Syntax-highlighted code block. Memoized on code+language. Falls back to plain monochrome. */
+const HighlightedCode = React.memo(({ code, language }: { code: string; language: string }) => {
+  const tokens = useMemo(() => tokenize(code, language), [code, language]);
+
+  // Fast path: single plain token — render as before, no extra <Text> wrappers
+  if (tokens.length === 1 && tokens[0].type === 'plain') {
+    return <Text selectable style={md.codeText}>{code}</Text>;
+  }
+
+  return (
+    <Text selectable style={md.codeText}>
+      {tokens.map((token, i) => (
+        <Text key={i} style={syntaxStyles[token.type]}>
+          {token.text}
+        </Text>
+      ))}
+    </Text>
+  );
+});
+
 /** Formatted response -- renders Claude's markdown as styled blocks.
  *
  *  `messageTextStyle` is threaded through to FormattedTextBlock so the
@@ -550,7 +583,7 @@ export function FormattedResponse({ content, messageTextStyle }: { content: stri
           return (
             <View key={`b${i}`} style={md.codeBlock}>
               {block.lang ? <Text style={md.codeLang}>{block.lang}</Text> : null}
-              <Text selectable style={md.codeText}>{block.content}</Text>
+              <HighlightedCode code={block.content} language={block.lang} />
             </View>
           );
         }
