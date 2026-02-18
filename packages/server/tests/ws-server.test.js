@@ -1,7 +1,14 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { once, EventEmitter } from 'node:events'
-import { WsServer } from '../src/ws-server.js'
+import { WsServer as _WsServer } from '../src/ws-server.js'
+
+// Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
+class WsServer extends _WsServer {
+  constructor(opts = {}) {
+    super({ noEncrypt: true, ...opts })
+  }
+}
 import WebSocket from 'ws'
 
 

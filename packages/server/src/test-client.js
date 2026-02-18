@@ -1,23 +1,40 @@
 /**
  * Quick test client — connect to the server from your terminal.
- * Usage: node src/test-client.js wss://your-cloudflare-url
+ * Usage: node src/test-client.js wss://your-cloudflare-url [--no-encrypt]
  *
  * This lets you validate the server works before building the mobile app.
  */
 import WebSocket from "ws";
 import readline from "readline";
 import "dotenv/config";
+import { createKeyPair, deriveSharedKey, encrypt, decrypt } from "./crypto.js";
 
 const url = process.argv[2];
 const token = process.env.API_TOKEN;
+const noEncrypt = process.argv.includes("--no-encrypt");
 
 if (!url) {
-  console.error("Usage: node src/test-client.js <wss://url>");
+  console.error("Usage: node src/test-client.js <wss://url> [--no-encrypt]");
   process.exit(1);
 }
 
 const ws = new WebSocket(url);
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+/** E2E encryption state */
+let encryptionState = null;
+let pendingKeyPair = null;
+
+/** Send a message, encrypting if E2E is active */
+function wsSend(payload) {
+  if (encryptionState) {
+    const envelope = encrypt(JSON.stringify(payload), encryptionState.sharedKey, encryptionState.sendNonce);
+    encryptionState.sendNonce++;
+    ws.send(JSON.stringify(envelope));
+  } else {
+    ws.send(JSON.stringify(payload));
+  }
+}
 
 ws.on("open", () => {
   console.log("[connected] Authenticating...");
@@ -25,13 +42,42 @@ ws.on("open", () => {
 });
 
 ws.on("message", (raw) => {
-  const msg = JSON.parse(raw.toString());
+  let msg = JSON.parse(raw.toString());
+
+  // Decrypt incoming encrypted messages
+  if (msg.type === "encrypted" && encryptionState) {
+    try {
+      msg = decrypt(msg, encryptionState.sharedKey, encryptionState.recvNonce);
+      encryptionState.recvNonce++;
+    } catch (err) {
+      console.error("[crypto] Decryption failed:", err.message);
+      ws.close();
+      return;
+    }
+  }
 
   switch (msg.type) {
     case "auth_ok":
-      console.log("[authenticated] Switching to terminal mode. Type to interact.\n");
-      // Start in terminal mode to see raw output
-      ws.send(JSON.stringify({ type: "mode", mode: "terminal" }));
+      console.log("[authenticated]", msg.encryption === "required" ? "E2E encryption required" : "No encryption");
+      if (msg.encryption === "required" && !noEncrypt) {
+        pendingKeyPair = createKeyPair();
+        ws.send(JSON.stringify({ type: "key_exchange", publicKey: pendingKeyPair.publicKey }));
+        console.log("[crypto] Key exchange initiated...");
+      } else {
+        console.log("Switching to terminal mode. Type to interact.\n");
+        wsSend({ type: "mode", mode: "terminal" });
+      }
+      break;
+
+    case "key_exchange_ok":
+      if (pendingKeyPair) {
+        const sharedKey = deriveSharedKey(msg.publicKey, pendingKeyPair.secretKey);
+        encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 };
+        pendingKeyPair = null;
+        console.log("[crypto] E2E encryption established");
+        console.log("Switching to terminal mode. Type to interact.\n");
+        wsSend({ type: "mode", mode: "terminal" });
+      }
       break;
 
     case "auth_fail":
@@ -59,7 +105,7 @@ ws.on("message", (raw) => {
 process.stdin.setRawMode?.(true);
 process.stdin.resume();
 process.stdin.on("data", (data) => {
-  ws.send(JSON.stringify({ type: "input", data: data.toString() }));
+  wsSend({ type: "input", data: data.toString() });
 });
 
 ws.on("close", () => {

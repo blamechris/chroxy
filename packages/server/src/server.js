@@ -82,6 +82,7 @@ export async function startServer(config) {
     apiToken: API_TOKEN,
     ptyManager,
     outputParser,
+    noEncrypt: config.noEncrypt,
   });
   wsServer.start();
 

@@ -3,6 +3,15 @@ import { Alert, AppState, Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as Device from 'expo-device';
 import { registerForPushNotifications } from '../notifications';
+import {
+  createKeyPair,
+  deriveSharedKey,
+  encrypt,
+  decrypt,
+  type EncryptionState,
+  type KeyPair,
+  type EncryptedEnvelope,
+} from '../utils/crypto';
 
 const STORAGE_KEY_URL = 'chroxy_last_url';
 const STORAGE_KEY_TOKEN = 'chroxy_last_token';
@@ -12,6 +21,25 @@ const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 const AUTO_RECONNECT_DELAY = 1500;
 /** Delay before reconnecting after a WebSocket error (ms) */
 const ERROR_RECONNECT_DELAY = 2000;
+
+/** E2E encryption state — reset on every new connection */
+let _encryptionState: EncryptionState | null = null;
+/** Pending keypair during key exchange (before shared key is derived) */
+let _pendingKeyPair: KeyPair | null = null;
+
+/**
+ * Send a JSON message over WebSocket, encrypting if E2E encryption is active.
+ * Use this instead of raw `socket.send(JSON.stringify(...))`.
+ */
+function wsSend(socket: WebSocket, payload: Record<string, unknown>): void {
+  if (_encryptionState) {
+    const envelope = encrypt(JSON.stringify(payload), _encryptionState.sharedKey, _encryptionState.sendNonce);
+    _encryptionState.sendNonce++;
+    socket.send(JSON.stringify(envelope));
+  } else {
+    socket.send(JSON.stringify(payload));
+  }
+}
 
 /** Strip ANSI escape codes for plain text display */
 export function stripAnsi(str: string): string {
@@ -32,7 +60,7 @@ async function registerPushToken(socket: WebSocket): Promise<void> {
   try {
     const token = await registerForPushNotifications();
     if (token && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'register_push_token', token }));
+      wsSend(socket, { type: 'register_push_token', token });
       console.log('[push] Registered push token with server');
     }
   } catch (err) {
@@ -560,7 +588,7 @@ function drainMessageQueue(socket: WebSocket) {
   console.log(`[queue] Draining ${valid.length} queued message(s)`);
   for (const m of valid) {
     try {
-      socket.send(JSON.stringify(m.payload));
+      wsSend(socket, m.payload as Record<string, unknown>);
     } catch (err) {
       console.warn(`[queue] Failed to send queued ${m.type}:`, err);
     }
@@ -740,16 +768,37 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
           customAgents: [],
         });
       }
-      ctx.socket.send(JSON.stringify({ type: 'mode', mode: get().viewMode }));
-      // Fetch slash commands for autocomplete
-      ctx.socket.send(JSON.stringify({ type: 'list_slash_commands' }));
-      // Fetch custom agents for agent browser
-      ctx.socket.send(JSON.stringify({ type: 'list_agents' }));
+      // Initiate key exchange if server requires encryption
+      if (msg.encryption === 'required') {
+        _pendingKeyPair = createKeyPair();
+        // Send key_exchange plaintext (before encryption is active)
+        ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _pendingKeyPair.publicKey }));
+        // Post-auth messages will be sent after key_exchange_ok arrives
+      } else {
+        // No encryption — send post-auth messages immediately
+        wsSend(ctx.socket, { type: 'mode', mode: get().viewMode });
+        wsSend(ctx.socket, { type: 'list_slash_commands' });
+        wsSend(ctx.socket, { type: 'list_agents' });
+      }
       // Save for quick reconnect
       saveConnection(ctx.url, ctx.token);
       set({ savedConnection: { url: ctx.url, token: ctx.token } });
       // Register push token (async, non-blocking)
       void registerPushToken(ctx.socket);
+      break;
+    }
+
+    case 'key_exchange_ok': {
+      if (_pendingKeyPair) {
+        const sharedKey = deriveSharedKey(msg.publicKey as string, _pendingKeyPair.secretKey);
+        _encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 };
+        _pendingKeyPair = null;
+        console.log('[crypto] E2E encryption established');
+        // Now send the post-auth messages that were deferred
+        wsSend(ctx.socket, { type: 'mode', mode: get().viewMode });
+        wsSend(ctx.socket, { type: 'list_slash_commands' });
+        wsSend(ctx.socket, { type: 'list_agents' });
+      }
       break;
     }
 
@@ -1842,6 +1891,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       });
 
     function _connectWebSocket() {
+    // Reset encryption state for each new connection (forward secrecy)
+    _encryptionState = null;
+    _pendingKeyPair = null;
     const socket = new WebSocket(url);
 
     socket.onopen = () => {
@@ -1866,6 +1918,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         msg = JSON.parse(event.data);
       } catch {
         return;
+      }
+      // Decrypt incoming encrypted messages
+      if (msg.type === 'encrypted' && _encryptionState) {
+        try {
+          msg = decrypt(msg as EncryptedEnvelope, _encryptionState.sharedKey, _encryptionState.recvNonce);
+          _encryptionState.recvNonce++;
+        } catch (err) {
+          console.error('[crypto] Decryption failed:', err);
+          socket.close();
+          return;
+        }
       }
       handleMessage(msg, socketCtx);
     };
@@ -1944,6 +2007,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       _terminalWriteTimer = null;
     }
     _pendingTerminalWrites = '';
+    // Clear encryption state (new connection = new keys = forward secrecy)
+    _encryptionState = null;
+    _pendingKeyPair = null;
     // Clear message queue on explicit disconnect
     messageQueue.length = 0;
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
@@ -2011,7 +2077,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     set({ viewMode: mode });
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'mode', mode }));
+      wsSend(socket, { type: 'mode', mode });
     }
   },
 
@@ -2119,7 +2185,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       payload.attachments = wireAttachments;
     }
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(payload));
+      wsSend(socket, payload);
       return 'sent';
     }
     return enqueueMessage('input', payload);
@@ -2129,7 +2195,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     const payload = { type: 'interrupt' };
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(payload));
+      wsSend(socket, payload);
       return 'sent';
     }
     return enqueueMessage('interrupt', payload);
@@ -2139,7 +2205,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     const payload = { type: 'permission_response', requestId, decision };
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(payload));
+      wsSend(socket, payload);
       return 'sent';
     }
     return enqueueMessage('permission_response', payload);
@@ -2150,7 +2216,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const payload: Record<string, string> = { type: 'user_question_response', answer };
     if (toolUseId) payload.toolUseId = toolUseId;
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(payload));
+      wsSend(socket, payload);
       return 'sent';
     }
     return enqueueMessage('user_question_response', payload);
@@ -2177,21 +2243,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setModel: (model: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'set_model', model }));
+      wsSend(socket, { type: 'set_model', model });
     }
   },
 
   setPermissionMode: (mode: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'set_permission_mode', mode }));
+      wsSend(socket, { type: 'set_permission_mode', mode });
     }
   },
 
   confirmPermissionMode: (mode: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'set_permission_mode', mode, confirmed: true }));
+      wsSend(socket, { type: 'set_permission_mode', mode, confirmed: true });
     }
     set({ pendingPermissionConfirm: null });
   },
@@ -2203,7 +2269,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   resize: (cols, rows) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'resize', cols, rows }));
+      wsSend(socket, { type: 'resize', cols, rows });
     }
   },
 
@@ -2218,21 +2284,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, string> = { type: 'list_directory' };
       if (path) msg.path = path;
-      socket.send(JSON.stringify(msg));
+      wsSend(socket, msg);
     }
   },
 
   fetchSlashCommands: () => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'list_slash_commands' }));
+      wsSend(socket, { type: 'list_slash_commands' });
     }
   },
 
   fetchCustomAgents: () => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'list_agents' }));
+      wsSend(socket, { type: 'list_agents' });
     }
   },
 
@@ -2265,7 +2331,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
 
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'switch_session', sessionId }));
+      wsSend(socket, { type: 'switch_session', sessionId });
     }
   },
 
@@ -2275,21 +2341,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const msg: Record<string, string> = { type: 'create_session' };
       if (name) msg.name = name;
       if (cwd) msg.cwd = cwd;
-      socket.send(JSON.stringify(msg));
+      wsSend(socket, msg);
     }
   },
 
   destroySession: (sessionId: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'destroy_session', sessionId }));
+      wsSend(socket, { type: 'destroy_session', sessionId });
     }
   },
 
   renameSession: (sessionId: string, name: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'rename_session', sessionId, name }));
+      wsSend(socket, { type: 'rename_session', sessionId, name });
     }
   },
 
@@ -2297,7 +2363,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ discoveredSessions: null }); // clear stale results
-      socket.send(JSON.stringify({ type: 'discover_sessions' }));
+      wsSend(socket, { type: 'discover_sessions' });
     }
   },
 
@@ -2306,7 +2372,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, string> = { type: 'attach_session', tmuxSession };
       if (name) msg.name = name;
-      socket.send(JSON.stringify(msg));
+      wsSend(socket, msg);
     }
   },
 
@@ -2315,7 +2381,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, string> = { type: 'request_full_history' };
       if (sessionId) msg.sessionId = sessionId;
-      socket.send(JSON.stringify(msg));
+      wsSend(socket, msg);
     }
   },
 

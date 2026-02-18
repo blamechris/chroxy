@@ -206,6 +206,7 @@ program
   .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
   .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
   .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
+  .option('--no-encrypt', 'Disable end-to-end encryption (dev/testing only)')
   .option('--no-discovery', 'Skip tmux auto-discovery on startup')
   .option('--no-supervisor', 'Disable supervisor mode (direct server, no auto-restart)')
   .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
@@ -225,6 +226,7 @@ program
     }
     if (options.auth === false) extraOverrides.noAuth = true
     if (options.discovery === false) extraOverrides.noDiscovery = true
+    if (options.encrypt === false) extraOverrides.noEncrypt = true
 
     const config = loadAndMergeConfig(options, extraOverrides)
 
