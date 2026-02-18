@@ -437,7 +437,13 @@ export class SessionManager extends EventEmitter {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
     const tmpPath = this._stateFilePath + '.tmp'
     writeFileRestricted(tmpPath, JSON.stringify(state, null, 2))
-    if (isWindows) try { unlinkSync(this._stateFilePath) } catch {}
+    if (isWindows) {
+      try { unlinkSync(this._stateFilePath) } catch (err) {
+        if (err && err.code !== 'ENOENT') {
+          console.error(`[session-manager] Failed to remove existing state file: ${err.message}`)
+        }
+      }
+    }
     renameSync(tmpPath, this._stateFilePath)
     console.log(`[session-manager] Serialized ${state.sessions.length} session(s) to ${this._stateFilePath}`)
     return state
