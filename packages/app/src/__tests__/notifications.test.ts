@@ -42,7 +42,7 @@ const mockSocket = {
   send: jest.fn(),
 };
 
-const mockMarkPromptAnswered = jest.fn();
+const mockMarkPromptAnsweredByRequestId = jest.fn();
 
 jest.mock('../store/connection', () => ({
   useConnectionStore: {
@@ -50,7 +50,7 @@ jest.mock('../store/connection', () => ({
       wsUrl: 'wss://test.trycloudflare.com',
       apiToken: 'test-token',
       socket: mockSocket,
-      markPromptAnswered: mockMarkPromptAnswered,
+      markPromptAnsweredByRequestId: mockMarkPromptAnsweredByRequestId,
     })),
   },
   loadConnection: jest.fn(() =>
@@ -75,7 +75,7 @@ beforeEach(() => {
     wsUrl: 'wss://test.trycloudflare.com',
     apiToken: 'test-token',
     socket: mockSocket,
-    markPromptAnswered: mockMarkPromptAnswered,
+    markPromptAnsweredByRequestId: mockMarkPromptAnsweredByRequestId,
   });
 });
 
@@ -112,7 +112,7 @@ describe('setupNotificationResponseListener', () => {
         decision: 'allow',
       }),
     );
-    expect(mockMarkPromptAnswered).toHaveBeenCalledWith('perm-123', 'allow');
+    expect(mockMarkPromptAnsweredByRequestId).toHaveBeenCalledWith('perm-123', 'allow');
   });
 
   it('maps deny action to deny decision via WebSocket', async () => {
@@ -137,7 +137,7 @@ describe('setupNotificationResponseListener', () => {
         decision: 'deny',
       }),
     );
-    expect(mockMarkPromptAnswered).toHaveBeenCalledWith('perm-456', 'deny');
+    expect(mockMarkPromptAnsweredByRequestId).toHaveBeenCalledWith('perm-456', 'deny');
   });
 
   it('ignores default action (body tap)', async () => {
@@ -156,7 +156,7 @@ describe('setupNotificationResponseListener', () => {
     });
 
     expect(mockSocket.send).not.toHaveBeenCalled();
-    expect(mockMarkPromptAnswered).not.toHaveBeenCalled();
+    expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
   });
 
   it('ignores unknown action identifiers', async () => {
@@ -175,7 +175,7 @@ describe('setupNotificationResponseListener', () => {
     });
 
     expect(mockSocket.send).not.toHaveBeenCalled();
-    expect(mockMarkPromptAnswered).not.toHaveBeenCalled();
+    expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
   });
 
   it('ignores non-permission categories', async () => {
@@ -194,7 +194,7 @@ describe('setupNotificationResponseListener', () => {
     });
 
     expect(mockSocket.send).not.toHaveBeenCalled();
-    expect(mockMarkPromptAnswered).not.toHaveBeenCalled();
+    expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
   });
 
   it('falls back to HTTP when WebSocket is disconnected', async () => {
@@ -234,7 +234,7 @@ describe('setupNotificationResponseListener', () => {
       requestId: 'perm-http-1',
       decision: 'allow',
     });
-    expect(mockMarkPromptAnswered).toHaveBeenCalledWith('perm-http-1', 'allow');
+    expect(mockMarkPromptAnsweredByRequestId).toHaveBeenCalledWith('perm-http-1', 'allow');
   });
 
   it('falls back to HTTP when socket is null', async () => {
@@ -243,7 +243,7 @@ describe('setupNotificationResponseListener', () => {
       wsUrl: 'wss://test.trycloudflare.com',
       apiToken: 'test-token',
       socket: null,
-      markPromptAnswered: mockMarkPromptAnswered,
+      markPromptAnsweredByRequestId: mockMarkPromptAnsweredByRequestId,
     });
 
     const mockFetch = jest.fn(() =>

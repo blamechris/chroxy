@@ -362,6 +362,7 @@ interface ConnectionState {
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
   sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
+  markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
   confirmPermissionMode: (mode: string) => void;
@@ -2325,6 +2326,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       set((state) => ({
         messages: state.messages.map((m) =>
           m.id === messageId ? { ...m, answered: answer } : m
+        ),
+      }));
+    }
+  },
+
+  markPromptAnsweredByRequestId: (requestId: string, answer: string) => {
+    const { activeSessionId, sessionStates } = get();
+
+    if (activeSessionId && sessionStates[activeSessionId]) {
+      updateActiveSession((ss) => ({
+        messages: ss.messages.map((m) =>
+          m.requestId === requestId ? { ...m, answered: answer } : m
+        ),
+      }));
+    } else {
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          m.requestId === requestId ? { ...m, answered: answer } : m
         ),
       }));
     }
