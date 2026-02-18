@@ -1138,6 +1138,7 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.getSessionContext = async () => null
 
     // Add firstSessionId getter
     Object.defineProperty(manager, 'firstSessionId', {
@@ -1419,6 +1420,7 @@ describe('WsServer attach_session message flow', () => {
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.getSessionContext = async () => null
 
     // Mock attachSession behavior
     manager.attachSession = async ({ tmuxSession, name }) => {
@@ -1914,6 +1916,7 @@ describe('user_question_response forwarding (multi-session)', () => {
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
     })
@@ -2328,6 +2331,7 @@ describe('agent idle/busy notifications', () => {
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.keys().next().value
     })
@@ -2496,6 +2500,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
     })
@@ -4271,6 +4276,7 @@ describe('permission/question routing to originating session', () => {
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => 'sess-a'
     })

@@ -179,7 +179,8 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'stream_start', messageId: '...' }        — beginning of streaming response
  *   { type: 'stream_delta', messageId, delta }         — token-by-token text
  *   { type: 'stream_end',   messageId: '...' }        — streaming response complete
- *   { type: 'tool_start',   messageId, tool, input }   — tool invocation
+ *   { type: 'tool_start',   messageId, toolUseId, tool, input } — tool invocation
+ *   { type: 'tool_result',  toolUseId, result, truncated }    — tool execution result
  *   { type: 'result',       ... }                     — query stats
  *   { type: 'status',       connected: true }         — connection status
  *   { type: 'claude_ready' }                          — Claude Code ready for input
@@ -1114,6 +1115,20 @@ export class WsServer {
         }
         break
 
+      case 'request_session_context': {
+        const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
+        if (!targetId) break
+        try {
+          const ctx = await this.sessionManager.getSessionContext(targetId)
+          if (ctx) {
+            this._send(ws, { type: 'session_context', ...ctx })
+          }
+        } catch (err) {
+          console.warn(`[ws] Failed to read session context: ${err.message}`)
+        }
+        break
+      }
+
       default:
         console.log(`[ws] Unknown message type: ${msg.type}`)
     }
@@ -1380,7 +1395,16 @@ export class WsServer {
           break
 
         case 'tool_start':
-          this._broadcastToSession(sessionId, { type: 'tool_start', messageId: data.messageId, tool: data.tool, input: data.input })
+          this._broadcastToSession(sessionId, { type: 'tool_start', messageId: data.messageId, toolUseId: data.toolUseId, tool: data.tool, input: data.input })
+          break
+
+        case 'tool_result':
+          this._broadcastToSession(sessionId, {
+            type: 'tool_result',
+            toolUseId: data.toolUseId,
+            result: data.result,
+            truncated: data.truncated,
+          })
           break
 
         case 'agent_spawned':
@@ -1415,6 +1439,10 @@ export class WsServer {
           this._broadcastToSession(sessionId, { type: 'agent_idle' })
           // Broadcast updated session list (isBusy may have changed)
           this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
+          // Refresh session context (git branch may have changed during the turn)
+          this.sessionManager.getSessionContext(sessionId).then((ctx) => {
+            if (ctx) this._broadcastToSession(sessionId, { type: 'session_context', ...ctx })
+          }).catch(() => {})
           break
 
         case 'raw':
@@ -1541,8 +1569,8 @@ export class WsServer {
       })
     })
 
-    this.cliSession.on('tool_start', ({ messageId, tool, input }) => {
-      this._broadcast({ type: 'tool_start', messageId, tool, input })
+    this.cliSession.on('tool_start', ({ messageId, toolUseId, tool, input }) => {
+      this._broadcast({ type: 'tool_start', messageId, toolUseId, tool, input })
     })
 
     this.cliSession.on('result', ({ cost, duration, usage, sessionId }) => {

@@ -7,6 +7,7 @@ import { getProvider } from './providers.js'
 import { discoverTmuxSessions } from './session-discovery.js'
 import { resolveJsonlPath, readConversationHistory, readConversationHistoryAsync } from './jsonl-reader.js'
 import { isWindows, writeFileRestricted } from './platform.js'
+import { readSessionContext } from './session-context.js'
 
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
@@ -212,6 +213,21 @@ export class SessionManager extends EventEmitter {
       })
     }
     return list
+  }
+
+  /**
+   * Read git/project context for a session's working directory.
+   * @param {string} [sessionId] - If omitted, uses first session
+   * @returns {Promise<{ sessionId: string, gitBranch: string|null, gitDirty: number, gitAhead: number, projectName: string|null } | null>}
+   */
+  async getSessionContext(sessionId) {
+    const entry = sessionId
+      ? this._sessions.get(sessionId)
+      : this._sessions.values().next().value
+    if (!entry) return null
+    const id = sessionId || this._sessions.keys().next().value
+    const ctx = await readSessionContext(entry.cwd)
+    return { sessionId: id, ...ctx }
   }
 
   /**
@@ -650,8 +666,19 @@ export class SessionManager extends EventEmitter {
         this._pushHistory(history, {
           type: 'tool_start',
           messageId: data.messageId,
+          toolUseId: data.toolUseId,
           tool: data.tool,
           input: data.input,
+          timestamp: Date.now(),
+        })
+        break
+
+      case 'tool_result':
+        this._pushHistory(history, {
+          type: 'tool_result',
+          toolUseId: data.toolUseId,
+          result: data.result,
+          truncated: data.truncated,
           timestamp: Date.now(),
         })
         break
@@ -724,7 +751,7 @@ export class SessionManager extends EventEmitter {
    * Handles both CliSession and PtySession events.
    */
   _wireSessionEvents(sessionId, session) {
-    const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'result', 'error', 'user_question']
+    const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'error', 'user_question']
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
         this._recordHistory(sessionId, event, data)

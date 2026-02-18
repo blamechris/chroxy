@@ -160,6 +160,10 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].conversationId : null;
   });
+  const sessionContext = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].sessionContext : null;
+  });
   const pendingPermissionConfirm = useConnectionStore((s) => s.pendingPermissionConfirm);
   const slashCommands = useConnectionStore((s) => s.slashCommands);
   const customAgents = useConnectionStore((s) => s.customAgents);
@@ -528,6 +532,7 @@ export function SessionScreen() {
           onConfirmPermissionMode={confirmPermissionMode}
           onCancelPermissionConfirm={cancelPermissionConfirm}
           conversationId={conversationId}
+          sessionContext={sessionContext}
         />
       )}
 

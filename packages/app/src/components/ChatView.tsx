@@ -174,6 +174,8 @@ function ActivityEntry({
     onToggleSelection(message.id);
   };
 
+  const hasResult = !!message.toolResult;
+
   return (
     <TouchableOpacity
       activeOpacity={0.7}
@@ -181,10 +183,10 @@ function ActivityEntry({
       onPress={handlePress}
       style={[styles.activityEntry, isSelected && styles.selectedBubble]}
     >
-      <Text style={styles.activityEntryIcon}>{ICON_CHEVRON_RIGHT}</Text>
+      <Text style={styles.activityEntryIcon}>{hasResult ? ICON_CHECK : ICON_CHEVRON_RIGHT}</Text>
       <Text style={styles.activityEntryTool}>{message.tool || 'Thinking'}</Text>
       <Text style={styles.activityEntryPreview} numberOfLines={1}>
-        {(message.content || '').slice(0, 40)}
+        {hasResult ? (message.toolResult || '').slice(0, 60) : (message.content || '').slice(0, 40)}
       </Text>
     </TouchableOpacity>
   );
@@ -261,10 +263,12 @@ function ActivityGroup({
 
 // -- Tool detail modal --
 
-function ToolDetailModal({ visible, toolName, content, onClose }: {
+function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTruncated, onClose }: {
   visible: boolean;
   toolName: string;
   content: string;
+  toolResult?: string;
+  toolResultTruncated?: boolean;
   onClose: () => void;
 }) {
   return (
@@ -286,7 +290,18 @@ function ToolDetailModal({ visible, toolName, content, onClose }: {
             </TouchableOpacity>
           </View>
           <ScrollView style={styles.toolModalScroll}>
-            <Text selectable style={styles.toolModalContent}>{content}</Text>
+            {content ? (
+              <>
+                <Text style={styles.toolModalSectionLabel}>Input</Text>
+                <Text selectable style={styles.toolModalContent}>{content}</Text>
+              </>
+            ) : null}
+            {toolResult != null ? (
+              <>
+                <Text style={[styles.toolModalSectionLabel, content ? { marginTop: 12 } : undefined]}>Result{toolResultTruncated ? ' (truncated)' : ''}</Text>
+                <Text selectable style={styles.toolModalContent}>{toolResult}</Text>
+              </>
+            ) : null}
           </ScrollView>
         </Pressable>
       </Pressable>
@@ -301,7 +316,7 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpe
   isSelected: boolean;
   isSelecting: boolean;
   onToggleSelection: () => void;
-  onOpenDetail: (toolName: string, content: string) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const longPressedRef = useRef(false);
@@ -319,7 +334,7 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpe
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      onOpenDetail(message.tool || 'Unknown', content);
+      onOpenDetail(message.tool || 'Unknown', content, message.toolResult, message.toolResultTruncated);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -546,7 +561,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   isSelecting: boolean;
   onLongPress: () => void;
   onPress: () => void;
-  onOpenDetail: (toolName: string, content: string) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean) => void;
   onImagePress?: (uri: string) => void;
 }) {
   const longPressedRef = useRef(false);
@@ -760,7 +775,7 @@ export function ChatView({
 }: ChatViewProps) {
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string } | null>(null);
+  const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
   // Pause auto-scroll when an unanswered prompt is visible — user needs to read context
@@ -781,8 +796,8 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef and isSelectingRef are stable refs
   }, [isPlanPending]);
 
-  const handleOpenDetail = (toolName: string, content: string) => {
-    setToolDetail({ toolName, content });
+  const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean) => {
+    setToolDetail({ toolName, content, toolResult, toolResultTruncated });
   };
 
   const displayGroups = useMemo(
@@ -903,6 +918,8 @@ export function ChatView({
         visible={toolDetail !== null}
         toolName={toolDetail?.toolName || ''}
         content={toolDetail?.content || ''}
+        toolResult={toolDetail?.toolResult}
+        toolResultTruncated={toolDetail?.toolResultTruncated}
         onClose={() => setToolDetail(null)}
       />
       <ImageViewer uri={viewerUri} onClose={() => setViewerUri(null)} />
@@ -1254,6 +1271,14 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     lineHeight: 20,
+  },
+  toolModalSectionLabel: {
+    color: COLORS.textDim,
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 6,
   },
   messageText: {
     color: COLORS.textChatMessage,

@@ -89,6 +89,8 @@ export interface ChatMessage {
   requestId?: string;
   toolInput?: Record<string, unknown>;
   toolUseId?: string;
+  toolResult?: string;
+  toolResultTruncated?: boolean;
   answered?: string;
   expiresAt?: number;
   timestamp: number;
@@ -175,6 +177,13 @@ export interface ConnectedClient {
 
 export type SessionHealth = 'healthy' | 'crashed';
 
+export interface SessionContext {
+  gitBranch: string | null;
+  gitDirty: number;
+  gitAhead: number;
+  projectName: string | null;
+}
+
 export interface SessionState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
@@ -191,6 +200,7 @@ export interface SessionState {
   planAllowedPrompts: { tool: string; prompt: string }[];
   primaryClientId: string | null;
   conversationId: string | null;
+  sessionContext: SessionContext | null;
 }
 
 export interface ServerError {
@@ -240,6 +250,7 @@ export function createEmptySessionState(): SessionState {
     planAllowedPrompts: [],
     primaryClientId: null,
     conversationId: null,
+    sessionContext: null,
   };
 }
 
@@ -844,6 +855,21 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       }
       break;
 
+    case 'session_context': {
+      const ctxSessionId = (msg.sessionId as string) || get().activeSessionId;
+      if (ctxSessionId && get().sessionStates[ctxSessionId]) {
+        updateSession(ctxSessionId, () => ({
+          sessionContext: {
+            gitBranch: typeof msg.gitBranch === 'string' ? msg.gitBranch : null,
+            gitDirty: typeof msg.gitDirty === 'number' ? msg.gitDirty : 0,
+            gitAhead: typeof msg.gitAhead === 'number' ? msg.gitAhead : 0,
+            projectName: typeof msg.projectName === 'string' ? msg.projectName : null,
+          },
+        }));
+      }
+      break;
+    }
+
     case 'session_switched': {
       const sessionId = msg.sessionId as string;
       // Only treat as session-switch replay if the user explicitly initiated it
@@ -1137,6 +1163,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         type: 'tool_use',
         content: msg.input ? JSON.stringify(msg.input) : (msg.tool as string) || '',
         tool: msg.tool as string | undefined,
+        toolUseId: msg.toolUseId as string | undefined,
         timestamp: Date.now(),
       };
       if (targetId && get().sessionStates[targetId]) {
@@ -1145,6 +1172,37 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         }));
       } else {
         get().addMessage(toolMsg);
+      }
+      break;
+    }
+
+    case 'tool_result': {
+      const toolUseId = msg.toolUseId as string;
+      if (!toolUseId) break;
+      const resultText = (msg.result as string) || '';
+      const truncated = !!(msg.truncated as boolean);
+      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      // Find the matching tool_use message and attach the result
+      const patchResult = (ss: SessionState) => {
+        const idx = ss.messages.findIndex(
+          (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
+        );
+        if (idx === -1) return {};
+        const updated = [...ss.messages];
+        updated[idx] = { ...updated[idx], toolResult: resultText, toolResultTruncated: truncated };
+        return { messages: updated };
+      };
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, patchResult);
+      } else {
+        const idx = get().messages.findIndex(
+          (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
+        );
+        if (idx !== -1) {
+          const updated = [...get().messages];
+          updated[idx] = { ...updated[idx], toolResult: resultText, toolResultTruncated: truncated };
+          set({ messages: updated });
+        }
       }
       break;
     }
@@ -1737,6 +1795,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       planAllowedPrompts: [],
       primaryClientId: null,
       conversationId: null,
+      sessionContext: null,
     };
   },
 

@@ -27,7 +27,11 @@ import { buildContentBlocks } from './content-blocks.js'
  *   user_question      { toolUseId, questions }
  *   agent_spawned      { toolUseId, description, startedAt }
  *   agent_completed    { toolUseId }
+ *   tool_result        { toolUseId, result, truncated }
  */
+
+// Max size for tool results forwarded to mobile (10KB)
+const MAX_TOOL_RESULT_SIZE = 10240
 export class SdkSession extends EventEmitter {
   static get capabilities() {
     return {
@@ -201,6 +205,7 @@ export class SdkSession extends EventEmitter {
                 } else if (blockType === 'tool_use') {
                   this.emit('tool_start', {
                     messageId: event.content_block.id || `${messageId}-tool`,
+                    toolUseId: event.content_block.id,
                     tool: event.content_block.name,
                     input: null,
                   })
@@ -242,6 +247,36 @@ export class SdkSession extends EventEmitter {
 
               if (block.type === 'tool_use') {
                 this._handleToolUseBlock(messageId, block)
+              }
+            }
+            break
+          }
+
+          case 'user': {
+            // Tool result content blocks appear in user-role messages during the tool loop
+            const userContent = msg.message?.content
+            if (Array.isArray(userContent)) {
+              for (const block of userContent) {
+                if (block.type === 'tool_result' && block.tool_use_id) {
+                  let result = ''
+                  if (typeof block.content === 'string') {
+                    result = block.content
+                  } else if (Array.isArray(block.content)) {
+                    result = block.content
+                      .filter(b => b.type === 'text')
+                      .map(b => b.text)
+                      .join('\n')
+                  }
+                  const truncated = result.length > MAX_TOOL_RESULT_SIZE
+                  if (truncated) {
+                    result = result.slice(0, MAX_TOOL_RESULT_SIZE)
+                  }
+                  this.emit('tool_result', {
+                    toolUseId: block.tool_use_id,
+                    result,
+                    truncated,
+                  })
+                }
               }
             }
             break
