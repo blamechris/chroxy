@@ -29,6 +29,18 @@ import { buildContentBlocks } from './content-blocks.js'
  *   agent_completed    { toolUseId }
  */
 export class SdkSession extends EventEmitter {
+  static get capabilities() {
+    return {
+      permissions: true,
+      inProcessPermissions: true,
+      modelSwitch: true,
+      permissionModeSwitch: true,
+      planMode: false,
+      resume: true,
+      terminal: false,
+    }
+  }
+
   constructor({ cwd, model, permissionMode, resumeSessionId } = {}) {
     super()
     this.cwd = cwd || process.cwd()

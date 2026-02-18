@@ -33,6 +33,18 @@ const MAX_TOOL_INPUT_LENGTH = 262144
  *   plan_ready       { allowedPrompts }
  */
 export class CliSession extends EventEmitter {
+  static get capabilities() {
+    return {
+      permissions: true,
+      inProcessPermissions: false,
+      modelSwitch: true,
+      permissionModeSwitch: true,
+      planMode: true,
+      resume: false,
+      terminal: false,
+    }
+  }
+
   constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath } = {}) {
     super()
     this.cwd = cwd || process.cwd()

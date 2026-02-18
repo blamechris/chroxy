@@ -30,7 +30,8 @@ export async function startCliServer(config) {
     process.exit(1)
   }
 
-  const modeStr = config.legacyCli ? 'CLI legacy mode' : 'SDK mode'
+  const providerType = config.provider || (config.legacyCli ? 'claude-cli' : 'claude-sdk')
+  const modeStr = providerType === 'claude-cli' ? 'CLI legacy mode' : `${providerType}`
   const banner = `Chroxy Server v${SERVER_VERSION} (${modeStr})`
   const pad = Math.max(0, 38 - banner.length)
   const left = Math.floor(pad / 2)
@@ -49,7 +50,6 @@ export async function startCliServer(config) {
 
   // 1. Create session manager
   const discoveryIntervalMs = config.discoveryInterval ? config.discoveryInterval * 1000 : 45000
-  const useLegacyCli = !!config.legacyCli
   const sessionManager = new SessionManager({
     maxSessions: 5,
     port: PORT,
@@ -58,7 +58,7 @@ export async function startCliServer(config) {
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
     discoveryIntervalMs,
-    useLegacyCli,
+    providerType,
   })
 
   // 2. Try restoring session state from a previous instance
