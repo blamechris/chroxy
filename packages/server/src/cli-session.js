@@ -514,9 +514,13 @@ export class CliSession extends EventEmitter {
     this._waitingForAnswer = false
     this._currentMessageId = null
     this._currentCtx = null
-    // NOTE: _inPlanMode is NOT reset here — it spans multiple turns
-    // (EnterPlanMode in one turn, ExitPlanMode in a later turn).
-    // It's reset after plan_ready is emitted and in destroy().
+    // If plan mode is active but ExitPlanMode never arrived (interrupt/crash),
+    // the flag is stale — reset it. In normal flow, _planAllowedPrompts is
+    // non-null (set by ExitPlanMode) and plan_ready has already been emitted
+    // + both flags reset before we reach here.
+    if (this._inPlanMode && this._planAllowedPrompts === null) {
+      this._inPlanMode = false
+    }
     this._planAllowedPrompts = null
     // Emit completions for any tracked agents so the app clears badges.
     // Centralised here so every callsite (result, crash, timeout, interrupt,

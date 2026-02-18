@@ -1954,6 +1954,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const wasConnected = get().connectionPhase === 'connected';
       set({ socket: null });
 
+      // Clear transient streaming/plan state so stale UI doesn't persist
+      // during reconnect (e.g. typing indicator, plan approval card).
+      _postPermissionSplits.clear();
+      _deltaIdRemaps.clear();
+      updateActiveSession((ss) => {
+        const patch: Partial<SessionState> = {};
+        if (ss.streamingMessageId) patch.streamingMessageId = null;
+        if (ss.isPlanPending) {
+          patch.isPlanPending = false;
+          patch.planAllowedPrompts = [];
+        }
+        return Object.keys(patch).length > 0 ? patch : {};
+      });
+
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated).
       // Calls connect() with _retryCount=0 to reset the retry budget — see comment
       // at connect() definition for rationale.
