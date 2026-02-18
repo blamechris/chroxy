@@ -203,7 +203,7 @@ export function setupNotificationResponseListener(): Notifications.EventSubscrip
 
     // Only update chat UI if the response was actually delivered
     if (delivered) {
-      useConnectionStore.getState().markPromptAnswered(requestId, decision);
+      useConnectionStore.getState().markPromptAnsweredByRequestId(requestId, decision);
     } else {
       console.warn(`[push] Permission ${requestId} could not be delivered — UI not updated`);
     }
