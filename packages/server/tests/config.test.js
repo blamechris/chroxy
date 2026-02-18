@@ -247,4 +247,34 @@ describe('mergeConfig', () => {
     const merged = mergeConfig({ cliOverrides: { legacyCli: false } })
     assert.equal(merged.provider, undefined)
   })
+
+  it('legacyCli from CLI with provider from file - CLI legacyCli wins', () => {
+    const fileConfig = { provider: 'claude-sdk' }
+    const cliOverrides = { legacyCli: true }
+    const merged = mergeConfig({ fileConfig, cliOverrides })
+    assert.equal(merged.provider, 'claude-sdk')
+  })
+
+  it('legacyCli from ENV with provider from file - file provider wins', () => {
+    process.env.CHROXY_LEGACY_CLI = 'true'
+    const fileConfig = { provider: 'claude-sdk' }
+    const merged = mergeConfig({ fileConfig })
+    assert.equal(merged.provider, 'claude-sdk')
+    assert.equal(merged.legacyCli, true)
+  })
+
+  it('legacyCli from ENV with no provider - legacyCli sets provider', () => {
+    process.env.CHROXY_LEGACY_CLI = 'true'
+    const merged = mergeConfig({})
+    assert.equal(merged.provider, 'claude-cli')
+    assert.equal(merged.legacyCli, true)
+  })
+
+  it('legacyCli from file with provider from ENV - ENV provider wins', () => {
+    process.env.CHROXY_PROVIDER = 'custom'
+    const fileConfig = { legacyCli: true }
+    const merged = mergeConfig({ fileConfig })
+    assert.equal(merged.provider, 'custom')
+    assert.equal(merged.legacyCli, true)
+  })
 })
