@@ -77,7 +77,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
   }, [isRecognizing, pulseAnim]);
 
   const showMicButton = viewMode === 'chat' && !isStreaming && !disabled && onMicPress;
-  const showAttachButton = viewMode === 'chat' && !isStreaming && !disabled && onAttach;
+  const showAttachButton = viewMode === 'chat' && !hasTerminal && !isStreaming && !disabled && onAttach;
 
   // Filter slash commands based on current input (only when typing `/` at the start)
   const filteredCommands = useMemo(() => {
