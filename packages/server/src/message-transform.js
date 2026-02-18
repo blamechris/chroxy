@@ -43,6 +43,8 @@ const BUILT_IN_TRANSFORMS = {
     cleaned = cleaned.replace(/\s+(um|uh)\s+/gi, ' ')
     // Clean up double spaces from removals
     cleaned = cleaned.replace(/  +/g, ' ').trim()
+    // Remove trailing comma left by filler removal (e.g. "fix the bug, um" → "fix the bug")
+    cleaned = cleaned.replace(/,\s*$/, '')
     // Ensure sentence ends with punctuation
     if (cleaned.length > 0 && !/[.!?]$/.test(cleaned)) {
       cleaned += '.'

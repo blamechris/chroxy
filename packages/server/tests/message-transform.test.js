@@ -104,6 +104,11 @@ describe('voiceCleanup transform', () => {
     assert.equal(result, 'fix, the bug.')
   })
 
+  it('removes trailing comma left by filler at end', () => {
+    const result = transform('fix the bug, um', { isVoiceInput: true })
+    assert.equal(result, 'fix the bug.')
+  })
+
   it('handles empty input', () => {
     const result = transform('', { isVoiceInput: true })
     assert.equal(result, '')
