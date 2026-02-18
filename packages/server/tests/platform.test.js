@@ -59,9 +59,7 @@ describe('platform', () => {
       }
       forceKill(fakeChild)
       assert.ok(killed)
-      if (!isWindows) {
-        assert.strictEqual(signal, 'SIGKILL')
-      }
+      assert.strictEqual(signal, 'SIGKILL')
     })
   })
 })

@@ -18,7 +18,7 @@ export function writeFileRestricted(filePath, data) {
 
 export function forceKill(child) {
   if (isWindows) {
-    child.kill()
+    child.kill('SIGKILL')
   } else {
     child.kill('SIGKILL')
   }
