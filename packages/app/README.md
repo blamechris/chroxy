@@ -6,30 +6,37 @@ React Native mobile app for connecting to your Chroxy server.
 
 ## Development
 
+The app requires a **custom dev build** (not Expo Go) because native modules like `expo-speech-recognition` and `expo-secure-store` are included.
+
 ```bash
 # Install dependencies
 npm install
 
-# Start Expo dev server
+# Build a dev client (one-time, or when native deps change)
+npx expo run:ios    # or npx expo run:android
+
+# Start Metro dev server (for daily hot-reload development)
 npx expo start
-
-# Run on iOS simulator
-npm run ios
-
-# Run on Android emulator
-npm run android
 ```
 
-### Testing with Expo Go
+### EAS Cloud Builds
 
-The fastest way to test on a physical device:
+For building in the cloud (no local SDK required):
 
-1. Install Expo Go from the App Store / Play Store
-2. Run `npx expo start`
-3. Scan the Expo dev server QR code with Expo Go
-4. The app will hot-reload as you make changes
+```bash
+npm install -g eas-cli
+eas login
+eas build --profile development --platform ios   # or android, or all
+```
 
-**Note:** Push notifications are not available in Expo Go (removed in SDK 53). The app gracefully degrades — notifications work in production/dev client builds.
+The dev client app replaces Expo Go. Only rebuild when native dependencies change — for normal code changes, hot reload works instantly.
+
+### Running Tests
+
+```bash
+npx jest
+npx tsc --noEmit   # type check
+```
 
 ## Architecture
 
@@ -42,12 +49,15 @@ src/
 │   └── SettingsScreen.tsx   # Model, permission, display settings
 ├── components/
 │   ├── ChatView.tsx         # Message list with markdown rendering
-│   ├── TerminalView.tsx     # Raw terminal output display
+│   ├── TerminalView.tsx     # xterm.js terminal emulator (WebView)
 │   ├── SettingsBar.tsx      # Collapsible model/cost/context bar
-│   ├── InputBar.tsx         # Text input with send/interrupt
+│   ├── InputBar.tsx         # Text input with send/interrupt + mic button
 │   ├── SessionPicker.tsx    # Horizontal session tabs
 │   ├── CreateSessionModal.tsx # New session + host session discovery
-│   └── MarkdownRenderer.tsx # Inline markdown with code blocks
+│   ├── MarkdownRenderer.tsx # Inline markdown with code blocks
+│   └── PlanApprovalCard.tsx # Plan mode approve/feedback UI
+├── hooks/
+│   └── useSpeechRecognition.ts # Voice-to-text input hook
 ├── constants/
 │   ├── colors.ts            # Theme color constants
 │   └── icons.ts             # Unicode icon constants
@@ -60,11 +70,16 @@ src/
 
 - **QR code scanning** for quick server connection
 - **Chat view** with markdown, code highlighting, blockquotes, links
+- **xterm.js terminal** — full VT100 emulation with colors and scrollback via WebView
 - **Permission handling** — approve/deny/always-allow tool use
+- **Plan mode UI** — plan approval card with approve and give-feedback actions
 - **Multi-session** — create, switch, destroy sessions from the app
-- **Agent monitoring** — background task tracking with elapsed time
+- **Agent monitoring** — background task tracking with elapsed time badge
+- **Voice input** — speech-to-text via `expo-speech-recognition` with interim results
 - **Auto-reconnect** — resilient ConnectionPhase state machine
 - **Message selection** — long-press to select, copy, or share transcript
+- **Push notifications** — alerts for permission prompts and idle sessions
+- **End-to-end encryption** — all WebSocket messages encrypted
 
 ## Building for Release
 
