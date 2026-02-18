@@ -28,7 +28,7 @@ try {
  * Idempotent — safe to call multiple times.
  */
 try {
-  Notifications.setNotificationCategoryAsync('permission', [
+  void Notifications.setNotificationCategoryAsync('permission', [
     {
       identifier: 'approve',
       buttonTitle: 'Approve',
@@ -39,9 +39,11 @@ try {
       buttonTitle: 'Deny',
       options: { isDestructive: true, opensAppToForeground: true },
     },
-  ]);
+  ]).catch(() => {
+    // Gracefully degrade if categories not supported (e.g. Android, Expo Go)
+  });
 } catch {
-  // Gracefully degrade if categories not supported
+  // Gracefully degrade if setNotificationCategoryAsync not available
 }
 
 /**
@@ -126,9 +128,9 @@ async function sendPermissionResponseHttp(
   const httpsUrl = wsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
   const url = `${httpsUrl}/permission-response`;
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10_000);
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -138,7 +140,6 @@ async function sendPermissionResponseHttp(
       body: JSON.stringify({ requestId, decision }),
       signal: controller.signal,
     });
-    clearTimeout(timeout);
 
     if (!res.ok) {
       console.warn(`[push] HTTP permission response failed: ${res.status}`);
@@ -149,6 +150,8 @@ async function sendPermissionResponseHttp(
   } catch (err) {
     console.warn('[push] HTTP permission response error:', err);
     return false;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -170,23 +173,39 @@ export function setupNotificationResponseListener(): Notifications.EventSubscrip
     if (data?.category !== 'permission' || !data.requestId) return;
 
     const { requestId } = data;
-    const decision = actionId === 'approve' ? 'allow' : 'deny';
+
+    // Explicitly handle only known action identifiers
+    let decision: 'allow' | 'deny';
+    if (actionId === 'approve') {
+      decision = 'allow';
+    } else if (actionId === 'deny') {
+      decision = 'deny';
+    } else {
+      // Ignore unexpected action identifiers
+      return;
+    }
 
     console.log(`[push] Notification action: ${actionId} → ${decision} for ${requestId}`);
 
     // Try WebSocket first if connected
+    let delivered = false;
     const { socket } = useConnectionStore.getState();
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(
         JSON.stringify({ type: 'permission_response', requestId, decision }),
       );
       console.log(`[push] Permission ${requestId} sent via WS: ${decision}`);
+      delivered = true;
     } else {
       // Fall back to HTTP POST via Cloudflare tunnel
-      await sendPermissionResponseHttp(requestId, decision);
+      delivered = await sendPermissionResponseHttp(requestId, decision);
     }
 
-    // Update chat UI to reflect the answered prompt
-    useConnectionStore.getState().markPromptAnswered(requestId, decision);
+    // Only update chat UI if the response was actually delivered
+    if (delivered) {
+      useConnectionStore.getState().markPromptAnswered(requestId, decision);
+    } else {
+      console.warn(`[push] Permission ${requestId} could not be delivered — UI not updated`);
+    }
   });
 }

@@ -1968,18 +1968,16 @@ export class WsServer {
     let body = ''
     let oversized = false
     req.on('data', (chunk) => {
+      if (oversized) return
       body += chunk
       if (body.length > MAX_BODY) {
         oversized = true
-        req.destroy()
+        res.writeHead(413, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'body too large' }))
       }
     })
     req.on('end', () => {
-      if (oversized) {
-        res.writeHead(413, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'body too large' }))
-        return
-      }
+      if (oversized) return
 
       let parsed
       try {
@@ -2021,6 +2019,7 @@ export class WsServer {
       // Fall back to legacy HTTP-held permission
       const pending = this._pendingPermissions.get(requestId)
       if (pending) {
+        this._permissionSessionMap.delete(requestId)
         this._resolvePermission(requestId, decision)
         console.log(`[ws] Permission ${requestId} resolved via HTTP: ${decision} (legacy)`)
         res.writeHead(200, { 'Content-Type': 'application/json' })

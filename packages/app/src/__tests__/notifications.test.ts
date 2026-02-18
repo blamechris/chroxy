@@ -64,6 +64,8 @@ import { setupNotificationResponseListener } from '../notifications';
 const mockAddListener =
   Notifications.addNotificationResponseReceivedListener as jest.Mock;
 
+const originalFetch = global.fetch;
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockSocket.readyState = 1; // WebSocket.OPEN
@@ -75,6 +77,10 @@ beforeEach(() => {
     socket: mockSocket,
     markPromptAnswered: mockMarkPromptAnswered,
   });
+});
+
+afterEach(() => {
+  global.fetch = originalFetch;
 });
 
 describe('setupNotificationResponseListener', () => {
@@ -144,6 +150,25 @@ describe('setupNotificationResponseListener', () => {
         request: {
           content: {
             data: { category: 'permission', requestId: 'perm-789' },
+          },
+        },
+      },
+    });
+
+    expect(mockSocket.send).not.toHaveBeenCalled();
+    expect(mockMarkPromptAnswered).not.toHaveBeenCalled();
+  });
+
+  it('ignores unknown action identifiers', async () => {
+    setupNotificationResponseListener();
+    const handler = mockAddListener.mock.calls[0][0];
+
+    await handler({
+      actionIdentifier: 'unknown_action',
+      notification: {
+        request: {
+          content: {
+            data: { category: 'permission', requestId: 'perm-unknown' },
           },
         },
       },
