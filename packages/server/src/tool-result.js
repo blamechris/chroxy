@@ -1,5 +1,5 @@
 // Max size for tool results forwarded to mobile (10KB)
-const MAX_TOOL_RESULT_SIZE = 10240
+export const MAX_TOOL_RESULT_SIZE = 10240
 
 /**
  * Extract tool_result events from a user-role message's content blocks.

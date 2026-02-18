@@ -428,6 +428,58 @@ describe('SdkSession', () => {
 
   // -- Getters --
 
+  // -- Transform integration --
+
+  describe('sendMessage applies transforms', () => {
+    it('applies voiceCleanup when configured and isVoice is true', async () => {
+      const s = createSession({ transforms: ['voiceCleanup'] })
+      s._processReady = true
+
+      // Spy on the pipeline's apply method
+      const applyCalls = []
+      const originalApply = s._transformPipeline.apply.bind(s._transformPipeline)
+      s._transformPipeline.apply = (msg, ctx) => {
+        applyCalls.push({ msg, ctx })
+        return originalApply(msg, ctx)
+      }
+
+      // sendMessage will fail at the SDK query (no real client), but the
+      // transform runs synchronously before the async part
+      s.on('error', () => {}) // absorb the SDK error
+      s.sendMessage('um fix the bug', [], { isVoice: true })
+
+      // Give the async sendMessage a tick to start, then destroy to prevent hang
+      await new Promise(r => setTimeout(r, 50))
+      s.destroy()
+
+      assert.equal(applyCalls.length, 1)
+      assert.equal(applyCalls[0].msg, 'um fix the bug')
+      assert.equal(applyCalls[0].ctx.isVoiceInput, true)
+      assert.equal(applyCalls[0].ctx.cwd, '/tmp')
+    })
+
+    it('does not transform when no transforms configured', async () => {
+      const s = createSession() // no transforms
+      s._processReady = true
+
+      const applyCalls = []
+      const originalApply = s._transformPipeline.apply.bind(s._transformPipeline)
+      s._transformPipeline.apply = (msg, ctx) => {
+        applyCalls.push({ msg, ctx })
+        return originalApply(msg, ctx)
+      }
+
+      s.on('error', () => {})
+      s.sendMessage('hello world', [])
+
+      await new Promise(r => setTimeout(r, 50))
+      s.destroy()
+
+      // Pipeline has no transforms, so apply is skipped (hasTransforms check)
+      assert.equal(applyCalls.length, 0)
+    })
+  })
+
   describe('getters', () => {
     it('isRunning reflects _isBusy', () => {
       assert.equal(session.isRunning, false)

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import EventEmitter from 'node:events'
-import { emitToolResults } from '../src/tool-result.js'
+import { emitToolResults, MAX_TOOL_RESULT_SIZE } from '../src/tool-result.js'
 
 describe('emitToolResults', () => {
   it('emits tool_result for string content', () => {
@@ -54,6 +54,24 @@ describe('emitToolResults', () => {
     assert.equal(results.length, 1)
     assert.equal(results[0].result.length, 100)
     assert.equal(results[0].truncated, true)
+  })
+
+  it('uses default MAX_TOOL_RESULT_SIZE when no maxSize provided', () => {
+    assert.equal(typeof MAX_TOOL_RESULT_SIZE, 'number')
+    assert.equal(MAX_TOOL_RESULT_SIZE, 10240)
+
+    const emitter = new EventEmitter()
+    const results = []
+    emitter.on('tool_result', r => results.push(r))
+
+    // Content just under the default limit — should not truncate
+    const content = 'x'.repeat(MAX_TOOL_RESULT_SIZE)
+    emitToolResults([
+      { type: 'tool_result', tool_use_id: 'tu_def', content },
+    ], emitter)
+
+    assert.equal(results[0].truncated, false)
+    assert.equal(results[0].result.length, MAX_TOOL_RESULT_SIZE)
   })
 
   it('skips blocks without tool_use_id', () => {
