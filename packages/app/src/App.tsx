@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -7,6 +7,7 @@ import { ConnectScreen } from './screens/ConnectScreen';
 import { SessionScreen } from './screens/SessionScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { useConnectionStore, selectShowSession } from './store/connection';
+import { setupNotificationResponseListener } from './notifications';
 
 export type RootStackParamList = {
   Connect: undefined;
@@ -18,6 +19,11 @@ const Stack = createNativeStackNavigator<RootStackParamList>();
 
 export default function App() {
   const showSession = useConnectionStore(selectShowSession);
+
+  useEffect(() => {
+    const sub = setupNotificationResponseListener();
+    return () => sub.remove();
+  }, []);
 
   return (
     <NavigationContainer>

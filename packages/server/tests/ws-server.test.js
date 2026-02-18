@@ -4571,3 +4571,352 @@ describe('request_session_context error paths', () => {
     ws.close()
   })
 })
+
+describe('POST /permission-response HTTP endpoint', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('resolves a pending legacy permission via HTTP', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+
+    // Create a pending permission via POST /permission
+    const permPromise = fetch(`http://127.0.0.1:${port}/permission`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool_name: 'Write', tool_input: { file_path: '/tmp/test.js' } }),
+    })
+
+    try {
+      const permReq = await waitForMessage(messages, 'permission_request', 2000)
+
+      // Resolve via POST /permission-response
+      const response = await fetch(`http://127.0.0.1:${port}/permission-response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId: permReq.requestId, decision: 'allow' }),
+      })
+      assert.equal(response.status, 200)
+      const data = await response.json()
+      assert.deepEqual(data, { ok: true })
+
+      // The original /permission response should also complete
+      const permRes = await permPromise
+      assert.equal(permRes.status, 200)
+      const permData = await permRes.json()
+      assert.equal(permData.decision, 'allow')
+    } finally {
+      ws.close()
+      await permPromise.catch(() => {})
+    }
+  })
+
+  it('rejects unauthenticated requests when authRequired: true', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const response = await fetch(`http://127.0.0.1:${port}/permission-response`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId: 'perm-1', decision: 'allow' }),
+    })
+    assert.equal(response.status, 403)
+    const data = await response.json()
+    assert.equal(data.error, 'unauthorized')
+  })
+
+  it('authenticates with Bearer token when authRequired: true', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    // Authenticate the WS client
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Create a pending permission
+    const permPromise = fetch(`http://127.0.0.1:${port}/permission`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer test-token',
+      },
+      body: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }),
+    })
+
+    try {
+      const permReq = await waitForMessage(messages, 'permission_request', 2000)
+
+      // Resolve via authenticated POST /permission-response
+      const response = await fetch(`http://127.0.0.1:${port}/permission-response`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer test-token',
+        },
+        body: JSON.stringify({ requestId: permReq.requestId, decision: 'allow' }),
+      })
+      assert.equal(response.status, 200)
+      const data = await response.json()
+      assert.deepEqual(data, { ok: true })
+    } finally {
+      ws.close()
+      await permPromise.catch(() => {})
+    }
+  })
+
+  it('returns 404 for unknown requestId', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const response = await fetch(`http://127.0.0.1:${port}/permission-response`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId: 'nonexistent-123', decision: 'allow' }),
+    })
+    assert.equal(response.status, 404)
+    const data = await response.json()
+    assert.equal(data.error, 'unknown or expired requestId')
+  })
+
+  it('returns 400 for invalid decision', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const response = await fetch(`http://127.0.0.1:${port}/permission-response`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId: 'perm-1', decision: 'maybe' }),
+    })
+    assert.equal(response.status, 400)
+    const data = await response.json()
+    assert.ok(data.error.includes('invalid decision'))
+  })
+
+  it('returns 400 for missing requestId', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const response = await fetch(`http://127.0.0.1:${port}/permission-response`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision: 'allow' }),
+    })
+    assert.equal(response.status, 400)
+    const data = await response.json()
+    assert.equal(data.error, 'missing requestId')
+  })
+
+  it('returns 400 for invalid JSON body', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const response = await fetch(`http://127.0.0.1:${port}/permission-response`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: 'not json',
+    })
+    assert.equal(response.status, 400)
+    const data = await response.json()
+    assert.equal(data.error, 'invalid JSON')
+  })
+
+  it('returns 404 on duplicate response (already resolved)', async () => {
+    const mockPty = new EventEmitter()
+    mockPty.write = () => {}
+    mockPty.resize = () => {}
+    const mockParser = new EventEmitter()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      ptyManager: mockPty,
+      outputParser: mockParser,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+
+    // Create a pending permission
+    const permPromise = fetch(`http://127.0.0.1:${port}/permission`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool_name: 'Read', tool_input: { file_path: '/tmp/file.txt' } }),
+    })
+
+    try {
+      const permReq = await waitForMessage(messages, 'permission_request', 2000)
+
+      // First response succeeds
+      const first = await fetch(`http://127.0.0.1:${port}/permission-response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId: permReq.requestId, decision: 'allow' }),
+      })
+      assert.equal(first.status, 200)
+
+      // Second response returns 404 (already resolved)
+      const second = await fetch(`http://127.0.0.1:${port}/permission-response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId: permReq.requestId, decision: 'deny' }),
+      })
+      assert.equal(second.status, 404)
+    } finally {
+      ws.close()
+      await permPromise.catch(() => {})
+    }
+  })
+
+  it('resolves SDK session permission via HTTP', async () => {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    const mockSession = createMockSession()
+    mockSession.cwd = '/tmp/project'
+    let resolvedWith = null
+    mockSession.respondToPermission = (reqId, decision) => { resolvedWith = { reqId, decision } }
+    sessionsMap.set('sess-1', {
+      session: mockSession,
+      name: 'Session 1',
+      cwd: '/tmp/project',
+      type: 'cli',
+      isBusy: false,
+    })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => [{ id: 'sess-1', name: 'Session 1', cwd: '/tmp/project', type: 'cli', isBusy: false }]
+    manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
+    manager.getSessionContext = async () => null
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => 'sess-1'
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    // Wait for the client to be fully set up (session_switched, etc.)
+    await waitForMessage(messages, 'session_switched', 2000)
+
+    // Simulate SDK session emitting a permission_request
+    const requestId = 'sdk-perm-http-1'
+    manager.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'permission_request',
+      data: {
+        requestId,
+        tool: 'Bash',
+        description: 'ls',
+        input: { command: 'ls' },
+        remainingMs: 300000,
+      },
+    })
+
+    await waitForMessage(messages, 'permission_request', 2000)
+
+    // Resolve via HTTP
+    const response = await fetch(`http://127.0.0.1:${port}/permission-response`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId, decision: 'allow' }),
+    })
+    assert.equal(response.status, 200)
+    const data = await response.json()
+    assert.deepEqual(data, { ok: true })
+    assert.deepEqual(resolvedWith, { reqId: requestId, decision: 'allow' })
+
+    ws.close()
+  })
+})

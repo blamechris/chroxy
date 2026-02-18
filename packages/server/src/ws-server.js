@@ -321,6 +321,13 @@ export class WsServer {
         return
       }
 
+      // Permission response endpoint — receives Approve/Deny from iOS notification actions
+      // (HTTP fallback when WebSocket is disconnected)
+      if (req.method === 'POST' && req.url === '/permission-response') {
+        this._handlePermissionResponseHttp(req, res)
+        return
+      }
+
       res.writeHead(404)
       res.end()
     })
@@ -1485,7 +1492,7 @@ export class WsServer {
           })
           // Push notification
           if (this.pushManager) {
-            this.pushManager.send('permission', 'Permission needed', `Claude wants to use: ${data.tool}`, { requestId: data.requestId, tool: data.tool })
+            this.pushManager.send('permission', 'Permission needed', `Claude wants to use: ${data.tool}`, { requestId: data.requestId, tool: data.tool }, 'permission')
           }
           break
 
@@ -1904,7 +1911,7 @@ export class WsServer {
 
       // Send push notification for permission — user may have the app backgrounded
       if (this.pushManager) {
-        this.pushManager.send('permission', 'Permission needed', `Claude wants to use: ${tool}`, { requestId, tool })
+        this.pushManager.send('permission', 'Permission needed', `Claude wants to use: ${tool}`, { requestId, tool }, 'permission')
       }
 
       // Track whether the HTTP connection has been closed (client disconnect / abort)
@@ -1947,6 +1954,80 @@ export class WsServer {
         },
         timer,
       })
+    })
+  }
+
+  /** Handle POST /permission-response from iOS notification actions (HTTP fallback) */
+  _handlePermissionResponseHttp(req, res) {
+    if (!this._validateBearerAuth(req, res)) {
+      console.warn('[ws] Rejected unauthenticated POST /permission-response')
+      return
+    }
+
+    const MAX_BODY = 4096
+    let body = ''
+    let oversized = false
+    req.on('data', (chunk) => {
+      if (oversized) return
+      body += chunk
+      if (body.length > MAX_BODY) {
+        oversized = true
+        res.writeHead(413, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'body too large' }))
+      }
+    })
+    req.on('end', () => {
+      if (oversized) return
+
+      let parsed
+      try {
+        parsed = JSON.parse(body)
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid JSON' }))
+        return
+      }
+
+      const { requestId, decision } = parsed
+      if (!requestId || typeof requestId !== 'string') {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'missing requestId' }))
+        return
+      }
+
+      const validDecisions = ['allow', 'deny', 'allowAlways']
+      if (!validDecisions.includes(decision)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: `invalid decision, must be one of: ${validDecisions.join(', ')}` }))
+        return
+      }
+
+      // Try SDK-mode first (in-process permission via sessionManager)
+      const originSessionId = this._permissionSessionMap.get(requestId)
+      if (originSessionId && this.sessionManager) {
+        const entry = this.sessionManager.getSession(originSessionId)
+        if (entry && typeof entry.session.respondToPermission === 'function') {
+          this._permissionSessionMap.delete(requestId)
+          entry.session.respondToPermission(requestId, decision)
+          console.log(`[ws] Permission ${requestId} resolved via HTTP: ${decision} (SDK)`)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true }))
+          return
+        }
+      }
+
+      // Fall back to legacy HTTP-held permission
+      const pending = this._pendingPermissions.get(requestId)
+      if (pending) {
+        this._permissionSessionMap.delete(requestId)
+        this._resolvePermission(requestId, decision)
+        console.log(`[ws] Permission ${requestId} resolved via HTTP: ${decision} (legacy)`)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true }))
+      } else {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unknown or expired requestId' }))
+      }
     })
   }
 
