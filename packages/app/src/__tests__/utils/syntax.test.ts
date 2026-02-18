@@ -106,6 +106,23 @@ describe('tokenize JavaScript', () => {
     expect(num!.text).toBe('0xFF');
   });
 
+  it('highlights single-digit prefixed numbers', () => {
+    const hexTokens = tokenize('const hx = 0x0', 'js');
+    const hexNum = firstOfType(hexTokens, 'number');
+    expect(hexNum).toBeDefined();
+    expect(hexNum!.text).toBe('0x0');
+
+    const octTokens = tokenize('const oc = 0o7', 'js');
+    const octNum = firstOfType(octTokens, 'number');
+    expect(octNum).toBeDefined();
+    expect(octNum!.text).toBe('0o7');
+
+    const binTokens = tokenize('const bn = 0b1', 'js');
+    const binNum = firstOfType(binTokens, 'number');
+    expect(binNum).toBeDefined();
+    expect(binNum!.text).toBe('0b1');
+  });
+
   it('highlights function calls', () => {
     const tokens = tokenize('console.log(x)', 'js');
     const fn = firstOfType(tokens, 'function');
