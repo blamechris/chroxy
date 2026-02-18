@@ -19,7 +19,10 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | PtyManager | `src/pty-manager.js` | tmux session management (PTY mode) |
 | OutputParser | `src/output-parser.js` | Terminal output parser (PTY mode) |
 | NoisePatterns | `src/noise-patterns.js` | Terminal noise filter patterns (PTY mode) |
-| TunnelManager | `src/tunnel.js` | Cloudflare tunnel lifecycle (quick/named/none) |
+| TunnelRegistry | `src/tunnel/registry.js` | Tunnel adapter registry (`registerTunnel`/`getTunnel`/`parseTunnelArg`) |
+| BaseTunnelAdapter | `src/tunnel/base.js` | Base class with shared recovery logic (backoff, events) |
+| CloudflareTunnelAdapter | `src/tunnel/cloudflare.js` | Cloudflare adapter (quick/named modes) |
+| TunnelManager | `src/tunnel.js` | Backward-compat shim re-exporting CloudflareTunnelAdapter |
 | TunnelEvents | `src/tunnel-events.js` | Tunnel event wiring helpers |
 | ProviderRegistry | `src/providers.js` | Provider adapter interface + built-in registrations |
 | SessionManager | `src/session-manager.js` | Session lifecycle management + auto-discovery |
@@ -132,7 +135,11 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `output-parser.js` | Terminal output parser |
 | `noise-patterns.js` | Terminal noise filter patterns |
 | `ws-server.js` | WebSocket protocol with auth |
-| `tunnel.js` | Cloudflare tunnel manager (quick/named/none) |
+| `tunnel.js` | Backward-compat shim (re-exports CloudflareTunnelAdapter as TunnelManager) |
+| `tunnel/index.js` | Tunnel module entry — re-exports + registers built-in adapters |
+| `tunnel/registry.js` | Tunnel adapter registry + `parseTunnelArg` flag parser |
+| `tunnel/base.js` | BaseTunnelAdapter — shared recovery logic |
+| `tunnel/cloudflare.js` | CloudflareTunnelAdapter — quick/named modes |
 | `tunnel-check.js` | Tunnel health verification |
 | `tunnel-events.js` | Tunnel event wiring helpers |
 | `session-manager.js` | Session lifecycle management |
