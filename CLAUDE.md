@@ -164,9 +164,9 @@ type(scope): Short summary in present tense
 
 Two server modes, both stream through `ws-server.js` → Cloudflare tunnel → mobile app:
 
-- **CLI Headless (default):** `server-cli.js` → `cli-session.js` wraps `claude -p --output-format stream-json`. No tmux/node-pty needed. Conversation state maintained internally (no `--resume`).
+- **CLI Headless (default):** `server-cli.js` → `sdk-session.js` (Agent SDK) or `cli-session.js` (legacy `claude -p`). No tmux/node-pty needed. Provider selected via `providers.js` registry.
 - **PTY/tmux (`--terminal`):** `server.js` → `pty-manager.js` + `output-parser.js`. Spawns tmux session, parses raw ANSI output.
-- **Shared:** `ws-server.js` (WebSocket + auth), `tunnel.js` (Cloudflare), `session-manager.js`, `config.js`, `push.js`
+- **Shared:** `ws-server.js` (WebSocket + auth + E2E encryption), `tunnel.js` (Cloudflare), `session-manager.js`, `providers.js`, `config.js`, `push.js`
 - **App:** ConnectScreen → SessionScreen (ChatView + TerminalView), Zustand store (`connection.ts`)
 
 For component tables, WS protocol messages, data flow diagrams, and file listings: see `docs/architecture/reference.md`

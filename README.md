@@ -9,7 +9,7 @@ Run a lightweight daemon on your dev machine. Connect from anywhere via your pho
 
 ```
 ┌─────────────┐                        ┌──────────────────┐
-│  Phone      │◄───── secure tunnel ──►│  Your Mac        │
+│  Phone      │◄───── secure tunnel ──►│  Your Machine    │
 │             │                        │                  │
 │ ┌─────────┐ │                        │ ┌──────────────┐ │
 │ │Chat View│ │◄── parsed messages ────│ │ Chroxy Server│ │
@@ -23,15 +23,17 @@ Run a lightweight daemon on your dev machine. Connect from anywhere via your pho
 ## Why Chroxy?
 
 - **No tmux required** — CLI headless mode wraps Claude Code directly. Just start the server and connect.
-- **Two views, one session** — Switch between a clean chat UI and raw terminal access.
+- **Two views, one session** — Switch between a clean chat UI and a full xterm.js terminal emulator.
 - **Multi-session** — Run multiple Claude sessions from one server. Create, switch, and destroy from the app.
-- **Privacy-first** — Your machine, your tunnel. No cloud middleman storing your code.
+- **Encrypted** — End-to-end encryption over Cloudflare tunnel. Your machine, your tunnel, no cloud middleman.
 - **Resilient** — Auto-reconnect on network drops, supervisor auto-restart on crash, push notifications for permission prompts.
+- **Voice input** — Dictate messages with speech-to-text from your phone.
+- **Cross-platform server** — Runs on macOS, Linux, and Windows.
 - **Open source** — MIT licensed. Audit it, fork it, improve it.
 
 ## Prerequisites
 
-- **Node.js 22** — Required for `node-pty` (PTY mode). Install via Homebrew:
+- **Node.js 22** — Required for the server. Install via Homebrew (macOS) or your package manager:
   ```bash
   brew install node@22
   ```
@@ -45,14 +47,14 @@ Run a lightweight daemon on your dev machine. Connect from anywhere via your pho
   brew install cloudflared
   ```
 
-- **tmux** *(optional)* — Only required for PTY mode (`--terminal` flag). CLI headless mode (default) does not need tmux:
+- **tmux** *(optional, macOS/Linux only)* — Only required for PTY mode (`--terminal` flag). CLI headless mode (default) does not need tmux:
   ```bash
   brew install tmux
   ```
 
 ## Quick Start
 
-### Server (on your Mac)
+### Server (on your dev machine)
 
 ```bash
 # Install and configure
@@ -76,9 +78,9 @@ Does not support `--terminal` (PTY) mode.
 
 ### Local WiFi (same network)
 
-If your phone and Mac are on the same WiFi, you can connect directly without the tunnel:
+If your phone and dev machine are on the same WiFi, you can connect directly without the tunnel:
 
-1. Find your Mac's local IP:
+1. Find your machine's local IP:
    ```bash
    ipconfig getifaddr en0
    ```
@@ -90,22 +92,29 @@ This skips the Cloudflare tunnel — lower latency, fully local.
 
 ### App (on your phone)
 
-For development, use Expo Go:
+The app requires a **custom dev build** (not Expo Go) because native modules like `expo-speech-recognition` and `expo-secure-store` are included:
+
 ```bash
 cd packages/app
 npm install
+
+# Build a dev client (one-time, or when native deps change)
+npx expo run:ios    # or npx expo run:android
+
+# For daily development (hot-reload, same as Expo Go)
 npx expo start
 ```
 
-Scan the Expo dev server QR code with Expo Go on your phone.
+See `packages/app/README.md` for EAS cloud build instructions.
 
 ## How It Works
 
-1. **Server** starts a Claude Code process (`claude -p` with structured JSON streaming)
+1. **Server** starts a Claude Code process via the Agent SDK (or `claude -p` in legacy mode)
 2. **WebSocket server** streams parsed messages, tool use, and permission requests to the app
-3. **Cloudflare tunnel** provides secure remote access without port forwarding
-4. **Mobile app** renders a chat UI with markdown, handles permissions, and sends input back
-5. **Multi-session manager** lets you run multiple conversations in parallel
+3. **End-to-end encryption** secures all messages between the server and app
+4. **Cloudflare tunnel** provides secure remote access without port forwarding
+5. **Mobile app** renders a chat UI with markdown, handles permissions, and sends input back
+6. **Multi-session manager** lets you run multiple conversations in parallel
 
 ### Server Modes
 
@@ -156,9 +165,13 @@ Open Expo Go on your phone and scan the Expo dev server QR code. Then use the Ch
 ### Running Tests
 
 ```bash
-# Server tests (395 tests)
+# Server tests (700+ tests)
 cd packages/server
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test
+
+# App type check
+cd packages/app
+npx tsc --noEmit
 ```
 
 ## Roadmap
@@ -178,9 +191,12 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test
 - [x] Auto-reconnect with ConnectionPhase state machine
 - [x] Message selection (copy/share)
 - [x] Agent monitoring (background tasks)
-- [ ] Terminal view with xterm.js (currently plain text)
-- [ ] Plan mode UI
-- [ ] Settings page polish
+- [x] Terminal view with xterm.js emulation (WebView)
+- [x] Plan mode UI (plan approval card, feedback)
+- [x] End-to-end encryption for WebSocket messages
+- [x] Voice-to-text input (speech recognition)
+- [x] Provider adapter interface (pluggable session backends)
+- [x] Windows support for CLI headless mode
 - [ ] TestFlight / Play Store release
 - [ ] Tailscale support as tunnel alternative
 - [ ] Session recording and replay

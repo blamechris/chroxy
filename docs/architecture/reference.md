@@ -21,9 +21,13 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | NoisePatterns | `src/noise-patterns.js` | Terminal noise filter patterns (PTY mode) |
 | TunnelManager | `src/tunnel.js` | Cloudflare tunnel lifecycle (quick/named/none) |
 | TunnelEvents | `src/tunnel-events.js` | Tunnel event wiring helpers |
+| ProviderRegistry | `src/providers.js` | Provider adapter interface + built-in registrations |
 | SessionManager | `src/session-manager.js` | Session lifecycle management + auto-discovery |
 | SessionDiscovery | `src/session-discovery.js` | tmux session discovery utilities |
 | Models | `src/models.js` | Model switching utilities |
+| ContentBlocks | `src/content-blocks.js` | Content block builder for structured output |
+| PermissionHook | `src/permission-hook.js` | Permission hook management (CLI mode) |
+| Platform | `src/platform.js` | Cross-platform utilities (Windows/macOS/Linux) |
 | Logger | `src/logger.js` | Shared logging utility |
 
 ## App Screens
@@ -38,9 +42,9 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| ChatView | `src/components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
+| ChatView | `src/components/ChatView.tsx` | Message list, tool bubbles, plan approval card (inline component) |
 | TerminalView | `src/components/TerminalView.tsx` | xterm.js terminal emulator (WebView), resize forwarding, crash recovery |
-| InputBar | `src/components/InputBar.tsx` | Text input with send/interrupt toggle |
+| InputBar | `src/components/InputBar.tsx` | Text input with send/interrupt + mic button |
 | SettingsBar | `src/components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
 | SessionPicker | `src/components/SessionPicker.tsx` | Horizontal session tab strip |
 | MarkdownRenderer | `src/components/MarkdownRenderer.tsx` | Markdown parsing + inline code highlighting |
@@ -79,11 +83,11 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 
 ### Client → Server
 
-`auth`, `input`, `resize`, `mode`, `interrupt`, `set_model`, `set_permission_mode`, `permission_response`, `list_sessions`, `switch_session`, `create_session`, `destroy_session`, `rename_session`, `discover_sessions`, `attach_session`, `trigger_discovery`, `register_push_token`, `user_question_response`, `list_directory`
+`auth`, `input`, `resize`, `mode`, `interrupt`, `set_model`, `set_permission_mode`, `permission_response`, `list_sessions`, `switch_session`, `create_session`, `destroy_session`, `rename_session`, `discover_sessions`, `attach_session`, `trigger_discovery`, `register_push_token`, `user_question_response`, `list_directory`, `key_exchange`
 
 ### Server → Client
 
-`auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `stream_delta`, `stream_end`, `raw`, `message`, `status`, `model_changed`, `status_update`, `available_models`, `permission_request`, `confirm_permission_mode`, `permission_mode_changed`, `available_permission_modes`, `session_list`, `session_switched`, `session_created`, `session_destroyed`, `session_error`, `discovered_sessions`, `discovery_triggered`, `history_replay_start`, `history_replay_end`, `raw_background`, `claude_ready`, `tool_start`, `result`, `agent_busy`, `agent_idle`, `agent_spawned`, `agent_completed`, `server_shutdown`, `server_status`, `server_error`, `user_question`, `plan_started`, `plan_ready`, `client_joined`, `client_left`, `primary_changed`, `directory_listing`
+`auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `stream_delta`, `stream_end`, `raw`, `message`, `status`, `model_changed`, `status_update`, `available_models`, `permission_request`, `confirm_permission_mode`, `permission_mode_changed`, `available_permission_modes`, `session_list`, `session_switched`, `session_created`, `session_destroyed`, `session_error`, `discovered_sessions`, `discovery_triggered`, `history_replay_start`, `history_replay_end`, `raw_background`, `claude_ready`, `tool_start`, `result`, `agent_busy`, `agent_idle`, `agent_spawned`, `agent_completed`, `server_shutdown`, `server_status`, `server_error`, `user_question`, `plan_started`, `plan_ready`, `client_joined`, `client_left`, `primary_changed`, `directory_listing`, `key_exchange`
 
 ### Protocol Details
 
@@ -96,6 +100,8 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 - `user_question` forwards `AskUserQuestion` prompts from plan mode; `user_question_response` sends the user's answer back
 - `agent_spawned` fires when the Task tool is detected (description truncated to 200 chars); `agent_completed` fires per-agent when the turn's `result` arrives or on process crash/destroy
 - `plan_started` fires on `EnterPlanMode` tool; `plan_ready` fires on `ExitPlanMode`, includes `allowedPrompts` payload — both are transient events (not recorded in history or replayed)
+- `key_exchange` implements ECDH key exchange for end-to-end encryption; after `auth_ok`, client and server exchange public keys, derive a shared secret, and encrypt all subsequent messages; `auth_ok` includes `encryption: 'required'` when encryption is enabled or `encryption: 'disabled'` when turned off; disable with `--no-encrypt`
+- `session_list` includes `provider` (provider name) and `capabilities` (feature flags from the provider adapter interface) per session
 - `auth` accepts optional `deviceInfo: { deviceId, deviceName, deviceType, platform }` for multi-client awareness
 - `auth_ok` includes `clientId` (assigned ID) and `connectedClients` (list of all connected clients)
 - `client_joined` broadcasts when a new client authenticates; `client_left` on disconnect
@@ -115,7 +121,11 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `server-cli.js` | CLI mode orchestrator |
 | `cli-session.js` | Claude Code headless executor (stream-json) |
 | `sdk-session.js` | Claude Agent SDK executor |
+| `providers.js` | Provider adapter registry + built-in registrations |
+| `content-blocks.js` | Content block builder for structured output |
+| `permission-hook.js` | Permission hook management (CLI mode) |
 | `push.js` | Push notifications via Expo Push API |
+| `platform.js` | Cross-platform utilities (Windows/macOS/Linux) |
 | `server.js` | PTY mode orchestrator |
 | `pty-manager.js` | PTY/tmux management |
 | `pty-session.js` | PTY session state + I/O handling |
@@ -138,15 +148,16 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `screens/ConnectScreen.tsx` | QR scan + manual connection UI |
 | `screens/SessionScreen.tsx` | Session orchestrator (wires components) |
 | `screens/SettingsScreen.tsx` | App settings and version info |
-| `components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
+| `components/ChatView.tsx` | Message list, tool bubbles, plan approval card (inline component) |
 | `components/TerminalView.tsx` | xterm.js terminal emulator (WebView), resize forwarding, crash recovery |
 | `components/xterm-html.ts` | Inline HTML template for xterm.js WebView |
-| `components/InputBar.tsx` | Text input with send/interrupt toggle |
+| `components/InputBar.tsx` | Text input with send/interrupt + mic button |
 | `components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
 | `components/SessionPicker.tsx` | Horizontal session tab strip |
 | `components/MarkdownRenderer.tsx` | Markdown parsing + inline code highlighting |
 | `components/CreateSessionModal.tsx` | New session creation dialog |
 | `store/connection.ts` | Zustand state store (ConnectionPhase) |
+| `hooks/useSpeechRecognition.ts` | Voice-to-text input hook |
 | `notifications.ts` | Push notification registration |
 | `constants/colors.ts` | Shared color palette |
 | `constants/icons.ts` | Shared icon constants |
@@ -161,3 +172,4 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `docs/qa-log.md` | QA audit log with coverage matrix |
 | `docs/smoke-test.md` | Manual smoke test checklist |
 | `docs/named-tunnel-guide.md` | Named tunnel setup guide |
+| `docs/self-hosting-guide.md` | Self-hosting requirements and deployment |

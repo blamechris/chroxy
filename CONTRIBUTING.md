@@ -26,12 +26,12 @@ Thanks for your interest in contributing! This document covers how to get starte
    npx expo start
    ```
 
-5. **Connect from your phone** — Open Expo Go, scan the Expo QR code, then scan the Chroxy server QR code inside the app.
+5. **Connect from your phone** — The app requires a custom dev build (not Expo Go) due to native modules. See `packages/app/README.md` for build instructions.
 
 ## Project Structure
 
 - `packages/server` — Node.js daemon with dual modes (CLI headless default, PTY/tmux opt-in) that exposes WebSocket API
-- `packages/app` — React Native app with QR scanning, chat view with markdown rendering, and terminal view
+- `packages/app` — React Native app (TypeScript, Expo 54) with chat view, xterm.js terminal, voice input, and plan mode UI
 - `docs/` — Architecture docs and guides
 - `scripts/` — Helper scripts
 
@@ -60,17 +60,16 @@ Thanks for your interest in contributing! This document covers how to get starte
 - UI polish and animations
 - Improve output parser patterns (`packages/server/src/output-parser.js`) for PTY mode
 - Better error messages and edge case handling
-- Syntax highlighting for code blocks in chat
 
 ### Medium
 - App-side test suite (component rendering, store logic)
-- Plan mode UI (display Claude's plan steps)
 - Settings page improvements
+- Maestro E2E test flows for new features
 
 ### Larger Projects
-- xterm.js integration for terminal view (replace plain text display)
 - Session recording and replay
 - Tailscale support as tunnel alternative
+- Additional session providers via the provider adapter interface
 
 ## Questions?
 
