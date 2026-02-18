@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'fs'
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { defaultShell, writeFileRestricted, forceKill, isWindows } from '../src/platform.js'
@@ -45,6 +45,15 @@ describe('platform', () => {
       const content = readFileSync(filePath, 'utf-8')
       assert.strictEqual(content, 'second')
     })
+
+    if (!isWindows) {
+      it('sets 0o600 permissions on Unix', () => {
+        const filePath = join(tmpDir, 'restricted.txt')
+        writeFileRestricted(filePath, 'secret')
+        const mode = statSync(filePath).mode & 0o777
+        assert.strictEqual(mode, 0o600)
+      })
+    }
   })
 
   describe('forceKill()', () => {
