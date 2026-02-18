@@ -1114,6 +1114,20 @@ export class WsServer {
         }
         break
 
+      case 'request_session_context': {
+        const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
+        if (!targetId) break
+        try {
+          const ctx = await this.sessionManager.getSessionContext(targetId)
+          if (ctx) {
+            this._send(ws, { type: 'session_context', ...ctx })
+          }
+        } catch (err) {
+          console.warn(`[ws] Failed to read session context: ${err.message}`)
+        }
+        break
+      }
+
       default:
         console.log(`[ws] Unknown message type: ${msg.type}`)
     }
@@ -1415,6 +1429,10 @@ export class WsServer {
           this._broadcastToSession(sessionId, { type: 'agent_idle' })
           // Broadcast updated session list (isBusy may have changed)
           this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
+          // Refresh session context (git branch may have changed during the turn)
+          this.sessionManager.getSessionContext(sessionId).then((ctx) => {
+            if (ctx) this._broadcastToSession(sessionId, { type: 'session_context', ...ctx })
+          }).catch(() => {})
           break
 
         case 'raw':

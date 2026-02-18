@@ -175,6 +175,13 @@ export interface ConnectedClient {
 
 export type SessionHealth = 'healthy' | 'crashed';
 
+export interface SessionContext {
+  gitBranch: string | null;
+  gitDirty: number;
+  gitAhead: number;
+  projectName: string | null;
+}
+
 export interface SessionState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
@@ -191,6 +198,7 @@ export interface SessionState {
   planAllowedPrompts: { tool: string; prompt: string }[];
   primaryClientId: string | null;
   conversationId: string | null;
+  sessionContext: SessionContext | null;
 }
 
 export interface ServerError {
@@ -240,6 +248,7 @@ export function createEmptySessionState(): SessionState {
     planAllowedPrompts: [],
     primaryClientId: null,
     conversationId: null,
+    sessionContext: null,
   };
 }
 
@@ -843,6 +852,21 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         }
       }
       break;
+
+    case 'session_context': {
+      const ctxSessionId = (msg.sessionId as string) || get().activeSessionId;
+      if (ctxSessionId && get().sessionStates[ctxSessionId]) {
+        updateSession(ctxSessionId, () => ({
+          sessionContext: {
+            gitBranch: typeof msg.gitBranch === 'string' ? msg.gitBranch : null,
+            gitDirty: typeof msg.gitDirty === 'number' ? msg.gitDirty : 0,
+            gitAhead: typeof msg.gitAhead === 'number' ? msg.gitAhead : 0,
+            projectName: typeof msg.projectName === 'string' ? msg.projectName : null,
+          },
+        }));
+      }
+      break;
+    }
 
     case 'session_switched': {
       const sessionId = msg.sessionId as string;
@@ -1737,6 +1761,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       planAllowedPrompts: [],
       primaryClientId: null,
       conversationId: null,
+      sessionContext: null,
     };
   },
 

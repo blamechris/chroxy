@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient, CustomAgent } from '../store/connection';
+import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext } from '../store/connection';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
@@ -32,6 +32,7 @@ export interface SettingsBarProps {
   onConfirmPermissionMode?: (mode: string) => void;
   onCancelPermissionConfirm?: () => void;
   conversationId?: string | null;
+  sessionContext?: SessionContext | null;
 }
 
 // -- Helpers --
@@ -97,6 +98,7 @@ export function SettingsBar({
   onConfirmPermissionMode,
   onCancelPermissionConfirm,
   conversationId,
+  sessionContext,
 }: SettingsBarProps) {
   // Elapsed time ticker — only runs when expanded with active agents
   const [now, setNow] = useState(Date.now());
@@ -142,13 +144,21 @@ export function SettingsBar({
     truncatedCwd = homeShortened.length > 30 ? homeShortened.slice(-30) : homeShortened;
   }
 
-  // Build collapsed summary: "~/Projects/chroxy · cli · Opus · $0.02"
+  // Build collapsed summary: "main · 3 dirty · chroxy · Opus · $0.02"
   const summaryParts: string[] = [];
 
-  if (truncatedCwd) {
+  if (sessionContext?.gitBranch) {
+    summaryParts.push(sessionContext.gitBranch);
+    if (sessionContext.gitDirty > 0) {
+      summaryParts.push(`${sessionContext.gitDirty} dirty`);
+    }
+    if (sessionContext.projectName) {
+      summaryParts.push(sessionContext.projectName);
+    }
+  } else if (truncatedCwd) {
     summaryParts.push(truncatedCwd);
   }
-  if (serverMode) {
+  if (serverMode && !sessionContext) {
     summaryParts.push(serverMode);
   }
 
@@ -221,6 +231,16 @@ export function SettingsBar({
       </TouchableOpacity>
       {expanded && (
         <View style={styles.expandedContent}>
+          {sessionContext?.gitBranch && (
+            <View style={styles.contextRow}>
+              <Text style={styles.contextText}>
+                {sessionContext.gitBranch}
+                {sessionContext.gitDirty > 0 ? ` \u00B7 ${sessionContext.gitDirty} uncommitted` : ''}
+                {sessionContext.gitAhead > 0 ? ` \u00B7 ${sessionContext.gitAhead} ahead` : ''}
+                {sessionContext.projectName ? ` \u00B7 ${sessionContext.projectName}` : ''}
+              </Text>
+            </View>
+          )}
           {claudeStatus ? (
             // PTY mode: display claudeStatus data
             <View style={styles.contextRow}>

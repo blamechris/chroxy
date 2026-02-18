@@ -7,6 +7,7 @@ import { getProvider } from './providers.js'
 import { discoverTmuxSessions } from './session-discovery.js'
 import { resolveJsonlPath, readConversationHistory, readConversationHistoryAsync } from './jsonl-reader.js'
 import { isWindows, writeFileRestricted } from './platform.js'
+import { readSessionContext } from './session-context.js'
 
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
@@ -209,6 +210,21 @@ export class SessionManager extends EventEmitter {
       })
     }
     return list
+  }
+
+  /**
+   * Read git/project context for a session's working directory.
+   * @param {string} [sessionId] - If omitted, uses first session
+   * @returns {Promise<{ sessionId, gitBranch, gitDirty, gitAhead, projectName }>}
+   */
+  async getSessionContext(sessionId) {
+    const entry = sessionId
+      ? this._sessions.get(sessionId)
+      : this._sessions.values().next().value
+    if (!entry) return null
+    const id = sessionId || this._sessions.keys().next().value
+    const ctx = await readSessionContext(entry.cwd)
+    return { sessionId: id, ...ctx }
   }
 
   /**
