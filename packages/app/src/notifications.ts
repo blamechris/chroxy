@@ -2,6 +2,8 @@ import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
+import { useConnectionStore } from './store/connection';
+import { loadConnection } from './store/connection';
 
 /**
  * Configure notification behavior — show alerts and play sounds
@@ -19,6 +21,27 @@ try {
   });
 } catch {
   // Expo Go SDK 53+ removed push notification support — gracefully degrade
+}
+
+/**
+ * Register iOS notification category with Approve/Deny action buttons.
+ * Idempotent — safe to call multiple times.
+ */
+try {
+  Notifications.setNotificationCategoryAsync('permission', [
+    {
+      identifier: 'approve',
+      buttonTitle: 'Approve',
+      options: { opensAppToForeground: true },
+    },
+    {
+      identifier: 'deny',
+      buttonTitle: 'Deny',
+      options: { isDestructive: true, opensAppToForeground: true },
+    },
+  ]);
+} catch {
+  // Gracefully degrade if categories not supported
 }
 
 /**
@@ -74,3 +97,96 @@ export async function registerForPushNotifications(): Promise<string | null> {
   }
 }
 
+/**
+ * Send a permission response via HTTP POST (fallback when WS is disconnected).
+ * Uses the Cloudflare tunnel HTTPS URL derived from the stored WS URL.
+ */
+async function sendPermissionResponseHttp(
+  requestId: string,
+  decision: string,
+): Promise<boolean> {
+  // Try Zustand store first, fall back to SecureStore for cold start
+  let wsUrl = useConnectionStore.getState().wsUrl;
+  let apiToken = useConnectionStore.getState().apiToken;
+
+  if (!wsUrl || !apiToken) {
+    const saved = await loadConnection();
+    if (saved) {
+      wsUrl = saved.url;
+      apiToken = saved.token;
+    }
+  }
+
+  if (!wsUrl || !apiToken) {
+    console.warn('[push] No connection info available for HTTP fallback');
+    return false;
+  }
+
+  // Convert wss://host → https://host
+  const httpsUrl = wsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
+  const url = `${httpsUrl}/permission-response`;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiToken}`,
+      },
+      body: JSON.stringify({ requestId, decision }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      console.warn(`[push] HTTP permission response failed: ${res.status}`);
+      return false;
+    }
+    console.log(`[push] Permission ${requestId} sent via HTTP: ${decision}`);
+    return true;
+  } catch (err) {
+    console.warn('[push] HTTP permission response error:', err);
+    return false;
+  }
+}
+
+/**
+ * Set up a listener for notification action responses (Approve/Deny buttons).
+ * Returns the subscription — caller should call .remove() on cleanup.
+ */
+export function setupNotificationResponseListener(): Notifications.EventSubscription {
+  return Notifications.addNotificationResponseReceivedListener(async (response) => {
+    const actionId = response.actionIdentifier;
+
+    // Ignore default tap (just opens app) — only handle explicit action buttons
+    if (actionId === Notifications.DEFAULT_ACTION_IDENTIFIER) return;
+
+    const data = response.notification.request.content.data as
+      | { category?: string; requestId?: string }
+      | undefined;
+
+    if (data?.category !== 'permission' || !data.requestId) return;
+
+    const { requestId } = data;
+    const decision = actionId === 'approve' ? 'allow' : 'deny';
+
+    console.log(`[push] Notification action: ${actionId} → ${decision} for ${requestId}`);
+
+    // Try WebSocket first if connected
+    const { socket } = useConnectionStore.getState();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(
+        JSON.stringify({ type: 'permission_response', requestId, decision }),
+      );
+      console.log(`[push] Permission ${requestId} sent via WS: ${decision}`);
+    } else {
+      // Fall back to HTTP POST via Cloudflare tunnel
+      await sendPermissionResponseHttp(requestId, decision);
+    }
+
+    // Update chat UI to reflect the answered prompt
+    useConnectionStore.getState().markPromptAnswered(requestId, decision);
+  });
+}

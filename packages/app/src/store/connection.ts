@@ -447,7 +447,7 @@ async function saveConnection(url: string, token: string) {
   }
 }
 
-async function loadConnection(): Promise<SavedConnection | null> {
+export async function loadConnection(): Promise<SavedConnection | null> {
   try {
     const url = await SecureStore.getItemAsync(STORAGE_KEY_URL);
     const token = await SecureStore.getItemAsync(STORAGE_KEY_TOKEN);

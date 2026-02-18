@@ -54,8 +54,9 @@ export class PushManager {
    * @param {string} title - Notification title
    * @param {string} body - Notification body text
    * @param {object} [data] - Extra data payload
+   * @param {string} [categoryId] - iOS notification category for action buttons
    */
-  async send(category, title, body, data = {}) {
+  async send(category, title, body, data = {}, categoryId = undefined) {
     if (this.tokens.size === 0) return
 
     // Rate limit check
@@ -72,6 +73,7 @@ export class PushManager {
       title,
       body,
       data: { ...data, category },
+      ...(categoryId && { categoryId }),
     }))
 
     try {
