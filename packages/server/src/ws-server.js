@@ -1555,6 +1555,10 @@ export class WsServer {
       this._broadcast({ type: 'tool_start', messageId, toolUseId, tool, input })
     })
 
+    this.cliSession.on('tool_result', ({ toolUseId, result, truncated }) => {
+      this._broadcast({ type: 'tool_result', toolUseId, result, truncated })
+    })
+
     this.cliSession.on('result', ({ cost, duration, usage, sessionId }) => {
       this._broadcast({ type: 'result', cost, duration, usage, sessionId })
     })

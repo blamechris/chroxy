@@ -174,7 +174,7 @@ function ActivityEntry({
     onToggleSelection(message.id);
   };
 
-  const hasResult = !!message.toolResult;
+  const hasResult = message.toolResult != null;
 
   return (
     <TouchableOpacity
