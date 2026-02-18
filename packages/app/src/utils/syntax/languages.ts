@@ -176,7 +176,8 @@ const java: LanguageDef = [
 const ruby: LanguageDef = [
   { pattern: s(/#[^\n]*/), type: 'comment' },
   { pattern: s(/(["'])(?:(?!\1|\\).|\\.)*\1/), type: 'string' },
-  { pattern: s(/\b(?:alias|and|begin|break|case|class|def|defined\?|do|else|elsif|end|ensure|for|if|in|module|next|nil|not|or|redo|require|rescue|retry|return|self|super|then|undef|unless|until|when|while|yield)\b/), type: 'keyword' },
+  { pattern: s(/\bdefined\?/), type: 'keyword' },
+  { pattern: s(/\b(?:alias|and|begin|break|case|class|def|do|else|elsif|end|ensure|for|if|in|module|next|nil|not|or|redo|require|rescue|retry|return|self|super|then|undef|unless|until|when|while|yield)\b/), type: 'keyword' },
   { pattern: s(/\b(?:true|false|nil)\b/), type: 'keyword' },
   { pattern: s(/:[a-zA-Z_]\w*/), type: 'string' },
   { pattern: s(/\b\d[\d_]*(?:\.[\d_]*)?\b/), type: 'number' },
