@@ -44,12 +44,16 @@ export function SettingsScreen() {
   const [showLangPicker, setShowLangPicker] = useState(false);
 
   useEffect(() => {
-    getSpeechLang().then(setSpeechLangState);
+    getSpeechLang()
+      .then(setSpeechLangState)
+      .catch(() => {
+        // Ignore — falls back to default 'en-US'
+      });
   }, []);
 
-  const handleSelectLang = (tag: string) => {
+  const handleSelectLang = async (tag: string) => {
     setSpeechLangState(tag);
-    setSpeechLang(tag);
+    await setSpeechLang(tag);
     setShowLangPicker(false);
   };
 

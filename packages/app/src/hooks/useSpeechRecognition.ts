@@ -15,7 +15,7 @@ try {
   // Native module not available (Expo Go) — speech features disabled
 }
 
-const SPEECH_LANG_KEY = '@chroxy/speechLang';
+const SPEECH_LANG_KEY = 'chroxy_speech_lang';
 
 /** Get the persisted speech language, or the device default. */
 export async function getSpeechLang(): Promise<string> {
@@ -31,7 +31,11 @@ export async function getSpeechLang(): Promise<string> {
 
 /** Persist the speech language preference. */
 export async function setSpeechLang(lang: string): Promise<void> {
-  await SecureStore.setItemAsync(SPEECH_LANG_KEY, lang);
+  try {
+    await SecureStore.setItemAsync(SPEECH_LANG_KEY, lang);
+  } catch {
+    // Ignore write errors (e.g., SecureStore unavailable)
+  }
 }
 
 export interface UseSpeechRecognitionReturn {
