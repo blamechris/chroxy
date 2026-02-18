@@ -1,4 +1,8 @@
+import { Alert } from 'react-native';
 import * as Notifications from 'expo-notifications';
+
+// Spy on Alert.alert
+const mockAlert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
 
 // Mock expo-notifications
 jest.mock('expo-notifications', () => ({
@@ -302,7 +306,7 @@ describe('setupNotificationResponseListener', () => {
       await promise;
 
       expect(mockFetch).toHaveBeenCalledTimes(2);
-      expect(mockMarkPromptAnswered).toHaveBeenCalledWith('perm-retry-1', 'allow');
+      expect(mockMarkPromptAnsweredByRequestId).toHaveBeenCalledWith('perm-retry-1', 'allow');
     } finally {
       jest.useRealTimers();
     }
@@ -332,7 +336,7 @@ describe('setupNotificationResponseListener', () => {
 
     // Should NOT retry on 400
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(mockMarkPromptAnswered).not.toHaveBeenCalled();
+    expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
   });
 
   it('gives up after all retries exhausted', async () => {
@@ -365,7 +369,13 @@ describe('setupNotificationResponseListener', () => {
 
       // Should have tried 3 times (initial + 2 retries)
       expect(mockFetch).toHaveBeenCalledTimes(3);
-      expect(mockMarkPromptAnswered).not.toHaveBeenCalled();
+      expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
+
+      // Should show user-visible alert
+      expect(mockAlert).toHaveBeenCalledWith(
+        'Permission Response Failed',
+        'Could not deliver your response. Open the app to respond manually.',
+      );
     } finally {
       jest.useRealTimers();
     }
