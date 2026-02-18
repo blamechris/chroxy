@@ -90,10 +90,11 @@ describe('CliSession stream-event handling', () => {
       session.on('error', () => {}) // absorb overflow error event
       session._handleEvent(toolUseStart('Bash', 'toolu_1'))
 
-      // Fill buffer close to limit (262144)
-      const bigChunk = 'x'.repeat(260000)
+      // Fill buffer close to the session's actual cap
+      const cap = session._maxToolInput
+      const bigChunk = 'x'.repeat(cap - 2000)
       session._handleEvent(inputJsonDelta(bigChunk))
-      assert.equal(session._currentCtx.toolInputChunks.length, 260000)
+      assert.equal(session._currentCtx.toolInputChunks.length, cap - 2000)
       assert.equal(session._currentCtx.toolInputOverflow, false)
 
       // This chunk pushes over the cap
@@ -111,8 +112,8 @@ describe('CliSession stream-event handling', () => {
 
       session._handleEvent(toolUseStart('AskUserQuestion', 'toolu_1'))
 
-      // Trigger overflow
-      const bigChunk = 'x'.repeat(262145)
+      // Trigger overflow using session's actual cap
+      const bigChunk = 'x'.repeat(session._maxToolInput + 1)
       session._handleEvent(inputJsonDelta(bigChunk))
 
       assert.equal(errors.length, 1)
@@ -125,8 +126,8 @@ describe('CliSession stream-event handling', () => {
       session.on('error', () => {}) // absorb overflow error event
       session._handleEvent(toolUseStart('Bash', 'toolu_1'))
 
-      // Trigger overflow
-      const bigChunk = 'x'.repeat(262145)
+      // Trigger overflow using session's actual cap
+      const bigChunk = 'x'.repeat(session._maxToolInput + 1)
       session._handleEvent(inputJsonDelta(bigChunk))
       assert.equal(session._currentCtx.toolInputOverflow, true)
 
