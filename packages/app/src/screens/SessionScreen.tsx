@@ -686,17 +686,17 @@ export function SessionScreen() {
       {/* Attachment picker bottom sheet */}
       <Modal visible={showAttachSheet} transparent animationType="slide" onRequestClose={() => setShowAttachSheet(false)}>
         <Pressable style={styles.sheetOverlay} onPress={() => setShowAttachSheet(false)}>
-          <Pressable style={styles.sheetContent} onPress={(e) => e.stopPropagation()}>
-            <TouchableOpacity style={styles.sheetOption} onPress={() => handleAttachOption(pickFromCamera)}>
+          <Pressable style={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 8) }]} onPress={(e) => e.stopPropagation()}>
+            <TouchableOpacity style={styles.sheetOption} onPress={() => handleAttachOption(pickFromCamera)} accessibilityRole="button" accessibilityLabel="Take photo">
               <Text style={styles.sheetOptionText}>Take Photo</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.sheetOption} onPress={() => handleAttachOption(pickFromGallery)}>
+            <TouchableOpacity style={styles.sheetOption} onPress={() => handleAttachOption(pickFromGallery)} accessibilityRole="button" accessibilityLabel="Choose from library">
               <Text style={styles.sheetOptionText}>Choose from Library</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.sheetOption} onPress={() => handleAttachOption(pickDocument)}>
+            <TouchableOpacity style={styles.sheetOption} onPress={() => handleAttachOption(pickDocument)} accessibilityRole="button" accessibilityLabel="Choose file">
               <Text style={styles.sheetOptionText}>Choose File</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[styles.sheetOption, styles.sheetCancel]} onPress={() => setShowAttachSheet(false)}>
+            <TouchableOpacity style={[styles.sheetOption, styles.sheetCancel]} onPress={() => setShowAttachSheet(false)} accessibilityRole="button" accessibilityLabel="Cancel attachment selection">
               <Text style={[styles.sheetOptionText, styles.sheetCancelText]}>Cancel</Text>
             </TouchableOpacity>
           </Pressable>
@@ -843,7 +843,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.backgroundSecondary,
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
-    paddingBottom: 34, // safe area bottom
+    paddingBottom: 34, // overridden inline with insets.bottom
     paddingTop: 8,
   },
   sheetOption: {

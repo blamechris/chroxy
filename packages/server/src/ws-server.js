@@ -671,6 +671,7 @@ export class WsServer {
           if (err) {
             this._send(ws, { type: 'session_error', message: `Invalid attachment: ${err}` })
             attachments = undefined
+            break
           }
         }
 
@@ -1033,6 +1034,7 @@ export class WsServer {
           if (err) {
             this._send(ws, { type: 'session_error', message: `Invalid attachment: ${err}` })
             attachments = undefined
+            break
           }
         }
         if ((!text || !text.trim()) && !attachments?.length) break
