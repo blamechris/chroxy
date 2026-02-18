@@ -76,8 +76,8 @@ export class BaseTunnelAdapter extends EventEmitter {
 
   /** Stop the tunnel */
   async stop() {
+    this.intentionalShutdown = true
     if (this.process) {
-      this.intentionalShutdown = true
       this.process.kill()
       this.process = null
       this.url = null
