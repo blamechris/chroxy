@@ -88,6 +88,10 @@ export async function startServer(config) {
 
   // 5. Start the tunnel via adapter registry
   const tunnelArg = parseTunnelArg(config.tunnel || 'quick')
+  if (!tunnelArg) {
+    console.error('PTY/tmux mode requires a tunnel. Use --tunnel quick or --tunnel named.')
+    process.exit(1)
+  }
   const TunnelAdapter = getTunnel(tunnelArg.provider)
   const tunnel = new TunnelAdapter({
     port: PORT,
