@@ -42,7 +42,7 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| ChatView | `src/components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
+| ChatView | `src/components/ChatView.tsx` | Message list, tool bubbles, plan approval card (inline component) |
 | TerminalView | `src/components/TerminalView.tsx` | xterm.js terminal emulator (WebView), resize forwarding, crash recovery |
 | InputBar | `src/components/InputBar.tsx` | Text input with send/interrupt + mic button |
 | SettingsBar | `src/components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
@@ -148,7 +148,7 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `screens/ConnectScreen.tsx` | QR scan + manual connection UI |
 | `screens/SessionScreen.tsx` | Session orchestrator (wires components) |
 | `screens/SettingsScreen.tsx` | App settings and version info |
-| `components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
+| `components/ChatView.tsx` | Message list, tool bubbles, plan approval card (inline component) |
 | `components/TerminalView.tsx` | xterm.js terminal emulator (WebView), resize forwarding, crash recovery |
 | `components/xterm-html.ts` | Inline HTML template for xterm.js WebView |
 | `components/InputBar.tsx` | Text input with send/interrupt + mic button |

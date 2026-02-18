@@ -48,7 +48,7 @@ src/
 │   ├── SessionScreen.tsx    # Chat + Terminal dual-view
 │   └── SettingsScreen.tsx   # Model, permission, display settings
 ├── components/
-│   ├── ChatView.tsx         # Message list with markdown rendering
+│   ├── ChatView.tsx         # Message list, plan approval card (inline)
 │   ├── TerminalView.tsx     # xterm.js terminal emulator (WebView)
 │   ├── SettingsBar.tsx      # Collapsible model/cost/context bar
 │   ├── InputBar.tsx         # Text input with send/interrupt + mic button
