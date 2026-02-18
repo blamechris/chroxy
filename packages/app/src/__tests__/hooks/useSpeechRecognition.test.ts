@@ -26,12 +26,11 @@ beforeEach(() => {
 });
 
 // Import after mock setup
-import { useSpeechRecognition, UseSpeechRecognitionReturn } from '../../hooks/useSpeechRecognition';
+import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 
 // Minimal hook runner using React.createElement — no @testing-library needed
 function renderHookSimple<T>(hookFn: () => T): { result: { current: T }; unmount: () => void } {
   const resultRef = { current: null as any as T };
-  let unmountFn: (() => void) | null = null;
 
   function TestComponent() {
     resultRef.current = hookFn();
