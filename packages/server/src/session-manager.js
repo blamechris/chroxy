@@ -215,7 +215,7 @@ export class SessionManager extends EventEmitter {
   /**
    * Read git/project context for a session's working directory.
    * @param {string} [sessionId] - If omitted, uses first session
-   * @returns {Promise<{ sessionId, gitBranch, gitDirty, gitAhead, projectName }>}
+   * @returns {Promise<{ sessionId: string, gitBranch: string|null, gitDirty: number, gitAhead: number, projectName: string|null } | null>}
    */
   async getSessionContext(sessionId) {
     const entry = sessionId
