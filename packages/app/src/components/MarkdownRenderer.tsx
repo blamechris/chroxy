@@ -271,6 +271,7 @@ const TableBlock = React.memo(({
     </ScrollView>
   );
 });
+TableBlock.displayName = 'TableBlock';
 
 /** Check if an element is a View component (HR, blockquote, table).
  *  These are the elements that force paragraph splitting for selectability. */
@@ -566,6 +567,7 @@ const HighlightedCode = React.memo(({ code, language }: { code: string; language
     </Text>
   );
 });
+HighlightedCode.displayName = 'HighlightedCode';
 
 /** Formatted response -- renders Claude's markdown as styled blocks.
  *

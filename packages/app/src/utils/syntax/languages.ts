@@ -237,7 +237,11 @@ const LANGUAGES: Record<string, LanguageDef> = {
   sql,
 };
 
-/** Aliases map short names to canonical names. */
+/** Aliases map short names to canonical names.
+ *  Some aliases map to a different language family for approximate highlighting
+ *  (e.g., kt/kotlin/scala → java, swift → c). These get reasonable keyword and
+ *  structure coloring but miss language-specific syntax (null-safety operators,
+ *  LINQ, optionals, etc.). */
 const ALIASES: Record<string, string> = {
   js: 'javascript',
   ts: 'typescript',
