@@ -89,6 +89,8 @@ export interface ChatMessage {
   requestId?: string;
   toolInput?: Record<string, unknown>;
   toolUseId?: string;
+  toolResult?: string;
+  toolResultTruncated?: boolean;
   answered?: string;
   expiresAt?: number;
   timestamp: number;
@@ -1161,6 +1163,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         type: 'tool_use',
         content: msg.input ? JSON.stringify(msg.input) : (msg.tool as string) || '',
         tool: msg.tool as string | undefined,
+        toolUseId: msg.toolUseId as string | undefined,
         timestamp: Date.now(),
       };
       if (targetId && get().sessionStates[targetId]) {
@@ -1169,6 +1172,37 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         }));
       } else {
         get().addMessage(toolMsg);
+      }
+      break;
+    }
+
+    case 'tool_result': {
+      const toolUseId = msg.toolUseId as string;
+      if (!toolUseId) break;
+      const resultText = (msg.result as string) || '';
+      const truncated = !!(msg.truncated as boolean);
+      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      // Find the matching tool_use message and attach the result
+      const patchResult = (ss: SessionState) => {
+        const idx = ss.messages.findIndex(
+          (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
+        );
+        if (idx === -1) return {};
+        const updated = [...ss.messages];
+        updated[idx] = { ...updated[idx], toolResult: resultText, toolResultTruncated: truncated };
+        return { messages: updated };
+      };
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, patchResult);
+      } else {
+        const idx = get().messages.findIndex(
+          (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
+        );
+        if (idx !== -1) {
+          const updated = [...get().messages];
+          updated[idx] = { ...updated[idx], toolResult: resultText, toolResultTruncated: truncated };
+          set({ messages: updated });
+        }
       }
       break;
     }
