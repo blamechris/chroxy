@@ -371,10 +371,77 @@ describe('setupNotificationResponseListener', () => {
       expect(mockFetch).toHaveBeenCalledTimes(3);
       expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
 
-      // Should show user-visible alert
-      expect(mockAlert).toHaveBeenCalledWith(
-        'Permission Response Failed',
+      // Should show user-visible alert with Retry button
+      expect(mockAlert).toHaveBeenCalledTimes(1);
+      expect(mockAlert.mock.calls[0][0]).toBe('Permission Response Failed');
+      expect(mockAlert.mock.calls[0][1]).toBe(
         'Could not deliver your response. Open the app to respond manually.',
+      );
+      const buttons = mockAlert.mock.calls[0][2] as Array<{
+        text: string;
+        onPress?: () => void;
+      }>;
+      expect(buttons).toHaveLength(2);
+      expect(buttons[0].text).toBe('OK');
+      expect(buttons[1].text).toBe('Retry');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('retry button in alert re-attempts HTTP delivery', async () => {
+    jest.useFakeTimers();
+    try {
+      mockSocket.readyState = 3; // WebSocket.CLOSED
+
+      // All initial attempts fail, then retry succeeds
+      const mockFetch = jest.fn()
+        .mockResolvedValue({ ok: false, status: 502 }) as jest.Mock;
+      global.fetch = mockFetch;
+
+      setupNotificationResponseListener();
+      const handler = mockAddListener.mock.calls[0][0];
+
+      const promise = handler({
+        actionIdentifier: 'approve',
+        notification: {
+          request: {
+            content: {
+              data: { category: 'permission', requestId: 'perm-retry-btn' },
+            },
+          },
+        },
+      });
+
+      await jest.advanceTimersByTimeAsync(20_000);
+      await promise;
+
+      // Initial 3 attempts failed
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
+
+      // Now make fetch succeed for the retry button press
+      mockFetch.mockResolvedValue({ ok: true, status: 200 });
+
+      // Press the Retry button
+      const buttons = mockAlert.mock.calls[0][2] as Array<{
+        text: string;
+        onPress?: () => void;
+      }>;
+      const retryButton = buttons.find((b) => b.text === 'Retry');
+      expect(retryButton?.onPress).toBeDefined();
+      retryButton!.onPress!();
+
+      // Advance timers for the retry's internal delays
+      await jest.advanceTimersByTimeAsync(20_000);
+      // Flush microtasks
+      await Promise.resolve();
+
+      // Retry should have called fetch again (at least 1 more time)
+      expect(mockFetch.mock.calls.length).toBeGreaterThan(3);
+      expect(mockMarkPromptAnsweredByRequestId).toHaveBeenCalledWith(
+        'perm-retry-btn',
+        'allow',
       );
     } finally {
       jest.useRealTimers();
