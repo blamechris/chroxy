@@ -9,7 +9,7 @@ import { dirname, join, resolve, normalize } from 'path'
 import { homedir, hostname } from 'os'
 import { timingSafeEqual } from 'crypto'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
-import { createKeyPair, deriveSharedKey, encrypt, decrypt } from './crypto.js'
+import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from './crypto.js'
 
 // -- Attachment validation constants --
 const MAX_ATTACHMENT_COUNT = 5
@@ -166,10 +166,12 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'list_slash_commands' }                     — request available slash commands
  *   { type: 'list_agents' }                             — request available custom agents
  *   { type: 'request_full_history', sessionId? }         — request full JSONL history for a session
+ *   { type: 'key_exchange', publicKey }                  — client's ephemeral X25519 public key (E2E encryption)
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
- *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, connectedClients } — auth succeeded with server context
+ *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, connectedClients, encryption } — auth succeeded (encryption: 'required'|'disabled')
+ *   { type: 'key_exchange_ok', publicKey }               — server's ephemeral X25519 public key (E2E encryption)
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli'|'terminal' }  — which backend mode is active
  *   { type: 'raw',          data: '...' }             — raw PTY output (terminal view)
@@ -213,6 +215,9 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'client_joined', client: { clientId, deviceName, deviceType, platform } } — new client connected
  *   { type: 'client_left', clientId }                — client disconnected
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
+ *
+ * Encrypted envelope (bidirectional, wraps any message above after key exchange):
+ *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
  */
 export class WsServer {
   constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt } = {}) {
@@ -387,7 +392,7 @@ export class WsServer {
         const client = this.clients.get(ws)
         if (msg.type === 'encrypted' && client?.encryptionState) {
           try {
-            msg = decrypt(msg, client.encryptionState.sharedKey, client.encryptionState.recvNonce)
+            msg = decrypt(msg, client.encryptionState.sharedKey, client.encryptionState.recvNonce, DIRECTION_CLIENT)
             client.encryptionState.recvNonce++
           } catch (err) {
             console.error(`[ws] Decryption failed from ${client.id}:`, err.message)
@@ -403,6 +408,7 @@ export class WsServer {
       ws.on('close', () => {
         clearTimeout(authTimeout)
         const client = this.clients.get(ws)
+        if (client?._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
         console.log(`[ws] Client ${client?.id} disconnected`)
         if (client?.authenticated) {
           this._handleClientDeparture(client)
@@ -2088,7 +2094,7 @@ export class WsServer {
     try {
       // Encrypt if encryption is active for this client
       if (client?.encryptionState) {
-        const envelope = encrypt(JSON.stringify(message), client.encryptionState.sharedKey, client.encryptionState.sendNonce)
+        const envelope = encrypt(JSON.stringify(message), client.encryptionState.sharedKey, client.encryptionState.sendNonce, DIRECTION_SERVER)
         client.encryptionState.sendNonce++
         ws.send(JSON.stringify(envelope))
       } else {

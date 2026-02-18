@@ -8,6 +8,8 @@ import {
   deriveSharedKey,
   encrypt,
   decrypt,
+  DIRECTION_SERVER,
+  DIRECTION_CLIENT,
   type EncryptionState,
   type KeyPair,
   type EncryptedEnvelope,
@@ -33,7 +35,7 @@ let _pendingKeyPair: KeyPair | null = null;
  */
 function wsSend(socket: WebSocket, payload: Record<string, unknown>): void {
   if (_encryptionState) {
-    const envelope = encrypt(JSON.stringify(payload), _encryptionState.sharedKey, _encryptionState.sendNonce);
+    const envelope = encrypt(JSON.stringify(payload), _encryptionState.sharedKey, _encryptionState.sendNonce, DIRECTION_CLIENT);
     _encryptionState.sendNonce++;
     socket.send(JSON.stringify(envelope));
   } else {
@@ -1922,7 +1924,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Decrypt incoming encrypted messages
       if (msg.type === 'encrypted' && _encryptionState) {
         try {
-          msg = decrypt(msg as EncryptedEnvelope, _encryptionState.sharedKey, _encryptionState.recvNonce);
+          msg = decrypt(msg as EncryptedEnvelope, _encryptionState.sharedKey, _encryptionState.recvNonce, DIRECTION_SERVER);
           _encryptionState.recvNonce++;
         } catch (err) {
           console.error('[crypto] Decryption failed:', err);

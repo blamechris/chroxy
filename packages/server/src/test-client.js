@@ -7,7 +7,7 @@
 import WebSocket from "ws";
 import readline from "readline";
 import "dotenv/config";
-import { createKeyPair, deriveSharedKey, encrypt, decrypt } from "./crypto.js";
+import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from "./crypto.js";
 
 const url = process.argv[2];
 const token = process.env.API_TOKEN;
@@ -28,7 +28,7 @@ let pendingKeyPair = null;
 /** Send a message, encrypting if E2E is active */
 function wsSend(payload) {
   if (encryptionState) {
-    const envelope = encrypt(JSON.stringify(payload), encryptionState.sharedKey, encryptionState.sendNonce);
+    const envelope = encrypt(JSON.stringify(payload), encryptionState.sharedKey, encryptionState.sendNonce, DIRECTION_CLIENT);
     encryptionState.sendNonce++;
     ws.send(JSON.stringify(envelope));
   } else {
@@ -47,7 +47,7 @@ ws.on("message", (raw) => {
   // Decrypt incoming encrypted messages
   if (msg.type === "encrypted" && encryptionState) {
     try {
-      msg = decrypt(msg, encryptionState.sharedKey, encryptionState.recvNonce);
+      msg = decrypt(msg, encryptionState.sharedKey, encryptionState.recvNonce, DIRECTION_SERVER);
       encryptionState.recvNonce++;
     } catch (err) {
       console.error("[crypto] Decryption failed:", err.message);
