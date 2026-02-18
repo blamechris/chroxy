@@ -15,8 +15,11 @@ describe('readSessionContext', () => {
 
   it('returns project name from package.json', async () => {
     const ctx = await readSessionContext(process.cwd())
-    // The chroxy repo root has a package.json with name "chroxy"
-    assert.equal(ctx.projectName, 'chroxy')
+    // process.cwd() may be monorepo root ("chroxy") or packages/server ("@chroxy/server")
+    assert.ok(typeof ctx.projectName === 'string' && ctx.projectName.length > 0,
+      `projectName should be a non-empty string, got: ${ctx.projectName}`)
+    assert.ok(ctx.projectName.includes('chroxy'),
+      `projectName should contain "chroxy", got: ${ctx.projectName}`)
   })
 
   it('returns null gitBranch for non-git directory', async () => {
