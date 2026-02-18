@@ -99,6 +99,11 @@ describe('voiceCleanup transform', () => {
     assert.equal(result, 'please fix the bug.')
   })
 
+  it('removes filler followed by comma mid-sentence', () => {
+    const result = transform('please um, fix the bug', { isVoiceInput: true })
+    assert.equal(result, 'please fix the bug.')
+  })
+
   it('removes multiple mid-sentence fillers', () => {
     const result = transform('fix, uh, the um bug', { isVoiceInput: true })
     assert.equal(result, 'fix, the bug.')

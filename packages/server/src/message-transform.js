@@ -40,7 +40,7 @@ const BUILT_IN_TRANSFORMS = {
     // Remove mid-sentence fillers (comma-delimited or standalone)
     // Careful: "like" and "so" have legitimate uses, only strip after comma
     cleaned = cleaned.replace(/,\s*(um|uh),?\s*/gi, ', ')
-    cleaned = cleaned.replace(/\s+(um|uh)\s+/gi, ' ')
+    cleaned = cleaned.replace(/\s+(um|uh),?\s+/gi, ' ')
     // Clean up double spaces from removals
     cleaned = cleaned.replace(/  +/g, ' ').trim()
     // Remove trailing comma left by filler removal (e.g. "fix the bug, um" → "fix the bug")
