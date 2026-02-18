@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, chmodSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import readline from 'readline'
 import { validateConfig, mergeConfig } from './config.js'
+import { isWindows, defaultShell, writeFileRestricted } from './platform.js'
 
 const CONFIG_DIR = join(homedir(), '.chroxy')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -78,12 +79,11 @@ program
       apiToken,
       port,
       tmuxSession: sessionName,
-      shell: process.env.SHELL || '/bin/zsh',
+      shell: defaultShell(),
     }
 
-    // Write config with restricted permissions (chmod handles existing files)
-    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 })
-    chmodSync(CONFIG_FILE, 0o600)
+    // Write config with restricted permissions
+    writeFileRestricted(CONFIG_FILE, JSON.stringify(config, null, 2))
 
     console.log('\n✅ Configuration saved to:', CONFIG_FILE)
     console.log('\n📱 Your API token (keep this secret):')
@@ -144,7 +144,7 @@ function loadAndMergeConfig(options, extraOverrides = {}) {
   const defaults = {
     port: 8765,
     tmuxSession: 'claude-code',
-    shell: process.env.SHELL || '/bin/zsh',
+    shell: defaultShell(),
     resume: false,
     noAuth: false,
   }
@@ -229,6 +229,13 @@ program
     if (options.encrypt === false) extraOverrides.noEncrypt = true
 
     const config = loadAndMergeConfig(options, extraOverrides)
+
+    // Block PTY/tmux mode on Windows
+    if (isWindows && config.terminal) {
+      console.error('PTY/tmux mode (--terminal) is not supported on Windows.')
+      console.error('Use the default CLI headless mode instead: npx chroxy start')
+      process.exit(1)
+    }
 
     // Determine if supervisor should be used
     const tunnelMode = config.tunnel || 'quick'
@@ -374,8 +381,7 @@ tunnelCmd
     config.tunnelName = tunnelName
     config.tunnelHostname = hostname
 
-    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 })
-    chmodSync(CONFIG_FILE, 0o600)
+    writeFileRestricted(CONFIG_FILE, JSON.stringify(config, null, 2))
 
     console.log('✅ Configuration saved to:', CONFIG_FILE)
     console.log('')

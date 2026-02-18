@@ -1,12 +1,13 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
-import { statSync, writeFileSync, readFileSync, unlinkSync, renameSync, existsSync, mkdirSync, chmodSync } from 'fs'
+import { statSync, readFileSync, unlinkSync, renameSync, existsSync, mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { discoverTmuxSessions } from './session-discovery.js'
 import { resolveJsonlPath, readConversationHistory, readConversationHistoryAsync } from './jsonl-reader.js'
+import { isWindows, writeFileRestricted } from './platform.js'
 
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
@@ -435,9 +436,9 @@ export class SessionManager extends EventEmitter {
     const dir = dirname(this._stateFilePath)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
     const tmpPath = this._stateFilePath + '.tmp'
-    writeFileSync(tmpPath, JSON.stringify(state, null, 2), { mode: 0o600 })
+    writeFileRestricted(tmpPath, JSON.stringify(state, null, 2))
+    if (isWindows) try { unlinkSync(this._stateFilePath) } catch {}
     renameSync(tmpPath, this._stateFilePath)
-    chmodSync(this._stateFilePath, 0o600)
     console.log(`[session-manager] Serialized ${state.sessions.length} session(s) to ${this._stateFilePath}`)
     return state
   }

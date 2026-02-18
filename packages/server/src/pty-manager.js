@@ -1,6 +1,8 @@
 import pty from "node-pty";
 import { execFileSync } from "child_process";
 import { EventEmitter } from "events";
+import { homedir } from "os";
+import { defaultShell } from "./platform.js";
 
 /** Lazily resolve the tmux binary path (cached after first call) */
 let _tmuxPath = null
@@ -57,7 +59,7 @@ export class PtyManager extends EventEmitter {
     super();
     this.sessionName = config.sessionName || "claude-code";
     validateSessionName(this.sessionName);
-    this.shellCmd = config.shell || process.env.SHELL || "/bin/zsh";
+    this.shellCmd = config.shell || defaultShell();
     this.resume = config.resume || false;
     this.port = config.port || null;
     this.apiToken = config.apiToken || null;
@@ -101,7 +103,7 @@ export class PtyManager extends EventEmitter {
         name: "xterm-256color",
         cols: this.cols,
         rows: this.rows,
-        cwd: process.env.HOME,
+        cwd: homedir(),
         env: {
           ...process.env,
           TERM: "xterm-256color",

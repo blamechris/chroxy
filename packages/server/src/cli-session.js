@@ -4,6 +4,7 @@ import { createInterface } from 'readline'
 import { resolveModelId } from './models.js'
 import { createPermissionHookManager } from './permission-hook.js'
 import { buildContentBlocks } from './content-blocks.js'
+import { forceKill } from './platform.js'
 
 // Max accumulated size for tool_use input_json_delta chunks (UTF-16 code units, ~256KB for ASCII)
 const MAX_TOOL_INPUT_LENGTH = 262144
@@ -598,9 +599,9 @@ export class CliSession extends EventEmitter {
       // Force-kill after 10s if process doesn't exit cleanly
       const forceKillTimer = setTimeout(() => {
         if (!didClose) {
-          console.warn('[cli-session] Process did not exit after 10s, force-killing with SIGKILL')
+          console.warn('[cli-session] Process did not exit after 10s, force-killing')
           try {
-            oldChild.kill('SIGKILL')
+            forceKill(oldChild)
           } catch (err) {
             // Process may already be gone, that's fine
           }
@@ -678,9 +679,9 @@ export class CliSession extends EventEmitter {
       // Force-kill after 10s if process doesn't exit cleanly
       const forceKillTimer = setTimeout(() => {
         if (!didClose) {
-          console.warn('[cli-session] Process did not exit after 10s, force-killing with SIGKILL')
+          console.warn('[cli-session] Process did not exit after 10s, force-killing')
           try {
-            oldChild.kill('SIGKILL')
+            forceKill(oldChild)
           } catch (err) {
             // Process may already be gone, that's fine
           }
@@ -777,7 +778,7 @@ export class CliSession extends EventEmitter {
       // Force-kill after 3s if still alive
       const child = this._child
       const forceKillTimer = setTimeout(() => {
-        try { child.kill('SIGKILL') } catch {}
+        try { forceKill(child) } catch {}
       }, 3000)
 
       child.on('close', () => clearTimeout(forceKillTimer))
