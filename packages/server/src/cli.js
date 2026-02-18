@@ -140,6 +140,7 @@ function loadAndMergeConfig(options, extraOverrides = {}) {
   if (options.tunnelName !== undefined) cliOverrides.tunnelName = options.tunnelName
   if (options.tunnelHostname !== undefined) cliOverrides.tunnelHostname = options.tunnelHostname
   if (options.legacyCli) cliOverrides.legacyCli = true
+  if (options.provider !== undefined) cliOverrides.provider = options.provider
 
   const defaults = {
     port: 8765,
@@ -210,6 +211,7 @@ program
   .option('--no-discovery', 'Skip tmux auto-discovery on startup')
   .option('--no-supervisor', 'Disable supervisor mode (direct server, no auto-restart)')
   .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
+  .option('--provider <name>', 'Session provider to use (e.g. claude-sdk, claude-cli)')
   .option('--max-payload <bytes>', 'WebSocket max message size in bytes (default: 1048576)')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
@@ -481,6 +483,7 @@ program
   .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
   .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
   .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
+  .option('--provider <name>', 'Session provider to use (e.g. claude-sdk, claude-cli)')
   .option('--max-payload <bytes>', 'WebSocket max message size in bytes (default: 1048576)')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {

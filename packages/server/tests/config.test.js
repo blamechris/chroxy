@@ -62,6 +62,27 @@ describe('validateConfig', () => {
     assert.equal(result.valid, true)
     assert.equal(result.warnings.length, 0)
   })
+
+  it('accepts provider key as string', () => {
+    const config = { provider: 'claude-sdk' }
+    const result = validateConfig(config)
+    assert.equal(result.valid, true)
+    assert.equal(result.warnings.length, 0)
+  })
+
+  it('warns when provider has wrong type', () => {
+    const config = { provider: 123 }
+    const result = validateConfig(config)
+    assert.equal(result.valid, false)
+    assert.ok(result.warnings.some(w => w.includes('provider') && w.includes('string')))
+  })
+
+  it('accepts valid provider names', () => {
+    const config = { provider: 'claude-sdk' }
+    const result = validateConfig(config)
+    assert.equal(result.valid, true)
+    assert.equal(result.warnings.length, 0)
+  })
 })
 
 describe('mergeConfig', () => {

@@ -3,8 +3,7 @@ import { randomUUID } from 'crypto'
 import { statSync, readFileSync, unlinkSync, renameSync, existsSync, mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
-import { CliSession } from './cli-session.js'
-import { SdkSession } from './sdk-session.js'
+import { getProvider } from './providers.js'
 import { discoverTmuxSessions } from './session-discovery.js'
 import { resolveJsonlPath, readConversationHistory, readConversationHistoryAsync } from './jsonl-reader.js'
 import { isWindows, writeFileRestricted } from './platform.js'
@@ -94,19 +93,19 @@ export class SessionDirectoryError extends SessionError {
  *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
  */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, useLegacyCli = false, stateFilePath, stateTtlMs, persistDebounceMs = 5000 } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 5000 } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
     this._apiToken = apiToken || null
-    this._useLegacyCli = !!useLegacyCli
+    this._providerType = providerType
     this._defaultCwd = defaultCwd || process.cwd()
     this._defaultModel = defaultModel || null
     this._defaultPermissionMode = defaultPermissionMode || 'approve'
     this._stateFilePath = stateFilePath || DEFAULT_STATE_FILE
     this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000 // 24 hours
     this._persistDebounceMs = persistDebounceMs
-    this._sessions = new Map() // sessionId -> { session: CliSession|PtySession, type: 'cli'|'pty', name, cwd, createdAt, tmuxSession? }
+    this._sessions = new Map() // sessionId -> { session, type: 'cli'|'pty', name, cwd, createdAt, tmuxSession? }
     this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
     this._maxHistory = 100
@@ -115,6 +114,9 @@ export class SessionManager extends EventEmitter {
     this._discoveryIntervalMs = discoveryIntervalMs
     this._discoveryTimer = null
     this._lastDiscoveredSessions = new Set() // Track tmux session names we've seen
+
+    // Validate provider exists at construction time for fail-fast behavior
+    getProvider(this._providerType)
   }
 
   /**
@@ -147,20 +149,15 @@ export class SessionManager extends EventEmitter {
     const sessionId = randomUUID().slice(0, 8)
     const sessionName = name || `Session ${this._sessions.size + 1}`
 
-    const session = this._useLegacyCli
-      ? new CliSession({
-          cwd: resolvedCwd,
-          model: resolvedModel,
-          permissionMode: resolvedPermissionMode,
-          port: this._port,
-          apiToken: this._apiToken,
-        })
-      : new SdkSession({
-          cwd: resolvedCwd,
-          model: resolvedModel,
-          permissionMode: resolvedPermissionMode,
-          resumeSessionId: resumeSessionId || null,
-        })
+    const ProviderClass = getProvider(this._providerType)
+    const session = new ProviderClass({
+      cwd: resolvedCwd,
+      model: resolvedModel,
+      permissionMode: resolvedPermissionMode,
+      port: this._port,
+      apiToken: this._apiToken,
+      resumeSessionId: resumeSessionId || null,
+    })
 
     const entry = {
       session,
@@ -195,6 +192,7 @@ export class SessionManager extends EventEmitter {
   listSessions() {
     const list = []
     for (const [sessionId, entry] of this._sessions) {
+      const ProviderClass = entry.session.constructor
       list.push({
         sessionId,
         name: entry.name,
@@ -206,6 +204,8 @@ export class SessionManager extends EventEmitter {
         isBusy: entry.session.isRunning,
         createdAt: entry.createdAt,
         conversationId: entry.session.resumeSessionId || null,
+        provider: this._providerType,
+        capabilities: ProviderClass.capabilities || {},
       })
     }
     return list

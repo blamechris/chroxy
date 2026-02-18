@@ -493,6 +493,40 @@ describe('SessionManager.listSessions includes conversationId', () => {
   })
 })
 
+describe('SessionManager provider support', () => {
+  it('defaults to claude-sdk provider', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    assert.equal(mgr._providerType, 'claude-sdk')
+  })
+
+  it('accepts providerType parameter', () => {
+    const mgr = new SessionManager({ maxSessions: 5, providerType: 'claude-cli' })
+    assert.equal(mgr._providerType, 'claude-cli')
+  })
+
+  it('listSessions includes provider and capabilities', () => {
+    const mgr = new SessionManager({ maxSessions: 5, providerType: 'claude-sdk' })
+
+    // Manually insert a mock session with a constructor that has capabilities
+    class MockProvider extends EventEmitter {
+      static get capabilities() {
+        return { permissions: true, resume: true }
+      }
+    }
+    const session = new MockProvider()
+    session.isRunning = false
+    session.model = 'test-model'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp', createdAt: Date.now() })
+
+    const sessions = mgr.listSessions()
+    assert.equal(sessions.length, 1)
+    assert.equal(sessions[0].provider, 'claude-sdk')
+    assert.deepEqual(sessions[0].capabilities, { permissions: true, resume: true })
+  })
+})
+
 describe('SessionManager.serializeState includes conversationId', () => {
   let tempDir
   let stateFile
