@@ -117,8 +117,9 @@ export class SdkSession extends EventEmitter {
     }
 
     // Apply message transforms if configured
-    if (this._transformPipeline.hasTransforms && prompt) {
-      prompt = this._transformPipeline.apply(prompt, {
+    let transformedPrompt = prompt
+    if (this._transformPipeline.hasTransforms && typeof prompt === 'string') {
+      transformedPrompt = this._transformPipeline.apply(prompt, {
         cwd: this.cwd,
         model: this.model,
         isVoiceInput: !!sendOptions.isVoice,
@@ -177,9 +178,9 @@ export class SdkSession extends EventEmitter {
 
     try {
       // If attachments present, build multimodal content blocks
-      const queryArgs = { prompt, options }
+      const queryArgs = { prompt: transformedPrompt, options }
       if (attachments?.length) {
-        queryArgs.prompt = buildContentBlocks(prompt, attachments)
+        queryArgs.prompt = buildContentBlocks(transformedPrompt, attachments)
       }
       this._query = query(queryArgs)
 

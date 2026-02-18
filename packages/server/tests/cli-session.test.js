@@ -74,7 +74,7 @@ describe('CliSession.sendMessage', () => {
     const session = createSession()
     session._processReady = false
     session.sendMessage('queued message')
-    assert.deepStrictEqual(session._pendingMessage, { prompt: 'queued message', attachments: undefined })
+    assert.deepStrictEqual(session._pendingMessage, { prompt: 'queued message', attachments: undefined, options: {} })
     assert.equal(session._isBusy, false)
   })
 

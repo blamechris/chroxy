@@ -94,7 +94,7 @@ export class SessionDirectoryError extends SessionError {
  *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
  */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 5000, maxToolInput } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 5000, maxToolInput, transforms } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -104,6 +104,7 @@ export class SessionManager extends EventEmitter {
     this._defaultModel = defaultModel || null
     this._defaultPermissionMode = defaultPermissionMode || 'approve'
     this._maxToolInput = maxToolInput || null
+    this._transforms = transforms || []
     this._stateFilePath = stateFilePath || DEFAULT_STATE_FILE
     this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000 // 24 hours
     this._persistDebounceMs = persistDebounceMs
@@ -159,6 +160,7 @@ export class SessionManager extends EventEmitter {
       port: this._port,
       apiToken: this._apiToken,
       resumeSessionId: resumeSessionId || null,
+      transforms: this._transforms,
     }
     if (this._maxToolInput) providerOpts.maxToolInput = this._maxToolInput
     const session = new ProviderClass(providerOpts)

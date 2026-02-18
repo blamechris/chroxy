@@ -228,7 +228,7 @@ export class CliSession extends EventEmitter {
       if (typeof pending === 'string') {
         this.sendMessage(pending)
       } else {
-        this.sendMessage(pending.prompt, pending.attachments)
+        this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
       }
     }
   }
@@ -270,13 +270,13 @@ export class CliSession extends EventEmitter {
 
     if (!this._processReady) {
       console.log('[cli-session] Process not ready, queuing message')
-      this._pendingMessage = { prompt, attachments }
+      this._pendingMessage = { prompt, attachments, options }
       return
     }
 
     // Apply message transforms if configured
     let transformedPrompt = prompt
-    if (this._transformPipeline.hasTransforms && prompt) {
+    if (this._transformPipeline.hasTransforms && typeof prompt === 'string') {
       transformedPrompt = this._transformPipeline.apply(prompt, {
         cwd: this.cwd,
         model: this.model,
