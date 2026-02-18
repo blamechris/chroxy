@@ -128,7 +128,7 @@ async function sendPermissionResponseHttp(
   const httpsUrl = wsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
   const url = `${httpsUrl}/permission-response`;
   const body = JSON.stringify({ requestId, decision });
-  const delays = [0, 2_000, 4_000]; // immediate, then 2s, then 4s
+  const delays = [0, 2_000, 4_000]; // 3 total attempts: immediate, 2s backoff, 4s backoff
 
   for (let attempt = 0; attempt < delays.length; attempt++) {
     if (attempt > 0) {
