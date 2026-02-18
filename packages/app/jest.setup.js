@@ -10,6 +10,24 @@ jest.mock('expo-speech-recognition', () => ({
   useSpeechRecognitionEvent: jest.fn(),
 }));
 
+// Mock expo-image-picker (native module not available in Jest)
+jest.mock('expo-image-picker', () => ({
+  requestCameraPermissionsAsync: jest.fn(() => Promise.resolve({ granted: true })),
+  requestMediaLibraryPermissionsAsync: jest.fn(() => Promise.resolve({ granted: true })),
+  launchCameraAsync: jest.fn(() => Promise.resolve({ canceled: true })),
+  launchImageLibraryAsync: jest.fn(() => Promise.resolve({ canceled: true })),
+}));
+
+// Mock expo-document-picker (native module not available in Jest)
+jest.mock('expo-document-picker', () => ({
+  getDocumentAsync: jest.fn(() => Promise.resolve({ canceled: true })),
+}));
+
+// Mock expo-file-system (native module not available in Jest)
+jest.mock('expo-file-system', () => ({
+  readAsStringAsync: jest.fn(() => Promise.resolve('')),
+}));
+
 // Mock react-native-webview (native module not available in Jest)
 jest.mock('react-native-webview', () => {
   const React = require('react');

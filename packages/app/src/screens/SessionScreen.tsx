@@ -28,6 +28,9 @@ import type { RootStackParamList } from '../App';
 import { ICON_CLOSE, ICON_GEAR } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
+import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
+import type { Attachment } from '../utils/attachments';
+import { ActionSheetIOS } from 'react-native';
 
 
 // Stable empty arrays to avoid new-reference-per-render in Zustand selectors
@@ -89,6 +92,7 @@ export function formatTranscript(selected: ChatMessage[]): string {
 export function SessionScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [inputText, setInputText] = useState('');
+  const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const scrollViewRef = useRef<ScrollView>(null);
   const terminalRef = useRef<TerminalHandle>(null);
   const insets = useSafeAreaInsets();
@@ -287,24 +291,76 @@ export function SessionScreen() {
   }, [messages, selectedIds, clearSelection]);
 
   const handleSend = () => {
-    if (!inputText.trim() || streamingMessageId) return;
+    const hasAttachments = pendingAttachments.length > 0;
+    if ((!inputText.trim() && !hasAttachments) || streamingMessageId) return;
     const text = inputText.trim();
     setInputText('');
 
+    // Build attachment metadata for the chat message (without base64 data)
+    const msgAttachments = hasAttachments
+      ? pendingAttachments.map(({ id, type, uri, name, mediaType, size }) => ({ id, type, uri, name, mediaType, size }))
+      : undefined;
+
     if (viewMode === 'chat') {
-      // Add user message + thinking indicator with session-aware state update
-      addUserMessage(text);
+      addUserMessage(text || `[${pendingAttachments.length} file(s) attached]`, msgAttachments);
     }
 
     // Clear plan approval card — user has responded (whether approving or giving feedback)
     if (isPlanPending) clearPlanState();
 
+    // Build wire attachments (with base64 data) for the server
+    const wire = hasAttachments ? toWireAttachments(pendingAttachments) : undefined;
+
+    // Clear pending attachments (frees base64 memory)
+    if (hasAttachments) setPendingAttachments([]);
+
     // PTY sessions: append CR so text + submit arrive as a single atomic write.
-    // Sending them separately caused a race condition where multi-line text
-    // would sit in the terminal input buffer before the CR arrived.
     // CLI sessions: the server handles the full message directly (no CR needed).
-    sendInput(hasTerminal ? text + '\r' : text);
+    sendInput(hasTerminal ? (text || '') + '\r' : (text || ''), wire);
   };
+
+  const addAttachment = useCallback(async (picker: () => Promise<Attachment | null>) => {
+    if (pendingAttachments.length >= MAX_ATTACHMENTS) {
+      Alert.alert('Limit reached', `Maximum ${MAX_ATTACHMENTS} attachments per message.`);
+      return;
+    }
+    try {
+      const att = await picker();
+      if (att) {
+        setPendingAttachments((prev) => [...prev, att]);
+      }
+    } catch (err: unknown) {
+      Alert.alert('Error', `Failed to attach file: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  }, [pendingAttachments.length]);
+
+  const handleAttach = useCallback(() => {
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options: ['Take Photo', 'Choose from Library', 'Choose File', 'Cancel'],
+          cancelButtonIndex: 3,
+        },
+        (index) => {
+          if (index === 0) addAttachment(pickFromCamera);
+          else if (index === 1) addAttachment(pickFromGallery);
+          else if (index === 2) addAttachment(pickDocument);
+        },
+      );
+    } else {
+      // Android: use Alert as a simple action sheet
+      Alert.alert('Attach', 'Choose source', [
+        { text: 'Take Photo', onPress: () => addAttachment(pickFromCamera) },
+        { text: 'Choose from Library', onPress: () => addAttachment(pickFromGallery) },
+        { text: 'Choose File', onPress: () => addAttachment(pickDocument) },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    }
+  }, [addAttachment]);
+
+  const handleRemoveAttachment = useCallback((id: string) => {
+    setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
+  }, []);
 
   const handleKeyPress = (key: string) => {
     const keyMap: Record<string, string> = {
@@ -629,6 +685,9 @@ export function SessionScreen() {
         slashCommands={slashCommands}
         isRecognizing={isRecognizing}
         onMicPress={speechAvailable ? handleMicPress : undefined}
+        attachments={pendingAttachments}
+        onAttach={handleAttach}
+        onRemoveAttachment={handleRemoveAttachment}
       />
 
       {/* Create session modal */}

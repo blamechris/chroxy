@@ -20,3 +20,5 @@ export const ICON_TRIANGLE_RIGHT = '\u25B6'; // Right-pointing triangle ▶
 export const ICON_GEAR = '\u2699';            // Gear ⚙
 export const ICON_MICROPHONE = '\uD83C\uDF99'; // Studio microphone 🎙
 export const ICON_CHECK = '\u2713';            // Check mark ✓
+export const ICON_PAPERCLIP = '\uD83D\uDCCE'; // Paperclip 📎
+export const ICON_DOCUMENT = '\uD83D\uDCC4'; // Page facing up 📄

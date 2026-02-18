@@ -8,6 +8,41 @@ import { createPermissionHookManager } from './permission-hook.js'
 const MAX_TOOL_INPUT_LENGTH = 262144
 
 /**
+ * Build a multimodal content array from prompt text and optional attachments.
+ * Each attachment has { type, mediaType, data (base64), name }.
+ */
+function buildContentBlocks(prompt, attachments) {
+  const content = []
+  if (prompt) {
+    content.push({ type: 'text', text: prompt })
+  }
+  if (attachments?.length) {
+    for (const att of attachments) {
+      if (att.type === 'image') {
+        content.push({
+          type: 'image',
+          source: { type: 'base64', media_type: att.mediaType, data: att.data },
+        })
+      } else if (att.mediaType === 'application/pdf') {
+        content.push({
+          type: 'document',
+          source: { type: 'base64', media_type: att.mediaType, data: att.data },
+        })
+      } else {
+        // Text-based files: decode base64 and inline as text
+        const text = Buffer.from(att.data, 'base64').toString('utf-8')
+        content.push({ type: 'text', text: `--- ${att.name} ---\n${text}` })
+      }
+    }
+  }
+  // Ensure at least one content block
+  if (content.length === 0) {
+    content.push({ type: 'text', text: '' })
+  }
+  return content
+}
+
+/**
  * Manages a persistent Claude Code CLI session using headless mode.
  *
  * A single `claude -p --input-format stream-json --output-format stream-json`
@@ -204,7 +239,11 @@ export class CliSession extends EventEmitter {
       const pending = this._pendingMessage
       this._pendingMessage = null
       console.log('[cli-session] Dequeuing pending message')
-      this.sendMessage(pending)
+      if (typeof pending === 'string') {
+        this.sendMessage(pending)
+      } else {
+        this.sendMessage(pending.prompt, pending.attachments)
+      }
     }
   }
 
@@ -237,7 +276,7 @@ export class CliSession extends EventEmitter {
   /**
    * Send a message to Claude via stdin NDJSON.
    */
-  sendMessage(prompt) {
+  sendMessage(prompt, attachments) {
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
       return
@@ -245,7 +284,7 @@ export class CliSession extends EventEmitter {
 
     if (!this._processReady) {
       console.log('[cli-session] Process not ready, queuing message')
-      this._pendingMessage = prompt
+      this._pendingMessage = { prompt, attachments }
       return
     }
 
@@ -254,15 +293,17 @@ export class CliSession extends EventEmitter {
     this._currentMessageId = `msg-${this._messageCounter}`
     this._currentCtx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null, currentToolName: null, currentToolUseId: null, toolInputChunks: '', toolInputOverflow: false }
 
+    const content = buildContentBlocks(prompt, attachments)
+
     const ndjson = JSON.stringify({
       type: 'user',
       message: {
         role: 'user',
-        content: [{ type: 'text', text: prompt }],
+        content,
       },
     })
 
-    console.log(`[cli-session] Sending message ${this._currentMessageId}: "${prompt.slice(0, 60)}"`)
+    console.log(`[cli-session] Sending message ${this._currentMessageId}: "${prompt.slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
     this._child.stdin.write(ndjson + '\n')
 
     // Safety timeout: force-clear if result never arrives (5 min)

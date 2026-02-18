@@ -175,7 +175,7 @@ export class WsServer {
   constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload } = {}) {
     this.port = port
     this.apiToken = apiToken
-    this._maxPayload = maxPayload || 1024 * 1024 // default 1MB
+    this._maxPayload = maxPayload || 10 * 1024 * 1024 // default 10MB (supports image/doc attachments)
     this.ptyManager = ptyManager || null
     this.outputParser = outputParser || null
     this.authRequired = authRequired
@@ -619,6 +619,7 @@ export class WsServer {
     switch (msg.type) {
       case 'input': {
         const text = msg.data
+        const attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
         const entry = this.sessionManager.getSession(client.activeSessionId)
         if (!entry) {
           this._send(ws, { type: 'session_error', message: 'No active session' })
@@ -634,12 +635,15 @@ export class WsServer {
           entry.session.expectEcho?.(text)
           entry.session.writeRaw(text)
         } else {
-          // CLI sessions: trim and drop empty input
-          if (!text || !text.trim()) break
-          console.log(`[ws] Message from ${client.id} to session ${client.activeSessionId}: "${text.slice(0, 80)}"`)
-          // Record user input in history so it survives reconnect replay
-          this.sessionManager.recordUserInput(client.activeSessionId, text.trim())
-          entry.session.sendMessage(text.trim())
+          // CLI sessions: trim and drop empty input (unless attachments present)
+          if ((!text || !text.trim()) && !attachments?.length) break
+          const trimmed = text?.trim() || ''
+          const attCount = attachments?.length || 0
+          console.log(`[ws] Message from ${client.id} to session ${client.activeSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
+          // Record user input in history (without base64 blobs)
+          const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
+          this.sessionManager.recordUserInput(client.activeSessionId, historyText)
+          entry.session.sendMessage(trimmed, attachments)
         }
 
         // Track last-writer-wins primary for this session
@@ -972,9 +976,12 @@ export class WsServer {
     switch (msg.type) {
       case 'input': {
         const text = msg.data
-        if (!text || !text.trim()) break
-        console.log(`[ws] Message from ${client.id}: "${text.slice(0, 80)}"`)
-        this.cliSession.sendMessage(text.trim())
+        const attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
+        if ((!text || !text.trim()) && !attachments?.length) break
+        const trimmed = text?.trim() || ''
+        const attCount = attachments?.length || 0
+        console.log(`[ws] Message from ${client.id}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
+        this.cliSession.sendMessage(trimmed, attachments)
         // Track last-writer-wins primary (uses 'default' as pseudo session ID)
         this._updatePrimary('default', client.id)
         break
