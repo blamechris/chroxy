@@ -8,11 +8,11 @@ import { BaseTunnelAdapter } from './base.js'
  * Named mode: spawns `cloudflared tunnel run <name>` — stable URL via DNS CNAME.
  */
 export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
-  constructor({ port, mode = 'quick', config = {} }) {
+  constructor({ port, mode = 'quick', config = {}, tunnelName, tunnelHostname }) {
     super({ port, mode, config })
-    // Support both config object keys and legacy top-level keys
-    this.tunnelName = config.tunnelName || null
-    this.tunnelHostname = config.tunnelHostname || null
+    // Support both config object keys and legacy top-level constructor args
+    this.tunnelName = config.tunnelName ?? tunnelName ?? null
+    this.tunnelHostname = config.tunnelHostname ?? tunnelHostname ?? null
   }
 
   static get name() {
@@ -133,6 +133,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
       const timeoutHandle = setTimeout(() => {
         if (!resolved) {
           resolved = true
+          this.intentionalShutdown = true
           proc.kill()
           reject(new Error('Tunnel timed out after 30s. Is cloudflared installed and logged in? (brew install cloudflared)'))
         }
@@ -198,6 +199,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
       const timeoutHandle = setTimeout(() => {
         if (!resolved) {
           resolved = true
+          this.intentionalShutdown = true
           proc.kill()
           reject(new Error('Tunnel timed out after 30s. Is cloudflared installed? (brew install cloudflared)'))
         }
