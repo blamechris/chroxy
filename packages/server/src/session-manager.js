@@ -93,7 +93,7 @@ export class SessionDirectoryError extends SessionError {
  *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
  */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 5000 } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 5000, maxToolInput } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -102,6 +102,7 @@ export class SessionManager extends EventEmitter {
     this._defaultCwd = defaultCwd || process.cwd()
     this._defaultModel = defaultModel || null
     this._defaultPermissionMode = defaultPermissionMode || 'approve'
+    this._maxToolInput = maxToolInput || null
     this._stateFilePath = stateFilePath || DEFAULT_STATE_FILE
     this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000 // 24 hours
     this._persistDebounceMs = persistDebounceMs
@@ -150,14 +151,16 @@ export class SessionManager extends EventEmitter {
     const sessionName = name || `Session ${this._sessions.size + 1}`
 
     const ProviderClass = getProvider(this._providerType)
-    const session = new ProviderClass({
+    const providerOpts = {
       cwd: resolvedCwd,
       model: resolvedModel,
       permissionMode: resolvedPermissionMode,
       port: this._port,
       apiToken: this._apiToken,
       resumeSessionId: resumeSessionId || null,
-    })
+    }
+    if (this._maxToolInput) providerOpts.maxToolInput = this._maxToolInput
+    const session = new ProviderClass(providerOpts)
 
     const entry = {
       session,
