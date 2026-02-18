@@ -368,6 +368,7 @@ export class CliSession extends EventEmitter {
               ctx.currentToolName = event.content_block.name
               ctx.currentToolUseId = event.content_block.id
               ctx.toolInputChunks = ''
+              ctx.toolInputBytes = 0
               ctx.toolInputOverflow = false
               this.emit('tool_start', {
                 messageId,

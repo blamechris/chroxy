@@ -204,10 +204,11 @@ describe('CliSession stream-event handling', () => {
       // Finish this block
       session._handleEvent(contentBlockStop())
 
-      // Start a new tool_use block — overflow should reset
+      // Start a new tool_use block — overflow and byte counter should reset
       session._handleEvent(toolUseStart('Edit', 'toolu_2'))
       assert.equal(session._currentCtx.toolInputOverflow, false)
       assert.equal(session._currentCtx.toolInputChunks, '')
+      assert.equal(session._currentCtx.toolInputBytes, 0)
 
       // New accumulation should work normally
       session._handleEvent(inputJsonDelta('{"file":"test.js"}'))
