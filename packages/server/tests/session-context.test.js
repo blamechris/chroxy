@@ -13,7 +13,7 @@ describe('readSessionContext', () => {
   before(async () => {
     // Create a temp git repo fixture
     gitDir = await mkdtemp(join(tmpdir(), 'session-ctx-git-'))
-    execFileSync('git', ['init'], { cwd: gitDir })
+    execFileSync('git', ['init', '-b', 'main'], { cwd: gitDir })
     execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: gitDir })
     execFileSync('git', ['config', 'user.name', 'Test'], { cwd: gitDir })
     await writeFile(join(gitDir, 'package.json'), JSON.stringify({ name: 'test-project' }))
