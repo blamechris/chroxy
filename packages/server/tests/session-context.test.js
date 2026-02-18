@@ -45,8 +45,8 @@ describe('readSessionContext', () => {
     await writeFile(join(gitDir, 'dirty.txt'), 'uncommitted')
     const ctx = await readSessionContext(gitDir)
     assert.ok(ctx.gitDirty >= 1, `expected dirty >= 1, got ${ctx.gitDirty}`)
-    // Clean up
-    execFileSync('git', ['checkout', '.'], { cwd: gitDir })
+    // Clean up: reset tracked files and index, then remove untracked file
+    execFileSync('git', ['reset', '--hard'], { cwd: gitDir })
     await rm(join(gitDir, 'dirty.txt'), { force: true })
   })
 
