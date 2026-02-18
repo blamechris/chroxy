@@ -24,7 +24,8 @@ try {
 }
 
 /**
- * Register iOS notification category with Approve/Deny action buttons.
+ * Register notification category with Approve/Deny action buttons.
+ * Works on both iOS and Android (expo-notifications supports categories on both).
  * Idempotent — safe to call multiple times.
  */
 try {
@@ -40,7 +41,7 @@ try {
       options: { isDestructive: true, opensAppToForeground: true },
     },
   ]).catch(() => {
-    // Gracefully degrade if categories not supported (e.g. Android, Expo Go)
+    // Gracefully degrade if categories not supported (e.g. Expo Go)
   });
 } catch {
   // Gracefully degrade if setNotificationCategoryAsync not available
