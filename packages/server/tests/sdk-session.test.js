@@ -237,6 +237,42 @@ describe('SdkSession', () => {
       assert.equal(events.length, 0)
       assert.equal(session._activeAgents.size, 0)
     })
+
+    it('emits error for oversized tool input', () => {
+      const errors = []
+      session.on('error', (data) => errors.push(data))
+
+      const bigInput = { data: 'x'.repeat(session._maxToolInput) }
+      session._handleToolUseBlock('msg-1', { name: 'Write', id: 'tool-big', input: bigInput })
+
+      assert.equal(errors.length, 1)
+      assert.ok(errors[0].message.includes('Tool input too large'))
+      assert.ok(errors[0].message.includes('Write'))
+    })
+
+    it('skips agent tracking when input exceeds cap', () => {
+      const spawned = []
+      const errors = []
+      session.on('agent_spawned', (data) => spawned.push(data))
+      session.on('error', (data) => errors.push(data))
+
+      const bigInput = { description: 'x'.repeat(session._maxToolInput) }
+      session._handleToolUseBlock('msg-1', { name: 'Task', id: 'tool-task', input: bigInput })
+
+      assert.equal(spawned.length, 0)
+      assert.equal(errors.length, 1)
+    })
+
+    it('accepts maxToolInput constructor option', () => {
+      const s = createSession({ maxToolInput: 1024 })
+      assert.equal(s._maxToolInput, 1024)
+
+      const errors = []
+      s.on('error', (data) => errors.push(data))
+      s._handleToolUseBlock('msg-1', { name: 'Bash', id: 'tool-4', input: { cmd: 'x'.repeat(2000) } })
+      assert.equal(errors.length, 1)
+      s.destroy()
+    })
   })
 
   // -- _clearMessageState --

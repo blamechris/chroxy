@@ -214,6 +214,7 @@ program
   .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
   .option('--provider <name>', 'Session provider to use (e.g. claude-sdk, claude-cli)')
   .option('--max-payload <bytes>', 'WebSocket max message size in bytes (default: 1048576)')
+  .option('--max-tool-input <bytes>', 'Maximum tool input size in bytes (default: 262144)')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
     // Build start-specific overrides
@@ -222,6 +223,10 @@ program
     if (options.maxPayload !== undefined) {
       const parsed = parseInt(options.maxPayload, 10)
       extraOverrides.maxPayload = Number.isNaN(parsed) ? options.maxPayload : parsed
+    }
+    if (options.maxToolInput !== undefined) {
+      const parsed = parseInt(options.maxToolInput, 10)
+      extraOverrides.maxToolInput = Number.isNaN(parsed) ? options.maxToolInput : parsed
     }
     if (options.discoveryInterval !== undefined) {
       const parsed = parseInt(options.discoveryInterval, 10)
@@ -515,12 +520,17 @@ program
   .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
   .option('--provider <name>', 'Session provider to use (e.g. claude-sdk, claude-cli)')
   .option('--max-payload <bytes>', 'WebSocket max message size in bytes (default: 1048576)')
+  .option('--max-tool-input <bytes>', 'Maximum tool input size in bytes (default: 262144)')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
     const extraOverrides = {}
     if (options.maxPayload !== undefined) {
       const parsed = parseInt(options.maxPayload, 10)
       extraOverrides.maxPayload = Number.isNaN(parsed) ? options.maxPayload : parsed
+    }
+    if (options.maxToolInput !== undefined) {
+      const parsed = parseInt(options.maxToolInput, 10)
+      extraOverrides.maxToolInput = Number.isNaN(parsed) ? options.maxToolInput : parsed
     }
     const config = loadAndMergeConfig(options, extraOverrides)
 
