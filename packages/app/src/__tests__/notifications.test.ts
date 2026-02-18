@@ -447,4 +447,106 @@ describe('setupNotificationResponseListener', () => {
       jest.useRealTimers();
     }
   });
+
+  it('retry button shows second alert when retry also fails', async () => {
+    jest.useFakeTimers();
+    try {
+      mockSocket.readyState = 3; // WebSocket.CLOSED
+
+      const mockFetch = jest.fn(() =>
+        Promise.resolve({ ok: false, status: 502 }),
+      ) as jest.Mock;
+      global.fetch = mockFetch;
+
+      setupNotificationResponseListener();
+      const handler = mockAddListener.mock.calls[0][0];
+
+      const promise = handler({
+        actionIdentifier: 'approve',
+        notification: {
+          request: {
+            content: {
+              data: { category: 'permission', requestId: 'perm-retry-fail' },
+            },
+          },
+        },
+      });
+
+      await jest.advanceTimersByTimeAsync(20_000);
+      await promise;
+
+      // First alert shown after initial retries exhausted
+      expect(mockAlert).toHaveBeenCalledTimes(1);
+
+      // Press the Retry button (fetch still returns 502)
+      const buttons = mockAlert.mock.calls[0][2] as Array<{
+        text: string;
+        onPress?: () => void;
+      }>;
+      const retryButton = buttons.find((b) => b.text === 'Retry');
+      retryButton!.onPress!();
+
+      await jest.advanceTimersByTimeAsync(20_000);
+      await Promise.resolve();
+
+      // Second alert should appear — "Still Failed"
+      expect(mockAlert).toHaveBeenCalledTimes(2);
+      expect(mockAlert.mock.calls[1][0]).toBe('Still Failed');
+      expect(mockAlert.mock.calls[1][1]).toBe('Open the app to respond manually.');
+      expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('retry button shows second alert when fetch throws', async () => {
+    jest.useFakeTimers();
+    try {
+      mockSocket.readyState = 3; // WebSocket.CLOSED
+
+      const mockFetch = jest.fn(() =>
+        Promise.resolve({ ok: false, status: 502 }),
+      ) as jest.Mock;
+      global.fetch = mockFetch;
+
+      setupNotificationResponseListener();
+      const handler = mockAddListener.mock.calls[0][0];
+
+      const promise = handler({
+        actionIdentifier: 'approve',
+        notification: {
+          request: {
+            content: {
+              data: { category: 'permission', requestId: 'perm-retry-throw' },
+            },
+          },
+        },
+      });
+
+      await jest.advanceTimersByTimeAsync(20_000);
+      await promise;
+
+      expect(mockAlert).toHaveBeenCalledTimes(1);
+
+      // Make fetch reject for the retry
+      mockFetch.mockRejectedValue(new Error('Network error'));
+
+      const buttons = mockAlert.mock.calls[0][2] as Array<{
+        text: string;
+        onPress?: () => void;
+      }>;
+      const retryButton = buttons.find((b) => b.text === 'Retry');
+      retryButton!.onPress!();
+
+      await jest.advanceTimersByTimeAsync(20_000);
+      await Promise.resolve();
+
+      // .catch() handler should show second alert
+      expect(mockAlert).toHaveBeenCalledTimes(2);
+      expect(mockAlert.mock.calls[1][0]).toBe('Still Failed');
+      expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

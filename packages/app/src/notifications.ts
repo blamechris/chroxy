@@ -235,7 +235,12 @@ export function setupNotificationResponseListener(): Notifications.EventSubscrip
               sendPermissionResponseHttp(requestId, decision).then((ok) => {
                 if (ok) {
                   useConnectionStore.getState().markPromptAnsweredByRequestId(requestId, decision);
+                } else {
+                  Alert.alert('Still Failed', 'Open the app to respond manually.');
                 }
+              }).catch(() => {
+                // Already logged inside sendPermissionResponseHttp
+                Alert.alert('Still Failed', 'Open the app to respond manually.');
               });
             },
           },
