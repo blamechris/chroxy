@@ -1117,14 +1117,20 @@ export class WsServer {
 
       case 'request_session_context': {
         const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
-        if (!targetId) break
+        if (!targetId) {
+          this._send(ws, { type: 'session_error', message: 'No active session' })
+          break
+        }
         try {
           const ctx = await this.sessionManager.getSessionContext(targetId)
           if (ctx) {
             this._send(ws, { type: 'session_context', ...ctx })
+          } else {
+            this._send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
           }
         } catch (err) {
           console.warn(`[ws] Failed to read session context: ${err.message}`)
+          this._send(ws, { type: 'session_error', message: `Failed to read session context: ${err.message}` })
         }
         break
       }

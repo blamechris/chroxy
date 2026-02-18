@@ -32,6 +32,9 @@ import { emitToolResults } from './tool-result.js'
  *   tool_result        { toolUseId, result, truncated }
  */
 
+// Default max accumulated size for tool_use input (~256KB)
+const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
+
 export class SdkSession extends EventEmitter {
   static get capabilities() {
     return {
@@ -45,11 +48,12 @@ export class SdkSession extends EventEmitter {
     }
   }
 
-  constructor({ cwd, model, permissionMode, resumeSessionId, transforms } = {}) {
+  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.model = model || null
     this.permissionMode = permissionMode || 'approve'
+    this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
 
     this._sdkSessionId = resumeSessionId || null
@@ -315,6 +319,16 @@ export class SdkSession extends EventEmitter {
    * user_question and waits for respondToQuestion().
    */
   _handleToolUseBlock(messageId, block) {
+    // Guard against oversized tool inputs
+    const inputStr = JSON.stringify(block.input || {})
+    if (inputStr.length > this._maxToolInput) {
+      console.warn(`[sdk-session] Tool input for ${block.name} exceeded ${this._maxToolInput} chars, skipping`)
+      this.emit('error', {
+        message: `Tool input too large (>${Math.round(this._maxToolInput / 1024)}KB) for ${block.name} — tool use was skipped`,
+      })
+      return
+    }
+
     if (block.name === 'Task') {
       const input = block.input || {}
       const description = (typeof input.description === 'string'
