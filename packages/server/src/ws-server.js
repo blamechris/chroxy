@@ -792,7 +792,7 @@ export class WsServer {
           // Record user input in history (without base64 blobs)
           const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
           this.sessionManager.recordUserInput(client.activeSessionId, historyText)
-          entry.session.sendMessage(trimmed, attachments)
+          entry.session.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
         }
 
         // Track last-writer-wins primary for this session
@@ -1152,7 +1152,7 @@ export class WsServer {
         const trimmed = text?.trim() || ''
         const attCount = attachments?.length || 0
         console.log(`[ws] Message from ${client.id}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
-        this.cliSession.sendMessage(trimmed, attachments)
+        this.cliSession.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
         // Track last-writer-wins primary (uses 'default' as pseudo session ID)
         this._updatePrimary('default', client.id)
         break

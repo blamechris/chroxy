@@ -357,7 +357,7 @@ interface ConnectionState {
   clearTerminalBuffer: () => void;
   setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
-  sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[]) => 'sent' | 'queued' | false;
+  sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
   sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;
@@ -2265,11 +2265,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
-  sendInput: (input, wireAttachments) => {
+  sendInput: (input, wireAttachments, options) => {
     const { socket } = get();
     const payload: Record<string, unknown> = { type: 'input', data: input };
     if (wireAttachments?.length) {
       payload.attachments = wireAttachments;
+    }
+    if (options?.isVoice) {
+      payload.isVoice = true;
     }
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);

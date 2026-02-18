@@ -5,6 +5,7 @@ import { resolveModelId } from './models.js'
 import { createPermissionHookManager } from './permission-hook.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { forceKill } from './platform.js'
+import { MessageTransformPipeline } from './message-transform.js'
 
 // Default max accumulated size for tool_use input_json_delta chunks (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
@@ -49,7 +50,7 @@ export class CliSession extends EventEmitter {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput } = {}) {
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.allowedTools = allowedTools || []
@@ -58,6 +59,7 @@ export class CliSession extends EventEmitter {
     this._port = port || null
     this._apiToken = apiToken || null
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
+    this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sessionId = null
     this._child = null
     this._destroying = false
@@ -226,7 +228,7 @@ export class CliSession extends EventEmitter {
       if (typeof pending === 'string') {
         this.sendMessage(pending)
       } else {
-        this.sendMessage(pending.prompt, pending.attachments)
+        this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
       }
     }
   }
@@ -260,7 +262,7 @@ export class CliSession extends EventEmitter {
   /**
    * Send a message to Claude via stdin NDJSON.
    */
-  sendMessage(prompt, attachments) {
+  sendMessage(prompt, attachments, options = {}) {
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
       return
@@ -268,8 +270,19 @@ export class CliSession extends EventEmitter {
 
     if (!this._processReady) {
       console.log('[cli-session] Process not ready, queuing message')
-      this._pendingMessage = { prompt, attachments }
+      this._pendingMessage = { prompt, attachments, options }
       return
+    }
+
+    // Apply message transforms if configured
+    let transformedPrompt = prompt
+    if (this._transformPipeline.hasTransforms && typeof prompt === 'string') {
+      transformedPrompt = this._transformPipeline.apply(prompt, {
+        cwd: this.cwd,
+        model: this.model,
+        isVoiceInput: !!options.isVoice,
+        platform: process.platform,
+      })
     }
 
     this._isBusy = true
@@ -277,7 +290,7 @@ export class CliSession extends EventEmitter {
     this._currentMessageId = `msg-${this._messageCounter}`
     this._currentCtx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null, currentToolName: null, currentToolUseId: null, toolInputChunks: '', toolInputOverflow: false }
 
-    const content = buildContentBlocks(prompt, attachments)
+    const content = buildContentBlocks(transformedPrompt, attachments)
 
     const ndjson = JSON.stringify({
       type: 'user',

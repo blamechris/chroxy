@@ -64,6 +64,7 @@ export async function startCliServer(config) {
     discoveryIntervalMs,
     providerType,
     maxToolInput: config.maxToolInput || null,
+    transforms: config.transforms || [],
   })
 
   // 2. Try restoring session state from a previous instance

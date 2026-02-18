@@ -33,6 +33,7 @@ const CONFIG_SCHEMA = {
   maxPayload: 'number',
   maxToolInput: 'number',
   noEncrypt: 'boolean',
+  transforms: 'array',
 }
 
 /**
@@ -188,6 +189,7 @@ function envKeyForConfig(key) {
     maxPayload: 'CHROXY_MAX_PAYLOAD',
     maxToolInput: 'CHROXY_MAX_TOOL_INPUT',
     noEncrypt: 'CHROXY_NO_ENCRYPT',
+    transforms: 'CHROXY_TRANSFORMS',
   }
   return envMap[key] || key.toUpperCase()
 }
