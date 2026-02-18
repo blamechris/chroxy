@@ -1,6 +1,6 @@
 import { SessionManager } from './session-manager.js'
 import { WsServer } from './ws-server.js'
-import { TunnelManager } from './tunnel.js'
+import { getTunnel, parseTunnelArg } from './tunnel/index.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { wireTunnelEvents } from './tunnel-events.js'
 import { PushManager } from './push.js'
@@ -186,18 +186,22 @@ export async function startCliServer(config) {
   }
 
   // Determine tunnel mode
-  const TUNNEL_MODE = config.tunnel || 'quick'
-  const SKIP_TUNNEL = NO_AUTH || TUNNEL_MODE === 'none'
+  const tunnelArg = parseTunnelArg(config.tunnel || 'quick')
+  const SKIP_TUNNEL = NO_AUTH || !tunnelArg
 
   let tunnel = null
   let currentWsUrl = null
   if (!SKIP_TUNNEL) {
-    // 4. Start the Cloudflare tunnel
-    tunnel = new TunnelManager({
+    // 4. Start the tunnel via adapter registry
+    const TunnelAdapter = getTunnel(tunnelArg.provider)
+    tunnel = new TunnelAdapter({
       port: PORT,
-      mode: TUNNEL_MODE,
-      tunnelName: config.tunnelName || null,
-      tunnelHostname: config.tunnelHostname || null,
+      mode: tunnelArg.mode,
+      config: {
+        ...config.tunnelConfig,
+        tunnelName: config.tunnelName || null,
+        tunnelHostname: config.tunnelHostname || null,
+      },
     })
     const { wsUrl, httpUrl } = await tunnel.start()
     currentWsUrl = wsUrl
@@ -234,7 +238,7 @@ export async function startCliServer(config) {
 
     // 7. Generate connection info
     const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
-    const modeLabel = TUNNEL_MODE === 'named' ? 'Named Tunnel' : 'Quick Tunnel'
+    const modeLabel = `${tunnelArg.provider}:${tunnelArg.mode}`
 
     console.log(`\n[✓] Server ready! (CLI headless mode, ${modeLabel})\n`)
     console.log('📱 Scan this QR code with the Chroxy app:\n')
@@ -243,7 +247,7 @@ export async function startCliServer(config) {
     console.log(`   URL:   ${wsUrl}`)
     console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
 
-  } else if (TUNNEL_MODE === 'none' && !NO_AUTH) {
+  } else if (!tunnelArg && !NO_AUTH) {
     console.log(`[✓] Server ready! (CLI headless mode, no tunnel)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)
     console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)

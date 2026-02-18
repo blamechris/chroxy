@@ -26,6 +26,7 @@ The server will print a QR code. Scan it with the Chroxy app.
 | `chroxy start` | Start server in CLI headless mode (default) |
 | `chroxy start --terminal` | Start server in PTY/tmux mode |
 | `chroxy start --tunnel named` | Use a named tunnel for stable URLs (requires Cloudflare account) |
+| `chroxy start --tunnel cloudflare:named` | Explicit provider:mode syntax |
 | `chroxy start --tunnel none` | Disable tunnel (local only) |
 | `chroxy start --no-auth` | Start without authentication (CLI mode only, binds to localhost) |
 | `chroxy start --no-supervisor` | Disable supervisor auto-restart (named tunnel mode) |
@@ -42,7 +43,8 @@ The server will print a QR code. Scan it with the Chroxy app.
 | `chroxy doctor` | Check dependencies and environment |
 | `chroxy sessions` | List saved sessions with conversation IDs |
 | `chroxy resume [session]` | Resume a Chroxy session in your terminal |
-| `chroxy tunnel setup` | Interactive named tunnel setup |
+| `chroxy tunnel setup` | Interactive named tunnel setup (default: Cloudflare) |
+| `chroxy tunnel setup --provider <name>` | Setup a specific tunnel provider |
 | `chroxy wrap -n name` | Create a discoverable tmux session running Claude |
 
 ## Architecture
@@ -57,7 +59,7 @@ The server will print a QR code. Scan it with the Chroxy app.
         ┌─────────────┼─────────────┐
         ▼             ▼             ▼
 ┌───────────────┐ ┌───────────┐ ┌───────────────┐
-│ server-cli.js │ │ ws-server │ │    tunnel     │
+│ server-cli.js │ │ ws-server │ │   tunnel/    │
 │               │ │           │ │               │
 │ Orchestrates  │ │ WebSocket │ │ cloudflared   │
 │ SDK sessions  │ │ + auth    │ │ management    │
@@ -82,7 +84,7 @@ The server will print a QR code. Scan it with the Chroxy app.
         ┌─────────────┼─────────────┐
         ▼             ▼             ▼
 ┌───────────────┐ ┌───────────┐ ┌───────────────┐
-│  pty-manager  │ │ ws-server │ │    tunnel     │
+│  pty-manager  │ │ ws-server │ │   tunnel/    │
 │               │ │           │ │               │
 │ Spawns tmux,  │ │ WebSocket │ │ cloudflared   │
 │ handles PTY   │ │ + auth    │ │ management    │
@@ -107,7 +109,9 @@ The server will print a QR code. Scan it with the Chroxy app.
 | CliSession | `cli-session.js` | Legacy headless executor via `claude -p` |
 | SessionManager | `session-manager.js` | Multi-session lifecycle management |
 | WsServer | `ws-server.js` | WebSocket protocol with auth + encryption |
-| TunnelManager | `tunnel.js` | Cloudflare tunnel lifecycle (quick/named/none) |
+| TunnelRegistry | `tunnel/registry.js` | Pluggable tunnel adapter registry |
+| BaseTunnelAdapter | `tunnel/base.js` | Base class with shared recovery logic |
+| CloudflareTunnelAdapter | `tunnel/cloudflare.js` | Cloudflare adapter (quick/named modes) |
 | Supervisor | `supervisor.js` | Tunnel owner + child auto-restart (named tunnel) |
 | PushManager | `push.js` | Push notifications via Expo Push API |
 | PtyManager | `pty-manager.js` | tmux session management (PTY mode) |

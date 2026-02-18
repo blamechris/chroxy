@@ -1,7 +1,7 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { execSync } from 'child_process'
-import { TunnelManager } from '../src/tunnel.js'
+import { CloudflareTunnelAdapter as TunnelManager } from '../src/tunnel/cloudflare.js'
 
 // Skip entire suite if cloudflared not installed
 let hasCloudflared = false

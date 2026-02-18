@@ -2,7 +2,7 @@ import { EventEmitter } from "events";
 import { PtyManager } from "./pty-manager.js";
 import { OutputParser } from "./output-parser.js";
 import { WsServer } from "./ws-server.js";
-import { TunnelManager } from "./tunnel.js";
+import { getTunnel, parseTunnelArg } from "./tunnel/index.js";
 import { waitForTunnel } from "./tunnel-check.js";
 import { wireTunnelEvents } from "./tunnel-events.js";
 import { createPermissionHookManager } from "./permission-hook.js";
@@ -86,8 +86,22 @@ export async function startServer(config) {
   });
   wsServer.start();
 
-  // 5. Start the Cloudflare tunnel
-  const tunnel = new TunnelManager({ port: PORT });
+  // 5. Start the tunnel via adapter registry
+  const tunnelArg = parseTunnelArg(config.tunnel || 'quick')
+  if (!tunnelArg) {
+    console.error('PTY/tmux mode requires a tunnel. Use --tunnel quick or --tunnel named.')
+    process.exit(1)
+  }
+  const TunnelAdapter = getTunnel(tunnelArg.provider)
+  const tunnel = new TunnelAdapter({
+    port: PORT,
+    mode: tunnelArg.mode,
+    config: {
+      ...config.tunnelConfig,
+      tunnelName: config.tunnelName || null,
+      tunnelHostname: config.tunnelHostname || null,
+    },
+  });
 
   const { wsUrl, httpUrl } = await tunnel.start();
 

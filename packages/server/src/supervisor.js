@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { EventEmitter } from 'events'
-import { TunnelManager } from './tunnel.js'
+import { getTunnel, parseTunnelArg } from './tunnel/index.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { createLogger } from './logger.js'
 import qrcode from 'qrcode-terminal'
@@ -79,13 +79,21 @@ export class Supervisor extends EventEmitter {
     return fork(script, args, opts)
   }
 
-  /** Override point: create TunnelManager instance */
+  /** Override point: create tunnel adapter instance */
   _createTunnel() {
-    return new TunnelManager({
+    const tunnelArg = parseTunnelArg(this._tunnelMode)
+    if (!tunnelArg) {
+      throw new Error('Supervisor requires a tunnel (cannot use tunnel=none)')
+    }
+    const TunnelAdapter = getTunnel(tunnelArg.provider)
+    return new TunnelAdapter({
       port: this._port,
-      mode: this._tunnelMode,
-      tunnelName: this.config.tunnelName || null,
-      tunnelHostname: this.config.tunnelHostname || null,
+      mode: tunnelArg.mode,
+      config: {
+        ...this.config.tunnelConfig,
+        tunnelName: this.config.tunnelName || null,
+        tunnelHostname: this.config.tunnelHostname || null,
+      },
     })
   }
 
@@ -173,7 +181,8 @@ export class Supervisor extends EventEmitter {
 
     // 3. Display connection info
     const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${this._apiToken}`
-    const modeLabel = this._tunnelMode === 'named' ? 'Named Tunnel' : 'Quick Tunnel'
+    const tunnelArg = parseTunnelArg(this._tunnelMode)
+    const modeLabel = tunnelArg ? `${tunnelArg.provider}:${tunnelArg.mode}` : this._tunnelMode
 
     this._log.info(`${modeLabel} ready`)
     console.log('📱 Scan this QR code with the Chroxy app:\n')
