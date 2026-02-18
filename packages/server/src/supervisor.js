@@ -109,21 +109,22 @@ export class Supervisor extends EventEmitter {
     if (this._signalsRegistered) return
     this._signalsRegistered = true
 
-    if (isWindows) {
+    if (!isWindows) {
       // Windows does not support SIGUSR2 — deploy restart is not available
-    } else process.on('SIGUSR2', () => {
-      if (this._draining) {
-        this._log.info('SIGUSR2 received but drain already in progress, ignoring')
-        return
-      }
-      if (!this._childReady) {
-        this._log.info('SIGUSR2 received but child not ready yet, ignoring')
-        return
-      }
-      this._log.info('SIGUSR2 received (deploy restart)')
-      this._lastDeployTimestamp = Date.now()
-      this.restartChild()
-    })
+      process.on('SIGUSR2', () => {
+        if (this._draining) {
+          this._log.info('SIGUSR2 received but drain already in progress, ignoring')
+          return
+        }
+        if (!this._childReady) {
+          this._log.info('SIGUSR2 received but child not ready yet, ignoring')
+          return
+        }
+        this._log.info('SIGUSR2 received (deploy restart)')
+        this._lastDeployTimestamp = Date.now()
+        this.restartChild()
+      })
+    }
 
     process.on('SIGINT', () => this.shutdown('SIGINT'))
     process.on('SIGTERM', () => this.shutdown('SIGTERM'))
