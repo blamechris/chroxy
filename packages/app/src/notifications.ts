@@ -227,6 +227,19 @@ export function setupNotificationResponseListener(): Notifications.EventSubscrip
       Alert.alert(
         'Permission Response Failed',
         'Could not deliver your response. Open the app to respond manually.',
+        [
+          { text: 'OK', style: 'cancel' },
+          {
+            text: 'Retry',
+            onPress: () => {
+              sendPermissionResponseHttp(requestId, decision).then((ok) => {
+                if (ok) {
+                  useConnectionStore.getState().markPromptAnsweredByRequestId(requestId, decision);
+                }
+              });
+            },
+          },
+        ],
       );
     }
   });
