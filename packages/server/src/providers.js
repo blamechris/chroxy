@@ -8,6 +8,44 @@
  *   - 'claude-sdk': Agent SDK session (SdkSession) — default
  *   - 'claude-cli': Legacy CLI process session (CliSession)
  *
+ * Example: Registering a custom provider
+ * ```js
+ * import { EventEmitter } from 'events'
+ * import { registerProvider } from './providers.js'
+ *
+ * class CustomSession extends EventEmitter {
+ *   constructor({ cwd, model, permissionMode, port, apiToken }) {
+ *     super()
+ *     this.cwd = cwd
+ *     this.model = model
+ *     this.permissionMode = permissionMode
+ *     this.isRunning = false
+ *     this.resumeSessionId = null
+ *   }
+ *
+ *   static get capabilities() {
+ *     return {
+ *       permissions: true,
+ *       inProcessPermissions: false,
+ *       modelSwitch: true,
+ *       permissionModeSwitch: true,
+ *       planMode: false,
+ *       resume: false,
+ *       terminal: false,
+ *     }
+ *   }
+ *
+ *   start() { ... }
+ *   destroy() { ... }
+ *   sendMessage(text) { ... }
+ *   setModel(model) { ... }
+ *   setPermissionMode(mode) { ... }
+ * }
+ *
+ * registerProvider('my-custom-provider', CustomSession)
+ * // Now use: npx chroxy start --provider my-custom-provider
+ * ```
+ *
  * @typedef {Object} ProviderCapabilities
  * @property {boolean} permissions      - Supports permission handling
  * @property {boolean} inProcessPermissions - Handles permissions in-process (no HTTP hook)

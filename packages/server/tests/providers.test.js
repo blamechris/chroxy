@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { registerProvider, getProvider, listProviders } from '../src/providers.js'
 import { CliSession } from '../src/cli-session.js'

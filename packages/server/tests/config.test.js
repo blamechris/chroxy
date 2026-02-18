@@ -76,6 +76,13 @@ describe('validateConfig', () => {
     assert.equal(result.valid, false)
     assert.ok(result.warnings.some(w => w.includes('provider') && w.includes('string')))
   })
+
+  it('accepts valid provider names', () => {
+    const config = { provider: 'claude-sdk' }
+    const result = validateConfig(config)
+    assert.equal(result.valid, true)
+    assert.equal(result.warnings.length, 0)
+  })
 })
 
 describe('mergeConfig', () => {

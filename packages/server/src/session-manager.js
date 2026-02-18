@@ -114,6 +114,9 @@ export class SessionManager extends EventEmitter {
     this._discoveryIntervalMs = discoveryIntervalMs
     this._discoveryTimer = null
     this._lastDiscoveredSessions = new Set() // Track tmux session names we've seen
+
+    // Validate provider exists at construction time for fail-fast behavior
+    getProvider(this._providerType)
   }
 
   /**

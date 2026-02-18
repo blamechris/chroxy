@@ -31,7 +31,11 @@ export async function startCliServer(config) {
   }
 
   const providerType = config.provider || (config.legacyCli ? 'claude-cli' : 'claude-sdk')
-  const modeStr = providerType === 'claude-cli' ? 'CLI legacy mode' : `${providerType}`
+  const modeStr = providerType === 'claude-cli'
+    ? 'claude-cli (CLI legacy mode)'
+    : providerType === 'claude-sdk'
+      ? 'claude-sdk (SDK mode)'
+      : providerType
   const banner = `Chroxy Server v${SERVER_VERSION} (${modeStr})`
   const pad = Math.max(0, 38 - banner.length)
   const left = Math.floor(pad / 2)
