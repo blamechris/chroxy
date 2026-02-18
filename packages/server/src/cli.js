@@ -699,6 +699,13 @@ program
         return
       }
 
+      if (isWindows) {
+        console.error('[deploy] Deploy restart via SIGUSR2 is not supported on Windows.')
+        console.error('   Restart the server manually: npx chroxy start')
+        process.exitCode = 1
+        return
+      }
+
       console.log(`[deploy] Signaling supervisor (pid ${supervisorPid}) to restart...`)
       process.kill(supervisorPid, 'SIGUSR2')
       console.log('[deploy] Deploy signal sent. Server will restart momentarily.\n')
