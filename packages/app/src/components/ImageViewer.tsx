@@ -1,5 +1,5 @@
 import React from 'react';
-import { Modal, View, Image, TouchableOpacity, Text, StyleSheet, Dimensions } from 'react-native';
+import { Modal, View, Image, TouchableOpacity, Pressable, Text, StyleSheet, Dimensions } from 'react-native';
 import { ICON_CLOSE } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
@@ -20,16 +20,18 @@ export function ImageViewer({ uri, onClose }: ImageViewerProps) {
       animationType="fade"
       onRequestClose={onClose}
     >
-      <View style={styles.overlay}>
+      <Pressable style={styles.overlay} onPress={onClose}>
         <TouchableOpacity style={styles.closeButton} onPress={onClose} accessibilityRole="button" accessibilityLabel="Close image">
           <Text style={styles.closeText}>{ICON_CLOSE}</Text>
         </TouchableOpacity>
-        <Image
-          source={{ uri }}
-          style={styles.image}
-          resizeMode="contain"
-        />
-      </View>
+        <Pressable onPress={(e) => e.stopPropagation()}>
+          <Image
+            source={{ uri }}
+            style={styles.image}
+            resizeMode="contain"
+          />
+        </Pressable>
+      </Pressable>
     </Modal>
   );
 }
