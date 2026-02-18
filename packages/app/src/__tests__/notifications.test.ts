@@ -437,8 +437,8 @@ describe('setupNotificationResponseListener', () => {
       // Flush microtasks
       await Promise.resolve();
 
-      // Retry should have called fetch again (at least 1 more time)
-      expect(mockFetch.mock.calls.length).toBeGreaterThan(3);
+      // Retry should have called fetch exactly one more time (total 4 calls)
+      expect(mockFetch).toHaveBeenCalledTimes(4);
       expect(mockMarkPromptAnsweredByRequestId).toHaveBeenCalledWith(
         'perm-retry-btn',
         'allow',
