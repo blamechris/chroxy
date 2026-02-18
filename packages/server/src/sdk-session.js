@@ -3,6 +3,7 @@ import { EventEmitter } from 'events'
 import { resolveModelId } from './models.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
+import { emitToolResults } from './tool-result.js'
 
 /**
  * Manages a Claude Code session using the Agent SDK.
@@ -31,11 +32,9 @@ import { MessageTransformPipeline } from './message-transform.js'
  *   tool_result        { toolUseId, result, truncated }
  */
 
-// Max size for tool results forwarded to mobile (10KB)
-const MAX_TOOL_RESULT_SIZE = 10240
-
 // Default max accumulated size for tool_use input (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
+
 export class SdkSession extends EventEmitter {
   static get capabilities() {
     return {
@@ -271,31 +270,7 @@ export class SdkSession extends EventEmitter {
 
           case 'user': {
             // Tool result content blocks appear in user-role messages during the tool loop
-            const userContent = msg.message?.content
-            if (Array.isArray(userContent)) {
-              for (const block of userContent) {
-                if (block.type === 'tool_result' && block.tool_use_id) {
-                  let result = ''
-                  if (typeof block.content === 'string') {
-                    result = block.content
-                  } else if (Array.isArray(block.content)) {
-                    result = block.content
-                      .filter(b => b.type === 'text')
-                      .map(b => b.text)
-                      .join('\n')
-                  }
-                  const truncated = result.length > MAX_TOOL_RESULT_SIZE
-                  if (truncated) {
-                    result = result.slice(0, MAX_TOOL_RESULT_SIZE)
-                  }
-                  this.emit('tool_result', {
-                    toolUseId: block.tool_use_id,
-                    result,
-                    truncated,
-                  })
-                }
-              }
-            }
+            emitToolResults(msg.message?.content, this)
             break
           }
 

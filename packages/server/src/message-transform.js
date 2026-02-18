@@ -17,6 +17,8 @@ const BUILT_IN_TRANSFORMS = {
    * Uses a system-note style prefix that Claude treats as ambient context.
    */
   contextAnnotation: (message, ctx) => {
+    // Skip annotation for very short messages (plan approvals, yes/no, etc.)
+    if (message.length < 10) return message
     const parts = []
     if (ctx.cwd) parts.push(`cwd: ${ctx.cwd}`)
     if (ctx.model) parts.push(`model: ${ctx.model}`)
@@ -33,8 +35,16 @@ const BUILT_IN_TRANSFORMS = {
   voiceCleanup: (message, ctx) => {
     if (!ctx.isVoiceInput) return message
     let cleaned = message
-    // Remove common filler words at start of sentences
+    // Remove common filler words at start of message
     cleaned = cleaned.replace(/^(um|uh|like|so|okay|well|basically),?\s*/i, '')
+    // Remove mid-sentence fillers (comma-delimited or standalone)
+    // Careful: "like" and "so" have legitimate uses, only strip after comma
+    cleaned = cleaned.replace(/,\s*(um|uh),?\s*/gi, ', ')
+    cleaned = cleaned.replace(/\s+(um|uh),?\s+/gi, ' ')
+    // Clean up double spaces from removals
+    cleaned = cleaned.replace(/  +/g, ' ').trim()
+    // Remove trailing comma left by filler removal (e.g. "fix the bug, um" → "fix the bug")
+    cleaned = cleaned.replace(/,\s*$/, '')
     // Ensure sentence ends with punctuation
     if (cleaned.length > 0 && !/[.!?]$/.test(cleaned)) {
       cleaned += '.'

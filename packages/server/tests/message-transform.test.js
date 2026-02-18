@@ -36,13 +36,28 @@ describe('contextAnnotation transform', () => {
   })
 
   it('includes git branch when available', () => {
-    const result = transform('hello', { cwd: '/tmp', gitBranch: 'feat/new' })
+    const result = transform('fix the branch issue', { cwd: '/tmp', gitBranch: 'feat/new' })
     assert.ok(result.includes('branch: feat/new'))
   })
 
   it('returns message unchanged when no context available', () => {
-    const result = transform('hello', {})
-    assert.equal(result, 'hello')
+    const result = transform('fix the bug please', {})
+    assert.equal(result, 'fix the bug please')
+  })
+
+  it('skips annotation for short messages', () => {
+    const result = transform('yes', { cwd: '/tmp', model: 'opus' })
+    assert.equal(result, 'yes')
+  })
+
+  it('skips annotation for plan approvals', () => {
+    const result = transform('approve', { cwd: '/tmp', model: 'opus' })
+    assert.equal(result, 'approve')
+  })
+
+  it('annotates messages at the threshold length', () => {
+    const result = transform('0123456789', { cwd: '/tmp' })
+    assert.ok(result.startsWith('[cwd: /tmp]'))
   })
 })
 
@@ -72,6 +87,31 @@ describe('voiceCleanup transform', () => {
     assert.equal(transform('fix the bug.', { isVoiceInput: true }), 'fix the bug.')
     assert.equal(transform('fix the bug!', { isVoiceInput: true }), 'fix the bug!')
     assert.equal(transform('fix the bug?', { isVoiceInput: true }), 'fix the bug?')
+  })
+
+  it('removes mid-sentence um/uh after commas', () => {
+    const result = transform('please, um, fix the bug', { isVoiceInput: true })
+    assert.equal(result, 'please, fix the bug.')
+  })
+
+  it('removes standalone um/uh mid-sentence', () => {
+    const result = transform('please um fix the bug', { isVoiceInput: true })
+    assert.equal(result, 'please fix the bug.')
+  })
+
+  it('removes filler followed by comma mid-sentence', () => {
+    const result = transform('please um, fix the bug', { isVoiceInput: true })
+    assert.equal(result, 'please fix the bug.')
+  })
+
+  it('removes multiple mid-sentence fillers', () => {
+    const result = transform('fix, uh, the um bug', { isVoiceInput: true })
+    assert.equal(result, 'fix, the bug.')
+  })
+
+  it('removes trailing comma left by filler at end', () => {
+    const result = transform('fix the bug, um', { isVoiceInput: true })
+    assert.equal(result, 'fix the bug.')
   })
 
   it('handles empty input', () => {
