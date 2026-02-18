@@ -647,8 +647,19 @@ export class SessionManager extends EventEmitter {
         this._pushHistory(history, {
           type: 'tool_start',
           messageId: data.messageId,
+          toolUseId: data.toolUseId,
           tool: data.tool,
           input: data.input,
+          timestamp: Date.now(),
+        })
+        break
+
+      case 'tool_result':
+        this._pushHistory(history, {
+          type: 'tool_result',
+          toolUseId: data.toolUseId,
+          result: data.result,
+          truncated: data.truncated,
           timestamp: Date.now(),
         })
         break
@@ -721,7 +732,7 @@ export class SessionManager extends EventEmitter {
    * Handles both CliSession and PtySession events.
    */
   _wireSessionEvents(sessionId, session) {
-    const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'result', 'error', 'user_question']
+    const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'error', 'user_question']
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
         this._recordHistory(sessionId, event, data)

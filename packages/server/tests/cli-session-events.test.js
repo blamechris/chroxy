@@ -281,4 +281,118 @@ describe('CliSession stream-event handling', () => {
       assert.equal(session._waitingForAnswer, false)
     })
   })
+
+  describe('tool_result events', () => {
+    it('emits tool_result for user events with tool_result content blocks', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (data) => results.push(data))
+
+      session._handleEvent({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_abc', content: 'file contents here' }],
+        },
+      })
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].toolUseId, 'toolu_abc')
+      assert.equal(results[0].result, 'file contents here')
+      assert.equal(results[0].truncated, false)
+    })
+
+    it('handles array content in tool_result blocks', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (data) => results.push(data))
+
+      session._handleEvent({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'toolu_def',
+            content: [
+              { type: 'text', text: 'Line 1' },
+              { type: 'text', text: 'Line 2' },
+            ],
+          }],
+        },
+      })
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].toolUseId, 'toolu_def')
+      assert.equal(results[0].result, 'Line 1\nLine 2')
+    })
+
+    it('truncates results exceeding 10KB', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (data) => results.push(data))
+
+      const largeContent = 'x'.repeat(20000)
+      session._handleEvent({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_big', content: largeContent }],
+        },
+      })
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].result.length, 10240)
+      assert.equal(results[0].truncated, true)
+    })
+
+    it('emits multiple tool_results from a single user event', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (data) => results.push(data))
+
+      session._handleEvent({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'toolu_1', content: 'result 1' },
+            { type: 'tool_result', tool_use_id: 'toolu_2', content: 'result 2' },
+          ],
+        },
+      })
+
+      assert.equal(results.length, 2)
+      assert.equal(results[0].toolUseId, 'toolu_1')
+      assert.equal(results[1].toolUseId, 'toolu_2')
+    })
+
+    it('skips tool_result blocks without tool_use_id', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (data) => results.push(data))
+
+      session._handleEvent({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', content: 'orphan result' }],
+        },
+      })
+
+      assert.equal(results.length, 0)
+    })
+
+    it('includes toolUseId in tool_start events', () => {
+      const session = createSession()
+      const events = []
+      session.on('tool_start', (data) => events.push(data))
+
+      session._handleEvent(toolUseStart('Read', 'toolu_read1'))
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].toolUseId, 'toolu_read1')
+      assert.equal(events[0].tool, 'Read')
+    })
+  })
 })
