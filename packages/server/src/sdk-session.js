@@ -321,8 +321,8 @@ export class SdkSession extends EventEmitter {
   _handleToolUseBlock(messageId, block) {
     // Guard against oversized tool inputs
     const inputStr = JSON.stringify(block.input || {})
-    if (inputStr.length > this._maxToolInput) {
-      console.warn(`[sdk-session] Tool input for ${block.name} exceeded ${this._maxToolInput} chars, skipping`)
+    if (Buffer.byteLength(inputStr, 'utf8') > this._maxToolInput) {
+      console.warn(`[sdk-session] Tool input for ${block.name} exceeded ${this._maxToolInput} bytes, skipping`)
       this.emit('error', {
         message: `Tool input too large (>${Math.round(this._maxToolInput / 1024)}KB) for ${block.name} — tool use was skipped`,
       })

@@ -41,6 +41,8 @@ const BUILT_IN_TRANSFORMS = {
     // Careful: "like" and "so" have legitimate uses, only strip after comma
     cleaned = cleaned.replace(/,\s*(um|uh),?\s*/gi, ', ')
     cleaned = cleaned.replace(/\s+(um|uh),?\s+/gi, ' ')
+    // Remove trailing filler words (e.g. "fix the bug um" → "fix the bug")
+    cleaned = cleaned.replace(/\s+(um|uh)$/gi, '')
     // Clean up double spaces from removals
     cleaned = cleaned.replace(/  +/g, ' ').trim()
     // Remove trailing comma left by filler removal (e.g. "fix the bug, um" → "fix the bug")

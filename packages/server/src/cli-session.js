@@ -287,7 +287,7 @@ export class CliSession extends EventEmitter {
     this._isBusy = true
     this._messageCounter++
     this._currentMessageId = `msg-${this._messageCounter}`
-    this._currentCtx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null, currentToolName: null, currentToolUseId: null, toolInputChunks: '', toolInputOverflow: false }
+    this._currentCtx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null, currentToolName: null, currentToolUseId: null, toolInputChunks: '', toolInputBytes: 0, toolInputOverflow: false }
 
     const content = buildContentBlocks(transformedPrompt, attachments)
 
@@ -392,8 +392,9 @@ export class CliSession extends EventEmitter {
               this.emit('stream_delta', { messageId, delta: delta.text })
             } else if (delta.type === 'input_json_delta' && ctx.currentContentBlockType === 'tool_use') {
               if (typeof delta.partial_json === 'string' && !ctx.toolInputOverflow) {
-                if (ctx.toolInputChunks.length + delta.partial_json.length > this._maxToolInput) {
-                  console.warn(`[cli-session] toolInputChunks exceeded ${this._maxToolInput} chars, discarding buffer`)
+                const chunkBytes = Buffer.byteLength(delta.partial_json, 'utf8')
+                if (ctx.toolInputBytes + chunkBytes > this._maxToolInput) {
+                  console.warn(`[cli-session] toolInputChunks exceeded ${this._maxToolInput} bytes, discarding buffer`)
                   ctx.toolInputChunks = ''
                   ctx.toolInputOverflow = true
                   this.emit('error', {
@@ -401,6 +402,7 @@ export class CliSession extends EventEmitter {
                   })
                 } else {
                   ctx.toolInputChunks += delta.partial_json
+                  ctx.toolInputBytes += chunkBytes
                 }
               }
             }

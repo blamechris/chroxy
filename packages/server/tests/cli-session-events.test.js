@@ -1,5 +1,6 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { CliSession } from '../src/cli-session.js'
 
 /**
@@ -22,6 +23,7 @@ function createSession() {
     currentToolName: null,
     currentToolUseId: null,
     toolInputChunks: '',
+    toolInputBytes: 0,
     toolInputOverflow: false,
   }
   return session
@@ -414,6 +416,46 @@ describe('CliSession stream-event handling', () => {
       assert.equal(events.length, 1)
       assert.equal(events[0].toolUseId, 'toolu_read1')
       assert.equal(events[0].tool, 'Read')
+    })
+  })
+
+  describe('sendMessage applies transforms', () => {
+    function createMockChild() {
+      const child = new EventEmitter()
+      child.stdin = { write: () => {}, end: () => {} }
+      child._stdinData = []
+      child.stdin.write = (data) => child._stdinData.push(data)
+      return child
+    }
+
+    it('applies voiceCleanup when configured and isVoice is true', () => {
+      const session = new CliSession({ cwd: '/tmp', transforms: ['voiceCleanup'] })
+      session._processReady = true
+      const child = createMockChild()
+      session._child = child
+
+      session.sendMessage('um fix the bug', [], { isVoice: true })
+
+      assert.equal(child._stdinData.length, 1)
+      const parsed = JSON.parse(child._stdinData[0].replace(/\n$/, ''))
+      // voiceCleanup should remove "um" and add period
+      assert.equal(parsed.message.content[0].text, 'fix the bug.')
+
+      session.destroy()
+    })
+
+    it('passes through unchanged when no transforms configured', () => {
+      const session = new CliSession({ cwd: '/tmp' })
+      session._processReady = true
+      const child = createMockChild()
+      session._child = child
+
+      session.sendMessage('um fix the bug', [])
+
+      const parsed = JSON.parse(child._stdinData[0].replace(/\n$/, ''))
+      assert.equal(parsed.message.content[0].text, 'um fix the bug')
+
+      session.destroy()
     })
   })
 })

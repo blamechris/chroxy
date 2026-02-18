@@ -4470,3 +4470,104 @@ describe('permission/question routing to originating session', () => {
     ws.close()
   })
 })
+
+describe('request_session_context error paths', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  function createMockSessionManager(sessions = []) {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    for (const s of sessions) {
+      const mockSession = createMockSession()
+      mockSession.cwd = s.cwd
+      sessionsMap.set(s.id, { session: mockSession, name: s.name, cwd: s.cwd, type: 'cli', isBusy: false })
+    }
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
+    manager.getSessionContext = async () => null
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    })
+    return manager
+  }
+
+  it('returns session_error when no active session', async () => {
+    // Manager with no sessions — no activeSessionId can be set
+    const mockManager = createMockSessionManager([])
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    send(ws, { type: 'request_session_context' })
+    const err = await waitForMessage(messages, 'session_error', 2000)
+    assert.equal(err.message, 'No active session')
+
+    ws.close()
+  })
+
+  it('returns session_error when session not found', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'sess-1', name: 'Test', cwd: '/tmp' }
+    ])
+    mockManager.getSessionContext = async () => null
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    // Request context for a non-existent session — getSessionContext returns null
+    send(ws, { type: 'request_session_context', sessionId: 'nonexistent' })
+    const err = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(err.message.includes('Session not found: nonexistent'))
+
+    ws.close()
+  })
+
+  it('returns session_error when getSessionContext throws', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'sess-1', name: 'Test', cwd: '/tmp' }
+    ])
+    mockManager.getSessionContext = async () => { throw new Error('git not found') }
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    // Request context for a valid session but getSessionContext throws
+    send(ws, { type: 'request_session_context', sessionId: 'sess-1' })
+    const err = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(err.message.includes('Failed to read session context'))
+    assert.ok(err.message.includes('git not found'))
+
+    ws.close()
+  })
+})
