@@ -9,6 +9,7 @@ import { dirname, join, resolve, normalize } from 'path'
 import { homedir, hostname } from 'os'
 import { timingSafeEqual } from 'crypto'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
+import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from './crypto.js'
 
 // -- Attachment validation constants --
 const MAX_ATTACHMENT_COUNT = 5
@@ -165,10 +166,12 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'list_slash_commands' }                     — request available slash commands
  *   { type: 'list_agents' }                             — request available custom agents
  *   { type: 'request_full_history', sessionId? }         — request full JSONL history for a session
+ *   { type: 'key_exchange', publicKey }                  — client's ephemeral X25519 public key (E2E encryption)
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
- *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, connectedClients } — auth succeeded with server context
+ *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, connectedClients, encryption } — auth succeeded (encryption: 'required'|'disabled')
+ *   { type: 'key_exchange_ok', publicKey }               — server's ephemeral X25519 public key (E2E encryption)
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli'|'terminal' }  — which backend mode is active
  *   { type: 'raw',          data: '...' }             — raw PTY output (terminal view)
@@ -212,15 +215,19 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'client_joined', client: { clientId, deviceName, deviceType, platform } } — new client connected
  *   { type: 'client_left', clientId }                — client disconnected
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
+ *
+ * Encrypted envelope (bidirectional, wraps any message above after key exchange):
+ *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
  */
 export class WsServer {
-  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload } = {}) {
+  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._maxPayload = maxPayload || 10 * 1024 * 1024 // default 10MB (supports image/doc attachments)
     this.ptyManager = ptyManager || null
     this.outputParser = outputParser || null
     this.authRequired = authRequired
+    this._encryptionEnabled = !noEncrypt
     this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
     this.httpServer = null
     this.wss = null
@@ -340,6 +347,9 @@ export class WsServer {
         isAlive: true,
         deviceInfo: null,
         ip,
+        encryptionState: null,    // { sharedKey, sendNonce, recvNonce } when active
+        encryptionPending: false, // true while waiting for key_exchange
+        postAuthQueue: null,      // queued messages during key exchange
       })
 
       // Track pong responses for keepalive detection
@@ -378,6 +388,23 @@ export class WsServer {
         } catch {
           return // ignore non-JSON
         }
+        // Decrypt incoming encrypted messages
+        const client = this.clients.get(ws)
+        if (msg.type === 'encrypted' && client?.encryptionState) {
+          if (typeof msg.d !== 'string' || typeof msg.n !== 'number') {
+            console.error(`[ws] Invalid encrypted message envelope from ${client.id}`)
+            ws.close()
+            return
+          }
+          try {
+            msg = decrypt(msg, client.encryptionState.sharedKey, client.encryptionState.recvNonce, DIRECTION_CLIENT)
+            client.encryptionState.recvNonce++
+          } catch (err) {
+            console.error(`[ws] Decryption failed from ${client.id}:`, err.message)
+            ws.close()
+            return
+          }
+        }
         this._handleMessage(ws, msg).catch((err) => {
           console.error('[ws] Unhandled error in message handler:', err)
         })
@@ -386,6 +413,7 @@ export class WsServer {
       ws.on('close', () => {
         clearTimeout(authTimeout)
         const client = this.clients.get(ws)
+        if (client?._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
         console.log(`[ws] Client ${client?.id} disconnected`)
         if (client?.authenticated) {
           this._handleClientDeparture(client)
@@ -475,7 +503,27 @@ export class WsServer {
       serverCommit: this._gitInfo.commit,
       cwd: sessionInfo.cwd,
       connectedClients: this._getConnectedClientList(),
+      encryption: this._encryptionEnabled ? 'required' : 'disabled',
     })
+
+    // If encryption enabled, queue all subsequent messages until key exchange completes
+    if (this._encryptionEnabled) {
+      client.encryptionPending = true
+      client.postAuthQueue = []
+      // 5s timeout: if no key_exchange arrives, proceed unencrypted (old client)
+      client._keyExchangeTimeout = setTimeout(() => {
+        if (client.encryptionPending) {
+          console.warn(`[ws] Key exchange timeout for ${client.id} — proceeding unencrypted (legacy client?)`)
+          client.encryptionPending = false
+          const queue = client.postAuthQueue
+          client.postAuthQueue = null
+          for (const queued of queue) {
+            this._send(ws, queued)
+          }
+        }
+      }, 5000)
+    }
+
     this._send(ws, { type: 'server_mode', mode: this.serverMode })
     this._send(ws, { type: 'status', connected: true })
 
@@ -637,6 +685,51 @@ export class WsServer {
 
     // Ignore duplicate auth messages from already-authenticated clients (e.g. auto-auth mode)
     if (msg.type === 'auth') return
+
+    // Handle key exchange for E2E encryption
+    if (client.encryptionPending) {
+      if (msg.type === 'key_exchange') {
+        clearTimeout(client._keyExchangeTimeout)
+        if (!msg.publicKey || typeof msg.publicKey !== 'string') {
+          console.warn(`[ws] Invalid key_exchange message from ${client.id}: missing or non-string publicKey`)
+          try {
+            ws.send(JSON.stringify({ type: 'error', error: 'Invalid key_exchange message: publicKey is required and must be a string' }))
+          } catch (err) {
+            console.error('[ws] Failed to send key_exchange error:', err.message)
+          }
+          ws.close(1008, 'Invalid key_exchange message')
+          return
+        }
+        const serverKp = createKeyPair()
+        const sharedKey = deriveSharedKey(msg.publicKey, serverKp.secretKey)
+        client.encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 }
+        client.encryptionPending = false
+        // Send key_exchange_ok unencrypted (client needs our public key to derive shared key)
+        try {
+          ws.send(JSON.stringify({ type: 'key_exchange_ok', publicKey: serverKp.publicKey }))
+        } catch (err) {
+          console.error('[ws] Failed to send key_exchange_ok:', err.message)
+        }
+        console.log(`[ws] E2E encryption established with ${client.id}`)
+        // Flush queued messages (now encrypted)
+        const queue = client.postAuthQueue
+        client.postAuthQueue = null
+        for (const queued of queue) {
+          this._send(ws, queued)
+        }
+        return
+      }
+      // Non-key_exchange message while pending — old client, proceed unencrypted
+      clearTimeout(client._keyExchangeTimeout)
+      console.warn(`[ws] Client ${client.id} sent ${msg.type} instead of key_exchange — proceeding unencrypted`)
+      client.encryptionPending = false
+      const queue = client.postAuthQueue
+      client.postAuthQueue = null
+      for (const queued of queue) {
+        this._send(ws, queued)
+      }
+      // Fall through to handle this message normally
+    }
 
     // During drain, only allow permission_response and user_question_response
     if (this._draining && msg.type !== 'permission_response' && msg.type !== 'user_question_response') {
@@ -2007,8 +2100,21 @@ export class WsServer {
 
   /** Send JSON to a single client */
   _send(ws, message) {
+    const client = this.clients.get(ws)
+    // Queue messages while key exchange is pending
+    if (client?.encryptionPending && client.postAuthQueue) {
+      client.postAuthQueue.push(message)
+      return
+    }
     try {
-      ws.send(JSON.stringify(message))
+      // Encrypt if encryption is active for this client
+      if (client?.encryptionState) {
+        const envelope = encrypt(JSON.stringify(message), client.encryptionState.sharedKey, client.encryptionState.sendNonce, DIRECTION_SERVER)
+        client.encryptionState.sendNonce++
+        ws.send(JSON.stringify(envelope))
+      } else {
+        ws.send(JSON.stringify(message))
+      }
     } catch (err) {
       console.error('[ws] Send error:', err.message)
     }

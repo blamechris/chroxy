@@ -157,6 +157,7 @@ export async function startCliServer(config) {
     authRequired: !NO_AUTH,
     pushManager,
     maxPayload: config.maxPayload,
+    noEncrypt: config.noEncrypt,
   })
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
