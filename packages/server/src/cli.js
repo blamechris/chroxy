@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto'
 import readline from 'readline'
 import { validateConfig, mergeConfig } from './config.js'
 import { isWindows, defaultShell, writeFileRestricted } from './platform.js'
+import { parseTunnelArg } from './tunnel/registry.js'
 
 const CONFIG_DIR = join(homedir(), '.chroxy')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -203,7 +204,7 @@ program
   .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve (CLI mode)')
   .option('--discovery-interval <seconds>', 'Auto-discovery polling interval in seconds (PTY mode)')
   .option('--max-restarts <count>', 'Max supervisor restart attempts before exit (default: 10)')
-  .option('--tunnel <mode>', 'Tunnel mode: quick (default), named, or none')
+  .option('--tunnel <mode>', 'Tunnel: quick (default), named, none, or provider:mode (e.g., cloudflare:named)')
   .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
   .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
   .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
@@ -240,8 +241,9 @@ program
     }
 
     // Determine if supervisor should be used
-    const tunnelMode = config.tunnel || 'quick'
-    const useSupervisor = tunnelMode === 'named'
+    const parsedTunnel = parseTunnelArg(config.tunnel || 'quick')
+    const isNamedTunnel = parsedTunnel && parsedTunnel.mode === 'named'
+    const useSupervisor = isNamedTunnel
       && !config.terminal
       && !config.noAuth
       && options.supervisor !== false
@@ -303,7 +305,7 @@ program
  */
 const tunnelCmd = program
   .command('tunnel')
-  .description('Manage Cloudflare tunnel configuration')
+  .description('Manage tunnel configuration')
 
 tunnelCmd
   .command('setup')
@@ -479,7 +481,7 @@ program
   .option('--model <model>', 'Model to use (CLI mode)')
   .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve (CLI mode)')
   .option('--max-restarts <count>', 'Max supervisor restart attempts before exit (default: 10)')
-  .option('--tunnel <mode>', 'Tunnel mode: quick (default), named, or none')
+  .option('--tunnel <mode>', 'Tunnel: quick (default), named, none, or provider:mode (e.g., cloudflare:named)')
   .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
   .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
   .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')

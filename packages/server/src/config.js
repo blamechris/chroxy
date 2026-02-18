@@ -27,6 +27,7 @@ const CONFIG_SCHEMA = {
   tunnel: 'string',
   tunnelName: 'string',
   tunnelHostname: 'string',
+  tunnelConfig: 'object',
   legacyCli: 'boolean',
   provider: 'string',
   maxPayload: 'number',
@@ -180,6 +181,7 @@ function envKeyForConfig(key) {
     tunnel: 'CHROXY_TUNNEL',
     tunnelName: 'CHROXY_TUNNEL_NAME',
     tunnelHostname: 'CHROXY_TUNNEL_HOSTNAME',
+    tunnelConfig: 'CHROXY_TUNNEL_CONFIG',
     legacyCli: 'CHROXY_LEGACY_CLI',
     provider: 'CHROXY_PROVIDER',
     maxPayload: 'CHROXY_MAX_PAYLOAD',
@@ -208,6 +210,14 @@ function parseEnvValue(key, value) {
 
   if (expectedType === 'array') {
     return value.split(',').map(s => s.trim())
+  }
+
+  if (expectedType === 'object') {
+    try {
+      return JSON.parse(value)
+    } catch {
+      return value
+    }
   }
 
   return value
