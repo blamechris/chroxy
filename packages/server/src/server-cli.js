@@ -30,7 +30,7 @@ export async function startCliServer(config) {
     process.exit(1)
   }
 
-  const providerType = config.provider || (config.legacyCli ? 'claude-cli' : 'claude-sdk')
+  const providerType = config.provider || 'claude-sdk'
   const modeStr = providerType === 'claude-cli'
     ? 'claude-cli (CLI legacy mode)'
     : providerType === 'claude-sdk'

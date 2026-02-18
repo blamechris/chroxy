@@ -138,7 +138,13 @@ export function mergeConfig({ fileConfig = {}, cliOverrides = {}, defaults = {},
     }
   }
 
-  // Log sources in verbose mode
+  // Map legacy legacyCli flag to provider if no explicit provider set
+  if (merged.legacyCli && !merged.provider) {
+    merged.provider = 'claude-cli'
+    sources.provider = 'legacyCli mapping'
+  }
+
+  // Log sources in verbose mode (after mapping so provider is included)
   if (verbose) {
     console.log('\n[config] Configuration sources:')
     for (const [key, source] of Object.entries(sources)) {
