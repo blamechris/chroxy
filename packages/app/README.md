@@ -54,8 +54,7 @@ src/
 │   ├── InputBar.tsx         # Text input with send/interrupt + mic button
 │   ├── SessionPicker.tsx    # Horizontal session tabs
 │   ├── CreateSessionModal.tsx # New session + host session discovery
-│   ├── MarkdownRenderer.tsx # Inline markdown with code blocks
-│   └── PlanApprovalCard.tsx # Plan mode approve/feedback UI
+│   └── MarkdownRenderer.tsx # Inline markdown with code blocks
 ├── hooks/
 │   └── useSpeechRecognition.ts # Voice-to-text input hook
 ├── constants/

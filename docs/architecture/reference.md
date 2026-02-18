@@ -45,7 +45,6 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | ChatView | `src/components/ChatView.tsx` | Message list, tool bubbles, plan approval card |
 | TerminalView | `src/components/TerminalView.tsx` | xterm.js terminal emulator (WebView), resize forwarding, crash recovery |
 | InputBar | `src/components/InputBar.tsx` | Text input with send/interrupt + mic button |
-| PlanApprovalCard | `src/components/PlanApprovalCard.tsx` | Plan mode approve/feedback UI |
 | SettingsBar | `src/components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
 | SessionPicker | `src/components/SessionPicker.tsx` | Horizontal session tab strip |
 | MarkdownRenderer | `src/components/MarkdownRenderer.tsx` | Markdown parsing + inline code highlighting |
@@ -153,7 +152,6 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `components/TerminalView.tsx` | xterm.js terminal emulator (WebView), resize forwarding, crash recovery |
 | `components/xterm-html.ts` | Inline HTML template for xterm.js WebView |
 | `components/InputBar.tsx` | Text input with send/interrupt + mic button |
-| `components/PlanApprovalCard.tsx` | Plan mode approve/feedback UI |
 | `components/SettingsBar.tsx` | Collapsible bar: model/permission/cost/agents |
 | `components/SessionPicker.tsx` | Horizontal session tab strip |
 | `components/MarkdownRenderer.tsx` | Markdown parsing + inline code highlighting |
