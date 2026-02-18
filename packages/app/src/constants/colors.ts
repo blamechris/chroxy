@@ -132,6 +132,32 @@ export const COLORS = {
   /** Reconnect URL text color */
   reconnectUrlText: 'rgba(255,255,255,0.7)',
 
+  // -- Syntax Highlighting Colors --
+  /** Syntax: keywords (if, return, const, etc.) */
+  syntaxKeyword: '#c4a5ff',
+  /** Syntax: string literals */
+  syntaxString: '#4eca6a',
+  /** Syntax: comments */
+  syntaxComment: '#7a7a7a',
+  /** Syntax: numeric literals */
+  syntaxNumber: '#ff9a52',
+  /** Syntax: function names / calls */
+  syntaxFunction: '#4a9eff',
+  /** Syntax: operators (+, =, =>, etc.) */
+  syntaxOperator: '#e0e0e0',
+  /** Syntax: punctuation ({, }, ;, etc.) */
+  syntaxPunctuation: '#888888',
+  /** Syntax: plain / unmatched text */
+  syntaxPlain: '#a0d0ff',
+  /** Syntax: diff added lines */
+  syntaxDiffAdd: '#4eca6a',
+  /** Syntax: diff removed lines */
+  syntaxDiffRemove: '#ff5b5b',
+  /** Syntax: type names / annotations */
+  syntaxType: '#4a9eff',
+  /** Syntax: property / key names */
+  syntaxProperty: '#4eca6a',
+
   // -- Shadow --
   /** Shadow color: used in elevation effects */
   shadowColor: '#000',
