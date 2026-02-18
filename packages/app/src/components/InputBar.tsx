@@ -1,8 +1,10 @@
 import React, { forwardRef, useMemo, useRef, useEffect } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, Platform, Animated } from 'react-native';
-import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH, ICON_MICROPHONE } from '../constants/icons';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, StyleSheet, Platform, Animated } from 'react-native';
+import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH, ICON_MICROPHONE, ICON_PAPERCLIP, ICON_CLOSE, ICON_DOCUMENT } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 import type { SlashCommand } from '../store/connection';
+import type { Attachment } from '../utils/attachments';
+import { formatFileSize } from '../utils/attachments';
 
 
 // -- Props --
@@ -26,6 +28,9 @@ export interface InputBarProps {
   slashCommands?: SlashCommand[];
   isRecognizing?: boolean;
   onMicPress?: () => void;
+  attachments?: Attachment[];
+  onAttach?: () => void;
+  onRemoveAttachment?: (id: string) => void;
 }
 
 // -- Component --
@@ -49,6 +54,9 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
   slashCommands = [],
   isRecognizing,
   onMicPress,
+  attachments = [],
+  onAttach,
+  onRemoveAttachment,
 }, ref) {
   const a11yDisabled = disabled ? { disabled: true as const } : undefined;
 
@@ -69,6 +77,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
   }, [isRecognizing, pulseAnim]);
 
   const showMicButton = viewMode === 'chat' && !isStreaming && !disabled && onMicPress;
+  const showAttachButton = viewMode === 'chat' && !hasTerminal && !isStreaming && !disabled && onAttach;
 
   // Filter slash commands based on current input (only when typing `/` at the start)
   const filteredCommands = useMemo(() => {
@@ -131,6 +140,40 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
           </TouchableOpacity>
         </View>
       )}
+      {attachments.length > 0 && (
+        <ScrollView
+          horizontal
+          style={styles.attachmentStrip}
+          contentContainerStyle={styles.attachmentStripContent}
+          keyboardShouldPersistTaps="handled"
+          showsHorizontalScrollIndicator={false}
+        >
+          {attachments.map((att) => (
+            <View key={att.id} style={styles.attachmentThumb}>
+              {att.type === 'image' ? (
+                <Image source={{ uri: att.uri }} style={styles.attachmentImage} />
+              ) : (
+                <View style={styles.attachmentDoc}>
+                  <Text style={styles.attachmentDocIcon}>{ICON_DOCUMENT}</Text>
+                  <Text style={styles.attachmentDocName} numberOfLines={1}>{att.name}</Text>
+                </View>
+              )}
+              <Text style={styles.attachmentSize}>{formatFileSize(att.size)}</Text>
+              {onRemoveAttachment && (
+                <TouchableOpacity
+                  style={styles.attachmentRemove}
+                  onPress={() => onRemoveAttachment(att.id)}
+                  hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Remove ${att.name}`}
+                >
+                  <Text style={styles.attachmentRemoveText}>{ICON_CLOSE}</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          ))}
+        </ScrollView>
+      )}
       <View style={styles.inputRow}>
         <TouchableOpacity
           style={styles.enterModeToggle}
@@ -158,6 +201,18 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
           editable={!disabled}
           accessibilityState={a11yDisabled}
         />
+        {showAttachButton && (
+          <TouchableOpacity
+            onPress={onAttach}
+            accessibilityRole="button"
+            accessibilityLabel="Attach file"
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <View style={styles.attachButton}>
+              <Text style={styles.attachButtonText}>{ICON_PAPERCLIP}</Text>
+            </View>
+          </TouchableOpacity>
+        )}
         {showMicButton && (
           <TouchableOpacity
             onPress={onMicPress}
@@ -265,6 +320,70 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
+  attachmentStrip: {
+    maxHeight: 80,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.borderPrimary,
+  },
+  attachmentStripContent: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  attachmentThumb: {
+    width: 64,
+    height: 64,
+    borderRadius: 8,
+    backgroundColor: COLORS.backgroundCard,
+    overflow: 'hidden',
+  },
+  attachmentImage: {
+    width: 64,
+    height: 64,
+    borderRadius: 8,
+  },
+  attachmentDoc: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  attachmentDocIcon: {
+    fontSize: 20,
+  },
+  attachmentDocName: {
+    color: COLORS.textMuted,
+    fontSize: 9,
+    textAlign: 'center',
+  },
+  attachmentSize: {
+    position: 'absolute',
+    bottom: 2,
+    right: 2,
+    color: COLORS.textDim,
+    fontSize: 8,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 3,
+    paddingVertical: 1,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  attachmentRemove: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.accentRed,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachmentRemoveText: {
+    color: COLORS.textPrimary,
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
   inputRow: {
     flexDirection: 'row',
     padding: 12,
@@ -296,6 +415,16 @@ const styles = StyleSheet.create({
   },
   inputDisabled: {
     opacity: 0.5,
+  },
+  attachButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachButtonText: {
+    fontSize: 20,
   },
   sendButtonDisabled: {
     opacity: 0.4,

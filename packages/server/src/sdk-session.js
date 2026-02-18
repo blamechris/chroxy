@@ -91,7 +91,7 @@ export class SdkSession extends EventEmitter {
    * Send a message to Claude via the Agent SDK.
    * Each call creates a new query() with resume to maintain conversation.
    */
-  async sendMessage(prompt) {
+  async sendMessage(prompt, attachments) {
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
       return
@@ -147,7 +147,24 @@ export class SdkSession extends EventEmitter {
     }, 300_000)
 
     try {
-      this._query = query({ prompt, options })
+      // If attachments present, build multimodal content blocks
+      const queryArgs = { prompt, options }
+      if (attachments?.length) {
+        const content = []
+        if (prompt) content.push({ type: 'text', text: prompt })
+        for (const att of attachments) {
+          if (att.type === 'image') {
+            content.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.data } })
+          } else if (att.mediaType === 'application/pdf') {
+            content.push({ type: 'document', source: { type: 'base64', media_type: att.mediaType, data: att.data } })
+          } else {
+            const text = Buffer.from(att.data, 'base64').toString('utf-8')
+            content.push({ type: 'text', text: `--- ${att.name} ---\n${text}` })
+          }
+        }
+        queryArgs.prompt = content
+      }
+      this._query = query(queryArgs)
 
       for await (const msg of this._query) {
         if (this._destroying) break

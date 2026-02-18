@@ -40,6 +40,16 @@ async function registerPushToken(socket: WebSocket): Promise<void> {
   }
 }
 
+/** Attachment metadata stored on a ChatMessage (base64 data cleared after send) */
+export interface MessageAttachment {
+  id: string;
+  type: 'image' | 'document';
+  uri: string;
+  name: string;
+  mediaType: string;
+  size: number;
+}
+
 export interface ChatMessage {
   id: string;
   type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error' | 'system';
@@ -52,6 +62,8 @@ export interface ChatMessage {
   answered?: string;
   expiresAt?: number;
   timestamp: number;
+  /** Attachments on user_input messages (images, documents) */
+  attachments?: MessageAttachment[];
 }
 
 interface SavedConnection {
@@ -299,12 +311,12 @@ interface ConnectionState {
   clearSavedConnection: () => Promise<void>;
   setViewMode: (mode: 'chat' | 'terminal') => void;
   addMessage: (message: ChatMessage) => void;
-  addUserMessage: (text: string) => void;
+  addUserMessage: (text: string, attachments?: MessageAttachment[]) => void;
   appendTerminalData: (data: string) => void;
   clearTerminalBuffer: () => void;
   setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
-  sendInput: (input: string) => 'sent' | 'queued' | false;
+  sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[]) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
   sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;
@@ -2014,12 +2026,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
 
-  addUserMessage: (text) => {
+  addUserMessage: (text, attachments) => {
     const userMsg: ChatMessage = {
       id: nextMessageId('user'),
       type: 'user_input',
       content: text,
       timestamp: Date.now(),
+      ...(attachments?.length ? { attachments } : undefined),
     };
     const thinkingMsg: ChatMessage = {
       id: 'thinking',
@@ -2099,9 +2112,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
-  sendInput: (input) => {
+  sendInput: (input, wireAttachments) => {
     const { socket } = get();
-    const payload = { type: 'input', data: input };
+    const payload: Record<string, unknown> = { type: 'input', data: input };
+    if (wireAttachments?.length) {
+      payload.attachments = wireAttachments;
+    }
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(payload));
       return 'sent';

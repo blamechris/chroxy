@@ -13,10 +13,12 @@ import {
   Animated,
   Modal,
   Pressable,
+  Image,
 } from 'react-native';
 import { ChatMessage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
-import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOSE, ICON_CHECK } from '../constants/icons';
+import { ImageViewer } from './ImageViewer';
+import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOSE, ICON_CHECK, ICON_DOCUMENT } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 
@@ -551,6 +553,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
     message.expiresAt != null && message.expiresAt <= Date.now()
   );
   const [permissionExpanded, setPermissionExpanded] = useState(false);
+  const [viewerUri, setViewerUri] = useState<string | null>(null);
   const isUser = message.type === 'user_input';
   const isTool = message.type === 'tool_use';
   const isThinking = message.type === 'thinking';
@@ -628,6 +631,23 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
           {message.content?.trim()}
         </Text>
       )}
+      {isUser && message.attachments && message.attachments.length > 0 && (
+        <View style={styles.attachmentRow}>
+          {message.attachments.map((att) => (
+            att.type === 'image' ? (
+              <TouchableOpacity key={att.id} onPress={() => setViewerUri(att.uri)} accessibilityRole="button" accessibilityLabel={`View ${att.name}`}>
+                <Image source={{ uri: att.uri }} style={styles.attachmentThumbnail} />
+              </TouchableOpacity>
+            ) : (
+              <View key={att.id} style={styles.attachmentChip}>
+                <Text style={styles.attachmentChipIcon}>{ICON_DOCUMENT}</Text>
+                <Text style={styles.attachmentChipName} numberOfLines={1}>{att.name}</Text>
+              </View>
+            )
+          ))}
+        </View>
+      )}
+      {viewerUri && <ImageViewer uri={viewerUri} onClose={() => setViewerUri(null)} />}
       {isPrompt && message.options && (
         <View style={styles.promptOptions}>
           {message.options.map((opt, i) => {
@@ -923,6 +943,34 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-end',
     borderColor: COLORS.accentBlueBorder,
     borderWidth: 1,
+  },
+  attachmentRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
+  },
+  attachmentThumbnail: {
+    width: 80,
+    height: 80,
+    borderRadius: 8,
+  },
+  attachmentChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    gap: 4,
+  },
+  attachmentChipIcon: {
+    fontSize: 14,
+  },
+  attachmentChipName: {
+    color: COLORS.textPrimary,
+    fontSize: 12,
+    maxWidth: 100,
   },
   thinkingIndicator: {
     flexDirection: 'row',
