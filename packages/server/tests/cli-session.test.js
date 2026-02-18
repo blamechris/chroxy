@@ -140,13 +140,29 @@ describe('CliSession._clearMessageState', () => {
     assert.equal(session._activeAgents.size, 0)
   })
 
-  it('preserves _inPlanMode flag', () => {
+  it('resets stale _inPlanMode when ExitPlanMode never arrived', () => {
     const session = createReadySession()
     session._isBusy = true
     session._inPlanMode = true
+    session._planAllowedPrompts = null // ExitPlanMode never set this
     session._currentCtx = { hasStreamStarted: false, didStreamText: false }
 
     session._clearMessageState()
+    assert.equal(session._inPlanMode, false)
+  })
+
+  it('preserves _inPlanMode when ExitPlanMode has fired', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._inPlanMode = true
+    session._planAllowedPrompts = [{ tool: 'Bash', prompt: 'run tests' }]
+    session._currentCtx = { hasStreamStarted: false, didStreamText: false }
+
+    session._clearMessageState()
+    // _inPlanMode stays true because plan_ready emit + reset happens
+    // in the result handler, before _clearMessageState is called.
+    // If we reach here with _planAllowedPrompts non-null, it means
+    // the result handler path hasn't run yet — preserve the flag.
     assert.equal(session._inPlanMode, true)
   })
 })
@@ -478,6 +494,34 @@ describe('CliSession plan mode', () => {
     assert.equal(events.length, 1)
     assert.ok(events[0].allowedPrompts)
     assert.equal(events[0].allowedPrompts.length, 1)
+    assert.equal(session._inPlanMode, false)
+  })
+
+  it('resets stale plan mode on interrupt (EnterPlanMode without ExitPlanMode)', () => {
+    const session = setupWithCtx()
+    const events = []
+    session.on('plan_started', (d) => events.push(d))
+
+    // EnterPlanMode fires
+    session._handleEvent({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        content_block: { type: 'tool_use', name: 'EnterPlanMode', id: 'toolu_plan2' },
+      },
+    })
+    session._handleEvent({
+      type: 'stream_event',
+      event: { type: 'content_block_stop' },
+    })
+
+    assert.equal(session._inPlanMode, true)
+    assert.equal(events.length, 1)
+
+    // Simulate interrupt — _clearMessageState called without ExitPlanMode
+    session._clearMessageState()
+
+    // Plan mode should be reset (stale — ExitPlanMode never arrived)
     assert.equal(session._inPlanMode, false)
   })
 })
