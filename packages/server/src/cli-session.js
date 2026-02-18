@@ -5,6 +5,7 @@ import { resolveModelId } from './models.js'
 import { createPermissionHookManager } from './permission-hook.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { forceKill } from './platform.js'
+import { MessageTransformPipeline } from './message-transform.js'
 
 // Default max accumulated size for tool_use input_json_delta chunks (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
@@ -49,7 +50,7 @@ export class CliSession extends EventEmitter {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput } = {}) {
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.allowedTools = allowedTools || []
@@ -58,6 +59,7 @@ export class CliSession extends EventEmitter {
     this._port = port || null
     this._apiToken = apiToken || null
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
+    this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sessionId = null
     this._child = null
     this._destroying = false
@@ -260,7 +262,7 @@ export class CliSession extends EventEmitter {
   /**
    * Send a message to Claude via stdin NDJSON.
    */
-  sendMessage(prompt, attachments) {
+  sendMessage(prompt, attachments, options = {}) {
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
       return
@@ -272,12 +274,23 @@ export class CliSession extends EventEmitter {
       return
     }
 
+    // Apply message transforms if configured
+    let transformedPrompt = prompt
+    if (this._transformPipeline.hasTransforms && prompt) {
+      transformedPrompt = this._transformPipeline.apply(prompt, {
+        cwd: this.cwd,
+        model: this.model,
+        isVoiceInput: !!options.isVoice,
+        platform: process.platform,
+      })
+    }
+
     this._isBusy = true
     this._messageCounter++
     this._currentMessageId = `msg-${this._messageCounter}`
     this._currentCtx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null, currentToolName: null, currentToolUseId: null, toolInputChunks: '', toolInputOverflow: false }
 
-    const content = buildContentBlocks(prompt, attachments)
+    const content = buildContentBlocks(transformedPrompt, attachments)
 
     const ndjson = JSON.stringify({
       type: 'user',

@@ -183,6 +183,7 @@ export function SessionScreen() {
   // Speech recognition
   const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition();
   const dictationStartRef = useRef(inputText.length);
+  const usedVoiceRef = useRef(false);
 
   // Surface speech recognition errors to the user
   useEffect(() => {
@@ -322,7 +323,9 @@ export function SessionScreen() {
 
     // PTY sessions: append CR so text + submit arrive as a single atomic write.
     // CLI sessions: the server handles the full message directly (no CR needed).
-    sendInput(hasTerminal ? (text || '') + '\r' : (text || ''), wire);
+    const isVoice = usedVoiceRef.current;
+    usedVoiceRef.current = false;
+    sendInput(hasTerminal ? (text || '') + '\r' : (text || ''), wire, { isVoice });
   };
 
   const addAttachment = useCallback(async (picker: () => Promise<Attachment | null>) => {
@@ -432,6 +435,7 @@ export function SessionScreen() {
       const prefix = inputText.slice(0, dictationStartRef.current);
       const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : '';
       isDictationUpdateRef.current = true;
+      usedVoiceRef.current = true;
       setInputText(prefix + separator + transcript);
     }
   }, [transcript]); // eslint-disable-line react-hooks/exhaustive-deps -- only react to transcript changes

@@ -2,6 +2,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk'
 import { EventEmitter } from 'events'
 import { resolveModelId } from './models.js'
 import { buildContentBlocks } from './content-blocks.js'
+import { MessageTransformPipeline } from './message-transform.js'
 
 /**
  * Manages a Claude Code session using the Agent SDK.
@@ -45,11 +46,12 @@ export class SdkSession extends EventEmitter {
     }
   }
 
-  constructor({ cwd, model, permissionMode, resumeSessionId } = {}) {
+  constructor({ cwd, model, permissionMode, resumeSessionId, transforms } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.model = model || null
     this.permissionMode = permissionMode || 'approve'
+    this._transformPipeline = new MessageTransformPipeline(transforms || [])
 
     this._sdkSessionId = resumeSessionId || null
     this._sessionId = null
@@ -108,10 +110,20 @@ export class SdkSession extends EventEmitter {
    * Send a message to Claude via the Agent SDK.
    * Each call creates a new query() with resume to maintain conversation.
    */
-  async sendMessage(prompt, attachments) {
+  async sendMessage(prompt, attachments, sendOptions = {}) {
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
       return
+    }
+
+    // Apply message transforms if configured
+    if (this._transformPipeline.hasTransforms && prompt) {
+      prompt = this._transformPipeline.apply(prompt, {
+        cwd: this.cwd,
+        model: this.model,
+        isVoiceInput: !!sendOptions.isVoice,
+        platform: process.platform,
+      })
     }
 
     this._isBusy = true

@@ -792,7 +792,7 @@ export class WsServer {
           // Record user input in history (without base64 blobs)
           const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
           this.sessionManager.recordUserInput(client.activeSessionId, historyText)
-          entry.session.sendMessage(trimmed, attachments)
+          entry.session.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
         }
 
         // Track last-writer-wins primary for this session
