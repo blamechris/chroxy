@@ -3,44 +3,10 @@ import { EventEmitter } from 'events'
 import { createInterface } from 'readline'
 import { resolveModelId } from './models.js'
 import { createPermissionHookManager } from './permission-hook.js'
+import { buildContentBlocks } from './content-blocks.js'
 
 // Max accumulated size for tool_use input_json_delta chunks (UTF-16 code units, ~256KB for ASCII)
 const MAX_TOOL_INPUT_LENGTH = 262144
-
-/**
- * Build a multimodal content array from prompt text and optional attachments.
- * Each attachment has { type, mediaType, data (base64), name }.
- */
-function buildContentBlocks(prompt, attachments) {
-  const content = []
-  if (prompt) {
-    content.push({ type: 'text', text: prompt })
-  }
-  if (attachments?.length) {
-    for (const att of attachments) {
-      if (att.type === 'image') {
-        content.push({
-          type: 'image',
-          source: { type: 'base64', media_type: att.mediaType, data: att.data },
-        })
-      } else if (att.mediaType === 'application/pdf') {
-        content.push({
-          type: 'document',
-          source: { type: 'base64', media_type: att.mediaType, data: att.data },
-        })
-      } else {
-        // Text-based files: decode base64 and inline as text
-        const text = Buffer.from(att.data, 'base64').toString('utf-8')
-        content.push({ type: 'text', text: `--- ${att.name} ---\n${text}` })
-      }
-    }
-  }
-  // Ensure at least one content block
-  if (content.length === 0) {
-    content.push({ type: 'text', text: '' })
-  }
-  return content
-}
 
 /**
  * Manages a persistent Claude Code CLI session using headless mode.

@@ -10,6 +10,45 @@ import { homedir, hostname } from 'os'
 import { timingSafeEqual } from 'crypto'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 
+// -- Attachment validation constants --
+const MAX_ATTACHMENT_COUNT = 5
+const MAX_IMAGE_SIZE = 2 * 1024 * 1024       // 2MB decoded
+const MAX_DOCUMENT_SIZE = 5 * 1024 * 1024    // 5MB decoded
+const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+const ALLOWED_DOC_TYPES = new Set(['application/pdf', 'text/plain', 'text/markdown', 'text/csv', 'application/json'])
+
+/**
+ * Validate an attachments array from a WebSocket message.
+ * Returns null if valid, or an error string if invalid.
+ */
+function validateAttachments(attachments) {
+  if (!Array.isArray(attachments)) return 'attachments must be an array'
+  if (attachments.length > MAX_ATTACHMENT_COUNT) return `too many attachments (max ${MAX_ATTACHMENT_COUNT})`
+  for (let i = 0; i < attachments.length; i++) {
+    const att = attachments[i]
+    if (!att || typeof att !== 'object') return `attachment[${i}]: not an object`
+    if (typeof att.type !== 'string' || (att.type !== 'image' && att.type !== 'document')) {
+      return `attachment[${i}]: type must be 'image' or 'document'`
+    }
+    if (typeof att.mediaType !== 'string') return `attachment[${i}]: missing mediaType`
+    if (typeof att.data !== 'string') return `attachment[${i}]: missing data`
+    if (typeof att.name !== 'string') return `attachment[${i}]: missing name`
+
+    // Validate media type
+    if (!ALLOWED_IMAGE_TYPES.has(att.mediaType) && !ALLOWED_DOC_TYPES.has(att.mediaType)) {
+      return `attachment[${i}]: unsupported mediaType '${att.mediaType}'`
+    }
+
+    // Check decoded size (base64 is ~4/3 of original)
+    const decodedSize = Math.ceil(att.data.length * 3 / 4)
+    const maxSize = att.type === 'image' ? MAX_IMAGE_SIZE : MAX_DOCUMENT_SIZE
+    if (decodedSize > maxSize) {
+      return `attachment[${i}]: exceeds ${maxSize / (1024 * 1024)}MB limit`
+    }
+  }
+  return null
+}
+
 /** Constant-time string comparison for auth tokens */
 function safeTokenCompare(a, b) {
   let valid = true
@@ -619,11 +658,20 @@ export class WsServer {
     switch (msg.type) {
       case 'input': {
         const text = msg.data
-        const attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
+        let attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
         const entry = this.sessionManager.getSession(client.activeSessionId)
         if (!entry) {
           this._send(ws, { type: 'session_error', message: 'No active session' })
           break
+        }
+
+        // Validate attachments before processing
+        if (attachments?.length) {
+          const err = validateAttachments(attachments)
+          if (err) {
+            this._send(ws, { type: 'session_error', message: `Invalid attachment: ${err}` })
+            attachments = undefined
+          }
         }
 
         // PTY sessions: forward raw input without trimming (keystrokes, \r, escape sequences)
@@ -979,7 +1027,14 @@ export class WsServer {
     switch (msg.type) {
       case 'input': {
         const text = msg.data
-        const attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
+        let attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
+        if (attachments?.length) {
+          const err = validateAttachments(attachments)
+          if (err) {
+            this._send(ws, { type: 'session_error', message: `Invalid attachment: ${err}` })
+            attachments = undefined
+          }
+        }
         if ((!text || !text.trim()) && !attachments?.length) break
         const trimmed = text?.trim() || ''
         const attCount = attachments?.length || 0
