@@ -628,6 +628,9 @@ export class WsServer {
 
         // PTY sessions: forward raw input without trimming (keystrokes, \r, escape sequences)
         if (entry.type === 'pty') {
+          if (attachments?.length) {
+            this._send(ws, { type: 'session_error', message: 'File attachments are not supported in terminal mode' })
+          }
           if (typeof text !== 'string') break
           if (text && text !== '\r' && text !== '\n') {
             console.log(`[ws] PTY input from ${client.id} to session ${client.activeSessionId}: "${text.replace(/[\r\n]/g, '\\n').slice(0, 80)}"`)
