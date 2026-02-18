@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { mergeConfig } from './config.js'
+import { defaultShell } from './platform.js'
 
 const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
 
@@ -33,7 +34,7 @@ async function main() {
   const defaults = {
     port: 8765,
     tmuxSession: 'claude-code',
-    shell: process.env.SHELL || '/bin/zsh',
+    shell: defaultShell(),
     resume: false,
     noAuth: false,
   }

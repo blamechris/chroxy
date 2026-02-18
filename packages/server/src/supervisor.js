@@ -1,4 +1,5 @@
 import { fork, execFileSync } from 'child_process'
+import { isWindows, forceKill } from './platform.js'
 import { createServer } from 'http'
 import { dirname, resolve, join } from 'path'
 import { createInterface } from 'readline'
@@ -108,19 +109,22 @@ export class Supervisor extends EventEmitter {
     if (this._signalsRegistered) return
     this._signalsRegistered = true
 
-    process.on('SIGUSR2', () => {
-      if (this._draining) {
-        this._log.info('SIGUSR2 received but drain already in progress, ignoring')
-        return
-      }
-      if (!this._childReady) {
-        this._log.info('SIGUSR2 received but child not ready yet, ignoring')
-        return
-      }
-      this._log.info('SIGUSR2 received (deploy restart)')
-      this._lastDeployTimestamp = Date.now()
-      this.restartChild()
-    })
+    if (!isWindows) {
+      // Windows does not support SIGUSR2 — deploy restart is not available
+      process.on('SIGUSR2', () => {
+        if (this._draining) {
+          this._log.info('SIGUSR2 received but drain already in progress, ignoring')
+          return
+        }
+        if (!this._childReady) {
+          this._log.info('SIGUSR2 received but child not ready yet, ignoring')
+          return
+        }
+        this._log.info('SIGUSR2 received (deploy restart)')
+        this._lastDeployTimestamp = Date.now()
+        this.restartChild()
+      })
+    }
 
     process.on('SIGINT', () => this.shutdown('SIGINT'))
     process.on('SIGTERM', () => this.shutdown('SIGTERM'))
@@ -494,7 +498,7 @@ export class Supervisor extends EventEmitter {
       this._child.send({ type: 'shutdown' })
       const forceKillTimer = setTimeout(() => {
         this._log.info('Force-killing child after 5s timeout')
-        try { this._child.kill('SIGKILL') } catch {}
+        try { forceKill(this._child) } catch {}
       }, 5000)
 
       this._child.on('exit', () => clearTimeout(forceKillTimer))
