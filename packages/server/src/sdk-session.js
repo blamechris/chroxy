@@ -1,6 +1,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { EventEmitter } from 'events'
 import { resolveModelId } from './models.js'
+import { buildContentBlocks } from './content-blocks.js'
 
 /**
  * Manages a Claude Code session using the Agent SDK.
@@ -150,19 +151,7 @@ export class SdkSession extends EventEmitter {
       // If attachments present, build multimodal content blocks
       const queryArgs = { prompt, options }
       if (attachments?.length) {
-        const content = []
-        if (prompt) content.push({ type: 'text', text: prompt })
-        for (const att of attachments) {
-          if (att.type === 'image') {
-            content.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.data } })
-          } else if (att.mediaType === 'application/pdf') {
-            content.push({ type: 'document', source: { type: 'base64', media_type: att.mediaType, data: att.data } })
-          } else {
-            const text = Buffer.from(att.data, 'base64').toString('utf-8')
-            content.push({ type: 'text', text: `--- ${att.name} ---\n${text}` })
-          }
-        }
-        queryArgs.prompt = content
+        queryArgs.prompt = buildContentBlocks(prompt, attachments)
       }
       this._query = query(queryArgs)
 

@@ -539,7 +539,7 @@ function PermissionPill({ message, onExpand }: {
 
 // -- Single message bubble --
 
-function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress, onOpenDetail }: {
+function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress }: {
   message: ChatMessage;
   onSelectOption?: (value: string, messageId: string, requestId?: string, toolUseId?: string) => void;
   isSelected: boolean;
@@ -547,13 +547,13 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   onLongPress: () => void;
   onPress: () => void;
   onOpenDetail: (toolName: string, content: string) => void;
+  onImagePress?: (uri: string) => void;
 }) {
   const longPressedRef = useRef(false);
   const [isExpired, setIsExpired] = useState(() =>
     message.expiresAt != null && message.expiresAt <= Date.now()
   );
   const [permissionExpanded, setPermissionExpanded] = useState(false);
-  const [viewerUri, setViewerUri] = useState<string | null>(null);
   const isUser = message.type === 'user_input';
   const isTool = message.type === 'tool_use';
   const isThinking = message.type === 'thinking';
@@ -635,7 +635,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
         <View style={styles.attachmentRow}>
           {message.attachments.map((att) => (
             att.type === 'image' ? (
-              <TouchableOpacity key={att.id} onPress={() => setViewerUri(att.uri)} accessibilityRole="button" accessibilityLabel={`View ${att.name}`}>
+              <TouchableOpacity key={att.id} onPress={() => onImagePress?.(att.uri)} accessibilityRole="button" accessibilityLabel={`View ${att.name}`}>
                 <Image source={{ uri: att.uri }} style={styles.attachmentThumbnail} />
               </TouchableOpacity>
             ) : (
@@ -647,7 +647,6 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
           ))}
         </View>
       )}
-      {viewerUri && <ImageViewer uri={viewerUri} onClose={() => setViewerUri(null)} />}
       {isPrompt && message.options && (
         <View style={styles.promptOptions}>
           {message.options.map((opt, i) => {
@@ -762,6 +761,7 @@ export function ChatView({
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string } | null>(null);
+  const [viewerUri, setViewerUri] = useState<string | null>(null);
 
   // Pause auto-scroll when an unanswered prompt is visible — user needs to read context
   const hasUnansweredPrompt = useMemo(
@@ -859,6 +859,7 @@ export function ChatView({
               onLongPress={() => onToggleSelection(msg.id)}
               onPress={() => onToggleSelection(msg.id)}
               onOpenDetail={handleOpenDetail}
+              onImagePress={setViewerUri}
             />
           );
         })
@@ -904,6 +905,7 @@ export function ChatView({
         content={toolDetail?.content || ''}
         onClose={() => setToolDetail(null)}
       />
+      <ImageViewer uri={viewerUri} onClose={() => setViewerUri(null)} />
     </View>
   );
 }

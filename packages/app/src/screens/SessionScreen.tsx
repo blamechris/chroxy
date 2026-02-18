@@ -10,6 +10,8 @@ import {
   Keyboard,
   Share,
   Alert,
+  Modal,
+  Pressable,
   LayoutAnimation,
   UIManager,
 } from 'react-native';
@@ -30,7 +32,6 @@ import { COLORS } from '../constants/colors';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
 import type { Attachment } from '../utils/attachments';
-import { ActionSheetIOS } from 'react-native';
 
 
 // Stable empty arrays to avoid new-reference-per-render in Zustand selectors
@@ -93,6 +94,7 @@ export function SessionScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [inputText, setInputText] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
+  const [showAttachSheet, setShowAttachSheet] = useState(false);
   const scrollViewRef = useRef<ScrollView>(null);
   const terminalRef = useRef<TerminalHandle>(null);
   const insets = useSafeAreaInsets();
@@ -335,27 +337,12 @@ export function SessionScreen() {
   }, [pendingAttachments.length]);
 
   const handleAttach = useCallback(() => {
-    if (Platform.OS === 'ios') {
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          options: ['Take Photo', 'Choose from Library', 'Choose File', 'Cancel'],
-          cancelButtonIndex: 3,
-        },
-        (index) => {
-          if (index === 0) addAttachment(pickFromCamera);
-          else if (index === 1) addAttachment(pickFromGallery);
-          else if (index === 2) addAttachment(pickDocument);
-        },
-      );
-    } else {
-      // Android: use Alert as a simple action sheet
-      Alert.alert('Attach', 'Choose source', [
-        { text: 'Take Photo', onPress: () => addAttachment(pickFromCamera) },
-        { text: 'Choose from Library', onPress: () => addAttachment(pickFromGallery) },
-        { text: 'Choose File', onPress: () => addAttachment(pickDocument) },
-        { text: 'Cancel', style: 'cancel' },
-      ]);
-    }
+    setShowAttachSheet(true);
+  }, []);
+
+  const handleAttachOption = useCallback((picker: () => Promise<Attachment | null>) => {
+    setShowAttachSheet(false);
+    addAttachment(picker);
   }, [addAttachment]);
 
   const handleRemoveAttachment = useCallback((id: string) => {
@@ -695,6 +682,26 @@ export function SessionScreen() {
         visible={showCreateModal}
         onClose={() => setShowCreateModal(false)}
       />
+
+      {/* Attachment picker bottom sheet */}
+      <Modal visible={showAttachSheet} transparent animationType="slide" onRequestClose={() => setShowAttachSheet(false)}>
+        <Pressable style={styles.sheetOverlay} onPress={() => setShowAttachSheet(false)}>
+          <Pressable style={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 8) }]} onPress={(e) => e.stopPropagation()}>
+            <TouchableOpacity style={styles.sheetOption} onPress={() => handleAttachOption(pickFromCamera)} accessibilityRole="button" accessibilityLabel="Take photo">
+              <Text style={styles.sheetOptionText}>Take Photo</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.sheetOption} onPress={() => handleAttachOption(pickFromGallery)} accessibilityRole="button" accessibilityLabel="Choose from library">
+              <Text style={styles.sheetOptionText}>Choose from Library</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.sheetOption} onPress={() => handleAttachOption(pickDocument)} accessibilityRole="button" accessibilityLabel="Choose file">
+              <Text style={styles.sheetOptionText}>Choose File</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.sheetOption, styles.sheetCancel]} onPress={() => setShowAttachSheet(false)} accessibilityRole="button" accessibilityLabel="Cancel attachment selection">
+              <Text style={[styles.sheetOptionText, styles.sheetCancelText]}>Cancel</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -826,5 +833,36 @@ const styles = StyleSheet.create({
     color: COLORS.accentRed,
     fontSize: 12,
     fontWeight: '600',
+  },
+  sheetOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  sheetContent: {
+    backgroundColor: COLORS.backgroundSecondary,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingBottom: 34, // overridden inline with insets.bottom
+    paddingTop: 8,
+  },
+  sheetOption: {
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    minHeight: 52,
+    justifyContent: 'center',
+  },
+  sheetOptionText: {
+    color: COLORS.accentBlue,
+    fontSize: 18,
+    textAlign: 'center',
+  },
+  sheetCancel: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.borderPrimary,
+    marginTop: 4,
+  },
+  sheetCancelText: {
+    color: COLORS.accentRed,
   },
 });
