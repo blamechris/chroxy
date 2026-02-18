@@ -31,6 +31,7 @@ const CONFIG_SCHEMA = {
   legacyCli: 'boolean',
   provider: 'string',
   maxPayload: 'number',
+  maxToolInput: 'number',
   noEncrypt: 'boolean',
 }
 
@@ -185,6 +186,7 @@ function envKeyForConfig(key) {
     legacyCli: 'CHROXY_LEGACY_CLI',
     provider: 'CHROXY_PROVIDER',
     maxPayload: 'CHROXY_MAX_PAYLOAD',
+    maxToolInput: 'CHROXY_MAX_TOOL_INPUT',
     noEncrypt: 'CHROXY_NO_ENCRYPT',
   }
   return envMap[key] || key.toUpperCase()

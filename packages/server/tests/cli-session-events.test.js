@@ -87,6 +87,7 @@ describe('CliSession stream-event handling', () => {
   describe('buffer cap (MAX_TOOL_INPUT_LENGTH)', () => {
     it('discards buffer when accumulated size exceeds cap', () => {
       const session = createSession()
+      session.on('error', () => {}) // absorb overflow error event
       session._handleEvent(toolUseStart('Bash', 'toolu_1'))
 
       // Fill buffer close to limit (262144)
@@ -103,8 +104,25 @@ describe('CliSession stream-event handling', () => {
       assert.equal(session._currentCtx.toolInputOverflow, true)
     })
 
+    it('emits error event on overflow', () => {
+      const session = createSession()
+      const errors = []
+      session.on('error', (data) => errors.push(data))
+
+      session._handleEvent(toolUseStart('AskUserQuestion', 'toolu_1'))
+
+      // Trigger overflow
+      const bigChunk = 'x'.repeat(262145)
+      session._handleEvent(inputJsonDelta(bigChunk))
+
+      assert.equal(errors.length, 1)
+      assert.ok(errors[0].message.includes('Tool input too large'))
+      assert.ok(errors[0].message.includes('AskUserQuestion'))
+    })
+
     it('stops accumulating after overflow', () => {
       const session = createSession()
+      session.on('error', () => {}) // absorb overflow error event
       session._handleEvent(toolUseStart('Bash', 'toolu_1'))
 
       // Trigger overflow
@@ -151,6 +169,7 @@ describe('CliSession stream-event handling', () => {
       const session = createSession()
       const events = []
       session.on('user_question', (data) => events.push(data))
+      session.on('error', () => {}) // absorb overflow error event
 
       session._handleEvent(toolUseStart('AskUserQuestion', 'toolu_ask2'))
 
@@ -170,6 +189,7 @@ describe('CliSession stream-event handling', () => {
   describe('overflow flag reset', () => {
     it('resets overflow flag on new content_block_start', () => {
       const session = createSession()
+      session.on('error', () => {}) // absorb overflow error event
 
       session._handleEvent(toolUseStart('Bash', 'toolu_1'))
 

@@ -6,8 +6,8 @@ import { createPermissionHookManager } from './permission-hook.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { forceKill } from './platform.js'
 
-// Max accumulated size for tool_use input_json_delta chunks (UTF-16 code units, ~256KB for ASCII)
-const MAX_TOOL_INPUT_LENGTH = 262144
+// Default max accumulated size for tool_use input_json_delta chunks (~256KB)
+const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
 
 /**
  * Manages a persistent Claude Code CLI session using headless mode.
@@ -45,7 +45,7 @@ export class CliSession extends EventEmitter {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath } = {}) {
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput } = {}) {
     super()
     this.cwd = cwd || process.cwd()
     this.allowedTools = allowedTools || []
@@ -53,6 +53,7 @@ export class CliSession extends EventEmitter {
     this.permissionMode = permissionMode || 'approve'
     this._port = port || null
     this._apiToken = apiToken || null
+    this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._sessionId = null
     this._child = null
     this._destroying = false
@@ -374,10 +375,13 @@ export class CliSession extends EventEmitter {
               this.emit('stream_delta', { messageId, delta: delta.text })
             } else if (delta.type === 'input_json_delta' && ctx.currentContentBlockType === 'tool_use') {
               if (typeof delta.partial_json === 'string' && !ctx.toolInputOverflow) {
-                if (ctx.toolInputChunks.length + delta.partial_json.length > MAX_TOOL_INPUT_LENGTH) {
-                  console.warn(`[cli-session] toolInputChunks exceeded ${MAX_TOOL_INPUT_LENGTH} chars, discarding buffer`)
+                if (ctx.toolInputChunks.length + delta.partial_json.length > this._maxToolInput) {
+                  console.warn(`[cli-session] toolInputChunks exceeded ${this._maxToolInput} chars, discarding buffer`)
                   ctx.toolInputChunks = ''
                   ctx.toolInputOverflow = true
+                  this.emit('error', {
+                    message: `Tool input too large (>${Math.round(this._maxToolInput / 1024)}KB) for ${ctx.currentToolName || 'unknown tool'} — input was truncated`,
+                  })
                 } else {
                   ctx.toolInputChunks += delta.partial_json
                 }
