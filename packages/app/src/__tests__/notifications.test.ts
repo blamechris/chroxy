@@ -493,13 +493,19 @@ describe('setupNotificationResponseListener', () => {
       expect(mockAlert).toHaveBeenCalledTimes(2);
       expect(mockAlert.mock.calls[1][0]).toBe('Still Failed');
       expect(mockAlert.mock.calls[1][1]).toBe('Open the app to respond manually.');
+      // 3 initial + 3 retry = 6 total fetch calls
+      expect(mockFetch).toHaveBeenCalledTimes(6);
       expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
     } finally {
       jest.useRealTimers();
     }
   });
 
-  it('retry button shows second alert when fetch throws', async () => {
+  // Note: this test exercises the .then(ok === false) path, not the .catch() path.
+  // sendPermissionResponseHttp catches fetch errors internally and returns false,
+  // so mockRejectedValue triggers the else branch, not .catch().
+  // The .catch() is defense-in-depth for future refactors — untested by design.
+  it('retry button shows feedback when fetch rejects internally', async () => {
     jest.useFakeTimers();
     try {
       mockSocket.readyState = 3; // WebSocket.CLOSED
@@ -541,9 +547,11 @@ describe('setupNotificationResponseListener', () => {
       await jest.advanceTimersByTimeAsync(20_000);
       await Promise.resolve();
 
-      // .catch() handler should show second alert
+      // else branch shows second alert (fetch rejection caught internally → returns false)
       expect(mockAlert).toHaveBeenCalledTimes(2);
       expect(mockAlert.mock.calls[1][0]).toBe('Still Failed');
+      // 3 initial (502) + 3 retry (rejected) = 6 total fetch calls
+      expect(mockFetch).toHaveBeenCalledTimes(6);
       expect(mockMarkPromptAnsweredByRequestId).not.toHaveBeenCalled();
     } finally {
       jest.useRealTimers();
