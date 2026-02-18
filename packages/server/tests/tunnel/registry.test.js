@@ -116,5 +116,13 @@ describe('Tunnel Registry', () => {
       const result = parseTunnelArg('tailscale:funnel')
       assert.deepEqual(result, { provider: 'tailscale', mode: 'funnel' })
     })
+
+    it('throws on trailing colon "cloudflare:"', () => {
+      assert.throws(() => parseTunnelArg('cloudflare:'), /Invalid tunnel format/)
+    })
+
+    it('throws on leading colon ":named"', () => {
+      assert.throws(() => parseTunnelArg(':named'), /Invalid tunnel format/)
+    })
   })
 })

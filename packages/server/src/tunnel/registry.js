@@ -79,6 +79,9 @@ export function parseTunnelArg(value) {
   // Explicit provider:mode syntax
   if (value.includes(':')) {
     const [provider, mode] = value.split(':', 2)
+    if (!provider || !mode) {
+      throw new Error(`Invalid tunnel format "${value}". Expected "provider:mode" (e.g., "cloudflare:named")`)
+    }
     return { provider, mode }
   }
 
