@@ -34,9 +34,12 @@ function validateAttachments(attachments) {
     if (typeof att.data !== 'string') return `attachment[${i}]: missing data`
     if (typeof att.name !== 'string') return `attachment[${i}]: missing name`
 
-    // Validate media type
-    if (!ALLOWED_IMAGE_TYPES.has(att.mediaType) && !ALLOWED_DOC_TYPES.has(att.mediaType)) {
-      return `attachment[${i}]: unsupported mediaType '${att.mediaType}'`
+    // Validate media type and cross-check against attachment type
+    if (att.type === 'image' && !ALLOWED_IMAGE_TYPES.has(att.mediaType)) {
+      return `attachment[${i}]: type 'image' requires an image mediaType`
+    }
+    if (att.type === 'document' && !ALLOWED_DOC_TYPES.has(att.mediaType)) {
+      return `attachment[${i}]: type 'document' requires a document mediaType`
     }
 
     // Check decoded size (base64 is ~4/3 of original)
