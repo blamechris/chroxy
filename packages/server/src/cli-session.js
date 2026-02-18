@@ -303,7 +303,7 @@ export class CliSession extends EventEmitter {
       },
     })
 
-    console.log(`[cli-session] Sending message ${this._currentMessageId}: "${prompt.slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
+    console.log(`[cli-session] Sending message ${this._currentMessageId}: "${(prompt || '').slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
     this._child.stdin.write(ndjson + '\n')
 
     // Safety timeout: force-clear if result never arrives (5 min)
