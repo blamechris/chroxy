@@ -150,6 +150,11 @@ export function mergeConfig({ fileConfig = {}, cliOverrides = {}, defaults = {},
     console.log('')
   }
 
+  // Map legacy legacyCli flag to provider if no explicit provider set
+  if (merged.legacyCli && !merged.provider) {
+    merged.provider = 'claude-cli'
+  }
+
   return merged
 }
 

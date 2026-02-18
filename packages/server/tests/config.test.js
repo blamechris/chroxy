@@ -232,4 +232,19 @@ describe('mergeConfig', () => {
     const merged = mergeConfig({ cliOverrides })
     assert.equal(merged.tunnel, 'none')
   })
+
+  it('maps legacyCli to provider when no explicit provider set', () => {
+    const merged = mergeConfig({ cliOverrides: { legacyCli: true } })
+    assert.equal(merged.provider, 'claude-cli')
+  })
+
+  it('does not override explicit provider with legacyCli', () => {
+    const merged = mergeConfig({ cliOverrides: { legacyCli: true, provider: 'custom' } })
+    assert.equal(merged.provider, 'custom')
+  })
+
+  it('does not set provider when legacyCli is false', () => {
+    const merged = mergeConfig({ cliOverrides: { legacyCli: false } })
+    assert.equal(merged.provider, undefined)
+  })
 })
