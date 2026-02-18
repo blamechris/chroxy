@@ -672,6 +672,7 @@ export function SessionScreen() {
         slashCommands={slashCommands}
         isRecognizing={isRecognizing}
         onMicPress={speechAvailable ? handleMicPress : undefined}
+        speechUnavailable={!speechAvailable}
         attachments={pendingAttachments}
         onAttach={handleAttach}
         onRemoveAttachment={handleRemoveAttachment}
