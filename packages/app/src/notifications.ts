@@ -127,32 +127,49 @@ async function sendPermissionResponseHttp(
   // Convert wss://host → https://host
   const httpsUrl = wsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
   const url = `${httpsUrl}/permission-response`;
+  const body = JSON.stringify({ requestId, decision });
+  const delays = [0, 2_000, 4_000]; // 3 total attempts: immediate, 2s backoff, 4s backoff
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiToken}`,
-      },
-      body: JSON.stringify({ requestId, decision }),
-      signal: controller.signal,
-    });
-
-    if (!res.ok) {
-      console.warn(`[push] HTTP permission response failed: ${res.status}`);
-      return false;
+  for (let attempt = 0; attempt < delays.length; attempt++) {
+    if (attempt > 0) {
+      console.log(`[push] Retry ${attempt}/${delays.length - 1} after ${delays[attempt]}ms...`);
+      await new Promise((r) => setTimeout(r, delays[attempt]));
     }
-    console.log(`[push] Permission ${requestId} sent via HTTP: ${decision}`);
-    return true;
-  } catch (err) {
-    console.warn('[push] HTTP permission response error:', err);
-    return false;
-  } finally {
-    clearTimeout(timeout);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiToken}`,
+        },
+        body,
+        signal: controller.signal,
+      });
+
+      if (res.ok) {
+        console.log(`[push] Permission ${requestId} sent via HTTP: ${decision}`);
+        return true;
+      }
+
+      // 4xx errors (except 408/429) are not retryable
+      if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+        console.warn(`[push] HTTP permission response rejected: ${res.status}`);
+        return false;
+      }
+
+      console.warn(`[push] HTTP permission response failed: ${res.status} (attempt ${attempt + 1}/${delays.length})`);
+    } catch (err) {
+      console.warn(`[push] HTTP permission response error (attempt ${attempt + 1}/${delays.length}):`, err);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+
+  console.warn(`[push] HTTP permission response failed after ${delays.length} attempts`);
+  return false;
 }
 
 /**

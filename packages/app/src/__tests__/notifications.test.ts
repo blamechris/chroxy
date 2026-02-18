@@ -271,4 +271,103 @@ describe('setupNotificationResponseListener', () => {
       decision: 'deny',
     });
   });
+
+  it('retries HTTP on transient failure then succeeds', async () => {
+    jest.useFakeTimers();
+    try {
+      mockSocket.readyState = 3; // WebSocket.CLOSED
+
+      // First call fails with 500, second succeeds
+      const mockFetch = jest.fn()
+        .mockResolvedValueOnce({ ok: false, status: 500 })
+        .mockResolvedValueOnce({ ok: true, status: 200 }) as jest.Mock;
+      global.fetch = mockFetch;
+
+      setupNotificationResponseListener();
+      const handler = mockAddListener.mock.calls[0][0];
+
+      const promise = handler({
+        actionIdentifier: 'approve',
+        notification: {
+          request: {
+            content: {
+              data: { category: 'permission', requestId: 'perm-retry-1' },
+            },
+          },
+        },
+      });
+
+      // Advance past retry delays
+      await jest.advanceTimersByTimeAsync(20_000);
+      await promise;
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockMarkPromptAnswered).toHaveBeenCalledWith('perm-retry-1', 'allow');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not retry on 4xx client error', async () => {
+    mockSocket.readyState = 3; // WebSocket.CLOSED
+
+    const mockFetch = jest.fn(() =>
+      Promise.resolve({ ok: false, status: 400 }),
+    ) as jest.Mock;
+    global.fetch = mockFetch;
+
+    setupNotificationResponseListener();
+    const handler = mockAddListener.mock.calls[0][0];
+
+    await handler({
+      actionIdentifier: 'approve',
+      notification: {
+        request: {
+          content: {
+            data: { category: 'permission', requestId: 'perm-4xx' },
+          },
+        },
+      },
+    });
+
+    // Should NOT retry on 400
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockMarkPromptAnswered).not.toHaveBeenCalled();
+  });
+
+  it('gives up after all retries exhausted', async () => {
+    jest.useFakeTimers();
+    try {
+      mockSocket.readyState = 3; // WebSocket.CLOSED
+
+      const mockFetch = jest.fn(() =>
+        Promise.resolve({ ok: false, status: 502 }),
+      ) as jest.Mock;
+      global.fetch = mockFetch;
+
+      setupNotificationResponseListener();
+      const handler = mockAddListener.mock.calls[0][0];
+
+      const promise = handler({
+        actionIdentifier: 'approve',
+        notification: {
+          request: {
+            content: {
+              data: { category: 'permission', requestId: 'perm-exhaust' },
+            },
+          },
+        },
+      });
+
+      // Advance past all retry delays
+      await jest.advanceTimersByTimeAsync(20_000);
+      await promise;
+
+      // Should have tried 3 times (initial + 2 retries)
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(mockMarkPromptAnswered).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
