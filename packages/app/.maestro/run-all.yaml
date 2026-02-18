@@ -13,3 +13,6 @@ name: All Phase 1 flows
 
 # Flow 3: LAN scan flow
 - runFlow: lan-scan.yaml
+
+# Flow 4: Small screen layout (iPhone SE)
+- runFlow: small-screen-layout.yaml

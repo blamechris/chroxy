@@ -38,6 +38,7 @@
     "expo-document-picker": "^14.0.8",
     "expo-file-system": "^19.0.21",
     "expo-image-picker": "^17.0.10",
+    "expo-localization": "~17.0.8",
     "expo-network": "~8.0.8",
     "expo-notifications": "~0.32.16",
     "expo-secure-store": "~15.0.8",

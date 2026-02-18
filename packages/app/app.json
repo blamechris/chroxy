@@ -54,7 +54,8 @@
           "speechRecognitionPermission": "Allow Chroxy to use speech recognition for voice input."
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-localization"
     ],
     "extra": {
       "eas": {

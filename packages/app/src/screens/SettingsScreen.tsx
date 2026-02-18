@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -7,17 +7,54 @@ import {
   TouchableOpacity,
   StyleSheet,
   Alert,
+  Modal,
+  Pressable,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Constants from 'expo-constants';
 import * as Clipboard from 'expo-clipboard';
 import { useConnectionStore } from '../store/connection';
 import { COLORS } from '../constants/colors';
+import { getSpeechLang, setSpeechLang } from '../hooks/useSpeechRecognition';
 
 const APP_VERSION = Constants.expoConfig?.version ?? 'unknown';
 
+const SPEECH_LANGUAGES = [
+  { tag: 'en-US', label: 'English (US)' },
+  { tag: 'en-GB', label: 'English (UK)' },
+  { tag: 'es-ES', label: 'Spanish (Spain)' },
+  { tag: 'es-MX', label: 'Spanish (Mexico)' },
+  { tag: 'fr-FR', label: 'French' },
+  { tag: 'de-DE', label: 'German' },
+  { tag: 'it-IT', label: 'Italian' },
+  { tag: 'pt-BR', label: 'Portuguese (Brazil)' },
+  { tag: 'pt-PT', label: 'Portuguese (Portugal)' },
+  { tag: 'nl-NL', label: 'Dutch' },
+  { tag: 'ja-JP', label: 'Japanese' },
+  { tag: 'ko-KR', label: 'Korean' },
+  { tag: 'zh-CN', label: 'Chinese (Simplified)' },
+  { tag: 'zh-TW', label: 'Chinese (Traditional)' },
+  { tag: 'ru-RU', label: 'Russian' },
+  { tag: 'ar-SA', label: 'Arabic' },
+];
+
 export function SettingsScreen() {
   const insets = useSafeAreaInsets();
+  const [speechLang, setSpeechLangState] = useState<string>('en-US');
+  const [showLangPicker, setShowLangPicker] = useState(false);
+
+  useEffect(() => {
+    getSpeechLang().then(setSpeechLangState);
+  }, []);
+
+  const handleSelectLang = (tag: string) => {
+    setSpeechLangState(tag);
+    setSpeechLang(tag);
+    setShowLangPicker(false);
+  };
+
+  const currentLangLabel = SPEECH_LANGUAGES.find((l) => l.tag === speechLang)?.label ?? speechLang;
+
   const {
     inputSettings,
     updateInputSettings,
@@ -170,6 +207,11 @@ export function SettingsScreen() {
             trackColor={{ false: COLORS.backgroundCard, true: COLORS.accentBlue }}
           />
         </View>
+        <View style={styles.separator} />
+        <TouchableOpacity style={styles.row} onPress={() => setShowLangPicker(true)}>
+          <Text style={styles.rowLabel}>Speech Language</Text>
+          <Text style={styles.rowValue}>{currentLangLabel}</Text>
+        </TouchableOpacity>
       </View>
 
       {/* ABOUT */}
@@ -229,6 +271,32 @@ export function SettingsScreen() {
           </>
         )}
       </View>
+
+      {/* Speech language picker */}
+      <Modal visible={showLangPicker} transparent animationType="slide" onRequestClose={() => setShowLangPicker(false)}>
+        <Pressable style={styles.sheetOverlay} onPress={() => setShowLangPicker(false)}>
+          <Pressable style={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 8) }]} onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.sheetTitle}>Speech Language</Text>
+            <ScrollView style={styles.sheetList} bounces={false}>
+              {SPEECH_LANGUAGES.map((lang) => (
+                <TouchableOpacity
+                  key={lang.tag}
+                  style={[styles.sheetOption, lang.tag === speechLang && styles.sheetOptionActive]}
+                  onPress={() => handleSelectLang(lang.tag)}
+                >
+                  <Text style={[styles.sheetOptionText, lang.tag === speechLang && styles.sheetOptionTextActive]}>
+                    {lang.label}
+                  </Text>
+                  <Text style={styles.sheetOptionTag}>{lang.tag}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <TouchableOpacity style={[styles.sheetOption, styles.sheetCancel]} onPress={() => setShowLangPicker(false)}>
+              <Text style={[styles.sheetOptionText, styles.sheetCancelText]}>Cancel</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </ScrollView>
   );
 }
@@ -301,5 +369,60 @@ const styles = StyleSheet.create({
     color: COLORS.accentOrange,
     fontSize: 11,
     fontWeight: '600',
+  },
+  sheetOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  sheetContent: {
+    backgroundColor: COLORS.backgroundSecondary,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingTop: 8,
+    maxHeight: '60%',
+  },
+  sheetTitle: {
+    color: COLORS.textPrimary,
+    fontSize: 16,
+    fontWeight: '600',
+    textAlign: 'center',
+    paddingVertical: 12,
+  },
+  sheetList: {
+    flexShrink: 1,
+  },
+  sheetOption: {
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    minHeight: 48,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  sheetOptionActive: {
+    backgroundColor: COLORS.accentBlueLight,
+  },
+  sheetOptionText: {
+    color: COLORS.textPrimary,
+    fontSize: 16,
+  },
+  sheetOptionTextActive: {
+    color: COLORS.accentBlue,
+    fontWeight: '600',
+  },
+  sheetOptionTag: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+  },
+  sheetCancel: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.borderPrimary,
+    marginTop: 4,
+    justifyContent: 'center',
+  },
+  sheetCancelText: {
+    color: COLORS.accentRed,
+    textAlign: 'center',
   },
 });

@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Alert } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
+import { getLocales } from 'expo-localization';
 
 // Dynamically resolve the native module — returns null in Expo Go
 let SpeechModule: typeof import('expo-speech-recognition').ExpoSpeechRecognitionModule | null = null;
@@ -11,6 +13,25 @@ try {
   useSpeechEvent = mod.useSpeechRecognitionEvent;
 } catch {
   // Native module not available (Expo Go) — speech features disabled
+}
+
+const SPEECH_LANG_KEY = '@chroxy/speechLang';
+
+/** Get the persisted speech language, or the device default. */
+export async function getSpeechLang(): Promise<string> {
+  try {
+    const stored = await SecureStore.getItemAsync(SPEECH_LANG_KEY);
+    if (stored) return stored;
+  } catch {
+    // Ignore read errors
+  }
+  const locales = getLocales();
+  return locales[0]?.languageTag ?? 'en-US';
+}
+
+/** Persist the speech language preference. */
+export async function setSpeechLang(lang: string): Promise<void> {
+  await SecureStore.setItemAsync(SPEECH_LANG_KEY, lang);
 }
 
 export interface UseSpeechRecognitionReturn {
@@ -86,8 +107,10 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
     // If stopListening was called while we were awaiting permission, don't start
     if (stopRequestedRef.current) return;
 
+    const lang = await getSpeechLang();
+
     SpeechModule.start({
-      lang: 'en-US',
+      lang,
       interimResults: true,
       contextualStrings: ['Claude', 'Chroxy'],
     });

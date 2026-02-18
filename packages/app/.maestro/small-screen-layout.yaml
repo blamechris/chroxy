@@ -1,0 +1,27 @@
+appId: host.exp.Exponent
+name: Small screen layout (iPhone SE)
+---
+
+# Verify ConnectScreen renders correctly on a small 375pt viewport (iPhone SE).
+# This flow should be run on an iPhone SE simulator.
+
+# Navigate to ConnectScreen from any state
+- runFlow: setup/ensure-connect-screen.yaml
+
+# Verify all key elements are visible (not clipped or overlapping)
+- assertVisible: "Connect to Chroxy"
+
+- assertVisible:
+    text: ".*Scan QR Code.*"
+
+- assertVisible:
+    text: ".*Scan Local Network.*"
+
+- assertVisible:
+    text: ".*Enter manually.*"
+
+# Port input should show default port
+- assertVisible: "8765"
+
+# Take screenshot for visual verification of small-screen layout
+- takeScreenshot: small-screen-layout

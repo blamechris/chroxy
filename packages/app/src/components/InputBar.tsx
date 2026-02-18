@@ -1,5 +1,5 @@
 import React, { forwardRef, useMemo, useRef, useEffect } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, StyleSheet, Platform, Animated } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, StyleSheet, Platform, Animated, Alert } from 'react-native';
 import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH, ICON_MICROPHONE, ICON_PAPERCLIP, ICON_CLOSE, ICON_DOCUMENT } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 import type { SlashCommand } from '../store/connection';
@@ -28,6 +28,7 @@ export interface InputBarProps {
   slashCommands?: SlashCommand[];
   isRecognizing?: boolean;
   onMicPress?: () => void;
+  speechUnavailable?: boolean;
   attachments?: Attachment[];
   onAttach?: () => void;
   onRemoveAttachment?: (id: string) => void;
@@ -54,6 +55,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
   slashCommands = [],
   isRecognizing,
   onMicPress,
+  speechUnavailable,
   attachments = [],
   onAttach,
   onRemoveAttachment,
@@ -76,7 +78,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
     pulseAnim.setValue(1);
   }, [isRecognizing, pulseAnim]);
 
-  const showMicButton = viewMode === 'chat' && !isStreaming && !disabled && onMicPress;
+  const showMicButton = viewMode === 'chat' && !isStreaming && !disabled && (onMicPress || speechUnavailable);
   const showAttachButton = viewMode === 'chat' && !hasTerminal && !isStreaming && !disabled && onAttach;
 
   // Filter slash commands based on current input (only when typing `/` at the start)
@@ -215,16 +217,22 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
         )}
         {showMicButton && (
           <TouchableOpacity
-            onPress={onMicPress}
+            onPress={onMicPress ?? (() => {
+              Alert.alert(
+                'Voice Input Unavailable',
+                'Speech recognition requires a dev build. Voice input is not available in Expo Go.',
+              );
+            })}
             accessibilityRole="button"
-            accessibilityLabel={isRecognizing ? 'Stop voice input' : 'Start voice input'}
+            accessibilityLabel={!onMicPress ? 'Voice input unavailable' : isRecognizing ? 'Stop voice input' : 'Start voice input'}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
             <Animated.View
               style={[
                 styles.micButton,
-                { backgroundColor: isRecognizing ? COLORS.accentRed : COLORS.accentGreen },
+                { backgroundColor: !onMicPress ? COLORS.backgroundCard : isRecognizing ? COLORS.accentRed : COLORS.accentGreen },
                 isRecognizing ? { opacity: pulseAnim } : undefined,
+                !onMicPress ? { opacity: 0.3 } : undefined,
               ]}
             >
               <Text style={styles.micButtonText}>{ICON_MICROPHONE}</Text>
