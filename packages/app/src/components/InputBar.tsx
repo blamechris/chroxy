@@ -1,6 +1,6 @@
 import React, { forwardRef, useMemo, useRef, useEffect } from 'react';
 import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, StyleSheet, Platform, Animated, Alert } from 'react-native';
-import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH, ICON_MICROPHONE, ICON_PAPERCLIP, ICON_CLOSE, ICON_DOCUMENT } from '../constants/icons';
+import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH, ICON_MICROPHONE, ICON_PAPERCLIP, ICON_CAMERA, ICON_CLOSE, ICON_DOCUMENT } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 import type { SlashCommand } from '../store/connection';
 import type { Attachment } from '../utils/attachments';
@@ -31,6 +31,7 @@ export interface InputBarProps {
   speechUnavailable?: boolean;
   attachments?: Attachment[];
   onAttach?: () => void;
+  onCamera?: () => void;
   onRemoveAttachment?: (id: string) => void;
 }
 
@@ -58,6 +59,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
   speechUnavailable,
   attachments = [],
   onAttach,
+  onCamera,
   onRemoveAttachment,
 }, ref) {
   const a11yDisabled = disabled ? { disabled: true as const } : undefined;
@@ -80,6 +82,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
 
   const showMicButton = viewMode === 'chat' && !isStreaming && !disabled && (onMicPress || speechUnavailable);
   const showAttachButton = viewMode === 'chat' && !hasTerminal && !isStreaming && !disabled && onAttach;
+  const showCameraButton = viewMode === 'chat' && !hasTerminal && !isStreaming && !disabled && onCamera;
 
   // Filter slash commands based on current input (only when typing `/` at the start)
   const filteredCommands = useMemo(() => {
@@ -203,6 +206,18 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
           editable={!disabled}
           accessibilityState={a11yDisabled}
         />
+        {showCameraButton && (
+          <TouchableOpacity
+            onPress={onCamera}
+            accessibilityRole="button"
+            accessibilityLabel="Take photo"
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <View style={styles.cameraButton}>
+              <Text style={styles.cameraButtonText}>{ICON_CAMERA}</Text>
+            </View>
+          </TouchableOpacity>
+        )}
         {showAttachButton && (
           <TouchableOpacity
             onPress={onAttach}
@@ -423,6 +438,17 @@ const styles = StyleSheet.create({
   },
   inputDisabled: {
     opacity: 0.5,
+  },
+  cameraButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.accentBlue,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cameraButtonText: {
+    fontSize: 18,
   },
   attachButton: {
     width: 36,
