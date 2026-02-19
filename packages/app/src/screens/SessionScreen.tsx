@@ -343,6 +343,10 @@ export function SessionScreen() {
     }
   }, [pendingAttachments.length]);
 
+  const handleCamera = useCallback(() => {
+    addAttachment(pickFromCamera);
+  }, [addAttachment]);
+
   const handleAttach = useCallback(() => {
     setShowAttachSheet(true);
   }, []);
@@ -684,6 +688,7 @@ export function SessionScreen() {
         speechUnavailable={!speechAvailable}
         attachments={pendingAttachments}
         onAttach={handleAttach}
+        onCamera={handleCamera}
         onRemoveAttachment={handleRemoveAttachment}
       />
 
