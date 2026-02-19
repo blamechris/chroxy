@@ -440,15 +440,14 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   cameraButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: COLORS.accentBlue,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
   },
   cameraButtonText: {
-    fontSize: 18,
+    fontSize: 20,
   },
   attachButton: {
     width: 36,
