@@ -222,7 +222,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'client_left', clientId }                — client disconnected
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
  *   { type: 'pong' }                                    — heartbeat response
- *   { type: 'permission_expired', requestId, message }  — permission response could not be routed (expired/handled)
+ *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
@@ -245,6 +245,7 @@ export class WsServer {
     this._permissionSessionMap = new Map() // requestId -> sessionId (for routing responses to correct session)
     this._questionSessionMap = new Map() // toolUseId -> sessionId (for routing question responses)
     this._primaryClients = new Map() // sessionId -> clientId (last-writer-wins)
+    this._cwdRealCache = new Map() // cwd string -> resolved realpath (avoids repeated realpath syscalls)
     this.pushManager = pushManager
 
     // Auth rate limiting: track failed attempts per IP
@@ -909,7 +910,7 @@ export class WsServer {
               // _pendingPermissions doesn't exist (legacy mock) — let respondToPermission decide
               entry.session.respondToPermission(requestId, decision)
             } else {
-              this._send(ws, { type: 'permission_expired', requestId, message: 'This permission request has expired or was already handled' })
+              this._send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
             }
             break
           }
@@ -919,7 +920,7 @@ export class WsServer {
         if (this._pendingPermissions.has(requestId)) {
           this._resolvePermission(requestId, decision)
         } else {
-          this._send(ws, { type: 'permission_expired', requestId, message: 'This permission request has expired or was already handled' })
+          this._send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
         }
         break
       }
@@ -1789,6 +1790,15 @@ export class WsServer {
     }
   }
 
+  /** Resolve a session CWD to its real path, caching the result to avoid repeated syscalls */
+  async _resolveSessionCwd(sessionCwd) {
+    const key = resolve(sessionCwd)
+    if (this._cwdRealCache.has(key)) return this._cwdRealCache.get(key)
+    const resolved = await realpath(key)
+    this._cwdRealCache.set(key, resolved)
+    return resolved
+  }
+
   /** Browse files and directories at a given path within the session CWD */
   async _browseFiles(ws, requestedPath, sessionCwd) {
     if (!sessionCwd) {
@@ -1812,7 +1822,7 @@ export class WsServer {
       absPath = normalize(absPath)
 
       // Resolve symlinks and restrict to session CWD
-      const cwdReal = await realpath(resolve(sessionCwd))
+      const cwdReal = await this._resolveSessionCwd(sessionCwd)
       let realAbsPath
       try {
         realAbsPath = await realpath(absPath)
@@ -1916,7 +1926,7 @@ export class WsServer {
       absPath = normalize(resolve(sessionCwd, requestedPath.trim()))
 
       // Resolve symlinks and restrict to session CWD
-      const cwdReal = await realpath(resolve(sessionCwd))
+      const cwdReal = await this._resolveSessionCwd(sessionCwd)
       let realAbsPath
       try {
         realAbsPath = await realpath(absPath)
@@ -2246,6 +2256,7 @@ export class WsServer {
           res.end(JSON.stringify({ decision }))
         },
         timer,
+        data: { requestId, tool, description, input: toolInput, remainingMs: 300_000 },
       })
     })
   }

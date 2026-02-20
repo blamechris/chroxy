@@ -1570,8 +1570,8 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       const expiredRequestId = msg.requestId as string;
       if (expiredRequestId) {
         console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);
-        // Find and mark the permission prompt as expired in the active session
-        const expTargetId = get().activeSessionId;
+        // Use sessionId from server if provided, otherwise fall back to active session
+        const expTargetId = (msg.sessionId as string) || get().activeSessionId;
         if (expTargetId && get().sessionStates[expTargetId]) {
           updateSession(expTargetId, (ss) => ({
             messages: ss.messages.map((m) =>
