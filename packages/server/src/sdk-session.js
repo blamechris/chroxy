@@ -70,6 +70,7 @@ export class SdkSession extends EventEmitter {
     this._pendingPermissions = new Map() // requestId -> { resolve, input }
     this._permissionTimers = new Map() // requestId -> timer
     this._permissionCounter = 0
+    this._lastPermissionData = new Map() // requestId -> emitted permission_request payload (for reconnect re-send)
 
     // AskUserQuestion handling
     this._pendingUserAnswer = null // { resolve, input } when waiting for user answer
@@ -371,19 +372,22 @@ export class SdkSession extends EventEmitter {
 
       console.log(`[sdk-session] Permission request ${requestId}: ${toolName}`)
 
-      this.emit('permission_request', {
+      const permPayload = {
         requestId,
         tool: toolName,
         description,
         input: toolInput,
         remainingMs: 300_000,
-      })
+      }
+      this._lastPermissionData.set(requestId, permPayload)
+      this.emit('permission_request', permPayload)
 
       // Auto-deny on abort signal (user interrupted)
       if (signal) {
         signal.addEventListener('abort', () => {
           if (this._pendingPermissions.has(requestId)) {
             this._pendingPermissions.delete(requestId)
+            this._lastPermissionData.delete(requestId)
             this._clearPermissionTimer(requestId)
             resolve({ behavior: 'deny', message: 'Request cancelled' })
           }
@@ -396,6 +400,7 @@ export class SdkSession extends EventEmitter {
         if (this._pendingPermissions.has(requestId)) {
           console.log(`[sdk-session] Permission ${requestId} timed out, auto-denying`)
           this._pendingPermissions.delete(requestId)
+          this._lastPermissionData.delete(requestId)
           resolve({ behavior: 'deny', message: 'Permission timed out' })
         }
       }, 300_000)
@@ -484,6 +489,7 @@ export class SdkSession extends EventEmitter {
       return
     }
     this._pendingPermissions.delete(requestId)
+    this._lastPermissionData.delete(requestId)
     this._clearPermissionTimer(requestId)
 
     console.log(`[sdk-session] Permission ${requestId} resolved: ${decision}`)
@@ -627,6 +633,7 @@ export class SdkSession extends EventEmitter {
       pending.resolve({ behavior: 'deny', message: 'Message completed' })
     }
     this._pendingPermissions.clear()
+    this._lastPermissionData.clear()
 
     // Auto-deny pending user answer
     this._clearQuestionTimer()

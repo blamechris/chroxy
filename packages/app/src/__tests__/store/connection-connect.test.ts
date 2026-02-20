@@ -132,7 +132,7 @@ describe('connect() retry exhaustion', () => {
     for (let attempt = 0; attempt <= 5; attempt++) {
       await flushPromises();
       if (attempt < 5) {
-        jest.advanceTimersByTime(10_000);
+        jest.advanceTimersByTime(15_000);
       }
     }
 
@@ -149,7 +149,7 @@ describe('connect() retry exhaustion', () => {
     for (let attempt = 0; attempt <= 5; attempt++) {
       await flushPromises();
       if (attempt < 5) {
-        jest.advanceTimersByTime(10_000);
+        jest.advanceTimersByTime(15_000);
       }
     }
 
