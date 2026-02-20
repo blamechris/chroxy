@@ -24,6 +24,7 @@ import { ChatView } from '../components/ChatView';
 import { TerminalView, TerminalHandle } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { InputBar } from '../components/InputBar';
+import { FileBrowser } from '../components/FileBrowser';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
@@ -502,6 +503,14 @@ export function SessionScreen() {
               </Text>
             </TouchableOpacity>
           )}
+          <TouchableOpacity
+            style={[styles.modeButton, viewMode === 'files' && styles.modeButtonActive]}
+            onPress={() => setViewMode('files')}
+          >
+            <Text style={[styles.modeButtonText, viewMode === 'files' && styles.modeButtonTextActive]}>
+              Files
+            </Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
             <Text style={styles.settingsButtonText}>{ICON_GEAR}</Text>
           </TouchableOpacity>
@@ -657,6 +666,8 @@ export function SessionScreen() {
           onApprovePlan={handleApprovePlan}
           onFocusInput={handleFocusInput}
         />
+      ) : viewMode === 'files' ? (
+        <FileBrowser />
       ) : (
         <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
       )}

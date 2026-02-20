@@ -3,9 +3,9 @@ import { execFileSync } from 'child_process'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
 import { statSync, readFileSync } from 'fs'
-import { readdir, readFile } from 'fs/promises'
+import { readdir, readFile, stat } from 'fs/promises'
 import { fileURLToPath } from 'url'
-import { dirname, join, resolve, normalize } from 'path'
+import { dirname, join, resolve, normalize, extname } from 'path'
 import { homedir, hostname } from 'os'
 import { timingSafeEqual } from 'crypto'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
@@ -163,6 +163,8 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'register_push_token', token }             — register Expo push token for notifications
  *   { type: 'user_question_response', answer }         — respond to AskUserQuestion prompt
  *   { type: 'list_directory', path? }                  — request directory listing for file browser
+ *   { type: 'browse_files', path? }                   — request file/directory listing for file browser
+ *   { type: 'read_file', path }                       — request file content for file viewer
  *   { type: 'list_slash_commands' }                     — request available slash commands
  *   { type: 'list_agents' }                             — request available custom agents
  *   { type: 'request_full_history', sessionId? }         — request full JSONL history for a session
@@ -211,6 +213,8 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
  *   { type: 'directory_listing', path, parentPath, entries, error } — directory listing response for file browser
+ *   { type: 'file_listing', path, parentPath, entries, error } — file browser listing response
+ *   { type: 'file_content', path, content, language, size, truncated, error } — file content response
  *   { type: 'slash_commands', commands: [{ name, description, source }] } — available slash commands
  *   { type: 'agent_list', agents: [{ name, description, source }] } — available custom agents
  *   { type: 'client_joined', client: { clientId, deviceName, deviceType, platform } } — new client connected
@@ -1074,6 +1078,18 @@ export class WsServer {
         this._listDirectory(ws, msg.path)
         break
 
+      case 'browse_files': {
+        const browseEntry = this.sessionManager.getSession(client.activeSessionId)
+        this._browseFiles(ws, msg.path, browseEntry?.cwd || null)
+        break
+      }
+
+      case 'read_file': {
+        const readEntry = this.sessionManager.getSession(client.activeSessionId)
+        this._readFile(ws, msg.path, readEntry?.cwd || null)
+        break
+      }
+
       case 'list_slash_commands': {
         const entry = this.sessionManager.getSession(client.activeSessionId)
         const cwd = entry?.cwd || null
@@ -1237,6 +1253,14 @@ export class WsServer {
         this._listDirectory(ws, msg.path)
         break
 
+      case 'browse_files':
+        this._browseFiles(ws, msg.path, this.cliSession?.cwd || null)
+        break
+
+      case 'read_file':
+        this._readFile(ws, msg.path, this.cliSession?.cwd || null)
+        break
+
       case 'list_slash_commands': {
         const cwd = this.cliSession?.cwd || null
         this._listSlashCommands(ws, cwd, null)
@@ -1292,6 +1316,14 @@ export class WsServer {
 
       case 'list_directory':
         this._listDirectory(ws, msg.path)
+        break
+
+      case 'browse_files':
+        this._browseFiles(ws, msg.path, null)
+        break
+
+      case 'read_file':
+        this._readFile(ws, msg.path, null)
         break
 
       case 'list_slash_commands':
@@ -1725,6 +1757,219 @@ export class WsServer {
         path: absPath || requestedPath || null,
         parentPath: null,
         entries: [],
+        error: errorMessage,
+      })
+    }
+  }
+
+  /** Browse files and directories at a given path within the session CWD */
+  async _browseFiles(ws, requestedPath, sessionCwd) {
+    if (!sessionCwd) {
+      this._send(ws, {
+        type: 'file_listing',
+        path: null,
+        parentPath: null,
+        entries: [],
+        error: 'File browsing is not available in this mode',
+      })
+      return
+    }
+
+    let absPath = null
+    try {
+      if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
+        absPath = resolve(sessionCwd)
+      } else {
+        absPath = resolve(sessionCwd, requestedPath.trim())
+      }
+      absPath = normalize(absPath)
+
+      // Restrict to session CWD
+      const cwdNorm = normalize(resolve(sessionCwd))
+      if (!absPath.startsWith(cwdNorm + '/') && absPath !== cwdNorm) {
+        this._send(ws, {
+          type: 'file_listing',
+          path: absPath,
+          parentPath: null,
+          entries: [],
+          error: 'Access denied: browsing is restricted to the project directory',
+        })
+        return
+      }
+
+      const dirents = await readdir(absPath, { withFileTypes: true })
+      const entries = []
+      for (const d of dirents) {
+        if (d.name.startsWith('.')) continue
+        if (d.name === 'node_modules') continue
+        const entry = { name: d.name, isDirectory: d.isDirectory(), size: null }
+        if (!d.isDirectory()) {
+          try {
+            const s = await stat(join(absPath, d.name))
+            entry.size = s.size
+          } catch (_) { /* skip size on error */ }
+        }
+        entries.push(entry)
+      }
+
+      // Sort: directories first, then files, alphabetical within each
+      entries.sort((a, b) => {
+        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
+        return a.name.localeCompare(b.name)
+      })
+
+      // parentPath is null at CWD root
+      const parentPath = absPath === cwdNorm ? null : resolve(absPath, '..')
+
+      this._send(ws, {
+        type: 'file_listing',
+        path: absPath,
+        parentPath,
+        entries,
+        error: null,
+      })
+    } catch (err) {
+      let errorMessage
+      if (err.code === 'ENOENT') errorMessage = 'Directory not found'
+      else if (err.code === 'EACCES') errorMessage = 'Permission denied'
+      else if (err.code === 'ENOTDIR') errorMessage = 'Not a directory'
+      else errorMessage = err.message || 'Unknown error'
+
+      this._send(ws, {
+        type: 'file_listing',
+        path: absPath || requestedPath || null,
+        parentPath: null,
+        entries: [],
+        error: errorMessage,
+      })
+    }
+  }
+
+  /** Read file content at a given path within the session CWD */
+  async _readFile(ws, requestedPath, sessionCwd) {
+    if (!sessionCwd) {
+      this._send(ws, {
+        type: 'file_content',
+        path: null,
+        content: null,
+        language: null,
+        size: null,
+        truncated: false,
+        error: 'File reading is not available in this mode',
+      })
+      return
+    }
+
+    if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
+      this._send(ws, {
+        type: 'file_content',
+        path: null,
+        content: null,
+        language: null,
+        size: null,
+        truncated: false,
+        error: 'No file path provided',
+      })
+      return
+    }
+
+    let absPath = null
+    try {
+      absPath = normalize(resolve(sessionCwd, requestedPath.trim()))
+
+      // Restrict to session CWD
+      const cwdNorm = normalize(resolve(sessionCwd))
+      if (!absPath.startsWith(cwdNorm + '/') && absPath !== cwdNorm) {
+        this._send(ws, {
+          type: 'file_content',
+          path: absPath,
+          content: null,
+          language: null,
+          size: null,
+          truncated: false,
+          error: 'Access denied: file reading is restricted to the project directory',
+        })
+        return
+      }
+
+      const fileStat = await stat(absPath)
+      if (fileStat.isDirectory()) {
+        this._send(ws, {
+          type: 'file_content',
+          path: absPath,
+          content: null,
+          language: null,
+          size: null,
+          truncated: false,
+          error: 'Cannot read a directory',
+        })
+        return
+      }
+
+      if (fileStat.size > 512 * 1024) {
+        this._send(ws, {
+          type: 'file_content',
+          path: absPath,
+          content: null,
+          language: null,
+          size: fileStat.size,
+          truncated: false,
+          error: 'File too large (max 512KB)',
+        })
+        return
+      }
+
+      // Read file content
+      const buf = await readFile(absPath)
+
+      // Binary detection: check first 8KB for null bytes
+      const checkLen = Math.min(buf.length, 8192)
+      for (let i = 0; i < checkLen; i++) {
+        if (buf[i] === 0) {
+          this._send(ws, {
+            type: 'file_content',
+            path: absPath,
+            content: null,
+            language: null,
+            size: fileStat.size,
+            truncated: false,
+            error: 'Binary file cannot be displayed',
+          })
+          return
+        }
+      }
+
+      let content = buf.toString('utf-8')
+      let truncated = false
+      if (content.length > 100 * 1024) {
+        content = content.slice(0, 100 * 1024)
+        truncated = true
+      }
+
+      const ext = extname(absPath).slice(1).toLowerCase()
+
+      this._send(ws, {
+        type: 'file_content',
+        path: absPath,
+        content,
+        language: ext || null,
+        size: fileStat.size,
+        truncated,
+        error: null,
+      })
+    } catch (err) {
+      let errorMessage
+      if (err.code === 'ENOENT') errorMessage = 'File not found'
+      else if (err.code === 'EACCES') errorMessage = 'Permission denied'
+      else errorMessage = err.message || 'Unknown error'
+
+      this._send(ws, {
+        type: 'file_content',
+        path: absPath || requestedPath || null,
+        content: null,
+        language: null,
+        size: null,
+        truncated: false,
         error: errorMessage,
       })
     }
