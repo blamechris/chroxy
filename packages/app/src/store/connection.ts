@@ -589,7 +589,7 @@ function _startHeartbeat(socket: WebSocket) {
   _heartbeatInterval = setInterval(() => {
     if (socket.readyState !== WebSocket.OPEN) { _stopHeartbeat(); return; }
     try {
-      socket.send(JSON.stringify({ type: 'ping' }));
+      wsSend(socket, { type: 'ping' });
     } catch { _stopHeartbeat(); return; }
     _pongTimeout = setTimeout(() => {
       // No pong received — connection is dead, force close to trigger reconnect

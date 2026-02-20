@@ -533,7 +533,7 @@ export class WsServer {
           client.encryptionPending = false
           client.postAuthQueue = null
           try {
-            ws.send(JSON.stringify({ type: 'error', error: 'Encryption required but key exchange timed out. Please reconnect.' }))
+            ws.send(JSON.stringify({ type: 'server_error', error: 'Encryption required but key exchange timed out. Please reconnect.', recoverable: false }))
           } catch (_) {}
           ws.close(1008, 'Key exchange timeout')
         }
@@ -747,7 +747,7 @@ export class WsServer {
       client.encryptionPending = false
       client.postAuthQueue = null
       try {
-        ws.send(JSON.stringify({ type: 'error', error: 'Encryption required but client did not initiate key exchange.' }))
+        ws.send(JSON.stringify({ type: 'server_error', error: 'Encryption required but client did not initiate key exchange.', recoverable: false }))
       } catch (_) {}
       ws.close(1008, 'Key exchange required')
       return
