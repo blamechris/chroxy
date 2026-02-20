@@ -161,6 +161,28 @@ export interface DirectoryListing {
   error: string | null;
 }
 
+export interface FileEntry {
+  name: string;
+  isDirectory: boolean;
+  size: number | null;
+}
+
+export interface FileListing {
+  path: string | null;
+  parentPath: string | null;
+  entries: FileEntry[];
+  error: string | null;
+}
+
+export interface FileContent {
+  path: string | null;
+  content: string | null;
+  language: string | null;
+  size: number | null;
+  truncated: boolean;
+  error: string | null;
+}
+
 export interface AgentInfo {
   toolUseId: string;
   description: string;
@@ -330,8 +352,12 @@ interface ConnectionState {
   // Directory listing callback for file browser
   _directoryListingCallback: ((listing: DirectoryListing) => void) | null;
 
+  // File browser callbacks
+  _fileBrowserCallback: ((listing: FileListing) => void) | null;
+  _fileContentCallback: ((content: FileContent) => void) | null;
+
   // View mode
-  viewMode: 'chat' | 'terminal';
+  viewMode: 'chat' | 'terminal' | 'files';
 
   // Input settings
   inputSettings: InputSettings;
@@ -350,7 +376,7 @@ interface ConnectionState {
   disconnect: () => void;
   loadSavedConnection: () => Promise<void>;
   clearSavedConnection: () => Promise<void>;
-  setViewMode: (mode: 'chat' | 'terminal') => void;
+  setViewMode: (mode: 'chat' | 'terminal' | 'files') => void;
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[]) => void;
   appendTerminalData: (data: string) => void;
@@ -372,6 +398,12 @@ interface ConnectionState {
   // Directory listing
   setDirectoryListingCallback: (cb: ((listing: DirectoryListing) => void) | null) => void;
   requestDirectoryListing: (path?: string) => void;
+
+  // File browser
+  setFileBrowserCallback: (cb: ((listing: FileListing) => void) | null) => void;
+  setFileContentCallback: (cb: ((content: FileContent) => void) | null) => void;
+  requestFileListing: (path?: string) => void;
+  requestFileContent: (path: string) => void;
 
   // Session actions
   switchSession: (sessionId: string) => void;
@@ -1643,6 +1675,34 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       break;
     }
 
+    case 'file_listing': {
+      const fileBrowserCb = get()._fileBrowserCallback;
+      if (fileBrowserCb) {
+        fileBrowserCb({
+          path: typeof msg.path === 'string' ? msg.path : null,
+          parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
+          entries: Array.isArray(msg.entries) ? msg.entries as FileEntry[] : [],
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
+    case 'file_content': {
+      const fileContentCb = get()._fileContentCallback;
+      if (fileContentCb) {
+        fileContentCb({
+          path: typeof msg.path === 'string' ? msg.path : null,
+          content: typeof msg.content === 'string' ? msg.content : null,
+          language: typeof msg.language === 'string' ? msg.language : null,
+          size: typeof msg.size === 'number' ? msg.size : null,
+          truncated: msg.truncated === true,
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
     case 'slash_commands': {
       // Ignore stale responses from a different session (race during session switch).
       // Only filter when activeSessionId is set — on initial connect it may still be null.
@@ -1759,6 +1819,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   slashCommands: [],
   customAgents: [],
   _directoryListingCallback: null,
+  _fileBrowserCallback: null,
+  _fileContentCallback: null,
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -2164,7 +2226,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setViewMode: (mode) => {
     const { socket } = get();
     set({ viewMode: mode });
-    if (socket && socket.readyState === WebSocket.OPEN) {
+    // Only send server-understood modes (not 'files' which is client-only)
+    if (socket && socket.readyState === WebSocket.OPEN && (mode === 'chat' || mode === 'terminal')) {
       wsSend(socket, { type: 'mode', mode });
     }
   },
@@ -2394,6 +2457,32 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const msg: Record<string, string> = { type: 'list_directory' };
       if (path) msg.path = path;
       wsSend(socket, msg);
+    }
+  },
+
+  // File browser
+
+  setFileBrowserCallback: (cb) => {
+    set({ _fileBrowserCallback: cb });
+  },
+
+  setFileContentCallback: (cb) => {
+    set({ _fileContentCallback: cb });
+  },
+
+  requestFileListing: (path?: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const msg: Record<string, string> = { type: 'browse_files' };
+      if (path) msg.path = path;
+      wsSend(socket, msg);
+    }
+  },
+
+  requestFileContent: (path: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'read_file', path });
     }
   },
 

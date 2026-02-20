@@ -20,7 +20,7 @@ export interface InputBarProps {
   onToggleEnterMode: () => void;
   isStreaming: boolean;
   claudeReady: boolean;
-  viewMode: 'chat' | 'terminal';
+  viewMode: 'chat' | 'terminal' | 'files';
   hasTerminal: boolean;
   bottomPadding: number;
   disabled?: boolean;

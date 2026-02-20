@@ -24,6 +24,7 @@ import { ChatView } from '../components/ChatView';
 import { TerminalView, TerminalHandle } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { InputBar } from '../components/InputBar';
+import { FileBrowser } from '../components/FileBrowser';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
@@ -308,7 +309,7 @@ export function SessionScreen() {
       ? pendingAttachments.map(({ id, type, uri, name, mediaType, size }) => ({ id, type, uri, name, mediaType, size }))
       : undefined;
 
-    if (viewMode === 'chat') {
+    if (viewMode === 'chat' || viewMode === 'files') {
       addUserMessage(text || `[${pendingAttachments.length} file(s) attached]`, msgAttachments);
     }
 
@@ -445,9 +446,9 @@ export function SessionScreen() {
   }, [transcript]); // eslint-disable-line react-hooks/exhaustive-deps -- only react to transcript changes
 
   // Check if Enter key should send based on current mode and settings
-  const enterToSend = viewMode === 'chat'
-    ? inputSettings.chatEnterToSend
-    : inputSettings.terminalEnterToSend;
+  const enterToSend = viewMode === 'terminal'
+    ? inputSettings.terminalEnterToSend
+    : inputSettings.chatEnterToSend;
 
   // Bottom padding: when keyboard is up, use keyboard height + buffer for suggestion bar;
   // otherwise use safe area for Android nav buttons
@@ -502,6 +503,14 @@ export function SessionScreen() {
               </Text>
             </TouchableOpacity>
           )}
+          <TouchableOpacity
+            style={[styles.modeButton, viewMode === 'files' && styles.modeButtonActive]}
+            onPress={() => setViewMode('files')}
+          >
+            <Text style={[styles.modeButtonText, viewMode === 'files' && styles.modeButtonTextActive]}>
+              Files
+            </Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
             <Text style={styles.settingsButtonText}>{ICON_GEAR}</Text>
           </TouchableOpacity>
@@ -657,6 +666,8 @@ export function SessionScreen() {
           onApprovePlan={handleApprovePlan}
           onFocusInput={handleFocusInput}
         />
+      ) : viewMode === 'files' ? (
+        <FileBrowser />
       ) : (
         <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
       )}
@@ -672,7 +683,7 @@ export function SessionScreen() {
         onKeyPress={handleKeyPress}
         enterToSend={enterToSend}
         onToggleEnterMode={() => {
-          const key = viewMode === 'chat' ? 'chatEnterToSend' : 'terminalEnterToSend';
+          const key = viewMode === 'terminal' ? 'terminalEnterToSend' : 'chatEnterToSend';
           updateInputSettings({ [key]: !inputSettings[key] });
         }}
         isStreaming={!!streamingMessageId}
