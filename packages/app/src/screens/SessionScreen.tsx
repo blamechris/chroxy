@@ -309,7 +309,7 @@ export function SessionScreen() {
       ? pendingAttachments.map(({ id, type, uri, name, mediaType, size }) => ({ id, type, uri, name, mediaType, size }))
       : undefined;
 
-    if (viewMode === 'chat') {
+    if (viewMode === 'chat' || viewMode === 'files') {
       addUserMessage(text || `[${pendingAttachments.length} file(s) attached]`, msgAttachments);
     }
 
@@ -446,9 +446,9 @@ export function SessionScreen() {
   }, [transcript]); // eslint-disable-line react-hooks/exhaustive-deps -- only react to transcript changes
 
   // Check if Enter key should send based on current mode and settings
-  const enterToSend = viewMode === 'chat'
-    ? inputSettings.chatEnterToSend
-    : inputSettings.terminalEnterToSend;
+  const enterToSend = viewMode === 'terminal'
+    ? inputSettings.terminalEnterToSend
+    : inputSettings.chatEnterToSend;
 
   // Bottom padding: when keyboard is up, use keyboard height + buffer for suggestion bar;
   // otherwise use safe area for Android nav buttons
@@ -683,7 +683,7 @@ export function SessionScreen() {
         onKeyPress={handleKeyPress}
         enterToSend={enterToSend}
         onToggleEnterMode={() => {
-          const key = viewMode === 'chat' ? 'chatEnterToSend' : 'terminalEnterToSend';
+          const key = viewMode === 'terminal' ? 'terminalEnterToSend' : 'chatEnterToSend';
           updateInputSettings({ [key]: !inputSettings[key] });
         }}
         isStreaming={!!streamingMessageId}

@@ -11,11 +11,9 @@ import {
 } from 'react-native';
 import { useConnectionStore, FileListing, FileContent } from '../store/connection';
 import { COLORS } from '../constants/colors';
-import { ICON_CLOSE, ICON_DOCUMENT } from '../constants/icons';
-import { ICON_FOLDER_OPEN } from '../constants/icons';
+import { ICON_CLOSE, ICON_DOCUMENT, ICON_FOLDER_OPEN } from '../constants/icons';
 import { tokenize, SYNTAX_COLORS } from '../utils/syntax';
 import type { Token } from '../utils/syntax';
-import { getLanguage } from '../utils/syntax/languages';
 
 /** Format bytes into human-readable size */
 function formatSize(bytes: number): string {
