@@ -23,9 +23,10 @@ fi
 git status
 git log main..HEAD --oneline
 git diff main --stat
+git diff main
 ```
 
-Review the commits and changed files. Understand the full scope of work before drafting the PR.
+Review the commits and full diff. Understand the full scope of work before drafting the PR.
 
 ### 2. Detect Closable Issues
 
@@ -42,9 +43,10 @@ echo "$BRANCH" | grep -oE '[0-9]+' | while read num; do
 done
 
 # Source 3: Open from-review issues whose title/body matches changed files
-CHANGED_FILES=$(git diff main --name-only | head -20)
 gh issue list --label "from-review" --label "enhancement" --state open --json number,title,body --limit 50
 ```
+
+Cross-reference the from-review issues against the files changed in this branch (`git diff main --name-only`) to find matches. Only include issues whose description relates to files actually modified in this PR.
 
 **For each candidate issue:** Verify it's open and the PR's changes actually address it. Don't claim to close an issue the commits don't fix.
 

@@ -14,7 +14,15 @@ Create a standardized GitHub issue with labels and traceability.
 
 ### 1. Parse Arguments and Gather Context
 
-Extract the title and any flags from `$ARGUMENTS`. Determine context:
+Extract the title and any flags from `$ARGUMENTS`:
+
+- **Title:** Everything that isn't a flag becomes the issue title
+- **`--from-pr N`** → `SOURCE_PR=N`
+- **`--comment-url URL`** → `COMMENT_URL=URL` (extract `FILE_PATH` and `LINE_NUMBER` from the URL if possible)
+- **`--complexity low|medium|high`** → `COMPLEXITY=value` (used for labeling in Step 4)
+- **`--label NAME`** → Append to `EXTRA_LABELS` array (repeatable)
+
+Then determine context:
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
@@ -88,7 +96,12 @@ if [ -n "$SOURCE_PR" ] || [ -n "$COMMENT_URL" ]; then
   LABELS="$LABELS,from-review"
 fi
 
-# Add any extra --label flags
+# Add complexity label if --complexity was provided in Step 1
+if [ -n "$COMPLEXITY" ]; then
+  LABELS="$LABELS,complexity: $COMPLEXITY"
+fi
+
+# Add any extra labels from --label flags parsed in Step 1
 for extra in "${EXTRA_LABELS[@]}"; do
   LABELS="$LABELS,$extra"
 done
