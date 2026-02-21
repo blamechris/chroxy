@@ -94,7 +94,7 @@ export class SessionDirectoryError extends SessionError {
  *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
  */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 5000, maxToolInput, transforms } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -111,7 +111,8 @@ export class SessionManager extends EventEmitter {
     this._sessions = new Map() // sessionId -> { session, type: 'cli'|'pty', name, cwd, createdAt, tmuxSession? }
     this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
-    this._maxHistory = 100
+    this._maxHistory = 500
+    this._historyTruncated = new Map() // sessionId -> boolean
     this._persistTimer = null
     this._autoDiscovery = autoDiscovery
     this._discoveryIntervalMs = discoveryIntervalMs
@@ -262,6 +263,7 @@ export class SessionManager extends EventEmitter {
     this._sessions.delete(sessionId)
     console.log(`[session-manager] Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
     this._messageHistory.delete(sessionId)
+    this._historyTruncated.delete(sessionId)
     // Clean up any pending streams for this session
     for (const key of this._pendingStreams.keys()) {
       if (key.startsWith(`${sessionId}:`)) {
@@ -546,6 +548,15 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Check if the ring buffer for a session has dropped older messages.
+   * @param {string} sessionId
+   * @returns {boolean}
+   */
+  isHistoryTruncated(sessionId) {
+    return this._historyTruncated.get(sessionId) || false
+  }
+
+  /**
    * Get the conversation ID (SDK session ID) for a session.
    * @returns {string|null}
    */
@@ -712,8 +723,17 @@ export class SessionManager extends EventEmitter {
    */
   _pushHistory(history, entry) {
     history.push(entry)
-    while (history.length > this._maxHistory) {
-      history.shift()
+    if (history.length > this._maxHistory) {
+      while (history.length > this._maxHistory) {
+        history.shift()
+      }
+      // Find the sessionId that owns this history array and mark it truncated
+      for (const [sessionId, h] of this._messageHistory) {
+        if (h === history) {
+          this._historyTruncated.set(sessionId, true)
+          break
+        }
+      }
     }
   }
 
