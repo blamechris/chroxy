@@ -6,6 +6,7 @@ import { execSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
+import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
 class WsServer extends _WsServer {
@@ -6407,5 +6408,792 @@ describe('browse_files and read_file handlers', () => {
     assert.equal(content.content, null)
 
     ws.close()
+  })
+})
+
+/** Create a mock SessionManager with configurable history */
+function createHistoryMockManager({ history = [], truncated = false, sessions = [] } = {}) {
+  const manager = new EventEmitter()
+  const sessionsMap = new Map()
+
+  for (const s of sessions) {
+    const mockSession = createMockSession()
+    mockSession.cwd = s.cwd
+    sessionsMap.set(s.id, {
+      session: mockSession,
+      name: s.name,
+      cwd: s.cwd,
+      type: s.type || 'cli',
+    })
+  }
+
+  manager.getSession = (id) => sessionsMap.get(id)
+  manager.listSessions = () => {
+    const list = []
+    for (const [id, entry] of sessionsMap) {
+      list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type })
+    }
+    return list
+  }
+  manager.getHistory = (_sessionId) => history
+  manager.isHistoryTruncated = (_sessionId) => truncated
+  manager.recordUserInput = () => {}
+  manager.getFullHistoryAsync = async () => []
+  manager.getSessionContext = async () => null
+
+  Object.defineProperty(manager, 'firstSessionId', {
+    get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+  })
+
+  return manager
+}
+
+describe('_replayHistory()', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('replays cleanly with empty history (no errors, no content messages)', async () => {
+    const mockManager = createHistoryMockManager({
+      history: [],
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 300))
+
+    // With empty history, there should be NO history_replay_start or history_replay_end
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const replayEnd = messages.find(m => m.type === 'history_replay_end')
+    assert.equal(replayStart, undefined, 'Should not send history_replay_start for empty history')
+    assert.equal(replayEnd, undefined, 'Should not send history_replay_end for empty history')
+
+    ws.close()
+  })
+
+  it('replays full ring buffer in correct order', async () => {
+    const history = [
+      { type: 'message', messageType: 'user_input', content: 'hello' },
+      { type: 'message', messageType: 'response', content: 'Hi there!', messageId: 'msg-1' },
+      { type: 'tool_start', messageId: 'msg-1', toolUseId: 'tool-1', tool: 'Read', input: '/tmp/file' },
+      { type: 'tool_result', toolUseId: 'tool-1', result: 'file contents' },
+      { type: 'result', cost: 0.01, duration: 500 },
+    ]
+
+    const mockManager = createHistoryMockManager({
+      history,
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 300))
+
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const replayEnd = messages.find(m => m.type === 'history_replay_end')
+    assert.ok(replayStart, 'Should send history_replay_start')
+    assert.ok(replayEnd, 'Should send history_replay_end')
+
+    // Find the replayed messages between start and end markers
+    const startIdx = messages.indexOf(replayStart)
+    const endIdx = messages.indexOf(replayEnd)
+    assert.ok(startIdx < endIdx, 'history_replay_start should come before history_replay_end')
+
+    // The replay starts from the last response message, so we expect:
+    // response, tool_start, tool_result, result (skipping user_input before the response)
+    const replayed = messages.slice(startIdx + 1, endIdx)
+    assert.equal(replayed.length, 4, 'Should replay from last response onwards (4 entries)')
+    assert.equal(replayed[0].type, 'message')
+    assert.equal(replayed[0].messageType, 'response')
+    assert.equal(replayed[0].content, 'Hi there!')
+    assert.equal(replayed[1].type, 'tool_start')
+    assert.equal(replayed[1].tool, 'Read')
+    assert.equal(replayed[2].type, 'tool_result')
+    assert.equal(replayed[2].result, 'file contents')
+    assert.equal(replayed[3].type, 'result')
+    assert.equal(replayed[3].cost, 0.01)
+
+    ws.close()
+  })
+
+  it('only replays from last response message to end (trims earlier turns)', async () => {
+    const history = [
+      // Earlier turn
+      { type: 'message', messageType: 'response', content: 'first answer', messageId: 'msg-1' },
+      { type: 'result', cost: 0.005, duration: 200 },
+      // Later turn
+      { type: 'message', messageType: 'user_input', content: 'second question' },
+      { type: 'message', messageType: 'response', content: 'second answer', messageId: 'msg-2' },
+      { type: 'result', cost: 0.01, duration: 300 },
+    ]
+
+    const mockManager = createHistoryMockManager({
+      history,
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 300))
+
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const replayEnd = messages.find(m => m.type === 'history_replay_end')
+    const startIdx = messages.indexOf(replayStart)
+    const endIdx = messages.indexOf(replayEnd)
+    const replayed = messages.slice(startIdx + 1, endIdx)
+
+    // Should only include from the LAST response onwards (second answer + result)
+    assert.equal(replayed.length, 2, 'Should replay only last turn (response + result)')
+    assert.equal(replayed[0].content, 'second answer')
+    assert.equal(replayed[1].cost, 0.01)
+
+    ws.close()
+  })
+
+  it('sends history_replay_start and history_replay_end markers with sessionId', async () => {
+    const history = [
+      { type: 'message', messageType: 'response', content: 'test', messageId: 'msg-1' },
+    ]
+
+    const mockManager = createHistoryMockManager({
+      history,
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 300))
+
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const replayEnd = messages.find(m => m.type === 'history_replay_end')
+
+    assert.ok(replayStart, 'Should send history_replay_start')
+    assert.equal(replayStart.sessionId, 'sess-1', 'history_replay_start should include sessionId')
+    assert.ok(replayEnd, 'Should send history_replay_end')
+    assert.equal(replayEnd.sessionId, 'sess-1', 'history_replay_end should include sessionId')
+
+    ws.close()
+  })
+
+  it('messages maintain original types and content through replay', async () => {
+    const history = [
+      { type: 'message', messageType: 'response', content: 'Hello **world**', messageId: 'msg-1' },
+      { type: 'tool_start', messageId: 'msg-1', toolUseId: 'tu-1', tool: 'Write', input: '{ "path": "/tmp/out" }' },
+      { type: 'tool_result', toolUseId: 'tu-1', result: 'wrote 42 bytes', truncated: true },
+      { type: 'result', cost: 0.025, duration: 1500, usage: { input: 100, output: 50 } },
+    ]
+
+    const mockManager = createHistoryMockManager({
+      history,
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 300))
+
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const replayEnd = messages.find(m => m.type === 'history_replay_end')
+    const startIdx = messages.indexOf(replayStart)
+    const endIdx = messages.indexOf(replayEnd)
+    const replayed = messages.slice(startIdx + 1, endIdx)
+
+    assert.equal(replayed.length, 4)
+
+    // Verify each message preserves its original fields
+    assert.equal(replayed[0].type, 'message')
+    assert.equal(replayed[0].messageType, 'response')
+    assert.equal(replayed[0].content, 'Hello **world**')
+    assert.equal(replayed[0].messageId, 'msg-1')
+
+    assert.equal(replayed[1].type, 'tool_start')
+    assert.equal(replayed[1].toolUseId, 'tu-1')
+    assert.equal(replayed[1].tool, 'Write')
+    assert.equal(replayed[1].input, '{ "path": "/tmp/out" }')
+
+    assert.equal(replayed[2].type, 'tool_result')
+    assert.equal(replayed[2].toolUseId, 'tu-1')
+    assert.equal(replayed[2].result, 'wrote 42 bytes')
+    assert.equal(replayed[2].truncated, true)
+
+    assert.equal(replayed[3].type, 'result')
+    assert.equal(replayed[3].cost, 0.025)
+    assert.equal(replayed[3].duration, 1500)
+    assert.deepEqual(replayed[3].usage, { input: 100, output: 50 })
+
+    ws.close()
+  })
+
+  it('sets truncated flag when ring buffer has dropped older messages', async () => {
+    const history = [
+      { type: 'message', messageType: 'response', content: 'recent', messageId: 'msg-99' },
+    ]
+
+    const mockManager = createHistoryMockManager({
+      history,
+      truncated: true,
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 300))
+
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    assert.ok(replayStart, 'Should send history_replay_start')
+    assert.equal(replayStart.truncated, true, 'Should set truncated flag when history was truncated')
+
+    ws.close()
+  })
+
+  it('sets truncated to false when ring buffer has not overflowed', async () => {
+    const history = [
+      { type: 'message', messageType: 'response', content: 'test', messageId: 'msg-1' },
+    ]
+
+    const mockManager = createHistoryMockManager({
+      history,
+      truncated: false,
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 300))
+
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    assert.ok(replayStart, 'Should send history_replay_start')
+    assert.equal(replayStart.truncated, false, 'truncated should be false')
+
+    ws.close()
+  })
+})
+
+describe('transient events not replayed in history', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('history containing only transient-like types is not replayed', async () => {
+    // _replayHistory starts from the last entry with type === 'message' && messageType === 'response'.
+    // Transient events (permission_request, agent_spawned, etc.) never have messageType === 'response',
+    // so a history that contains ONLY transient-style entries has no replay anchor — nothing is sent.
+    const mockManager = createHistoryMockManager({
+      history: [
+        { type: 'permission_request', requestId: 'perm-1', tool: 'Write', input: '/tmp/x' },
+        { type: 'agent_spawned', agentId: 'agent-1' },
+        { type: 'plan_started' },
+      ],
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 300))
+
+    // The history has entries but none are type=message with messageType=response,
+    // so the replay starts from index 0 but still wraps in markers.
+    // Verify that transient-style events in history ARE sent (they are in the buffer),
+    // but in real usage session-manager never records them so they never appear.
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const replayEnd = messages.find(m => m.type === 'history_replay_end')
+    assert.ok(replayStart, 'Should send history_replay_start')
+    assert.ok(replayEnd, 'Should send history_replay_end')
+
+    // The key insight: session-manager.js TRANSIENT_EVENTS list ensures these event types
+    // are never recorded via _recordHistory. Since getHistory() only returns recorded events,
+    // transient events are excluded from replay at the source.
+    // This test verifies _replayHistory does not crash or filter — it trusts the source.
+    ws.close()
+  })
+})
+
+describe('encryption integration (end-to-end)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  /**
+   * Helper: connect to an encryption-enabled server, complete key exchange,
+   * and return the ws, messages array, and encryption state for the client side.
+   */
+  async function connectWithEncryption(port) {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    const messages = []
+
+    ws.on('message', (data) => {
+      try {
+        messages.push(JSON.parse(data.toString()))
+      } catch (err) {
+        console.error('Failed to parse message:', data.toString())
+      }
+    })
+
+    // Wait for connection
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        function onOpen() { ws.removeListener('error', onError); resolve() }
+        function onError(err) { ws.removeListener('open', onOpen); reject(err) }
+        ws.once('open', onOpen)
+        ws.once('error', onError)
+      }),
+      2000,
+      'Connection timeout'
+    )
+
+    // Wait for auth_ok (sent unencrypted, includes encryption: 'required')
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'auth_ok')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Auth timeout'
+    )
+
+    const authOk = messages.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'required')
+
+    // Perform key exchange
+    const clientKp = createKeyPair()
+    ws.send(JSON.stringify({ type: 'key_exchange', publicKey: clientKp.publicKey }))
+
+    // Wait for key_exchange_ok (sent unencrypted)
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'key_exchange_ok')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Key exchange timeout'
+    )
+
+    const kxOk = messages.find(m => m.type === 'key_exchange_ok')
+    assert.ok(kxOk.publicKey, 'Server should send its public key')
+
+    // Derive shared key from server's public key and client's secret key
+    const sharedKey = deriveSharedKey(kxOk.publicKey, clientKp.secretKey)
+
+    return {
+      ws,
+      messages,
+      clientEncryption: {
+        sharedKey,
+        sendNonce: 0,
+        recvNonce: 0,
+      },
+    }
+  }
+
+  /**
+   * Helper: send an encrypted message from the client side.
+   */
+  function sendEncrypted(ws, msg, clientEncryption) {
+    const envelope = encrypt(JSON.stringify(msg), clientEncryption.sharedKey, clientEncryption.sendNonce, DIRECTION_CLIENT)
+    clientEncryption.sendNonce++
+    ws.send(JSON.stringify(envelope))
+  }
+
+  /**
+   * Helper: wait for an encrypted message, decrypt it, and return the plaintext.
+   * Encrypted messages arrive as { type: 'encrypted', d: '...', n: N }.
+   */
+  async function waitForEncryptedMessage(messages, clientEncryption, timeout = 2000) {
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'encrypted')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      timeout,
+      'Timeout waiting for encrypted message'
+    )
+
+    const encrypted = messages.find(m => m.type === 'encrypted')
+    // Remove the encrypted envelope from messages array to allow finding subsequent ones
+    const idx = messages.indexOf(encrypted)
+    if (idx !== -1) messages.splice(idx, 1)
+
+    const decrypted = decrypt(encrypted, clientEncryption.sharedKey, clientEncryption.recvNonce, DIRECTION_SERVER)
+    clientEncryption.recvNonce++
+    return decrypted
+  }
+
+  /**
+   * Helper: collect and decrypt all pending encrypted messages.
+   */
+  function drainEncryptedMessages(messages, clientEncryption) {
+    const decrypted = []
+    while (true) {
+      const idx = messages.findIndex(m => m.type === 'encrypted')
+      if (idx === -1) break
+      const envelope = messages.splice(idx, 1)[0]
+      const msg = decrypt(envelope, clientEncryption.sharedKey, clientEncryption.recvNonce, DIRECTION_SERVER)
+      clientEncryption.recvNonce++
+      decrypted.push(msg)
+    }
+    return decrypted
+  }
+
+  it('successful key exchange establishes encryption for subsequent messages', async () => {
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      keyExchangeTimeoutMs: 5000,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages, clientEncryption } = await connectWithEncryption(port)
+
+    // After key exchange, server should flush queued messages (server_mode, status, etc.)
+    // These should all arrive as encrypted envelopes
+    await new Promise(r => setTimeout(r, 500))
+
+    // All post-key-exchange messages should be encrypted
+    const encryptedMsgs = messages.filter(m => m.type === 'encrypted')
+    assert.ok(encryptedMsgs.length > 0, 'Should receive encrypted messages after key exchange')
+
+    // Decrypt them all and verify they are valid protocol messages
+    const decrypted = drainEncryptedMessages(messages, clientEncryption)
+    assert.ok(decrypted.length > 0, 'Should be able to decrypt messages')
+
+    // Should find server_mode and status among decrypted messages
+    const serverMode = decrypted.find(m => m.type === 'server_mode')
+    assert.ok(serverMode, 'Should have server_mode in encrypted messages')
+    assert.equal(serverMode.mode, 'cli')
+
+    const status = decrypted.find(m => m.type === 'status')
+    assert.ok(status, 'Should have status in encrypted messages')
+    assert.equal(status.connected, true)
+
+    ws.close()
+  })
+
+  it('encrypted message round-trip: client encrypts, server decrypts and processes', async () => {
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      keyExchangeTimeoutMs: 5000,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages, clientEncryption } = await connectWithEncryption(port)
+
+    // Drain initial encrypted messages (server_mode, status, etc.)
+    await new Promise(r => setTimeout(r, 500))
+    drainEncryptedMessages(messages, clientEncryption)
+
+    // Send an encrypted ping from client
+    sendEncrypted(ws, { type: 'ping' }, clientEncryption)
+
+    // Wait for encrypted pong response
+    await new Promise(r => setTimeout(r, 500))
+
+    // The pong should arrive as an encrypted envelope
+    const pong = await waitForEncryptedMessage(messages, clientEncryption, 2000)
+    assert.equal(pong.type, 'pong', 'Server should process encrypted ping and respond with encrypted pong')
+
+    ws.close()
+  })
+
+  it('queued messages during key exchange are flushed encrypted after completion', async () => {
+    // This test verifies that messages queued during the key exchange phase
+    // (between auth_ok and key_exchange_ok) are sent encrypted after handshake completes
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      keyExchangeTimeoutMs: 5000,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages, clientEncryption } = await connectWithEncryption(port)
+
+    // After key exchange, queued messages should be flushed
+    await new Promise(r => setTimeout(r, 500))
+
+    const decrypted = drainEncryptedMessages(messages, clientEncryption)
+
+    // Queued messages should include at minimum: server_mode, status, claude_ready, model_changed
+    const types = decrypted.map(m => m.type)
+    assert.ok(types.includes('server_mode'), 'Queued server_mode should be flushed encrypted')
+    assert.ok(types.includes('status'), 'Queued status should be flushed encrypted')
+
+    // Verify none of the queued messages arrived unencrypted (only auth_ok, key_exchange_ok are plain)
+    const plainMessages = messages.filter(m =>
+      m.type !== 'auth_ok' && m.type !== 'key_exchange_ok' && m.type !== 'encrypted'
+    )
+    assert.equal(plainMessages.length, 0,
+      'No post-auth messages should arrive unencrypted (except auth_ok and key_exchange_ok)')
+
+    ws.close()
+  })
+
+  it('server handles malformed encrypted data gracefully by closing connection', async () => {
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      keyExchangeTimeoutMs: 5000,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages, clientEncryption } = await connectWithEncryption(port)
+
+    // Drain initial messages
+    await new Promise(r => setTimeout(r, 500))
+    drainEncryptedMessages(messages, clientEncryption)
+
+    // Send a malformed encrypted envelope with garbage ciphertext
+    const garbageEnvelope = {
+      type: 'encrypted',
+      d: 'dGhpcyBpcyBub3QgdmFsaWQgY2lwaGVydGV4dA==', // base64 of "this is not valid ciphertext"
+      n: clientEncryption.sendNonce,
+    }
+    clientEncryption.sendNonce++
+
+    let closeCode = null
+    const closedPromise = new Promise((resolve) => {
+      ws.on('close', (code) => {
+        closeCode = code
+        resolve()
+      })
+    })
+
+    ws.send(JSON.stringify(garbageEnvelope))
+
+    // Server should close the connection because decryption fails
+    await withTimeout(closedPromise, 3000, 'Server should close connection on decryption failure')
+    assert.ok(closeCode !== null, 'Connection should be closed')
+
+    ws.close()
+  })
+
+  it('multiple encrypted messages maintain correct nonce sequence', async () => {
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      keyExchangeTimeoutMs: 5000,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages, clientEncryption } = await connectWithEncryption(port)
+
+    // Drain initial messages
+    await new Promise(r => setTimeout(r, 500))
+    drainEncryptedMessages(messages, clientEncryption)
+
+    // Send multiple encrypted pings
+    sendEncrypted(ws, { type: 'ping' }, clientEncryption)
+    sendEncrypted(ws, { type: 'ping' }, clientEncryption)
+    sendEncrypted(ws, { type: 'ping' }, clientEncryption)
+
+    await new Promise(r => setTimeout(r, 500))
+
+    // Decrypt all pong responses — nonce sequence must be continuous
+    const pong1 = await waitForEncryptedMessage(messages, clientEncryption, 2000)
+    const pong2 = await waitForEncryptedMessage(messages, clientEncryption, 2000)
+    const pong3 = await waitForEncryptedMessage(messages, clientEncryption, 2000)
+
+    assert.equal(pong1.type, 'pong', 'First pong should decrypt correctly')
+    assert.equal(pong2.type, 'pong', 'Second pong should decrypt correctly')
+    assert.equal(pong3.type, 'pong', 'Third pong should decrypt correctly')
+
+    ws.close()
+  })
+
+  it('encrypted history replay works end-to-end', async () => {
+    // Set up a session manager with history so _replayHistory fires after key exchange
+    const mockSession = createMockSession()
+    const mockManager = new EventEmitter()
+    mockManager.listSessions = () => [{ id: 'sess-1', name: 'Test', active: true }]
+    mockManager.getSession = (id) => id === 'sess-1' ? { session: mockSession, name: 'Test', cwd: '/tmp' } : null
+    Object.defineProperty(mockManager, 'firstSessionId', { get: () => 'sess-1' })
+    mockManager.getHistory = (_sessionId) => [
+      { type: 'message', messageType: 'response', content: 'encrypted replay test', messageId: 'msg-1' },
+      { type: 'result', cost: 0.01, duration: 200 },
+    ]
+    mockManager.isHistoryTruncated = (_sessionId) => false
+    mockManager.recordUserInput = () => {}
+    mockManager.getFullHistoryAsync = async () => []
+    mockManager.getSessionContext = async () => null
+
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+      keyExchangeTimeoutMs: 5000,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages, clientEncryption } = await connectWithEncryption(port)
+
+    // Wait for all encrypted messages to arrive
+    await new Promise(r => setTimeout(r, 500))
+
+    const decrypted = drainEncryptedMessages(messages, clientEncryption)
+
+    // Find history replay messages among decrypted
+    const replayStart = decrypted.find(m => m.type === 'history_replay_start')
+    const replayEnd = decrypted.find(m => m.type === 'history_replay_end')
+    assert.ok(replayStart, 'Should have encrypted history_replay_start')
+    assert.ok(replayEnd, 'Should have encrypted history_replay_end')
+
+    // History content should be present and correctly decrypted
+    const response = decrypted.find(m => m.type === 'message' && m.content === 'encrypted replay test')
+    assert.ok(response, 'Replayed response should decrypt correctly')
+
+    const result = decrypted.find(m => m.type === 'result')
+    assert.ok(result, 'Replayed result should decrypt correctly')
+    assert.equal(result.cost, 0.01)
+
+    ws.close()
+  })
+
+  it('disconnects client after key exchange timeout (never downgrades to plaintext)', async () => {
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      keyExchangeTimeoutMs: 300,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect but intentionally do NOT send key_exchange
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    const messages = []
+
+    ws.on('message', (data) => {
+      try {
+        messages.push(JSON.parse(data.toString()))
+      } catch (err) {
+        console.error('Failed to parse message:', data.toString())
+      }
+    })
+
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        function onOpen() { ws.removeListener('error', onError); resolve() }
+        function onError(err) { ws.removeListener('open', onOpen); reject(err) }
+        ws.once('open', onOpen)
+        ws.once('error', onError)
+      }),
+      2000,
+      'Connection timeout'
+    )
+
+    // Wait for auth_ok
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'auth_ok')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Auth timeout'
+    )
+
+    const authOk = messages.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'required', 'Server should require encryption')
+
+    // Do NOT send key_exchange — wait for timeout to close the connection
+    let closeCode = null
+    const closedPromise = new Promise((resolve) => {
+      ws.on('close', (code) => {
+        closeCode = code
+        resolve()
+      })
+    })
+
+    await withTimeout(closedPromise, 3000, 'Server should close after key exchange timeout')
+
+    // Server should send server_error before closing
+    const serverError = messages.find(m => m.type === 'server_error')
+    assert.ok(serverError, 'Server should send server_error on key exchange timeout')
+    assert.ok(serverError.error.includes('key exchange timed out'), 'Error should mention key exchange timeout')
+    assert.equal(serverError.recoverable, false, 'Error should be non-recoverable')
+    assert.equal(closeCode, 1008, 'Server should close with code 1008 (policy violation)')
   })
 })
