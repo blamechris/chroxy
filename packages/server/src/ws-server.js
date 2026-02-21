@@ -2357,6 +2357,8 @@ export class WsServer {
                 continue
               }
               console.log(`[ws] Re-sending pending permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
+              // Ensure permission response routing survives reconnect
+              this._permissionSessionMap.set(requestId, sessionId)
               // Strip createdAt — it's internal server state, not part of the client protocol
               const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = permData
               this._send(ws, { type: 'permission_request', ...clientPayload, remainingMs, sessionId })

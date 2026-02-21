@@ -5537,4 +5537,131 @@ describe('Reconnect permission recovery (_resendPendingPermissions)', () => {
     // createdAt must not leak to client
     assert.equal(sent[0].createdAt, undefined, 'createdAt should not be sent to client')
   })
+
+  it('re-populates _permissionSessionMap so responses route to correct session after reconnect', () => {
+    const now = Date.now()
+    const permData = {
+      requestId: 'perm-route-1',
+      tool: 'Bash',
+      description: 'route test',
+      input: { command: 'echo hi' },
+      remainingMs: 300_000,
+      createdAt: now - 5000,
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      authRequired: false,
+    })
+    server.sessionManager = createPermMockSessionManager({
+      'session-x': {
+        pending: { 'perm-route-1': true },
+        lastData: { 'perm-route-1': permData },
+      },
+    })
+
+    // Clear any pre-existing routing entries
+    server._permissionSessionMap.clear()
+
+    const sent = []
+    server._send = (ws, msg) => sent.push(msg)
+
+    server._resendPendingPermissions({})
+
+    // Verify the permission was re-sent
+    assert.equal(sent.length, 1, 'Should re-send the permission')
+    assert.equal(sent[0].requestId, 'perm-route-1')
+
+    // Verify the routing map was re-populated
+    assert.equal(server._permissionSessionMap.get('perm-route-1'), 'session-x',
+      'Should re-populate _permissionSessionMap so response routes to originating session')
+  })
+
+  it('re-populates routing map for multiple permissions across sessions', () => {
+    const now = Date.now()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      authRequired: false,
+    })
+    server.sessionManager = createPermMockSessionManager({
+      'session-a': {
+        pending: { 'perm-a1': true },
+        lastData: {
+          'perm-a1': {
+            requestId: 'perm-a1',
+            tool: 'Bash',
+            description: 'cmd a',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: now - 10_000,
+          },
+        },
+      },
+      'session-b': {
+        pending: { 'perm-b1': true },
+        lastData: {
+          'perm-b1': {
+            requestId: 'perm-b1',
+            tool: 'Edit',
+            description: 'edit b',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: now - 20_000,
+          },
+        },
+      },
+    })
+
+    server._permissionSessionMap.clear()
+
+    const sent = []
+    server._send = (ws, msg) => sent.push(msg)
+
+    server._resendPendingPermissions({})
+
+    assert.equal(sent.length, 2, 'Should re-send both permissions')
+    assert.equal(server._permissionSessionMap.get('perm-a1'), 'session-a',
+      'perm-a1 should route to session-a')
+    assert.equal(server._permissionSessionMap.get('perm-b1'), 'session-b',
+      'perm-b1 should route to session-b')
+  })
+
+  it('does not populate routing map for expired permissions', () => {
+    const sixMinAgo = Date.now() - 360_000
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      authRequired: false,
+    })
+    server.sessionManager = createPermMockSessionManager({
+      'session-1': {
+        pending: { 'perm-expired': true },
+        lastData: {
+          'perm-expired': {
+            requestId: 'perm-expired',
+            tool: 'Bash',
+            description: 'expired',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: sixMinAgo,
+          },
+        },
+      },
+    })
+
+    server._permissionSessionMap.clear()
+
+    const sent = []
+    server._send = (ws, msg) => sent.push(msg)
+
+    server._resendPendingPermissions({})
+
+    assert.equal(sent.length, 0, 'Should not re-send expired permission')
+    assert.equal(server._permissionSessionMap.has('perm-expired'), false,
+      'Should not populate routing map for expired permissions')
+  })
 })
