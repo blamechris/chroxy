@@ -25,10 +25,11 @@ import { TerminalView, TerminalHandle } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { InputBar } from '../components/InputBar';
 import { FileBrowser } from '../components/FileBrowser';
+import { DiffViewer } from '../components/DiffViewer';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
-import { ICON_CLOSE, ICON_GEAR } from '../constants/icons';
+import { ICON_CLOSE, ICON_GEAR, ICON_DIFF } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
@@ -179,6 +180,7 @@ export function SessionScreen() {
   const setTerminalWriteCallback = useConnectionStore((s) => s.setTerminalWriteCallback);
   const isCliMode = serverMode === 'cli';
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showDiffViewer, setShowDiffViewer] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
 
   // Speech recognition
@@ -511,6 +513,9 @@ export function SessionScreen() {
               Files
             </Text>
           </TouchableOpacity>
+          <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)}>
+            <Text style={styles.diffButtonText}>{ICON_DIFF}</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
             <Text style={styles.settingsButtonText}>{ICON_GEAR}</Text>
           </TouchableOpacity>
@@ -709,6 +714,12 @@ export function SessionScreen() {
         onClose={() => setShowCreateModal(false)}
       />
 
+      {/* Diff viewer modal */}
+      <DiffViewer
+        visible={showDiffViewer}
+        onClose={() => setShowDiffViewer(false)}
+      />
+
       {/* Attachment picker bottom sheet */}
       <Modal visible={showAttachSheet} transparent animationType="slide" onRequestClose={() => setShowAttachSheet(false)}>
         <Pressable style={styles.sheetOverlay} onPress={() => setShowAttachSheet(false)}>
@@ -760,6 +771,18 @@ const styles = StyleSheet.create({
   modeButtonTextActive: {
     color: COLORS.accentBlue,
     fontWeight: '600',
+  },
+  diffButton: {
+    paddingHorizontal: 8,
+    justifyContent: 'center',
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+  },
+  diffButtonText: {
+    color: COLORS.textMuted,
+    fontSize: 16,
+    fontWeight: '700',
   },
   settingsButton: {
     paddingHorizontal: 12,

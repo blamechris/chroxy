@@ -1,5 +1,6 @@
 import { createServer } from 'http'
-import { execFileSync } from 'child_process'
+import { execFileSync, execFile as execFileCb } from 'child_process'
+import { promisify } from 'util'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
 import { statSync, readFileSync } from 'fs'
@@ -10,6 +11,9 @@ import { homedir, hostname } from 'os'
 import { timingSafeEqual } from 'crypto'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from './crypto.js'
+import { parseDiff } from './diff-parser.js'
+
+const execFileAsync = promisify(execFileCb)
 
 // -- Permission TTL --
 const PERMISSION_TTL_MS = 300_000 // 5 minutes
@@ -1124,6 +1128,12 @@ export class WsServer {
         break
       }
 
+      case 'get_diff': {
+        const diffEntry = this.sessionManager.getSession(client.activeSessionId)
+        this._getDiff(ws, msg.base, diffEntry?.cwd || null)
+        break
+      }
+
       case 'list_slash_commands': {
         const entry = this.sessionManager.getSession(client.activeSessionId)
         const cwd = entry?.cwd || null
@@ -1295,6 +1305,10 @@ export class WsServer {
         this._readFile(ws, msg.path, this.cliSession?.cwd || null)
         break
 
+      case 'get_diff':
+        this._getDiff(ws, msg.base, this.cliSession?.cwd || null)
+        break
+
       case 'list_slash_commands': {
         const cwd = this.cliSession?.cwd || null
         this._listSlashCommands(ws, cwd, null)
@@ -1358,6 +1372,10 @@ export class WsServer {
 
       case 'read_file':
         this._readFile(ws, msg.path, null)
+        break
+
+      case 'get_diff':
+        this._getDiff(ws, msg.base, null)
         break
 
       case 'list_slash_commands':
@@ -2035,6 +2053,115 @@ export class WsServer {
         size: null,
         truncated: false,
         error: errorMessage,
+      })
+    }
+  }
+
+  /** Get git diff for uncommitted changes in the session CWD */
+  async _getDiff(ws, base, sessionCwd) {
+    if (!sessionCwd) {
+      this._send(ws, {
+        type: 'diff_result',
+        files: [],
+        error: 'Diff is not available in this mode',
+      })
+      return
+    }
+
+    try {
+      const cwdReal = await this._resolveSessionCwd(sessionCwd)
+      const rawBase = (typeof base === 'string' && base.trim()) ? base.trim() : 'HEAD'
+      // Validate ref name to prevent git flag injection (e.g. --output=/tmp/evil)
+      const diffBase = /^[a-zA-Z0-9._\-\/~^@{}:]+$/.test(rawBase) ? rawBase : 'HEAD'
+
+      // Run git diff to get all uncommitted changes (staged + unstaged)
+      let diffOutput = ''
+      try {
+        const { stdout } = await execFileAsync('git', ['diff', diffBase], {
+          cwd: cwdReal,
+          maxBuffer: 2 * 1024 * 1024, // 2MB max
+          timeout: 10000,
+        })
+        diffOutput = stdout
+      } catch (err) {
+        // If diffBase is HEAD and there are no commits yet, try without base
+        if (err.message && err.message.includes('unknown revision')) {
+          try {
+            const { stdout } = await execFileAsync('git', ['diff'], {
+              cwd: cwdReal,
+              maxBuffer: 2 * 1024 * 1024,
+              timeout: 10000,
+            })
+            diffOutput = stdout
+          } catch (innerErr) {
+            this._send(ws, {
+              type: 'diff_result',
+              files: [],
+              error: innerErr.message || 'Failed to run git diff',
+            })
+            return
+          }
+        } else {
+          this._send(ws, {
+            type: 'diff_result',
+            files: [],
+            error: err.message || 'Failed to run git diff',
+          })
+          return
+        }
+      }
+
+      // Also get staged changes if diffBase is HEAD
+      if (diffBase === 'HEAD') {
+        try {
+          const { stdout: stagedOutput } = await execFileAsync('git', ['diff', '--cached', 'HEAD'], {
+            cwd: cwdReal,
+            maxBuffer: 2 * 1024 * 1024,
+            timeout: 10000,
+          })
+          if (stagedOutput) {
+            diffOutput = (diffOutput ? diffOutput + '\n' : '') + stagedOutput
+          }
+        } catch {
+          // Ignore errors for staged diff (e.g., no commits yet)
+        }
+      }
+
+      if (!diffOutput.trim()) {
+        this._send(ws, {
+          type: 'diff_result',
+          files: [],
+          error: null,
+        })
+        return
+      }
+
+      const files = parseDiff(diffOutput)
+
+      // Deduplicate files that appear in both unstaged and staged diffs
+      const seen = new Map()
+      for (const file of files) {
+        if (seen.has(file.path)) {
+          // Merge hunks from both
+          const existing = seen.get(file.path)
+          existing.hunks.push(...file.hunks)
+          existing.additions += file.additions
+          existing.deletions += file.deletions
+        } else {
+          seen.set(file.path, file)
+        }
+      }
+
+      this._send(ws, {
+        type: 'diff_result',
+        files: Array.from(seen.values()),
+        error: null,
+      })
+    } catch (err) {
+      this._send(ws, {
+        type: 'diff_result',
+        files: [],
+        error: err.message || 'Unknown error',
       })
     }
   }
