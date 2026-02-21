@@ -12,6 +12,7 @@ import { timingSafeEqual } from 'crypto'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from './crypto.js'
 import { parseDiff } from './diff-parser.js'
+import { ClientMessageSchema, AuthSchema, KeyExchangeSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -416,7 +417,8 @@ export class WsServer {
         // Decrypt incoming encrypted messages
         const client = this.clients.get(ws)
         if (msg.type === 'encrypted' && client?.encryptionState) {
-          if (typeof msg.d !== 'string' || typeof msg.n !== 'number') {
+          const envParsed = EncryptedEnvelopeSchema.safeParse(msg)
+          if (!envParsed.success) {
             console.error(`[ws] Invalid encrypted message envelope from ${client.id}`)
             ws.close()
             return
@@ -671,6 +673,14 @@ export class WsServer {
     if (!client.authenticated) {
       if (msg.type !== 'auth') return
 
+      // Validate auth message shape
+      const authParsed = AuthSchema.safeParse(msg)
+      if (!authParsed.success) {
+        this._send(ws, { type: 'auth_fail', reason: 'invalid_message' })
+        ws.close()
+        return
+      }
+
       // Check rate limit before processing auth
       const ip = client.ip
       const failure = this._authFailures.get(ip)
@@ -722,8 +732,9 @@ export class WsServer {
     if (client.encryptionPending) {
       if (msg.type === 'key_exchange') {
         clearTimeout(client._keyExchangeTimeout)
-        if (!msg.publicKey || typeof msg.publicKey !== 'string') {
-          console.warn(`[ws] Invalid key_exchange message from ${client.id}: missing or non-string publicKey`)
+        const keParsed = KeyExchangeSchema.safeParse(msg)
+        if (!keParsed.success) {
+          console.warn(`[ws] Invalid key_exchange message from ${client.id}: ${keParsed.error.issues.map(i => i.message).join(', ')}`)
           try {
             ws.send(JSON.stringify({ type: 'error', error: 'Invalid key_exchange message: publicKey is required and must be a string' }))
           } catch (err) {
@@ -777,13 +788,23 @@ export class WsServer {
       return
     }
 
+    // Validate message schema before routing
+    const parsed = ClientMessageSchema.safeParse(msg)
+    if (!parsed.success) {
+      const details = parsed.error.issues.map(i => i.message).join(', ')
+      console.warn(`[ws] Invalid message from ${client.id}: ${details}`)
+      this._send(ws, { type: 'error', code: 'INVALID_MESSAGE', details })
+      return
+    }
+    const validatedMsg = parsed.data
+
     // Route based on server mode
     if (this.sessionManager) {
-      this._handleSessionMessage(ws, client, msg)
+      this._handleSessionMessage(ws, client, validatedMsg)
     } else if (this.cliSession) {
-      this._handleCliMessage(ws, client, msg)
+      this._handleCliMessage(ws, client, validatedMsg)
     } else {
-      this._handlePtyMessage(ws, client, msg)
+      this._handlePtyMessage(ws, client, validatedMsg)
     }
   }
 
