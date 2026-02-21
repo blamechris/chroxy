@@ -612,7 +612,7 @@ describe('WsServer with authRequired: true (default behavior)', () => {
 
     const authFail = await waitForMessage(messages, 'auth_fail', 2000)
     assert.ok(authFail, 'Should receive auth_fail for null token')
-    assert.equal(authFail.reason, 'invalid_token')
+    assert.equal(authFail.reason, 'invalid_message')
 
     if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
       await Promise.race([
@@ -664,7 +664,7 @@ describe('WsServer with authRequired: true (default behavior)', () => {
 
     const authFail = await waitForMessage(messages, 'auth_fail', 2000)
     assert.ok(authFail, 'Should receive auth_fail for undefined token')
-    assert.equal(authFail.reason, 'invalid_token')
+    assert.equal(authFail.reason, 'invalid_message')
 
     if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
       await Promise.race([
@@ -1571,13 +1571,13 @@ describe('WsServer attach_session message flow', () => {
     const { ws, messages } = await createClient(port, false)
     await authenticateAndDrainPostAuth(ws, messages)
 
-    // Send attach_session without tmuxSession
+    // Send attach_session without tmuxSession — Zod validation rejects before handler
     send(ws, { type: 'attach_session', name: 'Some Name' })
 
-    // Should receive session_error
-    const sessionError = await waitForMessage(messages, 'session_error', 2000)
-    assert.ok(sessionError, 'Should receive session_error message')
-    assert.equal(sessionError.message, 'tmuxSession is required', 'Should indicate tmuxSession is required')
+    // Should receive validation error (caught by schema validation layer)
+    const error = await waitForMessage(messages, 'error', 2000)
+    assert.ok(error, 'Should receive error message')
+    assert.equal(error.code, 'INVALID_MESSAGE', 'Should indicate invalid message')
 
     ws.close()
   })
@@ -5347,11 +5347,11 @@ describe('encryption key exchange enforcement', () => {
       'Server should have disconnected after invalid key_exchange'
     )
 
-    // Note: invalid key_exchange sends type 'error' (ws-server.js line ~718), whereas
+    // Note: invalid key_exchange sends type 'error' with INVALID_MESSAGE code, whereas
     // timeout/non-key_exchange rejection sends type 'server_error' (lines ~536, ~750)
     const errorMsg = messages.find(m => m.type === 'error')
     assert.ok(errorMsg, 'Should receive error message')
-    assert.match(errorMsg.error, /publicKey is required/i)
+    assert.equal(errorMsg.code, 'INVALID_MESSAGE')
     assert.equal(closeCode, 1008)
   })
 
