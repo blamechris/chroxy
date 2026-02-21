@@ -573,6 +573,42 @@ const _deltaIdRemaps = new Map<string, string>(); // original messageId → new 
 let _pendingTerminalWrites = '';
 let _terminalWriteTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** Client-side heartbeat: detect dead connections faster than TCP keepalive */
+let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+let _pongTimeout: ReturnType<typeof setTimeout> | null = null;
+const HEARTBEAT_INTERVAL_MS = 15_000; // Send ping every 15s
+const PONG_TIMEOUT_MS = 5_000;        // Disconnect if no pong within 5s
+
+function _stopHeartbeat() {
+  if (_heartbeatInterval) { clearInterval(_heartbeatInterval); _heartbeatInterval = null; }
+  if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
+}
+
+function _startHeartbeat(socket: WebSocket) {
+  _stopHeartbeat();
+  _heartbeatInterval = setInterval(() => {
+    if (socket.readyState !== WebSocket.OPEN) { _stopHeartbeat(); return; }
+    try {
+      wsSend(socket, { type: 'ping' });
+    } catch { _stopHeartbeat(); return; }
+    _pongTimeout = setTimeout(() => {
+      // No pong received — connection is dead, force close to trigger reconnect
+      console.warn('[ws] Heartbeat pong timeout — closing dead connection');
+      _stopHeartbeat();
+      try { socket.close(); } catch {}
+    }, PONG_TIMEOUT_MS);
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
+function _onPong() {
+  if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
+}
+
+/** Add up to 50% random jitter to a delay to prevent thundering herd on reconnect */
+function _withJitter(delayMs: number): number {
+  return delayMs + Math.floor(Math.random() * delayMs * 0.5);
+}
+
 function _flushTerminalWrites() {
   _terminalWriteTimer = null;
   if (_pendingTerminalWrites.length === 0) return;
@@ -751,6 +787,10 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
     (s) => useConnectionStore.setState(s as ConnectionState);
 
   switch (msg.type) {
+    case 'pong':
+      _onPong();
+      return;
+
     case 'auth_ok': {
       // Reset replay flags — fresh auth means clean slate
       _receivingHistoryReplay = false;
@@ -814,6 +854,9 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
           customAgents: [],
         });
       }
+      // Start client-side heartbeat for dead connection detection
+      _startHeartbeat(ctx.socket);
+
       // Initiate key exchange if server requires encryption
       if (msg.encryption === 'required') {
         _pendingKeyPair = createKeyPair();
@@ -1522,6 +1565,26 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       break;
     }
 
+    case 'permission_expired': {
+      // Server reports that a permission response we sent was stale/expired
+      const expiredRequestId = msg.requestId as string;
+      if (expiredRequestId) {
+        console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);
+        // Use sessionId from server if provided, otherwise fall back to active session
+        const expTargetId = (msg.sessionId as string) || get().activeSessionId;
+        if (expTargetId && get().sessionStates[expTargetId]) {
+          updateSession(expTargetId, (ss) => ({
+            messages: ss.messages.map((m) =>
+              m.requestId === expiredRequestId && m.type === 'prompt'
+                ? { ...m, content: `${m.content}\n(Expired — this permission was already handled or timed out)`, options: undefined }
+                : m
+            ),
+          }));
+        }
+      }
+      break;
+    }
+
     case 'user_question': {
       const questions = msg.questions as unknown[];
       if (!Array.isArray(questions) || questions.length === 0) break;
@@ -1962,7 +2025,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             });
             // Retry — the server will come back
             if (_retryCount < MAX_RETRIES) {
-              const delay = RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)];
+              const delay = _withJitter(RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)]);
               setTimeout(() => {
                 if (myAttemptId !== connectionAttemptId) return;
                 get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
@@ -1999,7 +2062,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         set({ connectionError: reason });
         // Tunnel not ready yet — retry
         if (_retryCount < MAX_RETRIES) {
-          const delay = RETRY_DELAYS[_retryCount];
+          const delay = _withJitter(RETRY_DELAYS[_retryCount]);
           console.log(`[ws] Retrying in ${delay}ms...`);
           setTimeout(() => {
             if (myAttemptId !== connectionAttemptId) return;
@@ -2070,6 +2133,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     };
 
     socket.onclose = () => {
+      _stopHeartbeat();
+
       // Stale socket from a previous connection attempt — ignore
       if (myAttemptId !== connectionAttemptId) return;
 
@@ -2133,6 +2198,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     disconnectedAttemptId = connectionAttemptId;
     // Clear saved connection so ConnectScreen doesn't auto-reconnect
     lastConnectedUrl = null;
+    _stopHeartbeat();
     const { socket } = get();
     if (socket) {
       socket.onclose = null;

@@ -128,11 +128,12 @@ describe('connect() retry exhaustion', () => {
 
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
 
-    // Flush through all 6 attempts (initial + 5 retries)
+    // Flush through all 6 attempts (initial + 5 retries).
+    // 15_000ms exceeds max jittered delay: max(RETRY_DELAYS) * 1.5 = 8000 * 1.5 = 12_000ms
     for (let attempt = 0; attempt <= 5; attempt++) {
       await flushPromises();
       if (attempt < 5) {
-        jest.advanceTimersByTime(10_000);
+        jest.advanceTimersByTime(15_000);
       }
     }
 
@@ -146,10 +147,11 @@ describe('connect() retry exhaustion', () => {
 
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
 
+    // 15_000ms exceeds max jittered delay: max(RETRY_DELAYS) * 1.5 = 8000 * 1.5 = 12_000ms
     for (let attempt = 0; attempt <= 5; attempt++) {
       await flushPromises();
       if (attempt < 5) {
-        jest.advanceTimersByTime(10_000);
+        jest.advanceTimersByTime(15_000);
       }
     }
 

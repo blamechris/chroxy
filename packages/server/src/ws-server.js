@@ -3,7 +3,7 @@ import { execFileSync } from 'child_process'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
 import { statSync, readFileSync } from 'fs'
-import { readdir, readFile, stat } from 'fs/promises'
+import { readdir, readFile, stat, realpath } from 'fs/promises'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve, normalize, extname } from 'path'
 import { homedir, hostname } from 'os'
@@ -169,6 +169,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'list_agents' }                             — request available custom agents
  *   { type: 'request_full_history', sessionId? }         — request full JSONL history for a session
  *   { type: 'key_exchange', publicKey }                  — client's ephemeral X25519 public key (E2E encryption)
+ *   { type: 'ping' }                                    — client heartbeat (server responds with pong)
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
@@ -220,6 +221,8 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'client_joined', client: { clientId, deviceName, deviceType, platform } } — new client connected
  *   { type: 'client_left', clientId }                — client disconnected
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
+ *   { type: 'pong' }                                    — heartbeat response
+ *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
@@ -242,6 +245,7 @@ export class WsServer {
     this._permissionSessionMap = new Map() // requestId -> sessionId (for routing responses to correct session)
     this._questionSessionMap = new Map() // toolUseId -> sessionId (for routing question responses)
     this._primaryClients = new Map() // sessionId -> clientId (last-writer-wins)
+    this._cwdRealCache = new Map() // cwd string -> resolved realpath (avoids repeated realpath syscalls)
     this.pushManager = pushManager
 
     // Auth rate limiting: track failed attempts per IP
@@ -522,18 +526,18 @@ export class WsServer {
     if (this._encryptionEnabled) {
       client.encryptionPending = true
       client.postAuthQueue = []
-      // 5s timeout: if no key_exchange arrives, proceed unencrypted (old client)
+      // 10s timeout: if no key_exchange arrives, disconnect (never downgrade to plaintext)
       client._keyExchangeTimeout = setTimeout(() => {
         if (client.encryptionPending) {
-          console.warn(`[ws] Key exchange timeout for ${client.id} — proceeding unencrypted (legacy client?)`)
+          console.error(`[ws] Key exchange timeout for ${client.id} — disconnecting (encryption required)`)
           client.encryptionPending = false
-          const queue = client.postAuthQueue
           client.postAuthQueue = null
-          for (const queued of queue) {
-            this._send(ws, queued)
-          }
+          try {
+            ws.send(JSON.stringify({ type: 'server_error', error: 'Encryption required but key exchange timed out. Please reconnect.', recoverable: false }))
+          } catch (_) {}
+          ws.close(1008, 'Key exchange timeout')
         }
-      }, 5000)
+      }, 10_000)
     }
 
     this._send(ws, { type: 'server_mode', mode: this.serverMode })
@@ -562,6 +566,9 @@ export class WsServer {
 
       this._send(ws, { type: 'available_models', models: MODELS })
       this._send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
+
+      // Re-emit any pending permission requests across all sessions
+      this._resendPendingPermissions(ws)
       return
     }
 
@@ -593,6 +600,9 @@ export class WsServer {
         modes: PERMISSION_MODES,
       })
     }
+
+    // Re-emit any pending permission requests (CLI single-session mode)
+    this._resendPendingPermissions(ws)
   }
 
   /** Replay message history for a session to a single client.
@@ -731,16 +741,22 @@ export class WsServer {
         }
         return
       }
-      // Non-key_exchange message while pending — old client, proceed unencrypted
+      // Non-key_exchange message while pending — disconnect (never downgrade to plaintext)
       clearTimeout(client._keyExchangeTimeout)
-      console.warn(`[ws] Client ${client.id} sent ${msg.type} instead of key_exchange — proceeding unencrypted`)
+      console.error(`[ws] Client ${client.id} sent ${msg.type} instead of key_exchange — disconnecting (encryption required)`)
       client.encryptionPending = false
-      const queue = client.postAuthQueue
       client.postAuthQueue = null
-      for (const queued of queue) {
-        this._send(ws, queued)
-      }
-      // Fall through to handle this message normally
+      try {
+        ws.send(JSON.stringify({ type: 'server_error', error: 'Encryption required but client did not initiate key exchange.', recoverable: false }))
+      } catch (_) {}
+      ws.close(1008, 'Key exchange required')
+      return
+    }
+
+    // Respond to client-side heartbeat pings immediately (even during drain)
+    if (msg.type === 'ping') {
+      this._send(ws, { type: 'pong' })
+      return
     }
 
     // During drain, only allow permission_response and user_question_response
@@ -887,13 +903,25 @@ export class WsServer {
         if (originSessionId && this.sessionManager) {
           const entry = this.sessionManager.getSession(originSessionId)
           if (entry && typeof entry.session.respondToPermission === 'function') {
-            entry.session.respondToPermission(requestId, decision)
+            // Check if the permission is still pending before responding
+            const hasPending = entry.session._pendingPermissions?.has(requestId)
+            if (hasPending !== false) {
+              // Either _pendingPermissions exists and has this requestId, or
+              // _pendingPermissions doesn't exist (legacy mock) — let respondToPermission decide
+              entry.session.respondToPermission(requestId, decision)
+            } else {
+              this._send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
+            }
             break
           }
         }
 
         // Fall through to legacy HTTP-based permission resolution
-        this._resolvePermission(requestId, decision)
+        if (this._pendingPermissions.has(requestId)) {
+          this._resolvePermission(requestId, decision)
+        } else {
+          this._send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
+        }
         break
       }
 
@@ -1762,6 +1790,15 @@ export class WsServer {
     }
   }
 
+  /** Resolve a session CWD to its real path, caching the result to avoid repeated syscalls */
+  async _resolveSessionCwd(sessionCwd) {
+    const key = resolve(sessionCwd)
+    if (this._cwdRealCache.has(key)) return this._cwdRealCache.get(key)
+    const resolved = await realpath(key)
+    this._cwdRealCache.set(key, resolved)
+    return resolved
+  }
+
   /** Browse files and directories at a given path within the session CWD */
   async _browseFiles(ws, requestedPath, sessionCwd) {
     if (!sessionCwd) {
@@ -1784,9 +1821,20 @@ export class WsServer {
       }
       absPath = normalize(absPath)
 
-      // Restrict to session CWD
-      const cwdNorm = normalize(resolve(sessionCwd))
-      if (!absPath.startsWith(cwdNorm + '/') && absPath !== cwdNorm) {
+      // Resolve symlinks and restrict to session CWD
+      const cwdReal = await this._resolveSessionCwd(sessionCwd)
+      let realAbsPath
+      try {
+        realAbsPath = await realpath(absPath)
+      } catch (err) {
+        if (err.code === 'ENOENT') {
+          // Path doesn't exist — let readdir handle the error naturally
+          realAbsPath = absPath
+        } else {
+          throw err
+        }
+      }
+      if (!realAbsPath.startsWith(cwdReal + '/') && realAbsPath !== cwdReal) {
         this._send(ws, {
           type: 'file_listing',
           path: absPath,
@@ -1797,7 +1845,7 @@ export class WsServer {
         return
       }
 
-      const dirents = await readdir(absPath, { withFileTypes: true })
+      const dirents = await readdir(realAbsPath, { withFileTypes: true })
       const entries = []
       for (const d of dirents) {
         if (d.name.startsWith('.')) continue
@@ -1805,7 +1853,7 @@ export class WsServer {
         const entry = { name: d.name, isDirectory: d.isDirectory(), size: null }
         if (!d.isDirectory()) {
           try {
-            const s = await stat(join(absPath, d.name))
+            const s = await stat(join(realAbsPath, d.name))
             entry.size = s.size
           } catch (_) { /* skip size on error */ }
         }
@@ -1819,11 +1867,11 @@ export class WsServer {
       })
 
       // parentPath is null at CWD root
-      const parentPath = absPath === cwdNorm ? null : resolve(absPath, '..')
+      const parentPath = realAbsPath === cwdReal ? null : resolve(realAbsPath, '..')
 
       this._send(ws, {
         type: 'file_listing',
-        path: absPath,
+        path: realAbsPath,
         parentPath,
         entries,
         error: null,
@@ -1877,9 +1925,19 @@ export class WsServer {
     try {
       absPath = normalize(resolve(sessionCwd, requestedPath.trim()))
 
-      // Restrict to session CWD
-      const cwdNorm = normalize(resolve(sessionCwd))
-      if (!absPath.startsWith(cwdNorm + '/') && absPath !== cwdNorm) {
+      // Resolve symlinks and restrict to session CWD
+      const cwdReal = await this._resolveSessionCwd(sessionCwd)
+      let realAbsPath
+      try {
+        realAbsPath = await realpath(absPath)
+      } catch (err) {
+        if (err.code === 'ENOENT') {
+          realAbsPath = absPath // let stat() handle it below
+        } else {
+          throw err
+        }
+      }
+      if (!realAbsPath.startsWith(cwdReal + '/') && realAbsPath !== cwdReal) {
         this._send(ws, {
           type: 'file_content',
           path: absPath,
@@ -1892,7 +1950,7 @@ export class WsServer {
         return
       }
 
-      const fileStat = await stat(absPath)
+      const fileStat = await stat(realAbsPath)
       if (fileStat.isDirectory()) {
         this._send(ws, {
           type: 'file_content',
@@ -1919,8 +1977,8 @@ export class WsServer {
         return
       }
 
-      // Read file content
-      const buf = await readFile(absPath)
+      // Read file content (use resolved path to avoid following symlinks after check)
+      const buf = await readFile(realAbsPath)
 
       // Binary detection: check first 8KB for null bytes
       const checkLen = Math.min(buf.length, 8192)
@@ -2198,6 +2256,7 @@ export class WsServer {
           res.end(JSON.stringify({ decision }))
         },
         timer,
+        data: { requestId, tool, description, input: toolInput, remainingMs: 300_000 },
       })
     })
   }
@@ -2274,6 +2333,32 @@ export class WsServer {
         res.end(JSON.stringify({ error: 'unknown or expired requestId' }))
       }
     })
+  }
+
+  /** Re-send any pending permission requests to a newly connected/reconnected client */
+  _resendPendingPermissions(ws) {
+    // SDK-mode: check all sessions for pending permissions
+    if (this.sessionManager?._sessions instanceof Map) {
+      for (const [sessionId, entry] of this.sessionManager._sessions) {
+        if (entry.session?._pendingPermissions instanceof Map) {
+          for (const [requestId] of entry.session._pendingPermissions) {
+            const permData = entry.session._lastPermissionData?.get(requestId)
+            if (permData) {
+              console.log(`[ws] Re-sending pending permission ${requestId} to reconnected client`)
+              this._send(ws, { type: 'permission_request', ...permData, sessionId })
+            }
+          }
+        }
+      }
+    }
+
+    // Legacy HTTP-held permissions
+    for (const [requestId, pending] of this._pendingPermissions) {
+      if (pending.data) {
+        console.log(`[ws] Re-sending pending legacy permission ${requestId} to reconnected client`)
+        this._send(ws, { type: 'permission_request', ...pending.data })
+      }
+    }
   }
 
   /** Resolve a pending permission request (called when app sends permission_response) */
