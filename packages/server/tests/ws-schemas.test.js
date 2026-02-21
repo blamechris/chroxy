@@ -203,8 +203,18 @@ describe('SetPermissionModeSchema', () => {
     assert.ok(result.data.confirmed)
   })
 
+  it('accepts plan mode', () => {
+    const result = SetPermissionModeSchema.safeParse({ type: 'set_permission_mode', mode: 'plan' })
+    assert.ok(result.success)
+  })
+
   it('rejects missing mode', () => {
     const result = SetPermissionModeSchema.safeParse({ type: 'set_permission_mode' })
+    assert.ok(!result.success)
+  })
+
+  it('rejects invalid mode value', () => {
+    const result = SetPermissionModeSchema.safeParse({ type: 'set_permission_mode', mode: 'bypassAll' })
     assert.ok(!result.success)
   })
 })
@@ -217,13 +227,33 @@ describe('PermissionResponseSchema', () => {
     assert.ok(result.success)
   })
 
+  it('accepts allowAlways decision', () => {
+    const result = PermissionResponseSchema.safeParse({ type: 'permission_response', requestId: 'req-1', decision: 'allowAlways' })
+    assert.ok(result.success)
+  })
+
+  it('accepts deny decision', () => {
+    const result = PermissionResponseSchema.safeParse({ type: 'permission_response', requestId: 'req-1', decision: 'deny' })
+    assert.ok(result.success)
+  })
+
   it('rejects missing requestId', () => {
     const result = PermissionResponseSchema.safeParse({ type: 'permission_response', decision: 'allow' })
     assert.ok(!result.success)
   })
 
+  it('rejects empty requestId', () => {
+    const result = PermissionResponseSchema.safeParse({ type: 'permission_response', requestId: '', decision: 'allow' })
+    assert.ok(!result.success)
+  })
+
   it('rejects missing decision', () => {
     const result = PermissionResponseSchema.safeParse({ type: 'permission_response', requestId: 'req-1' })
+    assert.ok(!result.success)
+  })
+
+  it('rejects invalid decision value', () => {
+    const result = PermissionResponseSchema.safeParse({ type: 'permission_response', requestId: 'req-1', decision: 'maybe' })
     assert.ok(!result.success)
   })
 })
@@ -464,6 +494,11 @@ describe('EncryptedEnvelopeSchema', () => {
     assert.ok(result.success)
   })
 
+  it('accepts positive integer nonce', () => {
+    const result = EncryptedEnvelopeSchema.safeParse({ type: 'encrypted', d: 'ciphertext', n: 42 })
+    assert.ok(result.success)
+  })
+
   it('rejects missing d', () => {
     const result = EncryptedEnvelopeSchema.safeParse({ type: 'encrypted', n: 0 })
     assert.ok(!result.success)
@@ -471,6 +506,16 @@ describe('EncryptedEnvelopeSchema', () => {
 
   it('rejects non-number n', () => {
     const result = EncryptedEnvelopeSchema.safeParse({ type: 'encrypted', d: 'data', n: 'zero' })
+    assert.ok(!result.success)
+  })
+
+  it('rejects negative nonce', () => {
+    const result = EncryptedEnvelopeSchema.safeParse({ type: 'encrypted', d: 'data', n: -1 })
+    assert.ok(!result.success)
+  })
+
+  it('rejects non-integer nonce', () => {
+    const result = EncryptedEnvelopeSchema.safeParse({ type: 'encrypted', d: 'data', n: 1.5 })
     assert.ok(!result.success)
   })
 })

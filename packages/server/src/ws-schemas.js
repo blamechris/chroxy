@@ -53,14 +53,14 @@ export const SetModelSchema = z.object({
 
 export const SetPermissionModeSchema = z.object({
   type: z.literal('set_permission_mode'),
-  mode: z.string(),
+  mode: z.enum(['approve', 'auto', 'plan']),
   confirmed: z.boolean().optional(),
 })
 
 export const PermissionResponseSchema = z.object({
   type: z.literal('permission_response'),
-  requestId: z.string(),
-  decision: z.string(),
+  requestId: z.string().min(1),
+  decision: z.enum(['allow', 'allowAlways', 'deny']),
 })
 
 export const ListSessionsSchema = z.object({
@@ -160,13 +160,14 @@ export const RequestSessionContextSchema = z.object({
 export const EncryptedEnvelopeSchema = z.object({
   type: z.literal('encrypted'),
   d: z.string(),
-  n: z.number(),
+  n: z.number().int().nonnegative(),
 })
 
 // -- Discriminated union of all client->server message types --
-// Note: auth, key_exchange, ping, and encrypted are handled before the
-// main switch and are not included in this union. They are validated
-// inline in _handleMessage for protocol ordering reasons.
+// Note: auth, key_exchange, and encrypted are handled before the main
+// switch and are not included in this union. They are validated inline
+// in _handleMessage for protocol ordering reasons. ping is also handled
+// earlier but is only checked by type, not validated with PingSchema.
 export const ClientMessageSchema = z.discriminatedUnion('type', [
   InputSchema,
   ResizeSchema,
