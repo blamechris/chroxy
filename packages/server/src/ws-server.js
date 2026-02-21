@@ -2580,7 +2580,7 @@ export class WsServer {
     // Assign per-client monotonic sequence number
     if (client) {
       client._seq++
-      message = { seq: client._seq, ...message }
+      message = { ...message, seq: client._seq }
     }
     try {
       // Encrypt if encryption is active for this client
