@@ -630,7 +630,8 @@ export class WsServer {
 
     const history = fullHistory.slice(startIdx)
 
-    this._send(ws, { type: 'history_replay_start', sessionId })
+    const truncated = this.sessionManager.isHistoryTruncated(sessionId)
+    this._send(ws, { type: 'history_replay_start', sessionId, truncated })
     for (const entry of history) {
       this._send(ws, entry)
     }

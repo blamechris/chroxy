@@ -558,3 +558,85 @@ describe('SessionManager.serializeState includes conversationId', () => {
     assert.equal(fileContents.sessions[0].conversationId, 'conv-persist-123')
   })
 })
+
+describe('SessionManager ring buffer size', () => {
+  it('defaults to 500 max history entries', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    assert.equal(mgr._maxHistory, 500)
+  })
+
+  it('trims history when exceeding 500 entries', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    mgr._messageHistory.set('s1', [])
+    const history = mgr._messageHistory.get('s1')
+
+    for (let i = 0; i < 600; i++) {
+      mgr._pushHistory(history, { type: 'message', content: `msg-${i}`, timestamp: i })
+    }
+
+    assert.equal(history.length, 500)
+    // Oldest messages should have been dropped (0-99)
+    assert.equal(history[0].content, 'msg-100')
+    assert.equal(history[499].content, 'msg-599')
+  })
+})
+
+describe('SessionManager persist debounce default', () => {
+  it('defaults to 2000ms persist debounce', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    assert.equal(mgr._persistDebounceMs, 2000)
+  })
+
+  it('allows overriding persist debounce', () => {
+    const mgr = new SessionManager({ maxSessions: 5, persistDebounceMs: 500 })
+    assert.equal(mgr._persistDebounceMs, 500)
+  })
+})
+
+describe('SessionManager.isHistoryTruncated', () => {
+  it('returns false when history has not been truncated', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    mgr._messageHistory.set('s1', [])
+    const history = mgr._messageHistory.get('s1')
+
+    for (let i = 0; i < 10; i++) {
+      mgr._pushHistory(history, { type: 'message', content: `msg-${i}`, timestamp: i })
+    }
+
+    assert.equal(mgr.isHistoryTruncated('s1'), false)
+  })
+
+  it('returns true after ring buffer drops messages', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    mgr._messageHistory.set('s1', [])
+    const history = mgr._messageHistory.get('s1')
+
+    // Fill beyond capacity to trigger truncation
+    for (let i = 0; i < 501; i++) {
+      mgr._pushHistory(history, { type: 'message', content: `msg-${i}`, timestamp: i })
+    }
+
+    assert.equal(mgr.isHistoryTruncated('s1'), true)
+  })
+
+  it('returns false for unknown session', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    assert.equal(mgr.isHistoryTruncated('nonexistent'), false)
+  })
+
+  it('clears truncation flag when session is destroyed', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+    mgr._messageHistory.set('s1', [])
+    mgr._historyTruncated.set('s1', true)
+
+    mgr.destroySession('s1')
+
+    assert.equal(mgr.isHistoryTruncated('s1'), false)
+    assert.equal(mgr._historyTruncated.has('s1'), false)
+  })
+})
