@@ -5170,6 +5170,7 @@ describe('encryption key exchange enforcement', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
+      keyExchangeTimeoutMs: 200,
     })
     const port = await startServerAndGetPort(server)
 
@@ -5213,10 +5214,10 @@ describe('encryption key exchange enforcement', () => {
     const authOk = messages.find(m => m.type === 'auth_ok')
     assert.equal(authOk.encryption, 'required', 'Should indicate encryption is required')
 
-    // Wait for the timeout disconnect (10s) — server should send server_error then close
+    // Wait for the timeout disconnect (200ms) — server should send server_error then close
     await withTimeout(
       closedPromise,
-      15_000,
+      2_000,
       'Server should have disconnected after key exchange timeout'
     )
 
