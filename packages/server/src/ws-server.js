@@ -11,6 +11,9 @@ import { timingSafeEqual } from 'crypto'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from './crypto.js'
 
+// -- Permission TTL --
+const PERMISSION_TTL_MS = 300_000 // 5 minutes
+
 // -- Attachment validation constants --
 const MAX_ATTACHMENT_COUNT = 5
 const MAX_IMAGE_SIZE = 2 * 1024 * 1024       // 2MB decoded
@@ -2257,7 +2260,7 @@ export class WsServer {
           res.end(JSON.stringify({ decision }))
         },
         timer,
-        data: { requestId, tool, description, input: toolInput, remainingMs: 300_000 },
+        data: { requestId, tool, description, input: toolInput, remainingMs: 300_000, createdAt: Date.now() },
       })
     })
   }
@@ -2345,8 +2348,17 @@ export class WsServer {
           for (const [requestId] of entry.session._pendingPermissions) {
             const permData = entry.session._lastPermissionData?.get(requestId)
             if (permData) {
-              console.log(`[ws] Re-sending pending permission ${requestId} to reconnected client`)
-              this._send(ws, { type: 'permission_request', ...permData, sessionId })
+              const elapsed = Math.max(0, Date.now() - (permData.createdAt ?? Date.now()))
+              const ttl = permData.remainingMs ?? PERMISSION_TTL_MS
+              const remainingMs = Math.min(ttl, Math.max(0, ttl - elapsed))
+              if (remainingMs <= 0) {
+                console.log(`[ws] Skipping expired permission ${requestId}`)
+                continue
+              }
+              console.log(`[ws] Re-sending pending permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
+              // Strip createdAt — it's internal server state, not part of the client protocol
+              const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = permData
+              this._send(ws, { type: 'permission_request', ...clientPayload, remainingMs, sessionId })
             }
           }
         }
@@ -2356,8 +2368,17 @@ export class WsServer {
     // Legacy HTTP-held permissions
     for (const [requestId, pending] of this._pendingPermissions) {
       if (pending.data) {
-        console.log(`[ws] Re-sending pending legacy permission ${requestId} to reconnected client`)
-        this._send(ws, { type: 'permission_request', ...pending.data })
+        const elapsed = Math.max(0, Date.now() - (pending.data.createdAt ?? Date.now()))
+        const ttl = pending.data.remainingMs ?? PERMISSION_TTL_MS
+        const remainingMs = Math.min(ttl, Math.max(0, ttl - elapsed))
+        if (remainingMs <= 0) {
+          console.log(`[ws] Skipping expired legacy permission ${requestId}`)
+          continue
+        }
+        console.log(`[ws] Re-sending pending legacy permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
+        // Strip createdAt — it's internal server state, not part of the client protocol
+        const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = pending.data
+        this._send(ws, { type: 'permission_request', ...clientPayload, remainingMs })
       }
     }
   }

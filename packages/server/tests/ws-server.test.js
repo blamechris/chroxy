@@ -5294,3 +5294,247 @@ describe('encryption key exchange enforcement', () => {
     ws.close()
   })
 })
+
+describe('Reconnect permission recovery (_resendPendingPermissions)', () => {
+  let server
+
+  /**
+   * Create a WsServer with a mock sessionManager that exposes _sessions Map.
+   * Each session has _pendingPermissions and _lastPermissionData maps
+   * to simulate SDK-mode permission state.
+   */
+  function createPermMockSessionManager(sessions = {}) {
+    const _sessions = new Map()
+    for (const [id, { pending, lastData }] of Object.entries(sessions)) {
+      const session = new EventEmitter()
+      session._pendingPermissions = new Map(Object.entries(pending || {}))
+      session._lastPermissionData = new Map(Object.entries(lastData || {}))
+      _sessions.set(id, { session })
+    }
+    return { _sessions }
+  }
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('re-sends pending permission on reconnect with correct fields', () => {
+    const now = Date.now()
+    const permData = {
+      requestId: 'perm-1',
+      tool: 'Bash',
+      description: 'ls -la',
+      input: { command: 'ls -la' },
+      remainingMs: 300_000,
+      createdAt: now - 1000, // 1 second ago
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      authRequired: false,
+    })
+    server.sessionManager = createPermMockSessionManager({
+      'session-1': {
+        pending: { 'perm-1': true },
+        lastData: { 'perm-1': permData },
+      },
+    })
+
+    const sent = []
+    server._send = (ws, msg) => sent.push(msg)
+
+    server._resendPendingPermissions({})
+
+    assert.equal(sent.length, 1, 'Should send exactly one permission')
+    assert.equal(sent[0].type, 'permission_request')
+    assert.equal(sent[0].requestId, 'perm-1')
+    assert.equal(sent[0].tool, 'Bash')
+    assert.equal(sent[0].sessionId, 'session-1')
+    assert.ok(sent[0].remainingMs > 0 && sent[0].remainingMs <= 300_000,
+      'remainingMs should be positive and <= 300s')
+    // createdAt is internal server state — must NOT leak to client protocol
+    assert.equal(sent[0].createdAt, undefined, 'createdAt should not be sent to client')
+  })
+
+  it('adjusts remainingMs for elapsed time', () => {
+    const twoMinAgo = Date.now() - 120_000
+    const permData = {
+      requestId: 'perm-2',
+      tool: 'Edit',
+      description: 'edit file',
+      input: {},
+      remainingMs: 300_000,
+      createdAt: twoMinAgo,
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      authRequired: false,
+    })
+    server.sessionManager = createPermMockSessionManager({
+      'session-1': {
+        pending: { 'perm-2': true },
+        lastData: { 'perm-2': permData },
+      },
+    })
+
+    const sent = []
+    server._send = (ws, msg) => sent.push(msg)
+
+    server._resendPendingPermissions({})
+
+    assert.equal(sent.length, 1)
+    // Should be approximately 180s remaining (300 - 120), allow 5s tolerance
+    assert.ok(sent[0].remainingMs >= 175_000 && sent[0].remainingMs <= 185_000,
+      `Expected ~180s remaining, got ${sent[0].remainingMs}ms`)
+  })
+
+  it('skips expired permissions (createdAt > 5 min ago)', () => {
+    const sixMinAgo = Date.now() - 360_000
+    const permData = {
+      requestId: 'perm-3',
+      tool: 'Bash',
+      description: 'expired command',
+      input: {},
+      remainingMs: 300_000,
+      createdAt: sixMinAgo,
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      authRequired: false,
+    })
+    server.sessionManager = createPermMockSessionManager({
+      'session-1': {
+        pending: { 'perm-3': true },
+        lastData: { 'perm-3': permData },
+      },
+    })
+
+    const sent = []
+    server._send = (ws, msg) => sent.push(msg)
+
+    server._resendPendingPermissions({})
+
+    assert.equal(sent.length, 0, 'Should not re-send expired permissions')
+  })
+
+  it('skips resolved permissions (in lastData but not pendingPermissions)', () => {
+    const permData = {
+      requestId: 'perm-4',
+      tool: 'Read',
+      description: 'read file',
+      input: {},
+      remainingMs: 300_000,
+      createdAt: Date.now() - 10_000,
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      authRequired: false,
+    })
+    // Permission is in lastData but NOT in pendingPermissions (already resolved)
+    server.sessionManager = createPermMockSessionManager({
+      'session-1': {
+        pending: {}, // empty — permission was resolved
+        lastData: { 'perm-4': permData },
+      },
+    })
+
+    const sent = []
+    server._send = (ws, msg) => sent.push(msg)
+
+    server._resendPendingPermissions({})
+
+    assert.equal(sent.length, 0, 'Should not re-send resolved permissions')
+  })
+
+  it('handles multiple sessions with mixed pending state', () => {
+    const now = Date.now()
+    const activePerm = {
+      requestId: 'perm-5',
+      tool: 'Bash',
+      description: 'active perm',
+      input: {},
+      remainingMs: 300_000,
+      createdAt: now - 30_000, // 30s ago
+    }
+    const resolvedPerm = {
+      requestId: 'perm-6',
+      tool: 'Edit',
+      description: 'resolved perm',
+      input: {},
+      remainingMs: 300_000,
+      createdAt: now - 60_000,
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      authRequired: false,
+    })
+    server.sessionManager = createPermMockSessionManager({
+      'session-a': {
+        pending: { 'perm-5': true },
+        lastData: { 'perm-5': activePerm },
+      },
+      'session-b': {
+        pending: {}, // perm-6 was resolved
+        lastData: { 'perm-6': resolvedPerm },
+      },
+    })
+
+    const sent = []
+    server._send = (ws, msg) => sent.push(msg)
+
+    server._resendPendingPermissions({})
+
+    assert.equal(sent.length, 1, 'Should only send the active permission')
+    assert.equal(sent[0].requestId, 'perm-5')
+    assert.equal(sent[0].sessionId, 'session-a')
+  })
+
+  it('re-sends legacy HTTP-held permissions with adjusted remainingMs', () => {
+    const now = Date.now()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      authRequired: false,
+    })
+    // No session manager — use legacy _pendingPermissions
+    server.sessionManager = null
+    server._pendingPermissions.set('perm-legacy', {
+      resolve: () => {},
+      timer: null,
+      data: {
+        requestId: 'perm-legacy',
+        tool: 'Bash',
+        description: 'legacy cmd',
+        input: {},
+        remainingMs: 300_000,
+        createdAt: now - 60_000, // 1 minute ago
+      },
+    })
+
+    const sent = []
+    server._send = (ws, msg) => sent.push(msg)
+
+    server._resendPendingPermissions({})
+
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].requestId, 'perm-legacy')
+    // Should be approximately 240s remaining (300 - 60), allow 5s tolerance
+    assert.ok(sent[0].remainingMs >= 235_000 && sent[0].remainingMs <= 245_000,
+      `Expected ~240s remaining, got ${sent[0].remainingMs}ms`)
+    // createdAt must not leak to client
+    assert.equal(sent[0].createdAt, undefined, 'createdAt should not be sent to client')
+  })
+})

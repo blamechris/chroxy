@@ -1539,28 +1539,58 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
           }
         }
       }
-      const permMsg: ChatMessage = {
-        id: nextMessageId('perm'),
-        type: 'prompt',
-        content: msg.tool ? `${msg.tool}: ${msg.description}` : ((msg.description as string) || 'Permission required'),
-        tool: msg.tool as string | undefined,
-        requestId: msg.requestId as string,
-        toolInput: msg.input && typeof msg.input === 'object' ? msg.input as Record<string, unknown> : undefined,
-        options: [
-          { label: 'Allow', value: 'allow' },
-          { label: 'Deny', value: 'deny' },
-          { label: 'Always Allow', value: 'allowAlways' },
-        ],
-        expiresAt: typeof msg.remainingMs === 'number' ? Date.now() + msg.remainingMs : undefined,
-        timestamp: Date.now(),
-      };
+      const permRequestId = msg.requestId as string;
+      const newOptions = [
+        { label: 'Allow', value: 'allow' },
+        { label: 'Deny', value: 'deny' },
+        { label: 'Always Allow', value: 'allowAlways' },
+      ];
+      const newExpiresAt = typeof msg.remainingMs === 'number' ? Date.now() + msg.remainingMs : undefined;
       const permTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (permTargetId && get().sessionStates[permTargetId]) {
-        updateSession(permTargetId, (ss) => ({
-          messages: [...ss.messages, permMsg],
-        }));
+
+      // Deduplicate: if a message with this requestId already exists (e.g. from before
+      // a reconnect), update it in place instead of creating a duplicate card.
+      const targetMessages = permTargetId && get().sessionStates[permTargetId]
+        ? get().sessionStates[permTargetId].messages
+        : get().messages;
+      const existingIdx = targetMessages.findIndex(
+        (m) => m.requestId === permRequestId && m.type === 'prompt'
+      );
+
+      if (existingIdx !== -1) {
+        // Update existing permission card — clear answered state and refresh expiry
+        const updater = (ss: { messages: ChatMessage[] }) => ({
+          messages: ss.messages.map((m) =>
+            m.requestId === permRequestId && m.type === 'prompt'
+              ? { ...m, answered: undefined, options: newOptions, expiresAt: newExpiresAt }
+              : m
+          ),
+        });
+        if (permTargetId && get().sessionStates[permTargetId]) {
+          updateSession(permTargetId, updater);
+        } else {
+          set({ messages: updater({ messages: get().messages }).messages });
+        }
       } else {
-        get().addMessage(permMsg);
+        // Create new permission card
+        const permMsg: ChatMessage = {
+          id: nextMessageId('perm'),
+          type: 'prompt',
+          content: msg.tool ? `${msg.tool}: ${msg.description}` : ((msg.description as string) || 'Permission required'),
+          tool: msg.tool as string | undefined,
+          requestId: permRequestId,
+          toolInput: msg.input && typeof msg.input === 'object' ? msg.input as Record<string, unknown> : undefined,
+          options: newOptions,
+          expiresAt: newExpiresAt,
+          timestamp: Date.now(),
+        };
+        if (permTargetId && get().sessionStates[permTargetId]) {
+          updateSession(permTargetId, (ss) => ({
+            messages: [...ss.messages, permMsg],
+          }));
+        } else {
+          get().addMessage(permMsg);
+        }
       }
       break;
     }
