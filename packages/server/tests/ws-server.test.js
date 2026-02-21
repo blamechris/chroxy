@@ -5665,3 +5665,191 @@ describe('Reconnect permission recovery (_resendPendingPermissions)', () => {
       'Should not populate routing map for expired permissions')
   })
 })
+
+describe('outbound message sequence numbers', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('includes monotonically increasing seq on all messages', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+
+    // Wait for initial messages to settle (auth_ok, server_mode, status, etc.)
+    await new Promise(r => setTimeout(r, 200))
+
+    // All messages should have a seq field
+    assert.ok(messages.length > 0, 'Should have received messages')
+    for (const msg of messages) {
+      assert.equal(typeof msg.seq, 'number', `Message type "${msg.type}" should have numeric seq`)
+    }
+
+    // seq should be monotonically increasing starting from 1
+    for (let i = 0; i < messages.length; i++) {
+      assert.equal(messages[i].seq, i + 1,
+        `Message ${i} (type: ${messages[i].type}) should have seq ${i + 1}, got ${messages[i].seq}`)
+    }
+
+    ws.close()
+  })
+
+  it('continues seq across different message types', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+
+    // Wait for initial messages
+    await new Promise(r => setTimeout(r, 200))
+
+    const initialCount = messages.length
+
+    // Trigger additional messages via ping
+    send(ws, { type: 'ping' })
+    await waitForMessage(messages, 'pong', 1000)
+
+    const pong = messages.find(m => m.type === 'pong')
+    assert.ok(pong, 'Should receive pong')
+    assert.equal(pong.seq, initialCount + 1,
+      'pong seq should continue from where initial messages left off')
+
+    ws.close()
+  })
+
+  it('resets seq on new connection', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // First connection
+    const { ws: ws1, messages: messages1 } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 200))
+
+    const firstAuthOk = messages1.find(m => m.type === 'auth_ok')
+    assert.equal(firstAuthOk.seq, 1, 'First connection auth_ok should have seq 1')
+
+    ws1.close()
+    await new Promise(r => setTimeout(r, 100))
+
+    // Second connection — seq should restart at 1
+    const { ws: ws2, messages: messages2 } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 200))
+
+    const secondAuthOk = messages2.find(m => m.type === 'auth_ok')
+    assert.equal(secondAuthOk.seq, 1, 'Second connection auth_ok should have seq 1 (reset)')
+
+    ws2.close()
+  })
+
+  it('assigns independent seq per client on broadcast', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect two clients
+    const { ws: ws1, messages: messages1 } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 200))
+
+    const { ws: ws2, messages: messages2 } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 200))
+
+    const client1CountBefore = messages1.length
+    const client2CountBefore = messages2.length
+
+    // Broadcast a message — each client gets their own seq
+    server.broadcast({ type: 'discovered_sessions', tmux: [] })
+    await new Promise(r => setTimeout(r, 200))
+
+    const disc1 = messages1.find(m => m.type === 'discovered_sessions')
+    const disc2 = messages2.find(m => m.type === 'discovered_sessions')
+    assert.ok(disc1, 'Client 1 should receive broadcast')
+    assert.ok(disc2, 'Client 2 should receive broadcast')
+
+    // Client 1 connected first and received more messages before the broadcast,
+    // plus it got a client_joined when client 2 connected
+    assert.equal(disc1.seq, client1CountBefore + 1,
+      'Client 1 broadcast seq should continue from its own counter')
+    assert.equal(disc2.seq, client2CountBefore + 1,
+      'Client 2 broadcast seq should continue from its own counter')
+
+    // The seq values should differ since the clients have different message counts
+    assert.notEqual(disc1.seq, disc2.seq,
+      'Different clients should have different seq values for the same broadcast')
+
+    ws1.close()
+    ws2.close()
+  })
+
+  it('includes seq in history replay messages', async () => {
+    // Create a mock session manager with history (must be EventEmitter for _setupSessionForwarding)
+    const mockSession = createMockSession()
+    const mockManager = new EventEmitter()
+    mockManager.listSessions = () => [{ id: 'sess-1', name: 'Test', active: true }]
+    mockManager.getSession = (id) => id === 'sess-1' ? { session: mockSession, name: 'Test', cwd: '/tmp' } : null
+    Object.defineProperty(mockManager, 'firstSessionId', { get: () => 'sess-1' })
+    mockManager.getHistory = () => [
+      { type: 'message', messageType: 'response', text: 'Hello', sessionId: 'sess-1' },
+      { type: 'stream_end', messageId: 'msg-1', sessionId: 'sess-1' },
+    ]
+    mockManager.isHistoryTruncated = () => false
+    mockManager.recordUserInput = () => {}
+    mockManager.getFullHistoryAsync = async () => []
+    mockManager.getSessionContext = async () => null
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+    await new Promise(r => setTimeout(r, 300))
+
+    // Find history replay messages
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const replayEnd = messages.find(m => m.type === 'history_replay_end')
+    assert.ok(replayStart, 'Should have history_replay_start')
+    assert.ok(replayEnd, 'Should have history_replay_end')
+    assert.equal(typeof replayStart.seq, 'number', 'history_replay_start should have seq')
+    assert.equal(typeof replayEnd.seq, 'number', 'history_replay_end should have seq')
+
+    // All messages including replayed ones should have continuous seq
+    for (let i = 0; i < messages.length; i++) {
+      assert.equal(messages[i].seq, i + 1,
+        `Message ${i} (type: ${messages[i].type}) should have seq ${i + 1}`)
+    }
+
+    ws.close()
+  })
+})
