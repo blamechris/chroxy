@@ -228,7 +228,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
  */
 export class WsServer {
-  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt } = {}) {
+  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._maxPayload = maxPayload || 10 * 1024 * 1024 // default 10MB (supports image/doc attachments)
@@ -236,6 +236,7 @@ export class WsServer {
     this.outputParser = outputParser || null
     this.authRequired = authRequired
     this._encryptionEnabled = !noEncrypt
+    this._keyExchangeTimeoutMs = keyExchangeTimeoutMs ?? 10_000
     this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
     this.httpServer = null
     this.wss = null
@@ -526,7 +527,7 @@ export class WsServer {
     if (this._encryptionEnabled) {
       client.encryptionPending = true
       client.postAuthQueue = []
-      // 10s timeout: if no key_exchange arrives, disconnect (never downgrade to plaintext)
+      // Key exchange timeout: if no key_exchange arrives, disconnect (never downgrade to plaintext)
       client._keyExchangeTimeout = setTimeout(() => {
         if (client.encryptionPending) {
           console.error(`[ws] Key exchange timeout for ${client.id} — disconnecting (encryption required)`)
@@ -537,7 +538,7 @@ export class WsServer {
           } catch (_) {}
           ws.close(1008, 'Key exchange timeout')
         }
-      }, 10_000)
+      }, this._keyExchangeTimeoutMs)
     }
 
     this._send(ws, { type: 'server_mode', mode: this.serverMode })
