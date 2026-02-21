@@ -1769,8 +1769,24 @@ export class WsServer {
       }
       absPath = normalize(absPath)
 
+      // Resolve symlinks so a symlink inside $HOME pointing outside cannot
+      // bypass the boundary check.  realpath() throws ENOENT for paths that
+      // don't exist — fall back to the normalised path and let readdir()
+      // surface the error naturally.
+      let realAbsPath
+      try {
+        realAbsPath = await realpath(absPath)
+      } catch (err) {
+        if (err.code === 'ENOENT') {
+          realAbsPath = absPath
+        } else {
+          throw err
+        }
+      }
+      const homeReal = await realpath(home)
+
       // Restrict directory listing to the user's home directory
-      if (!absPath.startsWith(home + '/') && absPath !== home) {
+      if (!realAbsPath.startsWith(homeReal + '/') && realAbsPath !== homeReal) {
         this._send(ws, {
           type: 'directory_listing',
           path: absPath,
@@ -1781,7 +1797,7 @@ export class WsServer {
         return
       }
 
-      const dirents = await readdir(absPath, { withFileTypes: true })
+      const dirents = await readdir(realAbsPath, { withFileTypes: true })
       const entries = dirents
         .filter(d => d.isDirectory() && !d.name.startsWith('.'))
         .sort((a, b) => a.name.localeCompare(b.name))
