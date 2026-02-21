@@ -4964,7 +4964,8 @@ describe('file browser symlink security', () => {
     rmSync(outsideDir, { recursive: true, force: true })
   })
 
-  it('browse_files: rejects symlink directory pointing outside CWD', async () => {
+  /** Spin up a WsServer with cwd set to tempDir and return a connected client. */
+  async function createFileBrowserTestServer() {
     const mockSession = createMockSession()
     mockSession.cwd = tempDir
 
@@ -4976,6 +4977,11 @@ describe('file browser symlink security', () => {
     })
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
+    return { ws, messages }
+  }
+
+  it('browse_files: rejects symlink directory pointing outside CWD', async () => {
+    const { ws, messages } = await createFileBrowserTestServer()
 
     send(ws, { type: 'browse_files', path: 'escape-link' })
     const listing = await waitForMessage(messages, 'file_listing', 2000)
@@ -4988,17 +4994,7 @@ describe('file browser symlink security', () => {
   })
 
   it('browse_files: allows symlink directory pointing within CWD', async () => {
-    const mockSession = createMockSession()
-    mockSession.cwd = tempDir
-
-    server = new WsServer({
-      port: 0,
-      apiToken: 'test-token',
-      cliSession: mockSession,
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-    const { ws, messages } = await createClient(port, true)
+    const { ws, messages } = await createFileBrowserTestServer()
 
     send(ws, { type: 'browse_files', path: 'internal-link' })
     const listing = await waitForMessage(messages, 'file_listing', 2000)
@@ -5011,17 +5007,7 @@ describe('file browser symlink security', () => {
   })
 
   it('browse_files: rejects ../../../ path traversal', async () => {
-    const mockSession = createMockSession()
-    mockSession.cwd = tempDir
-
-    server = new WsServer({
-      port: 0,
-      apiToken: 'test-token',
-      cliSession: mockSession,
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-    const { ws, messages } = await createClient(port, true)
+    const { ws, messages } = await createFileBrowserTestServer()
 
     send(ws, { type: 'browse_files', path: '../../../etc' })
     const listing = await waitForMessage(messages, 'file_listing', 2000)
@@ -5034,17 +5020,7 @@ describe('file browser symlink security', () => {
   })
 
   it('read_file: rejects symlink file pointing outside CWD', async () => {
-    const mockSession = createMockSession()
-    mockSession.cwd = tempDir
-
-    server = new WsServer({
-      port: 0,
-      apiToken: 'test-token',
-      cliSession: mockSession,
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-    const { ws, messages } = await createClient(port, true)
+    const { ws, messages } = await createFileBrowserTestServer()
 
     send(ws, { type: 'read_file', path: 'escape-file' })
     const content = await waitForMessage(messages, 'file_content', 2000)
@@ -5057,17 +5033,7 @@ describe('file browser symlink security', () => {
   })
 
   it('read_file: allows reading file through symlink within CWD', async () => {
-    const mockSession = createMockSession()
-    mockSession.cwd = tempDir
-
-    server = new WsServer({
-      port: 0,
-      apiToken: 'test-token',
-      cliSession: mockSession,
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-    const { ws, messages } = await createClient(port, true)
+    const { ws, messages } = await createFileBrowserTestServer()
 
     send(ws, { type: 'read_file', path: 'internal-link/file.txt' })
     const content = await waitForMessage(messages, 'file_content', 2000)
@@ -5079,17 +5045,7 @@ describe('file browser symlink security', () => {
   })
 
   it('read_file: rejects ../../../etc/passwd traversal', async () => {
-    const mockSession = createMockSession()
-    mockSession.cwd = tempDir
-
-    server = new WsServer({
-      port: 0,
-      apiToken: 'test-token',
-      cliSession: mockSession,
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-    const { ws, messages } = await createClient(port, true)
+    const { ws, messages } = await createFileBrowserTestServer()
 
     send(ws, { type: 'read_file', path: '../../../etc/passwd' })
     const content = await waitForMessage(messages, 'file_content', 2000)
@@ -5102,17 +5058,7 @@ describe('file browser symlink security', () => {
   })
 
   it('read_file: rejects null bytes in path', async () => {
-    const mockSession = createMockSession()
-    mockSession.cwd = tempDir
-
-    server = new WsServer({
-      port: 0,
-      apiToken: 'test-token',
-      cliSession: mockSession,
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-    const { ws, messages } = await createClient(port, true)
+    const { ws, messages } = await createFileBrowserTestServer()
 
     send(ws, { type: 'read_file', path: 'subdir/file.txt\x00.jpg' })
     const content = await waitForMessage(messages, 'file_content', 2000)
@@ -5127,17 +5073,7 @@ describe('file browser symlink security', () => {
     // Create a chain: tempDir/chain-link -> outsideDir/hidden-dir
     symlinkSync(join(outsideDir, 'hidden-dir'), join(tempDir, 'chain-link'))
 
-    const mockSession = createMockSession()
-    mockSession.cwd = tempDir
-
-    server = new WsServer({
-      port: 0,
-      apiToken: 'test-token',
-      cliSession: mockSession,
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-    const { ws, messages } = await createClient(port, true)
+    const { ws, messages } = await createFileBrowserTestServer()
 
     send(ws, { type: 'browse_files', path: 'chain-link' })
     const listing = await waitForMessage(messages, 'file_listing', 2000)
