@@ -2256,7 +2256,7 @@ export class WsServer {
           res.end(JSON.stringify({ decision }))
         },
         timer,
-        data: { requestId, tool, description, input: toolInput, remainingMs: 300_000 },
+        data: { requestId, tool, description, input: toolInput, remainingMs: 300_000, createdAt: Date.now() },
       })
     })
   }
@@ -2344,8 +2344,14 @@ export class WsServer {
           for (const [requestId] of entry.session._pendingPermissions) {
             const permData = entry.session._lastPermissionData?.get(requestId)
             if (permData) {
-              console.log(`[ws] Re-sending pending permission ${requestId} to reconnected client`)
-              this._send(ws, { type: 'permission_request', ...permData, sessionId })
+              const elapsed = Date.now() - (permData.createdAt || Date.now())
+              const remainingMs = Math.max(0, 300_000 - elapsed)
+              if (remainingMs <= 0) {
+                console.log(`[ws] Skipping expired permission ${requestId}`)
+                continue
+              }
+              console.log(`[ws] Re-sending pending permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
+              this._send(ws, { type: 'permission_request', ...permData, remainingMs, sessionId })
             }
           }
         }
@@ -2355,8 +2361,14 @@ export class WsServer {
     // Legacy HTTP-held permissions
     for (const [requestId, pending] of this._pendingPermissions) {
       if (pending.data) {
-        console.log(`[ws] Re-sending pending legacy permission ${requestId} to reconnected client`)
-        this._send(ws, { type: 'permission_request', ...pending.data })
+        const elapsed = Date.now() - (pending.data.createdAt || Date.now())
+        const remainingMs = Math.max(0, 300_000 - elapsed)
+        if (remainingMs <= 0) {
+          console.log(`[ws] Skipping expired legacy permission ${requestId}`)
+          continue
+        }
+        console.log(`[ws] Re-sending pending legacy permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
+        this._send(ws, { type: 'permission_request', ...pending.data, remainingMs })
       }
     }
   }

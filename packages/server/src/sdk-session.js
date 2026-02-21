@@ -378,6 +378,7 @@ export class SdkSession extends EventEmitter {
         description,
         input: toolInput,
         remainingMs: 300_000,
+        createdAt: Date.now(),
       }
       this._lastPermissionData.set(requestId, permPayload)
       this.emit('permission_request', permPayload)
