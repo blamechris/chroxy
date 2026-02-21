@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { once, EventEmitter } from 'node:events'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
@@ -6040,6 +6040,371 @@ describe('get_diff handler', () => {
 
     assert.ok(result.error, 'Should return error when no CWD')
     assert.match(result.error, /not available/i)
+
+    ws.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// browse_files and read_file handler tests (#663)
+// ---------------------------------------------------------------------------
+describe('browse_files and read_file handlers', () => {
+  let server
+  let tempDir
+
+  beforeEach(() => {
+    // Resolve symlinks (macOS /tmp -> /private/tmp) so paths match CWD realpath checks
+    tempDir = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-fb-test-')))
+
+    // Build a test directory tree:
+    //   tempDir/
+    //     alpha.js
+    //     beta.py
+    //     .hidden
+    //     node_modules/
+    //       dep/
+    //     subdir/
+    //       nested.txt
+    //     zeta/
+    mkdirSync(join(tempDir, 'subdir'))
+    mkdirSync(join(tempDir, 'zeta'))
+    mkdirSync(join(tempDir, 'node_modules', 'dep'), { recursive: true })
+    writeFileSync(join(tempDir, 'alpha.js'), 'const a = 1')
+    writeFileSync(join(tempDir, 'beta.py'), 'print("hi")')
+    writeFileSync(join(tempDir, '.hidden'), 'secret')
+    writeFileSync(join(tempDir, 'subdir', 'nested.txt'), 'nested content')
+    writeFileSync(join(tempDir, 'node_modules', 'dep', 'index.js'), 'module.exports = {}')
+  })
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  /** Spin up a WsServer with cwd set to tempDir and return a connected client. */
+  async function createTestServer(opts = {}) {
+    const mockSession = createMockSession()
+    if (opts.cwd !== undefined) {
+      mockSession.cwd = opts.cwd
+    } else {
+      mockSession.cwd = tempDir
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    return { ws, messages }
+  }
+
+  // ------- browse_files -------
+
+  it('browse_files: lists files in session CWD', async () => {
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'browse_files', path: '' })
+    const listing = await waitForMessage(messages, 'file_listing', 2000)
+
+    assert.equal(listing.error, null, 'Should not return an error')
+    assert.ok(listing.entries.length > 0, 'Should return entries')
+
+    // Check entries have expected shape
+    for (const entry of listing.entries) {
+      assert.equal(typeof entry.name, 'string')
+      assert.equal(typeof entry.isDirectory, 'boolean')
+      // size is null for directories, number for files
+      if (!entry.isDirectory) {
+        assert.equal(typeof entry.size, 'number')
+      }
+    }
+
+    // alpha.js should be present
+    assert.ok(listing.entries.some(e => e.name === 'alpha.js'), 'Should include alpha.js')
+    // subdir should be present
+    assert.ok(listing.entries.some(e => e.name === 'subdir' && e.isDirectory), 'Should include subdir/')
+
+    ws.close()
+  })
+
+  it('browse_files: sorts directories first, then alphabetical', async () => {
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'browse_files', path: '' })
+    const listing = await waitForMessage(messages, 'file_listing', 2000)
+
+    assert.equal(listing.error, null)
+
+    const dirs = listing.entries.filter(e => e.isDirectory)
+    const files = listing.entries.filter(e => !e.isDirectory)
+
+    // All directories should come before all files
+    const lastDirIdx = listing.entries.lastIndexOf(dirs[dirs.length - 1])
+    const firstFileIdx = listing.entries.indexOf(files[0])
+    assert.ok(lastDirIdx < firstFileIdx, 'Directories should come before files')
+
+    // Directories should be alphabetical among themselves
+    for (let i = 1; i < dirs.length; i++) {
+      assert.ok(dirs[i - 1].name.localeCompare(dirs[i].name) <= 0,
+        `Dir ${dirs[i - 1].name} should come before ${dirs[i].name}`)
+    }
+
+    // Files should be alphabetical among themselves
+    for (let i = 1; i < files.length; i++) {
+      assert.ok(files[i - 1].name.localeCompare(files[i].name) <= 0,
+        `File ${files[i - 1].name} should come before ${files[i].name}`)
+    }
+
+    ws.close()
+  })
+
+  it('browse_files: filters dotfiles and node_modules', async () => {
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'browse_files', path: '' })
+    const listing = await waitForMessage(messages, 'file_listing', 2000)
+
+    assert.equal(listing.error, null)
+
+    const names = listing.entries.map(e => e.name)
+    assert.ok(!names.includes('.hidden'), 'Should not include dotfiles')
+    assert.ok(!names.includes('node_modules'), 'Should not include node_modules')
+
+    ws.close()
+  })
+
+  it('browse_files: defaults to CWD when path is empty or null', async () => {
+    const { ws, messages } = await createTestServer()
+
+    // Test with empty string
+    send(ws, { type: 'browse_files', path: '' })
+    const listing1 = await waitForMessage(messages, 'file_listing', 2000)
+    assert.equal(listing1.error, null, 'Empty string should not error')
+    assert.ok(listing1.entries.length > 0, 'Should return entries for empty path')
+    const names1 = listing1.entries.map(e => e.name)
+
+    // Clear messages for next request
+    messages.length = 0
+
+    // Test with null
+    send(ws, { type: 'browse_files', path: null })
+    const listing2 = await waitForMessage(messages, 'file_listing', 2000)
+    assert.equal(listing2.error, null, 'Null path should not error')
+
+    // Both should return the same entries (CWD root)
+    const names2 = listing2.entries.map(e => e.name)
+    assert.deepEqual(names1, names2, 'Empty and null should return same entries')
+
+    ws.close()
+  })
+
+  it('browse_files: rejects path traversal outside CWD', async () => {
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'browse_files', path: '../../etc' })
+    const listing = await waitForMessage(messages, 'file_listing', 2000)
+
+    assert.ok(listing.error, 'Should return an error for path traversal')
+    assert.match(listing.error, /access denied/i)
+    assert.deepEqual(listing.entries, [])
+
+    // Also test absolute paths outside CWD
+    messages.length = 0
+    send(ws, { type: 'browse_files', path: '/etc' })
+    const listing2 = await waitForMessage(messages, 'file_listing', 2000)
+
+    assert.ok(listing2.error, 'Should return an error for absolute path outside CWD')
+    assert.match(listing2.error, /access denied/i)
+    assert.deepEqual(listing2.entries, [])
+
+    ws.close()
+  })
+
+  it('browse_files: returns error when no session CWD', async () => {
+    const { ws, messages } = await createTestServer({ cwd: null })
+
+    send(ws, { type: 'browse_files', path: '' })
+    const listing = await waitForMessage(messages, 'file_listing', 2000)
+
+    assert.ok(listing.error, 'Should return an error when no CWD')
+    assert.match(listing.error, /not available/i)
+    assert.deepEqual(listing.entries, [])
+
+    ws.close()
+  })
+
+  it('browse_files: returns error for non-existent directory', async () => {
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'browse_files', path: 'does-not-exist' })
+    const listing = await waitForMessage(messages, 'file_listing', 2000)
+
+    assert.ok(listing.error, 'Should return an error for non-existent directory')
+    assert.deepEqual(listing.entries, [])
+
+    ws.close()
+  })
+
+  // ------- read_file -------
+
+  it('read_file: reads a text file', async () => {
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'read_file', path: 'alpha.js' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.equal(content.error, null, 'Should not return an error')
+    assert.equal(content.content, 'const a = 1')
+    assert.equal(typeof content.size, 'number')
+    assert.equal(content.truncated, false)
+
+    ws.close()
+  })
+
+  it('read_file: detects language from file extension', async () => {
+    const { ws, messages } = await createTestServer()
+
+    // .js -> js
+    send(ws, { type: 'read_file', path: 'alpha.js' })
+    const jsContent = await waitForMessage(messages, 'file_content', 2000)
+    assert.equal(jsContent.language, 'js', 'Should detect .js extension')
+
+    // .py -> py
+    messages.length = 0
+    send(ws, { type: 'read_file', path: 'beta.py' })
+    const pyContent = await waitForMessage(messages, 'file_content', 2000)
+    assert.equal(pyContent.language, 'py', 'Should detect .py extension')
+
+    // .txt -> txt
+    messages.length = 0
+    send(ws, { type: 'read_file', path: 'subdir/nested.txt' })
+    const txtContent = await waitForMessage(messages, 'file_content', 2000)
+    assert.equal(txtContent.language, 'txt', 'Should detect .txt extension')
+
+    ws.close()
+  })
+
+  it('read_file: rejects path traversal outside CWD', async () => {
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'read_file', path: '../../etc/passwd' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.ok(content.error, 'Should return an error for path traversal')
+    assert.match(content.error, /access denied/i)
+    assert.equal(content.content, null)
+
+    // Also test absolute path outside CWD
+    messages.length = 0
+    send(ws, { type: 'read_file', path: '/etc/passwd' })
+    const content2 = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.ok(content2.error, 'Should return an error for absolute path outside CWD')
+    assert.match(content2.error, /access denied/i)
+    assert.equal(content2.content, null)
+
+    ws.close()
+  })
+
+  it('read_file: rejects files over 512KB', async () => {
+    // Create a file slightly over 512KB
+    const largeContent = 'x'.repeat(512 * 1024 + 1)
+    writeFileSync(join(tempDir, 'large.bin'), largeContent)
+
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'read_file', path: 'large.bin' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.ok(content.error, 'Should return an error for large file')
+    assert.match(content.error, /too large/i)
+    assert.equal(content.content, null)
+    assert.equal(typeof content.size, 'number')
+    assert.ok(content.size > 512 * 1024, 'Should report actual file size')
+
+    ws.close()
+  })
+
+  it('read_file: truncates content over 100KB', async () => {
+    // Create a file over 100KB but under 512KB
+    const bigContent = 'a'.repeat(150 * 1024)
+    writeFileSync(join(tempDir, 'big.txt'), bigContent)
+
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'read_file', path: 'big.txt' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.equal(content.error, null, 'Should not return an error')
+    assert.equal(content.truncated, true, 'Should be marked as truncated')
+    assert.equal(content.content.length, 100 * 1024, 'Content should be truncated to 100KB')
+
+    ws.close()
+  })
+
+  it('read_file: detects binary files', async () => {
+    // Create a file with null bytes (binary)
+    const binaryContent = Buffer.alloc(100)
+    binaryContent[0] = 0x89  // PNG-like header
+    binaryContent[1] = 0x50
+    binaryContent[2] = 0x4e
+    binaryContent[3] = 0x47
+    binaryContent[10] = 0x00 // null byte
+    writeFileSync(join(tempDir, 'image.png'), binaryContent)
+
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'read_file', path: 'image.png' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.ok(content.error, 'Should return an error for binary file')
+    assert.match(content.error, /binary/i)
+    assert.equal(content.content, null)
+
+    ws.close()
+  })
+
+  it('read_file: returns error for directories', async () => {
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'read_file', path: 'subdir' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.ok(content.error, 'Should return an error for directory')
+    assert.match(content.error, /cannot read a directory/i)
+    assert.equal(content.content, null)
+
+    ws.close()
+  })
+
+  it('read_file: returns error for non-existent file', async () => {
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'read_file', path: 'does-not-exist.txt' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.ok(content.error, 'Should return an error for non-existent file')
+    assert.match(content.error, /not found/i)
+    assert.equal(content.content, null)
+
+    ws.close()
+  })
+
+  it('read_file: returns error when no session CWD', async () => {
+    const { ws, messages } = await createTestServer({ cwd: null })
+
+    send(ws, { type: 'read_file', path: 'alpha.js' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.ok(content.error, 'Should return an error when no CWD')
+    assert.match(content.error, /not available/i)
+    assert.equal(content.content, null)
 
     ws.close()
   })
