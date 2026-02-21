@@ -62,7 +62,14 @@ If branch has commit messages referencing issues (`#NNN`) but NONE of those issu
 
 Based on the commits, changed files, and detected issues, draft the PR.
 
-**If `$ARGUMENTS` contains "batch" OR the PR closes 3+ issues, use Batch Fix template. Otherwise use Default template.**
+**Choose a template:**
+
+```
+IF $ARGUMENTS contains "batch" OR closes 3+ issues:
+  → Use BATCH FIX template (table format)
+ELSE:
+  → Use DEFAULT template (bullet list)
+```
 
 #### Default Template
 
