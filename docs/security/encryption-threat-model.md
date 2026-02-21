@@ -73,7 +73,7 @@ After key exchange, **every** WebSocket message is encrypted in both directions:
 
 ## 5. What Encryption Protects Against
 
-- **Tunnel operator eavesdropping**: Cloudflare (or any infrastructure between server and app) sees only encrypted envelopes. Message types, content, and metadata are all encrypted.
+- **Tunnel operator eavesdropping**: Cloudflare (or any infrastructure between server and app) sees only encrypted envelopes. Application-level message types and content are encrypted. However, the outer envelope (`type: 'encrypted'`, nonce counter `n`) and traffic metadata (frame sizes, timing) remain observable.
 - **Network MITM on the tunnel segment**: An attacker who can intercept tunnel traffic cannot read or modify messages without the shared key.
 - **Passive network monitoring**: ISPs, Wi-Fi operators, or other network-level observers on either side of the tunnel see only encrypted WebSocket frames.
 
@@ -95,7 +95,7 @@ Relay-based tools (where a third-party server mediates between user and AI) face
 | Server decryption | Potential privacy risk | Expected behavior |
 | Data at rest | On third-party infrastructure | On user's own machine |
 | Trust requirement | Must trust the relay operator | Trust only yourself |
-| Attack surface | Relay is high-value target | Single-user, not internet-facing |
+| Attack surface | Relay is high-value target | Single-tenant, internet-facing via tunnel (auth token + E2E) |
 
 Chroxy's architecture means:
 - No third-party server ever has access to conversation data
@@ -106,9 +106,9 @@ Chroxy's architecture means:
 
 ### Auth Token Transmitted Before Encryption
 
-The `auth` message containing the API token is sent in plaintext over the WebSocket (which itself uses WSS/TLS through the tunnel). The key exchange happens *after* successful authentication.
+The `auth` message containing the API token is sent in plaintext at the application layer over the WebSocket. When connecting through the Cloudflare tunnel, this WebSocket runs over `wss://` (TLS). However, when connecting directly over local WiFi via LAN discovery, the connection uses `ws://` (no TLS) and the token is visible to anyone who can sniff traffic on that network. The key exchange happens *after* successful authentication.
 
-**Mitigation**: The WebSocket connection runs over TLS (wss://) through Cloudflare's tunnel, providing transport-layer encryption. The application-layer E2E encryption adds a second layer specifically to protect against the tunnel operator.
+**Mitigation**: When using the Cloudflare tunnel (or any `wss://` URL), TLS provides transport-layer encryption for the auth token. On unencrypted `ws://` LAN connections, the auth token is exposed to local network sniffing -- such connections should only be used on trusted networks. The application-layer E2E encryption adds a second layer specifically to protect against the tunnel operator, but does not protect the auth token itself since it is sent before the key exchange completes.
 
 ### Trust On First Use (TOFU)
 
@@ -124,15 +124,15 @@ The app does not display key fingerprints or provide a mechanism for users to ve
 
 ### Single API Token
 
-A single static API token is used for authentication. If leaked, it grants full access until the server is restarted with a new token.
+A single static API token is used for authentication. The token is generated during `chroxy init` and persisted in `~/.chroxy/config.json`. If leaked, it grants full access until the token is regenerated (by re-running `chroxy init` or manually updating the config).
 
-**Mitigation**: Tokens are generated randomly at server startup. Auth rate limiting with exponential backoff (1s, 2s, 4s, ... up to 60s) protects against brute-force attempts. Failed auth entries are pruned after 5 minutes. Token comparison uses constant-time comparison (`crypto.timingSafeEqual`) to prevent timing attacks.
+**Mitigation**: Tokens are generated using `crypto.randomUUID()`. Auth rate limiting with exponential backoff (1s, 2s, 4s, ... up to 60s) protects against brute-force attempts. Failed auth entries are pruned after 5 minutes. Token comparison uses constant-time comparison (`crypto.timingSafeEqual`) to prevent timing attacks. On suspicion of compromise, regenerate the token and re-pair devices.
 
 ### Encryption Can Be Disabled
 
 The `--no-encrypt` flag disables E2E encryption entirely (intended for local development and testing only).
 
-**Mitigation**: The server logs a clear warning when encryption is disabled. The `auth_ok` message includes `encryption: 'disabled'` so the app knows the connection is unencrypted. This flag should never be used over a public tunnel.
+**Mitigation**: The `auth_ok` message includes `encryption: 'disabled'` so the app knows the connection is unencrypted. The flag is documented as intended for local development and testing only. This flag should never be used over a public tunnel.
 
 ## 9. Attack Vectors and Mitigations
 
@@ -146,7 +146,7 @@ The `--no-encrypt` flag disables E2E encryption entirely (intended for local dev
 | Key exchange MITM | Session hijack | TLS through Cloudflare tunnel protects the key exchange; ephemeral keys limit blast radius |
 | Downgrade attack | Plaintext exposure | Server refuses non-`key_exchange` messages when encryption is pending; timeout forces disconnect |
 | Stale connection hijack | Session takeover | Server-side WebSocket ping/pong keepalive detects dead connections; auth timeout (10s) prevents lingering unauthenticated sockets |
-| Token extraction from QR code | Unauthorized access | QR code contains the token; physical proximity required to scan; token only valid for one server instance |
+| Token extraction from QR code | Unauthorized access | QR code contains a persisted auth token; protect physical/visual access to the QR; rotate/regenerate the token on suspicion of compromise |
 | Compromised Cloudflare account | Tunnel hijack (Named Tunnels) | E2E encryption still protects message content even if tunnel routing is compromised |
 
 ## 10. Implementation Reference
@@ -154,7 +154,7 @@ The `--no-encrypt` flag disables E2E encryption entirely (intended for local dev
 | Component | Server | App |
 |-----------|--------|-----|
 | Crypto module | `packages/server/src/crypto.js` | `packages/app/src/utils/crypto.ts` |
-| Key exchange | `packages/server/src/ws-server.js` (lines 718-759) | `packages/app/src/store/connection.ts` |
+| Key exchange | `packages/server/src/ws-server.js` (`_handleMessage`) | `packages/app/src/store/connection.ts` |
 | Message encrypt/decrypt | `_send()` in `ws-server.js` | `wsSend()` / `onmessage` in `connection.ts` |
 | Library | `tweetnacl` + `tweetnacl-util` | `tweetnacl` + `tweetnacl-util` |
 | Tests | `packages/server/tests/crypto.test.js` | `packages/app/src/__tests__/utils/crypto.test.ts` |
