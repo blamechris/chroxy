@@ -1233,3 +1233,122 @@ describe('permission boundary splitting', () => {
     expect(useConnectionStore.getState().streamingMessageId).toBeNull();
   });
 });
+
+// -- Permission request dedup on reconnect --
+
+describe('permission_request dedup on reconnect', () => {
+  const mockSocket = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    useConnectionStore.getState().disconnect();
+    useConnectionStore.setState({
+      messages: [],
+      streamingMessageId: null,
+      connectionPhase: 'disconnected',
+    });
+    (mockSocket.send as jest.Mock).mockClear();
+    (mockSocket.close as jest.Mock).mockClear();
+    _testMessageHandler.setContext({
+      url: 'wss://test', token: 'tok', isReconnect: false,
+      silent: false, socket: mockSocket,
+    });
+  });
+
+  afterEach(() => {
+    _testMessageHandler.clearContext();
+    jest.useRealTimers();
+  });
+
+  it('updates existing permission card instead of appending duplicate on reconnect', () => {
+    // First permission_request — creates the card
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'perm-dup-1',
+      tool: 'Bash', description: 'rm -rf /tmp/test',
+      remainingMs: 300_000,
+    });
+
+    const msgsAfterFirst = useConnectionStore.getState().messages;
+    expect(msgsAfterFirst.filter((m) => m.type === 'prompt')).toHaveLength(1);
+    const firstCard = msgsAfterFirst.find((m) => m.requestId === 'perm-dup-1');
+    expect(firstCard).toBeDefined();
+    expect(firstCard!.expiresAt).toBeDefined();
+    const originalId = firstCard!.id;
+
+    // Second permission_request with same requestId (simulates reconnect re-send)
+    // with a shorter remainingMs (time has elapsed)
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'perm-dup-1',
+      tool: 'Bash', description: 'rm -rf /tmp/test',
+      remainingMs: 240_000,
+    });
+
+    const msgsAfterSecond = useConnectionStore.getState().messages;
+
+    // Should still have exactly one prompt — no duplicate
+    const prompts = msgsAfterSecond.filter((m) => m.type === 'prompt');
+    expect(prompts).toHaveLength(1);
+
+    // The card should be updated (same id, refreshed expiresAt)
+    const updatedCard = prompts[0];
+    expect(updatedCard.requestId).toBe('perm-dup-1');
+    expect(updatedCard.id).toBe(originalId);
+    // expiresAt should reflect the new remainingMs
+    expect(updatedCard.expiresAt).toBeDefined();
+  });
+
+  it('clears answered state when updating an existing permission card', () => {
+    // Create a permission card
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'perm-dup-2',
+      tool: 'Edit', description: 'edit config.js',
+      remainingMs: 300_000,
+    });
+
+    // Simulate the card being answered (mark it manually)
+    const msgs = useConnectionStore.getState().messages;
+    const card = msgs.find((m) => m.requestId === 'perm-dup-2');
+    expect(card).toBeDefined();
+    useConnectionStore.setState({
+      messages: msgs.map((m) =>
+        m.requestId === 'perm-dup-2' ? { ...m, answered: 'allow' } : m
+      ),
+    });
+
+    // Verify it was marked as answered
+    const answeredMsgs = useConnectionStore.getState().messages;
+    const answeredCard = answeredMsgs.find((m) => m.requestId === 'perm-dup-2');
+    expect(answeredCard!.answered).toBe('allow');
+
+    // Re-send same permission (reconnect) — should clear answered state
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'perm-dup-2',
+      tool: 'Edit', description: 'edit config.js',
+      remainingMs: 200_000,
+    });
+
+    const finalMsgs = useConnectionStore.getState().messages;
+    const finalCard = finalMsgs.find((m) => m.requestId === 'perm-dup-2');
+    expect(finalCard!.answered).toBeUndefined();
+    expect(finalCard!.expiresAt).toBeDefined();
+  });
+
+  it('creates separate cards for different requestIds', () => {
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'perm-a',
+      tool: 'Bash', description: 'ls',
+      remainingMs: 300_000,
+    });
+
+    _testMessageHandler.handle({
+      type: 'permission_request', requestId: 'perm-b',
+      tool: 'Edit', description: 'edit file',
+      remainingMs: 300_000,
+    });
+
+    const prompts = useConnectionStore.getState().messages.filter((m) => m.type === 'prompt');
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0].requestId).toBe('perm-a');
+    expect(prompts[1].requestId).toBe('perm-b');
+  });
+});

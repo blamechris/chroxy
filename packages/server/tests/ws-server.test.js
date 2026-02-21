@@ -5419,6 +5419,8 @@ describe('Reconnect permission recovery (_resendPendingPermissions)', () => {
     assert.equal(sent[0].sessionId, 'session-1')
     assert.ok(sent[0].remainingMs > 0 && sent[0].remainingMs <= 300_000,
       'remainingMs should be positive and <= 300s')
+    // createdAt is internal server state — must NOT leak to client protocol
+    assert.equal(sent[0].createdAt, undefined, 'createdAt should not be sent to client')
   })
 
   it('adjusts remainingMs for elapsed time', () => {
@@ -5595,5 +5597,7 @@ describe('Reconnect permission recovery (_resendPendingPermissions)', () => {
     // Should be approximately 240s remaining (300 - 60), allow 5s tolerance
     assert.ok(sent[0].remainingMs >= 235_000 && sent[0].remainingMs <= 245_000,
       `Expected ~240s remaining, got ${sent[0].remainingMs}ms`)
+    // createdAt must not leak to client
+    assert.equal(sent[0].createdAt, undefined, 'createdAt should not be sent to client')
   })
 })
