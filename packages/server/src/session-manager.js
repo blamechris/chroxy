@@ -549,6 +549,7 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Check if the ring buffer for a session has dropped older messages.
+   * @param {string} sessionId
    * @returns {boolean}
    */
   isHistoryTruncated(sessionId) {

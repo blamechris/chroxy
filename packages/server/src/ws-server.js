@@ -203,7 +203,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'session_error', message, category?, sessionId?, recoverable? } — session operation error
  *   { type: 'discovered_sessions', tmux: [...] }     — host tmux session scan results
  *   { type: 'discovery_triggered' }                  — ack that on-demand discovery started
- *   { type: 'history_replay_start', sessionId, fullHistory? } — beginning of history replay
+ *   { type: 'history_replay_start', sessionId, fullHistory?, truncated? } — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
  *   { type: 'conversation_id', sessionId, conversationId } — SDK conversation ID for session portability
  *   { type: 'raw_background', data: '...' }           — raw PTY data for chat-mode clients
