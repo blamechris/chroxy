@@ -1,6 +1,9 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { once, EventEmitter } from 'node:events'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
@@ -4916,6 +4919,440 @@ describe('POST /permission-response HTTP endpoint', () => {
     const data = await response.json()
     assert.deepEqual(data, { ok: true })
     assert.deepEqual(resolvedWith, { reqId: requestId, decision: 'allow' })
+
+    ws.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// File browser symlink traversal tests (#690)
+// ---------------------------------------------------------------------------
+describe('file browser symlink security', () => {
+  let server
+  let tempDir    // main CWD
+  let outsideDir // directory outside CWD that symlinks target
+
+  beforeEach(() => {
+    // Create temp directories
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-test-cwd-'))
+    outsideDir = mkdtempSync(join(tmpdir(), 'chroxy-test-outside-'))
+
+    // Create structure inside CWD:
+    //   tempDir/
+    //     subdir/
+    //       file.txt
+    //     internal-link -> subdir/     (symlink within CWD — should work)
+    //     escape-link -> outsideDir/   (symlink outside CWD — should be blocked)
+    //     escape-file -> outsideDir/secret.txt (file symlink outside CWD — should be blocked)
+    mkdirSync(join(tempDir, 'subdir'))
+    writeFileSync(join(tempDir, 'subdir', 'file.txt'), 'inside content')
+    writeFileSync(join(outsideDir, 'secret.txt'), 'outside secret')
+    mkdirSync(join(outsideDir, 'hidden-dir'))
+    writeFileSync(join(outsideDir, 'hidden-dir', 'data.txt'), 'hidden data')
+
+    symlinkSync(join(tempDir, 'subdir'), join(tempDir, 'internal-link'))
+    symlinkSync(outsideDir, join(tempDir, 'escape-link'))
+    symlinkSync(join(outsideDir, 'secret.txt'), join(tempDir, 'escape-file'))
+  })
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+    rmSync(tempDir, { recursive: true, force: true })
+    rmSync(outsideDir, { recursive: true, force: true })
+  })
+
+  it('browse_files: rejects symlink directory pointing outside CWD', async () => {
+    const mockSession = createMockSession()
+    mockSession.cwd = tempDir
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    send(ws, { type: 'browse_files', path: 'escape-link' })
+    const listing = await waitForMessage(messages, 'file_listing', 2000)
+
+    assert.ok(listing.error, 'Should return an error for symlink outside CWD')
+    assert.match(listing.error, /access denied/i)
+    assert.deepEqual(listing.entries, [])
+
+    ws.close()
+  })
+
+  it('browse_files: allows symlink directory pointing within CWD', async () => {
+    const mockSession = createMockSession()
+    mockSession.cwd = tempDir
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    send(ws, { type: 'browse_files', path: 'internal-link' })
+    const listing = await waitForMessage(messages, 'file_listing', 2000)
+
+    assert.equal(listing.error, null, 'Should not return an error for symlink within CWD')
+    assert.ok(listing.entries.length > 0, 'Should return entries')
+    assert.ok(listing.entries.some(e => e.name === 'file.txt'), 'Should list file.txt inside symlinked dir')
+
+    ws.close()
+  })
+
+  it('browse_files: rejects ../../../ path traversal', async () => {
+    const mockSession = createMockSession()
+    mockSession.cwd = tempDir
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    send(ws, { type: 'browse_files', path: '../../../etc' })
+    const listing = await waitForMessage(messages, 'file_listing', 2000)
+
+    assert.ok(listing.error, 'Should return an error for path traversal')
+    assert.match(listing.error, /access denied/i)
+    assert.deepEqual(listing.entries, [])
+
+    ws.close()
+  })
+
+  it('read_file: rejects symlink file pointing outside CWD', async () => {
+    const mockSession = createMockSession()
+    mockSession.cwd = tempDir
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    send(ws, { type: 'read_file', path: 'escape-file' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.ok(content.error, 'Should return an error for symlink file outside CWD')
+    assert.match(content.error, /access denied/i)
+    assert.equal(content.content, null)
+
+    ws.close()
+  })
+
+  it('read_file: allows reading file through symlink within CWD', async () => {
+    const mockSession = createMockSession()
+    mockSession.cwd = tempDir
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    send(ws, { type: 'read_file', path: 'internal-link/file.txt' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.equal(content.error, null, 'Should not return error for symlink within CWD')
+    assert.equal(content.content, 'inside content')
+
+    ws.close()
+  })
+
+  it('read_file: rejects ../../../etc/passwd traversal', async () => {
+    const mockSession = createMockSession()
+    mockSession.cwd = tempDir
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    send(ws, { type: 'read_file', path: '../../../etc/passwd' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.ok(content.error, 'Should return an error for path traversal')
+    assert.match(content.error, /access denied/i)
+    assert.equal(content.content, null)
+
+    ws.close()
+  })
+
+  it('read_file: rejects null bytes in path', async () => {
+    const mockSession = createMockSession()
+    mockSession.cwd = tempDir
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    send(ws, { type: 'read_file', path: 'subdir/file.txt\x00.jpg' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    // Should error — either access denied or file not found, but NOT return content
+    assert.ok(content.error, 'Should return an error for null bytes in path')
+
+    ws.close()
+  })
+
+  it('browse_files: rejects symlink chain escaping CWD', async () => {
+    // Create a chain: tempDir/chain-link -> outsideDir/hidden-dir
+    symlinkSync(join(outsideDir, 'hidden-dir'), join(tempDir, 'chain-link'))
+
+    const mockSession = createMockSession()
+    mockSession.cwd = tempDir
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    send(ws, { type: 'browse_files', path: 'chain-link' })
+    const listing = await waitForMessage(messages, 'file_listing', 2000)
+
+    assert.ok(listing.error, 'Should return an error for symlink chain outside CWD')
+    assert.match(listing.error, /access denied/i)
+
+    ws.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Encryption key exchange timeout/rejection tests (#691)
+// Uses _WsServer (raw, encryption enabled) instead of the WsServer wrapper
+// ---------------------------------------------------------------------------
+describe('encryption key exchange enforcement', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('disconnects client after key exchange timeout', async () => {
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect and authenticate but NEVER send key_exchange
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    const messages = []
+    let closeCode = null
+
+    ws.on('message', (data) => {
+      try { messages.push(JSON.parse(data.toString())) } catch (_) {}
+    })
+
+    // Register close handler once, before anything can trigger it
+    const closedPromise = new Promise((resolve) => {
+      ws.on('close', (code) => {
+        closeCode = code
+        resolve()
+      })
+    })
+
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      }),
+      2000,
+      'Connection timeout'
+    )
+
+    // Wait for auth_ok (which includes encryption: 'required')
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'auth_ok')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Auth timeout'
+    )
+
+    const authOk = messages.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'required', 'Should indicate encryption is required')
+
+    // Wait for the timeout disconnect (10s) — server should send server_error then close
+    await withTimeout(
+      closedPromise,
+      15_000,
+      'Server should have disconnected after key exchange timeout'
+    )
+
+    // Should have received server_error before close
+    const errorMsg = messages.find(m => m.type === 'server_error')
+    assert.ok(errorMsg, 'Should receive server_error before disconnect')
+    assert.match(errorMsg.error, /key exchange timed out/i)
+    assert.equal(errorMsg.recoverable, false)
+    assert.equal(closeCode, 1008, 'Close code should be 1008 (policy violation)')
+  })
+
+  it('disconnects client that sends non-key_exchange while encryption pending', async () => {
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    const messages = []
+    let closeCode = null
+
+    ws.on('message', (data) => {
+      try { messages.push(JSON.parse(data.toString())) } catch (_) {}
+    })
+    ws.on('close', (code) => { closeCode = code })
+
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      }),
+      2000,
+      'Connection timeout'
+    )
+
+    // Wait for auth_ok
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'auth_ok')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Auth timeout'
+    )
+
+    // Send a regular message instead of key_exchange
+    ws.send(JSON.stringify({ type: 'input', text: 'hello' }))
+
+    // Server should disconnect immediately
+    await withTimeout(
+      new Promise((resolve) => { ws.on('close', resolve) }),
+      3000,
+      'Server should have disconnected after non-key_exchange message'
+    )
+
+    const errorMsg = messages.find(m => m.type === 'server_error')
+    assert.ok(errorMsg, 'Should receive server_error')
+    assert.match(errorMsg.error, /did not initiate key exchange/i)
+    assert.equal(closeCode, 1008)
+  })
+
+  it('disconnects client that sends key_exchange without publicKey', async () => {
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    const messages = []
+    let closeCode = null
+
+    ws.on('message', (data) => {
+      try { messages.push(JSON.parse(data.toString())) } catch (_) {}
+    })
+    ws.on('close', (code) => { closeCode = code })
+
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      }),
+      2000,
+      'Connection timeout'
+    )
+
+    // Wait for auth_ok
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'auth_ok')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Auth timeout'
+    )
+
+    // Send key_exchange without publicKey
+    ws.send(JSON.stringify({ type: 'key_exchange' }))
+
+    // Server should disconnect
+    await withTimeout(
+      new Promise((resolve) => { ws.on('close', resolve) }),
+      3000,
+      'Server should have disconnected after invalid key_exchange'
+    )
+
+    // Note: invalid key_exchange sends type 'error' (ws-server.js line ~718), whereas
+    // timeout/non-key_exchange rejection sends type 'server_error' (lines ~536, ~750)
+    const errorMsg = messages.find(m => m.type === 'error')
+    assert.ok(errorMsg, 'Should receive error message')
+    assert.match(errorMsg.error, /publicKey is required/i)
+    assert.equal(closeCode, 1008)
+  })
+
+  it('auth_ok includes encryption: disabled when noEncrypt is set', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    const authOk = messages.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'disabled', 'Should indicate encryption is disabled')
 
     ws.close()
   })
