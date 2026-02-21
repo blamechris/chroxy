@@ -8,7 +8,9 @@ import {
   StyleSheet,
   Modal,
   ScrollView,
+  Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, FileListing, FileContent } from '../store/connection';
 import { COLORS } from '../constants/colors';
 import { ICON_CLOSE, ICON_DOCUMENT, ICON_FOLDER_OPEN } from '../constants/icons';
@@ -48,6 +50,7 @@ function FileViewerModal({
   filePath: string | null;
   onClose: () => void;
 }) {
+  const insets = useSafeAreaInsets();
   const [content, setContent] = useState<string | null>(null);
   const [language, setLanguage] = useState<string | null>(null);
   const [fileSize, setFileSize] = useState<number | null>(null);
@@ -114,7 +117,7 @@ function FileViewerModal({
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={styles.viewerContainer}>
-        <View style={styles.viewerHeader}>
+        <View style={[styles.viewerHeader, { paddingTop: insets.top + 12 }]}>
           <TouchableOpacity style={styles.viewerCloseButton} onPress={onClose}>
             <Text style={styles.viewerCloseText}>{ICON_CLOSE}</Text>
           </TouchableOpacity>
@@ -412,7 +415,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 12,
-    paddingTop: 56,
     paddingBottom: 12,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.borderPrimary,
@@ -449,7 +451,7 @@ const styles = StyleSheet.create({
     padding: 12,
   },
   codeText: {
-    fontFamily: 'Menlo',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontSize: 12,
     lineHeight: 18,
     color: COLORS.syntaxPlain,
