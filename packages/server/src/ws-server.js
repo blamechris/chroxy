@@ -236,7 +236,7 @@ export class WsServer {
     this.outputParser = outputParser || null
     this.authRequired = authRequired
     this._encryptionEnabled = !noEncrypt
-    this._keyExchangeTimeoutMs = keyExchangeTimeoutMs || 10_000
+    this._keyExchangeTimeoutMs = keyExchangeTimeoutMs ?? 10_000
     this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
     this.httpServer = null
     this.wss = null
@@ -527,7 +527,7 @@ export class WsServer {
     if (this._encryptionEnabled) {
       client.encryptionPending = true
       client.postAuthQueue = []
-      // 10s timeout: if no key_exchange arrives, disconnect (never downgrade to plaintext)
+      // Key exchange timeout: if no key_exchange arrives, disconnect (never downgrade to plaintext)
       client._keyExchangeTimeout = setTimeout(() => {
         if (client.encryptionPending) {
           console.error(`[ws] Key exchange timeout for ${client.id} — disconnecting (encryption required)`)
