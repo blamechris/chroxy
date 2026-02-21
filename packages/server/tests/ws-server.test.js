@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { once, EventEmitter } from 'node:events'
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
@@ -3676,6 +3676,82 @@ describe('directory listing', () => {
     assert.deepEqual(listing.entries, [])
 
     ws.close()
+  })
+
+  it('rejects symlink inside home that points outside home (#662)', async () => {
+    // Create a temp directory inside home with a symlink escaping to /tmp
+    const home = homedir()
+    const testDir = mkdtempSync(join(home, '.chroxy-test-symlink-'))
+    const outsideTarget = mkdtempSync(join(tmpdir(), 'chroxy-test-outside-'))
+    writeFileSync(join(outsideTarget, 'leaked.txt'), 'should not see this')
+    mkdirSync(join(outsideTarget, 'leaked-dir'))
+
+    try {
+      symlinkSync(outsideTarget, join(testDir, 'escape-link'))
+
+      server = new WsServer({
+        port: 0,
+        apiToken: TOKEN,
+        cliSession: createMockSession(),
+        authRequired: true,
+      })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+
+      // Try listing through the symlink — should be denied
+      send(ws, { type: 'list_directory', path: join(testDir, 'escape-link') })
+
+      const listing = await waitForMessage(messages, 'directory_listing', 2000)
+      assert.ok(listing, 'Should receive directory_listing')
+      assert.ok(listing.error, 'Should return an error for symlink outside home')
+      assert.match(listing.error, /restricted/i)
+      assert.deepEqual(listing.entries, [])
+
+      ws.close()
+    } finally {
+      rmSync(testDir, { recursive: true, force: true })
+      rmSync(outsideTarget, { recursive: true, force: true })
+    }
+  })
+
+  it('allows symlink inside home that points within home (#662)', async () => {
+    // Create a temp directory inside home with a symlink pointing to another dir in home
+    const home = homedir()
+    const testDir = mkdtempSync(join(home, '.chroxy-test-symlink-'))
+    const internalTarget = join(testDir, 'real-dir')
+    mkdirSync(internalTarget)
+    mkdirSync(join(internalTarget, 'child'))
+
+    try {
+      symlinkSync(internalTarget, join(testDir, 'internal-link'))
+
+      server = new WsServer({
+        port: 0,
+        apiToken: TOKEN,
+        cliSession: createMockSession(),
+        authRequired: true,
+      })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+
+      // List through the symlink — should work since target is inside home
+      send(ws, { type: 'list_directory', path: join(testDir, 'internal-link') })
+
+      const listing = await waitForMessage(messages, 'directory_listing', 2000)
+      assert.ok(listing, 'Should receive directory_listing')
+      assert.equal(listing.error, null, 'Should not return error for symlink within home')
+      assert.ok(listing.entries.some(e => e.name === 'child'), 'Should list child directory')
+
+      ws.close()
+    } finally {
+      rmSync(testDir, { recursive: true, force: true })
+    }
   })
 })
 
