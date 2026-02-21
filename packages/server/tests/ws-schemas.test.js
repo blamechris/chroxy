@@ -28,6 +28,7 @@ import {
   KeyExchangeSchema,
   PingSchema,
   RequestSessionContextSchema,
+  GetDiffSchema,
   EncryptedEnvelopeSchema,
   ClientMessageSchema,
 } from '../src/ws-schemas.js'
@@ -400,6 +401,16 @@ describe('BrowseFilesSchema', () => {
     const result = BrowseFilesSchema.safeParse({ type: 'browse_files' })
     assert.ok(result.success)
   })
+
+  it('accepts null path', () => {
+    const result = BrowseFilesSchema.safeParse({ type: 'browse_files', path: null })
+    assert.ok(result.success)
+  })
+
+  it('accepts string path', () => {
+    const result = BrowseFilesSchema.safeParse({ type: 'browse_files', path: 'subdir' })
+    assert.ok(result.success)
+  })
 })
 
 describe('ReadFileSchema', () => {
@@ -487,6 +498,20 @@ describe('RequestSessionContextSchema', () => {
 })
 
 
+// -- Get diff --
+describe('GetDiffSchema', () => {
+  it('accepts valid get_diff message', () => {
+    const result = GetDiffSchema.safeParse({ type: 'get_diff' })
+    assert.ok(result.success)
+  })
+
+  it('rejects wrong type', () => {
+    const result = GetDiffSchema.safeParse({ type: 'get_diffs' })
+    assert.ok(!result.success)
+  })
+})
+
+
 // -- Encrypted envelope --
 describe('EncryptedEnvelopeSchema', () => {
   it('accepts valid envelope', () => {
@@ -564,6 +589,7 @@ describe('ClientMessageSchema', () => {
       'trigger_discovery',
       'list_slash_commands',
       'list_agents',
+      'get_diff',
     ]
     for (const type of simpleTypes) {
       const result = ClientMessageSchema.safeParse({ type })

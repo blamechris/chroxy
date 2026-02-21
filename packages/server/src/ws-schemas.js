@@ -121,7 +121,7 @@ export const ListDirectorySchema = z.object({
 
 export const BrowseFilesSchema = z.object({
   type: z.literal('browse_files'),
-  path: z.string().optional(),
+  path: z.string().nullable().optional(),
 })
 
 export const ReadFileSchema = z.object({
@@ -154,6 +154,10 @@ export const PingSchema = z.object({
 export const RequestSessionContextSchema = z.object({
   type: z.literal('request_session_context'),
   sessionId: z.string().optional(),
+})
+
+export const GetDiffSchema = z.object({
+  type: z.literal('get_diff'),
 })
 
 // Encrypted envelope — validated separately (before decryption)
@@ -193,4 +197,5 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ListAgentsSchema,
   RequestFullHistorySchema,
   RequestSessionContextSchema,
+  GetDiffSchema,
 ])
