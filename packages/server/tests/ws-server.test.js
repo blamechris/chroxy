@@ -5028,6 +5028,7 @@ describe('file browser symlink security', () => {
 
     assert.ok(listing.error, 'Should return an error for path traversal')
     assert.match(listing.error, /access denied/i)
+    assert.deepEqual(listing.entries, [])
 
     ws.close()
   })
@@ -5180,7 +5181,14 @@ describe('encryption key exchange enforcement', () => {
     ws.on('message', (data) => {
       try { messages.push(JSON.parse(data.toString())) } catch (_) {}
     })
-    ws.on('close', (code) => { closeCode = code })
+
+    // Register close handler once, before anything can trigger it
+    const closedPromise = new Promise((resolve) => {
+      ws.on('close', (code) => {
+        closeCode = code
+        resolve()
+      })
+    })
 
     await withTimeout(
       new Promise((resolve, reject) => {
@@ -5207,9 +5215,7 @@ describe('encryption key exchange enforcement', () => {
 
     // Wait for the timeout disconnect (10s) — server should send server_error then close
     await withTimeout(
-      new Promise((resolve) => {
-        ws.on('close', resolve)
-      }),
+      closedPromise,
       15_000,
       'Server should have disconnected after key exchange timeout'
     )
@@ -5326,6 +5332,8 @@ describe('encryption key exchange enforcement', () => {
       'Server should have disconnected after invalid key_exchange'
     )
 
+    // Note: invalid key_exchange sends type 'error' (ws-server.js line ~718), whereas
+    // timeout/non-key_exchange rejection sends type 'server_error' (lines ~536, ~750)
     const errorMsg = messages.find(m => m.type === 'error')
     assert.ok(errorMsg, 'Should receive error message')
     assert.match(errorMsg.error, /publicKey is required/i)
