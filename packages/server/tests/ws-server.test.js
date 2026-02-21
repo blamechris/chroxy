@@ -5347,11 +5347,11 @@ describe('encryption key exchange enforcement', () => {
       'Server should have disconnected after invalid key_exchange'
     )
 
-    // Note: invalid key_exchange sends type 'error' (ws-server.js line ~718), whereas
+    // Note: invalid key_exchange sends type 'error' with INVALID_MESSAGE code, whereas
     // timeout/non-key_exchange rejection sends type 'server_error' (lines ~536, ~750)
     const errorMsg = messages.find(m => m.type === 'error')
     assert.ok(errorMsg, 'Should receive error message')
-    assert.match(errorMsg.error, /publicKey is required/i)
+    assert.equal(errorMsg.code, 'INVALID_MESSAGE')
     assert.equal(closeCode, 1008)
   })
 

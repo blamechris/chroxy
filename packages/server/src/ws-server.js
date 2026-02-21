@@ -734,9 +734,10 @@ export class WsServer {
         clearTimeout(client._keyExchangeTimeout)
         const keParsed = KeyExchangeSchema.safeParse(msg)
         if (!keParsed.success) {
-          console.warn(`[ws] Invalid key_exchange message from ${client.id}: ${keParsed.error.issues.map(i => i.message).join(', ')}`)
+          const details = keParsed.error.issues.map(i => i.message).join(', ')
+          console.warn(`[ws] Invalid key_exchange message from ${client.id}: ${details}`)
           try {
-            ws.send(JSON.stringify({ type: 'error', error: 'Invalid key_exchange message: publicKey is required and must be a string' }))
+            ws.send(JSON.stringify({ type: 'error', code: 'INVALID_MESSAGE', details }))
           } catch (err) {
             console.error('[ws] Failed to send key_exchange error:', err.message)
           }
