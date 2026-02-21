@@ -367,6 +367,7 @@ export class WsServer {
         isAlive: true,
         deviceInfo: null,
         ip,
+        _seq: 0,                  // monotonic sequence number for outbound messages
         encryptionState: null,    // { sharedKey, sendNonce, recvNonce } when active
         encryptionPending: false, // true while waiting for key_exchange
         postAuthQueue: null,      // queued messages during key exchange
@@ -2575,6 +2576,11 @@ export class WsServer {
     if (client?.encryptionPending && client.postAuthQueue) {
       client.postAuthQueue.push(message)
       return
+    }
+    // Assign per-client monotonic sequence number
+    if (client) {
+      client._seq++
+      message = { seq: client._seq, ...message }
     }
     try {
       // Encrypt if encryption is active for this client
