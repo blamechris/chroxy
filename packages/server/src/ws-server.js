@@ -2070,7 +2070,9 @@ export class WsServer {
 
     try {
       const cwdReal = await this._resolveSessionCwd(sessionCwd)
-      const diffBase = (typeof base === 'string' && base.trim()) ? base.trim() : 'HEAD'
+      const rawBase = (typeof base === 'string' && base.trim()) ? base.trim() : 'HEAD'
+      // Validate ref name to prevent git flag injection (e.g. --output=/tmp/evil)
+      const diffBase = /^[a-zA-Z0-9._\-\/~^@{}:]+$/.test(rawBase) ? rawBase : 'HEAD'
 
       // Run git diff to get all uncommitted changes (staged + unstaged)
       let diffOutput = ''

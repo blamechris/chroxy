@@ -5940,6 +5940,8 @@ describe('get_diff handler', () => {
     assert.equal(result.error, null)
     // New untracked file won't show in git diff HEAD, only in staged diff
     // So this tests that untracked files aren't falsely reported
+    assert.ok(Array.isArray(result.files), 'files should be an array')
+    assert.equal(result.files.length, 0, 'Untracked files should not appear in diff')
 
     ws.close()
   })
