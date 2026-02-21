@@ -183,6 +183,29 @@ export interface FileContent {
   error: string | null;
 }
 
+export interface DiffHunkLine {
+  type: 'context' | 'addition' | 'deletion';
+  content: string;
+}
+
+export interface DiffHunk {
+  header: string;
+  lines: DiffHunkLine[];
+}
+
+export interface DiffFile {
+  path: string;
+  status: 'modified' | 'added' | 'deleted' | 'renamed';
+  additions: number;
+  deletions: number;
+  hunks: DiffHunk[];
+}
+
+export interface DiffResult {
+  files: DiffFile[];
+  error: string | null;
+}
+
 export interface AgentInfo {
   toolUseId: string;
   description: string;
@@ -356,6 +379,9 @@ interface ConnectionState {
   _fileBrowserCallback: ((listing: FileListing) => void) | null;
   _fileContentCallback: ((content: FileContent) => void) | null;
 
+  // Diff viewer callback
+  _diffCallback: ((result: DiffResult) => void) | null;
+
   // View mode
   viewMode: 'chat' | 'terminal' | 'files';
 
@@ -404,6 +430,10 @@ interface ConnectionState {
   setFileContentCallback: (cb: ((content: FileContent) => void) | null) => void;
   requestFileListing: (path?: string) => void;
   requestFileContent: (path: string) => void;
+
+  // Diff viewer
+  setDiffCallback: (cb: ((result: DiffResult) => void) | null) => void;
+  requestDiff: (base?: string) => void;
 
   // Session actions
   switchSession: (sessionId: string) => void;
@@ -1796,6 +1826,17 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       break;
     }
 
+    case 'diff_result': {
+      const diffCb = get()._diffCallback;
+      if (diffCb) {
+        diffCb({
+          files: Array.isArray(msg.files) ? msg.files as DiffFile[] : [],
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
     case 'slash_commands': {
       // Ignore stale responses from a different session (race during session switch).
       // Only filter when activeSessionId is set — on initial connect it may still be null.
@@ -1914,6 +1955,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _directoryListingCallback: null,
   _fileBrowserCallback: null,
   _fileContentCallback: null,
+  _diffCallback: null,
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -2579,6 +2621,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'read_file', path });
+    }
+  },
+
+  // Diff viewer
+
+  setDiffCallback: (cb) => {
+    set({ _diffCallback: cb });
+  },
+
+  requestDiff: (base?: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const msg: Record<string, string> = { type: 'get_diff' };
+      if (base) msg.base = base;
+      wsSend(socket, msg);
     }
   },
 

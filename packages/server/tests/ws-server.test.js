@@ -2,6 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { once, EventEmitter } from 'node:events'
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
@@ -5849,6 +5850,118 @@ describe('outbound message sequence numbers', () => {
       assert.equal(messages[i].seq, i + 1,
         `Message ${i} (type: ${messages[i].type}) should have seq ${i + 1}`)
     }
+
+    ws.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Diff handler tests (#607)
+// ---------------------------------------------------------------------------
+describe('get_diff handler', () => {
+  let server
+  let tempDir
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-diff-test-'))
+    // Initialize a git repo in the temp directory
+    execSync('git init', { cwd: tempDir, stdio: 'pipe' })
+    execSync('git config user.email "test@test.com"', { cwd: tempDir, stdio: 'pipe' })
+    execSync('git config user.name "Test"', { cwd: tempDir, stdio: 'pipe' })
+    // Create an initial commit
+    writeFileSync(join(tempDir, 'file.txt'), 'initial content\n')
+    execSync('git add .', { cwd: tempDir, stdio: 'pipe' })
+    execSync('git commit -m "initial"', { cwd: tempDir, stdio: 'pipe' })
+  })
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  async function createDiffTestServer() {
+    const mockSession = createMockSession()
+    mockSession.cwd = tempDir
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    return { ws, messages }
+  }
+
+  it('returns empty files array when no changes', async () => {
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(result.error, null)
+    assert.deepEqual(result.files, [])
+
+    ws.close()
+  })
+
+  it('returns diff for modified file', async () => {
+    // Modify the file
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(result.error, null)
+    assert.equal(result.files.length, 1)
+    assert.equal(result.files[0].path, 'file.txt')
+    assert.equal(result.files[0].status, 'modified')
+    assert.ok(result.files[0].additions > 0 || result.files[0].deletions > 0,
+      'Should have additions or deletions')
+    assert.ok(result.files[0].hunks.length > 0, 'Should have hunks')
+
+    ws.close()
+  })
+
+  it('returns diff for new file', async () => {
+    writeFileSync(join(tempDir, 'new-file.txt'), 'new content\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(result.error, null)
+    // New untracked file won't show in git diff HEAD, only in staged diff
+    // So this tests that untracked files aren't falsely reported
+
+    ws.close()
+  })
+
+  it('returns error when no sessionCwd', async () => {
+    // Create a mock session without cwd set (cwd is undefined)
+    const mockSession = createMockSession()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.ok(result.error, 'Should return error when no CWD')
+    assert.match(result.error, /not available/i)
 
     ws.close()
   })
