@@ -701,4 +701,48 @@ describe('service', () => {
     })
   })
 
+
+  describe('startService error handling when servicePath is missing (#756)', () => {
+    it('throws when state has a servicePath that no longer exists on disk', () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'chroxy-stale-state-'))
+      try {
+        // Point servicePath at a file that does not exist
+        saveServiceState({
+          installedAt: new Date().toISOString(),
+          platform: 'darwin',
+          servicePath: join(stateDir, 'nonexistent.plist'),
+          nodePath: '/opt/homebrew/opt/node@22/bin/node',
+          chroxyBin: '/some/cli.js',
+        }, stateDir)
+
+        // Should throw before reaching launchctl because the plist is missing
+        assert.throws(() => startService({
+          _platform: 'darwin',
+          _stateDir: stateDir,
+        }), {
+          message: /not found.*stale.*chroxy service install/i,
+        })
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true })
+      }
+    })
+
+    it('accepts _stateDir option for loading state', () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'chroxy-statedir-'))
+      try {
+        // With _skipExec, verify the _stateDir parameter is wired through
+        const result = startService({ _skipExec: true, _platform: 'darwin', _stateDir: stateDir })
+        assert.equal(result.started, true)
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true })
+      }
+    })
+
+    it('still works with _skipExec when no state exists', () => {
+      // _skipExec bypasses the actual exec calls — should succeed regardless
+      const result = startService({ _skipExec: true, _platform: 'darwin' })
+      assert.equal(result.started, true)
+    })
+  })
+
 })

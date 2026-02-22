@@ -360,9 +360,13 @@ export class WsServer {
           res.end(JSON.stringify({ error: 'No connection info available' }))
           return
         }
-        // Redact apiToken when auth is disabled to prevent exposure on the network (#742)
-        if (!this.authRequired && connInfo.apiToken) {
-          connInfo.apiToken = '[REDACTED]'
+        // Redact secrets when auth is disabled to prevent exposure on the network (#742, #753)
+        if (!this.authRequired) {
+          if (connInfo.apiToken) {
+            connInfo.apiToken = '[REDACTED]'
+          }
+          // connectionUrl contains the token embedded in the query string (chroxy://host?token=...)
+          delete connInfo.connectionUrl
         }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(connInfo))
@@ -408,10 +412,19 @@ export class WsServer {
 
     this.wss.on('connection', (ws, req) => {
       const clientId = uuidv4().slice(0, 8)
+      // Best-effort client IP for logging and rate limiting.
+      // Prefers Cloudflare's cf-connecting-ip (set by the tunnel proxy),
+      // then x-forwarded-for, then the raw socket address.
       const ip = req.headers['cf-connecting-ip']
         || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
         || req.socket.remoteAddress
         || 'unknown'
+      // SECURITY: For localhost bypass decisions (e.g. skipping encryption),
+      // use ONLY the raw TCP socket address. Proxy headers like x-forwarded-for
+      // and cf-connecting-ip can be spoofed by an attacker to fake a localhost
+      // origin and bypass encryption. req.socket.remoteAddress is set by the
+      // kernel and cannot be forged over the network.
+      const socketIp = req.socket.remoteAddress || 'unknown'
       this.clients.set(ws, {
         id: clientId,
         authenticated: false,
@@ -420,6 +433,7 @@ export class WsServer {
         isAlive: true,
         deviceInfo: null,
         ip,
+        socketIp,
         _seq: 0,                  // monotonic sequence number for outbound messages
         encryptionState: null,    // { sharedKey, sendNonce, recvNonce } when active
         encryptionPending: false, // true while waiting for key_exchange
@@ -565,7 +579,9 @@ export class WsServer {
 
     // Skip encryption for localhost connections
     // ws://localhost traffic never leaves the machine — E2E encryption adds no security value
-    const isLocalhost = this._localhostBypass && (client.ip === '127.0.0.1' || client.ip === '::1' || client.ip === '::ffff:127.0.0.1')
+    // SECURITY: Use socketIp (req.socket.remoteAddress) — NOT client.ip which may
+    // include proxy headers (x-forwarded-for, cf-connecting-ip) that can be spoofed.
+    const isLocalhost = this._localhostBypass && (client.socketIp === '127.0.0.1' || client.socketIp === '::1' || client.socketIp === '::ffff:127.0.0.1')
     const requireEncryption = this._encryptionEnabled && !isLocalhost
 
     this._send(ws, {

@@ -369,20 +369,36 @@ export function uninstallService(options = {}) {
  * Start the system service.
  * @param {object} [options] - Options
  * @param {string} [options._platform] - Override platform for testing
+ * @param {string} [options._stateDir] - Override state directory (for testing)
  * @param {boolean} [options._skipExec] - Skip actual launchctl/systemctl calls (for testing)
  * @returns {{ started: boolean, message: string }}
  */
 export function startService(options = {}) {
   const plat = options._platform || platform()
   const paths = getServicePaths(plat)
+  const stateDir = options._stateDir || DEFAULT_CONFIG_DIR
 
   if (!options._skipExec) {
     if (paths.type === 'launchd') {
-      const state = loadServiceState()
+      const state = loadServiceState(stateDir)
       if (state?.servicePath) {
+        if (!existsSync(state.servicePath)) {
+          throw new Error(
+            `Service file not found at ${state.servicePath}. ` +
+            "The service state is stale. Run 'chroxy service install' to reinstall."
+          )
+        }
         execFileSync('launchctl', ['bootstrap', `gui/${process.getuid()}`, state.servicePath], { stdio: 'pipe' })
       } else {
-        execFileSync('launchctl', ['kickstart', `gui/${process.getuid()}/${SERVICE_LABEL}`], { stdio: 'pipe' })
+        // No servicePath in state — check if the plist exists at the default location
+        if (existsSync(paths.plistPath)) {
+          // Service file exists but state is missing/stale — use the default path
+          execFileSync('launchctl', ['bootstrap', `gui/${process.getuid()}`, paths.plistPath], { stdio: 'pipe' })
+        } else {
+          throw new Error(
+            "Service not installed. Run 'chroxy service install' first."
+          )
+        }
       }
     } else {
       execFileSync('systemctl', ['--user', 'start', 'chroxy.service'], { stdio: 'pipe' })

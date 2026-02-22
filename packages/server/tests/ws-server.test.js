@@ -7950,3 +7950,192 @@ describe('localhost encryption bypass', () => {
     ws.close()
   })
 })
+
+describe('GET /connect redacts connectionUrl in no-auth mode (#753)', () => {
+  let server
+  let tmpConfigDir
+  let originalConfigDir
+
+  beforeEach(() => {
+    originalConfigDir = process.env.CHROXY_CONFIG_DIR
+    tmpConfigDir = mkdtempSync(join(tmpdir(), 'chroxy-connect-url-'))
+    process.env.CHROXY_CONFIG_DIR = tmpConfigDir
+  })
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+    try { rmSync(tmpConfigDir, { recursive: true }) } catch {}
+    if (originalConfigDir !== undefined) {
+      process.env.CHROXY_CONFIG_DIR = originalConfigDir
+    } else {
+      delete process.env.CHROXY_CONFIG_DIR
+    }
+  })
+
+  it('removes connectionUrl from /connect response when authRequired is false', async () => {
+    const { writeConnectionInfo } = await import('../src/connection-info.js')
+    writeConnectionInfo({
+      wsUrl: 'wss://redact-url-test.example.com',
+      httpUrl: 'https://redact-url-test.example.com',
+      apiToken: 'secret-tok-753',
+      connectionUrl: 'chroxy://redact-url-test.example.com?token=secret-tok-753',
+      tunnelMode: 'cloudflare:quick',
+      startedAt: '2026-02-22T00:00:00.000Z',
+      pid: 55555,
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'secret-tok-753',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/connect`)
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    // connectionUrl contains the embedded token — must be removed in no-auth mode
+    assert.equal(body.connectionUrl, undefined,
+      'connectionUrl must be removed when authRequired is false (it embeds the token)')
+    // apiToken should also be redacted (from prior fix #742)
+    assert.equal(body.apiToken, '[REDACTED]')
+    // wsUrl should still be present (no secret in it)
+    assert.equal(body.wsUrl, 'wss://redact-url-test.example.com')
+  })
+
+  it('preserves connectionUrl in /connect response when authRequired is true', async () => {
+    const { writeConnectionInfo } = await import('../src/connection-info.js')
+    writeConnectionInfo({
+      wsUrl: 'wss://keep-url-test.example.com',
+      httpUrl: 'https://keep-url-test.example.com',
+      apiToken: 'auth-tok-753',
+      connectionUrl: 'chroxy://keep-url-test.example.com?token=auth-tok-753',
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'auth-tok-753',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/connect`, {
+      headers: { 'Authorization': 'Bearer auth-tok-753' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    // In auth mode, connectionUrl should be preserved
+    assert.equal(body.connectionUrl, 'chroxy://keep-url-test.example.com?token=auth-tok-753')
+    assert.equal(body.apiToken, 'auth-tok-753')
+  })
+})
+
+describe('localhost bypass uses socketIp not proxy headers (#755)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('client object stores both ip and socketIp', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-socket-ip',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    const messages = []
+
+    ws.on('message', (data) => {
+      try { messages.push(JSON.parse(data.toString())) } catch (_) {}
+    })
+
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      }),
+      2000,
+      'Connection timeout'
+    )
+
+    // Check that the server tracks socketIp on the client object
+    // After connecting, the client should be in the clients Map
+    const clients = Array.from(server.clients.values())
+    assert.ok(clients.length >= 1, 'Should have at least 1 client')
+    const client = clients[0]
+    assert.ok(client.socketIp, 'Client should have socketIp property')
+    // When connecting to 127.0.0.1, socketIp should be a localhost variant
+    const localhostAddrs = ['127.0.0.1', '::1', '::ffff:127.0.0.1']
+    assert.ok(localhostAddrs.includes(client.socketIp),
+      `socketIp should be a localhost address, got: ${client.socketIp}`)
+    // ip should also be set (may be same as socketIp for direct connections)
+    assert.ok(client.ip, 'Client should have ip property')
+
+    ws.close()
+  })
+
+  it('localhost bypass skips encryption for direct localhost connections', async () => {
+    const mockSession = createMockSession()
+    // Enable encryption but connect from localhost — should still skip encryption
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'tok-localhost-enc',
+      cliSession: mockSession,
+      authRequired: true,
+      localhostBypass: true,
+      // noEncrypt NOT set — encryption enabled
+    })
+    const port = await startServerAndGetPort(server)
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    const messages = []
+
+    ws.on('message', (data) => {
+      try { messages.push(JSON.parse(data.toString())) } catch (_) {}
+    })
+
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      }),
+      2000,
+      'Connection timeout'
+    )
+
+    // Auth
+    ws.send(JSON.stringify({ type: 'auth', token: 'tok-localhost-enc' }))
+
+    // Wait for auth_ok
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'auth_ok')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Auth timeout'
+    )
+
+    const authOk = messages.find(m => m.type === 'auth_ok')
+    assert.ok(authOk, 'Should receive auth_ok')
+    // Localhost bypass should disable encryption even when encryption is enabled
+    assert.equal(authOk.encryption, 'disabled',
+      'Encryption should be disabled for localhost connections via socketIp bypass')
+
+    ws.close()
+  })
+})
