@@ -362,7 +362,7 @@ export class SdkSession extends EventEmitter {
 
     // acceptEdits: auto-approve file operations, prompt for everything else
     if (this.permissionMode === 'acceptEdits' && ACCEPT_EDITS_TOOLS.has(toolName)) {
-      return Promise.resolve({ behavior: 'allow' })
+      return Promise.resolve({ behavior: 'allow', updatedInput: input || {} })
     }
 
     return new Promise((resolve) => {
