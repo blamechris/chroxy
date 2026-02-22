@@ -9,6 +9,7 @@ import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import qrcode from 'qrcode-terminal'
+import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -229,6 +230,17 @@ export async function startCliServer(config) {
         console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
         console.log('')
         wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
+
+        // Update connection info file with new tunnel URL
+        writeConnectionInfo({
+          wsUrl: newWsUrl,
+          httpUrl: newHttpUrl,
+          apiToken: API_TOKEN,
+          connectionUrl: newConnectionUrl,
+          tunnelMode: modeLabel,
+          startedAt: new Date().toISOString(),
+          pid: process.pid,
+        })
       } else {
         console.log(`[✓] Tunnel URL unchanged: ${newWsUrl}`)
         wsServer.broadcastStatus('Tunnel connection recovered')
@@ -248,6 +260,17 @@ export async function startCliServer(config) {
     console.log(`\nOr connect manually:`)
     console.log(`   URL:   ${wsUrl}`)
     console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+
+    // 7b. Write connection info file for programmatic access
+    writeConnectionInfo({
+      wsUrl,
+      httpUrl,
+      apiToken: API_TOKEN,
+      connectionUrl,
+      tunnelMode: modeLabel,
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    })
 
   } else if (!tunnelArg && !NO_AUTH) {
     console.log(`[✓] Server ready! (CLI headless mode, no tunnel)\n`)
@@ -279,6 +302,7 @@ export async function startCliServer(config) {
     sessionManager.destroyAll()
     wsServer.close()
     if (tunnel) await tunnel.stop()
+    removeConnectionInfo()
     process.exit(0)
   }
 

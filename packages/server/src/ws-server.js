@@ -14,6 +14,7 @@ import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIR
 import { parseDiff } from './diff-parser.js'
 import { ClientMessageSchema, AuthSchema, KeyExchangeSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
 import { EventNormalizer } from './event-normalizer.js'
+import { readConnectionInfo } from './connection-info.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -345,6 +346,20 @@ export class WsServer {
       // (HTTP fallback when WebSocket is disconnected)
       if (req.method === 'POST' && req.url === '/permission-response') {
         this._handlePermissionResponseHttp(req, res)
+        return
+      }
+
+      // Connection info endpoint — returns connection.json for programmatic access
+      if (req.method === 'GET' && req.url === '/connect') {
+        if (!this._validateBearerAuth(req, res)) return
+        const connInfo = readConnectionInfo()
+        if (!connInfo) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'No connection info available' }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(connInfo))
         return
       }
 
