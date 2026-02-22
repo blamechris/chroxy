@@ -61,7 +61,7 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
   <script>
     window.__CHROXY_CONFIG__ = {
       port: ${port},
-      token: ${apiToken ? JSON.stringify(apiToken) : 'null'},
+      token: ${apiToken ? JSON.stringify(apiToken).replace(/</g, '\\u003c') : '""'},
       noEncrypt: ${!!noEncrypt},
     };
   </script>
@@ -556,14 +556,21 @@ function getDashboardJs() {
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
 
-    // Fenced code blocks
+    // Extract code blocks into placeholders to protect from later transforms
+    var codeBlocks = [];
     html = html.replace(/\`\`\`(\\w*)?\\n([\\s\\S]*?)\`\`\`/g, function(m, lang, code) {
       var cls = lang ? ' class="language-' + lang + '"' : "";
-      return '<pre><code' + cls + '>' + code + '</code></pre>';
+      var placeholder = "\x00CB" + codeBlocks.length + "\x00";
+      codeBlocks.push('<pre><code' + cls + '>' + code + '</code></pre>');
+      return placeholder;
     });
 
-    // Inline code (avoid matching inside pre blocks)
-    html = html.replace(/\`([^\`\\n]+)\`/g, "<code>$1</code>");
+    // Extract inline code into placeholders
+    html = html.replace(/\`([^\`\\n]+)\`/g, function(m, code) {
+      var placeholder = "\x00CB" + codeBlocks.length + "\x00";
+      codeBlocks.push("<code>" + code + "</code>");
+      return placeholder;
+    });
 
     // Headers
     html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
@@ -571,11 +578,18 @@ function getDashboardJs() {
     html = html.replace(/^# (.+)$/gm, "<h1>$1</h1>");
 
     // Bold and italic
-    html = html.replace(/\\*\\*(.+?)\\*\\*/g, "<strong>$1</strong>");
-    html = html.replace(/\\*(.+?)\\*/g, "<em>$1</em>");
+    html = html.replace(/\\\*\\\*(.+?)\\\*\\\*/g, "<strong>$1</strong>");
+    html = html.replace(/\\\*(.+?)\\\*/g, "<em>$1</em>");
 
-    // Links
-    html = html.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Links — sanitize URL scheme to block javascript:/data:/vbscript:
+    html = html.replace(/\\\[([^\\\]]+)\\\]\\\(([^)]+)\\\)/g, function(m, text, url) {
+      var trimmed = url.trim().toLowerCase();
+      if (trimmed.indexOf("javascript:") === 0 || trimmed.indexOf("data:") === 0 || trimmed.indexOf("vbscript:") === 0) {
+        return text;
+      }
+      var safeUrl = url.replace(/"/g, "&quot;");
+      return '<a href="' + safeUrl + '" target="_blank" rel="noopener">' + text + '</a>';
+    });
 
     // Blockquotes
     html = html.replace(/^&gt; (.+)$/gm, "<blockquote>$1</blockquote>");
@@ -586,13 +600,18 @@ function getDashboardJs() {
       return "<ul>" + m + "</ul>";
     });
 
-    // Ordered lists
+    // Ordered lists — wrap in <ol>
     html = html.replace(/^\\d+\\. (.+)$/gm, "<li>$1</li>");
 
     // Paragraphs (double newlines)
     html = html.replace(/\\n\\n/g, "</p><p>");
-    // Single newlines to <br> (except inside pre)
+    // Single newlines to <br>
     html = html.replace(/\\n/g, "<br>");
+
+    // Restore code blocks from placeholders
+    for (var i = 0; i < codeBlocks.length; i++) {
+      html = html.replace("\x00CB" + i + "\x00", codeBlocks[i]);
+    }
 
     return html;
   }
@@ -774,8 +793,14 @@ function getDashboardJs() {
   });
 
   function updateModelSelect() {
-    var val = modelSelect.value;
+    var previousValue = modelSelect.value;
     modelSelect.innerHTML = "";
+    // Keep placeholder when no models available yet
+    var placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Model";
+    modelSelect.appendChild(placeholder);
+    if (!availableModels || availableModels.length === 0) return;
     availableModels.forEach(function(m) {
       var opt = document.createElement("option");
       opt.value = m.id || m.fullId || m;
@@ -783,13 +808,22 @@ function getDashboardJs() {
       modelSelect.appendChild(opt);
     });
     if (activeModel) {
-      // Try to select by matching label or id
-      for (var i = 0; i < modelSelect.options.length; i++) {
+      // Try to select by matching label or id (skip placeholder at 0)
+      for (var i = 1; i < modelSelect.options.length; i++) {
         var optLabel = modelSelect.options[i].textContent.toLowerCase();
         var optVal = modelSelect.options[i].value.toLowerCase();
         if (optLabel === activeModel.toLowerCase() || optVal === activeModel.toLowerCase()) {
           modelSelect.selectedIndex = i;
-          break;
+          return;
+        }
+      }
+    }
+    // Fall back to previous selection if possible
+    if (previousValue) {
+      for (var j = 1; j < modelSelect.options.length; j++) {
+        if (modelSelect.options[j].value === previousValue) {
+          modelSelect.selectedIndex = j;
+          return;
         }
       }
     }
@@ -881,6 +915,7 @@ function getDashboardJs() {
 
   function sendInput(text) {
     if (!text || !text.trim()) return;
+    if (!connected || !claudeReady) return;
     send({ type: "input", data: text.trim() });
     addMessage("user", text.trim());
     inputEl.value = "";
@@ -1058,6 +1093,17 @@ function getDashboardJs() {
         permissionMode = msg.mode || "approve";
         permissionSelect.value = permissionMode;
         break;
+
+      case "confirm_permission_mode": {
+        var targetMode = msg.mode || "approve";
+        var warning = msg.message || "Enable " + targetMode + " mode? Tools may run without approval.";
+        if (window.confirm(warning)) {
+          send({ type: "set_permission_mode", mode: targetMode, confirmed: true });
+        } else {
+          permissionSelect.value = permissionMode;
+        }
+        break;
+      }
 
       case "available_permission_modes":
         // Could update permission select options dynamically

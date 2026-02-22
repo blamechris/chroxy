@@ -19,9 +19,9 @@ describe('getDashboardHtml', () => {
     assert.ok(html.includes('"my-secret-token"'))
   })
 
-  it('sets token to null when not provided', () => {
+  it('sets token to empty string when not provided', () => {
     const html = getDashboardHtml(8765, null, false)
-    assert.ok(html.includes('token: null'))
+    assert.ok(html.includes('token: ""'))
   })
 
   it('embeds noEncrypt flag', () => {
