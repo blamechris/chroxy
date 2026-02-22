@@ -184,7 +184,7 @@ describe('dashboard markdown renderer', () => {
   })
 })
 
-describe('#760 — sanitizeId strips special characters', () => {
+describe('#762 — sanitizeId strips special characters', () => {
   const html = getDashboardHtml(8765, 'test-token', false)
 
   it('defines sanitizeId function', () => {
@@ -199,7 +199,7 @@ describe('#760 — sanitizeId strips special characters', () => {
   })
 })
 
-describe('#760 — querySelector calls use sanitized IDs', () => {
+describe('#762 — querySelector calls use sanitized IDs', () => {
   const html = getDashboardHtml(8765, 'test-token', false)
 
   it('uses sanitizeId for data-msg-id queries', () => {
@@ -247,7 +247,7 @@ describe('#760 — querySelector calls use sanitized IDs', () => {
   })
 })
 
-describe('#762 — javascript: URI blocking in markdown links', () => {
+describe('#760 — javascript: URI blocking in markdown links', () => {
   const html = getDashboardHtml(8765, 'test-token', false)
 
   it('blocks javascript: URIs', () => {
