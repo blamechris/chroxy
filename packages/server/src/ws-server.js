@@ -15,6 +15,7 @@ import { parseDiff } from './diff-parser.js'
 import { ClientMessageSchema, AuthSchema, KeyExchangeSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
 import { EventNormalizer } from './event-normalizer.js'
 import { readConnectionInfo } from './connection-info.js'
+import { getDashboardHtml } from './dashboard.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -367,6 +368,30 @@ export class WsServer {
         return
       }
 
+      // Dashboard endpoint
+      if (req.method === 'GET' && req.url?.startsWith('/dashboard')) {
+        const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
+        const queryToken = dashUrl.searchParams.get('token')
+
+        if (this.authRequired) {
+          const bearerToken = (req.headers['authorization'] || '').startsWith('Bearer ')
+            ? req.headers['authorization'].slice(7) : null
+          const token = queryToken || bearerToken
+          if (!token || !safeTokenCompare(token, this.apiToken)) {
+            res.writeHead(403, { 'Content-Type': 'text/html' })
+            res.end('<h1>403 Forbidden</h1><p>Invalid or missing token. Append ?token=YOUR_TOKEN to the URL.</p>')
+            return
+          }
+        }
+
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+        })
+        res.end(getDashboardHtml(this.port, this.apiToken, !this._encryptionEnabled))
+        return
+      }
       res.writeHead(404)
       res.end()
     })
