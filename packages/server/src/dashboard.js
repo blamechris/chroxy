@@ -1673,6 +1673,7 @@ function getDashboardJs() {
         closeCreateSessionModal();
         return;
       }
+      e.preventDefault();
       sendInterrupt();
       return;
     }
