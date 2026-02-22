@@ -249,7 +249,7 @@ export class WsServer {
     this.authRequired = authRequired
     this._encryptionEnabled = !noEncrypt
     this._keyExchangeTimeoutMs = keyExchangeTimeoutMs ?? 10_000
-    this._localhostBypass = localhostBypass !== false // default true
+    this._localhostBypass = localhostBypass ?? true
     this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
     this.httpServer = null
     this.wss = null
