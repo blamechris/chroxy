@@ -44,12 +44,25 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
       Disconnected. Reconnecting...
     </div>
 
+    <div id="plan-mode-banner" class="hidden">
+      Plan Mode
+    </div>
+
+    <div id="plan-approval-card" class="hidden">
+      <div id="plan-content"></div>
+      <div class="plan-buttons">
+        <button id="plan-approve-btn" class="btn-plan-approve">Approve</button>
+        <button id="plan-feedback-btn" class="btn-plan-feedback">Give Feedback</button>
+      </div>
+    </div>
+
     <div id="chat-messages"></div>
 
     <div id="status-bar">
       <span id="status-model"></span>
       <span id="status-cost"></span>
       <span id="status-context"></span>
+      <span id="status-agents" class="agent-badge hidden"></span>
     </div>
 
     <div id="input-bar">
@@ -501,6 +514,72 @@ function getDashboardCss() {
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #333355; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #444466; }
+
+    /* Plan mode banner */
+    #plan-mode-banner {
+      background: #2a1a40;
+      color: #a78bfa;
+      text-align: center;
+      padding: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      border-bottom: 1px solid #4a3a7a;
+      flex-shrink: 0;
+    }
+
+    /* Plan approval card */
+    #plan-approval-card {
+      background: #1e1a30;
+      border: 1px solid #4a3a7a;
+      border-radius: 10px;
+      padding: 14px;
+      margin: 8px 16px;
+      flex-shrink: 0;
+    }
+    #plan-content {
+      font-size: 13px;
+      color: #c0b8e0;
+      margin-bottom: 10px;
+      max-height: 200px;
+      overflow-y: auto;
+      line-height: 1.5;
+    }
+    .plan-buttons {
+      display: flex;
+      gap: 8px;
+    }
+    .btn-plan-approve {
+      padding: 6px 18px;
+      border-radius: 6px;
+      border: none;
+      background: #22c55e;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .btn-plan-approve:hover { background: #16a34a; }
+    .btn-plan-feedback {
+      padding: 6px 18px;
+      border-radius: 6px;
+      border: none;
+      background: #4a9eff;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .btn-plan-feedback:hover { background: #3a8eef; }
+
+    /* Agent badge */
+    .agent-badge {
+      background: #2a1a40;
+      color: #a78bfa;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 600;
+    }
   `
 }
 
@@ -531,6 +610,8 @@ function getDashboardJs() {
   var statusCost = 0;
   var statusContext = "";
   var statusModel = "";
+  var backgroundAgents = new Map();
+  var inPlanMode = false;
 
   // ---- DOM refs ----
   var messagesEl = document.getElementById("chat-messages");
@@ -546,6 +627,12 @@ function getDashboardJs() {
   var statusModelEl = document.getElementById("status-model");
   var statusCostEl = document.getElementById("status-cost");
   var statusContextEl = document.getElementById("status-context");
+  var statusAgentsEl = document.getElementById("status-agents");
+  var planModeBanner = document.getElementById("plan-mode-banner");
+  var planApprovalCard = document.getElementById("plan-approval-card");
+  var planContentEl = document.getElementById("plan-content");
+  var planApproveBtn = document.getElementById("plan-approve-btn");
+  var planFeedbackBtn = document.getElementById("plan-feedback-btn");
 
   // ---- Markdown renderer ----
   function renderMarkdown(text) {
@@ -583,8 +670,7 @@ function getDashboardJs() {
 
     // Links — sanitize URL scheme to block javascript:/data:/vbscript:
     html = html.replace(/\\\[([^\\\]]+)\\\]\\\(([^)]+)\\\)/g, function(m, text, url) {
-      var trimmed = url.trim().toLowerCase();
-      if (trimmed.indexOf("javascript:") === 0 || trimmed.indexOf("data:") === 0 || trimmed.indexOf("vbscript:") === 0) {
+      if (/^\\s*(javascript|data|vbscript)\\s*:/i.test(url)) {
         return text;
       }
       var safeUrl = url.replace(/"/g, "&quot;");
@@ -758,6 +844,10 @@ function getDashboardJs() {
     return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
+  function sanitizeId(id) {
+    return String(id).replace(/[^a-zA-Z0-9_-]/g, '');
+  }
+
   // ---- Session tabs ----
   function renderSessions() {
     sessionTabs.innerHTML = "";
@@ -834,6 +924,16 @@ function getDashboardJs() {
     statusModelEl.textContent = statusModel || activeModel || "";
     statusCostEl.textContent = statusCost ? "$" + statusCost.toFixed(4) : "";
     statusContextEl.textContent = statusContext || "";
+  }
+
+  function updateAgentBadge() {
+    var count = backgroundAgents.size;
+    if (count > 0) {
+      statusAgentsEl.textContent = count + (count === 1 ? " agent" : " agents");
+      statusAgentsEl.classList.remove("hidden");
+    } else {
+      statusAgentsEl.classList.add("hidden");
+    }
   }
 
   // ---- Connection status ----
@@ -1024,10 +1124,10 @@ function getDashboardJs() {
         if (!msg.delta) break;
         var target = null;
         if (msg.messageId) {
-          target = messagesEl.querySelector('[data-msg-id="' + msg.messageId + '"]');
+          target = messagesEl.querySelector('[data-msg-id="' + sanitizeId(msg.messageId) + '"]');
         }
         if (!target && streamingMsgId) {
-          target = messagesEl.querySelector('[data-msg-id="' + streamingMsgId + '"]');
+          target = messagesEl.querySelector('[data-msg-id="' + sanitizeId(streamingMsgId) + '"]');
         }
         if (target) {
           // Accumulate raw text, then re-render markdown
@@ -1050,7 +1150,7 @@ function getDashboardJs() {
 
       case "tool_result": {
         var toolId = msg.toolUseId || "";
-        var toolEl = messagesEl.querySelector('[data-tool-id="' + toolId + '"]');
+        var toolEl = messagesEl.querySelector('[data-tool-id="' + sanitizeId(toolId) + '"]');
         if (toolEl) {
           var resultDiv = toolEl.querySelector(".tool-result");
           if (resultDiv) {
@@ -1139,6 +1239,34 @@ function getDashboardJs() {
         addMessage("error", msg.message || "Session error");
         break;
 
+      case "plan_started":
+        inPlanMode = true;
+        planModeBanner.classList.remove("hidden");
+        break;
+
+      case "plan_ready":
+        inPlanMode = false;
+        planModeBanner.classList.add("hidden");
+        planApprovalCard.classList.remove("hidden");
+        if (msg.plan) {
+          planContentEl.innerHTML = renderMarkdown(msg.plan);
+        }
+        break;
+
+      case "agent_spawned":
+        if (msg.agentId) {
+          backgroundAgents.set(msg.agentId, { task: msg.task || "", startedAt: Date.now() });
+          updateAgentBadge();
+        }
+        break;
+
+      case "agent_completed":
+        if (msg.agentId) {
+          backgroundAgents.delete(msg.agentId);
+          updateAgentBadge();
+        }
+        break;
+
       default:
         // Ignore unhandled message types
         break;
@@ -1167,6 +1295,18 @@ function getDashboardJs() {
     if (e.key === "Escape") {
       sendInterrupt();
     }
+  });
+
+  // ---- Plan approval handlers ----
+  planApproveBtn.addEventListener("click", function() {
+    sendInput("Looks good, proceed.");
+    planApprovalCard.classList.add("hidden");
+  });
+
+  planFeedbackBtn.addEventListener("click", function() {
+    planApprovalCard.classList.add("hidden");
+    inputEl.value = "Feedback on plan: ";
+    inputEl.focus();
   });
 
   // ---- Init ----
