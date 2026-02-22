@@ -25,7 +25,7 @@
 /**
  * @typedef {Object} DiffFile
  * @property {string} path
- * @property {'modified'|'added'|'deleted'|'renamed'} status
+ * @property {'modified'|'added'|'deleted'|'renamed'|'untracked'} status
  * @property {number} additions
  * @property {number} deletions
  * @property {DiffHunk[]} hunks

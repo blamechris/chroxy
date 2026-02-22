@@ -6006,7 +6006,7 @@ describe('get_diff handler', () => {
     ws.close()
   })
 
-  it('returns diff for new file', async () => {
+  it('returns untracked new file with synthetic diff', async () => {
     writeFileSync(join(tempDir, 'new-file.txt'), 'new content\n')
 
     const { ws, messages } = await createDiffTestServer()
@@ -6015,10 +6015,54 @@ describe('get_diff handler', () => {
     const result = await waitForMessage(messages, 'diff_result', 5000)
 
     assert.equal(result.error, null)
-    // New untracked file won't show in git diff HEAD, only in staged diff
-    // So this tests that untracked files aren't falsely reported
-    assert.ok(Array.isArray(result.files), 'files should be an array')
-    assert.equal(result.files.length, 0, 'Untracked files should not appear in diff')
+    assert.equal(result.files.length, 1)
+    assert.equal(result.files[0].path, 'new-file.txt')
+    assert.equal(result.files[0].status, 'untracked')
+    assert.equal(result.files[0].additions, 1)
+    assert.equal(result.files[0].deletions, 0)
+    assert.equal(result.files[0].hunks.length, 1)
+    assert.equal(result.files[0].hunks[0].header, 'New untracked file')
+    assert.equal(result.files[0].hunks[0].lines[0].type, 'addition')
+    assert.equal(result.files[0].hunks[0].lines[0].content, 'new content')
+
+    ws.close()
+  })
+
+  it('shows untracked files alongside modified files', async () => {
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+    writeFileSync(join(tempDir, 'untracked.txt'), 'brand new\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(result.error, null)
+    assert.equal(result.files.length, 2)
+
+    const modified = result.files.find(f => f.path === 'file.txt')
+    const untracked = result.files.find(f => f.path === 'untracked.txt')
+    assert.ok(modified, 'Modified file should be present')
+    assert.ok(untracked, 'Untracked file should be present')
+    assert.equal(modified.status, 'modified')
+    assert.equal(untracked.status, 'untracked')
+
+    ws.close()
+  })
+
+  it('caps untracked files at 10', async () => {
+    for (let i = 0; i < 15; i++) {
+      writeFileSync(join(tempDir, `untracked-${String(i).padStart(2, '0')}.txt`), `content ${i}\n`)
+    }
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(result.error, null)
+    const untrackedFiles = result.files.filter(f => f.status === 'untracked')
+    assert.equal(untrackedFiles.length, 10, 'Should cap at 10 untracked files')
 
     ws.close()
   })

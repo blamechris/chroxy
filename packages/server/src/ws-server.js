@@ -2012,16 +2012,7 @@ export class WsServer {
         }
       }
 
-      if (!diffOutput.trim()) {
-        this._send(ws, {
-          type: 'diff_result',
-          files: [],
-          error: null,
-        })
-        return
-      }
-
-      const files = parseDiff(diffOutput)
+      const files = diffOutput.trim() ? parseDiff(diffOutput) : []
 
       // Deduplicate files that appear in both unstaged and staged diffs
       const seen = new Map()
@@ -2035,6 +2026,59 @@ export class WsServer {
         } else {
           seen.set(file.path, file)
         }
+      }
+
+      // Discover untracked files (new files not yet staged)
+      try {
+        const { stdout: untrackedOutput } = await execFileAsync(
+          'git', ['ls-files', '--others', '--exclude-standard'],
+          { cwd: cwdReal, maxBuffer: 512 * 1024, timeout: 5000 }
+        )
+        if (untrackedOutput.trim()) {
+          const untrackedPaths = untrackedOutput.trim().split('\n')
+            .filter(p => p && !seen.has(p))
+            .sort()
+            .slice(0, 10) // Cap at 10 untracked files
+
+          const MAX_UNTRACKED_SIZE = 50 * 1024 // 50KB per file
+          for (const filePath of untrackedPaths) {
+            try {
+              const absPath = resolve(cwdReal, filePath)
+              const fileStat = await stat(absPath)
+              if (!fileStat.isFile()) continue
+
+              let lines, additions
+              if (fileStat.size > MAX_UNTRACKED_SIZE) {
+                lines = [{ type: 'context', content: `File too large to preview (${(fileStat.size / 1024).toFixed(1)} KB)` }]
+                additions = 0
+              } else {
+                const content = await readFile(absPath, 'utf-8')
+                const contentLines = content.split('\n')
+                // Drop trailing empty line from split
+                if (contentLines.length > 0 && contentLines[contentLines.length - 1] === '') {
+                  contentLines.pop()
+                }
+                lines = contentLines.map(l => ({ type: 'addition', content: l }))
+                additions = lines.length
+              }
+
+              seen.set(filePath, {
+                path: filePath,
+                status: 'untracked',
+                additions,
+                deletions: 0,
+                hunks: [{
+                  header: 'New untracked file',
+                  lines,
+                }],
+              })
+            } catch {
+              // Skip files that can't be read (permissions, etc.)
+            }
+          }
+        }
+      } catch {
+        // Ignore ls-files errors (not a git repo edge case, etc.)
       }
 
       this._send(ws, {

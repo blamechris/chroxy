@@ -52,6 +52,8 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | SessionPicker | `src/components/SessionPicker.tsx` | Horizontal session tab strip |
 | MarkdownRenderer | `src/components/MarkdownRenderer.tsx` | Markdown parsing + inline code highlighting |
 | CreateSessionModal | `src/components/CreateSessionModal.tsx` | New session creation dialog |
+| DiffViewer | `src/components/DiffViewer.tsx` | Git diff modal with file list and line-level changes |
+| FileBrowser | `src/components/FileBrowser.tsx` | Project file browser with syntax-highlighted viewer |
 
 ## State Management (Zustand)
 
@@ -86,11 +88,97 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 
 ### Client → Server
 
-`auth`, `input`, `resize`, `mode`, `interrupt`, `set_model`, `set_permission_mode`, `permission_response`, `list_sessions`, `switch_session`, `create_session`, `destroy_session`, `rename_session`, `discover_sessions`, `attach_session`, `trigger_discovery`, `register_push_token`, `user_question_response`, `list_directory`, `key_exchange`
+| Type | Purpose |
+|------|---------|
+| `auth` | Authenticate with server token and device info |
+| `attach_session` | Attach to existing tmux session by name |
+| `browse_files` | Request file/directory listing within project |
+| `create_session` | Create new session with optional name/cwd |
+| `destroy_session` | Delete session by ID |
+| `discover_sessions` | Scan host for available tmux sessions |
+| `encrypted` | Encrypted message envelope (E2E encryption) |
+| `get_diff` | Request git diff for uncommitted changes |
+| `input` | Send text or voice message to session |
+| `interrupt` | Interrupt active Claude task |
+| `key_exchange` | Send client X25519 public key for encryption |
+| `list_agents` | Request available custom agent definitions |
+| `list_directory` | Request home directory listing for browsing |
+| `list_sessions` | Request list of all sessions |
+| `list_slash_commands` | Request available slash command definitions |
+| `mode` | Switch between terminal and chat view modes |
+| `permission_response` | Respond to permission prompt (allow/deny) |
+| `ping` | Client heartbeat for connection keep-alive |
+| `read_file` | Request file content within project |
+| `register_push_token` | Register Expo push token for notifications |
+| `rename_session` | Rename existing session by ID |
+| `request_full_history` | Request complete JSONL history for session |
+| `request_session_context` | Get context info for specific session |
+| `resize` | Resize PTY terminal (cols/rows) |
+| `set_model` | Change active Claude model |
+| `set_permission_mode` | Change permission handling mode |
+| `switch_session` | Switch to different active session |
+| `trigger_discovery` | Trigger on-demand tmux discovery scan |
+| `user_question_response` | Respond to AskUserQuestion prompt |
 
 ### Server → Client
 
-`auth_ok`, `auth_fail`, `server_mode`, `stream_start`, `stream_delta`, `stream_end`, `raw`, `message`, `status`, `model_changed`, `status_update`, `available_models`, `permission_request`, `confirm_permission_mode`, `permission_mode_changed`, `available_permission_modes`, `session_list`, `session_switched`, `session_created`, `session_destroyed`, `session_error`, `discovered_sessions`, `discovery_triggered`, `history_replay_start`, `history_replay_end`, `raw_background`, `claude_ready`, `tool_start`, `result`, `agent_busy`, `agent_idle`, `agent_spawned`, `agent_completed`, `server_shutdown`, `server_status`, `server_error`, `user_question`, `plan_started`, `plan_ready`, `client_joined`, `client_left`, `primary_changed`, `directory_listing`, `key_exchange`
+| Type | Purpose |
+|------|---------|
+| `agent_busy` | Agent started processing in session |
+| `agent_completed` | Subagent completed execution |
+| `agent_idle` | Agent finished processing in session |
+| `agent_list` | Available custom agent definitions list |
+| `agent_spawned` | New subagent spawned (transient event) |
+| `auth_fail` | Authentication failed (timeout/invalid token) |
+| `auth_ok` | Authentication successful with server info |
+| `available_models` | List of models server accepts |
+| `available_permission_modes` | List of permission modes available |
+| `claude_ready` | Claude Code ready for input |
+| `client_joined` | New client connected to server |
+| `client_left` | Client disconnected from server |
+| `confirm_permission_mode` | Challenge auto mode (needs confirmation) |
+| `conversation_id` | SDK conversation ID for session portability |
+| `diff_result` | Git diff for uncommitted changes |
+| `directory_listing` | Home directory listing response |
+| `discovered_sessions` | Available tmux sessions on host |
+| `discovery_triggered` | On-demand discovery scan started |
+| `encrypted` | Encrypted message envelope (E2E encryption) |
+| `file_content` | File content with syntax metadata |
+| `file_listing` | Project file/directory listing response |
+| `history_replay_end` | End of session history replay |
+| `history_replay_start` | Beginning of session history replay |
+| `key_exchange_ok` | Server X25519 public key for encryption |
+| `message` | Parsed chat message (user/response/tool_use) |
+| `model_changed` | Active model updated by user |
+| `permission_expired` | Permission request expired or already handled |
+| `permission_mode_changed` | Permission mode changed by user |
+| `permission_request` | Permission prompt from hook/SDK |
+| `plan_ready` | Plan complete, awaiting user approval |
+| `plan_started` | Claude entered plan mode |
+| `pong` | Heartbeat response to client ping |
+| `primary_changed` | Last-writer-wins primary client changed |
+| `raw` | Raw PTY output (terminal view) |
+| `raw_background` | Raw PTY data for chat-mode clients |
+| `result` | Query stats (cost/duration/tokens) |
+| `server_error` | Server-side error forwarded to app |
+| `server_mode` | Which backend mode active (cli/terminal) |
+| `server_shutdown` | Server shutting down (reason/ETA) |
+| `server_status` | Non-error status update (e.g., recovery) |
+| `session_context` | Context info for specific session |
+| `session_created` | New session created |
+| `session_destroyed` | Session removed |
+| `session_error` | Session operation error |
+| `session_list` | All available sessions |
+| `session_switched` | Switched to active session |
+| `slash_commands` | Available slash command definitions |
+| `status` | Connection status (connected: true/false) |
+| `status_update` | Claude Code status bar metadata |
+| `stream_delta` | Token-by-token streaming response text |
+| `stream_end` | Streaming response complete |
+| `stream_start` | Beginning of streaming response |
+| `tool_result` | Tool execution result output |
+| `tool_start` | Tool invocation started |
+| `user_question` | AskUserQuestion prompt from Claude |
 
 ### Protocol Details
 
@@ -135,6 +223,10 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `output-parser.js` | Terminal output parser |
 | `noise-patterns.js` | Terminal noise filter patterns |
 | `ws-server.js` | WebSocket protocol with auth |
+| `ws-schemas.js` | Zod schemas for WebSocket message validation |
+| `diff-parser.js` | Unified diff parser for git output |
+| `crypto.js` | ECDH key exchange + AES-GCM encryption |
+| `event-normalizer.js` | Normalize SDK/CLI events into unified format |
 | `tunnel.js` | Backward-compat shim (re-exports CloudflareTunnelAdapter as TunnelManager) |
 | `tunnel/index.js` | Tunnel module entry — re-exports + registers built-in adapters |
 | `tunnel/registry.js` | Tunnel adapter registry + `parseTunnelArg` flag parser |
@@ -163,11 +255,14 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `components/SessionPicker.tsx` | Horizontal session tab strip |
 | `components/MarkdownRenderer.tsx` | Markdown parsing + inline code highlighting |
 | `components/CreateSessionModal.tsx` | New session creation dialog |
+| `components/DiffViewer.tsx` | Git diff modal with file list and line-level changes |
+| `components/FileBrowser.tsx` | Project file browser with syntax-highlighted viewer |
 | `store/connection.ts` | Zustand state store (ConnectionPhase) |
 | `hooks/useSpeechRecognition.ts` | Voice-to-text input hook |
 | `notifications.ts` | Push notification registration |
 | `constants/colors.ts` | Shared color palette |
 | `constants/icons.ts` | Shared icon constants |
+| `utils/syntax.ts` | Syntax tokenizer for code highlighting |
 
 ### Docs
 
