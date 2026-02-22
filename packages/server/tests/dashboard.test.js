@@ -623,6 +623,18 @@ describe('#733 — keyboard shortcuts', () => {
     const ctrlEnterBlock = html.match(/e\.key === "Enter" && \(e\.ctrlKey \|\| e\.metaKey\)/)
     assert.ok(ctrlEnterBlock, 'should handle Ctrl/Cmd+Enter to send message')
   })
+
+  it('skips shortcuts when focused on input or textarea', () => {
+    assert.ok(html.includes('tag === "INPUT" || tag === "TEXTAREA"'),
+      'should guard shortcuts when active element is INPUT or TEXTAREA')
+  })
+
+  it('skips Escape interrupt when rename input is focused', () => {
+    assert.ok(html.includes('tab-rename-input'),
+      'Escape handler should check for active rename input')
+    const escapeGuard = html.match(/tab-rename-input[\s\S]*?return/)
+    assert.ok(escapeGuard, 'should return early when rename input is active during Escape')
+  })
 })
 
 describe('#733 — toast notifications', () => {
@@ -760,6 +772,16 @@ describe('#733 — user question prompts with options', () => {
   it('shows answer text after submitting', () => {
     assert.ok(html.includes('q-answer-text'),
       'should have answer text element')
+  })
+
+  it('prevents duplicate option button submissions', () => {
+    const optionGuard = html.match(/q-option-btn[\s\S]*?classList\.contains\("answered"\)\s*\)\s*return/)
+    assert.ok(optionGuard, 'option click handler should check answered class before sending')
+  })
+
+  it('prevents duplicate text input submissions', () => {
+    const textGuard = html.match(/function submitAnswer[\s\S]*?classList\.contains\("answered"\)\s*\)\s*return/)
+    assert.ok(textGuard, 'submitAnswer should check answered class before sending')
   })
 })
 
