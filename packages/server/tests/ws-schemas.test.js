@@ -31,6 +31,32 @@ import {
   GetDiffSchema,
   EncryptedEnvelopeSchema,
   ClientMessageSchema,
+  // Server -> Client schemas
+  ServerAuthOkSchema,
+  ServerAuthFailSchema,
+  ServerClaudeReadySchema,
+  ServerStreamStartSchema,
+  ServerStreamDeltaSchema,
+  ServerStreamEndSchema,
+  ServerMessageSchema,
+  ServerToolStartSchema,
+  ServerToolResultSchema,
+  ServerResultSchema,
+  ServerModelChangedSchema,
+  ServerPermissionModeChangedSchema,
+  ServerPermissionRequestSchema,
+  ServerUserQuestionSchema,
+  ServerAgentBusySchema,
+  ServerAgentIdleSchema,
+  ServerAgentSpawnedSchema,
+  ServerAgentCompletedSchema,
+  ServerPlanStartedSchema,
+  ServerPlanReadySchema,
+  ServerSessionListSchema,
+  ServerStatusUpdateSchema,
+  ServerErrorSchema,
+  ServerShutdownSchema,
+  ServerPongSchema,
 } from '../src/ws-schemas.js'
 
 
@@ -605,5 +631,327 @@ describe('ClientMessageSchema', () => {
     for (const issue of result.error.issues) {
       assert.equal(typeof issue.message, 'string')
     }
+  })
+})
+
+
+// ============================================================
+// Server -> Client schemas
+// ============================================================
+
+describe('ServerAuthOkSchema', () => {
+  it('accepts valid auth_ok', () => {
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'abc123',
+      serverMode: 'cli',
+      serverVersion: '0.1.0',
+      latestVersion: null,
+      serverCommit: 'deadbeef',
+      cwd: '/tmp',
+      connectedClients: [],
+      encryption: 'required',
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts with connected clients', () => {
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'abc',
+      serverMode: 'terminal',
+      serverVersion: '0.1.0',
+      latestVersion: '0.2.0',
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [{
+        clientId: 'c1',
+        deviceName: 'iPhone',
+        deviceType: 'phone',
+        platform: 'ios',
+      }],
+      encryption: 'disabled',
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects invalid serverMode', () => {
+    const result = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'abc',
+      serverMode: 'pty',
+      serverVersion: '0.1.0',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+    })
+    assert.ok(!result.success)
+  })
+})
+
+describe('ServerAuthFailSchema', () => {
+  it('accepts valid auth_fail', () => {
+    const result = ServerAuthFailSchema.safeParse({ type: 'auth_fail', reason: 'bad token' })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing reason', () => {
+    const result = ServerAuthFailSchema.safeParse({ type: 'auth_fail' })
+    assert.ok(!result.success)
+  })
+})
+
+describe('ServerClaudeReadySchema', () => {
+  it('accepts valid claude_ready', () => {
+    assert.ok(ServerClaudeReadySchema.safeParse({ type: 'claude_ready' }).success)
+  })
+})
+
+describe('ServerStreamStartSchema', () => {
+  it('accepts valid stream_start', () => {
+    const result = ServerStreamStartSchema.safeParse({ type: 'stream_start', messageId: 'msg-1' })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing messageId', () => {
+    assert.ok(!ServerStreamStartSchema.safeParse({ type: 'stream_start' }).success)
+  })
+})
+
+describe('ServerStreamDeltaSchema', () => {
+  it('accepts valid stream_delta', () => {
+    const result = ServerStreamDeltaSchema.safeParse({ type: 'stream_delta', messageId: 'msg-1', delta: 'Hello' })
+    assert.ok(result.success)
+  })
+})
+
+describe('ServerStreamEndSchema', () => {
+  it('accepts valid stream_end', () => {
+    assert.ok(ServerStreamEndSchema.safeParse({ type: 'stream_end', messageId: 'msg-1' }).success)
+  })
+})
+
+describe('ServerMessageSchema', () => {
+  it('accepts response message', () => {
+    const result = ServerMessageSchema.safeParse({
+      type: 'message',
+      messageType: 'response',
+      content: 'Hello!',
+      timestamp: Date.now(),
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts error message with tool', () => {
+    const result = ServerMessageSchema.safeParse({
+      type: 'message',
+      messageType: 'error',
+      content: 'fail',
+      tool: 'Bash',
+      timestamp: 1000,
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing content', () => {
+    assert.ok(!ServerMessageSchema.safeParse({ type: 'message', messageType: 'response', timestamp: 1 }).success)
+  })
+})
+
+describe('ServerToolStartSchema', () => {
+  it('accepts valid tool_start', () => {
+    const result = ServerToolStartSchema.safeParse({
+      type: 'tool_start',
+      messageId: 'm1',
+      toolUseId: 'tu1',
+      tool: 'Read',
+      input: '/tmp/file.txt',
+    })
+    assert.ok(result.success)
+  })
+})
+
+describe('ServerToolResultSchema', () => {
+  it('accepts valid tool_result', () => {
+    const result = ServerToolResultSchema.safeParse({
+      type: 'tool_result',
+      toolUseId: 'tu1',
+      result: 'file contents here',
+    })
+    assert.ok(result.success)
+  })
+})
+
+describe('ServerResultSchema', () => {
+  it('accepts valid result', () => {
+    const result = ServerResultSchema.safeParse({
+      type: 'result',
+      cost: 0.05,
+      duration: 3000,
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts result with all optional fields', () => {
+    const result = ServerResultSchema.safeParse({
+      type: 'result',
+      cost: 0.1,
+      duration: 5000,
+      usage: { inputTokens: 100, outputTokens: 50 },
+      sessionId: 'sdk-abc',
+    })
+    assert.ok(result.success)
+  })
+})
+
+describe('ServerModelChangedSchema', () => {
+  it('accepts model string', () => {
+    assert.ok(ServerModelChangedSchema.safeParse({ type: 'model_changed', model: 'sonnet' }).success)
+  })
+
+  it('accepts null model', () => {
+    assert.ok(ServerModelChangedSchema.safeParse({ type: 'model_changed', model: null }).success)
+  })
+})
+
+describe('ServerPermissionModeChangedSchema', () => {
+  it('accepts valid mode', () => {
+    assert.ok(ServerPermissionModeChangedSchema.safeParse({ type: 'permission_mode_changed', mode: 'approve' }).success)
+  })
+})
+
+describe('ServerPermissionRequestSchema', () => {
+  it('accepts valid permission_request', () => {
+    const result = ServerPermissionRequestSchema.safeParse({
+      type: 'permission_request',
+      requestId: 'req-1',
+      tool: 'Bash',
+      input: 'ls -la',
+    })
+    assert.ok(result.success)
+  })
+})
+
+describe('ServerUserQuestionSchema', () => {
+  it('accepts valid user_question', () => {
+    const result = ServerUserQuestionSchema.safeParse({
+      type: 'user_question',
+      toolUseId: 'tu1',
+      questions: [{ question: 'Which?', options: ['A', 'B'] }],
+    })
+    assert.ok(result.success)
+  })
+})
+
+describe('ServerAgentBusySchema', () => {
+  it('accepts valid agent_busy', () => {
+    assert.ok(ServerAgentBusySchema.safeParse({ type: 'agent_busy' }).success)
+  })
+})
+
+describe('ServerAgentIdleSchema', () => {
+  it('accepts valid agent_idle', () => {
+    assert.ok(ServerAgentIdleSchema.safeParse({ type: 'agent_idle' }).success)
+  })
+})
+
+describe('ServerAgentSpawnedSchema', () => {
+  it('accepts with all fields', () => {
+    const result = ServerAgentSpawnedSchema.safeParse({
+      type: 'agent_spawned',
+      toolUseId: 'tu1',
+      description: 'Explore codebase',
+      startedAt: Date.now(),
+    })
+    assert.ok(result.success)
+  })
+})
+
+describe('ServerAgentCompletedSchema', () => {
+  it('accepts valid agent_completed', () => {
+    assert.ok(ServerAgentCompletedSchema.safeParse({ type: 'agent_completed', toolUseId: 'tu1' }).success)
+  })
+})
+
+describe('ServerPlanStartedSchema', () => {
+  it('accepts valid plan_started', () => {
+    assert.ok(ServerPlanStartedSchema.safeParse({ type: 'plan_started' }).success)
+  })
+})
+
+describe('ServerPlanReadySchema', () => {
+  it('accepts with allowedPrompts', () => {
+    const result = ServerPlanReadySchema.safeParse({
+      type: 'plan_ready',
+      allowedPrompts: [{ tool: 'Bash', prompt: 'run tests' }],
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts without allowedPrompts', () => {
+    assert.ok(ServerPlanReadySchema.safeParse({ type: 'plan_ready' }).success)
+  })
+})
+
+describe('ServerSessionListSchema', () => {
+  it('accepts valid session list', () => {
+    const result = ServerSessionListSchema.safeParse({
+      type: 'session_list',
+      sessions: [{ sessionId: 's1', name: 'Test', isBusy: false }],
+    })
+    assert.ok(result.success)
+  })
+})
+
+describe('ServerStatusUpdateSchema', () => {
+  it('accepts valid status_update', () => {
+    const result = ServerStatusUpdateSchema.safeParse({
+      type: 'status_update',
+      model: 'sonnet',
+      cost: '$0.05',
+      messageCount: 10,
+      contextTokens: 5000,
+      contextPercent: 25,
+    })
+    assert.ok(result.success)
+  })
+})
+
+describe('ServerErrorSchema', () => {
+  it('accepts valid server_error', () => {
+    const result = ServerErrorSchema.safeParse({
+      type: 'server_error',
+      category: 'tunnel',
+      message: 'Connection lost',
+      recoverable: true,
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing recoverable', () => {
+    assert.ok(!ServerErrorSchema.safeParse({ type: 'server_error', message: 'fail' }).success)
+  })
+})
+
+describe('ServerShutdownSchema', () => {
+  it('accepts valid server_shutdown', () => {
+    const result = ServerShutdownSchema.safeParse({
+      type: 'server_shutdown',
+      reason: 'restart',
+      restartEtaMs: 5000,
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects invalid reason', () => {
+    assert.ok(!ServerShutdownSchema.safeParse({ type: 'server_shutdown', reason: 'crash', restartEtaMs: 0 }).success)
+  })
+})
+
+describe('ServerPongSchema', () => {
+  it('accepts valid pong', () => {
+    assert.ok(ServerPongSchema.safeParse({ type: 'pong' }).success)
   })
 })

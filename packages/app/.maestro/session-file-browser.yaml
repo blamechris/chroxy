@@ -1,0 +1,48 @@
+appId: host.exp.Exponent
+name: SessionScreen file browser navigation
+---
+
+# Test file browser directory navigation
+
+# Connect to mock server
+- runFlow: setup/ensure-session-screen.yaml
+
+# Switch to Files mode
+- tapOn: "Files"
+- waitForAnimationToEnd
+
+# Wait for root directory to load
+- extendedWaitUntil:
+    visible:
+      text: ".*src.*"
+    timeout: 5000
+
+# Verify root directory entries from mock server
+- assertVisible:
+    text: ".*package.json.*"
+
+# Take screenshot of root directory
+- takeScreenshot: file-browser-root
+
+# Navigate into src directory
+- tapOn:
+    text: ".*src.*"
+
+# Wait for subdirectory to load
+- extendedWaitUntil:
+    visible:
+      text: ".*index.js.*"
+    timeout: 5000
+
+# Take screenshot of src directory
+- takeScreenshot: file-browser-src
+
+# Navigate back
+- tapOn:
+    text: ".*Back.*"
+
+# Verify we're back at root
+- extendedWaitUntil:
+    visible:
+      text: ".*package.json.*"
+    timeout: 5000

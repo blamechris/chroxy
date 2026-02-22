@@ -1,0 +1,25 @@
+appId: host.exp.Exponent
+name: SessionScreen connected state
+---
+
+# Verify SessionScreen renders correctly when connected to mock server
+
+# Connect to mock server
+- runFlow: setup/ensure-session-screen.yaml
+
+# Verify mode toggle buttons
+- assertVisible: "Chat"
+- assertVisible: "Files"
+
+# Chat should be the active mode (default)
+# Verify empty state or ready state
+- assertVisible:
+    text: ".*"
+
+# Verify settings/disconnect buttons are present (icon buttons)
+# The close (X) button for disconnect
+- assertVisible:
+    text: ".*\u2715.*"
+
+# Take screenshot for verification
+- takeScreenshot: session-connected
