@@ -197,12 +197,12 @@ program
   .command('start')
   .description('Start the Chroxy server')
   .option('-c, --config <path>', 'Path to config file', CONFIG_FILE)
-  .option('-t, --terminal', 'Use PTY/tmux mode instead of CLI headless mode')
+  .option('-t, --terminal', '[DEPRECATED] Use PTY/tmux mode instead of CLI headless mode')
   .option('-r, --resume', 'Resume an existing Claude Code session instead of starting fresh')
   .option('--cwd <path>', 'Working directory for Claude (CLI mode)')
   .option('--model <model>', 'Model to use (CLI mode)')
   .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve (CLI mode)')
-  .option('--discovery-interval <seconds>', 'Auto-discovery polling interval in seconds (PTY mode)')
+  .option('--discovery-interval <seconds>', '[DEPRECATED] Auto-discovery polling interval in seconds (PTY mode)')
   .option('--max-restarts <count>', 'Max supervisor restart attempts before exit (default: 10)')
   .option('--tunnel <mode>', 'Tunnel: quick (default), named, none, or provider:mode (e.g., cloudflare:named)')
   .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
@@ -237,6 +237,13 @@ program
     if (options.encrypt === false) extraOverrides.noEncrypt = true
 
     const config = loadAndMergeConfig(options, extraOverrides)
+
+    // Deprecation warning for PTY/tmux mode
+    if (config.terminal) {
+      console.warn('⚠️  PTY/tmux mode (--terminal) is deprecated and will be removed in a future release.')
+      console.warn('   The default CLI headless mode is recommended for all new usage.')
+      console.warn('   See: https://github.com/blamechris/chroxy#server-modes')
+    }
 
     // Block PTY/tmux mode on Windows
     if (isWindows && config.terminal) {
