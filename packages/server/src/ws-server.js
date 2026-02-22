@@ -2075,14 +2075,29 @@ export class WsServer {
                 lines = [{ type: 'context', content: `File too large to preview (${(fileStat.size / 1024).toFixed(1)} KB)` }]
                 additions = 0
               } else {
-                const content = await readFile(realAbsPath, 'utf-8')
-                const contentLines = content.split('\n')
-                // Drop trailing empty line from split
-                if (contentLines.length > 0 && contentLines[contentLines.length - 1] === '') {
-                  contentLines.pop()
+                const buf = await readFile(realAbsPath)
+                // Binary detection: check first 8KB for null bytes (matches _readFile handler)
+                const checkLen = Math.min(buf.length, 8192)
+                let isBinary = false
+                for (let i = 0; i < checkLen; i++) {
+                  if (buf[i] === 0) {
+                    isBinary = true
+                    break
+                  }
                 }
-                lines = contentLines.map(l => ({ type: 'addition', content: l }))
-                additions = lines.length
+                if (isBinary) {
+                  lines = [{ type: 'context', content: 'Binary file — not shown' }]
+                  additions = 0
+                } else {
+                  const content = buf.toString('utf-8')
+                  const contentLines = content.split('\n')
+                  // Drop trailing empty line from split
+                  if (contentLines.length > 0 && contentLines[contentLines.length - 1] === '') {
+                    contentLines.pop()
+                  }
+                  lines = contentLines.map(l => ({ type: 'addition', content: l }))
+                  additions = lines.length
+                }
               }
 
               seen.set(filePath, {

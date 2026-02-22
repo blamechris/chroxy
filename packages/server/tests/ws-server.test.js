@@ -6122,6 +6122,33 @@ describe('get_diff handler', () => {
     ws.close()
   })
 
+  it('shows placeholder for binary untracked files', async () => {
+    // Create a binary file with realistic JPEG header bytes (invalid UTF-8 + null bytes)
+    const binaryContent = Buffer.from([
+      0xFF, 0xD8, 0xFF, 0xE0,                         // JPEG SOI + APP0 marker
+      0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,       // JFIF segment with nulls
+      0x01, 0x02, 0xFF, 0xDB, 0xFF, 0xC0, 0xFF, 0xDA, // typical JPEG markers
+    ])
+    writeFileSync(join(tempDir, 'image.png'), binaryContent)
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(result.error, null)
+    const binaryFile = result.files.find(f => f.path === 'image.png')
+    assert.ok(binaryFile, 'Binary untracked file should be present')
+    assert.equal(binaryFile.status, 'untracked')
+    assert.equal(binaryFile.additions, 0, 'Binary file should have 0 additions')
+    assert.equal(binaryFile.hunks.length, 1)
+    assert.equal(binaryFile.hunks[0].lines.length, 1)
+    assert.equal(binaryFile.hunks[0].lines[0].type, 'context')
+    assert.ok(binaryFile.hunks[0].lines[0].content.includes('Binary file'), 'Should show binary placeholder')
+
+    ws.close()
+  })
+
   it('returns error when no sessionCwd', async () => {
     // Create a mock session without cwd set (cwd is undefined)
     const mockSession = createMockSession()
