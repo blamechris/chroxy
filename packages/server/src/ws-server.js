@@ -3,7 +3,7 @@ import { execFileSync, execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
-import { statSync, readFileSync } from 'fs'
+import { statSync, readFileSync, realpathSync } from 'fs'
 import { readdir, readFile, stat, realpath } from 'fs/promises'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve, normalize, extname } from 'path'
@@ -310,7 +310,7 @@ export class WsServer {
   start(host) {
     // Create HTTP server that handles health checks, permission hooks, and WebSocket upgrades
     this.httpServer = createServer((req, res) => {
-      // Health check endpoint — Cloudflare and the app verify connectivity via GET /
+      // Health check endpoint — Cloudflare and the app verify connectivity via GET / and GET /health
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ status: 'ok', mode: this.serverMode, version: SERVER_VERSION }))
@@ -987,6 +987,20 @@ export class WsServer {
             }
           } catch (err) {
             this._send(ws, { type: 'session_error', message: `Directory does not exist: ${cwd}` })
+            break
+          }
+
+          // Restrict CWD to subdirectories of the user's home directory
+          const home = homedir()
+          let realCwd
+          try {
+            realCwd = realpathSync(cwd)
+          } catch {
+            this._send(ws, { type: 'session_error', message: `Cannot resolve path: ${cwd}` })
+            break
+          }
+          if (!realCwd.startsWith(home + '/') && realCwd !== home) {
+            this._send(ws, { type: 'session_error', message: 'Session directory must be within your home directory' })
             break
           }
         }
