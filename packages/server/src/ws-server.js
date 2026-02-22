@@ -240,7 +240,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
  */
 export class WsServer {
-  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs } = {}) {
+  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._maxPayload = maxPayload || 10 * 1024 * 1024 // default 10MB (supports image/doc attachments)
@@ -249,6 +249,7 @@ export class WsServer {
     this.authRequired = authRequired
     this._encryptionEnabled = !noEncrypt
     this._keyExchangeTimeoutMs = keyExchangeTimeoutMs ?? 10_000
+    this._localhostBypass = localhostBypass !== false // default true
     this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
     this.httpServer = null
     this.wss = null
@@ -562,6 +563,11 @@ export class WsServer {
       sessionInfo.cwd = null
     }
 
+    // Skip encryption for localhost connections
+    // ws://localhost traffic never leaves the machine — E2E encryption adds no security value
+    const isLocalhost = this._localhostBypass && (client.ip === '127.0.0.1' || client.ip === '::1' || client.ip === '::ffff:127.0.0.1')
+    const requireEncryption = this._encryptionEnabled && !isLocalhost
+
     this._send(ws, {
       type: 'auth_ok',
       clientId: client.id,
@@ -571,11 +577,11 @@ export class WsServer {
       serverCommit: this._gitInfo.commit,
       cwd: sessionInfo.cwd,
       connectedClients: this._getConnectedClientList(),
-      encryption: this._encryptionEnabled ? 'required' : 'disabled',
+      encryption: requireEncryption ? 'required' : 'disabled',
     })
 
-    // If encryption enabled, queue all subsequent messages until key exchange completes
-    if (this._encryptionEnabled) {
+    // If encryption required, queue all subsequent messages until key exchange completes
+    if (requireEncryption) {
       client.encryptionPending = true
       client.postAuthQueue = []
       // Key exchange timeout: if no key_exchange arrives, disconnect (never downgrade to plaintext)
