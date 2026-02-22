@@ -342,7 +342,7 @@ describe('WsServer GET /health response shape', () => {
     }
   })
 
-  it('returns status, mode, hostname, and version fields', async () => {
+  it('returns status, mode, and version fields (no hostname)', async () => {
     server = new WsServer({
       port: 0,
       apiToken: 'tok-health-test',
@@ -356,8 +356,7 @@ describe('WsServer GET /health response shape', () => {
     const body = await res.json()
     assert.equal(body.status, 'ok')
     assert.equal(typeof body.mode, 'string')
-    assert.equal(typeof body.hostname, 'string')
-    assert.ok(body.hostname.length > 0, 'hostname should be non-empty')
+    assert.equal(body.hostname, undefined, 'hostname should not be exposed')
     assert.equal(typeof body.version, 'string')
     assert.ok(body.version.length > 0, 'version should be non-empty')
   })
