@@ -6,7 +6,7 @@ import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import readline from 'readline'
 import { validateConfig, mergeConfig } from './config.js'
-import { isWindows, isMac, isLinux, defaultShell, writeFileRestricted } from './platform.js'
+import { isWindows, defaultShell, writeFileRestricted } from './platform.js'
 import { parseTunnelArg, getTunnel, listTunnels } from './tunnel/registry.js'
 
 const CONFIG_DIR = join(homedir(), '.chroxy')
@@ -975,6 +975,12 @@ serviceCmd
     }
 
     const cwd = options.cwd || homedir()
+
+    if (options.cwd && !existsSync(options.cwd)) {
+      console.error(`Error: Working directory "${options.cwd}" does not exist.`)
+      process.exit(1)
+    }
+
     const startAtLogin = options.startAtLogin || false
 
     try {
@@ -996,11 +1002,11 @@ serviceCmd
       console.log(`  Working dir:  ${cwd}`)
       console.log(`  Start on login: ${startAtLogin}`)
       if (paths.type === 'launchd') {
-        console.log('\nThe service is now loaded. To start it manually:')
+        console.log('\nThe service is installed but not running. To start it now:')
         console.log('  launchctl start com.chroxy.server')
       } else {
-        console.log('\nThe service is now enabled. To start it manually:')
-        console.log('  systemctl --user start chroxy.service')
+        console.log('\nThe service is enabled and running. To restart it:')
+        console.log('  systemctl --user restart chroxy.service')
       }
     } catch (err) {
       console.error(`Error installing service: ${err.message}`)

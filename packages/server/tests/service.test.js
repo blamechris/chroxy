@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
@@ -147,7 +147,7 @@ describe('service', () => {
 
     it('includes ExecStart with node and chroxy paths', () => {
       const unit = generateSystemdUnit(config)
-      assert.ok(unit.includes(`ExecStart=${config.nodePath} ${config.chroxyBin} start`))
+      assert.ok(unit.includes(`ExecStart="${config.nodePath}" "${config.chroxyBin}" start`))
     })
 
     it('sets Restart=on-failure and RestartSec=5', () => {

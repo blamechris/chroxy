@@ -9,6 +9,18 @@ const SERVICE_LABEL = 'com.chroxy.server'
 const DEFAULT_CONFIG_DIR = join(homedir(), '.chroxy')
 
 /**
+ * Escape XML special characters in a string.
+ */
+function escapeXml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+}
+
+/**
  * Returns platform-specific service file paths.
  * @param {string} [plat] - Override platform (defaults to process.platform)
  */
@@ -57,8 +69,8 @@ export function generateLaunchdPlist(config) {
   <string>${SERVICE_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${nodePath}</string>
-    <string>${chroxyBin}</string>
+    <string>${escapeXml(nodePath)}</string>
+    <string>${escapeXml(chroxyBin)}</string>
     <string>start</string>
   </array>
   <key>RunAtLoad</key>
@@ -66,15 +78,15 @@ export function generateLaunchdPlist(config) {
   <key>KeepAlive</key>
   <true/>
   <key>WorkingDirectory</key>
-  <string>${cwd}</string>
+  <string>${escapeXml(cwd)}</string>
   <key>StandardOutPath</key>
-  <string>${join(logDir, 'chroxy-stdout.log')}</string>
+  <string>${escapeXml(join(logDir, 'chroxy-stdout.log'))}</string>
   <key>StandardErrorPath</key>
-  <string>${join(logDir, 'chroxy-stderr.log')}</string>
+  <string>${escapeXml(join(logDir, 'chroxy-stderr.log'))}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>${pathValue}</string>
+    <string>${escapeXml(pathValue)}</string>
     <key>CHROXY_DAEMON</key>
     <string>1</string>
   </dict>
@@ -103,7 +115,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${nodePath} ${chroxyBin} start
+ExecStart="${nodePath}" "${chroxyBin}" start
 WorkingDirectory=${cwd}
 Restart=on-failure
 RestartSec=5
@@ -296,7 +308,7 @@ export function installService(config) {
     if (plat === 'darwin') {
       execFileSync('launchctl', ['load', servicePath])
     } else {
-      execFileSync('systemctl', ['--user', 'enable', 'chroxy.service'])
+      execFileSync('systemctl', ['--user', 'enable', '--now', 'chroxy.service'])
     }
   }
 
