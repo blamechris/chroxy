@@ -296,3 +296,128 @@ describe('console output', () => {
     }
   })
 })
+
+describe('setLogLevel (#747)', () => {
+  let logDir
+
+  beforeEach(() => {
+    logDir = mkdtempSync(join(tmpdir(), 'chroxy-log-'))
+  })
+
+  afterEach(() => {
+    closeFileLogging()
+    rmSync(logDir, { recursive: true, force: true })
+  })
+
+  it('is exported as a function', async () => {
+    const { setLogLevel } = await import('../src/logger.js')
+    assert.equal(typeof setLogLevel, 'function')
+  })
+
+  it('changes the minimum log level at runtime', async () => {
+    const { setLogLevel } = await import('../src/logger.js')
+    initFileLogging({ logDir, level: 'info' })
+    const log = createLogger('test')
+
+    // At info level, debug messages should not appear
+    log.debug('debug-before')
+
+    // Change to debug level
+    setLogLevel('debug')
+    log.debug('debug-after')
+
+    closeFileLogging()
+    const content = readFileSync(join(logDir, 'chroxy.log'), 'utf8')
+    assert.ok(!content.includes('debug-before'), 'debug should be filtered before setLogLevel')
+    assert.ok(content.includes('debug-after'), 'debug should pass after setLogLevel to debug')
+  })
+
+  it('can raise the level to suppress lower-priority messages', async () => {
+    const { setLogLevel } = await import('../src/logger.js')
+    initFileLogging({ logDir, level: 'debug' })
+    const log = createLogger('test')
+
+    log.info('info-before')
+
+    // Raise to error-only
+    setLogLevel('error')
+    log.info('info-after')
+    log.error('error-after')
+
+    closeFileLogging()
+    const content = readFileSync(join(logDir, 'chroxy.log'), 'utf8')
+    assert.ok(content.includes('info-before'))
+    assert.ok(!content.includes('info-after'), 'info should be filtered at error level')
+    assert.ok(content.includes('error-after'))
+  })
+
+  it('also affects console output filtering', async () => {
+    const { setLogLevel } = await import('../src/logger.js')
+    // Don't init file logging — test console-only mode
+    closeFileLogging() // reset state
+
+    const calls = []
+    const origLog = console.log
+    console.log = (...args) => calls.push(args.join(' '))
+
+    try {
+      // Default level is info (after closeFileLogging resets)
+      const log = createLogger('fg')
+      log.debug('should-not-appear')
+      assert.ok(!calls.some(c => c.includes('should-not-appear')))
+
+      setLogLevel('debug')
+      log.debug('should-appear')
+      assert.ok(calls.some(c => c.includes('should-appear')))
+    } finally {
+      console.log = origLog
+      closeFileLogging() // reset
+    }
+  })
+})
+
+describe('logger file write error handling (#746)', () => {
+  let logDir
+
+  beforeEach(() => {
+    logDir = mkdtempSync(join(tmpdir(), 'chroxy-log-'))
+  })
+
+  afterEach(() => {
+    closeFileLogging()
+    rmSync(logDir, { recursive: true, force: true })
+  })
+
+  it('does not throw when file write fails', () => {
+    initFileLogging({ logDir })
+    const log = createLogger('test')
+
+    // Remove the log directory to cause write failure
+    rmSync(logDir, { recursive: true, force: true })
+
+    // This should NOT throw, even though the file cannot be written
+    assert.doesNotThrow(() => {
+      log.info('this write should fail silently')
+    })
+  })
+
+  it('still writes to console when file write fails', () => {
+    initFileLogging({ logDir })
+    const log = createLogger('test')
+
+    // Remove the log directory to cause write failure
+    rmSync(logDir, { recursive: true, force: true })
+
+    const calls = []
+    const origLog = console.log
+    console.log = (...args) => calls.push(args.join(' '))
+
+    try {
+      log.info('console-still-works')
+      assert.ok(calls.some(c => c.includes('console-still-works')),
+        'console output should still work when file write fails')
+    } finally {
+      console.log = origLog
+    }
+  })
+})

@@ -7495,3 +7495,84 @@ describe('WsServer GET /connect endpoint', () => {
     assert.equal(body.error, 'No connection info available')
   })
 })
+
+describe('WsServer GET /connect redacts apiToken in no-auth mode (#742)', () => {
+  let server
+  let tmpConfigDir
+  let originalConfigDir
+
+  beforeEach(() => {
+    originalConfigDir = process.env.CHROXY_CONFIG_DIR
+    tmpConfigDir = mkdtempSync(join(tmpdir(), 'chroxy-connect-noauth-'))
+    process.env.CHROXY_CONFIG_DIR = tmpConfigDir
+  })
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+    try { rmSync(tmpConfigDir, { recursive: true }) } catch {}
+    if (originalConfigDir !== undefined) {
+      process.env.CHROXY_CONFIG_DIR = originalConfigDir
+    } else {
+      delete process.env.CHROXY_CONFIG_DIR
+    }
+  })
+
+  it('redacts apiToken from /connect response when authRequired is false', async () => {
+    const { writeConnectionInfo } = await import('../src/connection-info.js')
+    writeConnectionInfo({
+      wsUrl: 'wss://noauth-test.example.com',
+      httpUrl: 'https://noauth-test.example.com',
+      apiToken: 'secret-token-abc123',
+      connectionUrl: 'chroxy://noauth-test.example.com?token=secret-token-abc123',
+      tunnelMode: 'cloudflare:quick',
+      startedAt: '2026-02-22T00:00:00.000Z',
+      pid: 99999,
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'secret-token-abc123',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // No auth header needed since authRequired: false
+    const res = await fetch(`http://127.0.0.1:${port}/connect`)
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    // wsUrl should still be there
+    assert.equal(body.wsUrl, 'wss://noauth-test.example.com')
+    // apiToken MUST be redacted
+    assert.notEqual(body.apiToken, 'secret-token-abc123', 'apiToken must be redacted in no-auth mode')
+    assert.ok(body.apiToken === undefined || body.apiToken === '[REDACTED]',
+      'apiToken should be undefined or [REDACTED]')
+  })
+
+  it('still returns full apiToken in /connect response when authRequired is true', async () => {
+    const { writeConnectionInfo } = await import('../src/connection-info.js')
+    writeConnectionInfo({
+      wsUrl: 'wss://auth-test.example.com',
+      apiToken: 'auth-token-xyz789',
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'auth-token-xyz789',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/connect`, {
+      headers: { 'Authorization': 'Bearer auth-token-xyz789' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    // In auth mode, token should NOT be redacted
+    assert.equal(body.apiToken, 'auth-token-xyz789')
+  })
+})

@@ -306,7 +306,7 @@ export function installService(config) {
   // Register with system (unless testing)
   if (!config._skipRegister) {
     if (plat === 'darwin') {
-      execFileSync('launchctl', ['load', servicePath])
+      execFileSync('launchctl', ['bootstrap', `gui/${process.getuid()}`, servicePath])
     } else {
       execFileSync('systemctl', ['--user', 'enable', '--now', 'chroxy.service'])
     }
@@ -344,7 +344,7 @@ export function uninstallService(options = {}) {
   if (!options._skipUnregister) {
     try {
       if (state.platform === 'darwin') {
-        execFileSync('launchctl', ['unload', state.servicePath], { stdio: 'ignore' })
+        execFileSync('launchctl', ['bootout', `gui/${process.getuid()}/${SERVICE_LABEL}`], { stdio: 'ignore' })
       } else {
         execFileSync('systemctl', ['--user', 'disable', '--now', 'chroxy.service'], { stdio: 'ignore' })
       }
@@ -378,7 +378,12 @@ export function startService(options = {}) {
 
   if (!options._skipExec) {
     if (paths.type === 'launchd') {
-      execFileSync('launchctl', ['start', SERVICE_LABEL], { stdio: 'pipe' })
+      const state = loadServiceState()
+      if (state?.servicePath) {
+        execFileSync('launchctl', ['bootstrap', `gui/${process.getuid()}`, state.servicePath], { stdio: 'pipe' })
+      } else {
+        execFileSync('launchctl', ['kickstart', `gui/${process.getuid()}/${SERVICE_LABEL}`], { stdio: 'pipe' })
+      }
     } else {
       execFileSync('systemctl', ['--user', 'start', 'chroxy.service'], { stdio: 'pipe' })
     }
@@ -400,7 +405,7 @@ export function stopService(options = {}) {
 
   if (!options._skipExec) {
     if (paths.type === 'launchd') {
-      execFileSync('launchctl', ['stop', SERVICE_LABEL], { stdio: 'pipe' })
+      execFileSync('launchctl', ['bootout', `gui/${process.getuid()}/${SERVICE_LABEL}`], { stdio: 'pipe' })
     } else {
       execFileSync('systemctl', ['--user', 'stop', 'chroxy.service'], { stdio: 'pipe' })
     }
@@ -483,8 +488,24 @@ export async function getFullServiceStatus(options = {}) {
   // If running, try health endpoint
   if (status.running) {
     try {
-      const port = result.connection?.wsUrl?.match(/:(\d+)/)?.[1] || 8765
-      const response = await fetch(`http://127.0.0.1:${port}/`)
+      // Parse port: prefer config.json, then connection.json URL, then default (#745)
+      let port = 8765
+      const configFile = join(configDir, 'config.json')
+      if (existsSync(configFile)) {
+        try {
+          const cfg = JSON.parse(readFileSync(configFile, 'utf-8'))
+          if (cfg.port && typeof cfg.port === 'number') port = cfg.port
+        } catch {
+          // Ignore malformed config.json
+        }
+      }
+      if (port === 8765 && result.connection?.wsUrl) {
+        const urlPort = result.connection.wsUrl.match(/:(\d+)/)?.[1]
+        if (urlPort) port = parseInt(urlPort, 10)
+      }
+      const response = await fetch(`http://127.0.0.1:${port}/`, {
+        signal: AbortSignal.timeout(3000),
+      })
       result.health = await response.json()
     } catch {
       result.health = null

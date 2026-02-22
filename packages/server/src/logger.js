@@ -81,6 +81,17 @@ function _maybeRotate() {
 }
 
 /**
+ * Change the minimum log level at runtime.
+ * Useful for --verbose CLI flags to enable debug output. (#747)
+ * @param {string} level - One of 'debug', 'info', 'warn', 'error'
+ */
+export function setLogLevel(level) {
+  if (level in LOG_LEVELS) {
+    _logLevel = LOG_LEVELS[level]
+  }
+}
+
+/**
  * Create a component logger. Backward-compatible with existing API.
  * @param {string} component - Component name for log prefix
  * @returns {{ debug: Function, info: Function, warn: Function, error: Function, log: Function }}
@@ -99,10 +110,15 @@ export function createLogger(component) {
 
     // Write to file in daemon mode
     if (_logToFile && _logPath) {
-      appendFileSync(_logPath, line + '\n')
-      _writeCount++
-      if (_writeCount % ROTATION_CHECK_INTERVAL === 0) {
-        _maybeRotate()
+      try {
+        appendFileSync(_logPath, line + '\n')
+        _writeCount++
+        if (_writeCount % ROTATION_CHECK_INTERVAL === 0) {
+          _maybeRotate()
+        }
+      } catch {
+        // Silently ignore write failures (disk full, permission denied, etc.)
+        // to prevent logging errors from crashing the server (#746)
       }
     }
   }
