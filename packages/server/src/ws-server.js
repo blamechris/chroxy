@@ -13,6 +13,7 @@ import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from './crypto.js'
 import { parseDiff } from './diff-parser.js'
 import { ClientMessageSchema, AuthSchema, KeyExchangeSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
+import { EventNormalizer } from './event-normalizer.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -273,6 +274,7 @@ export class WsServer {
     }
 
     this.serverMode = (this.sessionManager || this.cliSession) ? 'cli' : 'terminal'
+    this._normalizer = new EventNormalizer()
     this._gitInfo = getGitInfo()
     this._startedAt = Date.now()
     this._draining = false
@@ -455,14 +457,8 @@ export class WsServer {
 
     this.httpServer.listen(this.port, host)
 
-    // Wire up event forwarding based on mode
-    if (this.sessionManager) {
-      this._setupSessionForwarding()
-    } else if (this.cliSession) {
-      this._setupCliForwarding()
-    } else {
-      this._setupPtyForwarding()
-    }
+    // Wire up unified event forwarding via EventNormalizer
+    this._setupForwarding()
 
     // Ping all authenticated clients every 30s to keep connections alive through
     // Cloudflare/mobile OS idle timeouts. Terminate unresponsive clients.
@@ -544,7 +540,7 @@ export class WsServer {
           client.encryptionPending = false
           client.postAuthQueue = null
           try {
-            ws.send(JSON.stringify({ type: 'server_error', error: 'Encryption required but key exchange timed out. Please reconnect.', recoverable: false }))
+            ws.send(JSON.stringify({ type: 'server_error', message: 'Encryption required but key exchange timed out. Please reconnect.', recoverable: false }))
           } catch (_) {}
           ws.close(1008, 'Key exchange timeout')
         }
@@ -769,7 +765,7 @@ export class WsServer {
       client.encryptionPending = false
       client.postAuthQueue = null
       try {
-        ws.send(JSON.stringify({ type: 'server_error', error: 'Encryption required but client did not initiate key exchange.', recoverable: false }))
+        ws.send(JSON.stringify({ type: 'server_error', message: 'Encryption required but client did not initiate key exchange.', recoverable: false }))
       } catch (_) {}
       ws.close(1008, 'Key exchange required')
       return
@@ -1420,196 +1416,61 @@ export class WsServer {
     }
   }
 
-  /** Wire up SessionManager events to broadcast to clients (multi-session) */
-  _setupSessionForwarding() {
-    // Buffer stream deltas to reduce WS message volume (50ms batch window).
-    // Keyed by sessionId:messageId composite to handle concurrent session streams.
-    const deltaBuffer = new Map() // `${sessionId}:${messageId}` -> accumulated text
-    let deltaFlushTimer = null
-    const flushDeltas = () => {
-      deltaFlushTimer = null
-      for (const [key, delta] of deltaBuffer) {
-        const [sessionId, messageId] = key.split(':', 2)
-        this._broadcastToSession(sessionId, { type: 'stream_delta', messageId, delta })
+  /**
+   * Unified event forwarding via EventNormalizer.
+   * Replaces the old _setupSessionForwarding / _setupCliForwarding / _setupPtyForwarding.
+   */
+  _setupForwarding() {
+    const normalizer = this._normalizer
+
+    // Wire the normalizer's timer-based delta flush to broadcast
+    normalizer.onFlush = (entries) => {
+      for (const { sessionId, messageId, delta } of entries) {
+        if (sessionId) {
+          this._broadcastToSession(sessionId, { type: 'stream_delta', messageId, delta })
+        } else {
+          this._broadcast({ type: 'stream_delta', messageId, delta })
+        }
       }
-      deltaBuffer.clear()
     }
 
+    if (this.sessionManager) {
+      this._setupSessionForwardingVia(normalizer)
+    } else if (this.cliSession) {
+      this._setupCliForwardingVia(normalizer)
+    } else {
+      this._setupPtyForwardingVia(normalizer)
+    }
+  }
+
+  /** Multi-session forwarding via normalizer */
+  _setupSessionForwardingVia(normalizer) {
     this.sessionManager.on('session_event', ({ sessionId, event, data }) => {
-      switch (event) {
-        case 'ready': {
-          const entry = this.sessionManager.getSession(sessionId)
-          this._broadcastToSession(sessionId, { type: 'claude_ready' })
-          if (entry) {
-            this._broadcastToSession(sessionId, {
-              type: 'model_changed',
-              model: entry.session.model ? toShortModelId(entry.session.model) : null,
-            })
-            this._broadcastToSession(sessionId, {
-              type: 'permission_mode_changed',
-              mode: entry.session.permissionMode || 'approve',
-            })
-          }
-          break
+      const ctx = {
+        sessionId,
+        mode: 'multi',
+        getSessionEntry: () => this.sessionManager.getSession(sessionId),
+      }
+      const result = normalizer.normalize(event, data, ctx)
+      if (!result) return
+
+      // Handle delta buffering
+      if (result.buffer) {
+        normalizer.bufferDelta(sessionId, data.messageId, data.delta)
+        return
+      }
+
+      // Execute side effects before messages (flush_deltas must happen before stream_end broadcast)
+      this._executeSideEffects(result.sideEffects, sessionId)
+      this._executeRegistrations(result.registrations, sessionId)
+
+      // Broadcast messages
+      for (const { msg, filter } of result.messages) {
+        if (filter) {
+          this._broadcastToSession(sessionId, msg, filter)
+        } else {
+          this._broadcastToSession(sessionId, msg)
         }
-
-        case 'conversation_id':
-          this._broadcastToSession(sessionId, {
-            type: 'conversation_id',
-            sessionId,
-            conversationId: data.conversationId,
-          })
-          // Broadcast updated session list (conversationId now available)
-          this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
-          break
-
-        case 'stream_start':
-          console.log(`[ws] Broadcasting stream_start: ${data.messageId} (session ${sessionId})`)
-          this._broadcastToSession(sessionId, { type: 'stream_start', messageId: data.messageId })
-          this._broadcastToSession(sessionId, { type: 'agent_busy' })
-          // Broadcast updated session list so SessionPicker busy dot appears immediately
-          this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
-          break
-
-        case 'stream_delta': {
-          const key = `${sessionId}:${data.messageId}`
-          const existing = deltaBuffer.get(key) || ''
-          deltaBuffer.set(key, existing + data.delta)
-          if (!deltaFlushTimer) {
-            deltaFlushTimer = setTimeout(flushDeltas, 50)
-          }
-          break
-        }
-
-        case 'stream_end':
-          // Flush remaining deltas for this session before sending stream_end
-          if (deltaBuffer.size > 0) {
-            const prefix = `${sessionId}:`
-            for (const [key, delta] of deltaBuffer) {
-              if (key.startsWith(prefix)) {
-                const messageId = key.slice(prefix.length)
-                this._broadcastToSession(sessionId, { type: 'stream_delta', messageId, delta })
-                deltaBuffer.delete(key)
-              }
-            }
-            // If we flushed everything and the timer is pending, cancel it
-            if (deltaBuffer.size === 0 && deltaFlushTimer) {
-              clearTimeout(deltaFlushTimer)
-              deltaFlushTimer = null
-            }
-          }
-          console.log(`[ws] Broadcasting stream_end: ${data.messageId} (session ${sessionId})`)
-          this._broadcastToSession(sessionId, { type: 'stream_end', messageId: data.messageId })
-          break
-
-        case 'message':
-          this._broadcastToSession(sessionId, {
-            type: 'message',
-            messageType: data.type,
-            content: data.content,
-            tool: data.tool,
-            options: data.options,
-            timestamp: data.timestamp,
-          })
-          break
-
-        case 'tool_start':
-          this._broadcastToSession(sessionId, { type: 'tool_start', messageId: data.messageId, toolUseId: data.toolUseId, tool: data.tool, input: data.input })
-          break
-
-        case 'tool_result':
-          this._broadcastToSession(sessionId, {
-            type: 'tool_result',
-            toolUseId: data.toolUseId,
-            result: data.result,
-            truncated: data.truncated,
-          })
-          break
-
-        case 'agent_spawned':
-          this._broadcastToSession(sessionId, {
-            type: 'agent_spawned',
-            toolUseId: data.toolUseId,
-            description: data.description,
-            startedAt: data.startedAt,
-          })
-          break
-
-        case 'agent_completed':
-          this._broadcastToSession(sessionId, {
-            type: 'agent_completed',
-            toolUseId: data.toolUseId,
-          })
-          break
-
-        case 'plan_started':
-          this._broadcastToSession(sessionId, { type: 'plan_started' })
-          break
-
-        case 'plan_ready':
-          this._broadcastToSession(sessionId, {
-            type: 'plan_ready',
-            allowedPrompts: data.allowedPrompts,
-          })
-          break
-
-        case 'result':
-          this._broadcastToSession(sessionId, { type: 'result', cost: data.cost, duration: data.duration, usage: data.usage, sessionId: data.sessionId })
-          this._broadcastToSession(sessionId, { type: 'agent_idle' })
-          // Broadcast updated session list (isBusy may have changed)
-          this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
-          // Refresh session context (git branch may have changed during the turn)
-          this.sessionManager.getSessionContext(sessionId).then((ctx) => {
-            if (ctx) this._broadcastToSession(sessionId, { type: 'session_context', ...ctx })
-          }).catch(() => {})
-          break
-
-        case 'raw':
-          // Forward raw PTY data only to clients actively viewing this session (bandwidth-heavy)
-          this._broadcastToSession(sessionId, { type: 'raw', data }, (client) => client.mode === 'terminal' && client.activeSessionId === sessionId)
-          // Also send as raw_background to chat-mode clients on this session
-          this._broadcastToSession(sessionId, { type: 'raw_background', data }, (client) => client.mode === 'chat' && client.activeSessionId === sessionId)
-          break
-
-        case 'status_update':
-          // Status bar metadata only goes to clients on this session (global claudeStatus would get confused)
-          console.log(this._formatStatusLog(data))
-          this._broadcastToSession(sessionId, { type: 'status_update', ...data }, (client) => client.activeSessionId === sessionId)
-          break
-
-        case 'user_question':
-          this._questionSessionMap.set(data.toolUseId, sessionId)
-          this._broadcastToSession(sessionId, {
-            type: 'user_question',
-            toolUseId: data.toolUseId,
-            questions: data.questions,
-          })
-          break
-
-        case 'permission_request':
-          this._permissionSessionMap.set(data.requestId, sessionId)
-          this._broadcastToSession(sessionId, {
-            type: 'permission_request',
-            requestId: data.requestId,
-            tool: data.tool,
-            description: data.description,
-            input: data.input,
-            remainingMs: data.remainingMs,
-          })
-          // Push notification
-          if (this.pushManager) {
-            this.pushManager.send('permission', 'Permission needed', `Claude wants to use: ${data.tool}`, { requestId: data.requestId, tool: data.tool }, 'permission')
-          }
-          break
-
-        case 'error':
-          this._broadcastToSession(sessionId, {
-            type: 'message',
-            messageType: 'error',
-            content: data.message,
-            timestamp: Date.now(),
-          })
-          break
       }
     })
 
@@ -1625,153 +1486,139 @@ export class WsServer {
     })
   }
 
-  /** Wire up CLI session events to broadcast to clients (legacy single-session) */
-  _setupCliForwarding() {
-    // Notify clients when Claude process is ready (initial start or respawn)
-    this.cliSession.on('ready', () => {
-      this._broadcast({ type: 'claude_ready' })
-      this._broadcast({
-        type: 'model_changed',
-        model: this.cliSession.model ? toShortModelId(this.cliSession.model) : null,
-      })
-      this._broadcast({
-        type: 'permission_mode_changed',
-        mode: this.cliSession.permissionMode || 'approve',
-      })
-    })
-
-    // Buffer stream deltas to reduce WS message volume (50ms batch window).
-    // This prevents flooding mobile clients over cellular/tunnel connections.
-    const deltaBuffer = new Map() // messageId -> accumulated text
-    let deltaFlushTimer = null
-    const flushDeltas = () => {
-      deltaFlushTimer = null
-      for (const [messageId, delta] of deltaBuffer) {
-        this._broadcast({ type: 'stream_delta', messageId, delta })
-      }
-      deltaBuffer.clear()
-    }
-
-    this.cliSession.on('stream_start', ({ messageId }) => {
-      console.log(`[ws] Broadcasting stream_start: ${messageId}`)
-      this._broadcast({ type: 'stream_start', messageId })
-    })
-
-    this.cliSession.on('stream_delta', ({ messageId, delta }) => {
-      const existing = deltaBuffer.get(messageId) || ''
-      deltaBuffer.set(messageId, existing + delta)
-      if (!deltaFlushTimer) {
-        deltaFlushTimer = setTimeout(flushDeltas, 50)
-      }
-    })
-
-    this.cliSession.on('stream_end', ({ messageId }) => {
-      // Flush remaining deltas before sending stream_end
-      if (deltaBuffer.size > 0) {
-        if (deltaFlushTimer) {
-          clearTimeout(deltaFlushTimer)
-          deltaFlushTimer = null
+  /** Legacy single CLI session forwarding via normalizer */
+  _setupCliForwardingVia(normalizer) {
+    const FORWARDED_EVENTS = [
+      'ready', 'stream_start', 'stream_delta', 'stream_end',
+      'message', 'tool_start', 'tool_result', 'result', 'error',
+      'user_question', 'agent_spawned', 'agent_completed',
+      'plan_started', 'plan_ready', 'status_update',
+    ]
+    for (const event of FORWARDED_EVENTS) {
+      this.cliSession.on(event, (data) => {
+        const ctx = {
+          sessionId: null,
+          mode: 'legacy-cli',
+          getSessionEntry: () => ({
+            session: this.cliSession,
+          }),
         }
-        flushDeltas()
+        const result = normalizer.normalize(event, data, ctx)
+        if (!result) return
+
+        if (result.buffer) {
+          normalizer.bufferDelta(null, data.messageId, data.delta)
+          return
+        }
+
+        this._executeSideEffects(result.sideEffects, null)
+        this._executeRegistrations(result.registrations, null)
+
+        for (const { msg, filter } of result.messages) {
+          if (filter) {
+            this._broadcast(msg, filter)
+          } else {
+            this._broadcast(msg)
+          }
+        }
+      })
+    }
+  }
+
+  /** PTY/tmux forwarding via normalizer */
+  _setupPtyForwardingVia(normalizer) {
+    // raw events from outputParser
+    this.outputParser.on('raw', (data) => {
+      const ctx = { sessionId: null, mode: 'pty' }
+      const result = normalizer.normalize('raw', data, ctx)
+      if (!result) return
+      for (const { msg, filter } of result.messages) {
+        this._broadcast(msg, filter || (() => true))
       }
-      console.log(`[ws] Broadcasting stream_end: ${messageId}`)
-      this._broadcast({ type: 'stream_end', messageId })
     })
 
-    this.cliSession.on('message', (message) => {
-      this._broadcast({
-        type: 'message',
-        messageType: message.type,
-        content: message.content,
-        tool: message.tool,
-        timestamp: message.timestamp,
-      })
+    // message events from outputParser
+    this.outputParser.on('message', (message) => {
+      const ctx = { sessionId: null, mode: 'pty' }
+      const result = normalizer.normalize('message', message, ctx)
+      if (!result) return
+      for (const { msg, filter } of result.messages) {
+        this._broadcast(msg, filter || (() => true))
+      }
     })
 
-    this.cliSession.on('tool_start', ({ messageId, toolUseId, tool, input }) => {
-      this._broadcast({ type: 'tool_start', messageId, toolUseId, tool, input })
+    // claude_ready from outputParser
+    this.outputParser.on('claude_ready', () => {
+      const result = normalizer.normalize('claude_ready', {}, { sessionId: null, mode: 'pty' })
+      if (!result) return
+      for (const { msg } of result.messages) {
+        this._broadcast(msg)
+      }
     })
 
-    this.cliSession.on('result', ({ cost, duration, usage, sessionId }) => {
-      this._broadcast({ type: 'result', cost, duration, usage, sessionId })
-    })
-
-    this.cliSession.on('user_question', (data) => {
-      this._broadcast({
-        type: 'user_question',
-        toolUseId: data.toolUseId,
-        questions: data.questions,
-      })
-    })
-
-    this.cliSession.on('agent_spawned', (data) => {
-      this._broadcast({ type: 'agent_spawned', ...data })
-    })
-    this.cliSession.on('agent_completed', (data) => {
-      this._broadcast({ type: 'agent_completed', ...data })
-    })
-
-    this.cliSession.on('plan_started', () => {
-      this._broadcast({ type: 'plan_started' })
-    })
-    this.cliSession.on('plan_ready', (data) => {
-      this._broadcast({ type: 'plan_ready', allowedPrompts: data.allowedPrompts })
-    })
-
-    this.cliSession.on('error', ({ message }) => {
-      this._broadcast({
-        type: 'message',
-        messageType: 'error',
-        content: message,
-        timestamp: Date.now(),
-      })
+    // status_update from outputParser
+    this.outputParser.on('status_update', (status) => {
+      const ctx = { sessionId: null, mode: 'pty' }
+      const result = normalizer.normalize('status_update', status, ctx)
+      if (!result) return
+      this._executeSideEffects(result.sideEffects, null)
+      for (const { msg, filter } of result.messages) {
+        this._broadcast(msg, filter || (() => true))
+      }
     })
   }
 
-  /** Wire up PTY + parser output to broadcast to clients */
-  _setupPtyForwarding() {
-    // Raw PTY data -> terminal view clients
-    this.outputParser.on('raw', (data) => {
-      this._broadcast(
-        { type: 'raw', data },
-        (client) => client.mode === 'terminal'
-      )
-    })
+  /** Execute side effect descriptors returned by the normalizer */
+  _executeSideEffects(sideEffects, sessionId) {
+    if (!sideEffects) return
+    for (const effect of sideEffects) {
+      switch (effect.type) {
+        case 'session_list':
+          if (this.sessionManager) {
+            this._broadcast({ type: 'session_list', sessions: this.sessionManager.listSessions() })
+          }
+          break
+        case 'refresh_context':
+          if (this.sessionManager) {
+            this.sessionManager.getSessionContext(effect.sessionId || sessionId).then((ctx) => {
+              if (ctx) this._broadcastToSession(effect.sessionId || sessionId, { type: 'session_context', ...ctx })
+            }).catch(() => {})
+          }
+          break
+        case 'push':
+          if (this.pushManager) {
+            this.pushManager.send(effect.category, effect.title, effect.body, effect.data, effect.channelId)
+          }
+          break
+        case 'flush_deltas': {
+          const sid = effect.sessionId ?? sessionId
+          const entries = this._normalizer.flushSession(sid)
+          for (const { sessionId: eSid, messageId, delta } of entries) {
+            if (eSid) {
+              this._broadcastToSession(eSid, { type: 'stream_delta', messageId, delta })
+            } else {
+              this._broadcast({ type: 'stream_delta', messageId, delta })
+            }
+          }
+          break
+        }
+        case 'log':
+          console.log(effect.message)
+          break
+      }
+    }
+  }
 
-    // Parsed messages -> chat view clients (only messages after client connected)
-    this.outputParser.on('message', (message) => {
-      this._broadcast(
-        {
-          type: 'message',
-          messageType: message.type,
-          content: message.content,
-          tool: message.tool,
-          options: message.options,
-          timestamp: message.timestamp,
-        },
-        (client) => client.mode === 'chat' && message.timestamp > (client.authTime || 0)
-      )
-    })
-
-    // Also send raw to chat clients (they may need it for the
-    // embedded terminal view or for fallback rendering)
-    this.outputParser.on('raw', (data) => {
-      this._broadcast(
-        { type: 'raw_background', data },
-        (client) => client.mode === 'chat'
-      )
-    })
-
-    // Claude Code ready signal -> all clients
-    this.outputParser.on('claude_ready', () => {
-      this._broadcast({ type: 'claude_ready' })
-    })
-
-    // Status bar metadata -> all clients
-    this.outputParser.on('status_update', (status) => {
-      console.log(this._formatStatusLog(status))
-      this._broadcast({ type: 'status_update', ...status })
-    })
+  /** Execute registration descriptors returned by the normalizer */
+  _executeRegistrations(registrations, sessionId) {
+    if (!registrations) return
+    for (const reg of registrations) {
+      if (reg.map === 'permission') {
+        this._permissionSessionMap.set(reg.key, reg.value ?? sessionId)
+      } else if (reg.map === 'question') {
+        this._questionSessionMap.set(reg.key, reg.value ?? sessionId)
+      }
+    }
   }
 
   /** List directories at a given path, sending a directory_listing response */
@@ -2781,6 +2628,7 @@ export class WsServer {
     this._permissionSessionMap.clear()
     this._questionSessionMap.clear()
     this._primaryClients.clear()
+    this._normalizer.destroy()
 
     for (const [ws] of this.clients) {
       ws.close()

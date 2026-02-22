@@ -1,0 +1,31 @@
+appId: host.exp.Exponent
+name: SessionScreen view mode switching
+---
+
+# Test switching between Chat and Files view modes
+
+# Connect to mock server
+- runFlow: setup/ensure-session-screen.yaml
+
+# Start in Chat mode
+- assertVisible: "Chat"
+
+# Switch to Files mode
+- tapOn: "Files"
+- waitForAnimationToEnd
+
+# Verify file browser is visible (mock server returns directory entries)
+- extendedWaitUntil:
+    visible:
+      text: ".*src.*"
+    timeout: 5000
+
+# Take screenshot of files view
+- takeScreenshot: session-files-view
+
+# Switch back to Chat mode
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Take screenshot of chat view
+- takeScreenshot: session-chat-view

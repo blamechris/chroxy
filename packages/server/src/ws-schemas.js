@@ -167,6 +167,171 @@ export const EncryptedEnvelopeSchema = z.object({
   n: z.number().int().nonnegative(),
 })
 
+// ============================================================
+// Server -> Client message schemas (documentation + test validation)
+// ============================================================
+
+const ClientInfoSchema = z.object({
+  clientId: z.string(),
+  deviceName: z.string().nullable(),
+  deviceType: z.enum(['phone', 'tablet', 'desktop', 'unknown']),
+  platform: z.string(),
+})
+
+export const ServerAuthOkSchema = z.object({
+  type: z.literal('auth_ok'),
+  clientId: z.string(),
+  serverMode: z.enum(['cli', 'terminal']),
+  serverVersion: z.string(),
+  latestVersion: z.string().nullable(),
+  serverCommit: z.string(),
+  cwd: z.string().nullable(),
+  connectedClients: z.array(ClientInfoSchema),
+  encryption: z.enum(['required', 'disabled']),
+}).passthrough()
+
+export const ServerAuthFailSchema = z.object({
+  type: z.literal('auth_fail'),
+  reason: z.string(),
+})
+
+export const ServerClaudeReadySchema = z.object({
+  type: z.literal('claude_ready'),
+})
+
+export const ServerStreamStartSchema = z.object({
+  type: z.literal('stream_start'),
+  messageId: z.string(),
+})
+
+export const ServerStreamDeltaSchema = z.object({
+  type: z.literal('stream_delta'),
+  messageId: z.string(),
+  delta: z.string(),
+})
+
+export const ServerStreamEndSchema = z.object({
+  type: z.literal('stream_end'),
+  messageId: z.string(),
+})
+
+export const ServerMessageSchema = z.object({
+  type: z.literal('message'),
+  messageType: z.string(),
+  content: z.string(),
+  tool: z.string().nullable().optional(),
+  options: z.any().optional(),
+  timestamp: z.number(),
+})
+
+export const ServerToolStartSchema = z.object({
+  type: z.literal('tool_start'),
+  messageId: z.string(),
+  toolUseId: z.string(),
+  tool: z.string(),
+  input: z.any(),
+})
+
+export const ServerToolResultSchema = z.object({
+  type: z.literal('tool_result'),
+  toolUseId: z.string(),
+  result: z.any(),
+  truncated: z.boolean().optional(),
+})
+
+export const ServerResultSchema = z.object({
+  type: z.literal('result'),
+  cost: z.number().optional(),
+  duration: z.number().optional(),
+  usage: z.any().optional(),
+  sessionId: z.string().nullable().optional(),
+})
+
+export const ServerModelChangedSchema = z.object({
+  type: z.literal('model_changed'),
+  model: z.string().nullable(),
+})
+
+export const ServerPermissionModeChangedSchema = z.object({
+  type: z.literal('permission_mode_changed'),
+  mode: z.string(),
+})
+
+export const ServerPermissionRequestSchema = z.object({
+  type: z.literal('permission_request'),
+  requestId: z.string(),
+  tool: z.string(),
+  description: z.string().optional(),
+  input: z.any(),
+  remainingMs: z.number().optional(),
+})
+
+export const ServerUserQuestionSchema = z.object({
+  type: z.literal('user_question'),
+  toolUseId: z.string(),
+  questions: z.array(z.any()),
+})
+
+export const ServerAgentBusySchema = z.object({
+  type: z.literal('agent_busy'),
+})
+
+export const ServerAgentIdleSchema = z.object({
+  type: z.literal('agent_idle'),
+})
+
+export const ServerAgentSpawnedSchema = z.object({
+  type: z.literal('agent_spawned'),
+  toolUseId: z.string(),
+  description: z.string().optional(),
+  startedAt: z.number().optional(),
+})
+
+export const ServerAgentCompletedSchema = z.object({
+  type: z.literal('agent_completed'),
+  toolUseId: z.string(),
+})
+
+export const ServerPlanStartedSchema = z.object({
+  type: z.literal('plan_started'),
+})
+
+export const ServerPlanReadySchema = z.object({
+  type: z.literal('plan_ready'),
+  allowedPrompts: z.array(z.any()).optional(),
+})
+
+export const ServerSessionListSchema = z.object({
+  type: z.literal('session_list'),
+  sessions: z.array(z.any()),
+})
+
+export const ServerStatusUpdateSchema = z.object({
+  type: z.literal('status_update'),
+  model: z.string().optional(),
+  cost: z.any().optional(),
+  messageCount: z.number().optional(),
+  contextTokens: z.number().optional(),
+  contextPercent: z.number().optional(),
+}).passthrough()
+
+export const ServerErrorSchema = z.object({
+  type: z.literal('server_error'),
+  category: z.string().optional(),
+  message: z.string(),
+  recoverable: z.boolean(),
+})
+
+export const ServerShutdownSchema = z.object({
+  type: z.literal('server_shutdown'),
+  reason: z.enum(['restart', 'shutdown']),
+  restartEtaMs: z.number(),
+})
+
+export const ServerPongSchema = z.object({
+  type: z.literal('pong'),
+})
+
 // -- Discriminated union of all client->server message types --
 // Note: auth, key_exchange, and encrypted are handled before the main
 // switch and are not included in this union. They are validated inline

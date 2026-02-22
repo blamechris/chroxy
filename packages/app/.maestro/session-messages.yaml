@@ -1,0 +1,36 @@
+appId: host.exp.Exponent
+name: SessionScreen send and receive messages
+---
+
+# Test sending a message and receiving a mock response
+
+# Connect to mock server
+- runFlow: setup/ensure-session-screen.yaml
+
+# Ensure we're in Chat mode
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Find and tap the text input area
+- tapOn:
+    text: ".*Message.*"
+    optional: true
+
+# Type a test message
+- inputText: "Hello from Maestro"
+
+# Take screenshot of input
+- takeScreenshot: session-message-input
+
+# Send the message (tap the send button)
+- tapOn:
+    text: ".*\u2191.*"
+
+# Wait for the mock response to appear
+- extendedWaitUntil:
+    visible:
+      text: ".*mock response.*"
+    timeout: 5000
+
+# Take screenshot of response
+- takeScreenshot: session-message-response

@@ -59,7 +59,8 @@
     "@types/jest": "^30.0.0",
     "@types/react": "~19.1.10",
     "jest-expo": "^54.0.17",
-    "typescript": "~5.9.2"
+    "typescript": "~5.9.2",
+    "ws": "^8.19.0"
   },
   "repository": {
     "type": "git",

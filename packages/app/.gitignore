@@ -12,3 +12,5 @@ web-build/
 
 # Maestro E2E test screenshots (generated at runtime)
 .maestro/**/*.png
+# Mock server PID file
+.maestro/scripts/.mock-server.pid

@@ -1,0 +1,82 @@
+# Tested devices: iPhone 15 Pro (iOS 17), iPhone SE 3 (iOS 17), portrait orientation
+#
+# Shared setup: connect to mock server and land on SessionScreen.
+# Requires: mock server running on port 9876 (see scripts/start-mock-server.sh)
+# Usage: - runFlow: setup/ensure-session-screen.yaml
+
+# Open the Expo project via deep link
+- openLink: exp://localhost:8081
+
+# Wait for the app to load
+- extendedWaitUntil:
+    visible:
+      text: ".*(Session|Chroxy|Connect).*"
+    timeout: 15000
+
+# Dismiss Expo dev menu if it appeared
+- tapOn:
+    point: "93%,43%"
+    optional: true
+
+# If already on SessionScreen (auto-connected), we're done — skip to end
+- runFlow:
+    when:
+      visible: "Chat"
+    commands:
+      - assertVisible: "Chat"
+
+# If on ConnectScreen, connect to mock server
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      # Expand manual entry form
+      - tapOn:
+          text: ".*Enter manually.*"
+
+      # Clear and enter mock server URL
+      - tapOn: "Server URL"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      # Enter API token
+      - tapOn:
+          text: "API Token.*"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+
+      # Tap Connect
+      - tapOn:
+          text: "^Connect$"
+
+      # Wait for SessionScreen to appear (Chat mode button indicates we're connected)
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# If on auto-connect spinner, cancel and reconnect manually
+- runFlow:
+    when:
+      visible:
+        text: "^Cancel$"
+    commands:
+      - tapOn:
+          text: "^Cancel$"
+      - waitForAnimationToEnd
+      - extendedWaitUntil:
+          visible: "Connect to Chroxy"
+          timeout: 5000
+      - tapOn:
+          text: ".*Enter manually.*"
+      - tapOn: "Server URL"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+      - tapOn:
+          text: "API Token.*"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+      - tapOn:
+          text: "^Connect$"
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000

@@ -1,9 +1,11 @@
 appId: host.exp.Exponent
-name: All Phase 1 flows
+name: All E2E flows
 ---
 
-# Run all Phase 1 flows sequentially on one device.
+# Run all E2E flows sequentially on one device.
 # This avoids the parallelism issue when passing multiple files to `maestro test`.
+
+# --- Phase 1: ConnectScreen flows (no server needed) ---
 
 # Flow 1: ConnectScreen renders correctly
 - runFlow: connect-screen.yaml
@@ -16,3 +18,19 @@ name: All Phase 1 flows
 
 # Flow 4: Small screen layout (iPhone SE)
 - runFlow: small-screen-layout.yaml
+
+# --- Phase 2: SessionScreen flows (mock server required) ---
+# Prerequisites: start mock server before running these flows
+#   bash .maestro/scripts/start-mock-server.sh
+
+# Flow 5: SessionScreen connected state
+- runFlow: session-screen-connected.yaml
+
+# Flow 6: Chat/Files view mode switching
+- runFlow: session-view-modes.yaml
+
+# Flow 7: File browser navigation
+- runFlow: session-file-browser.yaml
+
+# Flow 8: Send message and receive response
+- runFlow: session-messages.yaml
