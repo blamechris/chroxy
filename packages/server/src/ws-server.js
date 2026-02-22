@@ -7,7 +7,7 @@ import { statSync, readFileSync } from 'fs'
 import { readdir, readFile, stat, realpath } from 'fs/promises'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve, normalize, extname } from 'path'
-import { homedir, hostname } from 'os'
+import { homedir } from 'os'
 import { timingSafeEqual } from 'crypto'
 import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from './crypto.js'
@@ -313,7 +313,7 @@ export class WsServer {
       // Health check endpoint — Cloudflare and the app verify connectivity via GET /
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ status: 'ok', mode: this.serverMode, hostname: hostname(), version: SERVER_VERSION }))
+        res.end(JSON.stringify({ status: 'ok', mode: this.serverMode, version: SERVER_VERSION }))
         return
       }
 
