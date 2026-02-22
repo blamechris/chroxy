@@ -176,10 +176,11 @@ describe('updateModels', () => {
     assert.equal(result[0].fullId, 'claude-opus-4-6')
   })
 
-  it('returns empty array for empty input', () => {
+  it('returns empty array for empty input (preserves existing models)', () => {
+    const before = getModels()
     const result = updateModels([])
     assert.deepEqual(result, [])
-    assert.deepEqual(getModels(), [])
+    assert.deepEqual(getModels(), before)
   })
 
   it('returns null for non-array input (keeps existing models)', () => {

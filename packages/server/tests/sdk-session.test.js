@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { SdkSession } from '../src/sdk-session.js'
+import { resetModels } from '../src/models.js'
 
 /**
  * Tests for SdkSession — permission handling, question handling,
@@ -491,6 +492,10 @@ describe('SdkSession', () => {
   // -- Dynamic model list --
 
   describe('_fetchSupportedModels', () => {
+    afterEach(() => {
+      resetModels()
+    })
+
     function mockQuery(overrides = {}) {
       return { interrupt: async () => {}, ...overrides }
     }

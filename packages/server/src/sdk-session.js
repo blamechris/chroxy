@@ -604,7 +604,7 @@ export class SdkSession extends EventEmitter {
 
   /**
    * Query the SDK for available models and emit models_updated.
-   * Called after session init — non-blocking, failures are silently ignored.
+   * Called after session init — non-blocking, failures are logged and ignored.
    */
   async _fetchSupportedModels() {
     if (!this._query || typeof this._query.supportedModels !== 'function') return

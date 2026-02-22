@@ -55,6 +55,9 @@ export function updateModels(sdkModels) {
       return { id, label, fullId }
     })
 
+  // If the SDK yields no usable models, preserve current/default registry
+  if (converted.length === 0) return converted
+
   activeModels = converted
   rebuildLookups(converted)
   return converted
