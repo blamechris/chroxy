@@ -492,6 +492,7 @@ describe('service', () => {
         assert.equal(status.installed, true)
         assert.equal(status.running, false)
         assert.equal(status.pid, null)
+        assert.equal(status.stale, false)
       } finally {
         rmSync(dir, { recursive: true })
       }
