@@ -242,7 +242,7 @@ program
     if (config.terminal) {
       console.warn('⚠️  PTY/tmux mode (--terminal) is deprecated and will be removed in a future release.')
       console.warn('   The default CLI headless mode is recommended for all new usage.')
-      console.warn('   See: https://github.com/blamechris/chroxy#cli-headless-mode')
+      console.warn('   See: https://github.com/blamechris/chroxy#server-modes')
     }
 
     // Block PTY/tmux mode on Windows
