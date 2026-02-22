@@ -488,6 +488,69 @@ describe('SdkSession', () => {
     })
   })
 
+  // -- Dynamic model list --
+
+  describe('_fetchSupportedModels', () => {
+    function mockQuery(overrides = {}) {
+      return { interrupt: async () => {}, ...overrides }
+    }
+
+    it('emits models_updated with converted SDK models', async () => {
+      const events = []
+      session.on('models_updated', (data) => events.push(data))
+
+      session._query = mockQuery({
+        supportedModels: async () => [
+          { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: 'Fast' },
+          { value: 'claude-opus-4-6', displayName: 'Opus 4.6', description: 'Capable' },
+        ],
+      })
+
+      await session._fetchSupportedModels()
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].models.length, 2)
+      assert.equal(events[0].models[0].id, 'sonnet-4-6')
+      assert.equal(events[0].models[0].label, 'Sonnet 4.6')
+      assert.equal(events[0].models[0].fullId, 'claude-sonnet-4-6')
+      assert.equal(events[0].models[1].id, 'opus-4-6')
+      assert.equal(events[0].models[1].label, 'Opus 4.6')
+    })
+
+    it('does not emit when query has no supportedModels method', async () => {
+      const events = []
+      session.on('models_updated', (data) => events.push(data))
+
+      session._query = mockQuery()
+      await session._fetchSupportedModels()
+
+      assert.equal(events.length, 0)
+    })
+
+    it('does not emit when supportedModels throws', async () => {
+      const events = []
+      session.on('models_updated', (data) => events.push(data))
+
+      session._query = mockQuery({
+        supportedModels: async () => { throw new Error('SDK error') },
+      })
+
+      await session._fetchSupportedModels()
+
+      assert.equal(events.length, 0)
+    })
+
+    it('does not emit when no query is active', async () => {
+      const events = []
+      session.on('models_updated', (data) => events.push(data))
+
+      session._query = null
+      await session._fetchSupportedModels()
+
+      assert.equal(events.length, 0)
+    })
+  })
+
   // -- Getters --
 
   // -- Transform integration --

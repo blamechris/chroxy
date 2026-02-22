@@ -7,19 +7,73 @@ export const MODELS = [
   { id: 'opus46', label: 'Opus 4.6', fullId: 'claude-opus-4-6' },
 ]
 
+// Mutable state — updated by updateModels() when SDK reports available models
+let activeModels = MODELS
+
 // Accept both short ids and full model IDs in set_model
 export const ALLOWED_MODEL_IDS = new Set(MODELS.flatMap(m => [m.id, m.fullId]))
 
 // Lookup tables for bidirectional resolution
-const TO_FULL_ID = new Map(MODELS.flatMap(m => [[m.id, m.fullId], [m.fullId, m.fullId]]))
-const TO_SHORT_ID = new Map(MODELS.flatMap(m => [[m.fullId, m.id], [m.id, m.id]]))
+let toFullIdMap = new Map(MODELS.flatMap(m => [[m.id, m.fullId], [m.fullId, m.fullId]]))
+let toShortIdMap = new Map(MODELS.flatMap(m => [[m.fullId, m.id], [m.id, m.id]]))
+
+function rebuildLookups(models) {
+  ALLOWED_MODEL_IDS.clear()
+  toFullIdMap = new Map()
+  toShortIdMap = new Map()
+  for (const m of models) {
+    ALLOWED_MODEL_IDS.add(m.id)
+    ALLOWED_MODEL_IDS.add(m.fullId)
+    toFullIdMap.set(m.id, m.fullId)
+    toFullIdMap.set(m.fullId, m.fullId)
+    toShortIdMap.set(m.fullId, m.id)
+    toShortIdMap.set(m.id, m.id)
+  }
+}
+
+/**
+ * Get the current model list (may be updated by SDK).
+ */
+export function getModels() {
+  return activeModels
+}
+
+/**
+ * Update the active model list from SDK ModelInfo[].
+ * Converts SDK format { value, displayName, description } to our format { id, label, fullId }.
+ * Returns the converted list, or null if input is invalid.
+ */
+export function updateModels(sdkModels) {
+  if (!Array.isArray(sdkModels)) return null
+
+  const converted = sdkModels
+    .filter(m => m && typeof m.value === 'string' && m.value.length > 0)
+    .map(m => {
+      const fullId = m.value
+      const id = fullId.startsWith('claude-') ? fullId.slice(7) : fullId
+      const label = m.displayName || id
+      return { id, label, fullId }
+    })
+
+  activeModels = converted
+  rebuildLookups(converted)
+  return converted
+}
+
+/**
+ * Reset to the default hardcoded model list. Used in tests.
+ */
+export function resetModels() {
+  activeModels = MODELS
+  rebuildLookups(MODELS)
+}
 
 /**
  * Resolve a model identifier (short or full) to its canonical full model ID.
  * Returns the input unchanged if not recognized.
  */
 export function resolveModelId(model) {
-  return TO_FULL_ID.get(model) || model
+  return toFullIdMap.get(model) || model
 }
 
 /**
@@ -28,5 +82,5 @@ export function resolveModelId(model) {
  * Returns the input unchanged if not recognized.
  */
 export function toShortModelId(model) {
-  return TO_SHORT_ID.get(model) || model
+  return toShortIdMap.get(model) || model
 }
