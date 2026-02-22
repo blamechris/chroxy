@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -25,9 +25,9 @@ function formatSize(bytes: number): string {
 }
 
 /** Render syntax-highlighted code as Text elements */
-function SyntaxHighlightedCode({ content, language }: { content: string; language: string | null }) {
+const SyntaxHighlightedCode = React.memo(({ content, language }: { content: string; language: string | null }) => {
   const lang = language || '';
-  const tokens: Token[] = tokenize(content, lang);
+  const tokens = useMemo(() => tokenize(content, lang), [content, lang]);
 
   return (
     <Text style={styles.codeText} selectable>
@@ -38,7 +38,8 @@ function SyntaxHighlightedCode({ content, language }: { content: string; languag
       ))}
     </Text>
   );
-}
+});
+SyntaxHighlightedCode.displayName = 'SyntaxHighlightedCode';
 
 /** Modal for viewing file content with syntax highlighting */
 function FileViewerModal({

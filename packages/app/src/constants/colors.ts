@@ -158,6 +158,12 @@ export const COLORS = {
   /** Syntax: property / key names */
   syntaxProperty: '#4eca6a',
 
+  // -- Diff Colors --
+  /** Diff: added line background tint */
+  diffAddBackground: '#1a2e1a',
+  /** Diff: removed line background tint */
+  diffRemoveBackground: '#2e1a1a',
+
   // -- Shadow --
   /** Shadow color: used in elevation effects */
   shadowColor: '#000',

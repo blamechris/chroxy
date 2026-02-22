@@ -20,6 +20,7 @@ function statusColor(status: DiffFile['status']): string {
     case 'added': return COLORS.accentGreen;
     case 'deleted': return COLORS.accentRed;
     case 'renamed': return COLORS.accentBlue;
+    case 'untracked': return COLORS.accentBlue;
     default: return COLORS.accentOrange;
   }
 }
@@ -30,6 +31,7 @@ function statusLabel(status: DiffFile['status']): string {
     case 'added': return 'A';
     case 'deleted': return 'D';
     case 'renamed': return 'R';
+    case 'untracked': return 'U';
     default: return 'M';
   }
 }
@@ -403,7 +405,7 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     lineHeight: 18,
     paddingHorizontal: 4,
-    backgroundColor: '#1a2e1a',
+    backgroundColor: COLORS.diffAddBackground,
   },
   lineRemoved: {
     color: COLORS.accentRed,
@@ -411,7 +413,7 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     lineHeight: 18,
     paddingHorizontal: 4,
-    backgroundColor: '#2e1a1a',
+    backgroundColor: COLORS.diffRemoveBackground,
   },
   linePrefix: {
     fontWeight: '700',

@@ -195,7 +195,7 @@ export interface DiffHunk {
 
 export interface DiffFile {
   path: string;
-  status: 'modified' | 'added' | 'deleted' | 'renamed';
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked';
   additions: number;
   deletions: number;
   hunks: DiffHunk[];
