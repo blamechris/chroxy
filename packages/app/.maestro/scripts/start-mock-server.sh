@@ -14,9 +14,15 @@ MAX_WAIT=10  # seconds
 if [ -f "$PID_FILE" ]; then
   old_pid=$(cat "$PID_FILE")
   if kill -0 "$old_pid" 2>/dev/null; then
-    echo "[mock] Stopping existing mock server (PID $old_pid)"
-    kill "$old_pid" 2>/dev/null || true
-    sleep 0.5
+    # Verify PID belongs to the mock server (guard against PID reuse)
+    cmdline=$(ps -p "$old_pid" -o args= 2>/dev/null || true)
+    if echo "$cmdline" | grep -q 'mock-server.mjs'; then
+      echo "[mock] Stopping existing mock server (PID $old_pid)"
+      kill "$old_pid" 2>/dev/null || true
+      sleep 0.5
+    else
+      echo "[mock] PID $old_pid is not mock server (stale PID file)"
+    fi
   fi
   rm -f "$PID_FILE"
 fi
