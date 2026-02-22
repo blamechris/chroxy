@@ -5201,6 +5201,7 @@ describe('encryption key exchange enforcement', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
+      localhostBypass: false,
       keyExchangeTimeoutMs: 200,
     })
     const port = await startServerAndGetPort(server)
@@ -5267,6 +5268,7 @@ describe('encryption key exchange enforcement', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
+      localhostBypass: false,
     })
     const port = await startServerAndGetPort(server)
 
@@ -5322,6 +5324,7 @@ describe('encryption key exchange enforcement', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
+      localhostBypass: false,
     })
     const port = await startServerAndGetPort(server)
 
@@ -7019,6 +7022,7 @@ describe('encryption integration (end-to-end)', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
+      localhostBypass: false,
       keyExchangeTimeoutMs: 5000,
     })
     const port = await startServerAndGetPort(server)
@@ -7056,6 +7060,7 @@ describe('encryption integration (end-to-end)', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
+      localhostBypass: false,
       keyExchangeTimeoutMs: 5000,
     })
     const port = await startServerAndGetPort(server)
@@ -7088,6 +7093,7 @@ describe('encryption integration (end-to-end)', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
+      localhostBypass: false,
       keyExchangeTimeoutMs: 5000,
     })
     const port = await startServerAndGetPort(server)
@@ -7121,6 +7127,7 @@ describe('encryption integration (end-to-end)', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
+      localhostBypass: false,
       keyExchangeTimeoutMs: 5000,
     })
     const port = await startServerAndGetPort(server)
@@ -7163,6 +7170,7 @@ describe('encryption integration (end-to-end)', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
+      localhostBypass: false,
       keyExchangeTimeoutMs: 5000,
     })
     const port = await startServerAndGetPort(server)
@@ -7213,6 +7221,7 @@ describe('encryption integration (end-to-end)', () => {
       apiToken: 'test-token',
       sessionManager: mockManager,
       authRequired: false,
+      localhostBypass: false,
       keyExchangeTimeoutMs: 5000,
     })
     const port = await startServerAndGetPort(server)
@@ -7248,6 +7257,7 @@ describe('encryption integration (end-to-end)', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: false,
+      localhostBypass: false,
       keyExchangeTimeoutMs: 300,
     })
     const port = await startServerAndGetPort(server)
@@ -7709,5 +7719,234 @@ describe('dashboard endpoint', () => {
     assert.equal(res.status, 200)
     const body = await res.text()
     assert.ok(body.includes('Chroxy Dashboard'))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Localhost encryption bypass (#732)
+// Uses _WsServer (raw, encryption enabled) to test localhost bypass behavior
+// ---------------------------------------------------------------------------
+describe('localhost encryption bypass', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('localhost connection gets encryption disabled in auth_ok', async () => {
+    const mockSession = createMockSession()
+    // Create server WITH encryption enabled (using raw _WsServer)
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      // encryption is enabled by default (no noEncrypt)
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect from localhost (127.0.0.1 — which is what tests do by default)
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    const messages = []
+
+    ws.on('message', (data) => {
+      try { messages.push(JSON.parse(data.toString())) } catch (_) {}
+    })
+
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      }),
+      2000,
+      'Connection timeout'
+    )
+
+    // Wait for auth_ok
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'auth_ok')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Auth timeout'
+    )
+
+    const authOk = messages.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'disabled',
+      'Localhost connection should get encryption: disabled even when server has encryption enabled')
+
+    ws.close()
+  })
+
+  it('localhost connection skips key exchange timeout', async () => {
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      keyExchangeTimeoutMs: 200, // short timeout to prove it does NOT fire
+    })
+    const port = await startServerAndGetPort(server)
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    const messages = []
+    let closed = false
+
+    ws.on('message', (data) => {
+      try { messages.push(JSON.parse(data.toString())) } catch (_) {}
+    })
+    ws.on('close', () => { closed = true })
+
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      }),
+      2000,
+      'Connection timeout'
+    )
+
+    // Wait for auth_ok
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'auth_ok')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Auth timeout'
+    )
+
+    // Wait past the key exchange timeout period
+    await new Promise(r => setTimeout(r, 400))
+
+    // Connection should still be open (no key exchange timeout)
+    assert.equal(closed, false,
+      'Localhost connection should NOT be disconnected by key exchange timeout')
+    const errorMsg = messages.find(m => m.type === 'server_error')
+    assert.equal(errorMsg, undefined,
+      'Localhost connection should NOT receive server_error about key exchange')
+
+    ws.close()
+  })
+
+  it('localhost connection receives messages without encryption', async () => {
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    const messages = []
+
+    ws.on('message', (data) => {
+      try { messages.push(JSON.parse(data.toString())) } catch (_) {}
+    })
+
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      }),
+      2000,
+      'Connection timeout'
+    )
+
+    // Wait for auth_ok and subsequent messages
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'status')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Timeout waiting for status message'
+    )
+
+    // Messages should arrive in plaintext (not queued behind encryption pending)
+    const authOk = messages.find(m => m.type === 'auth_ok')
+    assert.ok(authOk, 'Should receive auth_ok in plaintext')
+
+    const serverMode = messages.find(m => m.type === 'server_mode')
+    assert.ok(serverMode, 'Should receive server_mode in plaintext')
+
+    const status = messages.find(m => m.type === 'status')
+    assert.ok(status, 'Should receive status in plaintext (not queued behind key exchange)')
+
+    // None of the messages should be encrypted envelopes
+    const encrypted = messages.find(m => m.type === 'encrypted')
+    assert.equal(encrypted, undefined, 'Localhost messages should not be encrypted')
+
+    ws.close()
+  })
+
+  it('dashboard deviceInfo is accepted', async () => {
+    const mockSession = createMockSession()
+    server = new _WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+    const messages = []
+
+    ws.on('message', (data) => {
+      try { messages.push(JSON.parse(data.toString())) } catch (_) {}
+    })
+
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      }),
+      2000,
+      'Connection timeout'
+    )
+
+    // Send auth with dashboard deviceInfo
+    ws.send(JSON.stringify({
+      type: 'auth',
+      token: 'test-token',
+      deviceInfo: {
+        deviceName: 'Web Dashboard',
+        deviceType: 'desktop',
+        platform: 'web',
+      },
+    }))
+
+    // Wait for auth_ok
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'auth_ok')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Auth timeout — dashboard deviceInfo should be accepted'
+    )
+
+    const authOk = messages.find(m => m.type === 'auth_ok')
+    assert.ok(authOk, 'Should receive auth_ok with dashboard deviceInfo')
+    assert.equal(authOk.encryption, 'disabled',
+      'Dashboard connecting from localhost should get encryption: disabled')
+
+    // Verify no auth_fail was received
+    const authFail = messages.find(m => m.type === 'auth_fail')
+    assert.equal(authFail, undefined, 'Should not receive auth_fail')
+
+    ws.close()
   })
 })
