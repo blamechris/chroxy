@@ -437,3 +437,385 @@ describe('#761 — background agent message handlers', () => {
       'should display plural "agents" label')
   })
 })
+
+describe('#733 — create session modal', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has modal overlay element', () => {
+    assert.ok(html.includes('id="create-session-modal"'),
+      'should have create session modal element')
+  })
+
+  it('modal is hidden by default', () => {
+    assert.ok(html.includes('id="create-session-modal" class="modal-overlay hidden"'),
+      'modal should be hidden by default')
+  })
+
+  it('has session name input', () => {
+    assert.ok(html.includes('id="modal-session-name"'),
+      'should have session name input')
+    assert.ok(html.includes('placeholder="Session name"'),
+      'session name input should have placeholder')
+  })
+
+  it('has CWD input', () => {
+    assert.ok(html.includes('id="modal-session-cwd"'),
+      'should have CWD input')
+    assert.ok(html.includes('placeholder="Working directory (optional)"'),
+      'CWD input should have placeholder')
+  })
+
+  it('has Create button', () => {
+    assert.ok(html.includes('id="modal-create-btn"'),
+      'should have Create button')
+    assert.ok(html.includes('>Create<'),
+      'Create button should have label')
+  })
+
+  it('has Cancel button', () => {
+    assert.ok(html.includes('id="modal-cancel-btn"'),
+      'should have Cancel button')
+    assert.ok(html.includes('>Cancel<'),
+      'Cancel button should have label')
+  })
+
+  it('has modal title "New Session"', () => {
+    assert.ok(html.includes('New Session'),
+      'modal should have title "New Session"')
+  })
+
+  it('has modal CSS styles', () => {
+    assert.ok(html.includes('.modal-overlay'),
+      'should have modal overlay CSS')
+    assert.ok(html.includes('.modal-content'),
+      'should have modal content CSS')
+  })
+
+  it('sends create_session message with name and cwd', () => {
+    assert.ok(html.includes('type: "create_session"'),
+      'should send create_session WS message')
+    // Verify cwd is included in the message
+    assert.ok(html.includes('msg.cwd = cwd'),
+      'should include cwd in create_session message')
+  })
+
+  it('has openCreateSessionModal function', () => {
+    assert.ok(html.includes('function openCreateSessionModal'),
+      'should define openCreateSessionModal function')
+  })
+
+  it('has closeCreateSessionModal function', () => {
+    assert.ok(html.includes('function closeCreateSessionModal'),
+      'should define closeCreateSessionModal function')
+  })
+
+  it('closes modal on backdrop click', () => {
+    assert.ok(html.includes('e.target === createSessionModal'),
+      'should close modal when clicking backdrop')
+  })
+})
+
+describe('#733 — destroy session', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has close button in session tabs', () => {
+    assert.ok(html.includes('tab-close'),
+      'should have tab-close class for destroy button')
+  })
+
+  it('sends destroy_session message', () => {
+    assert.ok(html.includes('type: "destroy_session"'),
+      'should send destroy_session WS message')
+  })
+
+  it('uses confirm dialog before destroying', () => {
+    assert.ok(html.includes('window.confirm') && html.includes('Destroy session'),
+      'should show confirm dialog before destroying session')
+  })
+
+  it('hides close button when only 1 session', () => {
+    assert.ok(html.includes('sessions.length > 1'),
+      'should check session count to decide whether to show close button')
+  })
+
+  it('has tab-close CSS styles', () => {
+    assert.ok(html.includes('.session-tab .tab-close'),
+      'should have CSS for tab close button')
+  })
+})
+
+describe('#733 — rename session', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has double-click handler for renaming', () => {
+    assert.ok(html.includes('dblclick'),
+      'should have dblclick event listener for rename')
+  })
+
+  it('sends rename_session message', () => {
+    assert.ok(html.includes('type: "rename_session"'),
+      'should send rename_session WS message')
+  })
+
+  it('has startInlineRename function', () => {
+    assert.ok(html.includes('function startInlineRename'),
+      'should define startInlineRename function')
+  })
+
+  it('has inline rename input CSS', () => {
+    assert.ok(html.includes('.tab-rename-input'),
+      'should have CSS for inline rename input')
+  })
+
+  it('commits rename on blur', () => {
+    assert.ok(html.includes('"blur", commit'),
+      'should commit rename on blur event')
+  })
+
+  it('cancels rename on Escape key', () => {
+    const renameSection = html.match(/startInlineRename[\s\S]*?function cancel/)
+    assert.ok(renameSection, 'should have rename with cancel function')
+  })
+})
+
+describe('#733 — keyboard shortcuts', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has document keydown listener', () => {
+    assert.ok(html.includes('document.addEventListener("keydown"'),
+      'should register document-level keydown listener')
+  })
+
+  it('handles Escape key to close modal or interrupt', () => {
+    // Escape should close modal first, then interrupt
+    const escapeBlock = html.match(/e\.key === "Escape"[\s\S]*?modalOpen/)
+    assert.ok(escapeBlock, 'Escape handler should check modalOpen state')
+  })
+
+  it('handles Ctrl/Cmd+N for new session modal', () => {
+    assert.ok(html.includes('e.key === "n"') && html.includes('e.ctrlKey || e.metaKey'),
+      'should handle Ctrl/Cmd+N to open new session modal')
+  })
+
+  it('calls openCreateSessionModal on Ctrl+N', () => {
+    // Find the Ctrl+N handler block
+    const ctrlNBlock = html.match(/e\.key === "n"[\s\S]*?openCreateSessionModal/)
+    assert.ok(ctrlNBlock, 'Ctrl/Cmd+N should call openCreateSessionModal')
+  })
+
+  it('handles Ctrl/Cmd+1-9 for session switching', () => {
+    assert.ok(html.includes('e.key >= "1"') && html.includes('e.key <= "9"'),
+      'should handle Ctrl/Cmd+1-9 for session switching')
+  })
+
+  it('sends switch_session on Ctrl+1-9', () => {
+    // The Ctrl+1-9 handler should use sessions[idx].sessionId
+    const switchBlock = html.match(/e\.key >= "1"[\s\S]*?switch_session/)
+    assert.ok(switchBlock, 'Ctrl/Cmd+1-9 should send switch_session message')
+  })
+
+  it('prevents default on handled shortcuts', () => {
+    assert.ok(html.includes('e.preventDefault()'),
+      'should call preventDefault on handled keyboard shortcuts')
+  })
+
+  it('handles Ctrl+Enter to send in input', () => {
+    const ctrlEnterBlock = html.match(/e\.key === "Enter" && \(e\.ctrlKey \|\| e\.metaKey\)/)
+    assert.ok(ctrlEnterBlock, 'should handle Ctrl/Cmd+Enter to send message')
+  })
+})
+
+describe('#733 — toast notifications', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has toast container element', () => {
+    assert.ok(html.includes('id="toast-container"'),
+      'should have toast container element')
+  })
+
+  it('has toast CSS styles', () => {
+    assert.ok(html.includes('#toast-container'),
+      'should have toast container CSS')
+    assert.ok(html.includes('.toast'),
+      'should have toast CSS class')
+  })
+
+  it('has toast close button CSS', () => {
+    assert.ok(html.includes('.toast .toast-close'),
+      'should have toast close button CSS')
+  })
+
+  it('has toast animation', () => {
+    assert.ok(html.includes('@keyframes toastIn'),
+      'should have toast entrance animation')
+  })
+
+  it('has showToast function', () => {
+    assert.ok(html.includes('function showToast'),
+      'should define showToast function')
+  })
+
+  it('auto-dismisses toasts after 5 seconds', () => {
+    assert.ok(html.includes('5000'),
+      'should auto-dismiss toasts after 5 seconds')
+  })
+
+  it('shows toast on server_error', () => {
+    const errorBlock = html.match(/case "server_error"[\s\S]*?showToast/)
+    assert.ok(errorBlock, 'server_error handler should call showToast')
+  })
+
+  it('shows toast on session_error', () => {
+    const sessionErrorBlock = html.match(/case "session_error"[\s\S]*?showToast/)
+    assert.ok(sessionErrorBlock, 'session_error handler should call showToast')
+  })
+})
+
+describe('#733 — reconnect banner', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has reconnect banner element', () => {
+    assert.ok(html.includes('id="reconnect-banner"'),
+      'should have reconnect banner element')
+  })
+
+  it('reconnect banner is hidden by default', () => {
+    assert.ok(html.includes('id="reconnect-banner" class="hidden"'),
+      'reconnect banner should be hidden by default')
+  })
+
+  it('has reconnect text span', () => {
+    assert.ok(html.includes('id="reconnect-text"'),
+      'should have reconnect-text span for dynamic text')
+  })
+
+  it('handles server_shutdown message', () => {
+    assert.ok(html.includes('case "server_shutdown"'),
+      'should handle server_shutdown WS message')
+  })
+
+  it('shows "Server restarting..." on restart', () => {
+    const shutdownBlock = html.match(/case "server_shutdown"[\s\S]*?break;/)
+    assert.ok(shutdownBlock, 'server_shutdown handler should exist')
+    assert.ok(shutdownBlock[0].includes('Server restarting'),
+      'should show "Server restarting..." text for restart reason')
+  })
+
+  it('shows "Server shutting down..." on shutdown', () => {
+    const shutdownBlock = html.match(/case "server_shutdown"[\s\S]*?break;/)
+    assert.ok(shutdownBlock, 'server_shutdown handler should exist')
+    assert.ok(shutdownBlock[0].includes('Server shutting down'),
+      'should show "Server shutting down..." for non-restart reason')
+  })
+
+  it('tracks initial connection state', () => {
+    assert.ok(html.includes('hadInitialConnect'),
+      'should track whether initial connection was made')
+  })
+})
+
+describe('#733 — user question prompts with options', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('handles user_question message', () => {
+    assert.ok(html.includes('case "user_question"'),
+      'should handle user_question WS message')
+  })
+
+  it('passes options to addQuestionPrompt', () => {
+    assert.ok(html.includes('questionOptions'),
+      'should extract options from question data')
+  })
+
+  it('renders option buttons when options are provided', () => {
+    assert.ok(html.includes('q-option-btn'),
+      'should render option buttons with q-option-btn class')
+  })
+
+  it('has q-options container for option buttons', () => {
+    assert.ok(html.includes('q-options'),
+      'should have q-options container class')
+  })
+
+  it('sends question_response when option clicked', () => {
+    assert.ok(html.includes('user_question_response'),
+      'should send user_question_response WS message')
+  })
+
+  it('grays out question after answering', () => {
+    assert.ok(html.includes('.question-prompt.answered'),
+      'should have CSS for answered state')
+  })
+
+  it('has option button CSS styles', () => {
+    assert.ok(html.includes('.question-prompt .q-option-btn'),
+      'should have CSS for option buttons')
+  })
+
+  it('hides options after answering', () => {
+    assert.ok(html.includes('.question-prompt.answered .q-options'),
+      'should hide options when answered')
+  })
+
+  it('shows answer text after submitting', () => {
+    assert.ok(html.includes('q-answer-text'),
+      'should have answer text element')
+  })
+})
+
+describe('#733 — status bar busy indicator', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has busy indicator element', () => {
+    assert.ok(html.includes('id="status-busy"'),
+      'should have busy indicator element in status bar')
+  })
+
+  it('busy indicator is hidden by default', () => {
+    assert.ok(html.includes('id="status-busy" class="busy-indicator hidden"'),
+      'busy indicator should be hidden by default')
+  })
+
+  it('has busy indicator CSS', () => {
+    assert.ok(html.includes('.busy-indicator'),
+      'should have busy-indicator CSS class')
+  })
+
+  it('has busy pulse animation', () => {
+    assert.ok(html.includes('@keyframes busyPulse'),
+      'should have busyPulse animation keyframes')
+  })
+
+  it('has updateBusyIndicator function', () => {
+    assert.ok(html.includes('function updateBusyIndicator'),
+      'should define updateBusyIndicator function')
+  })
+
+  it('updates busy indicator on agent_busy', () => {
+    const busyBlock = html.match(/case "agent_busy"[\s\S]*?break;/)
+    assert.ok(busyBlock, 'agent_busy handler should exist')
+    assert.ok(busyBlock[0].includes('updateBusyIndicator'),
+      'agent_busy should update busy indicator')
+  })
+
+  it('updates busy indicator on agent_idle', () => {
+    const idleBlock = html.match(/case "agent_idle"[\s\S]*?break;/)
+    assert.ok(idleBlock, 'agent_idle handler should exist')
+    assert.ok(idleBlock[0].includes('updateBusyIndicator'),
+      'agent_idle should update busy indicator')
+  })
+
+  it('updates busy indicator on stream_start', () => {
+    const streamBlock = html.match(/case "stream_start"[\s\S]*?break;/)
+    assert.ok(streamBlock, 'stream_start handler should exist')
+    assert.ok(streamBlock[0].includes('updateBusyIndicator'),
+      'stream_start should update busy indicator')
+  })
+
+  it('updates busy indicator on claude_ready', () => {
+    const readyBlock = html.match(/case "claude_ready"[\s\S]*?break;/)
+    assert.ok(readyBlock, 'claude_ready handler should exist')
+    assert.ok(readyBlock[0].includes('updateBusyIndicator'),
+      'claude_ready should update busy indicator')
+  })
+})
