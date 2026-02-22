@@ -37,12 +37,28 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
 
     <div id="session-bar">
       <div id="session-tabs"></div>
-      <button id="new-session-btn" title="New session">+</button>
+      <button id="new-session-btn" title="New session (Ctrl+N)">+</button>
     </div>
 
     <div id="reconnect-banner" class="hidden">
-      Disconnected. Reconnecting...
+      <span id="reconnect-text">Disconnected. Reconnecting...</span>
     </div>
+
+    <!-- Create session modal -->
+    <div id="create-session-modal" class="modal-overlay hidden">
+      <div class="modal-content">
+        <h3 class="modal-title">New Session</h3>
+        <input type="text" id="modal-session-name" placeholder="Session name" autocomplete="off">
+        <input type="text" id="modal-session-cwd" placeholder="Working directory (optional)" autocomplete="off">
+        <div class="modal-buttons">
+          <button id="modal-cancel-btn" class="btn-modal-cancel">Cancel</button>
+          <button id="modal-create-btn" class="btn-modal-create">Create</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast container -->
+    <div id="toast-container"></div>
 
     <div id="plan-mode-banner" class="hidden">
       Plan Mode
@@ -59,6 +75,7 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
     <div id="chat-messages"></div>
 
     <div id="status-bar">
+      <span id="status-busy" class="busy-indicator hidden"></span>
       <span id="status-model"></span>
       <span id="status-cost"></span>
       <span id="status-context"></span>
@@ -580,6 +597,195 @@ function getDashboardCss() {
       font-size: 11px;
       font-weight: 600;
     }
+
+    /* Session tab with close button */
+    .session-tab {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      position: relative;
+    }
+    .session-tab .tab-name {
+      pointer-events: none;
+    }
+    .session-tab .tab-close {
+      display: none;
+      background: none;
+      border: none;
+      color: #666;
+      font-size: 14px;
+      line-height: 1;
+      cursor: pointer;
+      padding: 0 2px;
+      border-radius: 3px;
+    }
+    .session-tab .tab-close:hover {
+      color: #f87171;
+      background: rgba(248, 113, 113, 0.15);
+    }
+    .session-tab:hover .tab-close.visible { display: inline-block; }
+    .session-tab .tab-rename-input {
+      background: #12121f;
+      color: #e0e0e0;
+      border: 1px solid #4a9eff;
+      border-radius: 4px;
+      padding: 1px 4px;
+      font-size: 13px;
+      width: 100px;
+      outline: none;
+    }
+
+    /* Create session modal */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    .modal-content {
+      background: #1a1a2e;
+      border: 1px solid #333355;
+      border-radius: 12px;
+      padding: 24px;
+      min-width: 340px;
+      max-width: 420px;
+    }
+    .modal-title {
+      color: #e0e0e0;
+      font-size: 16px;
+      margin-bottom: 16px;
+    }
+    .modal-content input {
+      width: 100%;
+      background: #12121f;
+      color: #e0e0e0;
+      border: 1px solid #333355;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 14px;
+      margin-bottom: 10px;
+    }
+    .modal-content input:focus {
+      outline: none;
+      border-color: #4a9eff;
+    }
+    .modal-content input::placeholder { color: #555; }
+    .modal-buttons {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 6px;
+    }
+    .btn-modal-cancel {
+      padding: 6px 16px;
+      border-radius: 6px;
+      border: 1px solid #333355;
+      background: transparent;
+      color: #999;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .btn-modal-cancel:hover { background: #222244; color: #ccc; }
+    .btn-modal-create {
+      padding: 6px 16px;
+      border-radius: 6px;
+      border: none;
+      background: #4a9eff;
+      color: #fff;
+      font-size: 13px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .btn-modal-create:hover { background: #3a8eef; }
+
+    /* Toast notifications */
+    #toast-container {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 2000;
+      max-width: 380px;
+    }
+    .toast {
+      background: #dc2626;
+      color: #fff;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      animation: toastIn 0.2s ease-out;
+    }
+    .toast .toast-msg { flex: 1; }
+    .toast .toast-close {
+      background: none;
+      border: none;
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 16px;
+      cursor: pointer;
+      line-height: 1;
+      padding: 0;
+      flex-shrink: 0;
+    }
+    .toast .toast-close:hover { color: #fff; }
+    @keyframes toastIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Busy indicator */
+    .busy-indicator {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #4a9eff;
+      animation: busyPulse 1s infinite ease-in-out;
+      flex-shrink: 0;
+    }
+    @keyframes busyPulse {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 1; }
+    }
+
+    /* Question prompt with option buttons */
+    .question-prompt .q-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .question-prompt .q-option-btn {
+      padding: 5px 12px;
+      border-radius: 6px;
+      border: 1px solid #2a5a7a;
+      background: #12121f;
+      color: #a0d0e0;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .question-prompt .q-option-btn:hover {
+      background: #1a2530;
+      border-color: #4a9eff;
+    }
+    .question-prompt.answered .q-options { display: none; }
+    .question-prompt .q-answer-text {
+      display: none;
+      font-size: 12px;
+      color: #888;
+      margin-top: 6px;
+    }
+    .question-prompt.answered .q-answer-text { display: block; }
   `
 }
 
@@ -612,6 +818,8 @@ function getDashboardJs() {
   var statusModel = "";
   var backgroundAgents = new Map();
   var inPlanMode = false;
+  var modalOpen = false;
+  var hadInitialConnect = false;
 
   // ---- DOM refs ----
   var messagesEl = document.getElementById("chat-messages");
@@ -620,6 +828,7 @@ function getDashboardJs() {
   var interruptBtn = document.getElementById("interrupt-btn");
   var statusDot = document.getElementById("connection-status");
   var reconnectBanner = document.getElementById("reconnect-banner");
+  var reconnectText = document.getElementById("reconnect-text");
   var modelSelect = document.getElementById("model-select");
   var permissionSelect = document.getElementById("permission-select");
   var sessionTabs = document.getElementById("session-tabs");
@@ -628,11 +837,18 @@ function getDashboardJs() {
   var statusCostEl = document.getElementById("status-cost");
   var statusContextEl = document.getElementById("status-context");
   var statusAgentsEl = document.getElementById("status-agents");
+  var statusBusyEl = document.getElementById("status-busy");
   var planModeBanner = document.getElementById("plan-mode-banner");
   var planApprovalCard = document.getElementById("plan-approval-card");
   var planContentEl = document.getElementById("plan-content");
   var planApproveBtn = document.getElementById("plan-approve-btn");
   var planFeedbackBtn = document.getElementById("plan-feedback-btn");
+  var createSessionModal = document.getElementById("create-session-modal");
+  var modalSessionName = document.getElementById("modal-session-name");
+  var modalSessionCwd = document.getElementById("modal-session-cwd");
+  var modalCreateBtn = document.getElementById("modal-create-btn");
+  var modalCancelBtn = document.getElementById("modal-cancel-btn");
+  var toastContainer = document.getElementById("toast-container");
 
   // ---- Markdown renderer ----
   function renderMarkdown(text) {
@@ -797,22 +1013,49 @@ function getDashboardJs() {
     return div;
   }
 
-  function addQuestionPrompt(question, toolUseId) {
+  function addQuestionPrompt(question, toolUseId, options) {
     var div = document.createElement("div");
     div.className = "question-prompt";
     div.setAttribute("data-tool-use-id", toolUseId || "");
-    div.innerHTML =
-      '<div class="q-text">' + escapeHtml(question) + '</div>' +
-      '<div class="q-input-row">' +
+
+    var html = '<div class="q-text">' + escapeHtml(question) + '</div>';
+
+    // If options are provided, show them as buttons
+    if (Array.isArray(options) && options.length > 0) {
+      html += '<div class="q-options">';
+      options.forEach(function(opt) {
+        html += '<button class="q-option-btn">' + escapeHtml(opt) + '</button>';
+      });
+      html += '</div>';
+    }
+
+    // Always show text input as fallback
+    html += '<div class="q-input-row">' +
       '<input type="text" placeholder="Type your answer...">' +
       '<button>Reply</button>' +
-      '</div>';
+      '</div>' +
+      '<div class="q-answer-text"></div>';
+
+    div.innerHTML = html;
+
+    // Option button handlers
+    div.querySelectorAll(".q-option-btn").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        var answer = btn.textContent;
+        sendQuestionResponse(answer, toolUseId);
+        div.querySelector(".q-answer-text").textContent = "Answered: " + answer;
+        div.classList.add("answered");
+      });
+    });
+
+    // Text input handler
     var qInput = div.querySelector("input");
-    var qBtn = div.querySelector("button");
+    var qBtn = div.querySelector(".q-input-row button");
     function submitAnswer() {
       var answer = qInput.value.trim();
       if (!answer) return;
       sendQuestionResponse(answer, toolUseId);
+      div.querySelector(".q-answer-text").textContent = "Answered: " + answer;
       div.classList.add("answered");
     }
     qBtn.addEventListener("click", submitAnswer);
@@ -851,24 +1094,116 @@ function getDashboardJs() {
   // ---- Session tabs ----
   function renderSessions() {
     sessionTabs.innerHTML = "";
+    var showClose = sessions.length > 1;
     sessions.forEach(function(s) {
       var tab = document.createElement("div");
       tab.className = "session-tab" + (s.sessionId === activeSessionId ? " active" : "");
-      tab.textContent = s.name || "Default";
+
+      var nameSpan = document.createElement("span");
+      nameSpan.className = "tab-name";
+      nameSpan.textContent = s.name || "Default";
+      tab.appendChild(nameSpan);
+
+      // Close button (hidden when only 1 session)
+      var closeBtn = document.createElement("button");
+      closeBtn.className = "tab-close" + (showClose ? " visible" : "");
+      closeBtn.innerHTML = "&times;";
+      closeBtn.title = "Destroy session";
+      closeBtn.addEventListener("click", function(e) {
+        e.stopPropagation();
+        if (window.confirm("Destroy session '" + (s.name || "Default") + "'?")) {
+          send({ type: "destroy_session", sessionId: s.sessionId });
+        }
+      });
+      tab.appendChild(closeBtn);
+
+      // Click to switch session
       tab.addEventListener("click", function() {
         if (s.sessionId !== activeSessionId) {
           send({ type: "switch_session", sessionId: s.sessionId });
         }
       });
+
+      // Double-click to rename session (inline editing)
+      tab.addEventListener("dblclick", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        startInlineRename(tab, s);
+      });
+
       sessionTabs.appendChild(tab);
     });
   }
 
-  newSessionBtn.addEventListener("click", function() {
-    var name = prompt("Session name:");
-    if (name && name.trim()) {
-      send({ type: "create_session", name: name.trim() });
+  function startInlineRename(tab, session) {
+    var nameSpan = tab.querySelector(".tab-name");
+    if (!nameSpan) return;
+    var input = document.createElement("input");
+    input.type = "text";
+    input.className = "tab-rename-input";
+    input.value = session.name || "Default";
+    nameSpan.replaceWith(input);
+    input.focus();
+    input.select();
+
+    function commit() {
+      var newName = input.value.trim();
+      if (newName && newName !== (session.name || "Default")) {
+        send({ type: "rename_session", sessionId: session.sessionId, name: newName });
+      }
+      // Re-render regardless to restore normal tab look
+      renderSessions();
     }
+    function cancel() {
+      renderSessions();
+    }
+    input.addEventListener("blur", commit);
+    input.addEventListener("keydown", function(e) {
+      if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+      if (e.key === "Escape") { e.preventDefault(); input.removeEventListener("blur", commit); cancel(); }
+    });
+  }
+
+  // ---- Create session modal ----
+  function openCreateSessionModal() {
+    modalSessionName.value = "";
+    modalSessionCwd.value = "";
+    createSessionModal.classList.remove("hidden");
+    modalOpen = true;
+    modalSessionName.focus();
+  }
+
+  function closeCreateSessionModal() {
+    createSessionModal.classList.add("hidden");
+    modalOpen = false;
+  }
+
+  function submitCreateSession() {
+    var name = modalSessionName.value.trim();
+    var cwd = modalSessionCwd.value.trim();
+    if (!name) { modalSessionName.focus(); return; }
+    var msg = { type: "create_session", name: name };
+    if (cwd) msg.cwd = cwd;
+    send(msg);
+    closeCreateSessionModal();
+  }
+
+  newSessionBtn.addEventListener("click", function() {
+    openCreateSessionModal();
+  });
+
+  modalCreateBtn.addEventListener("click", submitCreateSession);
+  modalCancelBtn.addEventListener("click", closeCreateSessionModal);
+
+  // Close modal on backdrop click
+  createSessionModal.addEventListener("click", function(e) {
+    if (e.target === createSessionModal) closeCreateSessionModal();
+  });
+
+  // Modal keyboard: Enter to submit, Escape to close
+  createSessionModal.addEventListener("keydown", function(e) {
+    if (e.key === "Enter") { e.preventDefault(); submitCreateSession(); }
+    if (e.key === "Escape") { e.preventDefault(); closeCreateSessionModal(); }
   });
 
   // ---- Model + permission selects ----
@@ -936,16 +1271,38 @@ function getDashboardJs() {
     }
   }
 
+  function updateBusyIndicator() {
+    if (isBusy) {
+      statusBusyEl.classList.remove("hidden");
+    } else {
+      statusBusyEl.classList.add("hidden");
+    }
+  }
+
+  // ---- Toast notifications ----
+  function showToast(message) {
+    var toast = document.createElement("div");
+    toast.className = "toast";
+    toast.innerHTML =
+      '<span class="toast-msg">' + escapeHtml(message) + '</span>' +
+      '<button class="toast-close">&times;</button>';
+    toast.querySelector(".toast-close").addEventListener("click", function() {
+      toast.remove();
+    });
+    toastContainer.appendChild(toast);
+    // Auto-dismiss after 5 seconds
+    setTimeout(function() {
+      if (toast.parentNode) toast.remove();
+    }, 5000);
+  }
+
   // ---- Connection status ----
   function setConnectionState(state) {
     statusDot.className = "status-dot " + state;
     connected = state === "connected";
     if (state === "connected") {
+      hadInitialConnect = true;
       reconnectBanner.classList.add("hidden");
-    } else if (state === "disconnected" || state === "connecting") {
-      if (!reconnectBanner.classList.contains("hidden") || state === "disconnected") {
-        // Show banner only after initial connect
-      }
     }
     updateButtons();
   }
@@ -992,9 +1349,13 @@ function getDashboardJs() {
       connected = false;
       claudeReady = false;
       isBusy = false;
+      updateBusyIndicator();
       updateButtons();
       // Show reconnect banner if we were previously connected
-      reconnectBanner.classList.remove("hidden");
+      if (hadInitialConnect) {
+        reconnectText.textContent = "Disconnected. Reconnecting...";
+        reconnectBanner.classList.remove("hidden");
+      }
       // Auto-reconnect
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(function() {
@@ -1077,6 +1438,7 @@ function getDashboardJs() {
         claudeReady = true;
         isBusy = false;
         removeThinking();
+        updateBusyIndicator();
         updateButtons();
         break;
 
@@ -1115,6 +1477,7 @@ function getDashboardJs() {
         messagesEl.appendChild(streamDiv);
         removeThinking();
         isBusy = true;
+        updateBusyIndicator();
         updateButtons();
         scrollToBottom();
         break;
@@ -1170,7 +1533,8 @@ function getDashboardJs() {
       case "user_question": {
         if (Array.isArray(msg.questions) && msg.questions.length > 0) {
           var q = msg.questions[0];
-          addQuestionPrompt(q.question || "Question from Claude", msg.toolUseId || "");
+          var questionOptions = Array.isArray(q.options) ? q.options : null;
+          addQuestionPrompt(q.question || "Question from Claude", msg.toolUseId || "", questionOptions);
         }
         break;
       }
@@ -1221,22 +1585,33 @@ function getDashboardJs() {
       case "agent_busy":
         isBusy = true;
         showThinking();
+        updateBusyIndicator();
         updateButtons();
         break;
 
       case "agent_idle":
         isBusy = false;
         removeThinking();
+        updateBusyIndicator();
         updateButtons();
         break;
 
       case "error":
       case "server_error":
         addMessage("error", msg.message || msg.details || "Unknown error");
+        showToast(msg.message || msg.details || "Unknown error");
         break;
 
       case "session_error":
         addMessage("error", msg.message || "Session error");
+        showToast(msg.message || "Session error");
+        break;
+
+      case "server_shutdown":
+        reconnectText.textContent = msg.reason === "restart"
+          ? "Server restarting..."
+          : "Server shutting down...";
+        reconnectBanner.classList.remove("hidden");
         break;
 
       case "plan_started":
@@ -1291,9 +1666,32 @@ function getDashboardJs() {
   });
 
   document.addEventListener("keydown", function(e) {
-    // Escape to interrupt
+    // Escape: close modal first, otherwise interrupt
     if (e.key === "Escape") {
+      if (modalOpen) {
+        e.preventDefault();
+        closeCreateSessionModal();
+        return;
+      }
       sendInterrupt();
+      return;
+    }
+
+    // Ctrl/Cmd+N: open new session modal
+    if (e.key === "n" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      openCreateSessionModal();
+      return;
+    }
+
+    // Ctrl/Cmd+1-9: switch to session by index
+    if ((e.ctrlKey || e.metaKey) && e.key >= "1" && e.key <= "9") {
+      e.preventDefault();
+      var idx = parseInt(e.key, 10) - 1;
+      if (idx < sessions.length) {
+        send({ type: "switch_session", sessionId: sessions[idx].sessionId });
+      }
+      return;
     }
   });
 
@@ -1311,6 +1709,7 @@ function getDashboardJs() {
 
   // ---- Init ----
   updateButtons();
+  updateBusyIndicator();
   connect();
 })();
 `
