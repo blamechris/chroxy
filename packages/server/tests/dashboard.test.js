@@ -227,6 +227,24 @@ describe('#760 — querySelector calls use sanitized IDs', () => {
     const toolIdQueries = html.match(/querySelector\('[^']*data-tool-id[^']*'\s*\+\s*(?!sanitizeId)\w/g)
     assert.ok(!toolIdQueries, 'all data-tool-id querySelector calls should use sanitizeId')
   })
+
+  it('stores sanitized IDs in data-msg-id attributes', () => {
+    // Every setAttribute("data-msg-id", ...) call must use sanitizeId
+    const allMsgIdSets = html.match(/setAttribute\("data-msg-id",\s*[^)]+\)/g) || []
+    assert.ok(allMsgIdSets.length > 0, 'should have data-msg-id setAttribute calls')
+    for (const call of allMsgIdSets) {
+      assert.ok(call.includes('sanitizeId'), `setAttribute call should use sanitizeId: ${call}`)
+    }
+  })
+
+  it('stores sanitized IDs in data-tool-id attributes', () => {
+    // Every setAttribute("data-tool-id", ...) call must use sanitizeId
+    const allToolIdSets = html.match(/setAttribute\("data-tool-id",\s*[^)]+\)/g) || []
+    assert.ok(allToolIdSets.length > 0, 'should have data-tool-id setAttribute calls')
+    for (const call of allToolIdSets) {
+      assert.ok(call.includes('sanitizeId'), `setAttribute call should use sanitizeId: ${call}`)
+    }
+  })
 })
 
 describe('#762 — javascript: URI blocking in markdown links', () => {

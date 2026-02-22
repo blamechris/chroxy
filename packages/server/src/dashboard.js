@@ -740,7 +740,7 @@ function getDashboardJs() {
       div.textContent = content;
     }
 
-    if (opts.id) div.setAttribute("data-msg-id", opts.id);
+    if (opts.id) div.setAttribute("data-msg-id", sanitizeId(opts.id));
     messagesEl.appendChild(div);
     scrollToBottom();
     return div;
@@ -749,7 +749,7 @@ function getDashboardJs() {
   function addToolBubble(tool, toolUseId, input) {
     var div = document.createElement("div");
     div.className = "tool-bubble";
-    div.setAttribute("data-tool-id", toolUseId || "");
+    div.setAttribute("data-tool-id", sanitizeId(toolUseId || ""));
     var inputSummary = "";
     if (input) {
       if (typeof input === "object") {
@@ -1110,7 +1110,7 @@ function getDashboardJs() {
         streamingMsgId = msg.messageId;
         var streamDiv = document.createElement("div");
         streamDiv.className = "msg assistant";
-        streamDiv.setAttribute("data-msg-id", streamingMsgId);
+        streamDiv.setAttribute("data-msg-id", sanitizeId(streamingMsgId));
         streamDiv.innerHTML = "";
         messagesEl.appendChild(streamDiv);
         removeThinking();
