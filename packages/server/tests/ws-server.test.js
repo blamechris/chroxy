@@ -5238,7 +5238,7 @@ describe('encryption key exchange enforcement', () => {
     // Should have received server_error before close
     const errorMsg = messages.find(m => m.type === 'server_error')
     assert.ok(errorMsg, 'Should receive server_error before disconnect')
-    assert.match(errorMsg.error, /key exchange timed out/i)
+    assert.match(errorMsg.message, /key exchange timed out/i)
     assert.equal(errorMsg.recoverable, false)
     assert.equal(closeCode, 1008, 'Close code should be 1008 (policy violation)')
   })
@@ -5294,7 +5294,7 @@ describe('encryption key exchange enforcement', () => {
 
     const errorMsg = messages.find(m => m.type === 'server_error')
     assert.ok(errorMsg, 'Should receive server_error')
-    assert.match(errorMsg.error, /did not initiate key exchange/i)
+    assert.match(errorMsg.message, /did not initiate key exchange/i)
     assert.equal(closeCode, 1008)
   })
 
