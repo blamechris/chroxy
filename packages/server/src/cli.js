@@ -1041,4 +1041,105 @@ serviceCmd
     }
   })
 
+
+serviceCmd
+  .command('start')
+  .description('Start the Chroxy daemon')
+  .action(async () => {
+    const { getServiceStatus, startService } = await import('./service.js')
+    const status = getServiceStatus()
+
+    if (!status.installed) {
+      console.error('Chroxy service is not installed. Run: chroxy service install')
+      process.exit(1)
+    }
+    if (status.running) {
+      console.error('Chroxy service is already running (PID ' + status.pid + ')')
+      process.exit(1)
+    }
+
+    try {
+      startService()
+      console.log('Chroxy service started')
+      console.log('Check status: chroxy service status')
+    } catch (err) {
+      console.error('Failed to start service:', err.message)
+      process.exit(1)
+    }
+  })
+
+serviceCmd
+  .command('stop')
+  .description('Stop the Chroxy daemon')
+  .action(async () => {
+    const { getServiceStatus, stopService } = await import('./service.js')
+    const status = getServiceStatus()
+
+    if (!status.installed) {
+      console.error('Chroxy service is not installed.')
+      process.exit(1)
+    }
+    if (!status.running) {
+      console.error('Chroxy service is not running.')
+      process.exit(1)
+    }
+
+    try {
+      stopService()
+      console.log('Chroxy service stopped')
+    } catch (err) {
+      console.error('Failed to stop service:', err.message)
+      process.exit(1)
+    }
+  })
+
+serviceCmd
+  .command('status')
+  .description('Show daemon status')
+  .action(async () => {
+    const { getFullServiceStatus } = await import('./service.js')
+    const status = await getFullServiceStatus()
+
+    console.log('\nChroxy Service Status\n')
+
+    if (!status.installed) {
+      console.log('  Installed:  No')
+      console.log('  Run: chroxy service install\n')
+      return
+    }
+
+    console.log('  Installed:  Yes')
+
+    if (!status.running) {
+      if (status.stale) {
+        console.log('  Running:    No (stale PID file)')
+      } else {
+        console.log('  Running:    No')
+      }
+      console.log('  Run: chroxy service start\n')
+      return
+    }
+
+    console.log('  Running:    Yes (PID ' + status.pid + ')')
+
+    if (status.health) {
+      console.log('  Status:     ' + status.health.status)
+    }
+
+    if (status.connection) {
+      console.log('  URL:        ' + status.connection.wsUrl)
+      const token = status.connection.apiToken
+      if (token) console.log('  Token:      ' + token.slice(0, 8) + '...')
+    }
+
+    if (status.recentLogs && status.recentLogs.length > 0) {
+      console.log('\n  Recent logs:')
+      for (const line of status.recentLogs) {
+        console.log('    ' + line)
+      }
+    }
+
+    console.log('')
+  })
+
 program.parse()

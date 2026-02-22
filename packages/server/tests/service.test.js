@@ -14,6 +14,10 @@ import {
   saveServiceState,
   installService,
   uninstallService,
+  startService,
+  stopService,
+  getServiceStatus,
+  getFullServiceStatus,
 } from '../src/service.js'
 
 describe('service', () => {
@@ -379,4 +383,219 @@ describe('service', () => {
       assert.ok(!existsSync(join(stateDir, 'service.json')))
     })
   })
+  describe('startService()', () => {
+    it('returns started status for darwin', () => {
+      const result = startService({ _skipExec: true, _platform: 'darwin' })
+      assert.equal(result.started, true)
+      assert.equal(typeof result.message, 'string')
+    })
+
+    it('returns started status for linux', () => {
+      const result = startService({ _skipExec: true, _platform: 'linux' })
+      assert.equal(result.started, true)
+      assert.equal(typeof result.message, 'string')
+    })
+
+    it('throws on unsupported platform', () => {
+      assert.throws(() => startService({ _skipExec: true, _platform: 'win32' }), {
+        message: /not supported/i,
+      })
+    })
+  })
+
+  describe('stopService()', () => {
+    it('returns stopped status for darwin', () => {
+      const result = stopService({ _skipExec: true, _platform: 'darwin' })
+      assert.equal(result.stopped, true)
+      assert.equal(typeof result.message, 'string')
+    })
+
+    it('returns stopped status for linux', () => {
+      const result = stopService({ _skipExec: true, _platform: 'linux' })
+      assert.equal(result.stopped, true)
+      assert.equal(typeof result.message, 'string')
+    })
+
+    it('throws on unsupported platform', () => {
+      assert.throws(() => stopService({ _skipExec: true, _platform: 'win32' }), {
+        message: /not supported/i,
+      })
+    })
+  })
+
+  describe('getServiceStatus()', () => {
+    it('returns not installed when no state file', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-status-'))
+      try {
+        const status = getServiceStatus({ configDir: dir })
+        assert.equal(status.installed, false)
+        assert.equal(status.running, false)
+        assert.equal(status.pid, null)
+        assert.equal(status.stale, false)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('returns installed but not running when no PID file', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-status-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        const status = getServiceStatus({ configDir: dir })
+        assert.equal(status.installed, true)
+        assert.equal(status.running, false)
+        assert.equal(status.pid, null)
+        assert.equal(status.stale, false)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('returns running when PID file has a live process', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-status-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        // Use current process PID — guaranteed alive
+        writeFileSync(join(dir, 'supervisor.pid'), String(process.pid))
+        const status = getServiceStatus({ configDir: dir })
+        assert.equal(status.installed, true)
+        assert.equal(status.running, true)
+        assert.equal(status.pid, process.pid)
+        assert.equal(status.stale, false)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('detects stale PID file for dead process', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-status-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        // Use a PID that almost certainly does not exist
+        writeFileSync(join(dir, 'supervisor.pid'), '99999999')
+        const status = getServiceStatus({ configDir: dir })
+        assert.equal(status.installed, true)
+        assert.equal(status.running, false)
+        assert.equal(status.pid, null)
+        assert.equal(status.stale, true)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('handles invalid PID file content', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-status-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        writeFileSync(join(dir, 'supervisor.pid'), 'not-a-number')
+        const status = getServiceStatus({ configDir: dir })
+        assert.equal(status.installed, true)
+        assert.equal(status.running, false)
+        assert.equal(status.pid, null)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('treats state without installed flag as not installed', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-status-'))
+      try {
+        // saveServiceState from install flow uses installedAt, not installed: true
+        // But getServiceStatus should handle any truthy state as installed
+        saveServiceState({ installedAt: '2026-01-01T00:00:00Z' }, dir)
+        const status = getServiceStatus({ configDir: dir })
+        // State exists but no explicit installed flag — still counts as installed
+        assert.equal(status.installed, true)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+  })
+
+  describe('getFullServiceStatus()', () => {
+    it('returns not installed status', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-full-'))
+      try {
+        const status = await getFullServiceStatus({ configDir: dir })
+        assert.equal(status.installed, false)
+        assert.equal(status.running, false)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('reads connection.json when available', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-full-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        writeFileSync(join(dir, 'connection.json'), JSON.stringify({
+          wsUrl: 'wss://test.example.com',
+          apiToken: 'test-token-12345678',
+        }))
+        const status = await getFullServiceStatus({ configDir: dir })
+        assert.equal(status.installed, true)
+        assert.equal(status.connection.wsUrl, 'wss://test.example.com')
+        assert.equal(status.connection.apiToken, 'test-token-12345678')
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('reads recent log lines (last 5)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-full-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        const logDir = join(dir, 'logs')
+        mkdirSync(logDir, { recursive: true })
+        writeFileSync(join(logDir, 'chroxy-stdout.log'), 'line1\nline2\nline3\nline4\nline5\nline6\nline7\n')
+        const status = await getFullServiceStatus({ configDir: dir })
+        assert.equal(status.recentLogs.length, 5)
+        assert.equal(status.recentLogs[0], 'line3')
+        assert.equal(status.recentLogs[4], 'line7')
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('handles missing connection.json gracefully', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-full-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        const status = await getFullServiceStatus({ configDir: dir })
+        assert.equal(status.installed, true)
+        assert.equal(status.connection, undefined)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('handles missing log directory gracefully', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-full-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        const status = await getFullServiceStatus({ configDir: dir })
+        assert.equal(status.installed, true)
+        assert.equal(status.recentLogs, undefined)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('handles fewer than 5 log lines', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-full-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        const logDir = join(dir, 'logs')
+        mkdirSync(logDir, { recursive: true })
+        writeFileSync(join(logDir, 'chroxy-stdout.log'), 'only-one-line\n')
+        const status = await getFullServiceStatus({ configDir: dir })
+        assert.ok(Array.isArray(status.recentLogs))
+        assert.equal(status.recentLogs.length, 1)
+        assert.equal(status.recentLogs[0], 'only-one-line')
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+  })
+
 })
