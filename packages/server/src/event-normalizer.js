@@ -7,8 +7,7 @@ import { toShortModelId } from './models.js'
  *   eventName: (data, ctx) => { messages, sideEffects, registrations }
  *
  * Where:
- *   messages       — Array of { msg, filter?, scope? } to broadcast
- *                    scope: 'session' (default) | 'global'
+ *   messages       — Array of { msg, filter? } to broadcast
  *                    filter: optional (client) => boolean predicate
  *   sideEffects    — Array of { type, ... } descriptors executed by WsServer
  *   registrations  — Array of { map, key, value } to register in WsServer maps
