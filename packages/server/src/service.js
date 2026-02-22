@@ -380,7 +380,7 @@ export function startService(options = {}) {
     if (paths.type === 'launchd') {
       execFileSync('launchctl', ['start', SERVICE_LABEL], { stdio: 'pipe' })
     } else {
-      execFileSync('systemctl', ['--user', 'start', 'chroxy'], { stdio: 'pipe' })
+      execFileSync('systemctl', ['--user', 'start', 'chroxy.service'], { stdio: 'pipe' })
     }
   }
 
@@ -402,7 +402,7 @@ export function stopService(options = {}) {
     if (paths.type === 'launchd') {
       execFileSync('launchctl', ['stop', SERVICE_LABEL], { stdio: 'pipe' })
     } else {
-      execFileSync('systemctl', ['--user', 'stop', 'chroxy'], { stdio: 'pipe' })
+      execFileSync('systemctl', ['--user', 'stop', 'chroxy.service'], { stdio: 'pipe' })
     }
   }
 
