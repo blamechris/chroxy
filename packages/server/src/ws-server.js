@@ -358,6 +358,10 @@ export class WsServer {
           res.end(JSON.stringify({ error: 'No connection info available' }))
           return
         }
+        // Redact apiToken when auth is disabled to prevent exposure on the network (#742)
+        if (!this.authRequired && connInfo.apiToken) {
+          connInfo.apiToken = '[REDACTED]'
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(connInfo))
         return

@@ -599,4 +599,106 @@ describe('service', () => {
     })
   })
 
+
+  describe('launchctl bootstrap/bootout (#743)', () => {
+    it('installService generates bootstrap command args for darwin', () => {
+      const serviceDir = join(tmpDir, 'LaunchAgents')
+      mkdirSync(serviceDir, { recursive: true })
+      const logDir = join(tmpDir, 'logs')
+      const stateDir = join(tmpDir, 'state')
+      const servicePath = join(serviceDir, 'com.chroxy.server.plist')
+
+      installService({
+        nodePath: '/opt/homebrew/opt/node@22/bin/node',
+        chroxyBin: '/usr/local/lib/node_modules/chroxy/src/cli.js',
+        _servicePath: servicePath,
+        _logDir: logDir,
+        _stateDir: stateDir,
+        _skipRegister: true,
+        _platform: 'darwin',
+      })
+
+      assert.ok(existsSync(servicePath))
+      const state = loadServiceState(stateDir)
+      assert.equal(state.platform, 'darwin')
+    })
+
+    it('uninstallService cleans up state for darwin', () => {
+      const serviceDir = join(tmpDir, 'LaunchAgents')
+      mkdirSync(serviceDir, { recursive: true })
+      const servicePath = join(serviceDir, 'com.chroxy.server.plist')
+      writeFileSync(servicePath, '<plist>test</plist>')
+      const stateDir = join(tmpDir, 'state2')
+      saveServiceState({
+        installedAt: new Date().toISOString(),
+        platform: 'darwin',
+        servicePath,
+        nodePath: '/opt/homebrew/opt/node@22/bin/node',
+        chroxyBin: '/some/cli.js',
+      }, stateDir)
+
+      uninstallService({
+        _stateDir: stateDir,
+        _skipUnregister: true,
+      })
+
+      assert.ok(!existsSync(servicePath))
+      assert.ok(!existsSync(join(stateDir, 'service.json')))
+    })
+  })
+
+  describe('service stop with KeepAlive (#748)', () => {
+    it('stopService returns stopped status with _skipExec on darwin', () => {
+      const result = stopService({ _skipExec: true, _platform: 'darwin' })
+      assert.equal(result.stopped, true)
+    })
+
+    it('startService returns started status with _skipExec on darwin', () => {
+      const result = startService({ _skipExec: true, _platform: 'darwin' })
+      assert.equal(result.started, true)
+    })
+  })
+
+  describe('getFullServiceStatus fetch timeout and port parsing (#745)', () => {
+    it('handles fetch timeout when server is not responding', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        writeFileSync(join(dir, 'supervisor.pid'), String(process.pid))
+        const status = await getFullServiceStatus({ configDir: dir })
+        assert.equal(status.installed, true)
+        assert.equal(status.running, true)
+        assert.equal(status.health, null)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('reads port from config.json when available', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        writeFileSync(join(dir, 'supervisor.pid'), String(process.pid))
+        writeFileSync(join(dir, 'config.json'), JSON.stringify({ port: 9999 }))
+        const status = await getFullServiceStatus({ configDir: dir })
+        assert.equal(status.installed, true)
+        assert.equal(status.health, null)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+
+    it('falls back to default port 8765 when no port info available', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
+      try {
+        saveServiceState({ installed: true, type: 'launchd' }, dir)
+        writeFileSync(join(dir, 'supervisor.pid'), String(process.pid))
+        const status = await getFullServiceStatus({ configDir: dir })
+        assert.equal(status.health, null)
+      } finally {
+        rmSync(dir, { recursive: true })
+      }
+    })
+  })
+
 })
