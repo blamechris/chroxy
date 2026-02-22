@@ -9,6 +9,7 @@ import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import qrcode from 'qrcode-terminal'
+import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -249,6 +250,17 @@ export async function startCliServer(config) {
     console.log(`   URL:   ${wsUrl}`)
     console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
 
+    // 7b. Write connection info file for programmatic access
+    writeConnectionInfo({
+      wsUrl,
+      httpUrl,
+      apiToken: API_TOKEN,
+      connectionUrl,
+      tunnelMode: modeLabel,
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    })
+
   } else if (!tunnelArg && !NO_AUTH) {
     console.log(`[✓] Server ready! (CLI headless mode, no tunnel)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)
@@ -279,6 +291,7 @@ export async function startCliServer(config) {
     sessionManager.destroyAll()
     wsServer.close()
     if (tunnel) await tunnel.stop()
+    removeConnectionInfo()
     process.exit(0)
   }
 

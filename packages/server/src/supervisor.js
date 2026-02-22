@@ -11,6 +11,7 @@ import { getTunnel, parseTunnelArg } from './tunnel/index.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { createLogger } from './logger.js'
 import qrcode from 'qrcode-terminal'
+import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -191,6 +192,17 @@ export class Supervisor extends EventEmitter {
     console.log(`   URL:   ${wsUrl}`)
     console.log(`   Token: ${this._apiToken.slice(0, 8)}...`)
     console.log('')
+
+    // 3b. Write connection info file for programmatic access
+    writeConnectionInfo({
+      wsUrl,
+      httpUrl,
+      apiToken: this._apiToken,
+      connectionUrl,
+      tunnelMode: modeLabel,
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    })
 
     // 4. Write PID file
     try {
@@ -500,6 +512,7 @@ export class Supervisor extends EventEmitter {
 
     // Remove PID file
     try { unlinkSync(this._pidFilePath) } catch {}
+    removeConnectionInfo()
 
     this._stopStandbyServer()
 

@@ -7405,3 +7405,87 @@ describe('models_updated broadcasting', () => {
     ws.close()
   })
 })
+
+describe('WsServer GET /connect endpoint', () => {
+  let server
+  let tmpConfigDir
+
+  beforeEach(() => {
+    // Create a temp config dir for connection.json isolation
+    tmpConfigDir = mkdtempSync(join(tmpdir(), 'chroxy-connect-test-'))
+    process.env.CHROXY_CONFIG_DIR = tmpConfigDir
+  })
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+    try { rmSync(tmpConfigDir, { recursive: true }) } catch {}
+    delete process.env.CHROXY_CONFIG_DIR
+  })
+
+  it('returns connection info JSON with valid auth', async () => {
+    // Write a connection.json file
+    const { writeConnectionInfo } = await import('../src/connection-info.js')
+    const info = {
+      wsUrl: 'wss://connect-test.example.com',
+      httpUrl: 'https://connect-test.example.com',
+      apiToken: 'tok-connect-test',
+      connectionUrl: 'chroxy://connect-test.example.com?token=tok-connect-test',
+      tunnelMode: 'cloudflare:quick',
+      startedAt: '2026-02-22T00:00:00.000Z',
+      pid: 12345,
+    }
+    writeConnectionInfo(info)
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-connect-test',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/connect`, {
+      headers: { 'Authorization': 'Bearer tok-connect-test' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(body.wsUrl, 'wss://connect-test.example.com')
+    assert.equal(body.apiToken, 'tok-connect-test')
+    assert.equal(body.tunnelMode, 'cloudflare:quick')
+  })
+
+  it('returns 403 without auth token', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-connect-auth',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/connect`)
+    assert.equal(res.status, 403)
+    const body = await res.json()
+    assert.equal(body.error, 'unauthorized')
+  })
+
+  it('returns 404 when no connection.json exists', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-connect-404',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/connect`, {
+      headers: { 'Authorization': 'Bearer tok-connect-404' },
+    })
+    assert.equal(res.status, 404)
+    const body = await res.json()
+    assert.equal(body.error, 'No connection info available')
+  })
+})
