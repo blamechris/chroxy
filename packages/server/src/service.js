@@ -440,12 +440,14 @@ export function getServiceStatus(options = {}) {
   }
 
   // Check if process is alive (signal 0 = check existence only)
+  // EPERM means the process exists but we lack permission — still alive
+  // ESRCH means the process does not exist
   let alive = false
   try {
     process.kill(pid, 0)
     alive = true
-  } catch {
-    // Process not running
+  } catch (err) {
+    alive = err.code === 'EPERM'
   }
 
   return {

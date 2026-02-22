@@ -498,7 +498,7 @@ describe('service', () => {
       }
     })
 
-    it('treats state without installed flag as not installed', () => {
+    it('treats existing state without installed flag as installed', () => {
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-status-'))
       try {
         // saveServiceState from install flow uses installedAt, not installed: true
