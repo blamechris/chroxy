@@ -2076,13 +2076,19 @@ export class WsServer {
                 additions = 0
               } else {
                 const content = await readFile(realAbsPath, 'utf-8')
-                const contentLines = content.split('\n')
-                // Drop trailing empty line from split
-                if (contentLines.length > 0 && contentLines[contentLines.length - 1] === '') {
-                  contentLines.pop()
+                // Detect binary files: null bytes in the first 512 chars indicate non-text
+                if (content.slice(0, 512).includes('\0')) {
+                  lines = [{ type: 'context', content: 'Binary file — not shown' }]
+                  additions = 0
+                } else {
+                  const contentLines = content.split('\n')
+                  // Drop trailing empty line from split
+                  if (contentLines.length > 0 && contentLines[contentLines.length - 1] === '') {
+                    contentLines.pop()
+                  }
+                  lines = contentLines.map(l => ({ type: 'addition', content: l }))
+                  additions = lines.length
                 }
-                lines = contentLines.map(l => ({ type: 'addition', content: l }))
-                additions = lines.length
               }
 
               seen.set(filePath, {
