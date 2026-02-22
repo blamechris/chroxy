@@ -5,6 +5,8 @@ import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 
+const ACCEPT_EDITS_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
+
 /**
  * Manages a Claude Code session using the Agent SDK.
  *
@@ -358,6 +360,11 @@ export class SdkSession extends EventEmitter {
       return this._handleAskUserQuestion(input, signal)
     }
 
+    // acceptEdits: auto-approve file operations, prompt for everything else
+    if (this.permissionMode === 'acceptEdits' && ACCEPT_EDITS_TOOLS.has(toolName)) {
+      return Promise.resolve({ behavior: 'allow' })
+    }
+
     return new Promise((resolve) => {
       const requestId = `perm-${++this._permissionCounter}-${Date.now()}`
       this._pendingPermissions.set(requestId, { resolve, input: input || {} })
@@ -562,7 +569,7 @@ export class SdkSession extends EventEmitter {
    * Change the permission mode. In SDK mode this doesn't require process restart.
    */
   setPermissionMode(mode) {
-    const VALID_MODES = ['approve', 'auto', 'plan']
+    const VALID_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
     if (!VALID_MODES.includes(mode)) {
       console.warn(`[sdk-session] Ignoring invalid permission mode: ${mode}`)
       return

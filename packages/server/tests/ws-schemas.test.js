@@ -235,6 +235,11 @@ describe('SetPermissionModeSchema', () => {
     assert.ok(result.success)
   })
 
+  it('accepts acceptEdits mode', () => {
+    const result = SetPermissionModeSchema.safeParse({ type: 'set_permission_mode', mode: 'acceptEdits' })
+    assert.ok(result.success)
+  })
+
   it('rejects missing mode', () => {
     const result = SetPermissionModeSchema.safeParse({ type: 'set_permission_mode' })
     assert.ok(!result.success)

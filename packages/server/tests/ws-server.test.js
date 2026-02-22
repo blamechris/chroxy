@@ -3425,6 +3425,39 @@ describe('auto permission mode confirmation handshake', () => {
     ws.close()
   })
 
+  it('acceptEdits mode bypasses confirmation (single-session)', async () => {
+    const mockSession = createMockSession()
+    let appliedMode = null
+    mockSession.setPermissionMode = (mode) => { appliedMode = mode }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    // Send acceptEdits mode (no confirmation needed — safer than auto)
+    send(ws, { type: 'set_permission_mode', mode: 'acceptEdits' })
+
+    const modeChanged = await waitForMessage(messages, 'permission_mode_changed', 2000)
+    assert.ok(modeChanged, 'Should receive permission_mode_changed immediately')
+    assert.equal(modeChanged.mode, 'acceptEdits')
+    assert.equal(appliedMode, 'acceptEdits')
+
+    // No confirm_permission_mode should have been sent
+    const confirm = messages.find(m => m.type === 'confirm_permission_mode')
+    assert.equal(confirm, undefined, 'acceptEdits should not trigger confirmation')
+
+    ws.close()
+  })
+
   it('auto mode requires confirmation (multi-session)', async () => {
     const manager = new EventEmitter()
     const mockSession = createMockSession()

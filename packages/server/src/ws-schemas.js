@@ -53,7 +53,7 @@ export const SetModelSchema = z.object({
 
 export const SetPermissionModeSchema = z.object({
   type: z.literal('set_permission_mode'),
-  mode: z.enum(['approve', 'auto', 'plan']),
+  mode: z.enum(['approve', 'auto', 'plan', 'acceptEdits']),
   confirmed: z.boolean().optional(),
 })
 

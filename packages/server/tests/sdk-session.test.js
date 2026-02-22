@@ -136,6 +136,58 @@ describe('SdkSession', () => {
     })
   })
 
+  // -- acceptEdits permission mode --
+
+  describe('acceptEdits permission mode', () => {
+    it('auto-approves file operation tools', async () => {
+      session.permissionMode = 'acceptEdits'
+      const events = []
+      session.on('permission_request', (data) => events.push(data))
+
+      const result = await session._handlePermission('Read', { file_path: '/tmp/x' }, null)
+      assert.equal(result.behavior, 'allow')
+      assert.equal(events.length, 0, 'Should NOT emit permission_request for file ops')
+    })
+
+    it('auto-approves all ACCEPT_EDITS_TOOLS', async () => {
+      session.permissionMode = 'acceptEdits'
+      const tools = ['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']
+
+      for (const tool of tools) {
+        const result = await session._handlePermission(tool, {}, null)
+        assert.equal(result.behavior, 'allow', `${tool} should be auto-approved`)
+      }
+    })
+
+    it('still prompts for Bash tool', async () => {
+      session.permissionMode = 'acceptEdits'
+      const events = []
+      session.on('permission_request', (data) => events.push(data))
+
+      const promise = session._handlePermission('Bash', { command: 'rm -rf /' }, null)
+
+      assert.equal(events.length, 1, 'Should emit permission_request for Bash')
+      assert.equal(events[0].tool, 'Bash')
+
+      session.respondToPermission(events[0].requestId, 'allow')
+      const result = await promise
+      assert.equal(result.behavior, 'allow')
+    })
+
+    it('still prompts for WebFetch tool', async () => {
+      session.permissionMode = 'acceptEdits'
+      const events = []
+      session.on('permission_request', (data) => events.push(data))
+
+      const promise = session._handlePermission('WebFetch', { url: 'https://example.com' }, null)
+      assert.equal(events.length, 1, 'Should emit permission_request for WebFetch')
+
+      session.respondToPermission(events[0].requestId, 'deny')
+      const result = await promise
+      assert.equal(result.behavior, 'deny')
+    })
+  })
+
   // -- AskUserQuestion handling --
 
   describe('_handleAskUserQuestion', () => {
@@ -356,6 +408,11 @@ describe('SdkSession', () => {
       session.setPermissionMode('invalid')
       assert.equal(session.permissionMode, 'approve')
     })
+
+    it('accepts acceptEdits mode', () => {
+      session.setPermissionMode('acceptEdits')
+      assert.equal(session.permissionMode, 'acceptEdits')
+    })
   })
 
   // -- _sdkPermissionMode --
@@ -374,6 +431,11 @@ describe('SdkSession', () => {
     it('maps plan to plan', () => {
       session.permissionMode = 'plan'
       assert.equal(session._sdkPermissionMode(), 'plan')
+    })
+
+    it('maps acceptEdits to default (uses canUseTool callback)', () => {
+      session.permissionMode = 'acceptEdits'
+      assert.equal(session._sdkPermissionMode(), 'default')
     })
   })
 
