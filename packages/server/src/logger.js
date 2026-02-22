@@ -63,13 +63,20 @@ function _maybeRotate() {
   try {
     const stats = statSync(_logPath)
     if (stats.size < MAX_LOG_SIZE) return
-  } catch { return }
+  } catch (err) {
+    if (err?.code !== 'ENOENT') console.error('[logger] stat failed:', err?.message)
+    return
+  }
 
   // Rotate: chroxy.3.log (overwritten) <- chroxy.2.log <- chroxy.1.log <- chroxy.log
   for (let i = MAX_LOG_FILES; i >= 1; i--) {
     const from = i === 1 ? _logPath : _logPath.replace('.log', `.${i - 1}.log`)
     const to = _logPath.replace('.log', `.${i}.log`)
-    try { renameSync(from, to) } catch {}
+    try {
+      renameSync(from, to)
+    } catch (err) {
+      if (err?.code !== 'ENOENT') console.error('[logger] rename failed:', err?.message)
+    }
   }
 }
 
