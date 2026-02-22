@@ -7192,7 +7192,7 @@ describe('encryption integration (end-to-end)', () => {
     // Server should send server_error before closing
     const serverError = messages.find(m => m.type === 'server_error')
     assert.ok(serverError, 'Server should send server_error on key exchange timeout')
-    assert.ok(serverError.error.includes('key exchange timed out'), 'Error should mention key exchange timeout')
+    assert.ok(serverError.message.includes('key exchange timed out'), 'Error should mention key exchange timeout')
     assert.equal(serverError.recoverable, false, 'Error should be non-recoverable')
     assert.equal(closeCode, 1008, 'Server should close with code 1008 (policy violation)')
   })
