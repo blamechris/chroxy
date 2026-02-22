@@ -668,7 +668,7 @@ export class CliSession extends EventEmitter {
    * Kills the current process and respawns with the new mode (new session).
    */
   setPermissionMode(mode) {
-    const VALID_MODES = ['approve', 'auto', 'plan']
+    const VALID_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
     if (!VALID_MODES.includes(mode)) {
       console.warn(`[cli-session] Ignoring invalid permission mode: ${mode}`)
       return

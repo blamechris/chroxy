@@ -137,6 +137,7 @@ function getGitInfo() {
 
 const PERMISSION_MODES = [
   { id: 'approve', label: 'Approve' },
+  { id: 'acceptEdits', label: 'Accept Edits' },
   { id: 'auto', label: 'Auto' },
   { id: 'plan', label: 'Plan' },
 ]

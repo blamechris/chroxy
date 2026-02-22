@@ -30,6 +30,51 @@ EOF
   exit 0
 fi
 
+# Accept Edits mode — auto-approve file operations, route everything else to phone
+if [ "$PERM_MODE" = "acceptEdits" ]; then
+  REQUEST=$(cat -)
+  TOOL_NAME=$(echo "$REQUEST" | grep -o '"tool_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+  case "$TOOL_NAME" in
+    Read|Write|Edit|NotebookEdit|Glob|Grep)
+      cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
+EOF
+      exit 0 ;;
+  esac
+  # Non-file tool — route to phone (reuse approve-mode curl logic with $REQUEST)
+  CURL_ARGS=(-s -X POST "http://localhost:${PORT}/permission" -H "Content-Type: application/json" -d "$REQUEST" --max-time 300)
+  if [ -n "$TOKEN" ]; then
+    CURL_ARGS+=(-H "Authorization: Bearer ${TOKEN}")
+  fi
+  RESPONSE=$(curl "${CURL_ARGS[@]}")
+  EXIT_CODE=$?
+  if [ $EXIT_CODE -ne 0 ]; then
+    cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}
+EOF
+    exit 0
+  fi
+  DECISION=$(echo "$RESPONSE" | grep -o '"decision":"[^"]*"' | head -1 | cut -d'"' -f4)
+  case "$DECISION" in
+    allow|allowAlways)
+      cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
+EOF
+      ;;
+    deny)
+      cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Denied by user via Chroxy mobile app"}}
+EOF
+      ;;
+    *)
+      cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}
+EOF
+      ;;
+  esac
+  exit 0
+fi
+
 # Plan mode — let Claude handle permission (read-only self-restriction)
 if [ "$PERM_MODE" = "plan" ]; then
   cat <<'EOF'
