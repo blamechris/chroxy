@@ -798,6 +798,11 @@ export class SessionManager extends EventEmitter {
       })
     }
 
+    // models_updated is global (not per-session) — forward as transient event
+    session.on('models_updated', (data) => {
+      this.emit('session_event', { sessionId, event: 'models_updated', data })
+    })
+
     // PtySession emits 'raw' for terminal view — forward it (not recorded in history)
     session.on('raw', (data) => {
       this.emit('session_event', { sessionId, event: 'raw', data })

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url'
 import { dirname, join, resolve, normalize, extname } from 'path'
 import { homedir } from 'os'
 import { timingSafeEqual } from 'crypto'
-import { MODELS, ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
+import { ALLOWED_MODEL_IDS, toShortModelId, getModels } from './models.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from './crypto.js'
 import { parseDiff } from './diff-parser.js'
 import { ClientMessageSchema, AuthSchema, KeyExchangeSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
@@ -572,7 +572,7 @@ export class WsServer {
         this._replayHistory(ws, activeId)
       }
 
-      this._send(ws, { type: 'available_models', models: MODELS })
+      this._send(ws, { type: 'available_models', models: getModels() })
       this._send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
 
       // Re-emit any pending permission requests across all sessions
@@ -597,7 +597,7 @@ export class WsServer {
       })
       this._send(ws, {
         type: 'available_models',
-        models: MODELS,
+        models: getModels(),
       })
       this._send(ws, {
         type: 'permission_mode_changed',
@@ -1461,6 +1461,12 @@ export class WsServer {
   /** Multi-session forwarding via normalizer */
   _setupSessionForwardingVia(normalizer) {
     this.sessionManager.on('session_event', ({ sessionId, event, data }) => {
+      // models_updated is global — broadcast to ALL clients, not per-session
+      if (event === 'models_updated' && data?.models) {
+        this._broadcast({ type: 'available_models', models: data.models })
+        return
+      }
+
       const ctx = {
         sessionId,
         mode: 'multi',
@@ -1538,6 +1544,13 @@ export class WsServer {
         }
       })
     }
+
+    // models_updated bypasses normalizer — global broadcast
+    this.cliSession.on('models_updated', (data) => {
+      if (data?.models) {
+        this._broadcast({ type: 'available_models', models: data.models })
+      }
+    })
   }
 
   /** PTY/tmux forwarding via normalizer */

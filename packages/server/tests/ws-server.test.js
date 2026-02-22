@@ -7323,3 +7323,100 @@ describe('encryption integration (end-to-end)', () => {
     assert.equal(closeCode, 1008, 'Server should close with code 1008 (policy violation)')
   })
 })
+
+describe('models_updated broadcasting', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('broadcasts available_models when cliSession emits models_updated', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    // Wait for initial messages (auth_ok, server_mode, etc.)
+    await new Promise(r => setTimeout(r, 200))
+    const initialCount = messages.length
+
+    // Emit models_updated from the CLI session
+    const newModels = [
+      { id: 'sonnet-4-6', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6' },
+      { id: 'opus-4-6', label: 'Opus 4.6', fullId: 'claude-opus-4-6' },
+    ]
+    mockSession.emit('models_updated', { models: newModels })
+
+    // Wait for broadcast
+    await new Promise(r => setTimeout(r, 200))
+
+    const modelMsgs = messages.slice(initialCount).filter(m => m.type === 'available_models')
+    assert.equal(modelMsgs.length, 1, 'Should receive exactly one available_models broadcast')
+    assert.deepStrictEqual(modelMsgs[0].models, newModels, 'Models should match emitted data')
+
+    ws.close()
+  })
+
+  it('broadcasts to all connected clients', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const client1 = await createClient(port)
+    const client2 = await createClient(port)
+
+    await new Promise(r => setTimeout(r, 200))
+    const c1Start = client1.messages.length
+    const c2Start = client2.messages.length
+
+    const newModels = [{ id: 'test-model', label: 'Test', fullId: 'claude-test-model' }]
+    mockSession.emit('models_updated', { models: newModels })
+
+    await new Promise(r => setTimeout(r, 200))
+
+    const c1Models = client1.messages.slice(c1Start).filter(m => m.type === 'available_models')
+    const c2Models = client2.messages.slice(c2Start).filter(m => m.type === 'available_models')
+    assert.equal(c1Models.length, 1, 'Client 1 should receive models update')
+    assert.equal(c2Models.length, 1, 'Client 2 should receive models update')
+
+    client1.ws.close()
+    client2.ws.close()
+  })
+
+  it('ignores models_updated with missing models data', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    await new Promise(r => setTimeout(r, 200))
+    const initialCount = messages.length
+
+    // Emit with no models property
+    mockSession.emit('models_updated', {})
+    await new Promise(r => setTimeout(r, 200))
+
+    const modelMsgs = messages.slice(initialCount).filter(m => m.type === 'available_models')
+    assert.equal(modelMsgs.length, 0, 'Should not broadcast when models data is missing')
+
+    ws.close()
+  })
+})

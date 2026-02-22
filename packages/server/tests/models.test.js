@@ -1,10 +1,10 @@
-import { describe, it } from 'node:test'
+import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId } from '../src/models.js'
+import { MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, resetModels } from '../src/models.js'
 
-describe('MODELS', () => {
-  it('has exactly 4 entries', () => {
-    assert.equal(MODELS.length, 4)
+describe('MODELS (default)', () => {
+  it('has at least 4 entries', () => {
+    assert.ok(MODELS.length >= 4)
   })
 
   it('each entry has id, label, and fullId', () => {
@@ -71,5 +71,135 @@ describe('toShortModelId', () => {
 
   it('passes through unknown identifiers', () => {
     assert.equal(toShortModelId('unknown-model'), 'unknown-model')
+  })
+})
+
+// -- Dynamic model updates --
+
+describe('getModels', () => {
+  beforeEach(() => {
+    resetModels()
+  })
+
+  it('returns MODELS by default', () => {
+    const models = getModels()
+    assert.deepEqual(models, MODELS)
+  })
+})
+
+describe('updateModels', () => {
+  beforeEach(() => {
+    resetModels()
+  })
+
+  it('updates getModels() to return new list', () => {
+    const sdkModels = [
+      { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: 'Fast and capable' },
+      { value: 'claude-opus-4-6', displayName: 'Opus 4.6', description: 'Most capable' },
+    ]
+
+    const result = updateModels(sdkModels)
+
+    assert.equal(result.length, 2)
+    assert.equal(result[0].id, 'sonnet-4-6')
+    assert.equal(result[0].label, 'Sonnet 4.6')
+    assert.equal(result[0].fullId, 'claude-sonnet-4-6')
+    assert.equal(result[1].id, 'opus-4-6')
+    assert.equal(result[1].label, 'Opus 4.6')
+    assert.equal(result[1].fullId, 'claude-opus-4-6')
+
+    const models = getModels()
+    assert.deepEqual(models, result)
+  })
+
+  it('updates ALLOWED_MODEL_IDS to include new models', () => {
+    const sdkModels = [
+      { value: 'claude-new-model-1', displayName: 'New Model', description: 'A new one' },
+    ]
+
+    updateModels(sdkModels)
+
+    assert.ok(ALLOWED_MODEL_IDS.has('claude-new-model-1'))
+    assert.ok(ALLOWED_MODEL_IDS.has('new-model-1'))
+  })
+
+  it('updates resolveModelId for new models', () => {
+    const sdkModels = [
+      { value: 'claude-sonnet-5-20260101', displayName: 'Sonnet 5', description: '' },
+    ]
+
+    updateModels(sdkModels)
+
+    assert.equal(resolveModelId('sonnet-5-20260101'), 'claude-sonnet-5-20260101')
+    assert.equal(resolveModelId('claude-sonnet-5-20260101'), 'claude-sonnet-5-20260101')
+  })
+
+  it('updates toShortModelId for new models', () => {
+    const sdkModels = [
+      { value: 'claude-opus-5', displayName: 'Opus 5', description: '' },
+    ]
+
+    updateModels(sdkModels)
+
+    assert.equal(toShortModelId('claude-opus-5'), 'opus-5')
+    assert.equal(toShortModelId('opus-5'), 'opus-5')
+  })
+
+  it('derives short id by stripping claude- prefix', () => {
+    const sdkModels = [
+      { value: 'claude-haiku-4-20260101', displayName: 'Haiku 4', description: '' },
+    ]
+
+    const result = updateModels(sdkModels)
+    assert.equal(result[0].id, 'haiku-4-20260101')
+  })
+
+  it('uses value as id when no claude- prefix', () => {
+    const sdkModels = [
+      { value: 'custom-model', displayName: 'Custom', description: '' },
+    ]
+
+    const result = updateModels(sdkModels)
+    assert.equal(result[0].id, 'custom-model')
+    assert.equal(result[0].fullId, 'custom-model')
+  })
+
+  it('skips entries without value', () => {
+    const sdkModels = [
+      { value: 'claude-opus-4-6', displayName: 'Opus 4.6', description: '' },
+      { value: '', displayName: 'Empty', description: '' },
+      { displayName: 'No Value', description: '' },
+    ]
+
+    const result = updateModels(sdkModels)
+    assert.equal(result.length, 1)
+    assert.equal(result[0].fullId, 'claude-opus-4-6')
+  })
+
+  it('returns empty array for empty input (preserves existing models)', () => {
+    const before = getModels()
+    const result = updateModels([])
+    assert.deepEqual(result, [])
+    assert.deepEqual(getModels(), before)
+  })
+
+  it('returns null for non-array input (keeps existing models)', () => {
+    const before = getModels()
+    const result = updateModels(null)
+    assert.equal(result, null)
+    assert.deepEqual(getModels(), before)
+  })
+})
+
+describe('resetModels', () => {
+  it('restores default models after update', () => {
+    updateModels([
+      { value: 'claude-test', displayName: 'Test', description: '' },
+    ])
+    assert.equal(getModels().length, 1)
+
+    resetModels()
+    assert.deepEqual(getModels(), MODELS)
+    assert.ok(ALLOWED_MODEL_IDS.has('sonnet'))
   })
 })

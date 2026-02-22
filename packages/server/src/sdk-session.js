@@ -1,6 +1,6 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { EventEmitter } from 'events'
-import { resolveModelId } from './models.js'
+import { resolveModelId, updateModels } from './models.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
@@ -204,6 +204,8 @@ export class SdkSession extends EventEmitter {
                 model: msg.model,
                 tools: msg.tools || [],
               })
+              // Fetch dynamic model list from SDK (non-blocking)
+              this._fetchSupportedModels()
             }
             break
           }
@@ -597,6 +599,25 @@ export class SdkSession extends EventEmitter {
       case 'auto': return 'bypassPermissions'
       case 'plan': return 'plan'
       default: return 'default'
+    }
+  }
+
+  /**
+   * Query the SDK for available models and emit models_updated.
+   * Called after session init — non-blocking, failures are logged and ignored.
+   */
+  async _fetchSupportedModels() {
+    if (!this._query || typeof this._query.supportedModels !== 'function') return
+
+    try {
+      const sdkModels = await this._query.supportedModels()
+      const converted = updateModels(sdkModels)
+      if (converted && converted.length > 0) {
+        console.log(`[sdk-session] Dynamic model list: ${converted.map(m => m.id).join(', ')}`)
+        this.emit('models_updated', { models: converted })
+      }
+    } catch (err) {
+      console.warn(`[sdk-session] Failed to fetch supported models: ${err.message}`)
     }
   }
 
