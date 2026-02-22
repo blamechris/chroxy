@@ -260,6 +260,7 @@ export async function startCliServer(config) {
     console.log(`\nOr connect manually:`)
     console.log(`   URL:   ${wsUrl}`)
     console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+    console.log(`   Dashboard: ${httpUrl}/dashboard`)
 
     // 7b. Write connection info file for programmatic access
     writeConnectionInfo({
@@ -276,9 +277,11 @@ export async function startCliServer(config) {
     console.log(`[✓] Server ready! (CLI headless mode, no tunnel)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)
     console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+    console.log(`   Dashboard: http://localhost:${PORT}/dashboard`)
   } else {
     console.log(`[✓] Server ready! (CLI headless mode, no auth)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)
+    console.log(`   Dashboard: http://localhost:${PORT}/dashboard`)
   }
 
   console.log('\nPress Ctrl+C to stop.\n')

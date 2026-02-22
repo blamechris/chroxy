@@ -7576,3 +7576,138 @@ describe('WsServer GET /connect redacts apiToken in no-auth mode (#742)', () => 
     assert.equal(body.apiToken, 'auth-token-xyz789')
   })
 })
+
+describe('dashboard endpoint', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('GET /dashboard returns 200 with HTML when auth disabled', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
+    assert.equal(res.status, 200)
+    assert.ok(res.headers.get('content-type').includes('text/html'))
+    const body = await res.text()
+    assert.ok(body.includes('Chroxy Dashboard'))
+  })
+
+  it('GET /dashboard?token=VALID returns 200 when auth enabled', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-auth',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard?token=tok-dash-auth`)
+    assert.equal(res.status, 200)
+    assert.ok(res.headers.get('content-type').includes('text/html'))
+    const body = await res.text()
+    assert.ok(body.includes('Chroxy Dashboard'))
+  })
+
+  it('GET /dashboard with Bearer token returns 200 when auth enabled', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-bearer',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`, {
+      headers: { 'Authorization': 'Bearer tok-dash-bearer' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.text()
+    assert.ok(body.includes('Chroxy Dashboard'))
+  })
+
+  it('GET /dashboard without token returns 403 when auth enabled', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-notoken',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
+    assert.equal(res.status, 403)
+    assert.ok(res.headers.get('content-type').includes('text/html'))
+    const body = await res.text()
+    assert.ok(body.includes('403'))
+  })
+
+  it('GET /dashboard?token=WRONG returns 403 when auth enabled', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-wrong',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard?token=bad-token`)
+    assert.equal(res.status, 403)
+    const body = await res.text()
+    assert.ok(body.includes('403'))
+  })
+
+  it('dashboard HTML contains embedded config', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-config',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
+    const body = await res.text()
+    assert.ok(body.includes('__CHROXY_CONFIG__'))
+    assert.ok(body.includes('"tok-dash-config"'), 'should embed the API token')
+    assert.ok(body.match(/port:\s*\d+/), 'should embed a port number')
+  })
+
+  it('response has no-store cache control', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-cache',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
+    assert.equal(res.headers.get('cache-control'), 'no-store')
+  })
+
+  it('GET /dashboard/anything also matches (subpath)', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-sub',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard/settings`)
+    assert.equal(res.status, 200)
+    const body = await res.text()
+    assert.ok(body.includes('Chroxy Dashboard'))
+  })
+})
