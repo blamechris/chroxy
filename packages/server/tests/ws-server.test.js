@@ -6123,11 +6123,12 @@ describe('get_diff handler', () => {
   })
 
   it('shows placeholder for binary untracked files', async () => {
-    // Create a binary file with null bytes (simulates image/compiled artifact)
-    const binaryContent = Buffer.alloc(256)
-    binaryContent.write('PNG')
-    binaryContent[10] = 0x00
-    binaryContent[20] = 0x00
+    // Create a binary file with realistic JPEG header bytes (invalid UTF-8 + null bytes)
+    const binaryContent = Buffer.from([
+      0xFF, 0xD8, 0xFF, 0xE0,                         // JPEG SOI + APP0 marker
+      0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,       // JFIF segment with nulls
+      0x01, 0x02, 0xFF, 0xDB, 0xFF, 0xC0, 0xFF, 0xDA, // typical JPEG markers
+    ])
     writeFileSync(join(tempDir, 'image.png'), binaryContent)
 
     const { ws, messages } = await createDiffTestServer()
