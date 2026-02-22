@@ -230,6 +230,17 @@ export async function startCliServer(config) {
         console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
         console.log('')
         wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
+
+        // Update connection info file with new tunnel URL
+        writeConnectionInfo({
+          wsUrl: newWsUrl,
+          httpUrl: newHttpUrl,
+          apiToken: API_TOKEN,
+          connectionUrl: newConnectionUrl,
+          tunnelMode: modeLabel,
+          startedAt: new Date().toISOString(),
+          pid: process.pid,
+        })
       } else {
         console.log(`[✓] Tunnel URL unchanged: ${newWsUrl}`)
         wsServer.broadcastStatus('Tunnel connection recovered')

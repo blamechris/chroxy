@@ -170,6 +170,17 @@ export class Supervisor extends EventEmitter {
         console.log(`\n   URL:   ${newWsUrl}`)
         console.log(`   Token: ${this._apiToken.slice(0, 8)}...`)
         console.log('')
+
+        // Update connection info file with new tunnel URL
+        writeConnectionInfo({
+          wsUrl: newWsUrl,
+          httpUrl: newHttpUrl,
+          apiToken: this._apiToken,
+          connectionUrl,
+          tunnelMode: modeLabel,
+          startedAt: new Date().toISOString(),
+          pid: process.pid,
+        })
       }
     })
 

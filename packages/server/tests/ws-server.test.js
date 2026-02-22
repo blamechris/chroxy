@@ -7409,9 +7409,11 @@ describe('models_updated broadcasting', () => {
 describe('WsServer GET /connect endpoint', () => {
   let server
   let tmpConfigDir
+  let originalConfigDir
 
   beforeEach(() => {
-    // Create a temp config dir for connection.json isolation
+    // Save original env var and create a temp config dir for isolation
+    originalConfigDir = process.env.CHROXY_CONFIG_DIR
     tmpConfigDir = mkdtempSync(join(tmpdir(), 'chroxy-connect-test-'))
     process.env.CHROXY_CONFIG_DIR = tmpConfigDir
   })
@@ -7422,7 +7424,11 @@ describe('WsServer GET /connect endpoint', () => {
       server = null
     }
     try { rmSync(tmpConfigDir, { recursive: true }) } catch {}
-    delete process.env.CHROXY_CONFIG_DIR
+    if (originalConfigDir !== undefined) {
+      process.env.CHROXY_CONFIG_DIR = originalConfigDir
+    } else {
+      delete process.env.CHROXY_CONFIG_DIR
+    }
   })
 
   it('returns connection info JSON with valid auth', async () => {

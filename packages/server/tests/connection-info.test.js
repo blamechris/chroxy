@@ -4,17 +4,22 @@ import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
-// Use CHROXY_CONFIG_DIR env var to isolate tests from real config
+// Save original env var value and use temp dir to isolate tests from real config
+const originalConfigDir = process.env.CHROXY_CONFIG_DIR
 const testDir = mkdtempSync(join(tmpdir(), 'chroxy-conn-test-'))
 process.env.CHROXY_CONFIG_DIR = testDir
 
 // Import AFTER setting env var so the module picks it up
 const { writeConnectionInfo, readConnectionInfo, removeConnectionInfo, getConnectionInfoPath } = await import('../src/connection-info.js')
 
-// Clean up after all tests
+// Clean up after all tests and restore original env var
 after(() => {
   try { rmSync(testDir, { recursive: true }) } catch {}
-  delete process.env.CHROXY_CONFIG_DIR
+  if (originalConfigDir !== undefined) {
+    process.env.CHROXY_CONFIG_DIR = originalConfigDir
+  } else {
+    delete process.env.CHROXY_CONFIG_DIR
+  }
 })
 
 function cleanup() {
