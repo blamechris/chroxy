@@ -2044,7 +2044,15 @@ export class WsServer {
           for (const filePath of untrackedPaths) {
             try {
               const absPath = resolve(cwdReal, filePath)
-              const fileStat = await stat(absPath)
+              // Resolve symlinks and verify containment within cwd (matches browse_files/read_file pattern)
+              let realAbsPath
+              try {
+                realAbsPath = await realpath(absPath)
+              } catch {
+                continue // Skip unresolvable paths
+              }
+              if (!realAbsPath.startsWith(cwdReal + '/') && realAbsPath !== cwdReal) continue
+              const fileStat = await stat(realAbsPath)
               if (!fileStat.isFile()) continue
 
               let lines, additions
@@ -2052,7 +2060,7 @@ export class WsServer {
                 lines = [{ type: 'context', content: `File too large to preview (${(fileStat.size / 1024).toFixed(1)} KB)` }]
                 additions = 0
               } else {
-                const content = await readFile(absPath, 'utf-8')
+                const content = await readFile(realAbsPath, 'utf-8')
                 const contentLines = content.split('\n')
                 // Drop trailing empty line from split
                 if (contentLines.length > 0 && contentLines[contentLines.length - 1] === '') {

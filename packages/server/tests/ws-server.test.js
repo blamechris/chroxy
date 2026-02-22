@@ -6067,6 +6067,29 @@ describe('get_diff handler', () => {
     ws.close()
   })
 
+  it('shows placeholder for untracked files exceeding 50KB', async () => {
+    // Create a file just over 50KB
+    const bigContent = 'x'.repeat(51 * 1024) + '\n'
+    writeFileSync(join(tempDir, 'big-untracked.txt'), bigContent)
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(result.error, null)
+    const bigFile = result.files.find(f => f.path === 'big-untracked.txt')
+    assert.ok(bigFile, 'Big untracked file should be present')
+    assert.equal(bigFile.status, 'untracked')
+    assert.equal(bigFile.additions, 0, 'Too-large file should have 0 additions')
+    assert.equal(bigFile.hunks.length, 1)
+    assert.equal(bigFile.hunks[0].lines.length, 1)
+    assert.equal(bigFile.hunks[0].lines[0].type, 'context')
+    assert.ok(bigFile.hunks[0].lines[0].content.includes('File too large to preview'), 'Should show size placeholder')
+
+    ws.close()
+  })
+
   it('returns error when no sessionCwd', async () => {
     // Create a mock session without cwd set (cwd is undefined)
     const mockSession = createMockSession()

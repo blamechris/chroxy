@@ -39,6 +39,7 @@ const SyntaxHighlightedCode = React.memo(({ content, language }: { content: stri
     </Text>
   );
 });
+SyntaxHighlightedCode.displayName = 'SyntaxHighlightedCode';
 
 /** Modal for viewing file content with syntax highlighting */
 function FileViewerModal({
