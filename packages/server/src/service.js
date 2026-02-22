@@ -364,3 +364,144 @@ export function uninstallService(options = {}) {
     unlinkSync(statePath)
   }
 }
+
+/**
+ * Start the system service.
+ * @param {object} [options] - Options
+ * @param {string} [options._platform] - Override platform for testing
+ * @param {boolean} [options._skipExec] - Skip actual launchctl/systemctl calls (for testing)
+ * @returns {{ started: boolean, message: string }}
+ */
+export function startService(options = {}) {
+  const plat = options._platform || platform()
+  const paths = getServicePaths(plat)
+
+  if (!options._skipExec) {
+    if (paths.type === 'launchd') {
+      execFileSync('launchctl', ['start', SERVICE_LABEL], { stdio: 'pipe' })
+    } else {
+      execFileSync('systemctl', ['--user', 'start', 'chroxy.service'], { stdio: 'pipe' })
+    }
+  }
+
+  return { started: true, message: 'Service started' }
+}
+
+/**
+ * Stop the system service.
+ * @param {object} [options] - Options
+ * @param {string} [options._platform] - Override platform for testing
+ * @param {boolean} [options._skipExec] - Skip actual launchctl/systemctl calls (for testing)
+ * @returns {{ stopped: boolean, message: string }}
+ */
+export function stopService(options = {}) {
+  const plat = options._platform || platform()
+  const paths = getServicePaths(plat)
+
+  if (!options._skipExec) {
+    if (paths.type === 'launchd') {
+      execFileSync('launchctl', ['stop', SERVICE_LABEL], { stdio: 'pipe' })
+    } else {
+      execFileSync('systemctl', ['--user', 'stop', 'chroxy.service'], { stdio: 'pipe' })
+    }
+  }
+
+  return { stopped: true, message: 'Service stopped' }
+}
+
+/**
+ * Check if the service is currently running by checking PID file.
+ * @param {object} [options]
+ * @param {string} [options.configDir] - Override config dir for testing
+ * @returns {{ installed: boolean, running: boolean, pid: number|null, stale: boolean }}
+ */
+export function getServiceStatus(options = {}) {
+  const configDir = options.configDir || DEFAULT_CONFIG_DIR
+  const state = loadServiceState(configDir)
+
+  if (!state) {
+    return { installed: false, running: false, pid: null, stale: false }
+  }
+
+  const pidFile = join(configDir, 'supervisor.pid')
+  if (!existsSync(pidFile)) {
+    return { installed: true, running: false, pid: null, stale: false }
+  }
+
+  let pid
+  try {
+    pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10)
+  } catch {
+    return { installed: true, running: false, pid: null, stale: false }
+  }
+
+  if (isNaN(pid)) {
+    return { installed: true, running: false, pid: null, stale: false }
+  }
+
+  // Check if process is alive (signal 0 = check existence only)
+  // EPERM means the process exists but we lack permission — still alive
+  // ESRCH means the process does not exist
+  let alive = false
+  try {
+    process.kill(pid, 0)
+    alive = true
+  } catch (err) {
+    alive = err.code === 'EPERM'
+  }
+
+  return {
+    installed: true,
+    running: alive,
+    pid: alive ? pid : null,
+    stale: !alive,
+  }
+}
+
+/**
+ * Get comprehensive service info for the status command.
+ * Includes health endpoint check, connection info, and recent logs.
+ * @param {object} [options]
+ * @param {string} [options.configDir] - Override config dir for testing
+ * @returns {Promise<object>} Full status including health, connection info, etc.
+ */
+export async function getFullServiceStatus(options = {}) {
+  const configDir = options.configDir || DEFAULT_CONFIG_DIR
+  const status = getServiceStatus({ configDir })
+  const result = { ...status }
+
+  // Try to read connection info
+  const connFile = join(configDir, 'connection.json')
+  if (existsSync(connFile)) {
+    try {
+      result.connection = JSON.parse(readFileSync(connFile, 'utf-8'))
+    } catch {
+      // Ignore malformed connection.json
+    }
+  }
+
+  // If running, try health endpoint
+  if (status.running) {
+    try {
+      const port = result.connection?.wsUrl?.match(/:(\d+)/)?.[1] || 8765
+      const response = await fetch(`http://127.0.0.1:${port}/`)
+      result.health = await response.json()
+    } catch {
+      result.health = null
+    }
+  }
+
+  // Read recent log lines
+  const logFile = join(configDir, 'logs', 'chroxy-stdout.log')
+  if (existsSync(logFile)) {
+    try {
+      const content = readFileSync(logFile, 'utf-8')
+      const lines = content.trim().split('\n')
+      result.recentLogs = lines.slice(-5)
+    } catch {
+      // Ignore read errors
+    }
+  }
+
+  return result
+}
