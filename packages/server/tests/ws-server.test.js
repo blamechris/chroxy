@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
+import { createMockSession } from './test-helpers.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
 class WsServer extends _WsServer {
@@ -132,18 +133,7 @@ async function waitForMessage(messages, type, timeout = 1000) {
   return messages.find(m => m.type === type)
 }
 
-/** Create a minimal mock session */
-function createMockSession() {
-  const session = new EventEmitter()
-  session.isReady = true
-  session.model = 'claude-sonnet-4-20250514'
-  session.permissionMode = 'approve'
-  session.sendMessage = () => {}
-  session.interrupt = () => {}
-  session.setModel = () => {}
-  session.setPermissionMode = () => {}
-  return session
-}
+// createMockSession imported from ./test-helpers.js (spy-enabled)
 
 
 describe('WsServer with authRequired: false', () => {
@@ -225,10 +215,6 @@ describe('WsServer with authRequired: false', () => {
 
   it('accepts input messages after auto-authentication', async () => {
     const mockSession = createMockSession()
-    let receivedInput = null
-    mockSession.sendMessage = (text) => {
-      receivedInput = text
-    }
 
     server = new WsServer({
       port: 0,
@@ -247,8 +233,9 @@ describe('WsServer with authRequired: false', () => {
     // Wait for the message to be processed
     await new Promise(r => setTimeout(r, 100))
 
-    // Verify the mock session received the input
-    assert.equal(receivedInput, 'hello world', 'Session should receive input')
+    // Verify the mock session received the input (spy records calls)
+    assert.equal(mockSession.sendMessage.callCount, 1, 'sendMessage should be called once')
+    assert.equal(mockSession.sendMessage.lastCall[0], 'hello world', 'Session should receive input')
 
     ws.close()
   })
@@ -2003,8 +1990,6 @@ describe('user_question_response forwarding (single-session)', () => {
 
   it('forwards user_question_response to cliSession', async () => {
     const mockSession = createMockSession()
-    let receivedAnswer = null
-    mockSession.respondToQuestion = (answer) => { receivedAnswer = answer }
 
     server = new WsServer({
       port: 0,
@@ -2021,15 +2006,15 @@ describe('user_question_response forwarding (single-session)', () => {
     send(ws, { type: 'user_question_response', answer: 'Option A' })
     await new Promise(r => setTimeout(r, 100))
 
-    assert.equal(receivedAnswer, 'Option A', 'Answer should be forwarded to cliSession')
+    // Spy records calls — no manual tracking needed
+    assert.equal(mockSession.respondToQuestion.callCount, 1, 'respondToQuestion should be called once')
+    assert.deepStrictEqual(mockSession.respondToQuestion.lastCall, ['Option A'], 'Answer should be forwarded to cliSession')
 
     ws.close()
   })
 
   it('ignores user_question_response with non-string answer', async () => {
     const mockSession = createMockSession()
-    let called = false
-    mockSession.respondToQuestion = () => { called = true }
 
     server = new WsServer({
       port: 0,
@@ -2046,7 +2031,7 @@ describe('user_question_response forwarding (single-session)', () => {
     send(ws, { type: 'user_question_response', answer: 123 })
     await new Promise(r => setTimeout(r, 100))
 
-    assert.equal(called, false, 'respondToQuestion should NOT be called for non-string answer')
+    assert.equal(mockSession.respondToQuestion.callCount, 0, 'respondToQuestion should NOT be called for non-string answer')
 
     ws.close()
   })
