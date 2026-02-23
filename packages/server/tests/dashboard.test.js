@@ -681,6 +681,37 @@ describe('#733 — toast notifications', () => {
     const sessionErrorBlock = html.match(/case "session_error"[\s\S]*?showToast/)
     assert.ok(sessionErrorBlock, 'session_error handler should call showToast')
   })
+
+  it('toast container has aria-live polite attribute', () => {
+    assert.ok(html.includes('aria-live="polite"'),
+      'toast container should have aria-live="polite" for screen readers')
+  })
+
+  it('toast container has role="status"', () => {
+    assert.ok(html.includes('id="toast-container" role="status"'),
+      'toast container should have role="status"')
+  })
+
+  it('individual toasts have role="alert"', () => {
+    const showToastBlock = html.match(/function showToast[\s\S]*?toastContainer\.appendChild/)
+    assert.ok(showToastBlock, 'showToast function should exist')
+    assert.ok(showToastBlock[0].includes('role", "alert"') || showToastBlock[0].includes("role\", \"alert\""),
+      'individual toasts should have role="alert"')
+  })
+
+  it('toast close button has aria-label', () => {
+    assert.ok(html.includes('aria-label="Close notification"'),
+      'toast close button should have descriptive aria-label')
+  })
+
+  it('caps visible toasts at 5', () => {
+    const showToastBlock = html.match(/function showToast[\s\S]*?toastContainer\.appendChild/)
+    assert.ok(showToastBlock, 'showToast function should exist')
+    assert.ok(showToastBlock[0].includes('children.length >= 5'),
+      'should evict oldest toasts when count reaches 5')
+    assert.ok(showToastBlock[0].includes('removeChild(toastContainer.firstChild)'),
+      'should remove oldest toast (FIFO) when cap is reached')
+  })
 })
 
 describe('#733 — reconnect banner', () => {
