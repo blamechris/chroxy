@@ -1,22 +1,99 @@
+/**
+ * Connection store — Zustand store managing WebSocket connection,
+ * session state, and all server communication.
+ *
+ * This module was split from a single 2850-line file into:
+ * - types.ts       — All shared interfaces and type definitions
+ * - utils.ts       — Pure utility functions (stripAnsi, filterThinking, etc.)
+ * - message-handler.ts — handleMessage() and module-level state
+ * - connection.ts   — Store definition and actions (this file)
+ */
 import { create } from 'zustand';
 import { Alert, AppState, Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as Device from 'expo-device';
-import { registerForPushNotifications } from '../notifications';
-import {
-  createKeyPair,
-  deriveSharedKey,
-  encrypt,
-  decrypt,
-  DIRECTION_SERVER,
-  DIRECTION_CLIENT,
-  type EncryptionState,
-  type KeyPair,
-  type EncryptedEnvelope,
-} from '../utils/crypto';
+import { type EncryptedEnvelope } from '../utils/crypto';
 
-const STORAGE_KEY_URL = 'chroxy_last_url';
-const STORAGE_KEY_TOKEN = 'chroxy_last_token';
+// Re-export all types for backward compatibility
+export type {
+  MessageAttachment,
+  ChatMessage,
+  ContextUsage,
+  ClaudeStatus,
+  ModelInfo,
+  SessionInfo,
+  DiscoveredSession,
+  DirectoryEntry,
+  DirectoryListing,
+  FileEntry,
+  FileListing,
+  FileContent,
+  DiffHunkLine,
+  DiffHunk,
+  DiffFile,
+  DiffResult,
+  AgentInfo,
+  ConnectedClient,
+  SessionHealth,
+  SessionContext,
+  McpServer,
+  SessionState,
+  ServerError,
+  SessionNotification,
+  SlashCommand,
+  CustomAgent,
+  ConnectionPhase,
+  ConnectionContext,
+  ConnectionState,
+} from './types';
+
+// Re-export utility functions for backward compatibility
+export { stripAnsi, filterThinking, nextMessageId, createEmptySessionState } from './utils';
+
+// Re-export loadConnection for backward compatibility (used by notifications.ts)
+export { loadConnection, _testQueueInternals, _testMessageHandler } from './message-handler';
+
+// Import what we need internally
+import type {
+  ChatMessage,
+  ConnectionContext,
+  ConnectionState,
+  MessageAttachment,
+} from './types';
+import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
+import {
+  setStore,
+  wsSend,
+  handleMessage,
+  setConnectionContext,
+  setEncryptionState,
+  setPendingKeyPair,
+  getEncryptionState,
+  getPendingKeyPair,
+  connectionAttemptId,
+  bumpConnectionAttemptId,
+  disconnectedAttemptId,
+  setDisconnectedAttemptId,
+  lastConnectedUrl,
+  setLastConnectedUrl,
+  setPendingSwitchSessionId,
+  resetReplayFlags,
+  clearPermissionSplits,
+  clearTerminalWriteBatching,
+  appendPendingTerminalWrite,
+  stopHeartbeat,
+  clearDeltaBuffers,
+  clearMessageQueue,
+  enqueueMessage,
+  updateSession,
+  updateActiveSession,
+  saveConnection,
+  clearConnection,
+  loadConnection,
+  drainMessageQueue,
+} from './message-handler';
+import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto';
+
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
 /** Delay before auto-reconnecting after an unexpected socket close (ms) */
@@ -24,470 +101,8 @@ const AUTO_RECONNECT_DELAY = 1500;
 /** Delay before reconnecting after a WebSocket error (ms) */
 const ERROR_RECONNECT_DELAY = 2000;
 
-/** E2E encryption state — reset on every new connection */
-let _encryptionState: EncryptionState | null = null;
-/** Pending keypair during key exchange (before shared key is derived) */
-let _pendingKeyPair: KeyPair | null = null;
-
-/**
- * Send a JSON message over WebSocket, encrypting if E2E encryption is active.
- * Use this instead of raw `socket.send(JSON.stringify(...))`.
- */
-function wsSend(socket: WebSocket, payload: Record<string, unknown>): void {
-  if (_encryptionState) {
-    const envelope = encrypt(JSON.stringify(payload), _encryptionState.sharedKey, _encryptionState.sendNonce, DIRECTION_CLIENT);
-    _encryptionState.sendNonce++;
-    socket.send(JSON.stringify(envelope));
-  } else {
-    socket.send(JSON.stringify(payload));
-  }
-}
-
-/** Strip ANSI escape codes for plain text display */
-export function stripAnsi(str: string): string {
-  return str.replace(
-    // eslint-disable-next-line no-control-regex
-    /\x1b\[[0-9;?]*[A-Za-z~]|\x1b\][^\x07]*\x07?|\x1b[()#][A-Z0-2]|\x1b[A-Za-z]|\x9b[0-9;?]*[A-Za-z~]/g,
-    '',
-  );
-}
-
-/** Filter out thinking placeholder messages */
-export function filterThinking(messages: ChatMessage[]): ChatMessage[] {
-  return messages.filter((m) => m.id !== 'thinking');
-}
-
-/** Register push notification token with the server */
-async function registerPushToken(socket: WebSocket): Promise<void> {
-  try {
-    const token = await registerForPushNotifications();
-    if (token && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'register_push_token', token });
-      console.log('[push] Registered push token with server');
-    }
-  } catch (err) {
-    console.log('[push] Push registration skipped:', err);
-  }
-}
-
-/** Attachment metadata stored on a ChatMessage (base64 data cleared after send) */
-export interface MessageAttachment {
-  id: string;
-  type: 'image' | 'document';
-  uri: string;
-  name: string;
-  mediaType: string;
-  size: number;
-}
-
-export interface ChatMessage {
-  id: string;
-  type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error' | 'system';
-  content: string;
-  tool?: string;
-  options?: { label: string; value: string }[];
-  requestId?: string;
-  toolInput?: Record<string, unknown>;
-  toolUseId?: string;
-  toolResult?: string;
-  toolResultTruncated?: boolean;
-  /** Base64 images from tool results (e.g. computer use screenshots) */
-  toolResultImages?: { mediaType: string; data: string }[];
-  answered?: string;
-  expiresAt?: number;
-  timestamp: number;
-  /** Attachments on user_input messages (images, documents) */
-  attachments?: MessageAttachment[];
-  /** MCP server name that provided the tool (only for MCP tools) */
-  serverName?: string;
-}
-
-interface SavedConnection {
-  url: string;
-  token: string;
-}
-
-export interface ContextUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheCreation: number;
-  cacheRead: number;
-}
-
-export interface ClaudeStatus {
-  cost: number;
-  model: string;
-  messageCount: number;
-  contextTokens: string;
-  contextPercent: number;
-  compactPercent: number | null;
-}
-
-interface InputSettings {
-  chatEnterToSend: boolean;
-  terminalEnterToSend: boolean;
-}
-
-export interface ModelInfo {
-  id: string;
-  label: string;
-  fullId: string;
-}
-
-export interface SessionInfo {
-  sessionId: string;
-  name: string;
-  cwd: string;
-  type: 'cli' | 'pty';
-  hasTerminal: boolean;
-  model: string | null;
-  permissionMode: string | null;
-  isBusy: boolean;
-  createdAt: number;
-  conversationId: string | null;
-}
-
-export interface DiscoveredSession {
-  sessionName: string;
-  cwd: string;
-  pid: number;
-}
-
-export interface DirectoryEntry {
-  name: string;
-  isDirectory: boolean;
-}
-
-export interface DirectoryListing {
-  path: string | null;
-  parentPath: string | null;
-  entries: DirectoryEntry[];
-  error: string | null;
-}
-
-export interface FileEntry {
-  name: string;
-  isDirectory: boolean;
-  size: number | null;
-}
-
-export interface FileListing {
-  path: string | null;
-  parentPath: string | null;
-  entries: FileEntry[];
-  error: string | null;
-}
-
-export interface FileContent {
-  path: string | null;
-  content: string | null;
-  language: string | null;
-  size: number | null;
-  truncated: boolean;
-  error: string | null;
-}
-
-export interface DiffHunkLine {
-  type: 'context' | 'addition' | 'deletion';
-  content: string;
-}
-
-export interface DiffHunk {
-  header: string;
-  lines: DiffHunkLine[];
-}
-
-export interface DiffFile {
-  path: string;
-  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked';
-  additions: number;
-  deletions: number;
-  hunks: DiffHunk[];
-}
-
-export interface DiffResult {
-  files: DiffFile[];
-  error: string | null;
-}
-
-export interface AgentInfo {
-  toolUseId: string;
-  description: string;
-  startedAt: number;
-}
-
-export interface ConnectedClient {
-  clientId: string;
-  deviceName: string | null;
-  deviceType: 'phone' | 'tablet' | 'desktop' | 'unknown';
-  platform: string;
-  isSelf: boolean;
-}
-
-export type SessionHealth = 'healthy' | 'crashed';
-
-export interface SessionContext {
-  gitBranch: string | null;
-  gitDirty: number;
-  gitAhead: number;
-  projectName: string | null;
-}
-
-export interface McpServer {
-  name: string;
-  status: string;
-}
-
-export interface SessionState {
-  messages: ChatMessage[];
-  streamingMessageId: string | null;
-  claudeReady: boolean;
-  activeModel: string | null;
-  permissionMode: string | null;
-  contextUsage: ContextUsage | null;
-  lastResultCost: number | null;
-  lastResultDuration: number | null;
-  isIdle: boolean;
-  health: SessionHealth;
-  activeAgents: AgentInfo[];
-  isPlanPending: boolean;
-  planAllowedPrompts: { tool: string; prompt: string }[];
-  primaryClientId: string | null;
-  conversationId: string | null;
-  sessionContext: SessionContext | null;
-  mcpServers: McpServer[];
-}
-
-export interface ServerError {
-  id: string;
-  category: 'tunnel' | 'session' | 'permission' | 'general';
-  message: string;
-  recoverable: boolean;
-  timestamp: number;
-}
-
-export interface SessionNotification {
-  id: string;
-  sessionId: string;
-  sessionName: string;
-  eventType: 'permission' | 'question' | 'completed' | 'error';
-  message: string;
-  timestamp: number;
-}
-
-export interface SlashCommand {
-  name: string;
-  description: string;
-  source: 'project' | 'user';
-}
-
-export interface CustomAgent {
-  name: string;
-  description: string;
-  source: 'project' | 'user';
-}
-
-export type ConnectionPhase =
-  | 'disconnected'        // Not connected, no auto-reconnect
-  | 'connecting'          // Initial connection attempt
-  | 'connected'           // WebSocket open + authenticated
-  | 'reconnecting'        // Auto-reconnecting after unexpected disconnect
-  | 'server_restarting';  // Health check returns { status: 'restarting' }
-
 export const selectShowSession = (s: ConnectionState): boolean =>
   s.connectionPhase !== 'disconnected';
-
-export function createEmptySessionState(): SessionState {
-  return {
-    messages: [],
-    streamingMessageId: null,
-    claudeReady: false,
-    activeModel: null,
-    permissionMode: null,
-    contextUsage: null,
-    lastResultCost: null,
-    lastResultDuration: null,
-    isIdle: true,
-    health: 'healthy',
-    activeAgents: [],
-    isPlanPending: false,
-    planAllowedPrompts: [],
-    primaryClientId: null,
-    conversationId: null,
-    sessionContext: null,
-    mcpServers: [],
-  };
-}
-
-interface ConnectionState {
-  // Connection
-  connectionPhase: ConnectionPhase;
-  wsUrl: string | null;
-  apiToken: string | null;
-  socket: WebSocket | null;
-
-  // Saved connection for quick reconnect
-  savedConnection: SavedConnection | null;
-
-  // Server mode: 'cli' (headless) or 'terminal' (PTY/tmux)
-  serverMode: 'cli' | 'terminal' | null;
-
-  // Server context (from auth_ok)
-  sessionCwd: string | null;
-  serverVersion: string | null;
-  latestVersion: string | null;
-  serverCommit: string | null;
-
-  // Multi-session state
-  sessions: SessionInfo[];
-  activeSessionId: string | null;
-  sessionStates: Record<string, SessionState>;
-
-  // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
-  claudeReady: boolean;
-  streamingMessageId: string | null;
-  activeModel: string | null;
-  permissionMode: string | null;
-  contextUsage: ContextUsage | null;
-  lastResultCost: number | null;
-  lastResultDuration: number | null;
-  isIdle: boolean;
-  messages: ChatMessage[];
-
-  // Available models from server (CLI mode)
-  availableModels: ModelInfo[];
-
-  // Available permission modes from server (CLI mode)
-  availablePermissionModes: { id: string; label: string }[];
-
-  // Discovered host tmux sessions (from discover_sessions)
-  discoveredSessions: DiscoveredSession[] | null;
-
-  // Claude Code status bar metadata (PTY mode)
-  claudeStatus: ClaudeStatus | null;
-
-  // Connected clients (multi-client awareness)
-  myClientId: string | null;
-  connectedClients: ConnectedClient[];
-  primaryClientId: string | null;
-
-  // Connection error feedback
-  connectionError: string | null;
-  connectionRetryCount: number;
-
-  // Server errors forwarded over WebSocket (last 10)
-  serverErrors: ServerError[];
-
-  // Background session notifications (permission, question, completed, error)
-  sessionNotifications: SessionNotification[];
-
-  // Shutdown state (reason + ETA for restarting banner countdown)
-  shutdownReason: 'restart' | 'shutdown' | null;
-  restartEtaMs: number | null;
-  restartingSince: number | null;
-
-  // Pending auto permission mode confirmation from server
-  pendingPermissionConfirm: { mode: string; warning: string } | null;
-
-  // Slash commands from server
-  slashCommands: SlashCommand[];
-
-  // Custom agents from server
-  customAgents: CustomAgent[];
-
-  // Directory listing callback for file browser
-  _directoryListingCallback: ((listing: DirectoryListing) => void) | null;
-
-  // File browser callbacks
-  _fileBrowserCallback: ((listing: FileListing) => void) | null;
-  _fileContentCallback: ((content: FileContent) => void) | null;
-
-  // Diff viewer callback
-  _diffCallback: ((result: DiffResult) => void) | null;
-
-  // View mode
-  viewMode: 'chat' | 'terminal' | 'files';
-
-  // Input settings
-  inputSettings: InputSettings;
-
-  // Raw terminal output buffer (ANSI-stripped, for plain text fallback)
-  terminalBuffer: string;
-
-  // Raw terminal buffer with ANSI codes intact (for xterm.js replay on view switch)
-  terminalRawBuffer: string;
-
-  // Imperative write callback for xterm.js (bypasses React state for performance)
-  _terminalWriteCallback: ((data: string) => void) | null;
-
-  // Actions
-  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => void;
-  disconnect: () => void;
-  loadSavedConnection: () => Promise<void>;
-  clearSavedConnection: () => Promise<void>;
-  setViewMode: (mode: 'chat' | 'terminal' | 'files') => void;
-  addMessage: (message: ChatMessage) => void;
-  addUserMessage: (text: string, attachments?: MessageAttachment[]) => void;
-  appendTerminalData: (data: string) => void;
-  clearTerminalBuffer: () => void;
-  setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
-  updateInputSettings: (settings: Partial<InputSettings>) => void;
-  sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
-  sendInterrupt: () => 'sent' | 'queued' | false;
-  sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
-  sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;
-  markPromptAnswered: (messageId: string, answer: string) => void;
-  markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
-  setModel: (model: string) => void;
-  setPermissionMode: (mode: string) => void;
-  confirmPermissionMode: (mode: string) => void;
-  cancelPermissionConfirm: () => void;
-  resize: (cols: number, rows: number) => void;
-
-  // Directory listing
-  setDirectoryListingCallback: (cb: ((listing: DirectoryListing) => void) | null) => void;
-  requestDirectoryListing: (path?: string) => void;
-
-  // File browser
-  setFileBrowserCallback: (cb: ((listing: FileListing) => void) | null) => void;
-  setFileContentCallback: (cb: ((content: FileContent) => void) | null) => void;
-  requestFileListing: (path?: string) => void;
-  requestFileContent: (path: string) => void;
-
-  // Diff viewer
-  setDiffCallback: (cb: ((result: DiffResult) => void) | null) => void;
-  requestDiff: (base?: string) => void;
-
-  // Session actions
-  switchSession: (sessionId: string) => void;
-  createSession: (name: string, cwd?: string) => void;
-  destroySession: (sessionId: string) => void;
-  renameSession: (sessionId: string, name: string) => void;
-  discoverSessions: () => void;
-  attachSession: (tmuxSession: string, name?: string) => void;
-  forgetSession: () => void;
-
-  // Slash commands
-  fetchSlashCommands: () => void;
-
-  // Custom agents
-  fetchCustomAgents: () => void;
-
-  // Full history sync (session portability)
-  requestFullHistory: (sessionId?: string) => void;
-
-  // Plan mode actions
-  clearPlanState: () => void;
-
-  // Server error actions
-  dismissServerError: (id: string) => void;
-
-  // Session notification actions
-  dismissSessionNotification: (id: string) => void;
-
-  // Convenience accessor
-  getActiveSessionState: () => SessionState;
-}
 
 // Stable device ID persisted across sessions
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
@@ -526,1489 +141,6 @@ function getDeviceInfo(): { deviceName: string | null; deviceType: 'phone' | 'ta
     platform: Platform.OS,
   };
 }
-
-async function saveConnection(url: string, token: string) {
-  try {
-    await SecureStore.setItemAsync(STORAGE_KEY_URL, url);
-    await SecureStore.setItemAsync(STORAGE_KEY_TOKEN, token);
-  } catch {
-    // Storage not available (e.g. Expo Go limitations)
-  }
-}
-
-export async function loadConnection(): Promise<SavedConnection | null> {
-  try {
-    const url = await SecureStore.getItemAsync(STORAGE_KEY_URL);
-    const token = await SecureStore.getItemAsync(STORAGE_KEY_TOKEN);
-    if (url && token) return { url, token };
-  } catch {
-    // Storage not available
-  }
-  return null;
-}
-
-async function clearConnection() {
-  try {
-    await SecureStore.deleteItemAsync(STORAGE_KEY_URL);
-    await SecureStore.deleteItemAsync(STORAGE_KEY_TOKEN);
-  } catch {
-    // Storage not available
-  }
-}
-
-/** Context captured from connect() closure for use by the extracted handleMessage(). */
-interface ConnectionContext {
-  url: string;
-  token: string;
-  isReconnect: boolean;
-  silent: boolean;
-  socket: WebSocket;
-}
-let _connectionContext: ConnectionContext | null = null;
-
-// Monotonically increasing counter to cancel stale retry chains
-let connectionAttemptId = 0;
-// Tracks which attempt was user-disconnected (replaces boolean flag to avoid
-// stale-socket race: disconnect → reconnect → old socket onclose fires)
-let disconnectedAttemptId = -1;
-// Track the last successfully connected URL to detect reconnects reliably
-let lastConnectedUrl: string | null = null;
-
-/**
- * Message ID Convention
- *
- * Message IDs are used to uniquely identify and track messages in the chat history.
- * The default format produced by nextMessageId is: `{prefix}-{counter}-{timestamp}`.
- *
- * Prefixes used with nextMessageId:
- * - 'user'        — User-sent messages
- * - messageType   — Server-forwarded messages where the prefix is the messageType
- *                    (e.g. 'response', 'error', 'prompt', etc.)
- * - 'tool'        — Tool use messages
- * - 'perm'        — Permission request prompts from Claude Code (tool permission dialogs)
- * - 'msg'         — Generic messages (default when no prefix is provided)
- *
- * Special IDs (not produced by nextMessageId):
- * - 'thinking'    — Ephemeral thinking placeholder (singleton, no counter/timestamp; not
- *                    persisted/filtered from transcript export, but rendered in the chat UI)
- *
- * Note on ID assignment:
- * - Most locally-created and non-streaming messages use nextMessageId(prefix).
- * - Messages that already include a server-assigned ID (e.g., streaming events such as
- *   `stream_start`/`stream_delta`, or history replay messages) keep that server-provided
- *   messageId instead of generating a new one.
- *
- * Example ID formats:
- * - 'user-1-1700000000000'
- * - 'response-2-1700000001000'
- * - 'tool-3-1700000002000'
- * - 'perm-4-1700000003000'
- */
-
-// Monotonic message ID counter (avoids Math.random() collisions)
-let messageIdCounter = 0;
-export function nextMessageId(prefix = 'msg'): string {
-  return `${prefix}-${++messageIdCounter}-${Date.now()}`;
-}
-
-// Flag: currently receiving history replay from server — skip adding messages
-// if local state already has them (prevents duplicates on reconnect)
-let _receivingHistoryReplay = false;
-// Flag: replay is from a session switch (cache may be stale) vs reconnect (cache is fresh)
-let _isSessionSwitchReplay = false;
-// Track user-initiated switch_session so we can distinguish it from auth-triggered session_switched
-let _pendingSwitchSessionId: string | null = null;
-
-// Permission boundary message splitting (#554):
-// When a permission_request arrives mid-stream, we split the response so
-// post-permission text becomes a new bubble.
-const _postPermissionSplits = new Set<string>(); // messageIds split at permission boundary
-const _deltaIdRemaps = new Map<string, string>(); // original messageId → new post-permission messageId
-
-// Terminal write batching: coalesce rapid writes into single injectJavaScript calls (~20/sec max)
-let _pendingTerminalWrites = '';
-let _terminalWriteTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** Client-side heartbeat: detect dead connections faster than TCP keepalive */
-let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-let _pongTimeout: ReturnType<typeof setTimeout> | null = null;
-const HEARTBEAT_INTERVAL_MS = 15_000; // Send ping every 15s
-const PONG_TIMEOUT_MS = 5_000;        // Disconnect if no pong within 5s
-
-function _stopHeartbeat() {
-  if (_heartbeatInterval) { clearInterval(_heartbeatInterval); _heartbeatInterval = null; }
-  if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
-}
-
-function _startHeartbeat(socket: WebSocket) {
-  _stopHeartbeat();
-  _heartbeatInterval = setInterval(() => {
-    if (socket.readyState !== WebSocket.OPEN) { _stopHeartbeat(); return; }
-    try {
-      wsSend(socket, { type: 'ping' });
-    } catch { _stopHeartbeat(); return; }
-    _pongTimeout = setTimeout(() => {
-      // No pong received — connection is dead, force close to trigger reconnect
-      console.warn('[ws] Heartbeat pong timeout — closing dead connection');
-      _stopHeartbeat();
-      try { socket.close(); } catch {}
-    }, PONG_TIMEOUT_MS);
-  }, HEARTBEAT_INTERVAL_MS);
-}
-
-function _onPong() {
-  if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
-}
-
-/** Add up to 50% random jitter to a delay to prevent thundering herd on reconnect */
-function _withJitter(delayMs: number): number {
-  return delayMs + Math.floor(Math.random() * delayMs * 0.5);
-}
-
-function _flushTerminalWrites() {
-  _terminalWriteTimer = null;
-  if (_pendingTerminalWrites.length === 0) return;
-  const data = _pendingTerminalWrites;
-  _pendingTerminalWrites = '';
-  const cb = useConnectionStore.getState()._terminalWriteCallback;
-  if (cb) cb(data);
-}
-
-// Delta batching: accumulate stream deltas and flush to state periodically
-// to reduce re-renders (dozens of deltas/sec → one state update per 100ms).
-// Keyed by sessionId so deltas are flushed to the correct session even if
-// the user switches sessions during the 100ms batching window.
-const pendingDeltas = new Map<string, { sessionId: string | null; delta: string }>();
-let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
-
-// Message queue: buffer messages while disconnected, drain on reconnect
-interface QueuedMessage {
-  type: string;
-  payload: unknown;
-  queuedAt: number;
-  maxAge: number;
-}
-
-const QUEUE_TTLS: Record<string, number> = {
-  input: 60_000,
-  interrupt: 5_000,
-  permission_response: 300_000,
-  user_question_response: 60_000,
-};
-const QUEUE_MAX_SIZE = 10;
-const QUEUE_EXCLUDED = new Set(['set_model', 'set_permission_mode', 'mode', 'resize']);
-const messageQueue: QueuedMessage[] = [];
-
-function enqueueMessage(type: string, payload: unknown): 'queued' | false {
-  if (QUEUE_EXCLUDED.has(type)) return false;
-  const maxAge = QUEUE_TTLS[type];
-  if (!maxAge) return false; // Unknown message type — don't queue
-  if (messageQueue.length >= QUEUE_MAX_SIZE) return false;
-  messageQueue.push({ type, payload, queuedAt: Date.now(), maxAge });
-  console.log(`[queue] Queued ${type} (${messageQueue.length}/${QUEUE_MAX_SIZE})`);
-  return 'queued';
-}
-
-/** @internal Exposed for testing only */
-export const _testQueueInternals = {
-  getQueue: () => messageQueue,
-  enqueue: enqueueMessage,
-  drain: drainMessageQueue,
-  clear: () => { messageQueue.length = 0; },
-};
-
-function drainMessageQueue(socket: WebSocket) {
-  if (messageQueue.length === 0) return;
-  const now = Date.now();
-  const valid = messageQueue.filter((m) => now - m.queuedAt < m.maxAge);
-  messageQueue.length = 0;
-  if (valid.length === 0) return;
-  console.log(`[queue] Draining ${valid.length} queued message(s)`);
-  for (const m of valid) {
-    try {
-      wsSend(socket, m.payload as Record<string, unknown>);
-    } catch (err) {
-      console.warn(`[queue] Failed to send queued ${m.type}:`, err);
-    }
-  }
-}
-
-function flushPendingDeltas() {
-  deltaFlushTimer = null;
-  if (pendingDeltas.size === 0) return;
-  const updates = new Map(pendingDeltas);
-  pendingDeltas.clear();
-
-  const state = useConnectionStore.getState();
-
-  // Group deltas by session
-  const bySession = new Map<string | null, Map<string, string>>();
-  for (const [msgId, { sessionId, delta }] of updates) {
-    if (!bySession.has(sessionId)) bySession.set(sessionId, new Map());
-    bySession.get(sessionId)!.set(msgId, delta);
-  }
-
-  let newSessionStates = { ...state.sessionStates };
-  let flatUpdated = false;
-
-  for (const [sessionId, deltas] of bySession) {
-    if (sessionId && newSessionStates[sessionId]) {
-      const sessionState = newSessionStates[sessionId];
-      const updatedMessages = sessionState.messages.map((m) => {
-        const d = deltas.get(m.id);
-        return d ? { ...m, content: m.content + d } : m;
-      });
-      newSessionStates = {
-        ...newSessionStates,
-        [sessionId]: { ...sessionState, messages: updatedMessages },
-      };
-      // Sync flat messages if this is the active session
-      if (sessionId === state.activeSessionId) {
-        useConnectionStore.setState({ sessionStates: newSessionStates, messages: updatedMessages });
-        flatUpdated = true;
-      }
-    } else {
-      // Legacy flat mode or no session
-      useConnectionStore.setState((s) => ({
-        messages: s.messages.map((m) => {
-          const d = deltas.get(m.id);
-          return d ? { ...m, content: m.content + d } : m;
-        }),
-      }));
-      flatUpdated = true;
-    }
-  }
-
-  if (!flatUpdated) {
-    useConnectionStore.setState({ sessionStates: newSessionStates });
-  }
-}
-
-/**
- * Update any session's state by ID. Syncs to flat state only when the target
- * session is the currently active session (so UI reads remain correct).
- */
-function updateSession(sessionId: string, updater: (session: SessionState) => Partial<SessionState>) {
-  const state = useConnectionStore.getState();
-  if (!state.sessionStates[sessionId]) return;
-
-  const current = state.sessionStates[sessionId];
-  const patch = updater(current);
-  if (Object.keys(patch).length === 0) return;
-  const updated = { ...current, ...patch };
-  const newSessionStates = { ...state.sessionStates, [sessionId]: updated };
-
-  // Sync relevant fields to flat state only for the active session
-  if (sessionId === state.activeSessionId) {
-    const flatPatch: Record<string, unknown> = { sessionStates: newSessionStates };
-    if ('messages' in patch) flatPatch.messages = patch.messages;
-    if ('streamingMessageId' in patch) flatPatch.streamingMessageId = patch.streamingMessageId;
-    if ('claudeReady' in patch) flatPatch.claudeReady = patch.claudeReady;
-    if ('activeModel' in patch) flatPatch.activeModel = patch.activeModel;
-    if ('permissionMode' in patch) flatPatch.permissionMode = patch.permissionMode;
-    if ('contextUsage' in patch) flatPatch.contextUsage = patch.contextUsage;
-    if ('lastResultCost' in patch) flatPatch.lastResultCost = patch.lastResultCost;
-    if ('lastResultDuration' in patch) flatPatch.lastResultDuration = patch.lastResultDuration;
-    if ('isIdle' in patch) flatPatch.isIdle = patch.isIdle;
-    useConnectionStore.setState(flatPatch);
-  } else {
-    useConnectionStore.setState({ sessionStates: newSessionStates });
-  }
-}
-
-/** Helper to update the active session's state and sync to flat state */
-function updateActiveSession(updater: (session: SessionState) => Partial<SessionState>) {
-  const state = useConnectionStore.getState();
-  const activeId = state.activeSessionId;
-  if (activeId) updateSession(activeId, updater);
-}
-
-/**
- * Push a notification for a background session event.
- * Deduplicates by (sessionId, eventType) — replaces existing rather than stacking.
- */
-function pushSessionNotification(
-  sessionId: string,
-  eventType: SessionNotification['eventType'],
-  message: string,
-) {
-  const state = useConnectionStore.getState();
-  // Only notify for background sessions
-  if (sessionId === state.activeSessionId) return;
-  // Look up session name from sessions list
-  const sessionInfo = state.sessions.find((s) => s.sessionId === sessionId);
-  const sessionName = sessionInfo?.name || sessionId;
-  const notification: SessionNotification = {
-    id: `${sessionId}-${eventType}-${Date.now()}`,
-    sessionId,
-    sessionName,
-    eventType,
-    message,
-    timestamp: Date.now(),
-  };
-  // Dedup: replace existing notification for same (sessionId, eventType)
-  // Use functional setState to avoid stale-state races when multiple
-  // notifications arrive close together.
-  useConnectionStore.setState((s) => {
-    const filtered = s.sessionNotifications.filter(
-      (n) => !(n.sessionId === sessionId && n.eventType === eventType),
-    );
-    return { sessionNotifications: [...filtered, notification] };
-  });
-}
-
-/**
- * Handles a parsed WebSocket message. Extracted from the socket.onmessage
- * closure so it can be tested directly with raw JSON payloads.
- *
- * Reads/writes store via useConnectionStore.getState()/setState() and
- * module-level helpers (updateSession, updateActiveSession, nextMessageId, etc).
- * The few variables that were closured in connect() are accessed via _connectionContext.
- */
-function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
-  const ctx = ctxOverride ?? _connectionContext;
-  if (!ctx) return;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
-  const msg = raw as Record<string, unknown>;
-  if (typeof msg.type !== 'string') return;
-
-  const get = () => useConnectionStore.getState();
-  const set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void =
-    (s) => useConnectionStore.setState(s as ConnectionState);
-
-  switch (msg.type) {
-    case 'pong':
-      _onPong();
-      return;
-
-    case 'auth_ok': {
-      // Reset replay flags — fresh auth means clean slate
-      _receivingHistoryReplay = false;
-      _isSessionSwitchReplay = false;
-      _pendingSwitchSessionId = null;
-      // Track this URL as successfully connected
-      lastConnectedUrl = ctx.url;
-      // Extract server context from auth_ok
-      const authServerMode: 'cli' | 'terminal' | null =
-        msg.serverMode === 'cli' || msg.serverMode === 'terminal' ? msg.serverMode : null;
-      const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
-      const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
-      const authLatestVersion = typeof msg.latestVersion === 'string' ? msg.latestVersion : null;
-      const authServerCommit = typeof msg.serverCommit === 'string' ? msg.serverCommit : null;
-      // Parse connected clients list with self-detection via clientId
-      const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
-      const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
-      const clients: ConnectedClient[] = rawClients
-        .filter((c: unknown): c is { clientId: string } => !!c && typeof c === 'object' && typeof (c as Record<string, unknown>).clientId === 'string')
-        .map((c: { clientId: string; deviceName?: string; deviceType?: string; platform?: string }) => ({
-          clientId: c.clientId,
-          deviceName: typeof c.deviceName === 'string' ? c.deviceName : null,
-          deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(c.deviceType ?? '') ? c.deviceType : 'unknown') as ConnectedClient['deviceType'],
-          platform: typeof c.platform === 'string' ? c.platform : 'unknown',
-          isSelf: c.clientId === myClientId,
-        }));
-
-      // On reconnect, preserve messages and terminal buffer
-      const connectedState = {
-        connectionPhase: 'connected' as const,
-        wsUrl: ctx.url,
-        apiToken: ctx.token,
-        socket: ctx.socket,
-        claudeReady: false,
-        serverMode: authServerMode,
-        sessionCwd: authSessionCwd,
-        serverVersion: authServerVersion,
-        latestVersion: authLatestVersion,
-        serverCommit: authServerCommit,
-        streamingMessageId: null,
-        myClientId: myClientId,
-        connectedClients: clients,
-        connectionError: null as string | null,
-        connectionRetryCount: 0,
-        // Clear shutdown state on successful connect
-        shutdownReason: null,
-        restartEtaMs: null,
-        restartingSince: null,
-      };
-      if (ctx.isReconnect) {
-        set(connectedState);
-      } else {
-        set({
-          ...connectedState,
-          messages: [],
-          terminalBuffer: '',
-          terminalRawBuffer: '',
-          sessions: [],
-          activeSessionId: null,
-          sessionStates: {},
-          customAgents: [],
-        });
-      }
-      // Start client-side heartbeat for dead connection detection
-      _startHeartbeat(ctx.socket);
-
-      // Initiate key exchange if server requires encryption
-      if (msg.encryption === 'required') {
-        _pendingKeyPair = createKeyPair();
-        // Send key_exchange plaintext (before encryption is active)
-        ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _pendingKeyPair.publicKey }));
-        // Post-auth messages will be sent after key_exchange_ok arrives
-      } else {
-        // No encryption — send post-auth messages immediately
-        wsSend(ctx.socket, { type: 'mode', mode: get().viewMode });
-        wsSend(ctx.socket, { type: 'list_slash_commands' });
-        wsSend(ctx.socket, { type: 'list_agents' });
-      }
-      // Save for quick reconnect
-      saveConnection(ctx.url, ctx.token);
-      set({ savedConnection: { url: ctx.url, token: ctx.token } });
-      // Register push token (async, non-blocking)
-      void registerPushToken(ctx.socket);
-      break;
-    }
-
-    case 'key_exchange_ok': {
-      if (_pendingKeyPair) {
-        if (!msg.publicKey || typeof msg.publicKey !== 'string') {
-          console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
-          ctx.socket.close();
-          set({ connectionPhase: 'disconnected', socket: null });
-          _pendingKeyPair = null;
-          break;
-        }
-        const sharedKey = deriveSharedKey(msg.publicKey, _pendingKeyPair.secretKey);
-        _encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 };
-        _pendingKeyPair = null;
-        console.log('[crypto] E2E encryption established');
-        // Now send the post-auth messages that were deferred
-        wsSend(ctx.socket, { type: 'mode', mode: get().viewMode });
-        wsSend(ctx.socket, { type: 'list_slash_commands' });
-        wsSend(ctx.socket, { type: 'list_agents' });
-      }
-      break;
-    }
-
-    case 'auth_fail':
-      ctx.socket.close();
-      set({ connectionPhase: 'disconnected', socket: null });
-      if (!ctx.silent) {
-        Alert.alert('Auth Failed', (msg.reason as string) || 'Invalid token');
-      }
-      break;
-
-    case 'server_mode':
-      set({ serverMode: msg.mode as 'cli' | 'terminal' });
-      // Force chat view in CLI mode (no terminal available)
-      if (msg.mode === 'cli' && get().viewMode === 'terminal') {
-        set({ viewMode: 'chat' });
-      }
-      break;
-
-    // --- Multi-session messages ---
-
-    case 'session_list':
-      if (Array.isArray(msg.sessions)) {
-        const sessionList = msg.sessions as SessionInfo[];
-        set({ sessions: sessionList });
-        // Sync conversationId from session list into session states
-        for (const s of sessionList) {
-          if (s.conversationId && get().sessionStates[s.sessionId]) {
-            updateSession(s.sessionId, (ss) =>
-              ss.conversationId !== s.conversationId ? { conversationId: s.conversationId } : {}
-            );
-          }
-        }
-      }
-      break;
-
-    case 'session_context': {
-      const ctxSessionId = (msg.sessionId as string) || get().activeSessionId;
-      if (ctxSessionId && get().sessionStates[ctxSessionId]) {
-        updateSession(ctxSessionId, () => ({
-          sessionContext: {
-            gitBranch: typeof msg.gitBranch === 'string' ? msg.gitBranch : null,
-            gitDirty: typeof msg.gitDirty === 'number' ? msg.gitDirty : 0,
-            gitAhead: typeof msg.gitAhead === 'number' ? msg.gitAhead : 0,
-            projectName: typeof msg.projectName === 'string' ? msg.projectName : null,
-          },
-        }));
-      }
-      break;
-    }
-
-    case 'session_switched': {
-      const sessionId = msg.sessionId as string;
-      // Only treat as session-switch replay if the user explicitly initiated it
-      // (auth-triggered session_switched on reconnect should use reconnect dedup)
-      if (_pendingSwitchSessionId && _pendingSwitchSessionId === sessionId) {
-        _isSessionSwitchReplay = true;
-      }
-      _pendingSwitchSessionId = null;
-      const switchConvId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
-      set((state: ConnectionState) => {
-        // Initialize session state if it doesn't exist
-        const sessionStates = { ...state.sessionStates };
-        if (!sessionStates[sessionId]) {
-          sessionStates[sessionId] = createEmptySessionState();
-        }
-        // Update conversationId if provided
-        if (switchConvId) {
-          sessionStates[sessionId] = { ...sessionStates[sessionId], conversationId: switchConvId };
-        }
-        const ss = sessionStates[sessionId];
-        return {
-          activeSessionId: sessionId,
-          sessionStates,
-          // Sync flat state from the switched-to session
-          messages: ss.messages,
-          streamingMessageId: ss.streamingMessageId,
-          claudeReady: ss.claudeReady,
-          activeModel: ss.activeModel,
-          permissionMode: ss.permissionMode,
-          contextUsage: ss.contextUsage,
-          lastResultCost: ss.lastResultCost,
-          lastResultDuration: ss.lastResultDuration,
-          isIdle: ss.isIdle,
-        };
-      });
-      // Refresh slash commands (project commands may differ per session cwd)
-      get().fetchSlashCommands();
-      // Refresh agents (project agents may differ per session cwd)
-      get().fetchCustomAgents();
-      break;
-    }
-
-    case 'conversation_id': {
-      const convSessionId = msg.sessionId as string;
-      const conversationId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
-      if (convSessionId && get().sessionStates[convSessionId]) {
-        updateSession(convSessionId, () => ({ conversationId }));
-      }
-      break;
-    }
-
-    case 'session_error': {
-      const errorSessionId = (msg.sessionId as string) || get().activeSessionId;
-      if (msg.category === 'crash' && errorSessionId && get().sessionStates[errorSessionId]) {
-        updateSession(errorSessionId, () => ({ health: 'crashed' as const }));
-        pushSessionNotification(errorSessionId, 'error', 'Session crashed');
-      }
-      if (msg.category !== 'crash') {
-        Alert.alert('Session Error', (msg.message as string) || 'Unknown error');
-      }
-      break;
-    }
-
-    case 'discovered_sessions':
-      if (Array.isArray(msg.tmux)) {
-        set({ discoveredSessions: msg.tmux as DiscoveredSession[] });
-        if ((msg.tmux as DiscoveredSession[]).length > 0) {
-          const names = (msg.tmux as DiscoveredSession[]).map((s: DiscoveredSession) => s.sessionName).join(', ');
-          const discoveryMsg: ChatMessage = {
-            id: nextMessageId('discovery'),
-            type: 'system',
-            content: (msg.tmux as DiscoveredSession[]).length === 1
-              ? `New Claude session found: ${names}. Open session picker to attach.`
-              : `${(msg.tmux as DiscoveredSession[]).length} new Claude sessions found: ${names}. Open session picker to attach.`,
-            timestamp: Date.now(),
-          };
-          const activeId = get().activeSessionId;
-          if (activeId && get().sessionStates[activeId]) {
-            updateActiveSession((ss) => ({
-              messages: [...ss.messages, discoveryMsg],
-            }));
-          } else {
-            get().addMessage(discoveryMsg);
-          }
-        }
-      }
-      break;
-
-    // --- History replay ---
-
-    case 'history_replay_start':
-      _receivingHistoryReplay = true;
-      // Full history replay (from request_full_history): clear messages before replay
-      if (msg.fullHistory === true) {
-        _isSessionSwitchReplay = true; // Use session-switch dedup path (replace, don't skip)
-        const targetId = (msg.sessionId as string) || get().activeSessionId;
-        if (targetId && get().sessionStates[targetId]) {
-          updateSession(targetId, () => ({ messages: [] }));
-        }
-      }
-      // Clear transient state — these events are not replayed from history,
-      // so any surviving entries are stale from pre-disconnect
-      updateActiveSession((ss) => {
-        const patch: Partial<SessionState> = {};
-        if (ss.activeAgents.length > 0) patch.activeAgents = [];
-        if (ss.isPlanPending) {
-          patch.isPlanPending = false;
-          patch.planAllowedPrompts = [];
-        }
-        return Object.keys(patch).length > 0 ? patch : {};
-      });
-      break;
-
-    case 'history_replay_end':
-      _receivingHistoryReplay = false;
-      _isSessionSwitchReplay = false;
-      // Mark all replayed prompts as answered — any prompt in history
-      // has already been resolved by the server.
-      // Note: replay is always for the active session (connect or switch).
-      updateActiveSession((ss) => {
-        const hasUnansweredPrompts = ss.messages.some(
-          (m) => m.type === 'prompt' && !m.answered
-        );
-        if (!hasUnansweredPrompts) return {};
-        return {
-          messages: ss.messages.map((m) =>
-            m.type === 'prompt' && !m.answered
-              ? { ...m, answered: '(resolved)' }
-              : m
-          ),
-        };
-      });
-      break;
-
-    // --- Existing message handlers (now session-aware) ---
-
-    case 'message': {
-      const msgType = (msg.messageType || msg.type) as string;
-      // Skip server-echoed user_input — we already show it instantly client-side
-      // But allow user_input during full history sync (messages came from terminal)
-      if (msgType === 'user_input' && !(_receivingHistoryReplay && _isSessionSwitchReplay)) break;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      // During reconnect replay, skip if app already has messages (cache is fresh)
-      if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
-      // During session-switch replay, skip if an equivalent message is already in cache (dedup)
-      if (_receivingHistoryReplay && _isSessionSwitchReplay) {
-        const targetState = targetId ? get().sessionStates[targetId] : null;
-        const cached = targetState ? targetState.messages : get().messages;
-        const isDuplicate = cached.some((m) => {
-          if (m.type !== msgType || m.content !== msg.content) return false;
-          if (m.timestamp !== msg.timestamp) return false;
-          if ((m.tool ?? null) !== (msg.tool ?? null)) return false;
-          return JSON.stringify(m.options ?? null) === JSON.stringify(msg.options ?? null);
-        });
-        if (isDuplicate) break;
-      }
-      const newMsg: ChatMessage = {
-        id: nextMessageId(msgType),
-        type: msgType as ChatMessage['type'],
-        content: msg.content as string,
-        tool: msg.tool as string | undefined,
-        options: msg.options as ChatMessage['options'],
-        timestamp: msg.timestamp as number,
-      };
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, (ss) => ({
-          messages: [
-            ...ss.messages.filter((m) => m.id !== 'thinking' || newMsg.id === 'thinking'),
-            newMsg,
-          ],
-        }));
-      } else {
-        get().addMessage(newMsg);
-      }
-      break;
-    }
-
-    case 'stream_start': {
-      const streamId = msg.messageId as string;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, (ss) => {
-          if (ss.messages.some((m) => m.id === streamId)) {
-            return { streamingMessageId: streamId };
-          }
-          return {
-            streamingMessageId: streamId,
-            messages: [
-              ...filterThinking(ss.messages),
-              { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
-            ],
-          };
-        });
-      } else {
-        set((state: ConnectionState) => {
-          if (state.messages.some((m) => m.id === streamId)) {
-            return { streamingMessageId: streamId };
-          }
-          return {
-            streamingMessageId: streamId,
-            messages: [
-              ...filterThinking(state.messages),
-              { id: streamId, type: 'response' as const, content: '', timestamp: Date.now() },
-            ],
-          };
-        });
-      }
-      break;
-    }
-
-    case 'stream_delta': {
-      // Batch deltas — accumulate and flush to state periodically.
-      // Use server-provided sessionId so deltas route to the correct session
-      // even for background (non-active) sessions.
-      let deltaId = msg.messageId as string;
-      const capturedSessionId = (msg.sessionId as string) || get().activeSessionId;
-
-      // Permission boundary split: first delta after a split creates a new message
-      if (_postPermissionSplits.has(deltaId)) {
-        _postPermissionSplits.delete(deltaId);
-        const newId = `${deltaId}-post-${Date.now()}`;
-        _deltaIdRemaps.set(deltaId, newId);
-        // Create the new response message and set it as streaming target
-        const newMsg: ChatMessage = {
-          id: newId,
-          type: 'response',
-          content: '',
-          timestamp: Date.now(),
-        };
-        const targetId = capturedSessionId;
-        if (targetId && get().sessionStates[targetId]) {
-          updateSession(targetId, (ss) => ({
-            streamingMessageId: newId,
-            messages: [...ss.messages, newMsg],
-          }));
-        } else {
-          set((state: ConnectionState) => ({
-            streamingMessageId: newId,
-            messages: [...state.messages, newMsg],
-          }));
-        }
-        deltaId = newId;
-      } else if (_deltaIdRemaps.has(deltaId)) {
-        // Subsequent deltas for a remapped message route to the new ID
-        deltaId = _deltaIdRemaps.get(deltaId)!;
-      }
-
-      const existingDelta = pendingDeltas.get(deltaId);
-      pendingDeltas.set(deltaId, {
-        sessionId: capturedSessionId,
-        delta: (existingDelta?.delta || '') + (msg.delta as string),
-      });
-      if (!deltaFlushTimer) {
-        deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
-      }
-      break;
-    }
-
-    case 'stream_end':
-      // Flush any buffered deltas immediately before clearing streaming state
-      if (deltaFlushTimer) {
-        clearTimeout(deltaFlushTimer);
-      }
-      flushPendingDeltas();
-      // Clean up permission boundary split tracking
-      _postPermissionSplits.delete(msg.messageId as string);
-      _deltaIdRemaps.delete(msg.messageId as string);
-      {
-        const targetId = (msg.sessionId as string) || get().activeSessionId;
-        if (targetId && get().sessionStates[targetId]) {
-          updateSession(targetId, () => ({ streamingMessageId: null }));
-        } else {
-          set({ streamingMessageId: null });
-        }
-      }
-      break;
-
-    case 'tool_start': {
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      // During reconnect replay, skip if app already has messages (cache is fresh)
-      if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
-      // Use server messageId as stable identifier for dedup (same ID on live + replay)
-      const toolId = (msg.messageId as string) || nextMessageId('tool');
-      // During session-switch replay, skip if tool already in cache (dedup by stable ID)
-      if (_receivingHistoryReplay && _isSessionSwitchReplay) {
-        const targetState = targetId ? get().sessionStates[targetId] : null;
-        const cached = targetState ? targetState.messages : get().messages;
-        if (cached.some((m) => m.id === toolId)) break;
-      }
-      const toolMsg: ChatMessage = {
-        id: toolId,
-        type: 'tool_use',
-        content: msg.input ? JSON.stringify(msg.input) : (msg.tool as string) || '',
-        tool: msg.tool as string | undefined,
-        toolUseId: msg.toolUseId as string | undefined,
-        timestamp: Date.now(),
-        serverName: msg.serverName as string | undefined,
-      };
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, (ss) => ({
-          messages: [...ss.messages, toolMsg],
-        }));
-      } else {
-        get().addMessage(toolMsg);
-      }
-      break;
-    }
-
-    case 'tool_result': {
-      const toolUseId = msg.toolUseId as string;
-      if (!toolUseId) break;
-      const resultText = (msg.result as string) || '';
-      const truncated = !!(msg.truncated as boolean);
-      const images = Array.isArray(msg.images) ? msg.images as { mediaType: string; data: string }[] : undefined;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      // Find the matching tool_use message and attach the result
-      const patch: Partial<ChatMessage> = { toolResult: resultText, toolResultTruncated: truncated };
-      if (images?.length) patch.toolResultImages = images;
-      const patchResult = (ss: SessionState) => {
-        const idx = ss.messages.findIndex(
-          (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
-        );
-        if (idx === -1) return {};
-        const updated = [...ss.messages];
-        updated[idx] = { ...updated[idx], ...patch };
-        return { messages: updated };
-      };
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, patchResult);
-      } else {
-        const idx = get().messages.findIndex(
-          (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
-        );
-        if (idx !== -1) {
-          const updated = [...get().messages];
-          updated[idx] = { ...updated[idx], ...patch };
-          set({ messages: updated });
-        }
-      }
-      break;
-    }
-
-    case 'result': {
-      // Flush any buffered deltas before clearing streaming state (safety net
-      // for when stream_end was missed — mirrors the stream_end flush logic)
-      if (deltaFlushTimer) {
-        clearTimeout(deltaFlushTimer);
-      }
-      flushPendingDeltas();
-      // Clean up permission boundary split tracking (safety net for missed
-      // stream_end — prevents unbounded growth of remap state)
-      _postPermissionSplits.clear();
-      _deltaIdRemaps.clear();
-      const usage = msg.usage as Record<string, number> | undefined;
-      const resultPatch = {
-        streamingMessageId: null as string | null,
-        contextUsage: usage
-          ? {
-              inputTokens: usage.input_tokens || 0,
-              outputTokens: usage.output_tokens || 0,
-              cacheCreation: usage.cache_creation_input_tokens || 0,
-              cacheRead: usage.cache_read_input_tokens || 0,
-            }
-          : null,
-        lastResultCost: typeof msg.cost === 'number' ? msg.cost : null,
-        lastResultDuration: typeof msg.duration === 'number' ? msg.duration : null,
-      };
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      // Notify if a background session just finished (was streaming)
-      if (targetId && get().sessionStates[targetId]?.streamingMessageId) {
-        pushSessionNotification(targetId, 'completed', 'Task completed');
-      }
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, () => resultPatch);
-      } else {
-        set(resultPatch);
-      }
-      break;
-    }
-
-    case 'model_changed': {
-      const model = (typeof msg.model === 'string' && (msg.model as string).trim()) ? (msg.model as string).trim() : null;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, () => ({ activeModel: model }));
-      } else {
-        set({ activeModel: model });
-      }
-      break;
-    }
-
-    case 'available_models':
-      if (Array.isArray(msg.models)) {
-        const cleaned = (msg.models as unknown[])
-          .map((m: unknown): ModelInfo | null => {
-            // Accept structured {id, label, fullId} objects
-            if (typeof m === 'object' && m !== null) {
-              const { id, label, fullId } = m as ModelInfo;
-              if (
-                typeof id === 'string' && id.trim() !== '' &&
-                typeof label === 'string' && label.trim() !== '' &&
-                typeof fullId === 'string' && fullId.trim() !== ''
-              ) {
-                return { id, label, fullId };
-              }
-            }
-            // Accept legacy string format for backward compatibility
-            if (typeof m === 'string' && m.trim().length > 0) {
-              const s = m.trim();
-              return { id: s, label: s.charAt(0).toUpperCase() + s.slice(1), fullId: s };
-            }
-            return null;
-          })
-          .filter((m: ModelInfo | null): m is ModelInfo => m !== null);
-        set({ availableModels: cleaned });
-      }
-      break;
-
-    case 'permission_mode_changed': {
-      const mode = (typeof msg.mode === 'string' && (msg.mode as string).trim()) ? (msg.mode as string).trim() : null;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, () => ({ permissionMode: mode }));
-      } else {
-        set({ permissionMode: mode });
-      }
-      // Clear pending confirm if mode change arrived (confirmation was accepted)
-      set({ pendingPermissionConfirm: null });
-      break;
-    }
-
-    case 'confirm_permission_mode': {
-      const confirmMode = typeof msg.mode === 'string' ? msg.mode : null;
-      const warning = typeof msg.warning === 'string' ? msg.warning : 'Are you sure?';
-      if (confirmMode) {
-        set({ pendingPermissionConfirm: { mode: confirmMode, warning } });
-      }
-      break;
-    }
-
-    case 'available_permission_modes':
-      if (Array.isArray(msg.modes)) {
-        const cleaned = (msg.modes as unknown[])
-          .filter((m): m is { id: string; label: string } =>
-            typeof m === 'object' && m !== null &&
-            typeof (m as { id: unknown }).id === 'string' &&
-            typeof (m as { label: unknown }).label === 'string'
-          );
-        set({ availablePermissionModes: cleaned });
-      }
-      break;
-
-    case 'status_update': {
-      // Server filters status_update to active session only, but defend
-      // against misrouted messages on the client side too.
-      const statusSid = (msg.sessionId as string) || get().activeSessionId;
-      if (statusSid && statusSid !== get().activeSessionId) break;
-      set({
-        claudeStatus: {
-          cost: msg.cost as number,
-          model: msg.model as string,
-          messageCount: msg.messageCount as number,
-          contextTokens: msg.contextTokens as string,
-          contextPercent: msg.contextPercent as number,
-          compactPercent: (msg.compactPercent as number) ?? null,
-        },
-      });
-      break;
-    }
-
-    case 'raw':
-      get().appendTerminalData(msg.data as string);
-      break;
-
-    case 'claude_ready': {
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, () => ({ claudeReady: true }));
-      } else {
-        set({ claudeReady: true });
-      }
-      // Drain queued messages on reconnect
-      const readySocket = get().socket;
-      if (readySocket && readySocket.readyState === WebSocket.OPEN) {
-        drainMessageQueue(readySocket);
-      }
-      break;
-    }
-
-    case 'agent_idle': {
-      const idleTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (idleTargetId && get().sessionStates[idleTargetId]) {
-        updateSession(idleTargetId, () => ({ isIdle: true }));
-      }
-      break;
-    }
-
-    case 'agent_busy': {
-      const busyTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (busyTargetId && get().sessionStates[busyTargetId]) {
-        updateSession(busyTargetId, () => ({ isIdle: false }));
-      }
-      break;
-    }
-
-    case 'agent_spawned': {
-      const spawnTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (spawnTargetId && get().sessionStates[spawnTargetId]) {
-        updateSession(spawnTargetId, (ss) => {
-          // Dedup: skip if agent with same toolUseId already tracked
-          if (ss.activeAgents.some((a) => a.toolUseId === msg.toolUseId)) return {};
-          return {
-            activeAgents: [...ss.activeAgents, {
-              toolUseId: msg.toolUseId as string,
-              description: (msg.description as string) || 'Background task',
-              startedAt: (msg.startedAt as number) || Date.now(),
-            }],
-          };
-        });
-      }
-      break;
-    }
-
-    case 'agent_completed': {
-      const completeTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (completeTargetId && get().sessionStates[completeTargetId]) {
-        updateSession(completeTargetId, (ss) => {
-          const filtered = ss.activeAgents.filter(
-            (a) => a.toolUseId !== msg.toolUseId
-          );
-          // Skip no-op update if agent wasn't tracked (e.g. duplicate event)
-          if (filtered.length === ss.activeAgents.length) return {};
-          return { activeAgents: filtered };
-        });
-      }
-      break;
-    }
-
-    case 'mcp_servers': {
-      const mcpTargetId = (msg.sessionId as string) || get().activeSessionId;
-      const rawServers = Array.isArray(msg.servers) ? msg.servers : [];
-      const servers: McpServer[] = rawServers.filter(
-        (s): s is McpServer => s && typeof s === 'object' && typeof s.name === 'string' && typeof s.status === 'string'
-      );
-      if (mcpTargetId && get().sessionStates[mcpTargetId]) {
-        updateSession(mcpTargetId, () => ({ mcpServers: servers }));
-      }
-      break;
-    }
-
-    case 'plan_started': {
-      const planStartTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (planStartTargetId && get().sessionStates[planStartTargetId]) {
-        updateSession(planStartTargetId, () => ({
-          isPlanPending: false,
-          planAllowedPrompts: [],
-        }));
-      }
-      break;
-    }
-
-    case 'plan_ready': {
-      const planReadyTargetId = (msg.sessionId as string) || get().activeSessionId;
-      const prompts = Array.isArray(msg.allowedPrompts) ? msg.allowedPrompts as { tool: string; prompt: string }[] : [];
-      if (planReadyTargetId && get().sessionStates[planReadyTargetId]) {
-        updateSession(planReadyTargetId, () => ({
-          isPlanPending: true,
-          planAllowedPrompts: prompts,
-        }));
-      }
-      break;
-    }
-
-    case 'raw_background':
-      // Buffer raw data even in chat mode so terminal tab is always up to date
-      get().appendTerminalData(msg.data as string);
-      break;
-
-    case 'permission_request': {
-      // Split streaming response at permission boundary (#554):
-      // If we're mid-stream, flush pending deltas and mark the message for split
-      // so post-permission text becomes a new bubble.
-      {
-        const permTargetId = (msg.sessionId as string) || get().activeSessionId;
-        const currentStreamId = permTargetId && get().sessionStates[permTargetId]
-          ? get().sessionStates[permTargetId].streamingMessageId
-          : get().streamingMessageId;
-        if (currentStreamId && currentStreamId !== 'pending') {
-          // Flush any buffered deltas for the current message
-          if (deltaFlushTimer) {
-            clearTimeout(deltaFlushTimer);
-          }
-          flushPendingDeltas();
-          // Resolve back to the original server messageId so `_postPermissionSplits`
-          // is always keyed by the ID that incoming `stream_delta` messages use.
-          // After a prior split, `streamingMessageId` is the remapped client-side ID
-          // but deltas still arrive with the original server ID.
-          let serverStreamId = currentStreamId;
-          for (const [origId, remappedId] of _deltaIdRemaps) {
-            if (remappedId === currentStreamId) {
-              serverStreamId = origId;
-              break;
-            }
-          }
-          // Mark for split — next delta for this messageId creates a new bubble
-          _postPermissionSplits.add(serverStreamId);
-          // Clear streaming state so the permission card isn't appended mid-stream
-          if (permTargetId && get().sessionStates[permTargetId]) {
-            updateSession(permTargetId, () => ({ streamingMessageId: null }));
-          } else {
-            set({ streamingMessageId: null });
-          }
-        }
-      }
-      const permRequestId = msg.requestId as string;
-      const newOptions = [
-        { label: 'Allow', value: 'allow' },
-        { label: 'Deny', value: 'deny' },
-        { label: 'Always Allow', value: 'allowAlways' },
-      ];
-      const newExpiresAt = typeof msg.remainingMs === 'number' ? Date.now() + msg.remainingMs : undefined;
-      const permTargetId = (msg.sessionId as string) || get().activeSessionId;
-
-      // Deduplicate: if a message with this requestId already exists (e.g. from before
-      // a reconnect), update it in place instead of creating a duplicate card.
-      const targetMessages = permTargetId && get().sessionStates[permTargetId]
-        ? get().sessionStates[permTargetId].messages
-        : get().messages;
-      const existingIdx = targetMessages.findIndex(
-        (m) => m.requestId === permRequestId && m.type === 'prompt'
-      );
-
-      if (existingIdx !== -1) {
-        // Update existing permission card — clear answered state and refresh expiry
-        const updater = (ss: { messages: ChatMessage[] }) => ({
-          messages: ss.messages.map((m) =>
-            m.requestId === permRequestId && m.type === 'prompt'
-              ? { ...m, answered: undefined, options: newOptions, expiresAt: newExpiresAt }
-              : m
-          ),
-        });
-        if (permTargetId && get().sessionStates[permTargetId]) {
-          updateSession(permTargetId, updater);
-        } else {
-          set({ messages: updater({ messages: get().messages }).messages });
-        }
-      } else {
-        // Create new permission card
-        const permMsg: ChatMessage = {
-          id: nextMessageId('perm'),
-          type: 'prompt',
-          content: msg.tool ? `${msg.tool}: ${msg.description}` : ((msg.description as string) || 'Permission required'),
-          tool: msg.tool as string | undefined,
-          requestId: permRequestId,
-          toolInput: msg.input && typeof msg.input === 'object' ? msg.input as Record<string, unknown> : undefined,
-          options: newOptions,
-          expiresAt: newExpiresAt,
-          timestamp: Date.now(),
-        };
-        if (permTargetId && get().sessionStates[permTargetId]) {
-          updateSession(permTargetId, (ss) => ({
-            messages: [...ss.messages, permMsg],
-          }));
-        } else {
-          get().addMessage(permMsg);
-        }
-      }
-      // Notify if this is a background session
-      if (permTargetId) {
-        const toolDesc = msg.tool ? `${msg.tool}` : 'Permission needed';
-        pushSessionNotification(permTargetId, 'permission', toolDesc);
-      }
-      break;
-    }
-
-    case 'permission_expired': {
-      // Server reports that a permission response we sent was stale/expired
-      const expiredRequestId = msg.requestId as string;
-      if (expiredRequestId) {
-        console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);
-        // Use sessionId from server if provided, otherwise fall back to active session
-        const expTargetId = (msg.sessionId as string) || get().activeSessionId;
-        if (expTargetId && get().sessionStates[expTargetId]) {
-          updateSession(expTargetId, (ss) => ({
-            messages: ss.messages.map((m) =>
-              m.requestId === expiredRequestId && m.type === 'prompt'
-                ? { ...m, content: `${m.content}\n(Expired — this permission was already handled or timed out)`, options: undefined }
-                : m
-            ),
-          }));
-        }
-      }
-      break;
-    }
-
-    case 'user_question': {
-      const questions = msg.questions as unknown[];
-      if (!Array.isArray(questions) || questions.length === 0) break;
-      const q = questions[0] as Record<string, unknown>;
-      if (!q || typeof q !== 'object' || typeof q.question !== 'string') break;
-      const questionMsg: ChatMessage = {
-        id: nextMessageId('question'),
-        type: 'prompt',
-        content: q.question as string,
-        toolUseId: msg.toolUseId as string,
-        options: Array.isArray(q.options)
-          ? (q.options as unknown[])
-              .filter((o: unknown): o is { label: string } => !!o && typeof o === 'object' && typeof (o as Record<string, unknown>).label === 'string')
-              .map((o: { label: string }) => ({
-                label: o.label,
-                value: o.label,
-              }))
-          : [],
-        timestamp: Date.now(),
-      };
-      const questionTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (questionTargetId && get().sessionStates[questionTargetId]) {
-        updateSession(questionTargetId, (ss) => ({
-          messages: [...ss.messages, questionMsg],
-        }));
-      } else {
-        get().addMessage(questionMsg);
-      }
-      // Notify if this is a background session
-      if (questionTargetId) {
-        const questionText = (q.question as string).slice(0, 60);
-        pushSessionNotification(questionTargetId, 'question', questionText);
-      }
-      break;
-    }
-
-    case 'server_status': {
-      // Non-error status update (e.g., tunnel recovery notifications).
-      // Global broadcast (no sessionId) — route to active session.
-      const statusMessage: string =
-        typeof msg.message === 'string' && (msg.message as string).trim().length > 0
-          ? stripAnsi(msg.message as string)
-          : 'Status update';
-      // Display as a system message in the chat
-      const statusMsg: ChatMessage = {
-        id: nextMessageId('status'),
-        type: 'system',
-        content: statusMessage,
-        timestamp: Date.now(),
-      };
-      const activeStatusId = get().activeSessionId;
-      if (activeStatusId && get().sessionStates[activeStatusId]) {
-        updateActiveSession((ss) => ({
-          messages: [...ss.messages, statusMsg],
-        }));
-      } else {
-        get().addMessage(statusMsg);
-      }
-      break;
-    }
-
-    case 'server_shutdown': {
-      const reason = msg.reason === 'restart' || msg.reason === 'shutdown' ? msg.reason : 'shutdown';
-      const eta = typeof msg.restartEtaMs === 'number' ? msg.restartEtaMs : 0;
-      set({
-        shutdownReason: reason,
-        restartEtaMs: eta,
-        restartingSince: Date.now(),
-      });
-      break;
-    }
-
-    // --- Multi-client awareness ---
-
-    case 'client_joined': {
-      if (!msg.client || typeof (msg.client as Record<string, unknown>).clientId !== 'string') break;
-      const client = msg.client as Record<string, unknown>;
-      const newClient: ConnectedClient = {
-        clientId: client.clientId as string,
-        deviceName: typeof client.deviceName === 'string' ? client.deviceName : null,
-        deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(client.deviceType as string) ? client.deviceType : 'unknown') as ConnectedClient['deviceType'],
-        platform: typeof client.platform === 'string' ? client.platform : 'unknown',
-        isSelf: false,
-      };
-      set((state: ConnectionState) => ({
-        connectedClients: [...state.connectedClients.filter((c) => c.clientId !== newClient.clientId), newClient],
-      }));
-      // Add system message
-      const deviceLabel = newClient.deviceName || 'A device';
-      const joinMsg: ChatMessage = {
-        id: nextMessageId('client'),
-        type: 'system',
-        content: `${deviceLabel} connected`,
-        timestamp: Date.now(),
-      };
-      const joinActiveId = get().activeSessionId;
-      if (joinActiveId && get().sessionStates[joinActiveId]) {
-        updateActiveSession((ss) => ({
-          messages: [...ss.messages, joinMsg],
-        }));
-      } else {
-        get().addMessage(joinMsg);
-      }
-      break;
-    }
-
-    case 'client_left': {
-      if (typeof msg.clientId !== 'string') break;
-      const departingClient = get().connectedClients.find((c) => c.clientId === msg.clientId);
-      set((state: ConnectionState) => ({
-        connectedClients: state.connectedClients.filter((c) => c.clientId !== msg.clientId),
-      }));
-      // Add system message
-      const leftLabel = departingClient?.deviceName || 'A device';
-      const leftMsg: ChatMessage = {
-        id: nextMessageId('client'),
-        type: 'system',
-        content: `${leftLabel} disconnected`,
-        timestamp: Date.now(),
-      };
-      const leftActiveId = get().activeSessionId;
-      if (leftActiveId && get().sessionStates[leftActiveId]) {
-        updateActiveSession((ss) => ({
-          messages: [...ss.messages, leftMsg],
-        }));
-      } else {
-        get().addMessage(leftMsg);
-      }
-      break;
-    }
-
-    case 'primary_changed': {
-      const primarySessionId = msg.sessionId as string;
-      const primaryClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
-      if (typeof primarySessionId === 'string' && get().sessionStates[primarySessionId]) {
-        updateSession(primarySessionId, () => ({
-          primaryClientId,
-        }));
-      } else if (!primarySessionId || primarySessionId === 'default') {
-        // Legacy/single-session mode: store at flat state level
-        set({ primaryClientId });
-      }
-      break;
-    }
-
-    case 'directory_listing': {
-      const cb = get()._directoryListingCallback;
-      if (cb) {
-        cb({
-          path: typeof msg.path === 'string' ? msg.path : null,
-          parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
-          entries: Array.isArray(msg.entries) ? msg.entries as DirectoryEntry[] : [],
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
-      }
-      break;
-    }
-
-    case 'file_listing': {
-      const fileBrowserCb = get()._fileBrowserCallback;
-      if (fileBrowserCb) {
-        fileBrowserCb({
-          path: typeof msg.path === 'string' ? msg.path : null,
-          parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
-          entries: Array.isArray(msg.entries) ? msg.entries as FileEntry[] : [],
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
-      }
-      break;
-    }
-
-    case 'file_content': {
-      const fileContentCb = get()._fileContentCallback;
-      if (fileContentCb) {
-        fileContentCb({
-          path: typeof msg.path === 'string' ? msg.path : null,
-          content: typeof msg.content === 'string' ? msg.content : null,
-          language: typeof msg.language === 'string' ? msg.language : null,
-          size: typeof msg.size === 'number' ? msg.size : null,
-          truncated: msg.truncated === true,
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
-      }
-      break;
-    }
-
-    case 'diff_result': {
-      const diffCb = get()._diffCallback;
-      if (diffCb) {
-        diffCb({
-          files: Array.isArray(msg.files) ? msg.files as DiffFile[] : [],
-          error: typeof msg.error === 'string' ? msg.error : null,
-        });
-      }
-      break;
-    }
-
-    case 'slash_commands': {
-      // Ignore stale responses from a different session (race during session switch).
-      // Only filter when activeSessionId is set — on initial connect it may still be null.
-      const slashSid = get().activeSessionId;
-      if (msg.sessionId && slashSid && msg.sessionId !== slashSid) break;
-      if (Array.isArray(msg.commands)) {
-        set({ slashCommands: msg.commands as SlashCommand[] });
-      }
-      break;
-    }
-
-    case 'agent_list': {
-      // Ignore stale responses from a different session (race during session switch).
-      // Only filter when activeSessionId is set — on initial connect it may still be null.
-      const agentSid = get().activeSessionId;
-      if (msg.sessionId && agentSid && msg.sessionId !== agentSid) break;
-      if (Array.isArray(msg.agents)) {
-        set({ customAgents: msg.agents as CustomAgent[] });
-      }
-      break;
-    }
-
-    case 'server_error': {
-      // Global broadcast (no sessionId) — route to active session.
-      // Validate and coerce untyped JSON fields
-      const allowedCategories = new Set<ServerError['category']>([
-        'tunnel', 'session', 'permission', 'general',
-      ]);
-      const category: ServerError['category'] =
-        typeof msg.category === 'string' && allowedCategories.has(msg.category as ServerError['category'])
-          ? (msg.category as ServerError['category'])
-          : 'general';
-      const message: string =
-        typeof msg.message === 'string' && (msg.message as string).trim().length > 0
-          ? stripAnsi(msg.message as string)
-          : 'Unknown server error';
-      const recoverable: boolean =
-        typeof msg.recoverable === 'boolean' ? msg.recoverable : true;
-
-      const serverError: ServerError = {
-        id: nextMessageId('err'),
-        category,
-        message,
-        recoverable,
-        timestamp: Date.now(),
-      };
-      set((state: ConnectionState) => ({
-        serverErrors: [...state.serverErrors, serverError].slice(-10),
-      }));
-      // Surface server errors into chat stream so they're visible
-      const errorMsg: ChatMessage = {
-        id: nextMessageId('err'),
-        type: 'error',
-        content: serverError.message,
-        timestamp: Date.now(),
-      };
-      const activeErrId = get().activeSessionId;
-      if (activeErrId && get().sessionStates[activeErrId]) {
-        updateActiveSession((ss) => ({
-          messages: filterThinking([...ss.messages, errorMsg]),
-          streamingMessageId: null,
-        }));
-      } else {
-        set({ streamingMessageId: null });
-        get().addMessage(errorMsg);
-      }
-      // Show an alert for non-recoverable errors
-      if (!serverError.recoverable) {
-        Alert.alert('Server Error', serverError.message);
-      }
-      break;
-    }
-  }
-}
-
-/** @internal Exposed for testing only — same pattern as _testQueueInternals */
-export const _testMessageHandler = {
-  handle: handleMessage,
-  setContext: (ctx: ConnectionContext) => { _connectionContext = ctx; },
-  clearContext: () => { _connectionContext = null; },
-};
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectionPhase: 'disconnected',
@@ -2129,16 +261,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const currentUrl = get().wsUrl;
     if (_retryCount === 0 && currentUrl !== null && currentUrl !== url) {
       get().forgetSession();
-      messageQueue.length = 0;
+      clearMessageQueue();
     }
 
     // Robust reconnect detection: check if we've successfully connected to this URL before
-    // This is more reliable than checking messages.length which may have been cleared
     const isReconnect = lastConnectedUrl === url;
 
     // New top-level connect call (not a retry) — bump attempt ID to cancel any pending retries
     if (_retryCount === 0) {
-      connectionAttemptId++;
+      bumpConnectionAttemptId();
     }
     const myAttemptId = connectionAttemptId;
 
@@ -2152,7 +283,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
     // Only clear connectionError on fresh user-initiated connections (not retries/reconnects)
-    // so the error reason remains visible in the banner during retry sequences
     const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
     set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, ...errorPatch });
 
@@ -2176,21 +306,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           console.log('[ws] Health check response:', body.status ?? 'no status field');
           if (body.status === 'restarting') {
             console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${MAX_RETRIES + 1})`);
-            // Extract ETA from standby health check (crash recovery — no prior server_shutdown)
             const healthEta = typeof body.restartEtaMs === 'number' ? body.restartEtaMs : null;
             const currentState = get();
             set({
               connectionPhase: 'server_restarting',
-              // Preserve shutdownReason from server_shutdown if we have it, otherwise default to 'restart'
               shutdownReason: currentState.shutdownReason ?? 'restart',
-              // Always refresh ETA from health check — it's computed at request time so it's
-              // more accurate than a stale server_shutdown ETA from before the connection dropped
               restartEtaMs: healthEta,
               restartingSince: currentState.restartingSince || Date.now(),
             });
-            // Retry — the server will come back
             if (_retryCount < MAX_RETRIES) {
-              const delay = _withJitter(RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)]);
+              const delay = withJitter(RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)]);
               setTimeout(() => {
                 if (myAttemptId !== connectionAttemptId) return;
                 get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
@@ -2220,14 +345,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       .catch((err) => {
         if (myAttemptId !== connectionAttemptId) return;
         console.log(`[ws] Health check failed: ${err.message}`);
-        // Categorize the error for user display
         const reason = err.name === 'AbortError' ? 'Server not responding'
           : err.message?.startsWith('HTTP ') ? err.message
           : 'Network error';
         set({ connectionError: reason });
-        // Tunnel not ready yet — retry
         if (_retryCount < MAX_RETRIES) {
-          const delay = _withJitter(RETRY_DELAYS[_retryCount]);
+          const delay = withJitter(RETRY_DELAYS[_retryCount]);
           console.log(`[ws] Retrying in ${delay}ms...`);
           setTimeout(() => {
             if (myAttemptId !== connectionAttemptId) return;
@@ -2251,8 +374,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     function _connectWebSocket() {
     // Reset encryption state for each new connection (forward secrecy)
-    _encryptionState = null;
-    _pendingKeyPair = null;
+    setEncryptionState(null);
+    setPendingKeyPair(null);
     const socket = new WebSocket(url);
 
     socket.onopen = () => {
@@ -2270,7 +393,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     };
 
     const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket };
-    _connectionContext = socketCtx;
+    setConnectionContext(socketCtx);
     socket.onmessage = (event) => {
       let msg;
       try {
@@ -2279,15 +402,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         return;
       }
       // Decrypt incoming encrypted messages
-      if (msg.type === 'encrypted' && _encryptionState) {
+      const encState = getEncryptionState();
+      if (msg.type === 'encrypted' && encState) {
         if (typeof msg.d !== 'string' || typeof msg.n !== 'number') {
           console.error('[crypto] Invalid encrypted envelope structure:', msg);
           socket.close();
           return;
         }
         try {
-          msg = decrypt(msg as EncryptedEnvelope, _encryptionState.sharedKey, _encryptionState.recvNonce, DIRECTION_SERVER);
-          _encryptionState.recvNonce++;
+          msg = decrypt(msg as EncryptedEnvelope, encState.sharedKey, encState.recvNonce, DIRECTION_SERVER);
+          setEncryptionState({ ...encState, recvNonce: encState.recvNonce + 1 });
         } catch (err) {
           console.error('[crypto] Decryption failed:', err);
           socket.close();
@@ -2298,7 +422,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     };
 
     socket.onclose = () => {
-      _stopHeartbeat();
+      stopHeartbeat();
 
       // Stale socket from a previous connection attempt — ignore
       if (myAttemptId !== connectionAttemptId) return;
@@ -2307,11 +431,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       set({ socket: null });
 
       // Clear transient streaming/plan state so stale UI doesn't persist
-      // during reconnect (e.g. typing indicator, plan approval card).
-      _postPermissionSplits.clear();
-      _deltaIdRemaps.clear();
+      clearPermissionSplits();
       updateActiveSession((ss) => {
-        const patch: Partial<SessionState> = {};
+        const patch: Partial<import('./types').SessionState> = {};
         if (ss.streamingMessageId) patch.streamingMessageId = null;
         if (ss.isPlanPending) {
           patch.isPlanPending = false;
@@ -2320,9 +442,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         return Object.keys(patch).length > 0 ? patch : {};
       });
 
-      // Auto-reconnect if the connection dropped unexpectedly (not user-initiated).
-      // Calls connect() with _retryCount=0 to reset the retry budget — see comment
-      // at connect() definition for rationale.
+      // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] Connection lost, auto-reconnecting...');
         set({ connectionPhase: 'reconnecting', connectionError: 'Connection lost', connectionRetryCount: 0 });
@@ -2333,7 +453,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       } else if (disconnectedAttemptId === myAttemptId) {
         set({ connectionPhase: 'disconnected' });
       } else {
-        // Connection dropped before auth completed — reset to disconnected
         set({ connectionPhase: 'disconnected' });
       }
     };
@@ -2359,43 +478,30 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   disconnect: () => {
     // Bump attempt ID to cancel any pending health checks / retry timers
-    connectionAttemptId++;
-    disconnectedAttemptId = connectionAttemptId;
+    bumpConnectionAttemptId();
+    setDisconnectedAttemptId(connectionAttemptId);
     // Clear saved connection so ConnectScreen doesn't auto-reconnect
-    lastConnectedUrl = null;
-    _stopHeartbeat();
+    setLastConnectedUrl(null);
+    stopHeartbeat();
     const { socket } = get();
     if (socket) {
       socket.onclose = null;
       socket.close();
     }
     // Reset replay flags in case disconnect happened mid-replay
-    _receivingHistoryReplay = false;
-    _isSessionSwitchReplay = false;
-    _pendingSwitchSessionId = null;
+    resetReplayFlags();
     // Flush and clear any pending delta buffer
-    if (deltaFlushTimer) {
-      clearTimeout(deltaFlushTimer);
-      deltaFlushTimer = null;
-    }
-    pendingDeltas.clear();
+    clearDeltaBuffers();
     // Clear permission boundary split tracking
-    _postPermissionSplits.clear();
-    _deltaIdRemaps.clear();
+    clearPermissionSplits();
     // Clear terminal write batching
-    if (_terminalWriteTimer) {
-      clearTimeout(_terminalWriteTimer);
-      _terminalWriteTimer = null;
-    }
-    _pendingTerminalWrites = '';
+    clearTerminalWriteBatching();
     // Clear encryption state (new connection = new keys = forward secrecy)
-    _encryptionState = null;
-    _pendingKeyPair = null;
+    setEncryptionState(null);
+    setPendingKeyPair(null);
     // Clear message queue on explicit disconnect
-    messageQueue.length = 0;
+    clearMessageQueue();
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
-    // so reconnect to the same server can show previous chat history.
-    // Only clear connection-level state.
     set({
       connectionPhase: 'disconnected',
       socket: null,
@@ -2432,12 +538,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       lastResultDuration: null,
       savedConnection: null,
     });
-    // Keep wsUrl, apiToken, messages, terminalBuffer, terminalRawBuffer, sessions, sessionStates
   },
 
   forgetSession: () => {
-    // Clear last connected URL so next connect is treated as fresh
-    lastConnectedUrl = null;
+    setLastConnectedUrl(null);
     set({
       messages: [],
       terminalBuffer: '',
@@ -2458,7 +562,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setViewMode: (mode) => {
     const { socket } = get();
     set({ viewMode: mode });
-    // Only send server-understood modes (not 'files' which is client-only)
     if (socket && socket.readyState === WebSocket.OPEN && (mode === 'chat' || mode === 'terminal')) {
       wsSend(socket, { type: 'mode', mode });
     }
@@ -2466,7 +569,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   addMessage: (message) => {
     set((state) => ({
-      // Remove thinking placeholder when a real message arrives from the server
       messages: [
         ...state.messages.filter((m) => m.id !== 'thinking' || message.id === 'thinking'),
         message,
@@ -2492,21 +594,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     const activeId = get().activeSessionId;
     if (activeId && get().sessionStates[activeId]) {
-      // Session mode: use updateActiveSession helper for consistent sync logic
       updateActiveSession((ss) => ({
         messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
         streamingMessageId: 'pending',
       }));
     } else {
-      // No active session: update flat state only (PTY mode, CLI mode pre-session, or legacy)
       set((state) => ({
         messages: [...filterThinking(state.messages), userMsg, thinkingMsg],
         streamingMessageId: 'pending',
       }));
     }
 
-    // Safety net: if no stream_start arrives (e.g., WS not open, Claude not ready),
-    // clear pending state and remove the thinking placeholder after 5 seconds.
+    // Safety net: if no stream_start arrives, clear pending state after 5 seconds.
     setTimeout(() => {
       if (get().streamingMessageId !== 'pending') return;
       const sid = get().activeSessionId;
@@ -2532,20 +631,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Forward raw data to xterm.js via batched write callback
     const cb = get()._terminalWriteCallback;
     if (cb) {
-      _pendingTerminalWrites += data;
-      if (!_terminalWriteTimer) {
-        _terminalWriteTimer = setTimeout(_flushTerminalWrites, 50);
-      }
+      appendPendingTerminalWrite(data);
     }
   },
 
   clearTerminalBuffer: () => {
     set({ terminalBuffer: '', terminalRawBuffer: '' });
-    if (_terminalWriteTimer) {
-      clearTimeout(_terminalWriteTimer);
-      _terminalWriteTimer = null;
-    }
-    _pendingTerminalWrites = '';
+    clearTerminalWriteBatching();
   },
 
   setTerminalWriteCallback: (cb) => {
@@ -2555,7 +647,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   updateInputSettings: (settings) => {
     set((state) => {
       const updated = { ...state.inputSettings, ...settings };
-      // Persist to storage (fire-and-forget)
       SecureStore.setItemAsync(STORAGE_KEY_INPUT_SETTINGS, JSON.stringify(updated)).catch(() => {});
       return { inputSettings: updated };
     });
@@ -2762,12 +853,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   switchSession: (sessionId: string) => {
     const { socket, activeSessionId, sessionStates } = get();
 
-    // Save current session state is already in sessionStates (it's always synced)
-    // Just update activeSessionId locally and send WS message
     if (sessionId === activeSessionId) return;
 
     // Mark as user-initiated switch so session_switched handler uses session-switch dedup
-    _pendingSwitchSessionId = sessionId;
+    setPendingSwitchSessionId(sessionId);
 
     // Optimistically switch to cached state + dismiss notifications for target session
     const cached = sessionStates[sessionId];
@@ -2823,7 +912,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   discoverSessions: () => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      set({ discoveredSessions: null }); // clear stale results
+      set({ discoveredSessions: null });
       wsSend(socket, { type: 'discover_sessions' });
     }
   },
@@ -2866,9 +955,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 }));
 
-// Reconnect on app resume from background — detects stale sockets that
-// Cloudflare or the mobile OS silently closed while the app was suspended.
-// Singleton guard prevents duplicate listeners on Fast Refresh in development.
+// Type for the store API used by message-handler
+type StoreApi = {
+  getState: () => ConnectionState;
+  setState: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void;
+};
+
+// Wire up the store reference synchronously now that create() has returned
+setStore({
+  getState: useConnectionStore.getState,
+  setState: useConnectionStore.setState as StoreApi['setState'],
+});
+
+// Reconnect on app resume from background
 AppState.addEventListener('change', (nextState) => {
   if (nextState === 'active') {
     const { socket, connectionPhase, wsUrl, apiToken } = useConnectionStore.getState();
