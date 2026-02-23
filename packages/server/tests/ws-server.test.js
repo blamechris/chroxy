@@ -379,7 +379,11 @@ describe('WsServer GET /health response shape', () => {
       redirect: 'manual',
     })
     assert.equal(res.status, 302)
-    assert.ok(res.headers.get('location').includes('/dashboard?token=tok-redirect-test'))
+    const location = res.headers.get('location')
+    assert.ok(location.includes('/dashboard'), 'redirect should go to /dashboard')
+    assert.ok(!location.includes('tok-redirect-test'), 'Location must not include API token')
+    assert.equal(res.headers.get('vary'), 'Accept')
+    assert.equal(res.headers.get('cache-control'), 'no-store')
   })
 
   it('returns JSON for / when Accept does not include text/html', async () => {

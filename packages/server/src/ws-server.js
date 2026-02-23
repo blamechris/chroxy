@@ -319,11 +319,15 @@ export class WsServer {
         // Browser visitors (Accept: text/html) get redirected to the dashboard
         const accept = req.headers['accept'] || ''
         if (req.url === '/' && accept.includes('text/html') && this.apiToken) {
-          res.writeHead(302, { 'Location': `/dashboard?token=${this.apiToken}` })
+          res.writeHead(302, {
+            'Location': '/dashboard',
+            'Cache-Control': 'no-store',
+            'Vary': 'Accept',
+          })
           res.end()
           return
         }
-        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Vary': 'Accept' })
         res.end(JSON.stringify({ status: 'ok', mode: this.serverMode, version: SERVER_VERSION }))
         return
       }
