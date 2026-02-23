@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage, ConnectionPhase, AgentInfo, McpServer } from '../store/connection';
+import { useConnectionStore, ChatMessage, ConnectionPhase, AgentInfo, McpServer, stripAnsi } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
@@ -228,9 +228,13 @@ export function SessionScreen() {
     [messages, searchMatchIds],
   );
 
-  // Reset match index when matches change
+  // Clamp match index when matches shrink (avoid stale index pointing past end).
+  // Does NOT reset to 0 on growth — prevents highlight jumping during streaming.
   useEffect(() => {
-    setCurrentMatchIndex(0);
+    setCurrentMatchIndex((prev) => {
+      if (searchMatchArray.length === 0) return 0;
+      return prev >= searchMatchArray.length ? searchMatchArray.length - 1 : prev;
+    });
   }, [searchMatchArray.length]);
 
   const currentMatchId = searchMatchArray.length > 0 ? searchMatchArray[currentMatchIndex] ?? null : null;
@@ -258,7 +262,9 @@ export function SessionScreen() {
 
   // Terminal scrollback export
   const handleExportTerminal = useCallback(async () => {
-    const buffer = useConnectionStore.getState().terminalBuffer;
+    // Use the larger raw buffer (100KB) and strip ANSI for readable export
+    const raw = useConnectionStore.getState().terminalRawBuffer;
+    const buffer = stripAnsi(raw);
     if (!buffer.trim()) {
       Alert.alert('Nothing to export', 'Terminal buffer is empty.');
       return;
