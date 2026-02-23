@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -17,12 +17,13 @@ interface SessionPillProps {
   session: SessionInfo;
   isActive: boolean;
   health: SessionHealth;
+  hasNotification: boolean;
   onPress: () => void;
   onLongPress: () => void;
   onLayout: (e: LayoutChangeEvent) => void;
 }
 
-function SessionPill({ session, isActive, health, onPress, onLongPress, onLayout }: SessionPillProps) {
+function SessionPill({ session, isActive, health, hasNotification, onPress, onLongPress, onLayout }: SessionPillProps) {
   const isPty = session.type === 'pty';
   const isCrashed = health === 'crashed';
   return (
@@ -33,13 +34,14 @@ function SessionPill({ session, isActive, health, onPress, onLongPress, onLayout
         isPty && styles.pillPty,
         isActive && isPty && styles.pillPtyActive,
         isCrashed && styles.pillCrashed,
+        hasNotification && !isActive && styles.pillAttention,
       ]}
       onPress={onPress}
       onLongPress={onLongPress}
       onLayout={onLayout}
       activeOpacity={0.7}
     >
-      {isCrashed ? <View style={styles.crashDot} /> : session.isBusy && <View style={styles.busyDot} />}
+      {isCrashed ? <View style={styles.crashDot} /> : hasNotification && !isActive ? <View style={styles.attentionDot} /> : session.isBusy && <View style={styles.busyDot} />}
       {isPty && <Text style={[styles.ptyIcon, isActive && styles.ptyIconActive]}>{ICON_SQUARE} </Text>}
       <Text style={[styles.pillText, isActive && styles.pillTextActive, isCrashed && styles.pillTextCrashed]} numberOfLines={1}>
         {session.name}
@@ -59,6 +61,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
   const switchSession = useConnectionStore((s) => s.switchSession);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const renameSession = useConnectionStore((s) => s.renameSession);
+  const sessionNotifications = useConnectionStore((s) => s.sessionNotifications);
 
   const scrollViewRef = useRef<ScrollView>(null);
   const pillLayouts = useRef<Map<string, { x: number; width: number }>>(new Map());
@@ -188,6 +191,11 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
     }
   }, [activeSessionId, scrollToSession]);
 
+  const notifiedSessionIds = useMemo(
+    () => new Set(sessionNotifications.map((n) => n.sessionId)),
+    [sessionNotifications],
+  );
+
   return (
     <View style={styles.container}>
       <ScrollView
@@ -204,6 +212,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
             session={session}
             isActive={session.sessionId === activeSessionId}
             health={sessionStates[session.sessionId]?.health || 'healthy'}
+            hasNotification={notifiedSessionIds.has(session.sessionId)}
             onPress={() => switchSession(session.sessionId)}
             onLongPress={() => handleLongPress(session)}
             onLayout={(e) => handlePillLayout(session.sessionId, e)}
@@ -273,6 +282,9 @@ const styles = StyleSheet.create({
   pillCrashed: {
     borderColor: COLORS.accentRedBorder,
   },
+  pillAttention: {
+    borderColor: COLORS.accentOrangeBorderStrong,
+  },
   pillTextCrashed: {
     color: COLORS.accentRed,
   },
@@ -281,6 +293,13 @@ const styles = StyleSheet.create({
     height: 6,
     borderRadius: 3,
     backgroundColor: COLORS.accentRed,
+    marginRight: 6,
+  },
+  attentionDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.accentOrange,
     marginRight: 6,
   },
   busyDot: {

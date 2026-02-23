@@ -256,6 +256,15 @@ export interface ServerError {
   timestamp: number;
 }
 
+export interface SessionNotification {
+  id: string;
+  sessionId: string;
+  sessionName: string;
+  eventType: 'permission' | 'question' | 'completed' | 'error';
+  message: string;
+  timestamp: number;
+}
+
 export interface SlashCommand {
   name: string;
   description: string;
@@ -358,6 +367,9 @@ interface ConnectionState {
   // Server errors forwarded over WebSocket (last 10)
   serverErrors: ServerError[];
 
+  // Background session notifications (permission, question, completed, error)
+  sessionNotifications: SessionNotification[];
+
   // Shutdown state (reason + ETA for restarting banner countdown)
   shutdownReason: 'restart' | 'shutdown' | null;
   restartEtaMs: number | null;
@@ -458,6 +470,9 @@ interface ConnectionState {
 
   // Server error actions
   dismissServerError: (id: string) => void;
+
+  // Session notification actions
+  dismissSessionNotification: (id: string) => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;
@@ -798,6 +813,36 @@ function updateActiveSession(updater: (session: SessionState) => Partial<Session
 }
 
 /**
+ * Push a notification for a background session event.
+ * Deduplicates by (sessionId, eventType) — replaces existing rather than stacking.
+ */
+function pushSessionNotification(
+  sessionId: string,
+  eventType: SessionNotification['eventType'],
+  message: string,
+) {
+  const state = useConnectionStore.getState();
+  // Only notify for background sessions
+  if (sessionId === state.activeSessionId) return;
+  // Look up session name from sessions list
+  const sessionInfo = state.sessions.find((s) => s.sessionId === sessionId);
+  const sessionName = sessionInfo?.name || sessionId;
+  const notification: SessionNotification = {
+    id: `${sessionId}-${eventType}-${Date.now()}`,
+    sessionId,
+    sessionName,
+    eventType,
+    message,
+    timestamp: Date.now(),
+  };
+  // Dedup: replace existing notification for same (sessionId, eventType)
+  const filtered = state.sessionNotifications.filter(
+    (n) => !(n.sessionId === sessionId && n.eventType === eventType),
+  );
+  useConnectionStore.setState({ sessionNotifications: [...filtered, notification] });
+}
+
+/**
  * Handles a parsed WebSocket message. Extracted from the socket.onmessage
  * closure so it can be tested directly with raw JSON payloads.
  *
@@ -1031,6 +1076,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       const errorSessionId = (msg.sessionId as string) || get().activeSessionId;
       if (msg.category === 'crash' && errorSessionId && get().sessionStates[errorSessionId]) {
         updateSession(errorSessionId, () => ({ health: 'crashed' as const }));
+        pushSessionNotification(errorSessionId, 'error', 'Session crashed');
       }
       if (msg.category !== 'crash') {
         Alert.alert('Session Error', (msg.message as string) || 'Unknown error');
@@ -1339,6 +1385,10 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         lastResultDuration: typeof msg.duration === 'number' ? msg.duration : null,
       };
       const targetId = (msg.sessionId as string) || get().activeSessionId;
+      // Notify if a background session just finished (was streaming)
+      if (targetId && get().sessionStates[targetId]?.streamingMessageId) {
+        pushSessionNotification(targetId, 'completed', 'Task completed');
+      }
       if (targetId && get().sessionStates[targetId]) {
         updateSession(targetId, () => resultPatch);
       } else {
@@ -1622,6 +1672,11 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
           get().addMessage(permMsg);
         }
       }
+      // Notify if this is a background session
+      if (permTargetId) {
+        const toolDesc = msg.tool ? `${msg.tool}` : 'Permission needed';
+        pushSessionNotification(permTargetId, 'permission', toolDesc);
+      }
       break;
     }
 
@@ -1672,6 +1727,11 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         }));
       } else {
         get().addMessage(questionMsg);
+      }
+      // Notify if this is a background session
+      if (questionTargetId) {
+        const questionText = (q.question as string).slice(0, 60);
+        pushSessionNotification(questionTargetId, 'question', questionText);
       }
       break;
     }
@@ -1946,6 +2006,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectionError: null,
   connectionRetryCount: 0,
   serverErrors: [],
+  sessionNotifications: [],
   shutdownReason: null,
   restartEtaMs: null,
   restartingSince: null,
@@ -2325,6 +2386,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       connectionError: null,
       connectionRetryCount: 0,
       serverErrors: [],
+      sessionNotifications: [],
       shutdownReason: null,
       restartEtaMs: null,
       restartingSince: null,
@@ -2468,8 +2530,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   sendInput: (input, wireAttachments, options) => {
-    const { socket } = get();
+    const { socket, activeSessionId } = get();
     const payload: Record<string, unknown> = { type: 'input', data: input };
+    if (activeSessionId) payload.sessionId = activeSessionId;
     if (wireAttachments?.length) {
       payload.attachments = wireAttachments;
     }
@@ -2484,8 +2547,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   sendInterrupt: () => {
-    const { socket } = get();
-    const payload = { type: 'interrupt' };
+    const { socket, activeSessionId } = get();
+    const payload: Record<string, unknown> = { type: 'interrupt' };
+    if (activeSessionId) payload.sessionId = activeSessionId;
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);
       return 'sent';
@@ -2551,23 +2615,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   setModel: (model: string) => {
-    const { socket } = get();
+    const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'set_model', model });
+      const payload: Record<string, unknown> = { type: 'set_model', model };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      wsSend(socket, payload);
     }
   },
 
   setPermissionMode: (mode: string) => {
-    const { socket } = get();
+    const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'set_permission_mode', mode });
+      const payload: Record<string, unknown> = { type: 'set_permission_mode', mode };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      wsSend(socket, payload);
     }
   },
 
   confirmPermissionMode: (mode: string) => {
-    const { socket } = get();
+    const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'set_permission_mode', mode, confirmed: true });
+      const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, confirmed: true };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      wsSend(socket, payload);
     }
     set({ pendingPermissionConfirm: null });
   },
@@ -2577,9 +2647,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   resize: (cols, rows) => {
-    const { socket } = get();
+    const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'resize', cols, rows });
+      const payload: Record<string, unknown> = { type: 'resize', cols, rows };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      wsSend(socket, payload);
     }
   },
 
@@ -2665,8 +2737,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Mark as user-initiated switch so session_switched handler uses session-switch dedup
     _pendingSwitchSessionId = sessionId;
 
-    // Optimistically switch to cached state
+    // Optimistically switch to cached state + dismiss notifications for target session
     const cached = sessionStates[sessionId];
+    const filteredNotifications = get().sessionNotifications.filter(
+      (n) => n.sessionId !== sessionId,
+    );
     if (cached) {
       set({
         activeSessionId: sessionId,
@@ -2678,7 +2753,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         contextUsage: cached.contextUsage,
         lastResultCost: cached.lastResultCost,
         lastResultDuration: cached.lastResultDuration,
+        sessionNotifications: filteredNotifications,
       });
+    } else {
+      set({ sessionNotifications: filteredNotifications });
     }
 
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -2746,6 +2824,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   dismissServerError: (id: string) => {
     set((state) => ({
       serverErrors: state.serverErrors.filter((e) => e.id !== id),
+    }));
+  },
+
+  dismissSessionNotification: (id: string) => {
+    set((state) => ({
+      sessionNotifications: state.sessionNotifications.filter((n) => n.id !== id),
     }));
   },
 }));
