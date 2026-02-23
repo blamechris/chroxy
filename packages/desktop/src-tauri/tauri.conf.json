@@ -1,0 +1,33 @@
+{
+  "productName": "Chroxy",
+  "version": "0.1.0",
+  "identifier": "com.chroxy.desktop",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "security": {
+      "csp": "default-src 'self' http://localhost:*; connect-src ws://localhost:* http://localhost:*; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "Chroxy",
+        "width": 900,
+        "height": 700,
+        "visible": false,
+        "center": true
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

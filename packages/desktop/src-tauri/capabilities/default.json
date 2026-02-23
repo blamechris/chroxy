@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for Chroxy desktop",
+  "windows": ["main", "dashboard"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "autostart:default",
+    "notification:default"
+  ]
+}
