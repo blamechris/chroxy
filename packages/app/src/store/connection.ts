@@ -1576,7 +1576,10 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
 
     case 'mcp_servers': {
       const mcpTargetId = (msg.sessionId as string) || get().activeSessionId;
-      const servers = (msg.servers as McpServer[]) || [];
+      const rawServers = Array.isArray(msg.servers) ? msg.servers : [];
+      const servers: McpServer[] = rawServers.filter(
+        (s): s is McpServer => s && typeof s === 'object' && typeof s.name === 'string' && typeof s.status === 'string'
+      );
       if (mcpTargetId && get().sessionStates[mcpTargetId]) {
         updateSession(mcpTargetId, () => ({ mcpServers: servers }));
       }

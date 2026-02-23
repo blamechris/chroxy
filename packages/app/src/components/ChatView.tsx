@@ -21,11 +21,16 @@ import { ImageViewer } from './ImageViewer';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOSE, ICON_CHECK, ICON_DOCUMENT } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
-/** Format a tool name for display. MCP tools show as "tool_name" with server noted separately. */
+/**
+ * Format a tool name for display. MCP tools show as "tool_name" with server noted separately.
+ * Duplicates the mcp__ prefix parsing from mcp-tools.js as a client-side fallback in case
+ * the raw tool name arrives without a pre-extracted serverName.
+ */
+const MCP_PREFIX = 'mcp__';
 function formatToolName(tool?: string): string {
   if (!tool) return 'Thinking';
-  if (tool.startsWith('mcp__')) {
-    const rest = tool.slice(5);
+  if (tool.startsWith(MCP_PREFIX)) {
+    const rest = tool.slice(MCP_PREFIX.length);
     const sep = rest.indexOf('__');
     if (sep > 0) return rest.slice(sep + 2);
   }

@@ -333,9 +333,11 @@ export class CliSession extends EventEmitter {
             model: data.model,
             tools: data.tools,
           })
-          // Emit MCP server status if present
-          if (Array.isArray(data.mcp_servers) && data.mcp_servers.length > 0) {
-            console.log(`[cli-session] MCP servers: ${data.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+          // Emit MCP server status if present (including empty list to clear stale state)
+          if (Array.isArray(data.mcp_servers)) {
+            if (data.mcp_servers.length > 0) {
+              console.log(`[cli-session] MCP servers: ${data.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+            }
             this.emit('mcp_servers', { servers: data.mcp_servers })
           }
         } else {

@@ -205,9 +205,11 @@ export class SdkSession extends EventEmitter {
                 model: msg.model,
                 tools: msg.tools || [],
               })
-              // Emit MCP server status if present
-              if (Array.isArray(msg.mcp_servers) && msg.mcp_servers.length > 0) {
-                console.log(`[sdk-session] MCP servers: ${msg.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+              // Emit MCP server status if present (including empty list to clear stale state)
+              if (Array.isArray(msg.mcp_servers)) {
+                if (msg.mcp_servers.length > 0) {
+                  console.log(`[sdk-session] MCP servers: ${msg.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+                }
                 this.emit('mcp_servers', { servers: msg.mcp_servers })
               }
               // Fetch dynamic model list from SDK (non-blocking)

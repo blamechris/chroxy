@@ -22,9 +22,12 @@ export function parseMcpToolName(toolName) {
   const sep = rest.indexOf('__')
   if (sep === -1 || sep === 0) return null
 
+  const parsedTool = rest.slice(sep + 2)
+  if (!parsedTool) return null
+
   return {
     serverName: rest.slice(0, sep),
-    toolName: rest.slice(sep + 2),
+    toolName: parsedTool,
   }
 }
 
@@ -34,7 +37,7 @@ export function parseMcpToolName(toolName) {
  * For built-in tools: the name as-is
  *
  * @param {string} toolName - The raw tool name
- * @returns {string}
+ * @returns {string|null|undefined} The input as-is for non-MCP/falsy values, or "server:tool" for MCP
  */
 export function formatToolDisplay(toolName) {
   const parsed = parseMcpToolName(toolName)

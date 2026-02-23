@@ -41,6 +41,10 @@ describe('parseMcpToolName', () => {
   it('returns null for mcp__ prefix with empty server name', () => {
     assert.equal(parseMcpToolName('mcp____tool'), null)
   })
+
+  it('returns null for mcp__ prefix with empty tool name', () => {
+    assert.equal(parseMcpToolName('mcp__server__'), null)
+  })
 })
 
 describe('formatToolDisplay', () => {
