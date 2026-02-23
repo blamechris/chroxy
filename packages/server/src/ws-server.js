@@ -195,7 +195,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'stream_delta', messageId, delta }         — token-by-token text
  *   { type: 'stream_end',   messageId: '...' }        — streaming response complete
  *   { type: 'tool_start',   messageId, toolUseId, tool, input } — tool invocation
- *   { type: 'tool_result',  toolUseId, result, truncated }    — tool execution result
+ *   { type: 'tool_result',  toolUseId, result, truncated, images? }  — tool result (images: [{mediaType, data}])
  *   { type: 'result',       ... }                     — query stats
  *   { type: 'status',       connected: true }         — connection status
  *   { type: 'claude_ready' }                          — Claude Code ready for input

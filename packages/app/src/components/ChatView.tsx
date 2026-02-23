@@ -175,6 +175,7 @@ function ActivityEntry({
   };
 
   const hasResult = !!message.toolResult;
+  const imageCount = message.toolResultImages?.length || 0;
 
   return (
     <TouchableOpacity
@@ -185,6 +186,9 @@ function ActivityEntry({
     >
       <Text style={styles.activityEntryIcon}>{hasResult ? ICON_CHECK : ICON_CHEVRON_RIGHT}</Text>
       <Text style={styles.activityEntryTool}>{message.tool || 'Thinking'}</Text>
+      {imageCount > 0 && (
+        <Text style={styles.activityImageBadge}>{imageCount === 1 ? '1 image' : `${imageCount} images`}</Text>
+      )}
       <Text style={styles.activityEntryPreview} numberOfLines={1}>
         {hasResult ? (message.toolResult || '').slice(0, 60) : (message.content || '').slice(0, 40)}
       </Text>
@@ -263,13 +267,15 @@ function ActivityGroup({
 
 // -- Tool detail modal --
 
-function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTruncated, onClose }: {
+function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTruncated, toolResultImages, onClose, onImagePress }: {
   visible: boolean;
   toolName: string;
   content: string;
   toolResult?: string;
   toolResultTruncated?: boolean;
+  toolResultImages?: { mediaType: string; data: string }[];
   onClose: () => void;
+  onImagePress: (uri: string) => void;
 }) {
   return (
     <Modal
@@ -285,6 +291,8 @@ function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTru
             <TouchableOpacity
               onPress={onClose}
               style={styles.toolModalCloseButton}
+              accessibilityRole="button"
+              accessibilityLabel="Close tool details"
             >
               <Text style={styles.toolModalCloseIcon}>{ICON_CLOSE}</Text>
             </TouchableOpacity>
@@ -296,9 +304,32 @@ function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTru
                 <Text selectable style={styles.toolModalContent}>{content}</Text>
               </>
             ) : null}
+            {toolResultImages && toolResultImages.length > 0 ? (
+              <>
+                <Text style={[styles.toolModalSectionLabel, content ? { marginTop: 12 } : undefined]}>
+                  {toolResultImages.length === 1 ? 'Image' : `Images (${toolResultImages.length})`}
+                </Text>
+                <View style={styles.toolImageGrid}>
+                  {toolResultImages.map((img, i) => {
+                    const uri = `data:${img.mediaType};base64,${img.data}`;
+                    return (
+                      <TouchableOpacity
+                        key={i}
+                        onPress={() => onImagePress(uri)}
+                        activeOpacity={0.8}
+                        accessibilityRole="button"
+                        accessibilityLabel={`View image ${i + 1} of ${toolResultImages.length}`}
+                      >
+                        <Image source={{ uri }} style={styles.toolImageThumb} resizeMode="cover" />
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </>
+            ) : null}
             {toolResult != null ? (
               <>
-                <Text style={[styles.toolModalSectionLabel, content ? { marginTop: 12 } : undefined]}>Result{toolResultTruncated ? ' (truncated)' : ''}</Text>
+                <Text style={[styles.toolModalSectionLabel, (content || toolResultImages?.length) ? { marginTop: 12 } : undefined]}>Result{toolResultTruncated ? ' (truncated)' : ''}</Text>
                 <Text selectable style={styles.toolModalContent}>{toolResult}</Text>
               </>
             ) : null}
@@ -316,7 +347,7 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpe
   isSelected: boolean;
   isSelecting: boolean;
   onToggleSelection: () => void;
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[]) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const longPressedRef = useRef(false);
@@ -334,7 +365,7 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpe
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      onOpenDetail(message.tool || 'Unknown', content, message.toolResult, message.toolResultTruncated);
+      onOpenDetail(message.tool || 'Unknown', content, message.toolResult, message.toolResultTruncated, message.toolResultImages);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -561,7 +592,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   isSelecting: boolean;
   onLongPress: () => void;
   onPress: () => void;
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[]) => void;
   onImagePress?: (uri: string) => void;
 }) {
   const longPressedRef = useRef(false);
@@ -775,7 +806,7 @@ export function ChatView({
 }: ChatViewProps) {
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean } | null>(null);
+  const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: { mediaType: string; data: string }[] } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
   // Pause auto-scroll when an unanswered prompt is visible — user needs to read context
@@ -796,8 +827,8 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef and isSelectingRef are stable refs
   }, [isPlanPending]);
 
-  const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean) => {
-    setToolDetail({ toolName, content, toolResult, toolResultTruncated });
+  const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[]) => {
+    setToolDetail({ toolName, content, toolResult, toolResultTruncated, toolResultImages });
   };
 
   const displayGroups = useMemo(
@@ -920,7 +951,9 @@ export function ChatView({
         content={toolDetail?.content || ''}
         toolResult={toolDetail?.toolResult}
         toolResultTruncated={toolDetail?.toolResultTruncated}
+        toolResultImages={toolDetail?.toolResultImages}
         onClose={() => setToolDetail(null)}
+        onImagePress={(uri) => { setToolDetail(null); setViewerUri(uri); }}
       />
       <ImageViewer uri={viewerUri} onClose={() => setViewerUri(null)} />
     </View>
@@ -1183,6 +1216,12 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
+  activityImageBadge: {
+    color: COLORS.accentBlue,
+    fontSize: 10,
+    fontWeight: '600',
+    marginRight: 4,
+  },
   toolBubble: {
     backgroundColor: COLORS.backgroundTertiary,
     padding: 8,
@@ -1279,6 +1318,17 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginBottom: 6,
+  },
+  toolImageGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  toolImageThumb: {
+    width: 140,
+    height: 100,
+    borderRadius: 8,
+    backgroundColor: COLORS.backgroundCard,
   },
   messageText: {
     color: COLORS.textChatMessage,

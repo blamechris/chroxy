@@ -105,11 +105,11 @@ const EVENT_MAP = {
     }],
   }),
 
-  tool_result: (data) => ({
-    messages: [{
-      msg: { type: 'tool_result', toolUseId: data.toolUseId, result: data.result, truncated: data.truncated },
-    }],
-  }),
+  tool_result: (data) => {
+    const msg = { type: 'tool_result', toolUseId: data.toolUseId, result: data.result, truncated: data.truncated }
+    if (data.images?.length) msg.images = data.images
+    return { messages: [{ msg }] }
+  },
 
   agent_spawned: (data) => ({
     messages: [{
