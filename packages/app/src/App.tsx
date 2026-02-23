@@ -34,13 +34,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    SecureStore.getItemAsync(ONBOARDING_KEY).then((val) => {
-      setOnboardingDone(val === 'true');
-    });
+    SecureStore.getItemAsync(ONBOARDING_KEY)
+      .then((val) => {
+        setOnboardingDone(val === 'true');
+      })
+      .catch(() => {
+        setOnboardingDone(true);
+      });
   }, []);
 
   const handleOnboardingComplete = useCallback(() => {
-    SecureStore.setItemAsync(ONBOARDING_KEY, 'true');
+    SecureStore.setItemAsync(ONBOARDING_KEY, 'true').catch(() => {});
     setOnboardingDone(true);
   }, []);
 

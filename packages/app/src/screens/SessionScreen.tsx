@@ -235,14 +235,10 @@ export function SessionScreen() {
     [messages, searchMatchIds],
   );
 
-  // Clamp match index when matches shrink (avoid stale index pointing past end).
-  // Does NOT reset to 0 on growth — prevents highlight jumping during streaming.
+  // Reset match index when the query changes (more reliable than .length which misses same-count changes)
   useEffect(() => {
-    setCurrentMatchIndex((prev) => {
-      if (searchMatchArray.length === 0) return 0;
-      return prev >= searchMatchArray.length ? searchMatchArray.length - 1 : prev;
-    });
-  }, [searchMatchArray.length]);
+    setCurrentMatchIndex(0);
+  }, [searchQuery]);
 
   const currentMatchId = searchMatchArray.length > 0 ? searchMatchArray[currentMatchIndex] ?? null : null;
 
@@ -605,12 +601,12 @@ export function SessionScreen() {
           <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)}>
             <Text style={styles.diffButtonText}>{ICON_DIFF}</Text>
           </TouchableOpacity>
-          {viewMode === 'chat' && (
+          {(viewMode === 'chat' || (layout.isSplitView && viewMode !== 'files')) && (
             <TouchableOpacity style={styles.diffButton} onPress={handleSearchOpen} accessibilityRole="button" accessibilityLabel="Search messages">
               <Text style={styles.diffButtonText}>{ICON_SEARCH}</Text>
             </TouchableOpacity>
           )}
-          {viewMode === 'terminal' && (
+          {(viewMode === 'terminal' || (layout.isSplitView && hasTerminal && viewMode !== 'files')) && (
             <TouchableOpacity style={styles.diffButton} onPress={handleExportTerminal} accessibilityRole="button" accessibilityLabel="Export terminal output">
               <Text style={styles.diffButtonText}>{ICON_EXPORT}</Text>
             </TouchableOpacity>
@@ -643,13 +639,13 @@ export function SessionScreen() {
               {currentMatchIndex + 1}/{searchMatchArray.length}
             </Text>
           )}
-          <TouchableOpacity onPress={handleSearchPrev} style={styles.searchNavButton} accessibilityLabel="Previous match">
+          <TouchableOpacity onPress={handleSearchPrev} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Previous match">
             <Text style={styles.searchNavText}>{ICON_ARROW_UP}</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={handleSearchNext} style={styles.searchNavButton} accessibilityLabel="Next match">
+          <TouchableOpacity onPress={handleSearchNext} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Next match">
             <Text style={styles.searchNavText}>{ICON_ARROW_DOWN}</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={handleSearchClose} style={styles.searchNavButton} accessibilityLabel="Close search">
+          <TouchableOpacity onPress={handleSearchClose} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Close search">
             <Text style={styles.searchNavText}>{ICON_CLOSE}</Text>
           </TouchableOpacity>
         </View>
