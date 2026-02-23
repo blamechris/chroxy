@@ -236,14 +236,16 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
  *   { type: 'pong' }                                    — heartbeat response
  *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
+ *   { type: 'token_rotated', newToken, expiresAt }     — API token was rotated, client should update stored token
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
  */
 export class WsServer {
-  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass } = {}) {
+  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager } = {}) {
     this.port = port
     this.apiToken = apiToken
+    this._tokenManager = tokenManager || null
     this._maxPayload = maxPayload || 10 * 1024 * 1024 // default 10MB (supports image/doc attachments)
     this.ptyManager = ptyManager || null
     this.outputParser = outputParser || null
@@ -289,10 +291,31 @@ export class WsServer {
     if (process.env.NODE_ENV !== 'test') {
       checkLatestVersion(packageJson.name).then((v) => { this._latestVersion = v }).catch(() => {})
     }
+
+    // Wire TokenManager rotation events — broadcast new token to all clients
+    if (this._tokenManager) {
+      this._tokenManager.on('token_rotated', ({ newToken, expiresAt }) => {
+        // Update our reference so subsequent auth checks use the new token
+        this.apiToken = newToken
+        this._broadcast({ type: 'token_rotated', newToken, expiresAt })
+        console.log(`[ws] Broadcasted token_rotated to all clients`)
+      })
+    }
   }
 
   _formatStatusLog(status) {
     return `[ws] Broadcasting status_update: $${status.cost} | ${status.model} | msgs:${status.messageCount} | ${status.contextTokens} (${status.contextPercent}%)`
+  }
+
+  /**
+   * Check whether a token is valid. Delegates to TokenManager (supports
+   * rotated + grace-period tokens) when available, otherwise falls back
+   * to constant-time comparison against the static apiToken.
+   */
+  _isTokenValid(token) {
+    if (!token) return false
+    if (this._tokenManager) return this._tokenManager.validate(token)
+    return safeTokenCompare(token, this.apiToken)
   }
 
   /**
@@ -303,7 +326,7 @@ export class WsServer {
     if (!this.authRequired) return true
     const authHeader = req.headers['authorization'] || ''
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
-    if (!token || !safeTokenCompare(token, this.apiToken)) {
+    if (!token || !this._isTokenValid(token)) {
       res.writeHead(403, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'unauthorized' }))
       return false
@@ -383,7 +406,7 @@ export class WsServer {
           const bearerToken = (req.headers['authorization'] || '').startsWith('Bearer ')
             ? req.headers['authorization'].slice(7) : null
           const token = queryToken || bearerToken
-          if (!token || !safeTokenCompare(token, this.apiToken)) {
+          if (!token || !this._isTokenValid(token)) {
             res.writeHead(403, { 'Content-Type': 'text/html' })
             res.end('<h1>403 Forbidden</h1><p>Invalid or missing token. Append ?token=YOUR_TOKEN to the URL.</p>')
             return
@@ -755,7 +778,7 @@ export class WsServer {
         return
       }
 
-      if (!this.authRequired || safeTokenCompare(msg.token, this.apiToken)) {
+      if (!this.authRequired || this._isTokenValid(msg.token)) {
         client.authenticated = true
         client.authTime = Date.now()
         // Clear rate limit on successful auth

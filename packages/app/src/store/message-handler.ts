@@ -1564,6 +1564,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       break;
     }
+
+    case 'token_rotated': {
+      const newToken = msg.newToken;
+      if (typeof newToken === 'string' && newToken.length > 0) {
+        // Update in-memory token so reconnects use the new one
+        set({ apiToken: newToken });
+        // Persist to secure storage
+        const wsUrl = get().wsUrl;
+        if (wsUrl) {
+          saveConnection(wsUrl, newToken).catch(() => {});
+        }
+        console.log(`[ws] Token rotated, updated stored token`);
+      }
+      break;
+    }
   }
 }
 

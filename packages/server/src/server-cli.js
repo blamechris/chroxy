@@ -4,12 +4,14 @@ import { getTunnel, parseTunnelArg } from './tunnel/index.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { wireTunnelEvents } from './tunnel-events.js'
 import { PushManager } from './push.js'
-import { hostname } from 'os'
-import { readFileSync } from 'fs'
+import { hostname, homedir } from 'os'
+import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import qrcode from 'qrcode-terminal'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
+import { TokenManager } from './token-manager.js'
+import { writeFileRestricted } from './platform.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -153,8 +155,25 @@ export async function startCliServer(config) {
     }
   })
 
-  // 3. Create push notification manager and WebSocket server
+  // 3. Create push notification manager, token manager, and WebSocket server
   const pushManager = new PushManager()
+
+  const configFile = join(homedir(), '.chroxy', 'config.json')
+  const tokenManager = new TokenManager({
+    token: API_TOKEN,
+    tokenExpiry: config.tokenExpiry || null,
+    onPersist: (newToken) => {
+      try {
+        const raw = existsSync(configFile) ? readFileSync(configFile, 'utf-8') : '{}'
+        const cfg = JSON.parse(raw)
+        cfg.apiToken = newToken
+        writeFileRestricted(configFile, JSON.stringify(cfg, null, 2))
+      } catch (err) {
+        console.error(`[token-manager] Failed to persist token: ${err.message}`)
+      }
+    },
+  })
+  tokenManager.start()
 
   wsServer = new WsServer({
     port: PORT,
@@ -165,6 +184,7 @@ export async function startCliServer(config) {
     pushManager,
     maxPayload: config.maxPayload,
     noEncrypt: config.noEncrypt,
+    tokenManager,
   })
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
@@ -302,6 +322,7 @@ export async function startCliServer(config) {
     if (bonjourInstance) {
       try { bonjourInstance.destroy?.() } catch {}
     }
+    tokenManager.destroy()
     sessionManager.destroyAll()
     wsServer.close()
     if (tunnel) await tunnel.stop()
