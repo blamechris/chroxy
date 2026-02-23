@@ -8,9 +8,8 @@ import { readdir, readFile, stat, realpath } from 'fs/promises'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve, normalize, extname } from 'path'
 import { homedir } from 'os'
-import { timingSafeEqual } from 'crypto'
 import { ALLOWED_MODEL_IDS, toShortModelId, getModels } from './models.js'
-import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from './crypto.js'
+import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from './crypto.js'
 import { parseDiff } from './diff-parser.js'
 import { ClientMessageSchema, AuthSchema, KeyExchangeSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
 import { EventNormalizer } from './event-normalizer.js'
@@ -64,28 +63,6 @@ function validateAttachments(attachments) {
   return null
 }
 
-/** Constant-time string comparison for auth tokens */
-function safeTokenCompare(a, b) {
-  let valid = true
-  if (typeof a !== 'string' || typeof b !== 'string') {
-    valid = false
-    a = ''
-    b = ''
-  }
-
-  const bufA = Buffer.from(a)
-  const bufB = Buffer.from(b)
-  const maxLen = Math.max(bufA.length, bufB.length)
-
-  // Always compare buffers of equal length to avoid leaking length via timing
-  const paddedA = Buffer.alloc(maxLen)
-  const paddedB = Buffer.alloc(maxLen)
-  bufA.copy(paddedA)
-  bufB.copy(paddedB)
-
-  const equal = maxLen === 0 ? false : timingSafeEqual(paddedA, paddedB)
-  return valid && equal && bufA.length === bufB.length
-}
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)

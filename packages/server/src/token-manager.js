@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { EventEmitter } from 'events'
+import { safeTokenCompare } from './crypto.js'
 
 /**
  * Manages token lifecycle with optional rotation and expiry.
@@ -97,8 +98,8 @@ export class TokenManager extends EventEmitter {
    */
   validate(token) {
     if (!token) return false
-    if (token === this._currentToken) return true
-    if (this._previousToken && token === this._previousToken) return true
+    if (safeTokenCompare(token, this._currentToken)) return true
+    if (this._previousToken && safeTokenCompare(token, this._previousToken)) return true
     return false
   }
 
