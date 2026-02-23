@@ -26,6 +26,7 @@ import { SettingsBar } from '../components/SettingsBar';
 import { InputBar } from '../components/InputBar';
 import { FileBrowser } from '../components/FileBrowser';
 import { DiffViewer } from '../components/DiffViewer';
+import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
@@ -652,6 +653,9 @@ export function SessionScreen() {
           </View>
         </View>
       ))}
+
+      {/* Background session notifications */}
+      <SessionNotificationBanner />
 
       {/* Content area */}
       {viewMode === 'chat' ? (

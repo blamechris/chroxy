@@ -35,7 +35,7 @@ export const ResizeSchema = z.object({
   type: z.literal('resize'),
   cols: z.number().int().min(1),
   rows: z.number().int().min(1),
-})
+}).passthrough()
 
 export const ModeSchema = z.object({
   type: z.literal('mode'),
@@ -44,18 +44,18 @@ export const ModeSchema = z.object({
 
 export const InterruptSchema = z.object({
   type: z.literal('interrupt'),
-})
+}).passthrough()
 
 export const SetModelSchema = z.object({
   type: z.literal('set_model'),
   model: z.string(),
-})
+}).passthrough()
 
 export const SetPermissionModeSchema = z.object({
   type: z.literal('set_permission_mode'),
   mode: z.enum(['approve', 'auto', 'plan', 'acceptEdits']),
   confirmed: z.boolean().optional(),
-})
+}).passthrough()
 
 export const PermissionResponseSchema = z.object({
   type: z.literal('permission_response'),
@@ -122,20 +122,20 @@ export const ListDirectorySchema = z.object({
 export const BrowseFilesSchema = z.object({
   type: z.literal('browse_files'),
   path: z.string().nullable().optional(),
-})
+}).passthrough()
 
 export const ReadFileSchema = z.object({
   type: z.literal('read_file'),
   path: z.string(),
-})
+}).passthrough()
 
 export const ListSlashCommandsSchema = z.object({
   type: z.literal('list_slash_commands'),
-})
+}).passthrough()
 
 export const ListAgentsSchema = z.object({
   type: z.literal('list_agents'),
-})
+}).passthrough()
 
 export const RequestFullHistorySchema = z.object({
   type: z.literal('request_full_history'),
@@ -158,7 +158,7 @@ export const RequestSessionContextSchema = z.object({
 
 export const GetDiffSchema = z.object({
   type: z.literal('get_diff'),
-})
+}).passthrough()
 
 // Encrypted envelope — validated separately (before decryption)
 export const EncryptedEnvelopeSchema = z.object({

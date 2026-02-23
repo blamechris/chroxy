@@ -1900,7 +1900,7 @@ describe('user_question_response forwarding (multi-session)', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -2064,7 +2064,7 @@ describe('background session sync (_broadcastToSession)', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -2313,7 +2313,7 @@ describe('agent idle/busy notifications', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -2482,7 +2482,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -2880,7 +2880,7 @@ describe('primary client tracking', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -4367,7 +4367,7 @@ describe('permission/question routing to originating session', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -4591,7 +4591,7 @@ describe('request_session_context error paths', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -6545,7 +6545,7 @@ function createHistoryMockManager({ history = [], truncated = false, sessions = 
   manager.listSessions = () => {
     const list = []
     for (const [id, entry] of sessionsMap) {
-      list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type })
+      list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type })
     }
     return list
   }
@@ -8135,6 +8135,187 @@ describe('localhost bypass uses socketIp not proxy headers (#755)', () => {
     // Localhost bypass should disable encryption even when encryption is enabled
     assert.equal(authOk.encryption, 'disabled',
       'Encryption should be disabled for localhost connections via socketIp bypass')
+
+    ws.close()
+  })
+})
+
+describe('session-targeted routing (#611)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  function createMockSessionManager(sessions = []) {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+
+    for (const sessionData of sessions) {
+      const mockSession = createMockSession()
+      mockSession.cwd = sessionData.cwd
+      sessionsMap.set(sessionData.id, {
+        session: mockSession,
+        name: sessionData.name,
+        cwd: sessionData.cwd,
+        type: sessionData.type || 'cli',
+        isBusy: false,
+      })
+    }
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.getFullHistoryAsync = async () => []
+    manager.getSessionContext = async () => null
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    })
+    return { manager, sessionsMap }
+  }
+
+  it('routes input to msg.sessionId instead of activeSessionId', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'session-a', name: 'A', cwd: '/tmp/a' },
+      { id: 'session-b', name: 'B', cwd: '/tmp/b' },
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    // Client's activeSessionId is 'session-a' (set by auth_ok)
+    // Send input targeted at session-b via msg.sessionId
+    send(ws, { type: 'input', data: 'hello session b', sessionId: 'session-b' })
+    await new Promise(r => setTimeout(r, 100))
+
+    const entryA = sessionsMap.get('session-a')
+    const entryB = sessionsMap.get('session-b')
+    assert.equal(entryA.session.sendMessage.callCount, 0, 'session-a should NOT receive input')
+    assert.equal(entryB.session.sendMessage.callCount, 1, 'session-b should receive input')
+    assert.equal(entryB.session.sendMessage.lastCall[0], 'hello session b')
+
+    ws.close()
+  })
+
+  it('falls back to activeSessionId when msg.sessionId is absent', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'session-a', name: 'A', cwd: '/tmp/a' },
+      { id: 'session-b', name: 'B', cwd: '/tmp/b' },
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    // No sessionId → should use activeSessionId (session-a from auth_ok)
+    send(ws, { type: 'input', data: 'hello default' })
+    await new Promise(r => setTimeout(r, 100))
+
+    const entryA = sessionsMap.get('session-a')
+    const entryB = sessionsMap.get('session-b')
+    assert.equal(entryA.session.sendMessage.callCount, 1, 'session-a (active) should receive input')
+    assert.equal(entryB.session.sendMessage.callCount, 0, 'session-b should NOT receive input')
+
+    ws.close()
+  })
+
+  it('routes interrupt to msg.sessionId', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'session-a', name: 'A', cwd: '/tmp/a' },
+      { id: 'session-b', name: 'B', cwd: '/tmp/b' },
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    send(ws, { type: 'interrupt', sessionId: 'session-b' })
+    await new Promise(r => setTimeout(r, 100))
+
+    const entryA = sessionsMap.get('session-a')
+    const entryB = sessionsMap.get('session-b')
+    assert.equal(entryA.session.interrupt.callCount, 0, 'session-a should NOT be interrupted')
+    assert.equal(entryB.session.interrupt.callCount, 1, 'session-b should be interrupted')
+
+    ws.close()
+  })
+
+  it('routes set_model to msg.sessionId', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'session-a', name: 'A', cwd: '/tmp/a' },
+      { id: 'session-b', name: 'B', cwd: '/tmp/b' },
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    send(ws, { type: 'set_model', model: 'sonnet', sessionId: 'session-b' })
+    await new Promise(r => setTimeout(r, 100))
+
+    const entryA = sessionsMap.get('session-a')
+    const entryB = sessionsMap.get('session-b')
+    assert.equal(entryA.session.setModel.callCount, 0, 'session-a should NOT have model changed')
+    assert.equal(entryB.session.setModel.callCount, 1, 'session-b should have model changed')
+    assert.equal(entryB.session.setModel.lastCall[0], 'sonnet')
+
+    ws.close()
+  })
+
+  it('routes set_permission_mode to msg.sessionId', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'session-a', name: 'A', cwd: '/tmp/a' },
+      { id: 'session-b', name: 'B', cwd: '/tmp/b' },
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws } = await createClient(port, true)
+
+    send(ws, { type: 'set_permission_mode', mode: 'plan', sessionId: 'session-b' })
+    await new Promise(r => setTimeout(r, 100))
+
+    const entryA = sessionsMap.get('session-a')
+    const entryB = sessionsMap.get('session-b')
+    assert.equal(entryA.session.setPermissionMode.callCount, 0, 'session-a should NOT have permission mode changed')
+    assert.equal(entryB.session.setPermissionMode.callCount, 1, 'session-b should have permission mode changed')
+    assert.equal(entryB.session.setPermissionMode.lastCall[0], 'plan')
 
     ws.close()
   })

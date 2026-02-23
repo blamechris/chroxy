@@ -878,9 +878,13 @@ export class WsServer {
       case 'input': {
         const text = msg.data
         let attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
-        const entry = this.sessionManager.getSession(client.activeSessionId)
+        const targetSessionId = msg.sessionId || client.activeSessionId
+        const entry = this.sessionManager.getSession(targetSessionId)
         if (!entry) {
-          this._send(ws, { type: 'session_error', message: 'No active session' })
+          const message = msg.sessionId
+            ? `Session not found: ${msg.sessionId}`
+            : 'No active session'
+          this._send(ws, { type: 'session_error', message })
           break
         }
 
@@ -901,7 +905,7 @@ export class WsServer {
           }
           if (typeof text !== 'string') break
           if (text && text !== '\r' && text !== '\n') {
-            console.log(`[ws] PTY input from ${client.id} to session ${client.activeSessionId}: "${text.replace(/[\r\n]/g, '\\n').slice(0, 80)}"`)
+            console.log(`[ws] PTY input from ${client.id} to session ${targetSessionId}: "${text.replace(/[\r\n]/g, '\\n').slice(0, 80)}"`)
           }
           entry.session.expectEcho?.(text)
           entry.session.writeRaw(text)
@@ -910,22 +914,23 @@ export class WsServer {
           if ((!text || !text.trim()) && !attachments?.length) break
           const trimmed = text?.trim() || ''
           const attCount = attachments?.length || 0
-          console.log(`[ws] Message from ${client.id} to session ${client.activeSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
+          console.log(`[ws] Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
           // Record user input in history (without base64 blobs)
           const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
-          this.sessionManager.recordUserInput(client.activeSessionId, historyText)
+          this.sessionManager.recordUserInput(targetSessionId, historyText)
           entry.session.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
         }
 
         // Track last-writer-wins primary for this session
-        this._updatePrimary(client.activeSessionId, client.id)
+        this._updatePrimary(targetSessionId, client.id)
         break
       }
 
       case 'interrupt': {
-        const entry = this.sessionManager.getSession(client.activeSessionId)
+        const interruptSessionId = msg.sessionId || client.activeSessionId
+        const entry = this.sessionManager.getSession(interruptSessionId)
         if (entry) {
-          console.log(`[ws] Interrupt from ${client.id} to session ${client.activeSessionId}`)
+          console.log(`[ws] Interrupt from ${client.id} to session ${interruptSessionId}`)
           entry.session.interrupt()
         }
         break
@@ -936,15 +941,16 @@ export class WsServer {
           typeof msg.model === 'string' &&
           ALLOWED_MODEL_IDS.has(msg.model)
         ) {
-          const entry = this.sessionManager.getSession(client.activeSessionId)
+          const modelSessionId = msg.sessionId || client.activeSessionId
+          const entry = this.sessionManager.getSession(modelSessionId)
           if (entry) {
             if (entry.type === 'pty') {
-              console.warn(`[ws] Rejected model change on PTY session ${client.activeSessionId} from ${client.id}`)
+              console.warn(`[ws] Rejected model change on PTY session ${modelSessionId} from ${client.id}`)
               this._send(ws, { type: 'session_error', message: 'Cannot change model on PTY sessions' })
             } else {
-              console.log(`[ws] Model change from ${client.id} on session ${client.activeSessionId}: ${msg.model}`)
+              console.log(`[ws] Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
               entry.session.setModel(msg.model)
-              this._broadcastToSession(client.activeSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+              this._broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
             }
           }
         } else {
@@ -958,10 +964,11 @@ export class WsServer {
           typeof msg.mode === 'string' &&
           ALLOWED_PERMISSION_MODE_IDS.has(msg.mode)
         ) {
-          const entry = this.sessionManager.getSession(client.activeSessionId)
+          const permModeSessionId = msg.sessionId || client.activeSessionId
+          const entry = this.sessionManager.getSession(permModeSessionId)
           if (entry) {
             if (entry.type === 'pty') {
-              console.warn(`[ws] Rejected permission mode change on PTY session ${client.activeSessionId} from ${client.id}`)
+              console.warn(`[ws] Rejected permission mode change on PTY session ${permModeSessionId} from ${client.id}`)
               this._send(ws, { type: 'session_error', message: 'Cannot change permission mode on PTY sessions' })
             } else if (msg.mode === 'auto' && !msg.confirmed) {
               console.log(`[ws] Auto mode requested by ${client.id}, awaiting confirmation`)
@@ -974,10 +981,10 @@ export class WsServer {
               if (msg.mode === 'auto') {
                 console.log(`[ws] Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()}`)
               } else {
-                console.log(`[ws] Permission mode change from ${client.id} on session ${client.activeSessionId}: ${msg.mode}`)
+                console.log(`[ws] Permission mode change from ${client.id} on session ${permModeSessionId}: ${msg.mode}`)
               }
               entry.session.setPermissionMode(msg.mode)
-              this._broadcastToSession(client.activeSessionId, { type: 'permission_mode_changed', mode: msg.mode })
+              this._broadcastToSession(permModeSessionId, { type: 'permission_mode_changed', mode: msg.mode })
             }
           }
         } else {
@@ -1186,7 +1193,8 @@ export class WsServer {
         const cols = msg.cols
         const rows = msg.rows
         if (!Number.isInteger(cols) || cols < 1 || !Number.isInteger(rows) || rows < 1) break
-        const entry = this.sessionManager.getSession(client.activeSessionId)
+        const resizeSessionId = msg.sessionId || client.activeSessionId
+        const entry = this.sessionManager.getSession(resizeSessionId)
         if (entry && entry.type === 'pty' && entry.session.resize) {
           entry.session.resize(cols, rows)
         }
@@ -1216,41 +1224,49 @@ export class WsServer {
         break
 
       case 'browse_files': {
-        const browseEntry = this.sessionManager.getSession(client.activeSessionId)
+        const browseSessionId = msg.sessionId || client.activeSessionId
+        const browseEntry = this.sessionManager.getSession(browseSessionId)
         this._browseFiles(ws, msg.path, browseEntry?.cwd || null)
         break
       }
 
       case 'read_file': {
-        const readEntry = this.sessionManager.getSession(client.activeSessionId)
+        const readSessionId = msg.sessionId || client.activeSessionId
+        const readEntry = this.sessionManager.getSession(readSessionId)
         this._readFile(ws, msg.path, readEntry?.cwd || null)
         break
       }
 
       case 'get_diff': {
-        const diffEntry = this.sessionManager.getSession(client.activeSessionId)
+        const diffSessionId = msg.sessionId || client.activeSessionId
+        const diffEntry = this.sessionManager.getSession(diffSessionId)
         this._getDiff(ws, msg.base, diffEntry?.cwd || null)
         break
       }
 
       case 'list_slash_commands': {
-        const entry = this.sessionManager.getSession(client.activeSessionId)
+        const cmdSessionId = msg.sessionId || client.activeSessionId
+        const entry = this.sessionManager.getSession(cmdSessionId)
         const cwd = entry?.cwd || null
-        this._listSlashCommands(ws, cwd, client.activeSessionId)
+        this._listSlashCommands(ws, cwd, cmdSessionId)
         break
       }
 
       case 'list_agents': {
-        const entry = this.sessionManager.getSession(client.activeSessionId)
+        const agentSessionId = msg.sessionId || client.activeSessionId
+        const entry = this.sessionManager.getSession(agentSessionId)
         const cwd = entry?.cwd || null
-        this._listAgents(ws, cwd, client.activeSessionId)
+        this._listAgents(ws, cwd, agentSessionId)
         break
       }
 
       case 'request_full_history': {
         const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
         if (!targetId || !this.sessionManager.getSession(targetId)) {
-          this._send(ws, { type: 'session_error', message: 'No active session' })
+          const message = msg.sessionId
+            ? `Session not found: ${msg.sessionId}`
+            : 'No active session'
+          this._send(ws, { type: 'session_error', message })
           break
         }
         const fullHistory = await this.sessionManager.getFullHistoryAsync(targetId)
