@@ -270,13 +270,15 @@ export class WsServer {
     }
 
     // Wire TokenManager rotation events — broadcast new token to all clients
+    this._tokenRotatedHandler = null
     if (this._tokenManager) {
-      this._tokenManager.on('token_rotated', ({ newToken, expiresAt }) => {
+      this._tokenRotatedHandler = ({ newToken, expiresAt }) => {
         // Update our reference so subsequent auth checks use the new token
         this.apiToken = newToken
         this._broadcast({ type: 'token_rotated', newToken, expiresAt })
         console.log(`[ws] Broadcasted token_rotated to all clients`)
-      })
+      }
+      this._tokenManager.on('token_rotated', this._tokenRotatedHandler)
     }
   }
 
@@ -2788,6 +2790,12 @@ export class WsServer {
 
   /** Graceful shutdown */
   close() {
+    // Remove TokenManager listener to prevent post-shutdown broadcasts
+    if (this._tokenManager && this._tokenRotatedHandler) {
+      this._tokenManager.off('token_rotated', this._tokenRotatedHandler)
+      this._tokenRotatedHandler = null
+    }
+
     if (this._pingInterval) {
       clearInterval(this._pingInterval)
       this._pingInterval = null

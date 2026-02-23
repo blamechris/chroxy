@@ -69,7 +69,7 @@ export class TokenManager extends EventEmitter {
     super()
     this._currentToken = token
     this._previousToken = null
-    this._graceMs = graceMs || DEFAULT_GRACE_MS
+    this._graceMs = graceMs ?? DEFAULT_GRACE_MS
     this._onPersist = onPersist || null
     this._rotationTimer = null
     this._graceTimer = null
