@@ -310,7 +310,7 @@ gh pr comment ${PR_NUM} --body "$(cat <<'EOF'
 |---|---------|---------|-----------|
 | 1 | Comment 1 summary | FIX | `abc1234` |
 | 2 | Comment 2 summary | FALSE POSITIVE | Evidence: [brief] |
-| 3 | Comment 3 summary | FOLLOW-UP | [#456](${ISSUE_URL}) |
+| 3 | Comment 3 summary | FOLLOW-UP | #456 |
 
 **Total:** X comments addressed
 - Fixed: Y (commit hashes above)
