@@ -18,7 +18,6 @@ import { MessageTransformPipeline } from './message-transform.js'
  *   stream_start { messageId }
  *   stream_delta { messageId, delta }
  *   stream_end   { messageId }
- *   message      { type, content, timestamp }
  *   tool_start   { messageId, toolUseId, tool, input }
  *   tool_result  { toolUseId, result, truncated }
  *   result       { sessionId, cost, duration, usage }
@@ -72,6 +71,10 @@ export class CodexSession extends EventEmitter {
     this._streamedText = ''
   }
 
+  get sessionId() {
+    return this._threadId
+  }
+
   get resumeSessionId() {
     return this._threadId
   }
@@ -102,6 +105,11 @@ export class CodexSession extends EventEmitter {
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
       return
+    }
+
+    // Codex CLI does not support attachments — warn if any are provided
+    if (attachments && attachments.length > 0) {
+      console.warn(`[codex-session] Attachments not supported by Codex CLI (${attachments.length} ignored)`)
     }
 
     // Apply message transforms if configured
@@ -270,12 +278,12 @@ export class CodexSession extends EventEmitter {
    *   thread.started                    → capture threadId for resume
    *   turn.started                      → (internal)
    *   item.started  (agent_message)     → stream_start
-   *   item.completed (agent_message)    → stream_delta + stream_end
+   *   item.completed (agent_message)    → stream_delta
    *   item.started  (command_execution) → tool_start (Bash)
    *   item.completed (command_execution)→ tool_result
    *   item.started  (file_change)       → tool_start (Edit/Write)
    *   item.completed (file_change)      → tool_result
-   *   turn.completed                    → result
+   *   turn.completed                    → stream_end + result
    *   turn.failed / error               → error
    */
   _handleEvent(data, messageId) {
