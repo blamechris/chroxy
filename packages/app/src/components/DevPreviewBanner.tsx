@@ -17,7 +17,7 @@ export function DevPreviewBanner({ previews, onClose }: DevPreviewBannerProps) {
         <View key={preview.port} style={styles.banner}>
           <TouchableOpacity
             style={styles.linkArea}
-            onPress={() => Linking.openURL(preview.url)}
+            onPress={() => void Linking.openURL(preview.url).catch(() => {})}
           >
             <Text style={styles.icon}>{'\uD83C\uDF10'}</Text>
             <View style={styles.textArea}>
