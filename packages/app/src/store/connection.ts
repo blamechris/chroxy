@@ -94,6 +94,15 @@ import {
   drainMessageQueue,
 } from './message-handler';
 import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto';
+import {
+  loadPersistedState,
+  loadSessionMessages,
+  persistSessionMessages,
+  persistViewMode,
+  persistActiveSession,
+  persistTerminalBuffer,
+  clearPersistedState,
+} from './persistence';
 
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
@@ -239,6 +248,33 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }
     } catch {
       // Storage not available or corrupt — use defaults
+    }
+    // Load persisted session state (view mode, active session, terminal buffer)
+    try {
+      const persisted = await loadPersistedState();
+      const updates: Partial<ReturnType<typeof get>> = {};
+      if (persisted.viewMode) updates.viewMode = persisted.viewMode;
+      if (persisted.activeSessionId) updates.activeSessionId = persisted.activeSessionId;
+      if (persisted.terminalBuffer) updates.terminalBuffer = persisted.terminalBuffer;
+      if (Object.keys(updates).length > 0) set(updates);
+
+      // Load cached messages for the active session
+      if (persisted.activeSessionId) {
+        const messages = await loadSessionMessages(persisted.activeSessionId);
+        if (messages.length > 0) {
+          set((state) => ({
+            sessionStates: {
+              ...state.sessionStates,
+              [persisted.activeSessionId!]: {
+                ...createEmptySessionState(),
+                messages,
+              },
+            },
+          }));
+        }
+      }
+    } catch {
+      // Persisted state unavailable — use defaults
     }
   },
 
@@ -543,6 +579,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   forgetSession: () => {
     setLastConnectedUrl(null);
+    clearPersistedState().catch(() => {});
     set({
       messages: [],
       terminalBuffer: '',
@@ -563,6 +600,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setViewMode: (mode) => {
     const { socket } = get();
     set({ viewMode: mode });
+    persistViewMode(mode).catch(() => {});
     if (socket && socket.readyState === WebSocket.OPEN && (mode === 'chat' || mode === 'terminal')) {
       wsSend(socket, { type: 'mode', mode });
     }
@@ -966,6 +1004,31 @@ type StoreApi = {
 setStore({
   getState: useConnectionStore.getState,
   setState: useConnectionStore.setState as StoreApi['setState'],
+});
+
+// Persist session messages and active session when they change
+let _prevActiveSessionId: string | null = null;
+let _prevMessageCount = 0;
+useConnectionStore.subscribe((state) => {
+  // Persist active session ID changes
+  if (state.activeSessionId !== _prevActiveSessionId) {
+    _prevActiveSessionId = state.activeSessionId;
+    persistActiveSession(state.activeSessionId).catch(() => {});
+  }
+
+  // Persist messages for the active session (debounced internally)
+  if (state.activeSessionId) {
+    const ss = state.sessionStates[state.activeSessionId];
+    if (ss && ss.messages.length !== _prevMessageCount) {
+      _prevMessageCount = ss.messages.length;
+      persistSessionMessages(state.activeSessionId, ss.messages);
+    }
+  }
+
+  // Persist terminal buffer changes (debounced internally)
+  if (state.terminalBuffer) {
+    persistTerminalBuffer(state.terminalBuffer);
+  }
 });
 
 // Reconnect on app resume from background
