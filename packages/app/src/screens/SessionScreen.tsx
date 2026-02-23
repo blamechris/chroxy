@@ -216,7 +216,9 @@ export function SessionScreen() {
     const ids = new Set<string>();
     for (const m of messages) {
       if (m.type === 'thinking') continue;
-      if (m.content?.toLowerCase().includes(q)) ids.add(m.id);
+      if (m.content?.toLowerCase().includes(q) || m.toolResult?.toLowerCase().includes(q)) {
+        ids.add(m.id);
+      }
     }
     return ids;
   }, [messages, searchQuery]);
