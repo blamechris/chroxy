@@ -6,9 +6,10 @@ import { tmpdir } from 'node:os'
 import { SessionDB } from '../src/session-db.js'
 
 const TEST_DIR = join(tmpdir(), `chroxy-session-db-test-${Date.now()}`)
+let _testCounter = 0
 
 function testDbPath(name = 'test') {
-  return join(TEST_DIR, `${name}.db`)
+  return join(TEST_DIR, `${name}-${_testCounter++}.db`)
 }
 
 describe('SessionDB', () => {
@@ -481,17 +482,18 @@ describe('SessionDB', () => {
         assert.strictEqual(history.length, 100)
         assert.strictEqual(db.getMessageCount('perf-test'), 500)
 
-        // Performance assertions (generous bounds — should be well under these)
-        assert.ok(insertTime < 1000, `Bulk insert took ${insertTime}ms (expected <1000ms)`)
-        assert.ok(readTime < 100, `History read took ${readTime}ms (expected <100ms)`)
-
-        console.log(`[perf] 500 message bulk insert: ${insertTime}ms, 100 message read: ${readTime}ms`)
+        // Performance assertions — gated for CI stability
+        if (process.env.PERF_TESTS === '1') {
+          assert.ok(insertTime < 1000, `Bulk insert took ${insertTime}ms (expected <1000ms)`)
+          assert.ok(readTime < 100, `History read took ${readTime}ms (expected <100ms)`)
+          console.log(`[perf] 500 message bulk insert: ${insertTime}ms, 100 message read: ${readTime}ms`)
+        }
       } finally {
         db.close()
       }
     })
 
-    it('handles 5 concurrent sessions with 500 messages each', () => {
+    it('handles 5 sessions with 500 messages each (sequential bulk insert)', () => {
       const db = new SessionDB(testDbPath(`perf-multi-${Date.now()}`))
       try {
         const sessions = ['s1', 's2', 's3', 's4', 's5']
@@ -517,8 +519,10 @@ describe('SessionDB', () => {
           assert.strictEqual(db.getMessageCount(id), 500)
         }
 
-        assert.ok(totalTime < 5000, `5×500 message insert took ${totalTime}ms (expected <5000ms)`)
-        console.log(`[perf] 5 sessions × 500 messages: ${totalTime}ms`)
+        if (process.env.PERF_TESTS === '1') {
+          assert.ok(totalTime < 5000, `5×500 message insert took ${totalTime}ms (expected <5000ms)`)
+          console.log(`[perf] 5 sessions × 500 messages: ${totalTime}ms`)
+        }
       } finally {
         db.close()
       }

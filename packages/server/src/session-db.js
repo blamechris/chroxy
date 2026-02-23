@@ -5,7 +5,7 @@
  * SQLite database. Each message is individually crash-safe (WAL mode).
  *
  * Usage:
- *   const db = new SessionDB('~/.chroxy/sessions.db')
+ *   const db = new SessionDB(defaultDbPath())
  *   db.saveSession({ id: 'abc', cwd: '/home/user', name: 'Main' })
  *   db.recordMessage('abc', { type: 'message', messageType: 'response', content: 'Hello', timestamp: Date.now() })
  *   const history = db.getHistory('abc', 100)
@@ -96,8 +96,15 @@ export class SessionDB {
     // Prepare common statements for performance
     this._stmts = {
       insertSession: this._db.prepare(`
-        INSERT OR REPLACE INTO sessions (id, sdk_session_id, cwd, name, model, permission_mode, created_at, updated_at)
+        INSERT INTO sessions (id, sdk_session_id, cwd, name, model, permission_mode, created_at, updated_at)
         VALUES (@id, @sdkSessionId, @cwd, @name, @model, @permissionMode, @createdAt, @updatedAt)
+        ON CONFLICT(id) DO UPDATE SET
+          sdk_session_id = excluded.sdk_session_id,
+          cwd = excluded.cwd,
+          name = excluded.name,
+          model = excluded.model,
+          permission_mode = excluded.permission_mode,
+          updated_at = excluded.updated_at
       `),
 
       updateSession: this._db.prepare(`
@@ -147,7 +154,7 @@ export class SessionDB {
 
       updateToolResult: this._db.prepare(`
         UPDATE messages SET result = ?, metadata = json_patch(COALESCE(metadata, '{}'), ?)
-        WHERE tool_use_id = ? AND session_id = ?
+        WHERE tool_use_id = ? AND session_id = ? AND type = 'tool_start'
       `),
 
       insertResult: this._db.prepare(`
@@ -163,6 +170,10 @@ export class SessionDB {
         DELETE FROM messages WHERE session_id = ? AND id NOT IN (
           SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?
         )
+      `),
+
+      touchSession: this._db.prepare(`
+        UPDATE sessions SET updated_at = ? WHERE id = ?
       `),
     }
   }
@@ -282,19 +293,49 @@ export class SessionDB {
     })
 
     // Touch session updated_at
-    this._db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(Date.now(), sessionId)
+    this._stmts.touchSession.run(Date.now(), sessionId)
   }
 
   /**
    * Record multiple messages in a single transaction (bulk insert).
+   * Touches session updated_at once at the end rather than per-message.
    */
   recordMessages(sessionId, entries) {
     const insert = this._db.transaction((items) => {
       for (const entry of items) {
-        this.recordMessage(sessionId, entry)
+        this._insertMessageRow(sessionId, entry)
       }
+      this._stmts.touchSession.run(Date.now(), sessionId)
     })
     insert(entries)
+  }
+
+  /**
+   * Internal: insert a message row without touching session updated_at.
+   * Used by recordMessages() to batch the updated_at touch.
+   */
+  _insertMessageRow(sessionId, entry) {
+    const input = entry.input != null
+      ? (typeof entry.input === 'string' ? entry.input : JSON.stringify(entry.input))
+      : null
+    const result = entry.result != null
+      ? (typeof entry.result === 'string' ? entry.result : JSON.stringify(entry.result))
+      : null
+    const metadata = entry.metadata != null ? JSON.stringify(entry.metadata) : null
+
+    this._stmts.insertMessage.run({
+      sessionId,
+      type: entry.type,
+      messageType: entry.messageType || null,
+      messageId: entry.messageId || null,
+      content: entry.content || null,
+      tool: entry.tool || null,
+      toolUseId: entry.toolUseId || null,
+      input,
+      result,
+      metadata,
+      timestamp: entry.timestamp || Date.now(),
+    })
   }
 
   /**

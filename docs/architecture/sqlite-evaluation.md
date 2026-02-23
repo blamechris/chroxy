@@ -41,7 +41,7 @@ Session persistence uses three mechanisms:
 - **API:** `db.prepare('...').run(params)` — clean, synchronous, no callback hell.
 - **Install:** Requires `node-gyp` build step (C++ compilation). Pre-built binaries available for most platforms via `prebuild-install`.
 - **Size:** ~2MB native binary.
-- **Compatibility:** Works with Node 14+. Already proven in the ecosystem (Drizzle, Prisma adapter, Turso).
+- **Compatibility:** Supports Node 20.x, 22.x, and newer (per current `better-sqlite3` engines). Already proven in the ecosystem (Drizzle, Prisma adapter, Turso).
 
 ### sql.js
 
@@ -211,7 +211,7 @@ SQLite eliminates debounce entirely — each `INSERT` is individually crash-safe
 ### better-sqlite3 Requirements
 
 - **Build tools:** node-gyp, C++ compiler (already required for node-pty)
-- **Node.js:** 14+ (we require 22)
+- **Node.js:** 20+ (we require 22, matching better-sqlite3 v12.x engines)
 - **Platforms:** macOS, Linux, Windows (prebuilt binaries available)
 - **npm install impact:** Adds ~5s to install (downloads prebuild or compiles)
 
