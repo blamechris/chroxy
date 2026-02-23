@@ -14,7 +14,7 @@ jest.mock('@react-native-async-storage/async-storage', () => {
       clear: jest.fn(() => { Object.keys(store).forEach((k) => delete store[k]); return Promise.resolve(); }),
     },
   };
-});
+}, { virtual: true });
 
 // Mock expo-speech-recognition (native module not available in Jest)
 jest.mock('expo-speech-recognition', () => ({
