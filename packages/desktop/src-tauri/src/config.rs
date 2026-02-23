@@ -39,5 +39,11 @@ pub fn load_config() -> ChroxyConfig {
         Err(_) => return ChroxyConfig::default(),
     };
 
-    serde_json::from_str(&contents).unwrap_or_default()
+    match serde_json::from_str(&contents) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("[config] Failed to parse {}: {}", path.display(), e);
+            ChroxyConfig::default()
+        }
+    }
 }

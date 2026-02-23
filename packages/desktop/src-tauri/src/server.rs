@@ -168,26 +168,36 @@ impl ServerManager {
         *self.health_running.lock().unwrap() = false;
 
         if let Some(ref mut child) = self.child {
-            // Send SIGTERM
-            unsafe {
-                libc::kill(child.id() as i32, libc::SIGTERM);
-            }
-
-            // Wait up to 5 seconds
-            let start = Instant::now();
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) => {
-                        if start.elapsed() > Duration::from_secs(5) {
-                            // Force kill
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(100));
+            // Only send SIGTERM if the child is still running
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => {
+                    // Child already exited or cannot be inspected; skip signalling
+                }
+                Ok(None) => {
+                    // SAFETY: We just confirmed the child is still running via try_wait().
+                    // The PID (child.id()) belongs to our direct child process, which
+                    // has not yet exited, so PID reuse cannot occur here.
+                    unsafe {
+                        libc::kill(child.id() as i32, libc::SIGTERM);
                     }
-                    Err(_) => break,
+
+                    // Wait up to 5 seconds for graceful shutdown
+                    let start = Instant::now();
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(_)) => break,
+                            Ok(None) => {
+                                if start.elapsed() > Duration::from_secs(5) {
+                                    // Force kill
+                                    let _ = child.kill();
+                                    let _ = child.wait();
+                                    break;
+                                }
+                                thread::sleep(Duration::from_millis(100));
+                            }
+                            Err(_) => break,
+                        }
+                    }
                 }
             }
         }
@@ -212,7 +222,9 @@ impl ServerManager {
 
         thread::spawn(move || {
             let start = Instant::now();
-            let url = format!("http://localhost:{}/health", port);
+            // Use GET / — the canonical health check endpoint used by Cloudflare
+            // routing, app pre-connect verification, and supervisor.js
+            let url = format!("http://localhost:{}/", port);
 
             loop {
                 if !*health_running.lock().unwrap() {
@@ -274,11 +286,12 @@ impl ServerManager {
     /// Resolve the chroxy CLI entry point (cli.js).
     /// Checks: relative to binary (monorepo), then `which chroxy`, then CHROXY_SERVER_PATH env.
     fn resolve_cli_js() -> Result<PathBuf, String> {
-        // Check monorepo path relative to the Tauri binary
+        // Check monorepo path relative to the Tauri binary.
+        // Walk up to 6 parent directories to find the monorepo root.
+        // In dev: packages/desktop/src-tauri/target/debug/chroxy-desktop (5 levels up)
+        // In release: packages/desktop/src-tauri/target/release/chroxy-desktop (5 levels up)
+        // Extra level provides margin for nested build configurations.
         if let Ok(exe) = std::env::current_exe() {
-            // In dev: binary is in target/debug/, project root is ../../..
-            // In monorepo: packages/desktop/src-tauri/target/debug/chroxy-desktop
-            //   → ../../../../server/src/cli.js
             let mut dir = exe.parent().map(|p| p.to_path_buf());
             for _ in 0..6 {
                 if let Some(d) = dir {
@@ -293,11 +306,18 @@ impl ServerManager {
             }
         }
 
-        // Check CHROXY_SERVER_PATH env
+        // Check CHROXY_SERVER_PATH env — canonicalize and verify it's a .js file
         if let Ok(path) = std::env::var("CHROXY_SERVER_PATH") {
             let p = PathBuf::from(&path);
-            if p.exists() {
-                return Ok(p);
+            if let Ok(canonical) = p.canonicalize() {
+                let is_js = canonical
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.eq_ignore_ascii_case("js"))
+                    .unwrap_or(false);
+                if canonical.is_file() && is_js {
+                    return Ok(canonical);
+                }
             }
         }
 

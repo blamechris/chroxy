@@ -3,10 +3,27 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 const DASHBOARD_LABEL: &str = "dashboard";
 const FALLBACK_LABEL: &str = "main";
 
+/// Percent-encode a string for safe use in URL query values.
+/// Encodes everything except unreserved characters (RFC 3986: A-Z a-z 0-9 - _ . ~).
+fn url_encode(s: &str) -> String {
+    let mut encoded = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
+}
+
 /// Open (or focus) the dashboard window pointing at the local server.
 pub fn open_dashboard(app: &AppHandle, port: u16, token: Option<&str>) {
     let url = match token {
-        Some(t) => format!("http://localhost:{}/dashboard?token={}", port, t),
+        Some(t) => format!("http://localhost:{}/dashboard?token={}", port, url_encode(t)),
         None => format!("http://localhost:{}/dashboard", port),
     };
 
