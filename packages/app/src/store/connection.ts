@@ -177,6 +177,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   pendingPermissionConfirm: null,
   slashCommands: [],
   customAgents: [],
+  checkpoints: [],
   _directoryListingCallback: null,
   _fileBrowserCallback: null,
   _fileContentCallback: null,
@@ -532,6 +533,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       pendingPermissionConfirm: null,
       slashCommands: [],
       customAgents: [],
+      checkpoints: [],
       _directoryListingCallback: null,
       _terminalWriteCallback: null,
       contextUsage: null,
@@ -933,6 +935,36 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const msg: Record<string, string> = { type: 'request_full_history' };
       if (sessionId) msg.sessionId = sessionId;
       wsSend(socket, msg);
+    }
+  },
+
+  createCheckpoint: (name?: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const msg: Record<string, string> = { type: 'create_checkpoint' };
+      if (name) msg.name = name;
+      wsSend(socket, msg);
+    }
+  },
+
+  listCheckpoints: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'list_checkpoints' });
+    }
+  },
+
+  restoreCheckpoint: (checkpointId: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'restore_checkpoint', checkpointId });
+    }
+  },
+
+  deleteCheckpoint: (checkpointId: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'delete_checkpoint', checkpointId });
     }
   },
 

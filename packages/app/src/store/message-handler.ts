@@ -1509,6 +1509,27 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'checkpoint_created': {
+      if (msg.checkpoint && typeof msg.checkpoint === 'object') {
+        const cp = msg.checkpoint as { id: string; name: string; description: string; messageCount: number; createdAt: number; hasGitSnapshot: boolean };
+        set({ checkpoints: [...get().checkpoints, cp] });
+      }
+      break;
+    }
+
+    case 'checkpoint_list': {
+      if (Array.isArray(msg.checkpoints)) {
+        set({ checkpoints: msg.checkpoints as { id: string; name: string; description: string; messageCount: number; createdAt: number; hasGitSnapshot: boolean }[] });
+      }
+      break;
+    }
+
+    case 'checkpoint_restored': {
+      // Server has created a new session from the checkpoint
+      // The session_list update will follow from the server
+      break;
+    }
+
     case 'mcp_servers': {
       const mcpTargetId = (msg.sessionId as string) || get().activeSessionId;
       const servers = (msg.servers as McpServer[]) || [];
