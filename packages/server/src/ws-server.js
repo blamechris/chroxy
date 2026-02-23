@@ -881,7 +881,10 @@ export class WsServer {
         const targetSessionId = msg.sessionId || client.activeSessionId
         const entry = this.sessionManager.getSession(targetSessionId)
         if (!entry) {
-          this._send(ws, { type: 'session_error', message: 'No active session' })
+          const message = msg.sessionId
+            ? `Session not found: ${msg.sessionId}`
+            : 'No active session'
+          this._send(ws, { type: 'session_error', message })
           break
         }
 
@@ -1260,7 +1263,10 @@ export class WsServer {
       case 'request_full_history': {
         const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
         if (!targetId || !this.sessionManager.getSession(targetId)) {
-          this._send(ws, { type: 'session_error', message: 'No active session' })
+          const message = msg.sessionId
+            ? `Session not found: ${msg.sessionId}`
+            : 'No active session'
+          this._send(ws, { type: 'session_error', message })
           break
         }
         const fullHistory = await this.sessionManager.getFullHistoryAsync(targetId)
