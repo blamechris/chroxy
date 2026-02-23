@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::{self, ChroxyConfig};
+use crate::lock_or_recover;
 use crate::node;
 
 /// Current state of the server process.
@@ -52,7 +53,7 @@ impl ServerManager {
     }
 
     pub fn status(&self) -> ServerStatus {
-        self.status.lock().unwrap().clone()
+        lock_or_recover(&self.status).clone()
     }
 
     pub fn is_running(&self) -> bool {
@@ -89,7 +90,7 @@ impl ServerManager {
         // Resolve cli.js path
         let cli_js = Self::resolve_cli_js()?;
 
-        *self.status.lock().unwrap() = ServerStatus::Starting;
+        *lock_or_recover(&self.status) = ServerStatus::Starting;
 
         // Build command
         let mut cmd = Command::new(&node_path);
@@ -130,7 +131,7 @@ impl ServerManager {
             thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().map_while(Result::ok) {
-                    let mut logs = buf.lock().unwrap();
+                    let mut logs = lock_or_recover(&buf);
                     if logs.len() >= 100 {
                         logs.pop_front();
                     }
@@ -145,7 +146,7 @@ impl ServerManager {
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
-                    let mut logs = buf.lock().unwrap();
+                    let mut logs = lock_or_recover(&buf);
                     if logs.len() >= 100 {
                         logs.pop_front();
                     }
@@ -165,7 +166,7 @@ impl ServerManager {
     /// Stop the server process gracefully (SIGTERM → 5s → SIGKILL).
     pub fn stop(&mut self) {
         // Stop health polling
-        *self.health_running.lock().unwrap() = false;
+        *lock_or_recover(&self.health_running) = false;
 
         if let Some(ref mut child) = self.child {
             // Only send SIGTERM if the child is still running
@@ -203,7 +204,7 @@ impl ServerManager {
         }
 
         self.child = None;
-        *self.status.lock().unwrap() = ServerStatus::Stopped;
+        *lock_or_recover(&self.status) = ServerStatus::Stopped;
     }
 
     /// Restart: stop then start.
@@ -218,7 +219,7 @@ impl ServerManager {
         let port = self.config.port;
         let health_running = self.health_running.clone();
 
-        *health_running.lock().unwrap() = true;
+        *lock_or_recover(&health_running) = true;
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -227,12 +228,12 @@ impl ServerManager {
             let url = format!("http://localhost:{}/", port);
 
             loop {
-                if !*health_running.lock().unwrap() {
+                if !*lock_or_recover(&health_running) {
                     return;
                 }
 
                 if start.elapsed() > Duration::from_secs(30) {
-                    let mut s = status.lock().unwrap();
+                    let mut s = lock_or_recover(&status);
                     if *s == ServerStatus::Starting {
                         *s = ServerStatus::Error("Health check timeout after 30s".to_string());
                     }
@@ -242,7 +243,7 @@ impl ServerManager {
                 match ureq::get(&url).timeout(Duration::from_secs(2)).call() {
                     Ok(resp) => {
                         if resp.status() == 200 {
-                            *status.lock().unwrap() = ServerStatus::Running;
+                            *lock_or_recover(&status) = ServerStatus::Running;
                             break;
                         }
                     }
@@ -256,24 +257,24 @@ impl ServerManager {
 
             // Continue monitoring while running
             loop {
-                if !*health_running.lock().unwrap() {
+                if !*lock_or_recover(&health_running) {
                     return;
                 }
 
                 thread::sleep(Duration::from_secs(5));
 
-                if !*health_running.lock().unwrap() {
+                if !*lock_or_recover(&health_running) {
                     return;
                 }
 
                 match ureq::get(&url).timeout(Duration::from_secs(2)).call() {
                     Ok(resp) => {
                         if resp.status() == 200 {
-                            *status.lock().unwrap() = ServerStatus::Running;
+                            *lock_or_recover(&status) = ServerStatus::Running;
                         }
                     }
                     Err(_) => {
-                        let mut s = status.lock().unwrap();
+                        let mut s = lock_or_recover(&status);
                         if *s == ServerStatus::Running {
                             *s = ServerStatus::Error("Server stopped responding".to_string());
                         }

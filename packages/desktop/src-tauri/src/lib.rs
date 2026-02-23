@@ -7,7 +7,13 @@ mod window;
 
 use server::{ServerManager, ServerStatus};
 use settings::DesktopSettings;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+
+/// Lock a Mutex, recovering from poisoning instead of panicking.
+pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -43,7 +49,7 @@ pub fn run() {
 
             // Auto-start server on launch if configured
             let settings = app.state::<Mutex<DesktopSettings>>();
-            let auto_start = settings.lock().unwrap().auto_start_server;
+            let auto_start = lock_or_recover(&settings).auto_start_server;
             if auto_start {
                 let config = config::load_config();
                 if config.api_token.is_some() {
@@ -58,7 +64,7 @@ pub fn run() {
             if let tauri::WindowEvent::Moved(pos) = event {
                 let app = window.app_handle();
                 if let Some(settings) = app.try_state::<Mutex<DesktopSettings>>() {
-                    let mut s = settings.lock().unwrap();
+                    let mut s = lock_or_recover(&settings);
                     s.last_window_x = Some(pos.x as f64);
                     s.last_window_y = Some(pos.y as f64);
                     let _ = s.save();
@@ -67,7 +73,7 @@ pub fn run() {
             if let tauri::WindowEvent::Resized(size) = event {
                 let app = window.app_handle();
                 if let Some(settings) = app.try_state::<Mutex<DesktopSettings>>() {
-                    let mut s = settings.lock().unwrap();
+                    let mut s = lock_or_recover(&settings);
                     s.last_window_width = Some(size.width as f64);
                     s.last_window_height = Some(size.height as f64);
                     let _ = s.save();
@@ -101,7 +107,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             .build(app)?;
 
     let settings = app.state::<Mutex<DesktopSettings>>();
-    let auto_start_server_checked = settings.lock().unwrap().auto_start_server;
+    let auto_start_server_checked = lock_or_recover(&settings).auto_start_server;
     let auto_start_server =
         CheckMenuItemBuilder::with_id("auto_start_server", "Auto-start Server")
             .checked(auto_start_server_checked)
@@ -143,7 +149,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 "auto_start_server" => handle_toggle_auto_start(app),
                 "quit" => {
                     if let Some(mgr) = app.try_state::<Mutex<ServerManager>>() {
-                        let mut mgr = mgr.lock().unwrap();
+                        let mut mgr = lock_or_recover(&mgr);
                         mgr.stop();
                     }
                     app.exit(0);
@@ -161,7 +167,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 let app = tray.app_handle();
                 let running = app
                     .try_state::<Mutex<ServerManager>>()
-                    .map(|s| s.lock().unwrap().is_running())
+                    .map(|s| lock_or_recover(&s).is_running())
                     .unwrap_or(false);
 
                 if running {
@@ -169,7 +175,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     let token;
                     {
                         let mgr = app.state::<Mutex<ServerManager>>();
-                        let mgr = mgr.lock().unwrap();
+                        let mgr = lock_or_recover(&mgr);
                         port = mgr.port();
                         token = mgr.token();
                     }
@@ -190,7 +196,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 fn update_menu_state(app: &tauri::AppHandle, running: bool) {
     if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
-        let items = items.lock().unwrap();
+        let items = lock_or_recover(&items);
         let _ = items.start.set_enabled(!running);
         let _ = items.stop.set_enabled(running);
         let _ = items.restart.set_enabled(running);
@@ -201,7 +207,7 @@ fn update_menu_state(app: &tauri::AppHandle, running: bool) {
 fn handle_start(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let result = {
-        let mut mgr = state.lock().unwrap();
+        let mut mgr = lock_or_recover(&state);
         mgr.start()
     };
 
@@ -213,7 +219,7 @@ fn handle_start(app: &tauri::AppHandle) {
                 for _ in 0..60 {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     let state = app_handle.state::<Mutex<ServerManager>>();
-                    let status = state.lock().unwrap().status();
+                    let status = lock_or_recover(&state).status();
                     match status {
                         ServerStatus::Running => {
                             update_menu_state(&app_handle, true);
@@ -239,7 +245,7 @@ fn handle_start(app: &tauri::AppHandle) {
 
 fn handle_stop(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
-    let mut mgr = state.lock().unwrap();
+    let mut mgr = lock_or_recover(&state);
     mgr.stop();
     drop(mgr);
     update_menu_state(app, false);
@@ -249,7 +255,7 @@ fn handle_stop(app: &tauri::AppHandle) {
 fn handle_restart(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let result = {
-        let mut mgr = state.lock().unwrap();
+        let mut mgr = lock_or_recover(&state);
         mgr.restart()
     };
 
@@ -265,7 +271,7 @@ fn handle_restart(app: &tauri::AppHandle) {
 
 fn handle_dashboard(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
-    let mgr = state.lock().unwrap();
+    let mgr = lock_or_recover(&state);
     if !mgr.is_running() {
         window::show_fallback(app);
         return;
@@ -290,7 +296,7 @@ fn handle_toggle_login(app: &tauri::AppHandle) {
 
     // Update the checkbox
     if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
-        let items = items.lock().unwrap();
+        let items = lock_or_recover(&items);
         let _ = items
             .auto_start_login
             .set_checked(!currently_enabled);
@@ -299,12 +305,12 @@ fn handle_toggle_login(app: &tauri::AppHandle) {
 
 fn handle_toggle_auto_start(app: &tauri::AppHandle) {
     if let Some(settings_state) = app.try_state::<Mutex<DesktopSettings>>() {
-        let mut settings = settings_state.lock().unwrap();
+        let mut settings = lock_or_recover(&settings_state);
         settings.auto_start_server = !settings.auto_start_server;
         let _ = settings.save();
 
         if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
-            let items = items.lock().unwrap();
+            let items = lock_or_recover(&items);
             let _ = items
                 .auto_start_server
                 .set_checked(settings.auto_start_server);
@@ -314,7 +320,7 @@ fn handle_toggle_auto_start(app: &tauri::AppHandle) {
 
 fn send_notification(app: &tauri::AppHandle, title: &str, body: &str) {
     if let Some(settings) = app.try_state::<Mutex<DesktopSettings>>() {
-        if !settings.lock().unwrap().show_notifications {
+        if !lock_or_recover(&settings).show_notifications {
             return;
         }
     }

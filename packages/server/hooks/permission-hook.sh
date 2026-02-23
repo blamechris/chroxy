@@ -22,6 +22,47 @@ PORT="$CHROXY_PORT"
 TOKEN="$CHROXY_TOKEN"
 PERM_MODE="${CHROXY_PERMISSION_MODE:-approve}"
 
+# ---- Shared: route a permission request to the phone via HTTP ----
+# Expects $REQUEST to contain the JSON body to POST.
+# Outputs the appropriate hookSpecificOutput JSON and exits.
+route_to_phone() {
+  CURL_ARGS=(-s -X POST "http://localhost:${PORT}/permission" -H "Content-Type: application/json" -d "$REQUEST" --max-time 300)
+  if [ -n "$TOKEN" ]; then
+    CURL_ARGS+=(-H "Authorization: Bearer ${TOKEN}")
+  fi
+
+  RESPONSE=$(curl "${CURL_ARGS[@]}")
+  EXIT_CODE=$?
+
+  if [ $EXIT_CODE -ne 0 ]; then
+    cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}
+EOF
+    exit 0
+  fi
+
+  DECISION=$(echo "$RESPONSE" | grep -o '"decision":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+  case "$DECISION" in
+    allow|allowAlways)
+      cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
+EOF
+      ;;
+    deny)
+      cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Denied by user via Chroxy mobile app"}}
+EOF
+      ;;
+    *)
+      cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}
+EOF
+      ;;
+  esac
+  exit 0
+}
+
 # Auto mode — allow everything without routing to the phone
 if [ "$PERM_MODE" = "auto" ]; then
   cat <<'EOF'
@@ -41,38 +82,8 @@ if [ "$PERM_MODE" = "acceptEdits" ]; then
 EOF
       exit 0 ;;
   esac
-  # Non-file tool — route to phone (reuse approve-mode curl logic with $REQUEST)
-  CURL_ARGS=(-s -X POST "http://localhost:${PORT}/permission" -H "Content-Type: application/json" -d "$REQUEST" --max-time 300)
-  if [ -n "$TOKEN" ]; then
-    CURL_ARGS+=(-H "Authorization: Bearer ${TOKEN}")
-  fi
-  RESPONSE=$(curl "${CURL_ARGS[@]}")
-  EXIT_CODE=$?
-  if [ $EXIT_CODE -ne 0 ]; then
-    cat <<'EOF'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}
-EOF
-    exit 0
-  fi
-  DECISION=$(echo "$RESPONSE" | grep -o '"decision":"[^"]*"' | head -1 | cut -d'"' -f4)
-  case "$DECISION" in
-    allow|allowAlways)
-      cat <<EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
-EOF
-      ;;
-    deny)
-      cat <<EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Denied by user via Chroxy mobile app"}}
-EOF
-      ;;
-    *)
-      cat <<'EOF'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}
-EOF
-      ;;
-  esac
-  exit 0
+  # Non-file tool — route to phone
+  route_to_phone
 fi
 
 # Plan mode — let Claude handle permission (read-only self-restriction)
@@ -85,43 +96,4 @@ fi
 
 # Approve mode (default) — route to phone via HTTP
 REQUEST=$(cat -)
-
-# Build curl args — omit Authorization header when token is empty (--no-auth mode)
-CURL_ARGS=(-s -X POST "http://localhost:${PORT}/permission" -H "Content-Type: application/json" -d "$REQUEST" --max-time 300)
-if [ -n "$TOKEN" ]; then
-  CURL_ARGS+=(-H "Authorization: Bearer ${TOKEN}")
-fi
-
-RESPONSE=$(curl "${CURL_ARGS[@]}")
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -ne 0 ]; then
-  # Timeout or connection failure — ask Claude's normal permission prompt
-  cat <<'EOF'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}
-EOF
-  exit 0
-fi
-
-# Extract decision from server response
-DECISION=$(echo "$RESPONSE" | grep -o '"decision":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-case "$DECISION" in
-  allow|allowAlways)
-    cat <<EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
-EOF
-    ;;
-  deny)
-    cat <<EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Denied by user via Chroxy mobile app"}}
-EOF
-    ;;
-  *)
-    # Unknown decision — fall through to Claude's normal prompt
-    cat <<'EOF'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}
-EOF
-    ;;
-esac
-exit 0
+route_to_phone

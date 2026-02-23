@@ -58,7 +58,7 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
     </div>
 
     <!-- Toast container -->
-    <div id="toast-container"></div>
+    <div id="toast-container" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <div id="plan-mode-banner" class="hidden">
       Plan Mode
@@ -990,7 +990,7 @@ function getDashboardJs() {
   function addPermissionPrompt(requestId, tool, description) {
     var div = document.createElement("div");
     div.className = "permission-prompt";
-    div.setAttribute("data-request-id", requestId);
+    div.setAttribute("data-request-id", sanitizeId(requestId));
     div.innerHTML =
       '<div class="perm-desc"><span class="perm-tool">' + escapeHtml(tool) + '</span>: ' +
       escapeHtml(description || "Permission requested") + '</div>' +
@@ -1016,7 +1016,7 @@ function getDashboardJs() {
   function addQuestionPrompt(question, toolUseId, options) {
     var div = document.createElement("div");
     div.className = "question-prompt";
-    div.setAttribute("data-tool-use-id", toolUseId || "");
+    div.setAttribute("data-tool-use-id", sanitizeId(toolUseId || ""));
 
     var html = '<div class="q-text">' + escapeHtml(question) + '</div>';
 
@@ -1285,12 +1285,14 @@ function getDashboardJs() {
   function showToast(message) {
     var toast = document.createElement("div");
     toast.className = "toast";
+    toast.setAttribute("role", "alert");
     toast.innerHTML =
       '<span class="toast-msg">' + escapeHtml(message) + '</span>' +
-      '<button class="toast-close">&times;</button>';
+      '<button class="toast-close" aria-label="Close notification">&times;</button>';
     toast.querySelector(".toast-close").addEventListener("click", function() {
       toast.remove();
     });
+    while (toastContainer.children.length >= 5) { toastContainer.removeChild(toastContainer.firstChild); }
     toastContainer.appendChild(toast);
     // Auto-dismiss after 5 seconds
     setTimeout(function() {
@@ -1609,6 +1611,11 @@ function getDashboardJs() {
         showToast(msg.message || "Session error");
         break;
 
+      case "session_created":
+        renderSessions();
+        showToast("Session created");
+        break;
+
       case "server_shutdown":
         reconnectText.textContent = msg.reason === "restart"
           ? "Server restarting..."
@@ -1619,6 +1626,7 @@ function getDashboardJs() {
       case "plan_started":
         inPlanMode = true;
         planModeBanner.classList.remove("hidden");
+        planApprovalCard.classList.add("hidden");
         break;
 
       case "plan_ready":

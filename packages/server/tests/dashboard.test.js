@@ -372,6 +372,38 @@ describe('#761 — plan mode message handlers', () => {
     assert.ok(planReadyBlock[0].includes('planApprovalCard') && planReadyBlock[0].includes('remove'),
       'plan_ready should show the plan approval card')
   })
+
+  it('hides stale approval card on plan_started', () => {
+    const planStartedBlock = html.match(/case "plan_started"[\s\S]*?break;/)
+    assert.ok(planStartedBlock, 'plan_started handler should exist')
+    assert.ok(
+      planStartedBlock[0].includes('planApprovalCard') && planStartedBlock[0].includes('add'),
+      'plan_started should hide any stale plan approval card from a previous cycle'
+    )
+  })
+})
+
+describe('#774 — session_created handler', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('handles session_created message', () => {
+    assert.ok(html.includes('case "session_created"'),
+      'should handle session_created WS message')
+  })
+
+  it('calls renderSessions on session_created', () => {
+    const sessionCreatedBlock = html.match(/case "session_created"[\s\S]*?break;/)
+    assert.ok(sessionCreatedBlock, 'session_created handler should exist')
+    assert.ok(sessionCreatedBlock[0].includes('renderSessions'),
+      'session_created should re-render session tabs')
+  })
+
+  it('shows toast on session_created', () => {
+    const sessionCreatedBlock = html.match(/case "session_created"[\s\S]*?break;/)
+    assert.ok(sessionCreatedBlock, 'session_created handler should exist')
+    assert.ok(sessionCreatedBlock[0].includes('showToast'),
+      'session_created should show a toast notification')
+  })
 })
 
 describe('#761 — background agent UI elements', () => {
@@ -680,6 +712,37 @@ describe('#733 — toast notifications', () => {
   it('shows toast on session_error', () => {
     const sessionErrorBlock = html.match(/case "session_error"[\s\S]*?showToast/)
     assert.ok(sessionErrorBlock, 'session_error handler should call showToast')
+  })
+
+  it('toast container has aria-live polite attribute', () => {
+    assert.ok(html.includes('aria-live="polite"'),
+      'toast container should have aria-live="polite" for screen readers')
+  })
+
+  it('toast container has role="status"', () => {
+    assert.ok(html.includes('id="toast-container" role="status"'),
+      'toast container should have role="status"')
+  })
+
+  it('individual toasts have role="alert"', () => {
+    const showToastBlock = html.match(/function showToast[\s\S]*?toastContainer\.appendChild/)
+    assert.ok(showToastBlock, 'showToast function should exist')
+    assert.ok(showToastBlock[0].includes('role", "alert"') || showToastBlock[0].includes("role\", \"alert\""),
+      'individual toasts should have role="alert"')
+  })
+
+  it('toast close button has aria-label', () => {
+    assert.ok(html.includes('aria-label="Close notification"'),
+      'toast close button should have descriptive aria-label')
+  })
+
+  it('caps visible toasts at 5', () => {
+    const showToastBlock = html.match(/function showToast[\s\S]*?toastContainer\.appendChild/)
+    assert.ok(showToastBlock, 'showToast function should exist')
+    assert.ok(showToastBlock[0].includes('children.length >= 5'),
+      'should evict oldest toasts when count reaches 5')
+    assert.ok(showToastBlock[0].includes('removeChild(toastContainer.firstChild)'),
+      'should remove oldest toast (FIFO) when cap is reached')
   })
 })
 
