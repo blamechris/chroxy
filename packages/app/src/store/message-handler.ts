@@ -1579,6 +1579,54 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       break;
     }
+
+    case 'session_warning': {
+      const message = typeof msg.message === 'string' ? msg.message : 'Session will timeout soon';
+      const warningMsg: ChatMessage = {
+        id: nextMessageId('warn'),
+        type: 'system',
+        content: message,
+        timestamp: Date.now(),
+      };
+      const warnSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      if (warnSessionId && get().sessionStates[warnSessionId]) {
+        const prevActiveId = get().activeSessionId;
+        // Add warning to the target session's messages
+        set((state: ConnectionState) => ({
+          sessionStates: {
+            ...state.sessionStates,
+            [warnSessionId]: {
+              ...state.sessionStates[warnSessionId],
+              messages: [...state.sessionStates[warnSessionId].messages, warningMsg],
+            },
+          },
+        }));
+        // Also show alert if the session isn't currently active
+        if (prevActiveId !== warnSessionId) {
+          Alert.alert('Session Warning', message);
+        }
+      } else {
+        get().addMessage(warningMsg);
+      }
+      break;
+    }
+
+    case 'session_timeout': {
+      const timeoutSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      const name = typeof msg.name === 'string' ? msg.name : 'Unknown';
+      Alert.alert('Session Closed', `Session "${name}" was closed due to inactivity.`);
+      // If the timed-out session was active, the server will have destroyed it.
+      // The session_destroyed handler (if present) or next session_list will update state.
+      if (timeoutSessionId && get().activeSessionId === timeoutSessionId) {
+        // Switch to first available session or clear
+        const sessions = get().sessionStates;
+        const remaining = Object.keys(sessions).filter((id) => id !== timeoutSessionId);
+        if (remaining.length > 0) {
+          set({ activeSessionId: remaining[0] });
+        }
+      }
+      break;
+    }
   }
 }
 

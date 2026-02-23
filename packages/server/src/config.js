@@ -35,6 +35,7 @@ const CONFIG_SCHEMA = {
   noEncrypt: 'boolean',
   transforms: 'array',
   tokenExpiry: 'string',
+  sessionTimeout: 'string',
 }
 
 /**
@@ -192,6 +193,7 @@ function envKeyForConfig(key) {
     noEncrypt: 'CHROXY_NO_ENCRYPT',
     transforms: 'CHROXY_TRANSFORMS',
     tokenExpiry: 'CHROXY_TOKEN_EXPIRY',
+    sessionTimeout: 'CHROXY_SESSION_TIMEOUT',
   }
   return envMap[key] || key.toUpperCase()
 }

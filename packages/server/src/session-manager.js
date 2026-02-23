@@ -8,6 +8,7 @@ import { discoverTmuxSessions } from './session-discovery.js'
 import { resolveJsonlPath, readConversationHistory, readConversationHistoryAsync } from './jsonl-reader.js'
 import { isWindows, writeFileRestricted } from './platform.js'
 import { readSessionContext } from './session-context.js'
+import { parseDuration } from './duration.js'
 
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
@@ -94,7 +95,7 @@ export class SessionDirectoryError extends SessionError {
  *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
  */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -118,6 +119,13 @@ export class SessionManager extends EventEmitter {
     this._discoveryIntervalMs = discoveryIntervalMs
     this._discoveryTimer = null
     this._lastDiscoveredSessions = new Set() // Track tmux session names we've seen
+
+    // Session idle timeout
+    this._sessionTimeoutMs = sessionTimeout ? parseDuration(sessionTimeout) : null
+    this._lastActivity = new Map() // sessionId -> timestamp
+    this._sessionWarned = new Set() // sessionIds that have received a timeout warning
+    this._timeoutCheckTimer = null
+    this._hasActiveViewersFn = null // Set via setActiveViewersFn() by WsServer
 
     // Validate provider exists at construction time for fail-fast behavior
     getProvider(this._providerType)
@@ -175,6 +183,7 @@ export class SessionManager extends EventEmitter {
     }
 
     this._sessions.set(sessionId, entry)
+    this._lastActivity.set(sessionId, Date.now())
     this._wireSessionEvents(sessionId, session)
     session.start()
 
@@ -261,6 +270,8 @@ export class SessionManager extends EventEmitter {
     }
     entry.session.destroy()
     this._sessions.delete(sessionId)
+    this._lastActivity.delete(sessionId)
+    this._sessionWarned.delete(sessionId)
     console.log(`[session-manager] Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
     this._messageHistory.delete(sessionId)
     this._historyTruncated.delete(sessionId)
@@ -280,6 +291,7 @@ export class SessionManager extends EventEmitter {
    */
   destroyAll() {
     this.stopAutoDiscovery()
+    this.stopSessionTimeouts()
     clearTimeout(this._persistTimer)
     this._persistTimer = null
     this.serializeState()
@@ -288,6 +300,8 @@ export class SessionManager extends EventEmitter {
       this.emit('session_destroyed', { sessionId })
     }
     this._sessions.clear()
+    this._lastActivity.clear()
+    this._sessionWarned.clear()
   }
 
   /**
@@ -342,6 +356,7 @@ export class SessionManager extends EventEmitter {
     }
 
     this._sessions.set(sessionId, entry)
+    this._lastActivity.set(sessionId, Date.now())
     this._wireSessionEvents(sessionId, session)
 
     try {
@@ -774,8 +789,11 @@ export class SessionManager extends EventEmitter {
    */
   _wireSessionEvents(sessionId, session) {
     const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'error', 'user_question']
+    // Events that indicate meaningful activity (reset idle timeout)
+    const ACTIVITY_EVENTS = new Set(['message', 'stream_start', 'tool_start', 'result', 'user_question'])
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
+        if (ACTIVITY_EVENTS.has(event)) this._touchActivity(sessionId)
         this._recordHistory(sessionId, event, data)
         this.emit('session_event', { sessionId, event, data })
 
@@ -818,5 +836,115 @@ export class SessionManager extends EventEmitter {
       console.error(`[session-manager] Session ${sessionId} crashed: ${data.error}`)
       this.emit('session_crashed', { sessionId, reason: data.reason, error: data.error })
     })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session idle timeout
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Set the function used to check if a session has active WebSocket viewers.
+   * Called by WsServer after construction to wire the two components together.
+   * @param {(sessionId: string) => boolean} fn
+   */
+  setActiveViewersFn(fn) {
+    this._hasActiveViewersFn = fn
+  }
+
+  /**
+   * Record activity for a session (resets idle timer).
+   * Called internally on relevant events, and publicly by WsServer on user input.
+   */
+  touchActivity(sessionId) {
+    this._touchActivity(sessionId)
+  }
+
+  /** @private */
+  _touchActivity(sessionId) {
+    this._lastActivity.set(sessionId, Date.now())
+    // Clear warning flag if session becomes active again
+    if (this._sessionWarned.has(sessionId)) {
+      this._sessionWarned.delete(sessionId)
+    }
+  }
+
+  /**
+   * Start periodic session timeout checks.
+   * Only starts if sessionTimeout was configured.
+   */
+  startSessionTimeouts() {
+    if (!this._sessionTimeoutMs) return
+    if (this._timeoutCheckTimer) return
+
+    const checkIntervalMs = Math.min(60_000, Math.floor(this._sessionTimeoutMs / 4))
+    console.log(`[session-manager] Session timeout enabled: ${this._sessionTimeoutMs}ms (check every ${checkIntervalMs}ms)`)
+    this._timeoutCheckTimer = setInterval(() => {
+      this._checkSessionTimeouts()
+    }, checkIntervalMs)
+  }
+
+  /**
+   * Stop periodic session timeout checks.
+   */
+  stopSessionTimeouts() {
+    if (this._timeoutCheckTimer) {
+      clearInterval(this._timeoutCheckTimer)
+      this._timeoutCheckTimer = null
+    }
+  }
+
+  /**
+   * Check all sessions for idle timeout. Warn first, then destroy on next check.
+   * Sessions with active WebSocket viewers or running queries are exempt.
+   */
+  _checkSessionTimeouts() {
+    if (!this._sessionTimeoutMs) return
+
+    const now = Date.now()
+    // Warning threshold: 2 minutes before timeout (or half the timeout, whichever is smaller)
+    const warningMs = Math.min(2 * 60_000, Math.floor(this._sessionTimeoutMs / 2))
+
+    for (const [sessionId, entry] of this._sessions) {
+      const lastActive = this._lastActivity.get(sessionId) || entry.createdAt
+      const idleMs = now - lastActive
+
+      // Skip sessions with active viewers
+      if (this._hasActiveViewersFn && this._hasActiveViewersFn(sessionId)) {
+        this._touchActivity(sessionId) // Viewing counts as activity
+        continue
+      }
+
+      // Skip busy sessions (query in progress)
+      if (entry.session.isRunning) {
+        this._touchActivity(sessionId)
+        continue
+      }
+
+      // Already warned — check if timeout has fully elapsed
+      if (this._sessionWarned.has(sessionId) && idleMs >= this._sessionTimeoutMs) {
+        console.log(`[session-manager] Session ${sessionId} timed out after ${Math.round(idleMs / 1000)}s idle`)
+        this.emit('session_timeout', {
+          sessionId,
+          name: entry.name,
+          idleMs,
+        })
+        this.destroySession(sessionId)
+        continue
+      }
+
+      // Warning threshold reached — send warning
+      if (!this._sessionWarned.has(sessionId) && idleMs >= this._sessionTimeoutMs - warningMs) {
+        const remainingMs = this._sessionTimeoutMs - idleMs
+        console.log(`[session-manager] Session ${sessionId} idle warning (${Math.round(remainingMs / 1000)}s remaining)`)
+        this._sessionWarned.add(sessionId)
+        this.emit('session_warning', {
+          sessionId,
+          name: entry.name,
+          reason: 'idle_timeout',
+          message: `Session "${entry.name}" will be closed in ${Math.round(remainingMs / 1000)}s due to inactivity`,
+          remainingMs,
+        })
+      }
+    }
   }
 }

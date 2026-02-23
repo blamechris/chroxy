@@ -69,6 +69,7 @@ export async function startCliServer(config) {
     providerType,
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],
+    sessionTimeout: config.sessionTimeout || null,
   })
 
   // 2. Try restoring session state from a previous instance
@@ -156,6 +157,20 @@ export async function startCliServer(config) {
     }
   })
 
+  sessionManager.on('session_warning', ({ sessionId, name, reason, message, remainingMs }) => {
+    console.log(`[cli] Session warning: ${message}`)
+    if (wsServer) {
+      wsServer.broadcast({ type: 'session_warning', sessionId, name, reason, message, remainingMs })
+    }
+  })
+
+  sessionManager.on('session_timeout', ({ sessionId, name, idleMs }) => {
+    console.log(`[cli] Session ${sessionId} (${name}) timed out after ${Math.round(idleMs / 1000)}s idle`)
+    if (wsServer) {
+      wsServer.broadcast({ type: 'session_timeout', sessionId, name, idleMs })
+    }
+  })
+
   // 3. Create push notification manager, token manager, and WebSocket server
   const pushManager = new PushManager()
 
@@ -189,6 +204,10 @@ export async function startCliServer(config) {
   })
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
+
+  // Wire session timeout to WsServer viewer checks
+  sessionManager.setActiveViewersFn((sid) => wsServer.hasActiveViewersForSession(sid))
+  sessionManager.startSessionTimeouts()
 
   // Advertise via mDNS/Bonjour for local network discovery
   let mdnsService = null

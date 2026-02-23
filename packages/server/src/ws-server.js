@@ -214,6 +214,8 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'pong' }                                    — heartbeat response
  *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
  *   { type: 'token_rotated', newToken, expiresAt }     — API token was rotated, client should update stored token
+ *   { type: 'session_warning', sessionId, name, reason, message, remainingMs } — session about to timeout
+ *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
@@ -932,6 +934,7 @@ export class WsServer {
           // Record user input in history (without base64 blobs)
           const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
           this.sessionManager.recordUserInput(targetSessionId, historyText)
+          this.sessionManager.touchActivity(targetSessionId)
           entry.session.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
         }
 
