@@ -99,11 +99,11 @@ const EVENT_MAP = {
     return { messages: [{ msg, filter }] }
   },
 
-  tool_start: (data) => ({
-    messages: [{
-      msg: { type: 'tool_start', messageId: data.messageId, toolUseId: data.toolUseId, tool: data.tool, input: data.input },
-    }],
-  }),
+  tool_start: (data) => {
+    const msg = { type: 'tool_start', messageId: data.messageId, toolUseId: data.toolUseId, tool: data.tool, input: data.input }
+    if (data.serverName) msg.serverName = data.serverName
+    return { messages: [{ msg }] }
+  },
 
   tool_result: (data) => {
     const msg = { type: 'tool_result', toolUseId: data.toolUseId, result: data.result, truncated: data.truncated }
@@ -120,6 +120,12 @@ const EVENT_MAP = {
   agent_completed: (data) => ({
     messages: [{
       msg: { type: 'agent_completed', toolUseId: data.toolUseId },
+    }],
+  }),
+
+  mcp_servers: (data) => ({
+    messages: [{
+      msg: { type: 'mcp_servers', servers: data.servers },
     }],
   }),
 

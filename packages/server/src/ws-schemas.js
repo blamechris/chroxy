@@ -230,6 +230,7 @@ export const ServerToolStartSchema = z.object({
   toolUseId: z.string(),
   tool: z.string(),
   input: z.any(),
+  serverName: z.string().optional(),
 })
 
 export const ServerToolResultSchema = z.object({
@@ -290,6 +291,14 @@ export const ServerAgentSpawnedSchema = z.object({
 export const ServerAgentCompletedSchema = z.object({
   type: z.literal('agent_completed'),
   toolUseId: z.string(),
+})
+
+export const ServerMcpServersSchema = z.object({
+  type: z.literal('mcp_servers'),
+  servers: z.array(z.object({
+    name: z.string(),
+    status: z.string(),
+  })),
 })
 
 export const ServerPlanStartedSchema = z.object({

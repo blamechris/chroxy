@@ -57,6 +57,7 @@ import {
   ServerErrorSchema,
   ServerShutdownSchema,
   ServerPongSchema,
+  ServerMcpServersSchema,
 } from '../src/ws-schemas.js'
 
 
@@ -775,6 +776,60 @@ describe('ServerToolStartSchema', () => {
       input: '/tmp/file.txt',
     })
     assert.ok(result.success)
+  })
+
+  it('accepts tool_start with serverName', () => {
+    const result = ServerToolStartSchema.safeParse({
+      type: 'tool_start',
+      messageId: 'm2',
+      toolUseId: 'tu2',
+      tool: 'mcp__filesystem__read_file',
+      input: null,
+      serverName: 'filesystem',
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.serverName, 'filesystem')
+  })
+
+  it('accepts tool_start without serverName (built-in tool)', () => {
+    const result = ServerToolStartSchema.safeParse({
+      type: 'tool_start',
+      messageId: 'm3',
+      toolUseId: 'tu3',
+      tool: 'Bash',
+      input: null,
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.serverName, undefined)
+  })
+})
+
+describe('ServerMcpServersSchema', () => {
+  it('accepts valid mcp_servers message', () => {
+    const result = ServerMcpServersSchema.safeParse({
+      type: 'mcp_servers',
+      servers: [
+        { name: 'filesystem', status: 'connected' },
+        { name: 'github', status: 'failed' },
+      ],
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.servers.length, 2)
+  })
+
+  it('accepts empty servers array', () => {
+    const result = ServerMcpServersSchema.safeParse({
+      type: 'mcp_servers',
+      servers: [],
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing servers field', () => {
+    const result = ServerMcpServersSchema.safeParse({
+      type: 'mcp_servers',
+    })
+    assert.ok(!result.success)
   })
 })
 
