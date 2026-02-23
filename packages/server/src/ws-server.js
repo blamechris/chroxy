@@ -3024,8 +3024,9 @@ export class WsServer {
     this._primaryClients.clear()
     this._normalizer.destroy()
 
-    // Clean up all dev preview tunnels
-    this._devPreview.closeAll()
+    // Clean up all dev preview tunnels (fire-and-forget; close() is synchronous
+    // by contract, and tunnel process cleanup is best-effort before exit)
+    void this._devPreview.closeAll()
 
     for (const [ws] of this.clients) {
       ws.close()
