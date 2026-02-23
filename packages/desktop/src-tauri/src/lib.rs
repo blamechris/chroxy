@@ -1,12 +1,13 @@
 mod config;
 mod node;
 mod server;
+mod window;
 
 use server::ServerManager;
 use std::sync::Mutex;
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder, MenuItem},
-    tray::TrayIconBuilder,
+    menu::{MenuBuilder, MenuItem, MenuItemBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
 
@@ -79,6 +80,40 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         })
+        .on_tray_icon_event(|tray, event| {
+            // Left-click toggles window visibility
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                let running = app
+                    .try_state::<Mutex<ServerManager>>()
+                    .map(|s| s.lock().unwrap().is_running())
+                    .unwrap_or(false);
+
+                if running {
+                    let port;
+                    let token;
+                    {
+                        let mgr = app.state::<Mutex<ServerManager>>();
+                        let mgr = mgr.lock().unwrap();
+                        port = mgr.port();
+                        token = mgr.token();
+                    }
+                    // Check if dashboard window exists and toggle, or create it
+                    if app.get_webview_window("dashboard").is_some() {
+                        window::toggle_window(app, true);
+                    } else {
+                        window::open_dashboard(app, port, token.as_deref());
+                    }
+                } else {
+                    window::toggle_window(app, false);
+                }
+            }
+        })
         .build(app)?;
 
     Ok(())
@@ -104,7 +139,6 @@ fn handle_start(app: &tauri::AppHandle) {
     match result {
         Ok(()) => {
             update_menu_state(app, true);
-            // Poll for actual Running status
             let app_handle = app.clone();
             std::thread::spawn(move || {
                 for _ in 0..60 {
@@ -135,6 +169,8 @@ fn handle_stop(app: &tauri::AppHandle) {
     mgr.stop();
     drop(mgr);
     update_menu_state(app, false);
+    // Show fallback page if window is visible
+    window::show_fallback(app);
 }
 
 fn handle_restart(app: &tauri::AppHandle) {
@@ -157,6 +193,7 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let mgr = state.lock().unwrap();
     if !mgr.is_running() {
+        window::show_fallback(app);
         return;
     }
 
@@ -164,10 +201,5 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     let token = mgr.token();
     drop(mgr);
 
-    let url = match token {
-        Some(t) => format!("http://localhost:{}/dashboard?token={}", port, t),
-        None => format!("http://localhost:{}/dashboard", port),
-    };
-
-    let _ = open::that(&url);
+    window::open_dashboard(app, port, token.as_deref());
 }
