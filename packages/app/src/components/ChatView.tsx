@@ -291,6 +291,8 @@ function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTru
             <TouchableOpacity
               onPress={onClose}
               style={styles.toolModalCloseButton}
+              accessibilityRole="button"
+              accessibilityLabel="Close tool details"
             >
               <Text style={styles.toolModalCloseIcon}>{ICON_CLOSE}</Text>
             </TouchableOpacity>
@@ -311,7 +313,13 @@ function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTru
                   {toolResultImages.map((img, i) => {
                     const uri = `data:${img.mediaType};base64,${img.data}`;
                     return (
-                      <TouchableOpacity key={i} onPress={() => onImagePress(uri)} activeOpacity={0.8}>
+                      <TouchableOpacity
+                        key={i}
+                        onPress={() => onImagePress(uri)}
+                        activeOpacity={0.8}
+                        accessibilityRole="button"
+                        accessibilityLabel={`View image ${i + 1} of ${toolResultImages.length}`}
+                      >
                         <Image source={{ uri }} style={styles.toolImageThumb} resizeMode="cover" />
                       </TouchableOpacity>
                     );

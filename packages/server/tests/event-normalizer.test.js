@@ -180,6 +180,21 @@ describe('EventNormalizer', () => {
       assert.equal(msg.result, 'file contents')
       assert.equal(msg.truncated, false)
     })
+
+    it('forwards images when present', () => {
+      const images = [{ mediaType: 'image/png', data: 'abc=' }]
+      const data = { toolUseId: 'tu1', result: 'screenshot', truncated: false, images }
+      const result = normalizer.normalize('tool_result', data, makeCtx())
+      const msg = result.messages[0].msg
+      assert.deepEqual(msg.images, images)
+    })
+
+    it('omits images when not present', () => {
+      const data = { toolUseId: 'tu1', result: 'text only', truncated: false }
+      const result = normalizer.normalize('tool_result', data, makeCtx())
+      const msg = result.messages[0].msg
+      assert.equal(msg.images, undefined)
+    })
   })
 
   // ---- EVENT_MAP: agent_spawned / agent_completed ----
