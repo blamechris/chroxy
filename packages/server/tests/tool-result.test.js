@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import EventEmitter from 'node:events'
-import { emitToolResults, MAX_TOOL_RESULT_SIZE } from '../src/tool-result.js'
+import { emitToolResults, MAX_TOOL_RESULT_SIZE, MAX_TOOL_IMAGE_SIZE } from '../src/tool-result.js'
 
 describe('emitToolResults', () => {
   it('emits tool_result for string content', () => {
@@ -125,5 +125,137 @@ describe('emitToolResults', () => {
     assert.equal(results.length, 2)
     assert.equal(results[0].toolUseId, 'tu_a')
     assert.equal(results[1].toolUseId, 'tu_b')
+  })
+
+  it('extracts image blocks from content array', () => {
+    const emitter = new EventEmitter()
+    const results = []
+    emitter.on('tool_result', r => results.push(r))
+
+    emitToolResults([
+      {
+        type: 'tool_result',
+        tool_use_id: 'tu_img',
+        content: [
+          { type: 'text', text: 'screenshot taken' },
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' },
+          },
+        ],
+      },
+    ], emitter)
+
+    assert.equal(results.length, 1)
+    assert.equal(results[0].result, 'screenshot taken')
+    assert.equal(results[0].images.length, 1)
+    assert.equal(results[0].images[0].mediaType, 'image/png')
+    assert.equal(results[0].images[0].data, 'iVBORw0KGgo=')
+  })
+
+  it('extracts multiple images from a single tool result', () => {
+    const emitter = new EventEmitter()
+    const results = []
+    emitter.on('tool_result', r => results.push(r))
+
+    emitToolResults([
+      {
+        type: 'tool_result',
+        tool_use_id: 'tu_multi',
+        content: [
+          { type: 'image', source: { media_type: 'image/png', data: 'aaa=' } },
+          { type: 'image', source: { media_type: 'image/jpeg', data: 'bbb=' } },
+        ],
+      },
+    ], emitter)
+
+    assert.equal(results.length, 1)
+    assert.equal(results[0].images.length, 2)
+    assert.equal(results[0].images[0].mediaType, 'image/png')
+    assert.equal(results[0].images[1].mediaType, 'image/jpeg')
+  })
+
+  it('skips images with disallowed media types', () => {
+    const emitter = new EventEmitter()
+    const results = []
+    emitter.on('tool_result', r => results.push(r))
+
+    emitToolResults([
+      {
+        type: 'tool_result',
+        tool_use_id: 'tu_bad',
+        content: [
+          { type: 'image', source: { media_type: 'image/svg+xml', data: '<svg/>' } },
+          { type: 'image', source: { media_type: 'image/png', data: 'ok=' } },
+        ],
+      },
+    ], emitter)
+
+    assert.equal(results.length, 1)
+    assert.equal(results[0].images.length, 1)
+    assert.equal(results[0].images[0].mediaType, 'image/png')
+  })
+
+  it('skips images exceeding MAX_TOOL_IMAGE_SIZE', () => {
+    const emitter = new EventEmitter()
+    const results = []
+    emitter.on('tool_result', r => results.push(r))
+
+    const bigData = 'x'.repeat(MAX_TOOL_IMAGE_SIZE + 1)
+    emitToolResults([
+      {
+        type: 'tool_result',
+        tool_use_id: 'tu_big',
+        content: [
+          { type: 'image', source: { media_type: 'image/png', data: bigData } },
+          { type: 'image', source: { media_type: 'image/png', data: 'small=' } },
+        ],
+      },
+    ], emitter)
+
+    assert.equal(results.length, 1)
+    assert.equal(results[0].images.length, 1)
+    assert.equal(results[0].images[0].data, 'small=')
+  })
+
+  it('omits images field when no valid images found', () => {
+    const emitter = new EventEmitter()
+    const results = []
+    emitter.on('tool_result', r => results.push(r))
+
+    emitToolResults([
+      {
+        type: 'tool_result',
+        tool_use_id: 'tu_noimg',
+        content: [
+          { type: 'text', text: 'just text' },
+          { type: 'image', source: {} },
+        ],
+      },
+    ], emitter)
+
+    assert.equal(results.length, 1)
+    assert.equal(results[0].result, 'just text')
+    assert.equal(results[0].images, undefined)
+  })
+
+  it('handles mediaType field name (camelCase variant)', () => {
+    const emitter = new EventEmitter()
+    const results = []
+    emitter.on('tool_result', r => results.push(r))
+
+    emitToolResults([
+      {
+        type: 'tool_result',
+        tool_use_id: 'tu_camel',
+        content: [
+          { type: 'image', source: { mediaType: 'image/webp', data: 'webp=' } },
+        ],
+      },
+    ], emitter)
+
+    assert.equal(results.length, 1)
+    assert.equal(results[0].images.length, 1)
+    assert.equal(results[0].images[0].mediaType, 'image/webp')
   })
 })

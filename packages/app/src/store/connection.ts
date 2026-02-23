@@ -91,6 +91,8 @@ export interface ChatMessage {
   toolUseId?: string;
   toolResult?: string;
   toolResultTruncated?: boolean;
+  /** Base64 images from tool results (e.g. computer use screenshots) */
+  toolResultImages?: { mediaType: string; data: string }[];
   answered?: string;
   expiresAt?: number;
   timestamp: number;
@@ -1337,15 +1339,18 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
       if (!toolUseId) break;
       const resultText = (msg.result as string) || '';
       const truncated = !!(msg.truncated as boolean);
+      const images = Array.isArray(msg.images) ? msg.images as { mediaType: string; data: string }[] : undefined;
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       // Find the matching tool_use message and attach the result
+      const patch: Partial<ChatMessage> = { toolResult: resultText, toolResultTruncated: truncated };
+      if (images?.length) patch.toolResultImages = images;
       const patchResult = (ss: SessionState) => {
         const idx = ss.messages.findIndex(
           (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
         );
         if (idx === -1) return {};
         const updated = [...ss.messages];
-        updated[idx] = { ...updated[idx], toolResult: resultText, toolResultTruncated: truncated };
+        updated[idx] = { ...updated[idx], ...patch };
         return { messages: updated };
       };
       if (targetId && get().sessionStates[targetId]) {
@@ -1356,7 +1361,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         );
         if (idx !== -1) {
           const updated = [...get().messages];
-          updated[idx] = { ...updated[idx], toolResult: resultText, toolResultTruncated: truncated };
+          updated[idx] = { ...updated[idx], ...patch };
           set({ messages: updated });
         }
       }
