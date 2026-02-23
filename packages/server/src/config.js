@@ -210,7 +210,7 @@ function parseEnvValue(key, value) {
   const expectedType = CONFIG_SCHEMA[key]
 
   if (expectedType === 'number') {
-    const num = parseInt(value, 10)
+    const num = parseFloat(value)
     return isNaN(num) ? value : num
   }
 

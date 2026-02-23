@@ -341,6 +341,29 @@ export const ServerPongSchema = z.object({
   type: z.literal('pong'),
 })
 
+export const ServerCostUpdateSchema = z.object({
+  type: z.literal('cost_update'),
+  sessionCost: z.number().nullable().optional(),
+  totalCost: z.number().nullable().optional(),
+  budget: z.number().nullable().optional(),
+})
+
+export const ServerBudgetWarningSchema = z.object({
+  type: z.literal('budget_warning'),
+  sessionCost: z.number(),
+  budget: z.number(),
+  percent: z.number(),
+  message: z.string(),
+})
+
+export const ServerBudgetExceededSchema = z.object({
+  type: z.literal('budget_exceeded'),
+  sessionCost: z.number(),
+  budget: z.number(),
+  percent: z.number(),
+  message: z.string(),
+})
+
 // -- Discriminated union of all client->server message types --
 // Note: auth, key_exchange, and encrypted are handled before the main
 // switch and are not included in this union. They are validated inline

@@ -99,6 +99,36 @@ describe('cost budget tracking', () => {
     assert.equal(exceeded[0].percent, 100)
   })
 
+  it('does not re-emit budget_exceeded after first crossing', () => {
+    const sid = sm.createSession({ name: 'Test' })
+    const entry = sm.getSession(sid)
+    const exceeded = []
+
+    sm.on('session_event', ({ event, data }) => {
+      if (event === 'budget_exceeded') exceeded.push(data)
+    })
+
+    entry.session.emit('result', { cost: 5.00, duration: 100 })
+    entry.session.emit('result', { cost: 1.00, duration: 50 })
+    entry.session.emit('result', { cost: 0.50, duration: 30 })
+    assert.equal(exceeded.length, 1, 'Should only exceed once')
+  })
+
+  it('does not emit both warning and exceeded when jumping past 100%', () => {
+    const sid = sm.createSession({ name: 'Test' })
+    const entry = sm.getSession(sid)
+    const events = []
+
+    sm.on('session_event', ({ event }) => {
+      if (event === 'budget_warning' || event === 'budget_exceeded') events.push(event)
+    })
+
+    // Jump from 0 to 120% in one result
+    entry.session.emit('result', { cost: 6.00, duration: 100 })
+    assert.equal(events.length, 1, 'Should emit only one budget event')
+    assert.equal(events[0], 'budget_exceeded', 'Should emit exceeded, not warning')
+  })
+
   it('does not emit budget events when no budget configured', () => {
     const smNoBudget = new SessionManager({
       providerType: 'test-cost',

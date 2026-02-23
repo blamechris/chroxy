@@ -119,6 +119,7 @@ export class SessionManager extends EventEmitter {
     this._persistTimer = null
     this._sessionCosts = new Map() // sessionId -> cumulative cost in dollars
     this._budgetWarned = new Set() // sessionIds that have already received 80% warning
+    this._budgetExceeded = new Set() // sessionIds that have already received 100% exceeded
     this._costBudget = typeof costBudget === 'number' && costBudget > 0 ? costBudget : null
     this._autoDiscovery = autoDiscovery
     this._discoveryIntervalMs = discoveryIntervalMs
@@ -292,6 +293,7 @@ export class SessionManager extends EventEmitter {
     }
     this._sessionCosts.delete(sessionId)
     this._budgetWarned.delete(sessionId)
+    this._budgetExceeded.delete(sessionId)
     this.emit('session_destroyed', { sessionId })
     this._schedulePersist()
     return true
@@ -914,7 +916,23 @@ export class SessionManager extends EventEmitter {
 
     const percent = cumulative / this._costBudget
 
-    // Warning at 80%
+    // Hard limit at 100% (checked first to avoid dual-emit with warning)
+    if (percent >= 1.0 && !this._budgetExceeded.has(sessionId)) {
+      this._budgetExceeded.add(sessionId)
+      this.emit('session_event', {
+        sessionId,
+        event: 'budget_exceeded',
+        data: {
+          sessionCost: cumulative,
+          budget: this._costBudget,
+          percent: Math.round(percent * 100),
+          message: `Session "${entry?.name || sessionId}" has exceeded the $${this._costBudget.toFixed(2)} budget ($${cumulative.toFixed(4)})`,
+        },
+      })
+      return
+    }
+
+    // Warning at 80% (skipped if already at/past 100%)
     if (percent >= 0.8 && !this._budgetWarned.has(sessionId)) {
       this._budgetWarned.add(sessionId)
       this.emit('session_event', {
@@ -925,20 +943,6 @@ export class SessionManager extends EventEmitter {
           budget: this._costBudget,
           percent: Math.round(percent * 100),
           message: `Session "${entry?.name || sessionId}" has used ${Math.round(percent * 100)}% of the $${this._costBudget.toFixed(2)} budget ($${cumulative.toFixed(4)})`,
-        },
-      })
-    }
-
-    // Hard limit at 100%
-    if (percent >= 1.0) {
-      this.emit('session_event', {
-        sessionId,
-        event: 'budget_exceeded',
-        data: {
-          sessionCost: cumulative,
-          budget: this._costBudget,
-          percent: Math.round(percent * 100),
-          message: `Session "${entry?.name || sessionId}" has exceeded the $${this._costBudget.toFixed(2)} budget ($${cumulative.toFixed(4)})`,
         },
       })
     }
