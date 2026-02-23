@@ -5,6 +5,12 @@ import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient, Cust
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
+// Connection quality → color mapping (consistent 13% opacity backgrounds)
+const QUALITY_COLORS = {
+  good: { bg: COLORS.accentGreenLight, fg: COLORS.accentGreen },
+  fair: { bg: COLORS.accentOrangeSubtle, fg: COLORS.accentOrange },
+  poor: { bg: COLORS.accentRedSubtle, fg: COLORS.accentRed },
+} as const;
 
 // -- Props --
 
@@ -219,18 +225,21 @@ export function SettingsBar({
             </Text>
           </View>
         )}
-        {connectionQuality && (
-          <View
-            style={[styles.qualityBadge, { backgroundColor: connectionQuality === 'good' ? COLORS.accentGreenSubtle : connectionQuality === 'fair' ? COLORS.accentOrangeSubtle : COLORS.accentRedSubtle }]}
-            accessibilityLabel={`Connection quality: ${connectionQuality}${latencyMs != null ? `, ${latencyMs}ms latency` : ''}`}
-            accessibilityRole="text"
-          >
-            <View style={[styles.qualityDot, { backgroundColor: connectionQuality === 'good' ? COLORS.accentGreen : connectionQuality === 'fair' ? COLORS.accentOrange : COLORS.accentRed }]} />
-            <Text style={[styles.qualityText, { color: connectionQuality === 'good' ? COLORS.accentGreen : connectionQuality === 'fair' ? COLORS.accentOrange : COLORS.accentRed }]}>
-              {latencyMs != null ? `${latencyMs}ms` : connectionQuality}
-            </Text>
-          </View>
-        )}
+        {connectionQuality && (() => {
+          const qc = QUALITY_COLORS[connectionQuality];
+          return (
+            <View
+              style={[styles.qualityBadge, { backgroundColor: qc.bg }]}
+              accessibilityLabel={`Connection quality: ${connectionQuality}${latencyMs != null ? `, ${latencyMs}ms latency` : ''}`}
+              accessibilityRole="text"
+            >
+              <View style={[styles.qualityDot, { backgroundColor: qc.fg }]} />
+              <Text style={[styles.qualityText, { color: qc.fg }]}>
+                {latencyMs != null ? `${latencyMs}ms` : connectionQuality}
+              </Text>
+            </View>
+          );
+        })()}
         {connectedClients.length > 1 && (
           <View
             style={styles.deviceBadge}
@@ -527,8 +536,8 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   qualityBadge: {
-    flexDirection: 'row' as const,
-    alignItems: 'center' as const,
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 8,
@@ -542,7 +551,7 @@ const styles = StyleSheet.create({
   },
   qualityText: {
     fontSize: 9,
-    fontWeight: '600' as const,
+    fontWeight: '600',
   },
   deviceBadge: {
     backgroundColor: COLORS.accentBlueSubtle,
