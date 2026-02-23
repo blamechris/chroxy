@@ -233,6 +233,7 @@ program
       const parsed = parseInt(options.discoveryInterval, 10)
       extraOverrides.discoveryInterval = Number.isNaN(parsed) ? options.discoveryInterval : parsed
     }
+    if (options.sessionTimeout !== undefined) extraOverrides.sessionTimeout = options.sessionTimeout
     if (options.auth === false) extraOverrides.noAuth = true
     if (options.discovery === false) extraOverrides.noDiscovery = true
     if (options.encrypt === false) extraOverrides.noEncrypt = true
@@ -547,6 +548,7 @@ program
       const parsed = parseInt(options.maxToolInput, 10)
       extraOverrides.maxToolInput = Number.isNaN(parsed) ? options.maxToolInput : parsed
     }
+    if (options.sessionTimeout !== undefined) extraOverrides.sessionTimeout = options.sessionTimeout
     const config = loadAndMergeConfig(options, extraOverrides)
 
     // Dev mode does not support terminal (PTY) mode

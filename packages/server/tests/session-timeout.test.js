@@ -156,6 +156,8 @@ describe('SessionManager session timeout', () => {
 
     assert.ok(!manager._sessionWarned.has(id))
     assert.ok(manager.getSession(id) !== null)
+    // Activity should be refreshed
+    assert.ok(Date.now() - manager._lastActivity.get(id) < 100)
   })
 
   it('cleans up timeout state on destroySession', () => {

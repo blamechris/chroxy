@@ -1183,6 +1183,7 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
     }
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
     manager.getSessionContext = async () => null
 
@@ -1465,6 +1466,7 @@ describe('WsServer attach_session message flow', () => {
     }
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
     manager.getSessionContext = async () => null
 
@@ -1961,6 +1963,7 @@ describe('user_question_response forwarding (multi-session)', () => {
     }
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
@@ -2125,6 +2128,7 @@ describe('background session sync (_broadcastToSession)', () => {
     }
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.keys().next().value
@@ -2374,6 +2378,7 @@ describe('agent idle/busy notifications', () => {
     }
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
@@ -2543,6 +2548,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
     }
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
@@ -2941,6 +2947,7 @@ describe('primary client tracking', () => {
     }
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
@@ -4428,6 +4435,7 @@ describe('permission/question routing to originating session', () => {
     }
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
@@ -4652,6 +4660,7 @@ describe('request_session_context error paths', () => {
     }
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
@@ -6607,6 +6616,7 @@ function createHistoryMockManager({ history = [], truncated = false, sessions = 
   manager.getHistory = (_sessionId) => history
   manager.isHistoryTruncated = (_sessionId) => truncated
   manager.recordUserInput = () => {}
+  manager.touchActivity = () => {}
   manager.getFullHistoryAsync = async () => []
   manager.getSessionContext = async () => null
 
@@ -8231,6 +8241,7 @@ describe('session-targeted routing (#611)', () => {
     }
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {

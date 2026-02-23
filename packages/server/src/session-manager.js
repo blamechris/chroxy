@@ -93,6 +93,8 @@ export class SessionDirectoryError extends SessionError {
  *   session_destroyed { sessionId }
  *   session_updated   { sessionId, name }
  *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
+ *   session_warning   { sessionId, name, reason, message, remainingMs } — session nearing idle timeout
+ *   session_timeout   { sessionId, name, idleMs } — session destroyed due to idle timeout
  */
 export class SessionManager extends EventEmitter {
   constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout } = {}) {
@@ -121,7 +123,11 @@ export class SessionManager extends EventEmitter {
     this._lastDiscoveredSessions = new Set() // Track tmux session names we've seen
 
     // Session idle timeout
-    this._sessionTimeoutMs = sessionTimeout ? parseDuration(sessionTimeout) : null
+    const parsedTimeout = sessionTimeout ? parseDuration(sessionTimeout) : null
+    if (sessionTimeout != null && parsedTimeout == null) {
+      console.warn(`[session-manager] Invalid sessionTimeout value "${sessionTimeout}". Session timeouts are disabled.`)
+    }
+    this._sessionTimeoutMs = parsedTimeout
     this._lastActivity = new Map() // sessionId -> timestamp
     this._sessionWarned = new Set() // sessionIds that have received a timeout warning
     this._timeoutCheckTimer = null
