@@ -1008,26 +1008,39 @@ setStore({
 
 // Persist session messages and active session when they change
 let _prevActiveSessionId: string | null = null;
-let _prevMessageCount = 0;
+const _prevMessageCounts: Record<string, number> = {};
+let _prevTerminalBufferLen = 0;
 useConnectionStore.subscribe((state) => {
   // Persist active session ID changes
   if (state.activeSessionId !== _prevActiveSessionId) {
+    // Flush messages for the previous session before switching (avoids losing debounced writes)
+    if (_prevActiveSessionId) {
+      const prevSs = state.sessionStates[_prevActiveSessionId];
+      if (prevSs) {
+        persistSessionMessages(_prevActiveSessionId, prevSs.messages);
+        _prevMessageCounts[_prevActiveSessionId] = prevSs.messages.length;
+      }
+    }
     _prevActiveSessionId = state.activeSessionId;
     persistActiveSession(state.activeSessionId).catch(() => {});
   }
 
-  // Persist messages for the active session (debounced internally)
+  // Persist messages for the active session (debounced internally, per-session tracking)
   if (state.activeSessionId) {
     const ss = state.sessionStates[state.activeSessionId];
-    if (ss && ss.messages.length !== _prevMessageCount) {
-      _prevMessageCount = ss.messages.length;
+    const prevCount = _prevMessageCounts[state.activeSessionId] ?? 0;
+    if (ss && ss.messages.length !== prevCount) {
+      _prevMessageCounts[state.activeSessionId] = ss.messages.length;
       persistSessionMessages(state.activeSessionId, ss.messages);
     }
   }
 
-  // Persist terminal buffer changes (debounced internally)
-  if (state.terminalBuffer) {
-    persistTerminalBuffer(state.terminalBuffer);
+  // Persist terminal buffer changes (debounced internally, only when changed)
+  if (state.terminalBuffer.length !== _prevTerminalBufferLen) {
+    _prevTerminalBufferLen = state.terminalBuffer.length;
+    if (state.terminalBuffer) {
+      persistTerminalBuffer(state.terminalBuffer);
+    }
   }
 });
 

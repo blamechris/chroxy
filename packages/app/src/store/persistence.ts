@@ -8,7 +8,7 @@
  * Data is debounced to avoid excessive writes on rapid message streams.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { ChatMessage, SessionState } from './types';
+import type { ChatMessage } from './types';
 
 const KEY_PREFIX = 'chroxy_persist_';
 const KEY_VIEW_MODE = `${KEY_PREFIX}view_mode`;
@@ -18,41 +18,61 @@ const KEY_TERMINAL_BUFFER = `${KEY_PREFIX}terminal_buffer`;
 /** Max messages to persist per session (keeps storage bounded) */
 const MAX_MESSAGES = 100;
 
-/** Max terminal buffer size to persist (bytes) */
+/** Max terminal buffer size to persist (characters, ~50 KB for ASCII) */
 const MAX_TERMINAL_SIZE = 50_000;
+
+/** Valid view modes — used to validate persisted values */
+const VALID_VIEW_MODES = ['chat', 'terminal', 'files'] as const;
+type ViewMode = (typeof VALID_VIEW_MODES)[number];
 
 function sessionMessagesKey(sessionId: string): string {
   return `${KEY_PREFIX}messages_${sessionId}`;
 }
 
 // ---------------------------------------------------------------------------
+// Debounce factory — each caller gets independent timer/pending state
+// ---------------------------------------------------------------------------
+
+interface DebouncedPersister {
+  schedule: (fn: () => Promise<void>) => void;
+}
+
+/** Create an independent debounced persister with its own timer */
+function createDebouncedPersist(delayMs: number): DebouncedPersister {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let pending: (() => Promise<void>) | null = null;
+
+  return {
+    schedule(fn: () => Promise<void>): void {
+      pending = fn;
+      if (timer) return;
+      timer = setTimeout(async () => {
+        timer = null;
+        const save = pending;
+        pending = null;
+        if (save) {
+          try {
+            await save();
+          } catch (err) {
+            console.warn('[persist] Debounced save failed:', err);
+          }
+        }
+      }, delayMs);
+    },
+  };
+}
+
+// Separate debounce instances per data stream — prevents cross-clobbering
+const _messagesPersister = createDebouncedPersist(500);
+const _terminalPersister = createDebouncedPersist(1000);
+
+// ---------------------------------------------------------------------------
 // Save helpers
 // ---------------------------------------------------------------------------
 
-let _saveTimer: ReturnType<typeof setTimeout> | null = null;
-let _pendingSave: (() => Promise<void>) | null = null;
-
-/** Debounced persist — coalesces rapid writes into a single flush */
-function debouncedPersist(fn: () => Promise<void>, delayMs = 500): void {
-  _pendingSave = fn;
-  if (_saveTimer) return;
-  _saveTimer = setTimeout(async () => {
-    _saveTimer = null;
-    const save = _pendingSave;
-    _pendingSave = null;
-    if (save) {
-      try {
-        await save();
-      } catch (err) {
-        console.warn('[persist] Debounced save failed:', err);
-      }
-    }
-  }, delayMs);
-}
-
 /** Persist messages for a specific session */
 export function persistSessionMessages(sessionId: string, messages: ChatMessage[]): void {
-  debouncedPersist(async () => {
+  _messagesPersister.schedule(async () => {
     // Keep only the last N messages, strip large base64 data
     const trimmed = messages.slice(-MAX_MESSAGES).map(stripLargeData);
     await AsyncStorage.setItem(sessionMessagesKey(sessionId), JSON.stringify(trimmed));
@@ -60,7 +80,7 @@ export function persistSessionMessages(sessionId: string, messages: ChatMessage[
 }
 
 /** Persist the active view mode */
-export async function persistViewMode(mode: string): Promise<void> {
+export async function persistViewMode(mode: ViewMode): Promise<void> {
   try {
     await AsyncStorage.setItem(KEY_VIEW_MODE, mode);
   } catch {
@@ -83,12 +103,12 @@ export async function persistActiveSession(sessionId: string | null): Promise<vo
 
 /** Persist terminal buffer (debounced) */
 export function persistTerminalBuffer(buffer: string): void {
-  debouncedPersist(async () => {
+  _terminalPersister.schedule(async () => {
     const trimmed = buffer.length > MAX_TERMINAL_SIZE
       ? buffer.slice(-MAX_TERMINAL_SIZE)
       : buffer;
     await AsyncStorage.setItem(KEY_TERMINAL_BUFFER, trimmed);
-  }, 1000);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -96,7 +116,7 @@ export function persistTerminalBuffer(buffer: string): void {
 // ---------------------------------------------------------------------------
 
 export interface PersistedState {
-  viewMode: 'chat' | 'terminal' | 'files' | null;
+  viewMode: ViewMode | null;
   activeSessionId: string | null;
   terminalBuffer: string | null;
 }
@@ -109,8 +129,14 @@ export async function loadPersistedState(): Promise<PersistedState> {
       KEY_ACTIVE_SESSION,
       KEY_TERMINAL_BUFFER,
     ]);
+    // Validate viewMode against allowed values (guards against stale/corrupt data)
+    const rawViewMode = viewMode[1];
+    const validatedViewMode: ViewMode | null =
+      rawViewMode && (VALID_VIEW_MODES as readonly string[]).includes(rawViewMode)
+        ? (rawViewMode as ViewMode)
+        : null;
     return {
-      viewMode: (viewMode[1] as PersistedState['viewMode']) || null,
+      viewMode: validatedViewMode,
       activeSessionId: activeSessionId[1] || null,
       terminalBuffer: terminalBuffer[1] || null,
     };
@@ -152,15 +178,15 @@ export async function clearPersistedState(): Promise<void> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Strip large base64 data from messages to keep storage bounded */
+/** Strip base64 image data from messages to keep storage bounded */
 function stripLargeData(msg: ChatMessage): ChatMessage {
   if (!msg.toolResultImages?.length && !msg.attachments?.length) return msg;
   return {
     ...msg,
-    // Keep image metadata but strip base64 data
+    // Always strip base64 image data — it's not useful after restart
     toolResultImages: msg.toolResultImages?.map(img => ({
       ...img,
-      data: img.data.length > 1000 ? '[image data stripped for storage]' : img.data,
+      data: img.data ? '[image data stripped for storage]' : img.data,
     })),
     // Attachments should already have data cleared after send, but be safe
     attachments: msg.attachments?.map(att => ({
