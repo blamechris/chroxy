@@ -98,6 +98,8 @@ export interface ChatMessage {
   timestamp: number;
   /** Attachments on user_input messages (images, documents) */
   attachments?: MessageAttachment[];
+  /** MCP server name that provided the tool (only for MCP tools) */
+  serverName?: string;
 }
 
 interface SavedConnection {
@@ -231,6 +233,11 @@ export interface SessionContext {
   projectName: string | null;
 }
 
+export interface McpServer {
+  name: string;
+  status: string;
+}
+
 export interface SessionState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
@@ -248,6 +255,7 @@ export interface SessionState {
   primaryClientId: string | null;
   conversationId: string | null;
   sessionContext: SessionContext | null;
+  mcpServers: McpServer[];
 }
 
 export interface ServerError {
@@ -307,6 +315,7 @@ export function createEmptySessionState(): SessionState {
     primaryClientId: null,
     conversationId: null,
     sessionContext: null,
+    mcpServers: [],
   };
 }
 
@@ -1323,6 +1332,7 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
         tool: msg.tool as string | undefined,
         toolUseId: msg.toolUseId as string | undefined,
         timestamp: Date.now(),
+        serverName: msg.serverName as string | undefined,
       };
       if (targetId && get().sessionStates[targetId]) {
         updateSession(targetId, (ss) => ({
@@ -1560,6 +1570,18 @@ function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
           if (filtered.length === ss.activeAgents.length) return {};
           return { activeAgents: filtered };
         });
+      }
+      break;
+    }
+
+    case 'mcp_servers': {
+      const mcpTargetId = (msg.sessionId as string) || get().activeSessionId;
+      const rawServers = Array.isArray(msg.servers) ? msg.servers : [];
+      const servers: McpServer[] = rawServers.filter(
+        (s): s is McpServer => s && typeof s === 'object' && typeof s.name === 'string' && typeof s.status === 'string'
+      );
+      if (mcpTargetId && get().sessionStates[mcpTargetId]) {
+        updateSession(mcpTargetId, () => ({ mcpServers: servers }));
       }
       break;
     }
@@ -2064,6 +2086,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       primaryClientId: null,
       conversationId: null,
       sessionContext: null,
+      mcpServers: [],
     };
   },
 

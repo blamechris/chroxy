@@ -4,6 +4,7 @@ import { resolveModelId, updateModels } from './models.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
+import { parseMcpToolName } from './mcp-tools.js'
 
 const ACCEPT_EDITS_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
 
@@ -204,6 +205,13 @@ export class SdkSession extends EventEmitter {
                 model: msg.model,
                 tools: msg.tools || [],
               })
+              // Emit MCP server status if present (including empty list to clear stale state)
+              if (Array.isArray(msg.mcp_servers)) {
+                if (msg.mcp_servers.length > 0) {
+                  console.log(`[sdk-session] MCP servers: ${msg.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+                }
+                this.emit('mcp_servers', { servers: msg.mcp_servers })
+              }
               // Fetch dynamic model list from SDK (non-blocking)
               this._fetchSupportedModels()
             }
@@ -224,12 +232,15 @@ export class SdkSession extends EventEmitter {
                     this.emit('stream_start', { messageId })
                   }
                 } else if (blockType === 'tool_use') {
-                  this.emit('tool_start', {
+                  const toolStartData = {
                     messageId: event.content_block.id || `${messageId}-tool`,
                     toolUseId: event.content_block.id,
                     tool: event.content_block.name,
                     input: null,
-                  })
+                  }
+                  const mcp = parseMcpToolName(event.content_block.name)
+                  if (mcp) toolStartData.serverName = mcp.serverName
+                  this.emit('tool_start', toolStartData)
                 }
                 break
               }

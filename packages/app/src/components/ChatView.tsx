@@ -21,6 +21,22 @@ import { ImageViewer } from './ImageViewer';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOSE, ICON_CHECK, ICON_DOCUMENT } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
+/**
+ * Format a tool name for display. MCP tools show as "tool_name" with server noted separately.
+ * Duplicates the mcp__ prefix parsing from mcp-tools.js as a client-side fallback in case
+ * the raw tool name arrives without a pre-extracted serverName.
+ */
+const MCP_PREFIX = 'mcp__';
+function formatToolName(tool?: string): string {
+  if (!tool) return 'Thinking';
+  if (tool.startsWith(MCP_PREFIX)) {
+    const rest = tool.slice(MCP_PREFIX.length);
+    const sep = rest.indexOf('__');
+    if (sep > 0) return rest.slice(sep + 2);
+  }
+  return tool;
+}
+
 
 // -- Animated Thinking Indicator --
 
@@ -177,6 +193,8 @@ function ActivityEntry({
   const hasResult = !!message.toolResult;
   const imageCount = message.toolResultImages?.length || 0;
 
+  const displayTool = formatToolName(message.tool);
+
   return (
     <TouchableOpacity
       activeOpacity={0.7}
@@ -185,7 +203,14 @@ function ActivityEntry({
       style={[styles.activityEntry, isSelected && styles.selectedBubble]}
     >
       <Text style={styles.activityEntryIcon}>{hasResult ? ICON_CHECK : ICON_CHEVRON_RIGHT}</Text>
-      <Text style={styles.activityEntryTool}>{message.tool || 'Thinking'}</Text>
+      {message.serverName ? (
+        <Text style={styles.activityEntryTool}>
+          <Text style={styles.mcpServerTag}>{message.serverName}</Text>
+          {' '}{displayTool}
+        </Text>
+      ) : (
+        <Text style={styles.activityEntryTool}>{displayTool}</Text>
+      )}
       {imageCount > 0 && (
         <Text style={styles.activityImageBadge}>{imageCount === 1 ? '1 image' : `${imageCount} images`}</Text>
       )}
@@ -267,13 +292,14 @@ function ActivityGroup({
 
 // -- Tool detail modal --
 
-function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTruncated, toolResultImages, onClose, onImagePress }: {
+function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, onClose, onImagePress }: {
   visible: boolean;
   toolName: string;
   content: string;
   toolResult?: string;
   toolResultTruncated?: boolean;
   toolResultImages?: { mediaType: string; data: string }[];
+  serverName?: string;
   onClose: () => void;
   onImagePress: (uri: string) => void;
 }) {
@@ -287,7 +313,12 @@ function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTru
       <Pressable style={styles.toolModalOverlay} onPress={onClose}>
         <Pressable style={styles.toolModalContainer} onPress={(e) => e.stopPropagation()}>
           <View style={styles.toolModalHeader}>
-            <Text style={styles.toolModalTitle} numberOfLines={1}>Tool: {toolName}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.toolModalTitle} numberOfLines={1}>Tool: {toolName}</Text>
+              {serverName ? (
+                <Text style={styles.toolModalServerLabel}>via MCP server: {serverName}</Text>
+              ) : null}
+            </View>
             <TouchableOpacity
               onPress={onClose}
               style={styles.toolModalCloseButton}
@@ -347,7 +378,7 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpe
   isSelected: boolean;
   isSelecting: boolean;
   onToggleSelection: () => void;
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[]) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[], serverName?: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const longPressedRef = useRef(false);
@@ -355,6 +386,8 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpe
 
   // Hide empty tool messages
   if (!content) return null;
+
+  const displayTool = formatToolName(message.tool);
 
   const handlePress = () => {
     // Suppress the tap that fires on release after a long-press
@@ -365,7 +398,7 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpe
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      onOpenDetail(message.tool || 'Unknown', content, message.toolResult, message.toolResultTruncated, message.toolResultImages);
+      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -388,7 +421,16 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpe
     >
       <View style={styles.toolHeader}>
         <Text style={styles.toolChevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
-        <Text style={styles.senderLabelTool}>Tool: {message.tool}</Text>
+        <Text style={styles.senderLabelTool}>
+          {message.serverName ? (
+            <>
+              <Text style={styles.mcpServerTag}>{message.serverName}</Text>
+              {' '}{displayTool}
+            </>
+          ) : (
+            <>Tool: {displayTool}</>
+          )}
+        </Text>
       </View>
       {expanded ? (
         <Text selectable style={styles.toolContentExpanded}>{content}</Text>
@@ -592,7 +634,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   isSelecting: boolean;
   onLongPress: () => void;
   onPress: () => void;
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[]) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[], serverName?: string) => void;
   onImagePress?: (uri: string) => void;
 }) {
   const longPressedRef = useRef(false);
@@ -806,7 +848,7 @@ export function ChatView({
 }: ChatViewProps) {
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: { mediaType: string; data: string }[] } | null>(null);
+  const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: { mediaType: string; data: string }[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
   // Pause auto-scroll when an unanswered prompt is visible — user needs to read context
@@ -827,8 +869,8 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef and isSelectingRef are stable refs
   }, [isPlanPending]);
 
-  const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[]) => {
-    setToolDetail({ toolName, content, toolResult, toolResultTruncated, toolResultImages });
+  const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[], serverName?: string) => {
+    setToolDetail({ toolName, content, toolResult, toolResultTruncated, toolResultImages, serverName });
   };
 
   const displayGroups = useMemo(
@@ -952,6 +994,7 @@ export function ChatView({
         toolResult={toolDetail?.toolResult}
         toolResultTruncated={toolDetail?.toolResultTruncated}
         toolResultImages={toolDetail?.toolResultImages}
+        serverName={toolDetail?.serverName}
         onClose={() => setToolDetail(null)}
         onImagePress={(uri) => { setToolDetail(null); setViewerUri(uri); }}
       />
@@ -1222,6 +1265,11 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginRight: 4,
   },
+  mcpServerTag: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    fontWeight: '400',
+  },
   toolBubble: {
     backgroundColor: COLORS.backgroundTertiary,
     padding: 8,
@@ -1288,8 +1336,12 @@ const styles = StyleSheet.create({
     color: COLORS.accentPurple,
     fontSize: 14,
     fontWeight: '600',
-    flex: 1,
     marginRight: 12,
+  },
+  toolModalServerLabel: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    marginTop: 2,
   },
   toolModalCloseButton: {
     width: 44,

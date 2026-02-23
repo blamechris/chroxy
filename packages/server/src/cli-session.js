@@ -7,6 +7,7 @@ import { buildContentBlocks } from './content-blocks.js'
 import { forceKill } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
+import { parseMcpToolName } from './mcp-tools.js'
 
 // Default max accumulated size for tool_use input_json_delta chunks (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
@@ -332,6 +333,13 @@ export class CliSession extends EventEmitter {
             model: data.model,
             tools: data.tools,
           })
+          // Emit MCP server status if present (including empty list to clear stale state)
+          if (Array.isArray(data.mcp_servers)) {
+            if (data.mcp_servers.length > 0) {
+              console.log(`[cli-session] MCP servers: ${data.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+            }
+            this.emit('mcp_servers', { servers: data.mcp_servers })
+          }
         } else {
           // Forward non-init system events (e.g. usage limits, sub-agent
           // notifications) as system messages to the client
@@ -370,12 +378,15 @@ export class CliSession extends EventEmitter {
               ctx.toolInputChunks = ''
               ctx.toolInputBytes = 0
               ctx.toolInputOverflow = false
-              this.emit('tool_start', {
+              const toolStartData = {
                 messageId,
                 toolUseId: event.content_block.id,
                 tool: event.content_block.name,
                 input: null,
-              })
+              }
+              const mcp = parseMcpToolName(event.content_block.name)
+              if (mcp) toolStartData.serverName = mcp.serverName
+              this.emit('tool_start', toolStartData)
             }
             break
           }

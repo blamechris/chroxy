@@ -168,6 +168,33 @@ describe('EventNormalizer', () => {
       assert.equal(msg.tool, 'Read')
       assert.equal(msg.input, '/tmp')
     })
+
+    it('includes serverName for MCP tools', () => {
+      const data = { messageId: 'm2', toolUseId: 'tu2', tool: 'mcp__github__list_repos', input: null, serverName: 'github' }
+      const result = normalizer.normalize('tool_start', data, makeCtx())
+      const msg = result.messages[0].msg
+      assert.equal(msg.serverName, 'github')
+    })
+
+    it('omits serverName for built-in tools', () => {
+      const data = { messageId: 'm3', toolUseId: 'tu3', tool: 'Bash', input: null }
+      const result = normalizer.normalize('tool_start', data, makeCtx())
+      const msg = result.messages[0].msg
+      assert.equal(msg.serverName, undefined)
+    })
+  })
+
+  // ---- EVENT_MAP: mcp_servers ----
+
+  describe('mcp_servers event', () => {
+    it('maps server list', () => {
+      const data = { servers: [{ name: 'filesystem', status: 'connected' }, { name: 'github', status: 'connected' }] }
+      const result = normalizer.normalize('mcp_servers', data, makeCtx())
+      const msg = result.messages[0].msg
+      assert.equal(msg.type, 'mcp_servers')
+      assert.equal(msg.servers.length, 2)
+      assert.equal(msg.servers[0].name, 'filesystem')
+    })
   })
 
   describe('tool_result event', () => {
@@ -412,7 +439,7 @@ describe('EVENT_MAP', () => {
     const expectedEvents = [
       'ready', 'conversation_id', 'stream_start', 'stream_delta', 'stream_end',
       'message', 'tool_start', 'tool_result', 'agent_spawned', 'agent_completed',
-      'plan_started', 'plan_ready', 'result', 'raw', 'status_update',
+      'mcp_servers', 'plan_started', 'plan_ready', 'result', 'raw', 'status_update',
       'user_question', 'permission_request', 'error', 'claude_ready',
     ]
     for (const event of expectedEvents) {
@@ -434,6 +461,7 @@ describe('EVENT_MAP', () => {
       tool_result: { toolUseId: 'tu1', result: 'ok', truncated: false },
       agent_spawned: { toolUseId: 'tu1', description: 'd', startedAt: 1 },
       agent_completed: { toolUseId: 'tu1' },
+      mcp_servers: { servers: [{ name: 'fs', status: 'connected' }] },
       plan_started: {},
       plan_ready: { allowedPrompts: [] },
       result: { cost: 0, duration: 0, usage: {} },

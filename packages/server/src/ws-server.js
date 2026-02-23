@@ -194,8 +194,9 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'stream_start', messageId: '...' }        — beginning of streaming response
  *   { type: 'stream_delta', messageId, delta }         — token-by-token text
  *   { type: 'stream_end',   messageId: '...' }        — streaming response complete
- *   { type: 'tool_start',   messageId, toolUseId, tool, input } — tool invocation
+ *   { type: 'tool_start',   messageId, toolUseId, tool, input, serverName? } — tool invocation (serverName present for MCP tools)
  *   { type: 'tool_result',  toolUseId, result, truncated, images? }  — tool result (images: [{mediaType, data}])
+ *   { type: 'mcp_servers',  servers: [{ name, status }] }     — connected MCP servers
  *   { type: 'result',       ... }                     — query stats
  *   { type: 'status',       connected: true }         — connection status
  *   { type: 'claude_ready' }                          — Claude Code ready for input
@@ -1595,7 +1596,7 @@ export class WsServer {
       'ready', 'stream_start', 'stream_delta', 'stream_end',
       'message', 'tool_start', 'tool_result', 'result', 'error',
       'user_question', 'agent_spawned', 'agent_completed',
-      'plan_started', 'plan_ready', 'status_update',
+      'plan_started', 'plan_ready', 'status_update', 'mcp_servers',
     ]
     for (const event of FORWARDED_EVENTS) {
       this.cliSession.on(event, (data) => {
