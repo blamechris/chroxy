@@ -57,7 +57,18 @@ export function SettingsScreen() {
       .catch(() => {
         // Ignore — falls back to default 'en-US'
       });
-    isBiometricAvailable().then(setBiometricAvail);
+    isBiometricAvailable().then((avail) => {
+      setBiometricAvail(avail);
+      // Auto-disable if biometrics became unavailable (e.g., enrollment removed)
+      if (!avail) {
+        getBiometricEnabled().then((wasOn) => {
+          if (wasOn) {
+            setBiometricEnabled(false);
+            setBiometricOn(false);
+          }
+        });
+      }
+    });
     getBiometricEnabled().then(setBiometricOn);
   }, []);
 
@@ -163,8 +174,9 @@ export function SettingsScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* SECURITY */}
-      {biometricAvail && (
+      {/* SECURITY — show when hardware available, or when preference is
+           still enabled (so user can disable it even if biometrics were revoked) */}
+      {(biometricAvail || biometricOn) && (
         <>
           <Text style={styles.sectionHeader}>SECURITY</Text>
           <View style={styles.section}>
@@ -172,6 +184,7 @@ export function SettingsScreen() {
               <Text style={styles.rowLabel}>Biometric Lock</Text>
               <Switch
                 value={biometricOn}
+                disabled={!biometricAvail && !biometricOn}
                 onValueChange={async (value) => {
                   if (value) {
                     // Verify biometric before enabling
@@ -187,7 +200,9 @@ export function SettingsScreen() {
             <View style={styles.separator} />
             <View style={styles.row}>
               <Text style={[styles.rowLabel, styles.rowHint]}>
-                Require Face ID / Touch ID when returning to the app
+                {biometricAvail
+                  ? 'Require Face ID / Touch ID when returning to the app'
+                  : 'Biometric hardware unavailable — toggle off to disable lock'}
               </Text>
             </View>
           </View>

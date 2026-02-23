@@ -73,10 +73,8 @@ export function useBiometricLock() {
     getBiometricEnabled().then(setEnabled);
   }, []);
 
-  // Track app state transitions
+  // Track app state transitions and re-sync preference on foreground
   useEffect(() => {
-    if (!enabled) return;
-
     const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
       const prev = appStateRef.current;
       appStateRef.current = next;
@@ -85,14 +83,26 @@ export function useBiometricLock() {
         wentBackground.current = true;
       }
 
-      if (next === 'active' && wentBackground.current) {
-        wentBackground.current = false;
-        setIsLocked(true);
+      if (next === 'active') {
+        // Re-read preference on every foreground transition so Settings
+        // toggle changes take effect without restart
+        getBiometricEnabled().then((val) => {
+          setEnabled(val);
+          if (!val) {
+            // Preference was disabled — ensure unlocked
+            setIsLocked(false);
+            return;
+          }
+          if (wentBackground.current) {
+            wentBackground.current = false;
+            setIsLocked(true);
+          }
+        });
       }
     });
 
     return () => sub.remove();
-  }, [enabled]);
+  }, []);
 
   const unlock = useCallback(async () => {
     const success = await authenticate();
