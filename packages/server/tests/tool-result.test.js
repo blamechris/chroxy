@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import EventEmitter from 'node:events'
-import { emitToolResults, MAX_TOOL_RESULT_SIZE, MAX_TOOL_IMAGE_SIZE } from '../src/tool-result.js'
+import { emitToolResults, MAX_TOOL_RESULT_SIZE, MAX_TOOL_IMAGE_SIZE, MAX_TOOL_IMAGES_PER_RESULT } from '../src/tool-result.js'
 
 describe('emitToolResults', () => {
   it('emits tool_result for string content', () => {
@@ -237,6 +237,32 @@ describe('emitToolResults', () => {
     assert.equal(results.length, 1)
     assert.equal(results[0].result, 'just text')
     assert.equal(results[0].images, undefined)
+  })
+
+  it('caps images at MAX_TOOL_IMAGES_PER_RESULT per result', () => {
+    const emitter = new EventEmitter()
+    const results = []
+    emitter.on('tool_result', r => results.push(r))
+
+    // Create more images than the cap
+    const imageBlocks = Array.from({ length: MAX_TOOL_IMAGES_PER_RESULT + 3 }, (_, i) => ({
+      type: 'image',
+      source: { media_type: 'image/png', data: `img${i}=` },
+    }))
+
+    emitToolResults([
+      {
+        type: 'tool_result',
+        tool_use_id: 'tu_cap',
+        content: imageBlocks,
+      },
+    ], emitter)
+
+    assert.equal(results.length, 1)
+    assert.equal(results[0].images.length, MAX_TOOL_IMAGES_PER_RESULT)
+    // Should keep the first N images
+    assert.equal(results[0].images[0].data, 'img0=')
+    assert.equal(results[0].images[MAX_TOOL_IMAGES_PER_RESULT - 1].data, `img${MAX_TOOL_IMAGES_PER_RESULT - 1}=`)
   })
 
   it('handles mediaType field name (camelCase variant)', () => {
