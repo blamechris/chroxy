@@ -11,7 +11,9 @@
     "server:dev": "npm run dev -w @chroxy/server",
     "app": "npm run start -w @chroxy/app",
     "app:ios": "npm run ios -w @chroxy/app",
-    "app:android": "npm run android -w @chroxy/app"
+    "app:android": "npm run android -w @chroxy/app",
+    "desktop": "npm run dev -w @chroxy/desktop",
+    "desktop:build": "npm run build -w @chroxy/desktop"
   },
   "repository": {
     "type": "git",
