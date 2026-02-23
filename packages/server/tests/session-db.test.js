@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach } from 'node:test'
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -64,7 +64,7 @@ describe('SessionDB', () => {
       db = new SessionDB(testDbPath(`crud-${Date.now()}`))
     })
 
-    after(() => { try { db?.close() } catch {} })
+    afterEach(() => { try { db?.close() } catch {} })
 
     it('creates and retrieves a session', () => {
       db.saveSession({
@@ -141,7 +141,7 @@ describe('SessionDB', () => {
       db.saveSession({ id: 's1', cwd: '/tmp' })
     })
 
-    after(() => { try { db?.close() } catch {} })
+    afterEach(() => { try { db?.close() } catch {} })
 
     it('records and retrieves a message', () => {
       db.recordMessage('s1', {
@@ -260,7 +260,7 @@ describe('SessionDB', () => {
       }
     })
 
-    after(() => { try { db?.close() } catch {} })
+    afterEach(() => { try { db?.close() } catch {} })
 
     it('returns messages in chronological order', () => {
       const history = db.getHistory('s1', 10)
@@ -293,7 +293,7 @@ describe('SessionDB', () => {
       db.saveSession({ id: 's1', cwd: '/tmp' })
     })
 
-    after(() => { try { db?.close() } catch {} })
+    afterEach(() => { try { db?.close() } catch {} })
 
     it('records and aggregates costs', () => {
       db.recordResult('s1', { cost: 0.05, duration: 1200, inputTokens: 1000, outputTokens: 500, timestamp: Date.now() })
@@ -312,7 +312,7 @@ describe('SessionDB', () => {
       db.saveSession({ id: 's1', cwd: '/tmp' })
     })
 
-    after(() => { try { db?.close() } catch {} })
+    afterEach(() => { try { db?.close() } catch {} })
 
     it('prunes old messages keeping last N', () => {
       for (let i = 0; i < 100; i++) {
@@ -356,7 +356,7 @@ describe('SessionDB', () => {
       db = new SessionDB(testDbPath(`migrate-${Date.now()}`))
     })
 
-    after(() => { try { db?.close() } catch {} })
+    afterEach(() => { try { db?.close() } catch {} })
 
     it('imports sessions and messages from JSON state file', () => {
       const jsonPath = join(TEST_DIR, `state-${Date.now()}.json`)
@@ -537,7 +537,7 @@ describe('SessionDB', () => {
       db.saveSession({ id: 's1', cwd: '/tmp' })
     })
 
-    after(() => { try { db?.close() } catch {} })
+    afterEach(() => { try { db?.close() } catch {} })
 
     it('converts message rows to WS format', () => {
       db.recordMessage('s1', {

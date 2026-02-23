@@ -4,6 +4,9 @@ export const MAX_TOOL_RESULT_SIZE = 10240
 // Max base64 size per image forwarded to mobile (500KB base64 ≈ 375KB decoded)
 export const MAX_TOOL_IMAGE_SIZE = 512000
 
+// Max number of images forwarded per tool result (prevents oversized WS frames on mobile)
+export const MAX_TOOL_IMAGES_PER_RESULT = 5
+
 // Allowed image media types
 const ALLOWED_IMAGE_TYPES = new Set([
   'image/png',
@@ -51,6 +54,8 @@ export function emitToolResults(content, emitter, maxSize = MAX_TOOL_RESULT_SIZE
         // Skip images that exceed the size limit
         if (data.length > MAX_TOOL_IMAGE_SIZE) continue
         images.push({ mediaType, data })
+        // Cap total images per result
+        if (images.length >= MAX_TOOL_IMAGES_PER_RESULT) break
       }
     }
 

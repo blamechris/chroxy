@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage, ConnectionPhase, AgentInfo } from '../store/connection';
+import { useConnectionStore, ChatMessage, ConnectionPhase, AgentInfo, McpServer } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
@@ -39,6 +39,7 @@ import type { Attachment } from '../utils/attachments';
 
 // Stable empty arrays to avoid new-reference-per-render in Zustand selectors
 const EMPTY_AGENTS: AgentInfo[] = [];
+const EMPTY_MCP_SERVERS: McpServer[] = [];
 const EMPTY_PROMPTS: { tool: string; prompt: string }[] = [];
 
 // Message sent when user taps "Approve" on a plan approval card
@@ -170,6 +171,10 @@ export function SessionScreen() {
   const pendingPermissionConfirm = useConnectionStore((s) => s.pendingPermissionConfirm);
   const slashCommands = useConnectionStore((s) => s.slashCommands);
   const customAgents = useConnectionStore((s) => s.customAgents);
+  const mcpServers = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].mcpServers : EMPTY_MCP_SERVERS;
+  });
   const destroySession = useConnectionStore((s) => s.destroySession);
   const connectionError = useConnectionStore((s) => s.connectionError);
   const connectionRetryCount = useConnectionStore((s) => s.connectionRetryCount);
@@ -548,6 +553,7 @@ export function SessionScreen() {
           activeAgents={activeAgents}
           connectedClients={connectedClients}
           customAgents={customAgents}
+          mcpServers={mcpServers}
           onInvokeAgent={handleInvokeAgent}
           setModel={setModel}
           setPermissionMode={setPermissionMode}

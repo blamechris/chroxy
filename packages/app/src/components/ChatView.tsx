@@ -15,7 +15,7 @@ import {
   Pressable,
   Image,
 } from 'react-native';
-import { ChatMessage } from '../store/connection';
+import { ChatMessage, ToolResultImage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
 import { ImageViewer } from './ImageViewer';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOSE, ICON_CHECK, ICON_DOCUMENT } from '../constants/icons';
@@ -298,7 +298,7 @@ function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTru
   content: string;
   toolResult?: string;
   toolResultTruncated?: boolean;
-  toolResultImages?: { mediaType: string; data: string }[];
+  toolResultImages?: ToolResultImage[];
   serverName?: string;
   onClose: () => void;
   onImagePress: (uri: string) => void;
@@ -313,7 +313,7 @@ function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTru
       <Pressable style={styles.toolModalOverlay} onPress={onClose}>
         <Pressable style={styles.toolModalContainer} onPress={(e) => e.stopPropagation()}>
           <View style={styles.toolModalHeader}>
-            <View style={{ flex: 1 }}>
+            <View style={styles.toolModalTitleContainer}>
               <Text style={styles.toolModalTitle} numberOfLines={1}>Tool: {toolName}</Text>
               {serverName ? (
                 <Text style={styles.toolModalServerLabel}>via MCP server: {serverName}</Text>
@@ -378,7 +378,7 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpe
   isSelected: boolean;
   isSelecting: boolean;
   onToggleSelection: () => void;
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[], serverName?: string) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const longPressedRef = useRef(false);
@@ -634,7 +634,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
   isSelecting: boolean;
   onLongPress: () => void;
   onPress: () => void;
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[], serverName?: string) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string) => void;
   onImagePress?: (uri: string) => void;
 }) {
   const longPressedRef = useRef(false);
@@ -848,7 +848,7 @@ export function ChatView({
 }: ChatViewProps) {
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: { mediaType: string; data: string }[]; serverName?: string } | null>(null);
+  const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
   // Pause auto-scroll when an unanswered prompt is visible — user needs to read context
@@ -869,7 +869,7 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef and isSelectingRef are stable refs
   }, [isPlanPending]);
 
-  const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: { mediaType: string; data: string }[], serverName?: string) => {
+  const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string) => {
     setToolDetail({ toolName, content, toolResult, toolResultTruncated, toolResultImages, serverName });
   };
 
@@ -1331,6 +1331,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.borderPrimary,
+  },
+  toolModalTitleContainer: {
+    flex: 1,
   },
   toolModalTitle: {
     color: COLORS.accentPurple,

@@ -17,6 +17,7 @@ import { type EncryptedEnvelope } from '../utils/crypto';
 // Re-export all types for backward compatibility
 export type {
   MessageAttachment,
+  ToolResultImage,
   ChatMessage,
   ContextUsage,
   ClaudeStatus,

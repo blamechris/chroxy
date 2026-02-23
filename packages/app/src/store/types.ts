@@ -16,6 +16,12 @@ export interface MessageAttachment {
   size: number;
 }
 
+/** Base64 image from a tool result (e.g. computer use screenshots) */
+export interface ToolResultImage {
+  mediaType: string;
+  data: string;
+}
+
 export interface ChatMessage {
   id: string;
   type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error' | 'system';
@@ -28,7 +34,7 @@ export interface ChatMessage {
   toolResult?: string;
   toolResultTruncated?: boolean;
   /** Base64 images from tool results (e.g. computer use screenshots) */
-  toolResultImages?: { mediaType: string; data: string }[];
+  toolResultImages?: ToolResultImage[];
   answered?: string;
   expiresAt?: number;
   timestamp: number;

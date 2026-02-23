@@ -39,6 +39,7 @@ import type {
   SessionNotification,
   SessionState,
   SlashCommand,
+  ToolResultImage,
 } from './types';
 import { createEmptySessionState } from './utils';
 
@@ -955,7 +956,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (!toolUseId) break;
       const resultText = (msg.result as string) || '';
       const truncated = !!(msg.truncated as boolean);
-      const images = Array.isArray(msg.images) ? msg.images as { mediaType: string; data: string }[] : undefined;
+      const images = Array.isArray(msg.images) ? msg.images as ToolResultImage[] : undefined;
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       // Find the matching tool_use message and attach the result
       const patch: Partial<ChatMessage> = { toolResult: resultText, toolResultTruncated: truncated };
