@@ -151,6 +151,18 @@ const EVENT_MAP = {
     return { messages, sideEffects }
   },
 
+  cost_update: (data) => ({
+    messages: [{ msg: { type: 'cost_update', sessionCost: data.sessionCost, totalCost: data.totalCost, budget: data.budget } }],
+  }),
+
+  budget_warning: (data) => ({
+    messages: [{ msg: { type: 'budget_warning', sessionCost: data.sessionCost, budget: data.budget, percent: data.percent, message: data.message } }],
+  }),
+
+  budget_exceeded: (data) => ({
+    messages: [{ msg: { type: 'budget_exceeded', sessionCost: data.sessionCost, budget: data.budget, percent: data.percent, message: data.message } }],
+  }),
+
   raw: (data, ctx) => {
     if (ctx.mode === 'multi') {
       return {

@@ -70,6 +70,7 @@ export async function startCliServer(config) {
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],
     sessionTimeout: config.sessionTimeout || null,
+    costBudget: config.costBudget || null,
   })
 
   // 2. Try restoring session state from a previous instance
@@ -138,6 +139,10 @@ export async function startCliServer(config) {
           pushManager.send('idle', 'Claude is waiting', body, { sessionId })
         }
       }
+    } else if (event === 'budget_warning') {
+      console.warn(`[cli] Budget warning: ${data.message}`)
+    } else if (event === 'budget_exceeded') {
+      console.warn(`[cli] Budget exceeded: ${data.message}`)
     }
   })
 

@@ -190,6 +190,7 @@ export interface SessionState {
   contextUsage: ContextUsage | null;
   lastResultCost: number | null;
   lastResultDuration: number | null;
+  sessionCost: number | null;
   isIdle: boolean;
   health: SessionHealth;
   activeAgents: AgentInfo[];
@@ -288,6 +289,10 @@ export interface ConnectionState {
   lastResultDuration: number | null;
   isIdle: boolean;
   messages: ChatMessage[];
+
+  // Cost tracking
+  totalCost: number | null;
+  costBudget: number | null;
 
   // Available models from server (CLI mode)
   availableModels: ModelInfo[];

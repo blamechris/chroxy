@@ -216,6 +216,7 @@ program
   .option('--max-payload <bytes>', 'WebSocket max message size in bytes (default: 1048576)')
   .option('--max-tool-input <bytes>', 'Maximum tool input size in bytes (default: 262144)')
   .option('--session-timeout <duration>', 'Idle session timeout (e.g. 2h, 30m). Disabled by default')
+  .option('--cost-budget <dollars>', 'Per-session cost budget in dollars (e.g., 5.00)')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
     // Build start-specific overrides
@@ -228,6 +229,10 @@ program
     if (options.maxToolInput !== undefined) {
       const parsed = parseInt(options.maxToolInput, 10)
       extraOverrides.maxToolInput = Number.isNaN(parsed) ? options.maxToolInput : parsed
+    }
+    if (options.costBudget !== undefined) {
+      const parsed = parseFloat(options.costBudget)
+      extraOverrides.costBudget = Number.isNaN(parsed) ? options.costBudget : parsed
     }
     if (options.discoveryInterval !== undefined) {
       const parsed = parseInt(options.discoveryInterval, 10)
@@ -537,6 +542,7 @@ program
   .option('--max-payload <bytes>', 'WebSocket max message size in bytes (default: 1048576)')
   .option('--max-tool-input <bytes>', 'Maximum tool input size in bytes (default: 262144)')
   .option('--session-timeout <duration>', 'Idle session timeout (e.g. 2h, 30m). Disabled by default')
+  .option('--cost-budget <dollars>', 'Per-session cost budget in dollars (e.g., 5.00)')
   .option('-v, --verbose', 'Show detailed config sources and validation info')
   .action(async (options) => {
     const extraOverrides = {}
@@ -549,6 +555,10 @@ program
       extraOverrides.maxToolInput = Number.isNaN(parsed) ? options.maxToolInput : parsed
     }
     if (options.sessionTimeout !== undefined) extraOverrides.sessionTimeout = options.sessionTimeout
+    if (options.costBudget !== undefined) {
+      const parsed = parseFloat(options.costBudget)
+      extraOverrides.costBudget = Number.isNaN(parsed) ? options.costBudget : parsed
+    }
     const config = loadAndMergeConfig(options, extraOverrides)
 
     // Dev mode does not support terminal (PTY) mode
