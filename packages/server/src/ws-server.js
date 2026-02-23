@@ -280,6 +280,17 @@ export class WsServer {
     this.defaultSessionId = defaultSessionId || null
     this._checkpointManager = new CheckpointManager()
 
+    // Clean up checkpoints when sessions are destroyed
+    if (sessionManager && typeof sessionManager.on === 'function') {
+      sessionManager.on('session_destroyed', (sessionId) => {
+        try {
+          this._checkpointManager.clearCheckpoints(sessionId)
+        } catch (err) {
+          console.warn(`[ws] Failed to clear checkpoints for destroyed session ${sessionId}: ${err.message}`)
+        }
+      })
+    }
+
     // Legacy single-session mode: wrap cliSession in a minimal shim
     if (!sessionManager && cliSession) {
       this.cliSession = cliSession
@@ -1348,13 +1359,17 @@ export class WsServer {
           this._send(ws, { type: 'session_error', message: `Session not found: ${sid}` })
           break
         }
+        if (!entry.session.resumeSessionId) {
+          this._send(ws, { type: 'session_error', message: 'Cannot create checkpoint before first message' })
+          break
+        }
         try {
           const checkpoint = await this._checkpointManager.createCheckpoint({
             sessionId: sid,
             resumeSessionId: entry.session.resumeSessionId,
             cwd: entry.cwd,
-            name: typeof msg.name === 'string' ? msg.name : undefined,
-            description: typeof msg.description === 'string' ? msg.description : undefined,
+            name: typeof msg.name === 'string' ? msg.name.slice(0, 100) : undefined,
+            description: typeof msg.description === 'string' ? msg.description.slice(0, 500) : undefined,
             messageCount: this.sessionManager.getHistoryCount(sid),
           })
           this._send(ws, {

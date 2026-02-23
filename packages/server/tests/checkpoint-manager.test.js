@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
@@ -91,7 +91,7 @@ describe('CheckpointManager', () => {
     assert.equal(list.length, 0)
   })
 
-  it('restores a checkpoint and returns the data', async () => {
+  it('restores a checkpoint and returns the data with correct file state', async () => {
     // Make some changes after the initial commit
     writeFileSync(join(gitDir, 'file.txt'), 'modified content')
 
@@ -106,9 +106,13 @@ describe('CheckpointManager', () => {
 
     const restored = await manager.restoreCheckpoint('sess-1', cp.id)
     assert.equal(restored.resumeSessionId, 'sdk-abc')
+
+    // Verify file content was restored to the checkpoint state
+    const content = readFileSync(join(gitDir, 'file.txt'), 'utf8')
+    assert.equal(content, 'modified content')
   })
 
-  it('captures git state with untracked files', async () => {
+  it('captures and restores git state with untracked files', async () => {
     writeFileSync(join(gitDir, 'new-file.txt'), 'untracked content')
 
     const cp = await manager.createCheckpoint({
@@ -118,6 +122,13 @@ describe('CheckpointManager', () => {
     })
 
     assert.ok(cp.gitRef)
+
+    // Remove the untracked file and verify restore brings it back
+    rmSync(join(gitDir, 'new-file.txt'))
+    await manager.restoreCheckpoint('sess-1', cp.id)
+
+    const content = readFileSync(join(gitDir, 'new-file.txt'), 'utf8')
+    assert.equal(content, 'untracked content')
   })
 
   it('works in clean git state (no changes)', async () => {

@@ -23,6 +23,7 @@ import { registerForPushNotifications } from '../notifications';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
 import type {
   ChatMessage,
+  Checkpoint,
   ConnectedClient,
   ConnectionContext,
   ConnectionState,
@@ -1510,16 +1511,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'checkpoint_created': {
+      const cpSid = (msg.sessionId as string) || get().activeSessionId;
+      if (cpSid !== get().activeSessionId) break;
       if (msg.checkpoint && typeof msg.checkpoint === 'object') {
-        const cp = msg.checkpoint as { id: string; name: string; description: string; messageCount: number; createdAt: number; hasGitSnapshot: boolean };
+        const cp = msg.checkpoint as Checkpoint;
         set({ checkpoints: [...get().checkpoints, cp] });
       }
       break;
     }
 
     case 'checkpoint_list': {
+      const listSid = (msg.sessionId as string) || get().activeSessionId;
+      if (listSid !== get().activeSessionId) break;
       if (Array.isArray(msg.checkpoints)) {
-        set({ checkpoints: msg.checkpoints as { id: string; name: string; description: string; messageCount: number; createdAt: number; hasGitSnapshot: boolean }[] });
+        set({ checkpoints: msg.checkpoints as Checkpoint[] });
       }
       break;
     }

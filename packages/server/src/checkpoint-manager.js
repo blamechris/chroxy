@@ -27,6 +27,7 @@ export class CheckpointManager extends EventEmitter {
   constructor() {
     super()
     this._checkpoints = new Map() // sessionId -> Checkpoint[]
+    this._counters = new Map() // sessionId -> monotonic counter for default names
     this._ensureDir()
   }
 
@@ -52,7 +53,10 @@ export class CheckpointManager extends EventEmitter {
 
     // Enforce max checkpoints — remove oldest if at limit
     if (checkpoints.length >= MAX_CHECKPOINTS_PER_SESSION) {
-      checkpoints.shift()
+      const evicted = checkpoints.shift()
+      if (evicted?.gitRef) {
+        this._deleteGitRef(evicted.cwd, evicted.gitRef).catch(() => {})
+      }
     }
 
     const checkpoint = {
@@ -60,7 +64,7 @@ export class CheckpointManager extends EventEmitter {
       sessionId,
       resumeSessionId,
       cwd,
-      name: name || `Checkpoint ${checkpoints.length + 1}`,
+      name: name || `Checkpoint ${(this._counters.get(sessionId) || 0) + 1}`,
       description: description || '',
       messageCount: messageCount || 0,
       createdAt: Date.now(),
@@ -74,6 +78,7 @@ export class CheckpointManager extends EventEmitter {
     }
 
     checkpoints.push(checkpoint)
+    this._counters.set(sessionId, (this._counters.get(sessionId) || 0) + 1)
     this._checkpoints.set(sessionId, checkpoints)
     this._persist(sessionId)
 
@@ -191,24 +196,31 @@ export class CheckpointManager extends EventEmitter {
     const tagName = `chroxy-checkpoint/${checkpointId}`
 
     try {
-      // Stage all changes (including untracked) and create a temporary commit
-      // Then tag it and reset back. This captures the full working tree state.
-      const { stdout: stashRef } = await execFileAsync(
-        'git', ['stash', 'create', '--include-untracked'],
+      // Check if there are any changes (tracked or untracked) to capture
+      const { stdout: status } = await execFileAsync(
+        'git', ['status', '--porcelain'],
         { cwd }
       )
-      const ref = stashRef.trim()
 
-      if (!ref) {
-        // Nothing to stash — working tree is clean. Tag HEAD directly.
+      if (!status.trim()) {
+        // Working tree is clean — tag HEAD directly
         await execFileAsync('git', ['tag', tagName, 'HEAD'], { cwd })
         return tagName
       }
 
-      // Tag the stash ref (doesn't actually push to stash stack)
-      await execFileAsync('git', ['tag', tagName, ref], { cwd })
+      // Use stash push to capture full state (including untracked files),
+      // tag the stash entry, then drop it from the stack to avoid clutter.
+      await execFileAsync(
+        'git', ['stash', 'push', '--include-untracked', '-m', `chroxy-checkpoint/${checkpointId}`],
+        { cwd }
+      )
+      await execFileAsync('git', ['tag', tagName, 'stash@{0}'], { cwd })
+      // Pop the stash to restore the working tree to its pre-snapshot state
+      await execFileAsync('git', ['stash', 'pop'], { cwd })
       return tagName
     } catch (err) {
+      // If stash push succeeded but tag/pop failed, try to recover
+      try { await execFileAsync('git', ['stash', 'pop'], { cwd }) } catch { /* best effort */ }
       console.warn(`[checkpoint] Failed to create git snapshot: ${err.message}`)
       return null
     }
@@ -242,9 +254,14 @@ export class CheckpointManager extends EventEmitter {
         return
       }
 
-      // Apply the tagged stash state
-      // git stash apply uses the ref; checkout --force resets to the tagged commit
-      await execFileAsync('git', ['checkout', gitRef, '--', '.'], { cwd })
+      // Restore files from the tagged stash to the working tree.
+      // stash apply restores tracked + untracked files from the stash object.
+      // Fall back to checkout if the ref is a plain commit (e.g., HEAD tag).
+      try {
+        await execFileAsync('git', ['stash', 'apply', gitRef], { cwd })
+      } catch {
+        await execFileAsync('git', ['checkout', gitRef, '--', '.'], { cwd })
+      }
     } catch (err) {
       console.warn(`[checkpoint] Failed to restore git snapshot: ${err.message}`)
       throw new Error(`Git restore failed: ${err.message}`)
