@@ -63,7 +63,7 @@ spec:
     spec:
       containers:
         - name: chroxy
-          image: ghcr.io/blamechris/chroxy:latest   # or your registry
+          image: ghcr.io/blamechris/chroxy:0.1.0   # pin to a release tag; replace with your registry
           ports:
             - containerPort: 8765
           env:
@@ -72,8 +72,10 @@ spec:
                 secretKeyRef:
                   name: chroxy-secrets
                   key: anthropic-api-key
-            - name: CHROXY_PORT
+            - name: PORT
               value: "8765"
+            - name: CHROXY_TUNNEL
+              value: "none"
           volumeMounts:
             - name: chroxy-config
               mountPath: /home/chroxy/.chroxy
@@ -227,7 +229,7 @@ server {
 Start the server without tunnel mode when using a reverse proxy:
 
 ```bash
-npx chroxy start --no-tunnel
+npx chroxy start --tunnel none
 ```
 
 ### Caddy
@@ -243,20 +245,12 @@ Caddy handles TLS automatically via Let's Encrypt. WebSocket proxying works by d
 Start the server without tunnel mode:
 
 ```bash
-npx chroxy start --no-tunnel
+npx chroxy start --tunnel none
 ```
 
-### QR Code with Reverse Proxy
+### Connecting with Reverse Proxy
 
-When using a reverse proxy instead of a Cloudflare tunnel, the server won't generate a QR code automatically. Set the external URL in config:
-
-```json
-{
-  "externalUrl": "wss://chroxy.example.com"
-}
-```
-
-Or manually enter `wss://chroxy.example.com` in the app's manual connection screen.
+When using a reverse proxy instead of a Cloudflare tunnel, the server won't generate a QR code automatically (there is no config option to set an external URL). Enter `wss://chroxy.example.com` manually in the app's connection screen.
 
 ## Security Hardening
 
@@ -301,8 +295,8 @@ iptables -A INPUT -p tcp --dport 8765 -j DROP
 ### Authentication
 
 - The API token is required for all WebSocket connections
-- Rate limiting on failed auth attempts (5 failures per IP triggers 60s block)
-- Token is transmitted during the WebSocket handshake, not in URL params
+- Rate limiting on failed auth attempts using exponential backoff (1s, 2s, 4s, 8s, 16s, capped at 60s)
+- Token is sent as a JSON message after WebSocket connect, not in URL params
 
 ### Checklist
 
@@ -315,7 +309,7 @@ iptables -A INPUT -p tcp --dport 8765 -j DROP
 - [ ] Anthropic API key stored as a secret, not in config files
 - [ ] Server runs as non-root user
 - [ ] Working directory has appropriate file permissions
-- [ ] Log files don't contain API tokens (server redacts by default)
+- [ ] Log files don't contain API tokens (review server log output for leaks)
 
 ## Multi-User Considerations
 
@@ -332,14 +326,14 @@ services:
     <<: *chroxy-base
     environment:
       - ANTHROPIC_API_KEY=${ALICE_API_KEY}
-      - CHROXY_PORT=8765
+      - PORT=8765
     ports: ["8765:8765"]
 
   chroxy-bob:
     <<: *chroxy-base
     environment:
       - ANTHROPIC_API_KEY=${BOB_API_KEY}
-      - CHROXY_PORT=8766
+      - PORT=8766
     ports: ["8766:8766"]
 ```
 
