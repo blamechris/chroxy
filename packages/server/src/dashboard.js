@@ -1611,11 +1611,6 @@ function getDashboardJs() {
         showToast(msg.message || "Session error");
         break;
 
-      case "session_created":
-        renderSessions();
-        showToast("Session created");
-        break;
-
       case "server_shutdown":
         reconnectText.textContent = msg.reason === "restart"
           ? "Server restarting..."
