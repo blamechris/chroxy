@@ -10,7 +10,7 @@ Address all PR review comments systematically and respond inline.
 
 ### 0. Wait for Automated Reviews
 
-Copilot review typically takes **3–5 minutes** after PR creation to even begin. If you run `/check-pr` immediately after creating the PR, the review won't exist yet.
+Copilot review typically takes **3-5 minutes** after PR creation to even begin. If you run `/check-pr` immediately after creating the PR, the review won't exist yet.
 
 **IMPORTANT:** Do NOT skip this step. If no Copilot review exists and the PR was created recently (within 5 min), you MUST wait — otherwise you'll process zero comments and miss the entire review.
 
@@ -43,7 +43,7 @@ if [ "$COPILOT_STATUS" = "IN_PROGRESS" ]; then
   for i in $(seq 1 10); do
     sleep 30
     COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
-      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if (.[0].state == "PENDING") then "IN_PROGRESS" else "COMPLETED" end')
+      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (.[0].state == "PENDING") then "IN_PROGRESS" else "COMPLETED" end')
     [ "$COPILOT_STATUS" != "IN_PROGRESS" ] && break
   done
 fi
@@ -52,8 +52,8 @@ fi
 ### 1. Fetch PR Info
 
 ```bash
-# Fetch all review comments (inline)
-gh api repos/${REPO}/pulls/${PR_NUM}/comments
+# Fetch all review comments (inline) — paginate to avoid truncation
+gh api repos/${REPO}/pulls/${PR_NUM}/comments --paginate
 
 # Fetch all reviews
 gh api repos/${REPO}/pulls/${PR_NUM}/reviews
@@ -62,29 +62,41 @@ gh api repos/${REPO}/pulls/${PR_NUM}/reviews
 gh api repos/${REPO}/issues/${PR_NUM}/comments
 ```
 
-### 2. Skip Already-Replied Comments
+### 2. Skip Already-Replied Comments (Idempotency)
 
-Before processing, check which comments already have replies:
+Before processing, filter out comments that already have replies from this workflow.
+This makes `/check-pr` safe to re-run without duplicating work.
 
 ```bash
-# Get IDs of comments that are replies (in_reply_to_id is set)
-gh api repos/${REPO}/pulls/${PR_NUM}/comments --jq '[.[] | select(.in_reply_to_id != null) | .in_reply_to_id] | unique'
+# Fetch all review comments with reply threading info
+ALL_COMMENTS=$(gh api repos/${REPO}/pulls/${PR_NUM}/comments --paginate)
+
+# Determine the current workflow user (used to detect this workflow's replies)
+WORKFLOW_USER=$(gh api user --jq .login)
+
+# Build list of comment IDs that already have replies FROM THIS WORKFLOW (filter by author)
+REPLIED_IDS=$(echo "$ALL_COMMENTS" | jq --arg user "$WORKFLOW_USER" \
+  '[.[] | select(.in_reply_to_id != null and .user.login == $user) | .in_reply_to_id] | unique')
+
+# Filter to only unprocessed top-level comments (no existing reply from this workflow)
+PENDING_COMMENTS=$(echo "$ALL_COMMENTS" \
+  | jq --argjson replied "$REPLIED_IDS" \
+    '[.[] | select(.in_reply_to_id == null) | select([.id] | inside($replied) | not)]')
 ```
 
-Only process root comments (where `in_reply_to_id` is null) that do NOT appear in the replied-to list. This prevents duplicate work when re-running `/check-pr`.
+Only process comments in `PENDING_COMMENTS`. If all comments already have replies, report "All comments already addressed" and exit.
 
-### 3. Process EVERY Unreplied Comment — ONE AT A TIME
+### 3. Process EVERY Pending Comment — ONE AT A TIME
 
-For each review comment (Copilot or human) that has NOT been replied to, you MUST do ALL of these steps **before moving to the next comment**:
+For each pending review comment (Copilot or human), you MUST do ALL of these steps **before moving to the next comment**:
 
 1. Read the comment carefully
-2. Evaluate if it's actionable
-3. Take action (fix code, or create issue)
-4. **Post the inline reply via `gh api ... /replies` IMMEDIATELY** — do NOT batch replies
+2. Classify it into exactly ONE of the three valid outcomes below
+3. Take the required action AND post a reply
 
 **CRITICAL: The inline reply (`gh api ... /comments/${COMMENT_ID}/replies`) is the PRIMARY output of this skill.** The summary comment is secondary. If you only post a summary without inline replies, the skill has FAILED — conversation threads will remain unresolved and block merging.
 
-**Default stance: FIX IT NOW** - Only defer if the suggestion is a false positive or requires scope expansion (tracked via follow-up issue).
+**Default stance: FIX IT NOW** — Only defer if the suggestion is a false positive or requires scope expansion (tracked via follow-up issue).
 
 **CRITICAL: There are ONLY THREE valid outcomes for each comment. Every comment MUST result in one of these:**
 
@@ -141,11 +153,17 @@ Study these examples. Your replies must match this structure exactly.
 >
 > **Reason for deferral:** Switching from absolute `expiresAt` to relative `remainingMs` requires changing the WS protocol contract and both server broadcast paths — out of scope for this countdown UI PR.
 
+---
+
 #### Outcome 1: FIX IMMEDIATELY (default)
+
+When the comment identifies a real issue, fix it immediately.
+
+**Required in reply:** commit hash AND before/after code diff. Both are mandatory.
 
 1. Make the code fix
 2. Commit with descriptive message (NO attribution — no Co-Authored-By, no "Generated with", no AI mentions)
-3. Reply inline with the EXACT format below — commit hash AND code diff are MANDATORY:
+3. Reply inline with the EXACT format below:
 
 ```bash
 gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
@@ -164,9 +182,13 @@ Fixed in \`${COMMIT_SHA}\`
 
 **NEVER post a fix reply without the commit SHA and a code diff.** If you fixed it, prove it.
 
-#### Outcome 2: FALSE POSITIVE
+---
 
-Only use this if the suggestion is factually incorrect. Reply inline:
+#### Outcome 2: FALSE POSITIVE (evidence REQUIRED)
+
+Only use this if the suggestion is factually incorrect. You MUST provide evidence.
+
+**Required in reply:** specific evidence why the comment is wrong (doc reference, code reference, or logical proof).
 
 ```bash
 gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
@@ -180,15 +202,13 @@ gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
 - Link to similar code in codebase"
 ```
 
-#### Outcome 3: FOLLOW-UP ISSUE (for valid but out-of-scope suggestions)
+---
 
-**ALWAYS create an issue. NEVER just say "good idea" without tracking it.**
+#### Outcome 3: FOLLOW-UP ISSUE (GitHub issue creation MANDATORY)
 
-This applies when:
-- The suggestion is valid but would expand the PR's scope
-- The suggestion is an enhancement/improvement beyond the PR's intent
-- The suggestion requires changes in other files not touched by this PR
-- The fix is non-trivial and deserves its own PR
+When a suggestion is valid but out of scope for this PR. You MUST create a GitHub issue — never reply with just "good idea" or "noted for later" without an issue URL.
+
+**Required in reply:** the created issue URL. No exceptions.
 
 ```bash
 # 1. ALWAYS create the issue — this is NOT optional
@@ -227,6 +247,17 @@ Created ${ISSUE_URL} to track this.
 **Reason for deferral:** Brief explanation why not in this PR"
 ```
 
+---
+
+**INVALID outcomes (never use these):**
+
+- "Good idea, we should do this later" without an issue URL
+- "Follow-up." or "Deferred." without a `**FOLLOW-UP ISSUE**` label and issue URL
+- "Intentional design decision" without evidence — use FALSE POSITIVE with evidence instead
+- "Noted" / "Acknowledged" without a FIX or ISSUE URL
+- Any reply that doesn't start with `**FIX**`, `**FALSE POSITIVE**`, or `**FOLLOW-UP ISSUE**`
+- Empty Reference cells in the summary table
+
 ### 4. Push All Fixes
 
 ```bash
@@ -239,7 +270,7 @@ After pushing fixes, check if any open `from-review` issues were resolved by the
 
 ```bash
 # List open from-review issues
-gh issue list --label "from-review" --json number,title,body
+gh issue list --label "from-review" --state open --limit 100 --json number,title,body,url
 
 # For each fix, check if an open issue describes the same problem.
 # If so, close it with a comment linking the PR:
@@ -255,11 +286,11 @@ gh issue close ${ISSUE_NUM}
 
 ```bash
 # Count root comments (not replies) from reviewers
-ROOT_COUNT=$(gh api repos/${REPO}/pulls/${PR_NUM}/comments \
+ROOT_COUNT=$(gh api repos/${REPO}/pulls/${PR_NUM}/comments --paginate \
   --jq '[.[] | select(.in_reply_to_id == null)] | length')
 
 # Count unique root comments that have at least one reply
-REPLIED_COUNT=$(gh api repos/${REPO}/pulls/${PR_NUM}/comments \
+REPLIED_COUNT=$(gh api repos/${REPO}/pulls/${PR_NUM}/comments --paginate \
   --jq '[.[] | select(.in_reply_to_id != null) | .in_reply_to_id] | unique | length')
 
 echo "Root comments: ${ROOT_COUNT}, Replied: ${REPLIED_COUNT}"
@@ -269,26 +300,32 @@ If `REPLIED_COUNT < ROOT_COUNT`, you have UNREPLIED comments. Go back to step 3 
 
 ### 7. Post Summary Comment
 
-After addressing ALL comments, post a summary on the PR. Every row MUST have a commit hash, issue URL, or brief justification in the Commit/Issue column.
+After addressing ALL comments, post a summary on the PR. **Every row MUST have a commit hash or issue URL — no empty cells.**
 
 ```bash
 gh pr comment ${PR_NUM} --body "$(cat <<'EOF'
 ## Review Comments Addressed
 
-| Comment | Action | Commit/Issue |
-|---------|--------|--------------|
-| Brief description | Fixed | `abc1234` |
-| Brief description | False positive | N/A — reason |
-| Brief description | Follow-up | #123 |
+| # | Comment | Outcome | Reference |
+|---|---------|---------|-----------|
+| 1 | Comment 1 summary | FIX | `abc1234` |
+| 2 | Comment 2 summary | FALSE POSITIVE | Evidence: [brief] |
+| 3 | Comment 3 summary | FOLLOW-UP | [#456](${ISSUE_URL}) |
 
 **Total:** X comments addressed
-- Fixed: Y
-- False positives: Z
-- Follow-up issues created: W
-- Existing issues closed: A
+- Fixed: Y (commit hashes above)
+- False positives: Z (with evidence)
+- Follow-up issues created: V (linked above)
+- Existing issues closed: W
 EOF
 )"
 ```
+
+**Summary table rules:**
+- The **Reference** column must NEVER be empty
+- FIX rows: commit hash (e.g., `abc1234`)
+- FALSE POSITIVE rows: brief evidence summary
+- FOLLOW-UP rows: issue URL or auto-linked issue number (e.g., `#456`)
 
 ### 8. Report to User
 
@@ -313,13 +350,34 @@ Then below the table, list:
 
 ## Critical Rules
 
-1. **EVERY comment gets an INLINE reply** — No silent dismissals. The `gh api .../replies` call is the MOST IMPORTANT output. A summary comment WITHOUT inline replies is a FAILURE.
+1. **EVERY pending comment gets a reply** — No silent dismissals. The `gh api .../replies` call is the MOST IMPORTANT output. A summary comment WITHOUT inline replies is a FAILURE.
 2. **Reply IMMEDIATELY after each comment** — Process one comment at a time: read → fix/defer → post inline reply → next. Do NOT batch all fixes and try to reply later.
-3. **Verify before summarizing** — Run the verification step (step 6) and confirm all threads have replies BEFORE posting the summary comment. If any are missing, go back and post them.
-4. **Fix first, defer second** — Default is to fix the issue
-5. **Be specific** — ALWAYS show before/after code diffs in fix replies
-6. **Link commits** — EVERY fix reply MUST include its commit hash
-7. **ALWAYS create issues for deferred items** — NEVER say "good idea" without a GitHub issue URL. If it's valid and you're not fixing it now, create the issue. No exceptions.
-8. **No attribution** — Follow Zero Attribution Policy (no Co-Authored-By, no "Generated with Claude", no AI mentions anywhere)
-9. **No editing comments** — Reply inline to comments, never edit them
-10. **Idempotent** — Skip comments that already have replies (check in_reply_to_id)
+3. **Exactly 3 valid outcomes** — FIX, FALSE POSITIVE, or FOLLOW-UP ISSUE. Nothing else.
+4. **FIX requires commit hash + code diff** — Both mandatory in reply
+5. **FALSE POSITIVE requires evidence** — No bare dismissals
+6. **FOLLOW-UP requires issue URL** — Never say "good idea" without creating an issue
+7. **Summary table has no empty cells** — Every row has a reference
+8. **Verify before summarizing** — Run the verification step (step 6) and confirm all threads have replies BEFORE posting the summary comment. If any are missing, go back and post them.
+9. **Idempotent** — Safe to re-run; already-replied comments are skipped (author-filtered)
+10. **No attribution** — Follow Zero Attribution Policy (no Co-Authored-By, no "Generated with Claude", no AI mentions anywhere)
+
+## Example Workflow
+
+```
+1. Run /check-pr 42
+2. Poll Copilot review... ready (state: COMPLETED)
+3. Fetch 5 comments, 2 already replied → 3 pending
+4. Comment A: "Missing null check on line 45"
+   → Outcome: FIX
+   → Commit fix, reply with **FIX** + hash + before/after diff
+5. Comment B: "This variable seems unused"
+   → Outcome: FALSE POSITIVE
+   → Reply with **FALSE POSITIVE** + evidence: "Used on line 78 in _process()"
+6. Comment C: "Add retry logic for network calls"
+   → Outcome: FOLLOW-UP ISSUE
+   → Create issue #99 with labels, reply with **FOLLOW-UP ISSUE** + URL
+7. Push fixes
+8. Verify all threads have replies (step 6)
+9. Post summary table (all Reference cells filled)
+10. Report to user
+```
