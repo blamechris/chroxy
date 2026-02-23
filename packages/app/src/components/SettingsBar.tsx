@@ -34,6 +34,8 @@ export interface SettingsBarProps {
   onCancelPermissionConfirm?: () => void;
   conversationId?: string | null;
   sessionContext?: SessionContext | null;
+  latencyMs?: number | null;
+  connectionQuality?: 'good' | 'fair' | 'poor' | null;
 }
 
 // -- Helpers --
@@ -101,6 +103,8 @@ export function SettingsBar({
   onCancelPermissionConfirm,
   conversationId,
   sessionContext,
+  latencyMs,
+  connectionQuality,
 }: SettingsBarProps) {
   // Elapsed time ticker — only runs when expanded with active agents
   const [now, setNow] = useState(Date.now());
@@ -212,6 +216,18 @@ export function SettingsBar({
           >
             <Text style={styles.agentBadgeText}>
               {activeAgents.length} agent{activeAgents.length !== 1 ? 's' : ''}
+            </Text>
+          </View>
+        )}
+        {connectionQuality && (
+          <View
+            style={[styles.qualityBadge, { backgroundColor: connectionQuality === 'good' ? COLORS.accentGreenSubtle : connectionQuality === 'fair' ? COLORS.accentOrangeSubtle : COLORS.accentRedSubtle }]}
+            accessibilityLabel={`Connection quality: ${connectionQuality}${latencyMs != null ? `, ${latencyMs}ms latency` : ''}`}
+            accessibilityRole="text"
+          >
+            <View style={[styles.qualityDot, { backgroundColor: connectionQuality === 'good' ? COLORS.accentGreen : connectionQuality === 'fair' ? COLORS.accentOrange : COLORS.accentRed }]} />
+            <Text style={[styles.qualityText, { color: connectionQuality === 'good' ? COLORS.accentGreen : connectionQuality === 'fair' ? COLORS.accentOrange : COLORS.accentRed }]}>
+              {latencyMs != null ? `${latencyMs}ms` : connectionQuality}
             </Text>
           </View>
         )}
@@ -509,6 +525,24 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  qualityBadge: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginRight: 8,
+    gap: 3,
+  },
+  qualityDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+  },
+  qualityText: {
+    fontSize: 9,
+    fontWeight: '600' as const,
   },
   deviceBadge: {
     backgroundColor: COLORS.accentBlueSubtle,

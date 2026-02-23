@@ -198,12 +198,14 @@ export function clearTerminalWriteBatching(): void {
 // ---------------------------------------------------------------------------
 let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let _pongTimeout: ReturnType<typeof setTimeout> | null = null;
+let _lastPingSentAt = 0;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 5_000;
 
 export function stopHeartbeat(): void {
   if (_heartbeatInterval) { clearInterval(_heartbeatInterval); _heartbeatInterval = null; }
   if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
+  _lastPingSentAt = 0;
 }
 
 export function startHeartbeat(socket: WebSocket): void {
@@ -211,6 +213,7 @@ export function startHeartbeat(socket: WebSocket): void {
   _heartbeatInterval = setInterval(() => {
     if (socket.readyState !== WebSocket.OPEN) { stopHeartbeat(); return; }
     try {
+      _lastPingSentAt = Date.now();
       wsSend(socket, { type: 'ping' });
     } catch { stopHeartbeat(); return; }
     _pongTimeout = setTimeout(() => {
@@ -223,6 +226,13 @@ export function startHeartbeat(socket: WebSocket): void {
 
 function _onPong(): void {
   if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
+  // Measure RTT and update connection quality
+  if (_lastPingSentAt > 0) {
+    const rttMs = Date.now() - _lastPingSentAt;
+    _lastPingSentAt = 0;
+    const quality: 'good' | 'fair' | 'poor' = rttMs < 200 ? 'good' : rttMs < 500 ? 'fair' : 'poor';
+    getStore().setState({ latencyMs: rttMs, connectionQuality: quality });
+  }
 }
 
 // ---------------------------------------------------------------------------

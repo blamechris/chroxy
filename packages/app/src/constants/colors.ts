@@ -59,6 +59,8 @@ export const COLORS = {
   accentGreen: '#22c55e',
   /** Light green: low-opacity background (13%) */
   accentGreenLight: '#22c55e22',
+  /** Subtle green: low-opacity background (20%) */
+  accentGreenSubtle: '#22c55e33',
   /** Green border: standard opacity (20%) */
   accentGreenBorder: '#22c55e33',
   /** Strong green border: higher opacity (40%) */

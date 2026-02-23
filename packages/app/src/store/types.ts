@@ -305,6 +305,10 @@ export interface ConnectionState {
   connectedClients: ConnectedClient[];
   primaryClientId: string | null;
 
+  // Connection quality (measured via ping/pong RTT)
+  latencyMs: number | null;
+  connectionQuality: 'good' | 'fair' | 'poor' | null;
+
   // Connection error feedback
   connectionError: string | null;
   connectionRetryCount: number;

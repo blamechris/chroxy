@@ -176,6 +176,8 @@ export function SessionScreen() {
     return id && s.sessionStates[id] ? s.sessionStates[id].mcpServers : EMPTY_MCP_SERVERS;
   });
   const destroySession = useConnectionStore((s) => s.destroySession);
+  const latencyMs = useConnectionStore((s) => s.latencyMs);
+  const connectionQuality = useConnectionStore((s) => s.connectionQuality);
   const connectionError = useConnectionStore((s) => s.connectionError);
   const connectionRetryCount = useConnectionStore((s) => s.connectionRetryCount);
   const shutdownReason = useConnectionStore((s) => s.shutdownReason);
@@ -562,6 +564,8 @@ export function SessionScreen() {
           onCancelPermissionConfirm={cancelPermissionConfirm}
           conversationId={conversationId}
           sessionContext={sessionContext}
+          latencyMs={latencyMs}
+          connectionQuality={connectionQuality}
         />
       )}
 
