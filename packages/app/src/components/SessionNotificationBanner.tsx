@@ -61,7 +61,7 @@ export function SessionNotificationBanner() {
 
   if (notifications.length === 0) return null;
 
-  const visible = notifications.slice(0, MAX_VISIBLE);
+  const visible = notifications.slice(-MAX_VISIBLE);
   const overflow = notifications.length - MAX_VISIBLE;
 
   return (
