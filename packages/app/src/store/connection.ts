@@ -38,6 +38,7 @@ export type {
   SessionHealth,
   SessionContext,
   McpServer,
+  DevPreview,
   SessionState,
   ServerError,
   SessionNotification,
@@ -210,6 +211,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   terminalRawBuffer: '',
   _terminalWriteCallback: null,
 
+  closeDevPreview: (port: number) => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'close_dev_preview', port, sessionId: activeSessionId });
+    }
+  },
+
   getActiveSessionState: () => {
     const { activeSessionId, sessionStates } = get();
     if (activeSessionId && sessionStates[activeSessionId]) {
@@ -235,6 +243,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       conversationId: null,
       sessionContext: null,
       mcpServers: [],
+      devPreviews: [],
     };
   },
 
