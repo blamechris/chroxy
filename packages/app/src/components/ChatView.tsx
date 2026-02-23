@@ -121,6 +121,12 @@ export interface ChatViewProps {
   planAllowedPrompts?: { tool: string; prompt: string }[];
   onApprovePlan?: () => void;
   onFocusInput?: () => void;
+  /** Search query for highlighting matching messages */
+  searchQuery?: string;
+  /** Set of message IDs that match the current search query */
+  searchMatchIds?: Set<string>;
+  /** ID of the currently focused search match (for scroll-into-view) */
+  currentMatchId?: string | null;
 }
 
 // -- Display group types for message grouping --
@@ -845,6 +851,9 @@ export function ChatView({
   planAllowedPrompts,
   onApprovePlan,
   onFocusInput,
+  searchQuery,
+  searchMatchIds,
+  currentMatchId,
 }: ChatViewProps) {
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
@@ -937,18 +946,21 @@ export function ChatView({
             );
           }
           const msg = group.message;
+          const isSearchMatch = searchMatchIds?.has(msg.id) ?? false;
+          const isCurrentMatch = currentMatchId === msg.id;
           return (
-            <MessageBubble
-              key={msg.id}
-              message={msg}
-              onSelectOption={onSelectOption}
-              isSelected={selectedIds.has(msg.id)}
-              isSelecting={isSelecting}
-              onLongPress={() => onToggleSelection(msg.id)}
-              onPress={() => onToggleSelection(msg.id)}
-              onOpenDetail={handleOpenDetail}
-              onImagePress={setViewerUri}
-            />
+            <View key={msg.id} style={isSearchMatch ? (isCurrentMatch ? styles.searchMatchCurrent : styles.searchMatch) : undefined}>
+              <MessageBubble
+                message={msg}
+                onSelectOption={onSelectOption}
+                isSelected={selectedIds.has(msg.id)}
+                isSelecting={isSelecting}
+                onLongPress={() => onToggleSelection(msg.id)}
+                onPress={() => onToggleSelection(msg.id)}
+                onOpenDetail={handleOpenDetail}
+                onImagePress={setViewerUri}
+              />
+            </View>
           );
         })
       )}
@@ -1008,6 +1020,19 @@ export function ChatView({
 const styles = StyleSheet.create({
   chatContainer: {
     flex: 1,
+  },
+  searchMatch: {
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.accentBlue,
+    borderRadius: 4,
+    paddingLeft: 2,
+  },
+  searchMatchCurrent: {
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.accentOrange,
+    borderRadius: 4,
+    paddingLeft: 2,
+    backgroundColor: COLORS.accentOrangeLight,
   },
   scrollView: {
     flex: 1,

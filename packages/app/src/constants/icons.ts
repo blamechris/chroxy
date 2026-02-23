@@ -24,3 +24,5 @@ export const ICON_PAPERCLIP = '\uD83D\uDCCE'; // Paperclip 📎
 export const ICON_DOCUMENT = '\uD83D\uDCC4'; // Page facing up 📄
 export const ICON_FOLDER_OPEN = '\uD83D\uDCC2'; // Open folder 📂
 export const ICON_DIFF = '\u00B1';               // Plus-minus sign ±
+export const ICON_SEARCH = '\uD83D\uDD0D';       // Left-pointing magnifying glass 🔍
+export const ICON_EXPORT = '\uD83D\uDCE4';       // Outbox tray 📤
