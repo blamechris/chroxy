@@ -1900,7 +1900,7 @@ describe('user_question_response forwarding (multi-session)', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -2064,7 +2064,7 @@ describe('background session sync (_broadcastToSession)', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -2313,7 +2313,7 @@ describe('agent idle/busy notifications', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -2482,7 +2482,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -2880,7 +2880,7 @@ describe('primary client tracking', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -4367,7 +4367,7 @@ describe('permission/question routing to originating session', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -4591,7 +4591,7 @@ describe('request_session_context error paths', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
@@ -6545,7 +6545,7 @@ function createHistoryMockManager({ history = [], truncated = false, sessions = 
   manager.listSessions = () => {
     const list = []
     for (const [id, entry] of sessionsMap) {
-      list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type })
+      list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type })
     }
     return list
   }
@@ -8170,7 +8170,7 @@ describe('session-targeted routing (#611)', () => {
     manager.listSessions = () => {
       const list = []
       for (const [id, entry] of sessionsMap) {
-        list.push({ id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
       }
       return list
     }
