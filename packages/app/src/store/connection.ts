@@ -836,10 +836,14 @@ function pushSessionNotification(
     timestamp: Date.now(),
   };
   // Dedup: replace existing notification for same (sessionId, eventType)
-  const filtered = state.sessionNotifications.filter(
-    (n) => !(n.sessionId === sessionId && n.eventType === eventType),
-  );
-  useConnectionStore.setState({ sessionNotifications: [...filtered, notification] });
+  // Use functional setState to avoid stale-state races when multiple
+  // notifications arrive close together.
+  useConnectionStore.setState((s) => {
+    const filtered = s.sessionNotifications.filter(
+      (n) => !(n.sessionId === sessionId && n.eventType === eventType),
+    );
+    return { sessionNotifications: [...filtered, notification] };
+  });
 }
 
 /**
