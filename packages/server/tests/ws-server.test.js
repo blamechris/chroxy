@@ -364,6 +364,57 @@ describe('WsServer GET /health response shape', () => {
     assert.deepEqual(Object.keys(healthBody).sort(), Object.keys(rootBody).sort())
     assert.equal(healthBody.status, rootBody.status)
   })
+
+  it('redirects browser requests (Accept: text/html) from / to /dashboard', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-redirect-test',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: { 'Accept': 'text/html,application/xhtml+xml' },
+      redirect: 'manual',
+    })
+    assert.equal(res.status, 302)
+    assert.ok(res.headers.get('location').includes('/dashboard?token=tok-redirect-test'))
+  })
+
+  it('returns JSON for / when Accept does not include text/html', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-json-test',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: { 'Accept': 'application/json' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(body.status, 'ok')
+  })
+
+  it('does not redirect /health to dashboard', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-health-no-redirect',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { 'Accept': 'text/html' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(body.status, 'ok')
+  })
 })
 
 describe('WsServer POST /permission with authRequired: false', () => {
