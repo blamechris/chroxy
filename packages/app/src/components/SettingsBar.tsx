@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext } from '../store/connection';
+import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer } from '../store/connection';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
@@ -25,6 +25,7 @@ export interface SettingsBarProps {
   activeAgents: AgentInfo[];
   connectedClients: ConnectedClient[];
   customAgents: CustomAgent[];
+  mcpServers: McpServer[];
   onInvokeAgent?: (agentName: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
@@ -91,6 +92,7 @@ export function SettingsBar({
   activeAgents,
   connectedClients,
   customAgents,
+  mcpServers,
   onInvokeAgent,
   setModel,
   setPermissionMode,
@@ -378,6 +380,24 @@ export function SettingsBar({
                   </Text>
                   <Text style={styles.agentElapsed}>
                     {client.platform}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+          {mcpServers.length > 0 && (
+            <View style={styles.agentSection}>
+              <Text style={styles.deviceSectionTitle}>
+                MCP Servers ({mcpServers.length})
+              </Text>
+              {mcpServers.map((server) => (
+                <View key={server.name} style={styles.agentEntry}>
+                  <View style={[styles.statusDot, { backgroundColor: server.status === 'connected' ? COLORS.accentGreen : COLORS.textMuted }]} />
+                  <Text style={styles.agentDescription} numberOfLines={1}>
+                    {server.name}
+                  </Text>
+                  <Text style={styles.agentElapsed}>
+                    {server.status}
                   </Text>
                 </View>
               ))}

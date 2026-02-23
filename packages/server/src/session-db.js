@@ -12,6 +12,7 @@
  *   db.close()
  */
 import Database from 'better-sqlite3'
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -176,6 +177,14 @@ export class SessionDB {
         UPDATE sessions SET updated_at = ? WHERE id = ?
       `),
     }
+
+    // Transactions
+    this._txBulkInsert = this._db.transaction((sessionId, items) => {
+      for (const entry of items) {
+        this._insertMessageRow(sessionId, entry)
+      }
+      this._stmts.touchSession.run(Date.now(), sessionId)
+    })
   }
 
   // ---------------------------------------------------------------------------
@@ -208,6 +217,8 @@ export class SessionDB {
 
   /**
    * Update specific fields on a session.
+   * Note: Uses COALESCE — fields cannot be intentionally set to NULL.
+   * Pass only the fields you want to change; omitted fields keep their current value.
    */
   updateSession(sessionId, fields) {
     this._stmts.updateSession.run({
@@ -301,13 +312,7 @@ export class SessionDB {
    * Touches session updated_at once at the end rather than per-message.
    */
   recordMessages(sessionId, entries) {
-    const insert = this._db.transaction((items) => {
-      for (const entry of items) {
-        this._insertMessageRow(sessionId, entry)
-      }
-      this._stmts.touchSession.run(Date.now(), sessionId)
-    })
-    insert(entries)
+    this._txBulkInsert(sessionId, entries)
   }
 
   /**
@@ -447,7 +452,7 @@ export class SessionDB {
 
     const migrate = this._db.transaction(() => {
       for (const session of state.sessions) {
-        const id = session.sdkSessionId || `migrated-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        const id = session.sdkSessionId || `migrated-${randomUUID()}`
 
         this.saveSession({
           id,

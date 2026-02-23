@@ -170,6 +170,10 @@ export function SessionScreen() {
   const pendingPermissionConfirm = useConnectionStore((s) => s.pendingPermissionConfirm);
   const slashCommands = useConnectionStore((s) => s.slashCommands);
   const customAgents = useConnectionStore((s) => s.customAgents);
+  const mcpServers = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].mcpServers : [];
+  });
   const destroySession = useConnectionStore((s) => s.destroySession);
   const connectionError = useConnectionStore((s) => s.connectionError);
   const connectionRetryCount = useConnectionStore((s) => s.connectionRetryCount);
@@ -548,6 +552,7 @@ export function SessionScreen() {
           activeAgents={activeAgents}
           connectedClients={connectedClients}
           customAgents={customAgents}
+          mcpServers={mcpServers}
           onInvokeAgent={handleInvokeAgent}
           setModel={setModel}
           setPermissionMode={setPermissionMode}
