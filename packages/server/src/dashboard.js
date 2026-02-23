@@ -1041,6 +1041,7 @@ function getDashboardJs() {
     // Option button handlers
     div.querySelectorAll(".q-option-btn").forEach(function(btn) {
       btn.addEventListener("click", function() {
+        if (div.classList.contains("answered")) return;
         var answer = btn.textContent;
         sendQuestionResponse(answer, toolUseId);
         div.querySelector(".q-answer-text").textContent = "Answered: " + answer;
@@ -1052,6 +1053,7 @@ function getDashboardJs() {
     var qInput = div.querySelector("input");
     var qBtn = div.querySelector(".q-input-row button");
     function submitAnswer() {
+      if (div.classList.contains("answered")) return;
       var answer = qInput.value.trim();
       if (!answer) return;
       sendQuestionResponse(answer, toolUseId);
@@ -1160,7 +1162,7 @@ function getDashboardJs() {
     input.addEventListener("blur", commit);
     input.addEventListener("keydown", function(e) {
       if (e.key === "Enter") { e.preventDefault(); input.blur(); }
-      if (e.key === "Escape") { e.preventDefault(); input.removeEventListener("blur", commit); cancel(); }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); input.removeEventListener("blur", commit); cancel(); }
     });
   }
 
@@ -1666,17 +1668,24 @@ function getDashboardJs() {
   });
 
   document.addEventListener("keydown", function(e) {
-    // Escape: close modal first, otherwise interrupt
+    // Escape: close modal first, skip if renaming, otherwise interrupt
     if (e.key === "Escape") {
       if (modalOpen) {
         e.preventDefault();
         closeCreateSessionModal();
         return;
       }
+      if (document.activeElement && document.activeElement.classList.contains("tab-rename-input")) {
+        return;
+      }
       e.preventDefault();
       sendInterrupt();
       return;
     }
+
+    // Skip shortcuts when typing in inputs (except Escape handled above)
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
 
     // Ctrl/Cmd+N: open new session modal
     if (e.key === "n" && (e.ctrlKey || e.metaKey)) {
