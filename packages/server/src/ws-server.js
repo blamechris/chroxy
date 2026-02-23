@@ -745,7 +745,7 @@ export class WsServer {
       }
 
       // Check rate limit before processing auth
-      const ip = client.ip
+      const ip = client.socketIp
       const failure = this._authFailures.get(ip)
       if (failure && failure.blockedUntil > Date.now()) {
         console.warn(`[ws] Auth rate-limited for IP ${ip} (${failure.count} failures)`)
@@ -781,7 +781,7 @@ export class WsServer {
         const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
         existing.blockedUntil = now + backoff
         this._authFailures.set(ip, existing)
-        console.warn(`[ws] Auth failure from IP ${ip} (attempt ${existing.count}, blocked for ${backoff}ms)`)
+        console.warn(`[ws] Auth failure from IP ${client.ip} (attempt ${existing.count}, blocked for ${backoff}ms)`)
         this._send(ws, { type: 'auth_fail', reason: 'invalid_token' })
         ws.close()
       }

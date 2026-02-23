@@ -198,7 +198,7 @@ program
   .description('Start the Chroxy server')
   .option('-c, --config <path>', 'Path to config file', CONFIG_FILE)
   .option('-t, --terminal', '[DEPRECATED] Use PTY/tmux mode instead of CLI headless mode')
-  .option('-r, --resume', 'Resume an existing Claude Code session instead of starting fresh')
+  .option('-r, --resume', '[DEPRECATED] Resume a PTY-mode session (PTY mode is deprecated)')
   .option('--cwd <path>', 'Working directory for Claude (CLI mode)')
   .option('--model <model>', 'Model to use (CLI mode)')
   .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve (CLI mode)')
@@ -209,7 +209,7 @@ program
   .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
   .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
   .option('--no-encrypt', 'Disable end-to-end encryption (dev/testing only)')
-  .option('--no-discovery', 'Skip tmux auto-discovery on startup')
+  .option('--no-discovery', '[DEPRECATED] Skip tmux auto-discovery (PTY mode only)')
   .option('--no-supervisor', 'Disable supervisor mode (direct server, no auto-restart)')
   .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
   .option('--provider <name>', 'Session provider to use (e.g. claude-sdk, claude-cli)')
@@ -243,6 +243,12 @@ program
       console.warn('⚠️  PTY/tmux mode (--terminal) is deprecated and will be removed in a future release.')
       console.warn('   The default CLI headless mode is recommended for all new usage.')
       console.warn('   See: https://github.com/blamechris/chroxy#server-modes')
+    }
+    if (config.resume) {
+      console.warn('⚠️  --resume is deprecated (PTY mode only). Use the default CLI headless mode.')
+    }
+    if (config.noDiscovery) {
+      console.warn('⚠️  --no-discovery is deprecated (PTY mode only). Use the default CLI headless mode.')
     }
 
     // Block PTY/tmux mode on Windows

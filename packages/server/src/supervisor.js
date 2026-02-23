@@ -202,6 +202,7 @@ export class Supervisor extends EventEmitter {
     console.log(`\nOr connect manually:`)
     console.log(`   URL:   ${wsUrl}`)
     console.log(`   Token: ${this._apiToken.slice(0, 8)}...`)
+    console.log(`   Dashboard: http://localhost:${this._port}/dashboard?token=${this._apiToken}`)
     console.log('')
 
     // 3b. Write connection info file for programmatic access
