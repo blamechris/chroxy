@@ -32,6 +32,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
 import { ICON_CLOSE, ICON_GEAR, ICON_DIFF, ICON_SEARCH, ICON_EXPORT, ICON_ARROW_UP, ICON_ARROW_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
+import { useLayout } from '../hooks/useLayout';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
 import type { Attachment } from '../utils/attachments';
@@ -103,6 +104,7 @@ export function SessionScreen() {
   const terminalRef = useRef<TerminalHandle>(null);
   const insets = useSafeAreaInsets();
   const keyboardHeight = useKeyboardHeight();
+  const layout = useLayout();
 
   const {
     viewMode,
@@ -232,10 +234,12 @@ export function SessionScreen() {
   const currentMatchId = searchMatchArray.length > 0 ? searchMatchArray[currentMatchIndex] ?? null : null;
 
   const handleSearchPrev = useCallback(() => {
+    if (searchMatchArray.length === 0) return;
     setCurrentMatchIndex((i) => (i > 0 ? i - 1 : searchMatchArray.length - 1));
   }, [searchMatchArray.length]);
 
   const handleSearchNext = useCallback(() => {
+    if (searchMatchArray.length === 0) return;
     setCurrentMatchIndex((i) => (i < searchMatchArray.length - 1 ? i + 1 : 0));
   }, [searchMatchArray.length]);
 
@@ -286,9 +290,10 @@ export function SessionScreen() {
   const activeSession = sessions.find((s) => s.sessionId === activeSessionId);
   const hasTerminal = !isCliMode || (activeSession?.hasTerminal ?? false);
 
-  // Wire up terminal write callback when terminal view is visible
+  // Wire up terminal write callback when terminal view is visible (including split view)
+  const terminalVisible = (viewMode === 'terminal' || (layout.isSplitView && viewMode !== 'files')) && hasTerminal;
   useEffect(() => {
-    if (viewMode !== 'terminal' || !hasTerminal) return;
+    if (!terminalVisible) return;
 
     const writeCallback = (data: string) => {
       terminalRef.current?.write(data);
@@ -298,7 +303,7 @@ export function SessionScreen() {
     return () => {
       setTerminalWriteCallback(null);
     };
-  }, [viewMode, hasTerminal, activeSessionId, setTerminalWriteCallback]);
+  }, [terminalVisible, activeSessionId, setTerminalWriteCallback]);
 
   // Replay raw buffer into xterm.js when it becomes ready (initial mount, view switch, or crash recovery)
   const handleTerminalReady = useCallback(() => {
@@ -767,8 +772,36 @@ export function SessionScreen() {
       {/* Background session notifications */}
       <SessionNotificationBanner />
 
-      {/* Content area */}
-      {viewMode === 'chat' ? (
+      {/* Content area — split view on tablets in landscape */}
+      {layout.isSplitView && hasTerminal && viewMode !== 'files' ? (
+        <View style={styles.splitContainer}>
+          <View style={styles.splitPane}>
+            <ChatView
+              messages={messages}
+              scrollViewRef={scrollViewRef}
+              claudeReady={claudeReady}
+              onSelectOption={handleSelectOption}
+              isCliMode={isCliMode}
+              selectedIds={selectedIds}
+              isSelecting={isSelecting}
+              isSelectingRef={isSelectingRef}
+              onToggleSelection={toggleSelection}
+              streamingMessageId={streamingMessageId}
+              isPlanPending={isPlanPending}
+              planAllowedPrompts={planAllowedPrompts}
+              onApprovePlan={handleApprovePlan}
+              onFocusInput={handleFocusInput}
+              searchQuery={searchVisible ? searchQuery : undefined}
+              searchMatchIds={searchVisible ? searchMatchIds : undefined}
+              currentMatchId={searchVisible ? currentMatchId : undefined}
+            />
+          </View>
+          <View style={styles.splitDivider} />
+          <View style={styles.splitPane}>
+            <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+          </View>
+        </View>
+      ) : viewMode === 'chat' ? (
         <ChatView
           messages={messages}
           scrollViewRef={scrollViewRef}
@@ -1064,5 +1097,16 @@ const styles = StyleSheet.create({
   },
   sheetCancelText: {
     color: COLORS.accentRed,
+  },
+  splitContainer: {
+    flex: 1,
+    flexDirection: 'row',
+  },
+  splitPane: {
+    flex: 1,
+  },
+  splitDivider: {
+    width: 1,
+    backgroundColor: COLORS.backgroundCard,
   },
 });
