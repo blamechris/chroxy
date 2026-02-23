@@ -372,6 +372,38 @@ describe('#761 — plan mode message handlers', () => {
     assert.ok(planReadyBlock[0].includes('planApprovalCard') && planReadyBlock[0].includes('remove'),
       'plan_ready should show the plan approval card')
   })
+
+  it('hides stale approval card on plan_started', () => {
+    const planStartedBlock = html.match(/case "plan_started"[\s\S]*?break;/)
+    assert.ok(planStartedBlock, 'plan_started handler should exist')
+    assert.ok(
+      planStartedBlock[0].includes('planApprovalCard') && planStartedBlock[0].includes('add'),
+      'plan_started should hide any stale plan approval card from a previous cycle'
+    )
+  })
+})
+
+describe('#774 — session_created handler', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('handles session_created message', () => {
+    assert.ok(html.includes('case "session_created"'),
+      'should handle session_created WS message')
+  })
+
+  it('calls renderSessions on session_created', () => {
+    const sessionCreatedBlock = html.match(/case "session_created"[\s\S]*?break;/)
+    assert.ok(sessionCreatedBlock, 'session_created handler should exist')
+    assert.ok(sessionCreatedBlock[0].includes('renderSessions'),
+      'session_created should re-render session tabs')
+  })
+
+  it('shows toast on session_created', () => {
+    const sessionCreatedBlock = html.match(/case "session_created"[\s\S]*?break;/)
+    assert.ok(sessionCreatedBlock, 'session_created handler should exist')
+    assert.ok(sessionCreatedBlock[0].includes('showToast'),
+      'session_created should show a toast notification')
+  })
 })
 
 describe('#761 — background agent UI elements', () => {
