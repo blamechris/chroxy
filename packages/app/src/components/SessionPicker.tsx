@@ -25,6 +25,7 @@ interface SessionPillProps {
 
 function SessionPill({ session, isActive, health, hasNotification, onPress, onLongPress, onLayout }: SessionPillProps) {
   const isPty = session.type === 'pty';
+  const isCodex = session.provider === 'codex';
   const isCrashed = health === 'crashed';
   return (
     <TouchableOpacity
@@ -33,6 +34,8 @@ function SessionPill({ session, isActive, health, hasNotification, onPress, onLo
         isActive && styles.pillActive,
         isPty && styles.pillPty,
         isActive && isPty && styles.pillPtyActive,
+        isCodex && styles.pillCodex,
+        isActive && isCodex && styles.pillCodexActive,
         isCrashed && styles.pillCrashed,
         hasNotification && !isActive && styles.pillAttention,
       ]}
@@ -43,7 +46,8 @@ function SessionPill({ session, isActive, health, hasNotification, onPress, onLo
     >
       {isCrashed ? <View style={styles.crashDot} /> : hasNotification && !isActive ? <View style={styles.attentionDot} /> : session.isBusy && <View style={styles.busyDot} />}
       {isPty && <Text style={[styles.ptyIcon, isActive && styles.ptyIconActive]}>{ICON_SQUARE} </Text>}
-      <Text style={[styles.pillText, isActive && styles.pillTextActive, isCrashed && styles.pillTextCrashed]} numberOfLines={1}>
+      {isCodex && <Text style={[styles.codexBadge, isActive && styles.codexBadgeActive]}>CX </Text>}
+      <Text style={[styles.pillText, isActive && styles.pillTextActive, isActive && isCodex && styles.pillTextCodexActive, isCrashed && styles.pillTextCrashed]} numberOfLines={1}>
         {session.name}
       </Text>
     </TouchableOpacity>
@@ -132,8 +136,9 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
       return;
     }
 
+    const providerLabel = session.provider === 'codex' ? ' (Codex)' : session.provider === 'claude-cli' ? ' (CLI)' : '';
     Alert.alert(
-      session.name,
+      session.name + providerLabel,
       `CWD: ${session.cwd}`,
       [
         {
@@ -264,12 +269,30 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accentGreenLight,
     borderColor: COLORS.accentGreenBorderStrong,
   },
+  pillCodex: {
+    borderColor: COLORS.accentPurpleSubtle,
+  },
+  pillCodexActive: {
+    backgroundColor: '#a78bfa22',
+    borderColor: '#a78bfa66',
+  },
   ptyIcon: {
     color: COLORS.accentGreenBorderStrong,
     fontSize: 8,
   },
   ptyIconActive: {
     color: COLORS.accentGreen,
+  },
+  codexBadge: {
+    color: '#a78bfa66',
+    fontSize: 9,
+    fontWeight: '700' as const,
+  },
+  codexBadgeActive: {
+    color: COLORS.accentPurple,
+  },
+  pillTextCodexActive: {
+    color: COLORS.accentPurple,
   },
   pillText: {
     color: COLORS.textMuted,

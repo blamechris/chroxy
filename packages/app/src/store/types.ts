@@ -87,6 +87,7 @@ export interface SessionInfo {
   isBusy: boolean;
   createdAt: number;
   conversationId: string | null;
+  provider?: string;
 }
 
 export interface DiscoveredSession {
