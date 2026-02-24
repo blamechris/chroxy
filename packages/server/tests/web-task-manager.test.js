@@ -170,6 +170,77 @@ describe('WebTaskManager', () => {
     })
   })
 
+  describe('task ID format', () => {
+    it('uses full UUID for task IDs', () => {
+      manager = new WebTaskManager()
+      manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {}
+
+      const { taskId } = manager.launchTask('test')
+      // Full UUID: 8-4-4-4-12 = 36 chars
+      assert.equal(taskId.length, 36)
+      assert.match(taskId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    })
+  })
+
+  describe('eviction', () => {
+    it('evicts oldest completed tasks when map exceeds MAX_TASKS', () => {
+      manager = new WebTaskManager()
+      manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {}
+
+      // Fill to 101 tasks, marking first 50 as completed
+      for (let i = 0; i < 101; i++) {
+        const { taskId } = manager.launchTask(`task ${i}`)
+        if (i < 50) {
+          const task = manager._tasks.get(taskId)
+          task.status = 'completed'
+          task.updatedAt = i // oldest first
+        }
+      }
+
+      // Eviction should have trimmed to 100
+      assert.ok(manager._tasks.size <= 100)
+    })
+
+    it('does not evict pending or running tasks', () => {
+      manager = new WebTaskManager()
+      manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {}
+
+      // Create 101 tasks — all pending (no completed/failed to evict)
+      for (let i = 0; i < 101; i++) {
+        manager.launchTask(`task ${i}`)
+      }
+
+      // Can't evict pending tasks, so map stays at 101
+      assert.equal(manager._tasks.size, 101)
+    })
+  })
+
+  describe('poll timeout', () => {
+    it('fails running tasks after max poll count', () => {
+      manager = new WebTaskManager()
+      manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {}
+
+      const { taskId } = manager.launchTask('test')
+      const task = manager._tasks.get(taskId)
+      task.status = 'running'
+
+      const errors = []
+      manager.on('task_error', (e) => errors.push(e))
+
+      // Simulate exceeding max poll count
+      manager._pollCount = 59
+      manager._pollTaskStatus()
+
+      assert.equal(task.status, 'failed')
+      assert.ok(task.error.includes('timed out'))
+      assert.equal(errors.length, 1)
+    })
+  })
+
   describe('WebTaskUnavailableError', () => {
     it('has correct name and code', () => {
       const err = new WebTaskUnavailableError()
