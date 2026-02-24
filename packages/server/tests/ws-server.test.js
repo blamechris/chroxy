@@ -8375,3 +8375,133 @@ describe('session-targeted routing (#611)', () => {
     ws.close()
   })
 })
+
+describe('WsServer with TokenManager', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('authenticates via TokenManager.validate()', async () => {
+    // Create a mock TokenManager
+    const { TokenManager } = await import('../src/token-manager.js')
+    const tokenManager = new TokenManager({ token: 'real-token' })
+
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'real-token',
+      cliSession: mockSession,
+      authRequired: true,
+      tokenManager,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Auth with real token should work
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'real-token' })
+    const authOk = await waitForMessage(messages, 'auth_ok')
+    assert.ok(authOk, 'Should authenticate with current token')
+
+    ws.close()
+    tokenManager.destroy()
+  })
+
+  it('accepts old token during grace period after rotation', async () => {
+    const { TokenManager } = await import('../src/token-manager.js')
+    const tokenManager = new TokenManager({ token: 'old-token', graceMs: 5000 })
+
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'old-token',
+      cliSession: mockSession,
+      authRequired: true,
+      tokenManager,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Rotate the token
+    const newToken = tokenManager.rotate()
+
+    // Auth with OLD token should still work (grace period)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'old-token' })
+    const authOk = await waitForMessage(messages, 'auth_ok')
+    assert.ok(authOk, 'Should authenticate with old token during grace period')
+
+    ws.close()
+    tokenManager.destroy()
+  })
+
+  it('broadcasts token_rotated to connected clients', async () => {
+    const { TokenManager } = await import('../src/token-manager.js')
+    const tokenManager = new TokenManager({ token: 'initial-token', graceMs: 5000 })
+
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'initial-token',
+      cliSession: mockSession,
+      authRequired: true,
+      tokenManager,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect and authenticate
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'initial-token' })
+    await waitForMessage(messages, 'auth_ok')
+
+    // Rotate — should broadcast
+    const newToken = tokenManager.rotate()
+    const rotated = await waitForMessage(messages, 'token_rotated')
+    assert.ok(rotated, 'Should receive token_rotated message')
+    assert.equal(rotated.newToken, newToken)
+    assert.ok(typeof rotated.expiresAt === 'number' || rotated.expiresAt === null)
+
+    ws.close()
+    tokenManager.destroy()
+  })
+
+  it('updates apiToken on rotation so new connections use the new token', async () => {
+    const { TokenManager } = await import('../src/token-manager.js')
+    const tokenManager = new TokenManager({ token: 'first-token', graceMs: 100 })
+
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'first-token',
+      cliSession: mockSession,
+      authRequired: true,
+      tokenManager,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Rotate the token
+    const newToken = tokenManager.rotate()
+
+    // Wait for grace period to expire
+    await new Promise(r => setTimeout(r, 200))
+
+    // Auth with new token should work
+    const { ws: ws1, messages: msgs1 } = await createClient(port, false)
+    send(ws1, { type: 'auth', token: newToken })
+    const authOk = await waitForMessage(msgs1, 'auth_ok')
+    assert.ok(authOk, 'Should authenticate with new token')
+
+    // Auth with old token should fail (grace period expired)
+    const { ws: ws2, messages: msgs2 } = await createClient(port, false)
+    send(ws2, { type: 'auth', token: 'first-token' })
+    const authFail = await waitForMessage(msgs2, 'auth_fail')
+    assert.ok(authFail, 'Should reject expired old token')
+
+    ws1.close()
+    ws2.close()
+    tokenManager.destroy()
+  })
+})

@@ -1635,6 +1635,16 @@ function getDashboardJs() {
         reconnectBanner.classList.remove("hidden");
         break;
 
+      case "token_rotated":
+        if (msg.newToken) {
+          token = msg.newToken;
+          // Update URL bar so bookmarking works with new token
+          var newUrl = new URL(window.location);
+          newUrl.searchParams.set("token", token);
+          window.history.replaceState(null, "", newUrl.toString());
+        }
+        break;
+
       case "plan_started":
         inPlanMode = true;
         planModeBanner.classList.remove("hidden");

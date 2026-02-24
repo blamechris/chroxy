@@ -4,12 +4,14 @@ import { getTunnel, parseTunnelArg } from './tunnel/index.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { wireTunnelEvents } from './tunnel-events.js'
 import { PushManager } from './push.js'
-import { hostname } from 'os'
-import { readFileSync } from 'fs'
+import { hostname, homedir } from 'os'
+import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import qrcode from 'qrcode-terminal'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
+import { TokenManager } from './token-manager.js'
+import { writeFileRestricted } from './platform.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -154,8 +156,25 @@ export async function startCliServer(config) {
     }
   })
 
-  // 3. Create push notification manager and WebSocket server
+  // 3. Create push notification manager, token manager, and WebSocket server
   const pushManager = new PushManager()
+
+  const configFile = join(homedir(), '.chroxy', 'config.json')
+  const tokenManager = NO_AUTH ? null : new TokenManager({
+    token: API_TOKEN,
+    tokenExpiry: config.tokenExpiry || null,
+    onPersist: (newToken) => {
+      try {
+        const raw = existsSync(configFile) ? readFileSync(configFile, 'utf-8') : '{}'
+        const cfg = JSON.parse(raw)
+        cfg.apiToken = newToken
+        writeFileRestricted(configFile, JSON.stringify(cfg, null, 2))
+      } catch (err) {
+        console.error(`[token-manager] Failed to persist token: ${err.message}`)
+      }
+    },
+  })
+  if (tokenManager) tokenManager.start()
 
   wsServer = new WsServer({
     port: PORT,
@@ -166,6 +185,7 @@ export async function startCliServer(config) {
     pushManager,
     maxPayload: config.maxPayload,
     noEncrypt: config.noEncrypt,
+    tokenManager,
   })
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
@@ -222,13 +242,15 @@ export async function startCliServer(config) {
       // Only display new QR code if URL actually changed
       if (newWsUrl !== currentWsUrl) {
         currentWsUrl = newWsUrl
-        const newConnectionUrl = `chroxy://${newWsUrl.replace('wss://', '')}?token=${API_TOKEN}`
+        // Use tokenManager.currentToken to get the latest (possibly rotated) token
+        const currentApiToken = tokenManager ? tokenManager.currentToken : API_TOKEN
+        const newConnectionUrl = `chroxy://${newWsUrl.replace('wss://', '')}?token=${currentApiToken}`
         console.log('\n[✓] New tunnel URL established:\n')
         console.log('📱 Scan this QR code with the Chroxy app:\n')
         qrcode.generate(newConnectionUrl, { small: true })
         console.log(`\nOr connect manually:`)
         console.log(`   URL:   ${newWsUrl}`)
-        console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+        console.log(`   Token: ${currentApiToken.slice(0, 8)}...`)
         console.log('')
         wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
 
@@ -236,7 +258,7 @@ export async function startCliServer(config) {
         writeConnectionInfo({
           wsUrl: newWsUrl,
           httpUrl: newHttpUrl,
-          apiToken: API_TOKEN,
+          apiToken: currentApiToken,
           connectionUrl: newConnectionUrl,
           tunnelMode: modeLabel,
           startedAt: new Date().toISOString(),
@@ -303,6 +325,7 @@ export async function startCliServer(config) {
     if (bonjourInstance) {
       try { bonjourInstance.destroy?.() } catch {}
     }
+    if (tokenManager) tokenManager.destroy()
     sessionManager.destroyAll()
     wsServer.close()
     if (tunnel) await tunnel.stop()

@@ -34,6 +34,7 @@ const CONFIG_SCHEMA = {
   maxToolInput: 'number',
   noEncrypt: 'boolean',
   transforms: 'array',
+  tokenExpiry: 'string',
 }
 
 /**
@@ -190,6 +191,7 @@ function envKeyForConfig(key) {
     maxToolInput: 'CHROXY_MAX_TOOL_INPUT',
     noEncrypt: 'CHROXY_NO_ENCRYPT',
     transforms: 'CHROXY_TRANSFORMS',
+    tokenExpiry: 'CHROXY_TOKEN_EXPIRY',
   }
   return envMap[key] || key.toUpperCase()
 }
