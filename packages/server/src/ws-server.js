@@ -1443,6 +1443,12 @@ export class WsServer {
           this._send(ws, { type: 'session_error', message: 'Missing checkpointId' })
           break
         }
+        // Guard: reject restore while session is actively processing (#818)
+        const currentEntry = this.sessionManager.getSession(sid)
+        if (currentEntry?.session?.isRunning) {
+          this._send(ws, { type: 'session_error', message: 'Cannot restore checkpoint while session is busy. Wait for the current task to finish or interrupt first.' })
+          break
+        }
         try {
           // Restore file state and get checkpoint data
           const checkpoint = await this._checkpointManager.restoreCheckpoint(sid, msg.checkpointId)
