@@ -53,6 +53,32 @@ export function validateAttachments(attachments) {
 }
 
 /**
+ * Validate that a cwd path exists, is a directory, and is within the user's home directory.
+ * Returns null if valid, or an error string describing the problem.
+ * @param {string} cwd - The directory path to validate
+ * @returns {string|null} Error message or null if valid
+ */
+function validateCwdWithinHome(cwd) {
+  try {
+    const s = statSync(cwd)
+    if (!s.isDirectory()) return `Not a directory: ${cwd}`
+  } catch {
+    return `Directory does not exist: ${cwd}`
+  }
+  const home = homedir()
+  let realCwd
+  try {
+    realCwd = realpathSync(cwd)
+  } catch {
+    return `Cannot resolve path: ${cwd}`
+  }
+  if (!realCwd.startsWith(home + '/') && realCwd !== home) {
+    return 'Directory must be within your home directory'
+  }
+  return null
+}
+
+/**
  * Handle messages in multi-session mode.
  *
  * ctx shape: {
@@ -263,27 +289,9 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       const provider = (typeof msg.provider === 'string' && msg.provider.trim()) ? msg.provider.trim() : undefined
 
       if (cwd) {
-        try {
-          const stat = statSync(cwd)
-          if (!stat.isDirectory()) {
-            ctx.send(ws, { type: 'session_error', message: `Not a directory: ${cwd}` })
-            break
-          }
-        } catch (err) {
-          ctx.send(ws, { type: 'session_error', message: `Directory does not exist: ${cwd}` })
-          break
-        }
-
-        const home = homedir()
-        let realCwd
-        try {
-          realCwd = realpathSync(cwd)
-        } catch {
-          ctx.send(ws, { type: 'session_error', message: `Cannot resolve path: ${cwd}` })
-          break
-        }
-        if (!realCwd.startsWith(home + '/') && realCwd !== home) {
-          ctx.send(ws, { type: 'session_error', message: 'Session directory must be within your home directory' })
+        const cwdError = validateCwdWithinHome(cwd)
+        if (cwdError) {
+          ctx.send(ws, { type: 'session_error', message: cwdError })
           break
         }
       }
@@ -627,26 +635,9 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
 
     case 'launch_web_task': {
       if (msg.cwd) {
-        try {
-          const cwdStat = statSync(msg.cwd)
-          if (!cwdStat.isDirectory()) {
-            ctx.send(ws, { type: 'web_task_error', taskId: null, message: `Not a directory: ${msg.cwd}` })
-            break
-          }
-        } catch {
-          ctx.send(ws, { type: 'web_task_error', taskId: null, message: `Directory does not exist: ${msg.cwd}` })
-          break
-        }
-        const home = homedir()
-        let realCwd
-        try {
-          realCwd = realpathSync(msg.cwd)
-        } catch {
-          ctx.send(ws, { type: 'web_task_error', taskId: null, message: `Cannot resolve path: ${msg.cwd}` })
-          break
-        }
-        if (!realCwd.startsWith(home + '/') && realCwd !== home) {
-          ctx.send(ws, { type: 'web_task_error', taskId: null, message: 'Task directory must be within your home directory' })
+        const cwdError = validateCwdWithinHome(msg.cwd)
+        if (cwdError) {
+          ctx.send(ws, { type: 'web_task_error', taskId: null, message: cwdError })
           break
         }
       }

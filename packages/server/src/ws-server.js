@@ -257,7 +257,7 @@ export class WsServer {
 
     // Clean up checkpoints when sessions are destroyed
     if (sessionManager && typeof sessionManager.on === 'function') {
-      sessionManager.on('session_destroyed', (sessionId) => {
+      sessionManager.on('session_destroyed', ({ sessionId }) => {
         try {
           this._checkpointManager.clearCheckpoints(sessionId)
         } catch (err) {
