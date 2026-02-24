@@ -707,6 +707,12 @@ describe('SessionManager budget pause lifecycle', () => {
     assert.equal(mgr.isBudgetPaused('s1'), true)
     mgr.resumeBudget('s1')
     assert.equal(mgr.isBudgetPaused('s1'), false)
+
+    // resumeBudget() schedules a debounced persist; clear it to avoid writes after cleanup
+    if (mgr._persistTimer) {
+      clearTimeout(mgr._persistTimer)
+      mgr._persistTimer = null
+    }
   })
 
   it('destroySession cleans up budget state', () => {
