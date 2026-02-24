@@ -100,7 +100,7 @@ export class SessionDirectoryError extends SessionError {
  * Format milliseconds into a human-friendly duration string.
  * Examples: "2 minutes", "1 hour 30 minutes", "45 seconds"
  */
-function _formatIdleDuration(ms) {
+export function formatIdleDuration(ms) {
   const totalSeconds = Math.round(ms / 1000)
   if (totalSeconds < 60) return `${totalSeconds} second${totalSeconds !== 1 ? 's' : ''}`
   const totalMinutes = Math.round(totalSeconds / 60)
@@ -1072,7 +1072,7 @@ export class SessionManager extends EventEmitter {
       // Warning threshold reached — send warning (#817: human-friendly durations)
       if (!this._sessionWarned.has(sessionId) && idleMs >= this._sessionTimeoutMs - warningMs) {
         const remainingMs = Math.max(0, this._sessionTimeoutMs - idleMs)
-        const friendly = _formatIdleDuration(remainingMs)
+        const friendly = formatIdleDuration(remainingMs)
         console.log(`[session-manager] Session ${sessionId} idle warning (${friendly} remaining)`)
         this._sessionWarned.add(sessionId)
         this.emit('session_warning', {
@@ -1087,7 +1087,7 @@ export class SessionManager extends EventEmitter {
 
     // Destroy outside the iteration loop (#815)
     for (const { sessionId, name, idleMs } of toDestroy) {
-      const friendly = _formatIdleDuration(idleMs)
+      const friendly = formatIdleDuration(idleMs)
       console.log(`[session-manager] Session ${sessionId} timed out after ${friendly} idle`)
       this.emit('session_timeout', { sessionId, name, idleMs })
       this.destroySession(sessionId)
