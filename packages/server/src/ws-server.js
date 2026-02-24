@@ -1133,6 +1133,7 @@ export class WsServer {
       case 'create_session': {
         const name = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : undefined
         const cwd = (typeof msg.cwd === 'string' && msg.cwd.trim()) ? msg.cwd.trim() : undefined
+        const provider = (typeof msg.provider === 'string' && msg.provider.trim()) ? msg.provider.trim() : undefined
 
         // Validate cwd if provided
         if (cwd) {
@@ -1163,7 +1164,7 @@ export class WsServer {
         }
 
         try {
-          const sessionId = this.sessionManager.createSession({ name, cwd })
+          const sessionId = this.sessionManager.createSession({ name, cwd, provider })
           // Auto-switch the creating client to the new session
           client.activeSessionId = sessionId
           const entry = this.sessionManager.getSession(sessionId)

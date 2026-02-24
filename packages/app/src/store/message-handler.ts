@@ -641,6 +641,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'session_list':
       if (Array.isArray(msg.sessions)) {
         const sessionList = msg.sessions as SessionInfo[];
+        // GC persisted messages for sessions that dropped out of the list
+        const prevSessionIds = Object.keys(get().sessionStates);
+        const newSessionIdSet = new Set(sessionList.map((s) => s.sessionId));
+        for (const prevId of prevSessionIds) {
+          if (!newSessionIdSet.has(prevId)) {
+            void clearPersistedSession(prevId);
+            // Clean up in-memory session state too
+            set((state: ConnectionState) => {
+              const sessionStates = { ...state.sessionStates };
+              delete sessionStates[prevId];
+              return { sessionStates };
+            });
+          }
+        }
         set({ sessions: sessionList });
         // Sync conversationId from session list into session states
         for (const s of sessionList) {

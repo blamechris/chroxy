@@ -75,6 +75,18 @@ export function validateConfig(config, verbose = false) {
     }
   }
 
+  // Validate externalUrl format if provided
+  if (config.externalUrl && typeof config.externalUrl === 'string') {
+    try {
+      const parsed = new URL(config.externalUrl)
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        warnings.push(`externalUrl should use http:// or https:// protocol, got '${parsed.protocol}'`)
+      }
+    } catch {
+      warnings.push(`Invalid URL format for 'externalUrl': ${config.externalUrl}`)
+    }
+  }
+
   // Log warnings
   if (warnings.length > 0) {
     console.warn('\n⚠ Configuration warnings:')
