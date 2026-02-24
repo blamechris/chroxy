@@ -641,6 +641,51 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'session_list':
       if (Array.isArray(msg.sessions)) {
         const sessionList = msg.sessions as SessionInfo[];
+        // GC persisted messages for sessions that dropped out of the list
+        const prevSessionIds = Object.keys(get().sessionStates);
+        const newSessionIdSet = new Set(sessionList.map((s) => s.sessionId));
+        const removedIds = prevSessionIds.filter((id) => !newSessionIdSet.has(id));
+        for (const prevId of removedIds) {
+          void clearPersistedSession(prevId);
+        }
+        // Batch in-memory cleanup into a single state update
+        if (removedIds.length > 0) {
+          const patch: Partial<ConnectionState> = {};
+          const newStates = { ...get().sessionStates };
+          for (const id of removedIds) {
+            delete newStates[id];
+          }
+          patch.sessionStates = newStates;
+          // If the active session was removed, switch to next available
+          if (get().activeSessionId && removedIds.includes(get().activeSessionId!)) {
+            const remaining = Object.keys(newStates);
+            const nextId = remaining.length > 0 ? remaining[0] : null;
+            patch.activeSessionId = nextId;
+            if (nextId && newStates[nextId]) {
+              const ss = newStates[nextId];
+              patch.messages = ss.messages;
+              patch.streamingMessageId = ss.streamingMessageId;
+              patch.claudeReady = ss.claudeReady;
+              patch.activeModel = ss.activeModel;
+              patch.permissionMode = ss.permissionMode;
+              patch.contextUsage = ss.contextUsage;
+              patch.lastResultCost = ss.lastResultCost;
+              patch.lastResultDuration = ss.lastResultDuration;
+              patch.isIdle = ss.isIdle;
+            } else {
+              patch.messages = [];
+              patch.streamingMessageId = null;
+              patch.claudeReady = false;
+              patch.activeModel = null;
+              patch.permissionMode = null;
+              patch.contextUsage = null;
+              patch.lastResultCost = null;
+              patch.lastResultDuration = null;
+              patch.isIdle = true;
+            }
+          }
+          set(patch);
+        }
         set({ sessions: sessionList });
         // Sync conversationId from session list into session states
         for (const s of sessionList) {
