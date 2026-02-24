@@ -735,25 +735,29 @@ export function SessionScreen() {
       {/* Offline cached session banner */}
       {viewingCachedSession && (
         <View style={styles.reconnectingBanner}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <View style={styles.cachedBannerRow}>
             <Text style={styles.reconnectingText}>Viewing cached history</Text>
-            <View style={{ flexDirection: 'row', gap: 12 }}>
+            <View style={styles.cachedBannerActions}>
               {savedConnection && (
                 <TouchableOpacity
                   onPress={() => {
                     exitCachedSession();
                     connect(savedConnection.url, savedConnection.token);
                   }}
-                  style={{ paddingHorizontal: 10, paddingVertical: 4, backgroundColor: COLORS.accentGreen, borderRadius: 6 }}
+                  style={styles.cachedReconnectButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Reconnect to server"
                 >
-                  <Text style={{ color: COLORS.textPrimary, fontSize: 13, fontWeight: '600' }}>Reconnect</Text>
+                  <Text style={styles.cachedReconnectText}>Reconnect</Text>
                 </TouchableOpacity>
               )}
               <TouchableOpacity
                 onPress={exitCachedSession}
-                style={{ paddingHorizontal: 10, paddingVertical: 4, backgroundColor: COLORS.backgroundSecondary, borderRadius: 6, borderWidth: 1, borderColor: COLORS.borderPrimary }}
+                style={styles.cachedBackButton}
+                accessibilityRole="button"
+                accessibilityLabel="Go back to connect screen"
               >
-                <Text style={{ color: COLORS.textSecondary, fontSize: 13 }}>Back</Text>
+                <Text style={styles.cachedBackText}>Back</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1126,6 +1130,44 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accentOrangeMedium,
     paddingVertical: 6,
     alignItems: 'center',
+  },
+  cachedBannerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: 12,
+  },
+  cachedBannerActions: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  cachedReconnectButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: COLORS.accentGreen,
+    borderRadius: 6,
+    minHeight: 36,
+    justifyContent: 'center',
+  },
+  cachedReconnectText: {
+    color: COLORS.textPrimary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  cachedBackButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: COLORS.backgroundSecondary,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+    minHeight: 36,
+    justifyContent: 'center',
+  },
+  cachedBackText: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
   },
   reconnectingText: {
     color: COLORS.accentOrange,
