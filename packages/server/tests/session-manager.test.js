@@ -4,7 +4,7 @@ import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'fs
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
-import { SessionManager, _formatIdleDuration } from '../src/session-manager.js'
+import { SessionManager, formatIdleDuration } from '../src/session-manager.js'
 
 /**
  * Tests for SessionManager serialization, restoration, and allIdle.
@@ -641,39 +641,39 @@ describe('SessionManager.isHistoryTruncated', () => {
   })
 })
 
-describe('_formatIdleDuration', () => {
+describe('formatIdleDuration', () => {
   it('formats zero', () => {
-    assert.equal(_formatIdleDuration(0), '0 seconds')
+    assert.equal(formatIdleDuration(0), '0 seconds')
   })
 
   it('formats seconds (singular and plural)', () => {
-    assert.equal(_formatIdleDuration(1000), '1 second')
-    assert.equal(_formatIdleDuration(45000), '45 seconds')
+    assert.equal(formatIdleDuration(1000), '1 second')
+    assert.equal(formatIdleDuration(45000), '45 seconds')
   })
 
   it('formats exact minutes', () => {
-    assert.equal(_formatIdleDuration(60000), '1 minute')
-    assert.equal(_formatIdleDuration(120000), '2 minutes')
-    assert.equal(_formatIdleDuration(59 * 60000), '59 minutes')
+    assert.equal(formatIdleDuration(60000), '1 minute')
+    assert.equal(formatIdleDuration(120000), '2 minutes')
+    assert.equal(formatIdleDuration(59 * 60000), '59 minutes')
   })
 
   it('rounds seconds to nearest minute when >= 60s', () => {
     // 90 seconds → rounds to 2 minutes
-    assert.equal(_formatIdleDuration(90000), '2 minutes')
+    assert.equal(formatIdleDuration(90000), '2 minutes')
   })
 
   it('formats exact hours', () => {
-    assert.equal(_formatIdleDuration(3600000), '1 hour')
-    assert.equal(_formatIdleDuration(7200000), '2 hours')
+    assert.equal(formatIdleDuration(3600000), '1 hour')
+    assert.equal(formatIdleDuration(7200000), '2 hours')
   })
 
   it('formats hours with minutes', () => {
-    assert.equal(_formatIdleDuration(5400000), '1 hour 30 minutes')
-    assert.equal(_formatIdleDuration(9000000), '2 hours 30 minutes')
+    assert.equal(formatIdleDuration(5400000), '1 hour 30 minutes')
+    assert.equal(formatIdleDuration(9000000), '2 hours 30 minutes')
   })
 
   it('handles large durations', () => {
-    assert.equal(_formatIdleDuration(86400000), '24 hours')
+    assert.equal(formatIdleDuration(86400000), '24 hours')
   })
 })
 
