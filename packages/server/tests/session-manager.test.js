@@ -776,8 +776,12 @@ describe('SessionManager budget pause lifecycle', () => {
     // Costs should be keyed by the NEW session IDs, not the old ones
     const sessions = mgr.listSessions()
     assert.equal(sessions.length, 2)
-    const newId1 = sessions[0].sessionId
-    const newId2 = sessions[1].sessionId
+    const session1 = sessions.find(s => s.name === 'Test')
+    const session2 = sessions.find(s => s.name === 'Test 2')
+    assert.ok(session1, 'session "Test" should exist')
+    assert.ok(session2, 'session "Test 2" should exist')
+    const newId1 = session1.sessionId
+    const newId2 = session2.sessionId
     assert.notEqual(newId1, 'old-s1')
     assert.notEqual(newId2, 'old-s2')
 
@@ -805,7 +809,10 @@ describe('SessionManager budget pause lifecycle', () => {
     const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
     mgr.restoreState()
 
-    // Without id field in session, old keys are kept as-is (backwards compat)
+    // Without id field in session, old keys are kept as-is (backwards compat).
+    // This means the cost tracking data is preserved but remains associated with the legacy
+    // key (e.g. "s1") rather than any new session ID, so session-specific cost features may
+    // not work correctly for sessions restored from these old state files.
     assert.equal(mgr._sessionCosts.get('s1'), 3.00)
     assert.equal(mgr._budgetWarned.has('s1'), true)
 

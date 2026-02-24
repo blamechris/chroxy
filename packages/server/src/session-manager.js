@@ -586,31 +586,51 @@ export class SessionManager extends EventEmitter {
       }
     }
 
-    // Restore cost tracking data (v1+), remapping old IDs to new IDs
+    // Restore cost tracking data (v1+), remapping old IDs to new IDs.
+    // Only restore budget state for sessions that were successfully created;
+    // if a session failed to restore, its old ID won't be in oldToNew and
+    // we skip it to avoid orphaned budget tracking entries.
     if (state.costs && typeof state.costs === 'object') {
       for (const [oldId, cost] of Object.entries(state.costs)) {
         if (typeof cost === 'number' && cost > 0) {
-          const newId = oldToNew.get(oldId) || oldId
-          this._sessionCosts.set(newId, cost)
+          const newId = oldToNew.get(oldId)
+          if (newId) {
+            this._sessionCosts.set(newId, cost)
+          } else if (oldToNew.size === 0) {
+            // Backwards compat: old state files without id field have no mappings
+            this._sessionCosts.set(oldId, cost)
+          }
         }
       }
     }
     if (Array.isArray(state.budgetWarned)) {
       for (const id of state.budgetWarned) {
-        const newId = oldToNew.get(id) || id
-        this._budgetWarned.add(newId)
+        const newId = oldToNew.get(id)
+        if (newId) {
+          this._budgetWarned.add(newId)
+        } else if (oldToNew.size === 0) {
+          this._budgetWarned.add(id)
+        }
       }
     }
     if (Array.isArray(state.budgetExceeded)) {
       for (const id of state.budgetExceeded) {
-        const newId = oldToNew.get(id) || id
-        this._budgetExceeded.add(newId)
+        const newId = oldToNew.get(id)
+        if (newId) {
+          this._budgetExceeded.add(newId)
+        } else if (oldToNew.size === 0) {
+          this._budgetExceeded.add(id)
+        }
       }
     }
     if (Array.isArray(state.budgetPaused)) {
       for (const id of state.budgetPaused) {
-        const newId = oldToNew.get(id) || id
-        this._budgetPaused.add(newId)
+        const newId = oldToNew.get(id)
+        if (newId) {
+          this._budgetPaused.add(newId)
+        } else if (oldToNew.size === 0) {
+          this._budgetPaused.add(id)
+        }
       }
     }
 
