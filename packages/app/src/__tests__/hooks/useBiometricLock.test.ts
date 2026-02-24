@@ -32,7 +32,7 @@ jest.spyOn(AppState, 'addEventListener').mockImplementation((_event, callback) =
   return { remove: removeSpy } as any;
 });
 
-import { renderHookSimple, actAsync, flushMicrotasks } from '../test-helpers';
+import { renderHookSimple, actAsync, flushMicrotasks } from '../../test-utils/test-helpers';
 
 beforeEach(() => {
   jest.clearAllMocks();

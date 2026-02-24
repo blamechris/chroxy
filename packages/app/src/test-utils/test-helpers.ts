@@ -39,5 +39,5 @@ export async function actAsync(fn: () => Promise<void>): Promise<void> {
 
 /** Flush microtask queue (resolved promises) */
 export function flushMicrotasks(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+  return Promise.resolve();
 }

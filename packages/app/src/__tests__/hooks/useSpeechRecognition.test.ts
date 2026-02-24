@@ -27,7 +27,7 @@ beforeEach(() => {
 
 // Import after mock setup
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
-import { renderHookSimple, actAsync } from '../test-helpers';
+import { renderHookSimple, actAsync } from '../../test-utils/test-helpers';
 
 function actSync(fn: () => void) {
   const TestRenderer = require('react-test-renderer');

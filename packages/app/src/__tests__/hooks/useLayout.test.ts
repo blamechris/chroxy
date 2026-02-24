@@ -8,7 +8,7 @@ jest.mock('react-native/Libraries/Utilities/useWindowDimensions', () => ({
 }));
 
 import { useLayout } from '../../hooks/useLayout';
-import { renderHookSimple } from '../test-helpers';
+import { renderHookSimple } from '../../test-utils/test-helpers';
 
 describe('useLayout', () => {
   afterEach(() => {
