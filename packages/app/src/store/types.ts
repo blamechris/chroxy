@@ -190,6 +190,11 @@ export interface McpServer {
   status: string;
 }
 
+export interface DevPreview {
+  port: number;
+  url: string;
+}
+
 export interface SessionState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
@@ -209,6 +214,7 @@ export interface SessionState {
   conversationId: string | null;
   sessionContext: SessionContext | null;
   mcpServers: McpServer[];
+  devPreviews: DevPreview[];
 }
 
 export interface ServerError {
@@ -446,6 +452,9 @@ export interface ConnectionState {
 
   // Session notification actions
   dismissSessionNotification: (id: string) => void;
+
+  // Dev server preview
+  closeDevPreview: (port: number) => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;

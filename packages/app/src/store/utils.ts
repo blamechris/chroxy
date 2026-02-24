@@ -83,5 +83,6 @@ export function createEmptySessionState(): SessionState {
     conversationId: null,
     sessionContext: null,
     mcpServers: [],
+    devPreviews: [],
   };
 }

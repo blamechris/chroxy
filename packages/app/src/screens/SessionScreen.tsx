@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage, ConnectionPhase, AgentInfo, McpServer, stripAnsi } from '../store/connection';
+import { useConnectionStore, ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview, stripAnsi } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
@@ -27,6 +27,7 @@ import { InputBar } from '../components/InputBar';
 import { FileBrowser } from '../components/FileBrowser';
 import { DiffViewer } from '../components/DiffViewer';
 import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
+import { DevPreviewBanner } from '../components/DevPreviewBanner';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
@@ -41,6 +42,7 @@ import type { Attachment } from '../utils/attachments';
 // Stable empty arrays to avoid new-reference-per-render in Zustand selectors
 const EMPTY_AGENTS: AgentInfo[] = [];
 const EMPTY_MCP_SERVERS: McpServer[] = [];
+const EMPTY_DEV_PREVIEWS: DevPreview[] = [];
 const EMPTY_PROMPTS: { tool: string; prompt: string }[] = [];
 
 // Message sent when user taps "Approve" on a plan approval card
@@ -182,6 +184,11 @@ export function SessionScreen() {
     return id && s.sessionStates[id] ? s.sessionStates[id].sessionCost : null;
   });
   const costBudget = useConnectionStore((s) => s.costBudget);
+  const devPreviews = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].devPreviews : EMPTY_DEV_PREVIEWS;
+  });
+  const closeDevPreview = useConnectionStore((s) => s.closeDevPreview);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const latencyMs = useConnectionStore((s) => s.latencyMs);
   const connectionQuality = useConnectionStore((s) => s.connectionQuality);
@@ -786,6 +793,9 @@ export function SessionScreen() {
 
       {/* Background session notifications */}
       <SessionNotificationBanner />
+
+      {/* Dev server preview banner */}
+      <DevPreviewBanner previews={devPreviews} onClose={closeDevPreview} />
 
       {/* Content area — split view on tablets in landscape */}
       {layout.isSplitView && hasTerminal && viewMode !== 'files' ? (

@@ -16,6 +16,7 @@ import { EventNormalizer } from './event-normalizer.js'
 import { readConnectionInfo } from './connection-info.js'
 import { getDashboardHtml } from './dashboard.js'
 import { CheckpointManager } from './checkpoint-manager.js'
+import { DevPreviewManager } from './dev-preview.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -163,6 +164,7 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'list_checkpoints' }                         — request checkpoint list for active session
  *   { type: 'restore_checkpoint', checkpointId }         — rewind to a checkpoint (creates new session)
  *   { type: 'delete_checkpoint', checkpointId }          — delete a checkpoint
+ *   { type: 'close_dev_preview', port, sessionId? }     — close a dev server preview tunnel
  *   { type: 'ping' }                                    — client heartbeat (server responds with pong)
  *
  * Server -> Client:
@@ -224,6 +226,8 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'token_rotated', newToken, expiresAt }     — API token was rotated, client should update stored token
  *   { type: 'session_warning', sessionId, name, reason, message, remainingMs } — session about to timeout
  *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
+ *   { type: 'dev_preview', port, url, sessionId }       — dev server preview tunnel opened
+ *   { type: 'dev_preview_stopped', port, sessionId }    — dev server preview tunnel closed
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
@@ -271,6 +275,9 @@ export class WsServer {
         }
       })
     }
+
+    // Dev server preview tunneling
+    this._devPreview = new DevPreviewManager()
 
     // Legacy single-session mode: wrap cliSession in a minimal shim
     if (!sessionManager && cliSession) {
@@ -1476,6 +1483,14 @@ export class WsServer {
         break
       }
 
+      case 'close_dev_preview': {
+        const previewSessionId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
+        if (previewSessionId && typeof msg.port === 'number') {
+          this._devPreview.closePreview(previewSessionId, msg.port)
+        }
+        break
+      }
+
       default:
         console.log(`[ws] Unknown message type: ${msg.type}`)
     }
@@ -1736,6 +1751,26 @@ export class WsServer {
       }
     })
 
+    // Dev server preview: scan tool_result events for localhost server patterns
+    this.sessionManager.on('session_event', ({ sessionId, event, data }) => {
+      if (event === 'tool_result' && data?.result) {
+        this._devPreview.handleToolResult(sessionId, data.result)
+      }
+    })
+
+    // Dev server preview: broadcast tunnel start/stop to clients
+    this._devPreview.on('dev_preview_started', ({ sessionId, port, url }) => {
+      this._broadcastToSession(sessionId, { type: 'dev_preview', port, url })
+    })
+    this._devPreview.on('dev_preview_stopped', ({ sessionId, port }) => {
+      this._broadcastToSession(sessionId, { type: 'dev_preview_stopped', port })
+    })
+
+    // Dev server preview: cleanup on session destroy
+    this.sessionManager.on('session_destroyed', ({ sessionId }) => {
+      this._devPreview.closeSession(sessionId)
+    })
+
     // Handle session crashes detected by health checks
     this.sessionManager.on('session_crashed', ({ sessionId, reason, error }) => {
       console.log(`[ws] Session ${sessionId} crashed (${reason}): ${error}`)
@@ -1785,6 +1820,23 @@ export class WsServer {
         }
       })
     }
+
+    // Dev server preview: scan tool_result events for localhost server patterns (legacy CLI)
+    this.cliSession.on('tool_result', (data) => {
+      if (data?.result) {
+        this._devPreview.handleToolResult('__legacy__', data.result)
+      }
+    })
+    this._devPreview.on('dev_preview_started', ({ sessionId, port, url }) => {
+      if (sessionId === '__legacy__') {
+        this._broadcast({ type: 'dev_preview', port, url })
+      }
+    })
+    this._devPreview.on('dev_preview_stopped', ({ sessionId, port }) => {
+      if (sessionId === '__legacy__') {
+        this._broadcast({ type: 'dev_preview_stopped', port })
+      }
+    })
 
     // models_updated bypasses normalizer — global broadcast
     this.cliSession.on('models_updated', (data) => {
@@ -2971,6 +3023,10 @@ export class WsServer {
     this._questionSessionMap.clear()
     this._primaryClients.clear()
     this._normalizer.destroy()
+
+    // Clean up all dev preview tunnels (fire-and-forget; close() is synchronous
+    // by contract, and tunnel process cleanup is best-effort before exit)
+    void this._devPreview.closeAll()
 
     for (const [ws] of this.clients) {
       ws.close()
