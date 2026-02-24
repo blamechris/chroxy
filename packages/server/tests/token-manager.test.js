@@ -46,11 +46,8 @@ describe('parseDuration', () => {
     assert.equal(parseDuration('10x'), null)
   })
 
-  it('treats plain "0" as zero milliseconds', () => {
-    assert.equal(parseDuration('0'), 0)
-  })
-
-  it('rejects unit-suffixed zero durations', () => {
+  it('rejects all zero durations consistently', () => {
+    assert.equal(parseDuration('0'), null)
     assert.equal(parseDuration('0h'), null)
     assert.equal(parseDuration('0m0s'), null)
   })
