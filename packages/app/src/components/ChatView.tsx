@@ -235,17 +235,32 @@ function ActivityGroup({
   isSelecting,
   selectedIds,
   onToggleSelection,
+  searchMatchIds,
+  onLayoutMessage,
 }: {
   messages: ChatMessage[];
   isActive: boolean;
   isSelecting: boolean;
   selectedIds: Set<string>;
   onToggleSelection: (id: string) => void;
+  searchMatchIds?: Set<string>;
+  onLayoutMessage?: (id: string, y: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const toolCount = activityMessages.filter((m) => m.type === 'tool_use').length;
   const lastMessage = activityMessages[activityMessages.length - 1];
   const isThinking = isActive && lastMessage?.type === 'thinking';
+
+  // Auto-expand when a search match is inside this group
+  const hasSearchMatch = searchMatchIds
+    ? activityMessages.some((m) => searchMatchIds.has(m.id))
+    : false;
+  useEffect(() => {
+    if (hasSearchMatch && !expanded) {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setExpanded(true);
+    }
+  }, [hasSearchMatch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handlePress = () => {
     if (isSelecting) return;
@@ -948,14 +963,25 @@ export function ChatView({
         displayGroups.map((group) => {
           if (group.type === 'activity') {
             return (
-              <ActivityGroup
+              <View
                 key={group.key}
-                messages={group.messages}
-                isActive={group.isActive}
-                isSelecting={isSelecting}
-                selectedIds={selectedIds}
-                onToggleSelection={onToggleSelection}
-              />
+                onLayout={(e) => {
+                  const y = e.nativeEvent.layout.y;
+                  for (const m of group.messages) {
+                    messageLayoutsRef.current.set(m.id, y);
+                  }
+                }}
+              >
+                <ActivityGroup
+                  messages={group.messages}
+                  isActive={group.isActive}
+                  isSelecting={isSelecting}
+                  selectedIds={selectedIds}
+                  onToggleSelection={onToggleSelection}
+                  searchMatchIds={searchMatchIds}
+                  onLayoutMessage={(id, y) => messageLayoutsRef.current.set(id, y)}
+                />
+              </View>
             );
           }
           const msg = group.message;

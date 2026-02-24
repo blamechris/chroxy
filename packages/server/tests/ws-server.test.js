@@ -8533,3 +8533,130 @@ describe('WsServer with TokenManager', () => {
     tokenManager.destroy()
   })
 })
+
+describe('restore_checkpoint idle guard', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  function createMockSessionManager(sessions = [], checkpointManager = null) {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    for (const s of sessions) {
+      const mockSession = createMockSession()
+      mockSession.isRunning = s.isRunning || false
+      sessionsMap.set(s.id, {
+        session: mockSession,
+        name: s.name,
+        cwd: s.cwd || '/tmp',
+        type: 'cli',
+      })
+    }
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, isBusy: entry.session.isRunning })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
+    manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
+    manager.getSessionContext = async () => null
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    })
+    return manager
+  }
+
+  it('rejects restore_checkpoint when session is busy (isRunning=true)', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'session-1', name: 'Busy Session', cwd: '/tmp', isRunning: true }
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Clear messages after auth flow
+    messages.length = 0
+
+    send(ws, { type: 'restore_checkpoint', checkpointId: 'cp-123' })
+    const error = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(error, 'Should receive session_error')
+    assert.ok(error.message.includes('busy'), 'Error message should mention busy session')
+
+    ws.close()
+  })
+
+  it('allows restore_checkpoint when session is idle (isRunning=false)', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'session-1', name: 'Idle Session', cwd: '/tmp', isRunning: false }
+    ])
+
+    // Mock checkpoint manager
+    const checkpointMgr = {
+      restoreCheckpoint: async () => ({
+        id: 'cp-123',
+        resumeSessionId: 'sdk-resume-abc',
+        cwd: '/tmp',
+        name: 'Test Checkpoint',
+      }),
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    // Attach checkpoint manager directly
+    server._checkpointManager = checkpointMgr
+
+    // Mock createSession on manager for the restore flow
+    mockManager.createSession = ({ name, cwd, resumeSessionId }) => {
+      const newId = 'session-new'
+      const newSession = createMockSession()
+      const entry = { session: newSession, name, cwd: cwd || '/tmp', type: 'cli' }
+      // Add to internal map so getSession works
+      const sessionsMap = new Map()
+      sessionsMap.set(newId, entry)
+      mockManager.getSession = (id) => {
+        if (id === newId) return entry
+        return undefined
+      }
+      return newId
+    }
+
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    messages.length = 0
+
+    send(ws, { type: 'restore_checkpoint', checkpointId: 'cp-123' })
+    const restored = await waitForMessage(messages, 'checkpoint_restored', 2000)
+    assert.ok(restored, 'Should receive checkpoint_restored')
+    assert.equal(restored.checkpointId, 'cp-123')
+
+    ws.close()
+  })
+})
