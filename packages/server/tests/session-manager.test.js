@@ -4,7 +4,7 @@ import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'fs
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
-import { SessionManager } from '../src/session-manager.js'
+import { SessionManager, _formatIdleDuration } from '../src/session-manager.js'
 
 /**
  * Tests for SessionManager serialization, restoration, and allIdle.
@@ -638,5 +638,151 @@ describe('SessionManager.isHistoryTruncated', () => {
 
     assert.equal(mgr.isHistoryTruncated('s1'), false)
     assert.equal(mgr._historyTruncated.has('s1'), false)
+  })
+})
+
+describe('_formatIdleDuration', () => {
+  it('formats zero', () => {
+    assert.equal(_formatIdleDuration(0), '0 seconds')
+  })
+
+  it('formats seconds (singular and plural)', () => {
+    assert.equal(_formatIdleDuration(1000), '1 second')
+    assert.equal(_formatIdleDuration(45000), '45 seconds')
+  })
+
+  it('formats exact minutes', () => {
+    assert.equal(_formatIdleDuration(60000), '1 minute')
+    assert.equal(_formatIdleDuration(120000), '2 minutes')
+    assert.equal(_formatIdleDuration(59 * 60000), '59 minutes')
+  })
+
+  it('rounds seconds to nearest minute when >= 60s', () => {
+    // 90 seconds → rounds to 2 minutes
+    assert.equal(_formatIdleDuration(90000), '2 minutes')
+  })
+
+  it('formats exact hours', () => {
+    assert.equal(_formatIdleDuration(3600000), '1 hour')
+    assert.equal(_formatIdleDuration(7200000), '2 hours')
+  })
+
+  it('formats hours with minutes', () => {
+    assert.equal(_formatIdleDuration(5400000), '1 hour 30 minutes')
+    assert.equal(_formatIdleDuration(9000000), '2 hours 30 minutes')
+  })
+
+  it('handles large durations', () => {
+    assert.equal(_formatIdleDuration(86400000), '24 hours')
+  })
+})
+
+describe('SessionManager budget pause lifecycle', () => {
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-budget-test-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('isBudgetPaused returns false for unknown session', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    assert.equal(mgr.isBudgetPaused('nonexistent'), false)
+  })
+
+  it('isBudgetPaused returns true after adding to _budgetPaused', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    mgr._budgetPaused.add('s1')
+    assert.equal(mgr.isBudgetPaused('s1'), true)
+  })
+
+  it('resumeBudget removes session from _budgetPaused', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+    mgr._budgetPaused.add('s1')
+    assert.equal(mgr.isBudgetPaused('s1'), true)
+    mgr.resumeBudget('s1')
+    assert.equal(mgr.isBudgetPaused('s1'), false)
+  })
+
+  it('destroySession cleans up budget state', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+    mgr._budgetPaused.add('s1')
+    mgr._budgetWarned.add('s1')
+    mgr._budgetExceeded.add('s1')
+    mgr._sessionCosts.set('s1', 1.50)
+
+    mgr.destroySession('s1')
+
+    assert.equal(mgr.isBudgetPaused('s1'), false)
+    assert.equal(mgr._budgetWarned.has('s1'), false)
+    assert.equal(mgr._budgetExceeded.has('s1'), false)
+    assert.equal(mgr._sessionCosts.has('s1'), false)
+  })
+
+  it('serializes cost and budget state', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
+    mgr._sessionCosts.set('s1', 2.50)
+    mgr._sessionCosts.set('s2', 0.75)
+    mgr._budgetWarned.add('s1')
+    mgr._budgetExceeded.add('s1')
+    mgr._budgetPaused.add('s1')
+
+    const state = mgr.serializeState()
+
+    assert.deepEqual(state.costs, { s1: 2.50, s2: 0.75 })
+    assert.deepEqual(state.budgetWarned, ['s1'])
+    assert.deepEqual(state.budgetExceeded, ['s1'])
+    assert.deepEqual(state.budgetPaused, ['s1'])
+  })
+
+  it('restores cost and budget state from disk', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [{ name: 'Test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
+      costs: { s1: 3.00, s2: 0.50 },
+      budgetWarned: ['s1'],
+      budgetExceeded: ['s1'],
+      budgetPaused: ['s1'],
+    }))
+
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+
+    assert.equal(mgr._sessionCosts.get('s1'), 3.00)
+    assert.equal(mgr._sessionCosts.get('s2'), 0.50)
+    assert.equal(mgr._budgetWarned.has('s1'), true)
+    assert.equal(mgr._budgetExceeded.has('s1'), true)
+    assert.equal(mgr._budgetPaused.has('s1'), true)
+
+    mgr.destroyAll()
+  })
+
+  it('ignores invalid cost values during restore', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [{ name: 'Test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
+      costs: { s1: 'not-a-number', s2: -5, s3: 0, s4: 1.25 },
+    }))
+
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+
+    assert.equal(mgr._sessionCosts.has('s1'), false)
+    assert.equal(mgr._sessionCosts.has('s2'), false)
+    assert.equal(mgr._sessionCosts.has('s3'), false)
+    assert.equal(mgr._sessionCosts.get('s4'), 1.25)
+
+    mgr.destroyAll()
   })
 })

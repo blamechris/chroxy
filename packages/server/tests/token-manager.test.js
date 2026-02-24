@@ -37,6 +37,24 @@ describe('parseDuration', () => {
   it('handles whitespace', () => {
     assert.equal(parseDuration('  1h  '), 3_600_000)
   })
+
+  it('rejects strings with invalid characters', () => {
+    assert.equal(parseDuration('1hour'), null)
+    assert.equal(parseDuration('5min'), null)
+    assert.equal(parseDuration('1.5h'), null)
+    assert.equal(parseDuration('2h+30m'), null)
+    assert.equal(parseDuration('10x'), null)
+  })
+
+  it('rejects zero durations', () => {
+    assert.equal(parseDuration('0'), 0)
+    assert.equal(parseDuration('0h'), null)
+    assert.equal(parseDuration('0m0s'), null)
+  })
+
+  it('parses single second', () => {
+    assert.equal(parseDuration('1s'), 1_000)
+  })
 })
 
 describe('TokenManager', () => {
@@ -137,5 +155,26 @@ describe('TokenManager', () => {
     manager.destroy()
     assert.equal(manager.listenerCount('token_rotated'), 0)
     manager = null // prevent afterEach double-destroy
+  })
+
+  it('clamps expiry below 5 minutes to 5 minutes', () => {
+    manager = new TokenManager({ token: 'abc-123', tokenExpiry: '60' })
+    // 60 seconds → clamped to 5 minutes (300000ms)
+    assert.equal(manager._expiryMs, 300_000)
+  })
+
+  it('accepts expiry at exactly 5 minutes', () => {
+    manager = new TokenManager({ token: 'abc-123', tokenExpiry: '5m' })
+    assert.equal(manager._expiryMs, 300_000)
+  })
+
+  it('accepts expiry above 5 minutes without clamping', () => {
+    manager = new TokenManager({ token: 'abc-123', tokenExpiry: '10m' })
+    assert.equal(manager._expiryMs, 600_000)
+  })
+
+  it('clamps very short expiry (1s) to 5 minutes', () => {
+    manager = new TokenManager({ token: 'abc-123', tokenExpiry: '1s' })
+    assert.equal(manager._expiryMs, 300_000)
   })
 })

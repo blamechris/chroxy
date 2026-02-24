@@ -100,7 +100,7 @@ export class SessionDirectoryError extends SessionError {
  * Format milliseconds into a human-friendly duration string.
  * Examples: "2 minutes", "1 hour 30 minutes", "45 seconds"
  */
-function _formatIdleDuration(ms) {
+export function _formatIdleDuration(ms) {
   const totalSeconds = Math.round(ms / 1000)
   if (totalSeconds < 60) return `${totalSeconds} second${totalSeconds !== 1 ? 's' : ''}`
   const totalMinutes = Math.round(totalSeconds / 60)
