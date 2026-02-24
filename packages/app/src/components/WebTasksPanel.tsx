@@ -7,12 +7,8 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { COLORS } from '../constants/colors';
+import { ICON_CLOUD, ICON_CHECK, ICON_CROSS, ICON_DOWNLOAD } from '../constants/icons';
 import type { WebTask, WebFeatureStatus } from '../store/types';
-
-const ICON_CLOUD = '\u2601'; // Cloud
-const ICON_CHECK = '\u2713';
-const ICON_CROSS = '\u2717';
-const ICON_DOWNLOAD = '\u21E9'; // Downwards arrow
 
 interface WebTasksPanelProps {
   tasks: WebTask[];

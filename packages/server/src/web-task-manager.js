@@ -22,6 +22,8 @@ import { randomUUID } from 'crypto'
  */
 
 const POLL_INTERVAL_MS = 10_000 // 10s between status checks
+const MAX_TASKS = 100 // evict oldest completed/failed tasks beyond this
+const MAX_POLL_COUNT = 60 // 60 polls × 10s = 10 min max poll duration
 
 export class WebTaskManager extends EventEmitter {
   constructor({ cwd } = {}) {
@@ -33,6 +35,7 @@ export class WebTaskManager extends EventEmitter {
     this._teleportAvailable = false
     this._detected = false
     this._pollTimer = null
+    this._pollCount = 0
   }
 
   /** Whether the CLI supports --remote (web task launch) */
@@ -98,7 +101,7 @@ export class WebTaskManager extends EventEmitter {
       throw new WebTaskUnavailableError()
     }
 
-    const taskId = randomUUID().slice(0, 8)
+    const taskId = randomUUID()
     const task = {
       taskId,
       prompt: prompt.trim(),
@@ -111,6 +114,7 @@ export class WebTaskManager extends EventEmitter {
     }
 
     this._tasks.set(taskId, task)
+    this._evictIfNeeded()
     this.emit('task_created', { ...task })
 
     // Spawn the remote process
@@ -161,6 +165,22 @@ export class WebTaskManager extends EventEmitter {
   }
 
   /**
+   * Evict oldest completed/failed tasks when map exceeds MAX_TASKS.
+   * @private
+   */
+  _evictIfNeeded() {
+    if (this._tasks.size <= MAX_TASKS) return
+
+    const terminal = [...this._tasks.values()]
+      .filter(t => t.status === 'completed' || t.status === 'failed')
+      .sort((a, b) => a.updatedAt - b.updatedAt)
+
+    while (this._tasks.size > MAX_TASKS && terminal.length > 0) {
+      this._tasks.delete(terminal.shift().taskId)
+    }
+  }
+
+  /**
    * Spawn the remote CLI process for a task.
    * @private
    */
@@ -202,6 +222,7 @@ export class WebTaskManager extends EventEmitter {
   _startPolling() {
     if (this._pollTimer) return
 
+    this._pollCount = 0
     this._pollTimer = setInterval(() => {
       this._pollTaskStatus()
     }, POLL_INTERVAL_MS)
@@ -223,8 +244,23 @@ export class WebTaskManager extends EventEmitter {
    * @private
    */
   async _pollTaskStatus() {
+    this._pollCount++
+
     const running = [...this._tasks.values()].filter(t => t.status === 'running')
     if (running.length === 0) {
+      this._stopPolling()
+      return
+    }
+
+    // Fail running tasks after max polls to prevent indefinite timers
+    if (this._pollCount >= MAX_POLL_COUNT) {
+      for (const task of running) {
+        task.status = 'failed'
+        task.error = 'Task timed out waiting for status update'
+        task.updatedAt = Date.now()
+        this.emit('task_updated', { ...task })
+        this.emit('task_error', { taskId: task.taskId, message: task.error })
+      }
       this._stopPolling()
       return
     }
