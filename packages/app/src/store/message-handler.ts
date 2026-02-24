@@ -1742,13 +1742,37 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const newStates = { ...sessionStates };
         delete newStates[timeoutSessionId];
         const newSessions = sessions.filter((s) => s.sessionId !== timeoutSessionId);
-        const patch: Record<string, unknown> = { sessionStates: newStates, sessions: newSessions };
-        // Switch away if this was the active session
+        const patch: Partial<ConnectionState> = { sessionStates: newStates, sessions: newSessions };
+        // If the timed-out session was active, switch to next and sync flat fields (#816)
         if (get().activeSessionId === timeoutSessionId) {
           const remaining = Object.keys(newStates);
-          patch.activeSessionId = remaining.length > 0 ? remaining[0] : null;
+          const nextId = remaining.length > 0 ? remaining[0] : null;
+          patch.activeSessionId = nextId;
+          if (nextId && newStates[nextId]) {
+            const ss = newStates[nextId];
+            patch.messages = ss.messages;
+            patch.streamingMessageId = ss.streamingMessageId;
+            patch.claudeReady = ss.claudeReady;
+            patch.activeModel = ss.activeModel;
+            patch.permissionMode = ss.permissionMode;
+            patch.contextUsage = ss.contextUsage;
+            patch.lastResultCost = ss.lastResultCost;
+            patch.lastResultDuration = ss.lastResultDuration;
+            patch.isIdle = ss.isIdle;
+          } else {
+            // No sessions remain — clear flat fields
+            patch.messages = [];
+            patch.streamingMessageId = null;
+            patch.claudeReady = false;
+            patch.activeModel = null;
+            patch.permissionMode = null;
+            patch.contextUsage = null;
+            patch.lastResultCost = null;
+            patch.lastResultDuration = null;
+            patch.isIdle = true;
+          }
         }
-        set(patch as Partial<ConnectionState>);
+        set(patch);
         // Garbage-collect persisted messages for the deleted session (#797)
         void clearPersistedSession(timeoutSessionId);
       }

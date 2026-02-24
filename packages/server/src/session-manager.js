@@ -1026,15 +1026,17 @@ export class SessionManager extends EventEmitter {
         continue
       }
 
-      // Already warned — check if timeout has fully elapsed
-      if (this._sessionWarned.has(sessionId) && idleMs >= this._sessionTimeoutMs) {
+      // Timeout fully elapsed — destroy (whether or not a warning was sent).
+      // Handles both the normal warned->timeout path and the edge case where
+      // the session jumped past the warning threshold (clock jump, stall). (#815)
+      if (idleMs >= this._sessionTimeoutMs) {
         toDestroy.push({ sessionId, name: entry.name, idleMs })
         continue
       }
 
       // Warning threshold reached — send warning (#817: human-friendly durations)
       if (!this._sessionWarned.has(sessionId) && idleMs >= this._sessionTimeoutMs - warningMs) {
-        const remainingMs = this._sessionTimeoutMs - idleMs
+        const remainingMs = Math.max(0, this._sessionTimeoutMs - idleMs)
         const friendly = _formatIdleDuration(remainingMs)
         console.log(`[session-manager] Session ${sessionId} idle warning (${friendly} remaining)`)
         this._sessionWarned.add(sessionId)
