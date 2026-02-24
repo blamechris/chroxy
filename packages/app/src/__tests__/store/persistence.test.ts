@@ -2,7 +2,7 @@
  * Tests for client-side state persistence module.
  *
  * Uses the AsyncStorage mock from jest.setup.js (in-memory store).
- * Debounced functions use real timers + explicit delay waits.
+ * Debounced functions use fake timers for deterministic, fast execution.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -13,6 +13,7 @@ import {
   loadPersistedState,
   loadSessionMessages,
   clearPersistedState,
+  _resetForTesting,
 } from '../../store/persistence';
 import type { ChatMessage } from '../../store/types';
 
@@ -26,14 +27,15 @@ function makeMsg(id: string, overrides?: Partial<ChatMessage>): ChatMessage {
   };
 }
 
-/** Wait for debounce timer + async save to complete */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 beforeEach(async () => {
+  jest.useFakeTimers();
+  _resetForTesting();
   await AsyncStorage.clear();
   jest.clearAllMocks();
+});
+
+afterEach(() => {
+  jest.useRealTimers();
 });
 
 // ---------------------------------------------------------------------------
@@ -89,7 +91,7 @@ describe('persistSessionMessages', () => {
   it('persists and loads messages for a session', async () => {
     const messages = [makeMsg('1'), makeMsg('2')];
     persistSessionMessages('s1', messages);
-    await delay(700); // debounce 500ms + margin
+    await jest.advanceTimersByTimeAsync(500);
 
     const loaded = await loadSessionMessages('s1');
     expect(loaded).toHaveLength(2);
@@ -100,7 +102,7 @@ describe('persistSessionMessages', () => {
   it('trims to MAX_MESSAGES (100)', async () => {
     const messages = Array.from({ length: 120 }, (_, i) => makeMsg(`m-${i}`));
     persistSessionMessages('s1', messages);
-    await delay(700);
+    await jest.advanceTimersByTimeAsync(500);
 
     const loaded = await loadSessionMessages('s1');
     expect(loaded).toHaveLength(100);
@@ -116,7 +118,7 @@ describe('persistSessionMessages', () => {
       }),
     ];
     persistSessionMessages('s1', messages);
-    await delay(700);
+    await jest.advanceTimersByTimeAsync(500);
 
     const loaded = await loadSessionMessages('s1');
     expect(loaded[0].toolResultImages![0].data).toBe('[image data stripped for storage]');
@@ -131,7 +133,7 @@ describe('persistSessionMessages', () => {
       }),
     ];
     persistSessionMessages('s1', messages);
-    await delay(700);
+    await jest.advanceTimersByTimeAsync(500);
 
     const loaded = await loadSessionMessages('s1');
     expect(loaded[0].attachments![0].uri).toBe('[data stripped]');
@@ -146,7 +148,7 @@ describe('persistSessionMessages', () => {
       }),
     ];
     persistSessionMessages('s1', messages);
-    await delay(700);
+    await jest.advanceTimersByTimeAsync(500);
 
     const loaded = await loadSessionMessages('s1');
     expect(loaded[0].attachments![0].uri).toBe('file:///doc.pdf');
@@ -156,7 +158,7 @@ describe('persistSessionMessages', () => {
     persistSessionMessages('s1', [makeMsg('a')]);
     persistSessionMessages('s1', [makeMsg('b')]);
     persistSessionMessages('s1', [makeMsg('c')]);
-    await delay(700);
+    await jest.advanceTimersByTimeAsync(500);
 
     const loaded = await loadSessionMessages('s1');
     expect(loaded).toHaveLength(1);
@@ -188,7 +190,7 @@ describe('persistSessionMessages', () => {
 describe('persistTerminalBuffer', () => {
   it('persists and loads terminal buffer', async () => {
     persistTerminalBuffer('hello terminal');
-    await delay(1200); // debounce 1000ms + margin
+    await jest.advanceTimersByTimeAsync(1000);
 
     const state = await loadPersistedState();
     expect(state.terminalBuffer).toBe('hello terminal');
@@ -197,7 +199,7 @@ describe('persistTerminalBuffer', () => {
   it('truncates to MAX_TERMINAL_SIZE (50000 chars)', async () => {
     const bigBuffer = 'x'.repeat(60000);
     persistTerminalBuffer(bigBuffer);
-    await delay(1200);
+    await jest.advanceTimersByTimeAsync(1000);
 
     const state = await loadPersistedState();
     expect(state.terminalBuffer!.length).toBe(50000);

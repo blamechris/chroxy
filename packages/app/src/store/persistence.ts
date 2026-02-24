@@ -35,6 +35,7 @@ function sessionMessagesKey(sessionId: string): string {
 
 interface DebouncedPersister {
   schedule: (fn: () => Promise<void>) => void;
+  cancel: () => void;
 }
 
 /** Create an independent debounced persister with its own timer */
@@ -58,6 +59,10 @@ function createDebouncedPersist(delayMs: number): DebouncedPersister {
           }
         }
       }, delayMs);
+    },
+    cancel(): void {
+      if (timer) { clearTimeout(timer); timer = null; }
+      pending = null;
     },
   };
 }
@@ -187,6 +192,12 @@ export async function clearPersistedState(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Reset module-level debounce state for deterministic testing */
+export function _resetForTesting(): void {
+  _messagesPersister.cancel();
+  _terminalPersister.cancel();
+}
 
 /** Strip base64 image data from messages to keep storage bounded */
 function stripLargeData(msg: ChatMessage): ChatMessage {
