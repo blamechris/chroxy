@@ -36,6 +36,8 @@ export interface ChatMessage {
   /** Base64 images from tool results (e.g. computer use screenshots) */
   toolResultImages?: ToolResultImage[];
   answered?: string;
+  /** Timestamp when the user answered a permission prompt */
+  answeredAt?: number;
   expiresAt?: number;
   timestamp: number;
   /** Attachments on user_input messages (images, documents) */

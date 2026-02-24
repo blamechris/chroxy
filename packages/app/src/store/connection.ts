@@ -819,17 +819,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   markPromptAnswered: (messageId: string, answer: string) => {
     const { activeSessionId, sessionStates } = get();
+    const now = Date.now();
 
     if (activeSessionId && sessionStates[activeSessionId]) {
       updateActiveSession((ss) => ({
         messages: ss.messages.map((m) =>
-          m.id === messageId ? { ...m, answered: answer } : m
+          m.id === messageId ? { ...m, answered: answer, answeredAt: now } : m
         ),
       }));
     } else {
       set((state) => ({
         messages: state.messages.map((m) =>
-          m.id === messageId ? { ...m, answered: answer } : m
+          m.id === messageId ? { ...m, answered: answer, answeredAt: now } : m
         ),
       }));
     }
@@ -837,17 +838,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => {
     const { activeSessionId, sessionStates } = get();
+    const now = Date.now();
 
     if (activeSessionId && sessionStates[activeSessionId]) {
       updateActiveSession((ss) => ({
         messages: ss.messages.map((m) =>
-          m.requestId === requestId ? { ...m, answered: answer } : m
+          m.requestId === requestId ? { ...m, answered: answer, answeredAt: now } : m
         ),
       }));
     } else {
       set((state) => ({
         messages: state.messages.map((m) =>
-          m.requestId === requestId ? { ...m, answered: answer } : m
+          m.requestId === requestId ? { ...m, answered: answer, answeredAt: now } : m
         ),
       }));
     }
