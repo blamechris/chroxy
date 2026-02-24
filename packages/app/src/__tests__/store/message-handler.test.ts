@@ -1,5 +1,5 @@
 /**
- * Tests for message-handler session_timeout state cleanup (#832).
+ * Tests for message-handler state cleanup (#832, #844).
  *
  * Uses _testMessageHandler to invoke handleMessage directly
  * with a mock Zustand store.
@@ -198,6 +198,117 @@ describe('session_timeout handler', () => {
     expect(state.sessionStates).toHaveProperty('s1');
     expect(state.sessionStates).not.toHaveProperty('s2');
     expect(state.sessions).toHaveLength(1);
+  });
+});
+
+describe('session_list GC handler', () => {
+  it('calls clearPersistedSession for sessions removed from list', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Session 1' } as any,
+        { sessionId: 's2', name: 'Session 2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Send session_list that only includes s1 (s2 removed)
+    _testMessageHandler.handle({
+      type: 'session_list',
+      sessions: [{ sessionId: 's1', name: 'Session 1' }],
+    });
+
+    expect(clearPersistedSession).toHaveBeenCalledWith('s2');
+    expect(store.getState().sessionStates).not.toHaveProperty('s2');
+  });
+
+  it('does not call clearPersistedSession when no sessions removed', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'Session 1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'session_list',
+      sessions: [{ sessionId: 's1', name: 'Session 1' }],
+    });
+
+    expect(clearPersistedSession).not.toHaveBeenCalled();
+  });
+
+  it('cleans up multiple removed sessions at once', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+        { sessionId: 's3', name: 'S3' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+        s3: createEmptySessionState(),
+      },
+      messages: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Only s1 remains
+    _testMessageHandler.handle({
+      type: 'session_list',
+      sessions: [{ sessionId: 's1', name: 'S1' }],
+    });
+
+    expect(clearPersistedSession).toHaveBeenCalledWith('s2');
+    expect(clearPersistedSession).toHaveBeenCalledWith('s3');
+    expect(clearPersistedSession).toHaveBeenCalledTimes(2);
+    const state = store.getState();
+    expect(state.sessionStates).not.toHaveProperty('s2');
+    expect(state.sessionStates).not.toHaveProperty('s3');
+    expect(state.sessionStates).toHaveProperty('s1');
+  });
+
+  it('switches active session when active session is removed from list', () => {
+    const s2State = { ...createEmptySessionState(), messages: [{ id: 'm1', type: 'response' as const, content: 'from s2', timestamp: 1 }] };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: s2State,
+      },
+      messages: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Remove active session s1, only s2 remains
+    _testMessageHandler.handle({
+      type: 'session_list',
+      sessions: [{ sessionId: 's2', name: 'S2' }],
+    });
+
+    const state = store.getState();
+    expect(state.activeSessionId).toBe('s2');
+    expect(state.messages).toEqual(s2State.messages);
   });
 });
 

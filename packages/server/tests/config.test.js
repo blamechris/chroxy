@@ -83,6 +83,42 @@ describe('validateConfig', () => {
     assert.equal(result.valid, true)
     assert.equal(result.warnings.length, 0)
   })
+
+  it('accepts valid https externalUrl', () => {
+    const result = validateConfig({ externalUrl: 'https://example.com' })
+    assert.equal(result.valid, true)
+    assert.equal(result.warnings.length, 0)
+  })
+
+  it('accepts valid http externalUrl', () => {
+    const result = validateConfig({ externalUrl: 'http://localhost:8080' })
+    assert.equal(result.valid, true)
+    assert.equal(result.warnings.length, 0)
+  })
+
+  it('warns about non-http protocol in externalUrl', () => {
+    const result = validateConfig({ externalUrl: 'ftp://example.com' })
+    assert.equal(result.valid, false)
+    assert.ok(result.warnings.some(w => w.includes('externalUrl') && w.includes('ftp:')))
+  })
+
+  it('warns about malformed externalUrl', () => {
+    const result = validateConfig({ externalUrl: 'not-a-url' })
+    assert.equal(result.valid, false)
+    assert.ok(result.warnings.some(w => w.includes('Invalid URL format') && w.includes('not-a-url')))
+  })
+
+  it('skips validation for empty externalUrl', () => {
+    const result = validateConfig({ externalUrl: '' })
+    assert.equal(result.valid, true)
+    assert.equal(result.warnings.length, 0)
+  })
+
+  it('warns about wss protocol in externalUrl', () => {
+    const result = validateConfig({ externalUrl: 'wss://example.com' })
+    assert.equal(result.valid, false)
+    assert.ok(result.warnings.some(w => w.includes('externalUrl') && w.includes('wss:')))
+  })
 })
 
 describe('mergeConfig', () => {
