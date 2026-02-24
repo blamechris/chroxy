@@ -967,6 +967,13 @@ export class WsServer {
           const trimmed = text?.trim() || ''
           const attCount = attachments?.length || 0
           console.log(`[ws] Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
+
+          // Budget pause guard: block new messages when session has exceeded cost budget
+          if (this.sessionManager.isBudgetPaused(targetSessionId)) {
+            this._send(ws, { type: 'session_error', message: 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.' })
+            break
+          }
+
           // Auto-checkpoint before each user message (fire-and-forget)
           if (entry.session.resumeSessionId) {
             this._checkpointManager.createCheckpoint({
@@ -995,6 +1002,16 @@ export class WsServer {
         if (entry) {
           console.log(`[ws] Interrupt from ${client.id} to session ${interruptSessionId}`)
           entry.session.interrupt()
+        }
+        break
+      }
+
+      case 'resume_budget': {
+        const budgetSessionId = msg.sessionId || client.activeSessionId
+        if (budgetSessionId && this.sessionManager.isBudgetPaused(budgetSessionId)) {
+          this.sessionManager.resumeBudget(budgetSessionId)
+          this._broadcastToSession(budgetSessionId, { type: 'budget_resumed', sessionId: budgetSessionId })
+          console.log(`[ws] Budget resumed for session ${budgetSessionId} by ${client.id}`)
         }
         break
       }
