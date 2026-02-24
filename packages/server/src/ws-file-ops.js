@@ -599,6 +599,5 @@ export function createFileOps(sendFn) {
     getDiff,
     listSlashCommands,
     listAgents,
-    resolveSessionCwd,
   }
 }
