@@ -1582,16 +1582,4 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     marginTop: 8,
   },
-  searchMatch: {
-    borderLeftWidth: 3,
-    borderLeftColor: COLORS.accentBlue,
-    borderRadius: 4,
-    paddingLeft: 2,
-  },
-  searchMatchCurrent: {
-    borderLeftWidth: 3,
-    borderLeftColor: COLORS.accentOrange,
-    borderRadius: 4,
-    paddingLeft: 2,
-  },
 });
