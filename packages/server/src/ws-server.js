@@ -418,7 +418,16 @@ export class WsServer {
     })
 
     // WebSocket server in noServer mode — we handle the upgrade manually
-    this.wss = new WebSocketServer({ noServer: true, maxPayload: this._maxPayload })
+    this.wss = new WebSocketServer({
+      noServer: true,
+      maxPayload: this._maxPayload,
+      perMessageDeflate: {
+        zlibDeflateOptions: { level: 6 },
+        zlibInflateOptions: { chunkSize: 16 * 1024 },
+        threshold: 1024,
+        concurrencyLimit: 10,
+      },
+    })
 
     this.httpServer.on('upgrade', (req, socket, head) => {
       this.wss.handleUpgrade(req, socket, head, (ws) => {

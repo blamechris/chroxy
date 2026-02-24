@@ -5,6 +5,12 @@ import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient, Cust
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
+// Connection quality → color mapping (consistent 13% opacity backgrounds)
+const QUALITY_COLORS = {
+  good: { bg: COLORS.accentGreenLight, fg: COLORS.accentGreen },
+  fair: { bg: COLORS.accentOrangeSubtle, fg: COLORS.accentOrange },
+  poor: { bg: COLORS.accentRedSubtle, fg: COLORS.accentRed },
+} as const;
 
 // -- Props --
 
@@ -34,6 +40,8 @@ export interface SettingsBarProps {
   onCancelPermissionConfirm?: () => void;
   conversationId?: string | null;
   sessionContext?: SessionContext | null;
+  latencyMs?: number | null;
+  connectionQuality?: 'good' | 'fair' | 'poor' | null;
 }
 
 // -- Helpers --
@@ -101,6 +109,8 @@ export function SettingsBar({
   onCancelPermissionConfirm,
   conversationId,
   sessionContext,
+  latencyMs,
+  connectionQuality,
 }: SettingsBarProps) {
   // Elapsed time ticker — only runs when expanded with active agents
   const [now, setNow] = useState(Date.now());
@@ -215,6 +225,21 @@ export function SettingsBar({
             </Text>
           </View>
         )}
+        {connectionQuality && (() => {
+          const qc = QUALITY_COLORS[connectionQuality];
+          return (
+            <View
+              style={[styles.qualityBadge, { backgroundColor: qc.bg }]}
+              accessibilityLabel={`Connection quality: ${connectionQuality}${latencyMs != null ? `, ${latencyMs}ms latency` : ''}`}
+              accessibilityRole="text"
+            >
+              <View style={[styles.qualityDot, { backgroundColor: qc.fg }]} />
+              <Text style={[styles.qualityText, { color: qc.fg }]}>
+                {latencyMs != null ? `${latencyMs}ms` : connectionQuality}
+              </Text>
+            </View>
+          );
+        })()}
         {connectedClients.length > 1 && (
           <View
             style={styles.deviceBadge}
@@ -509,6 +534,24 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  qualityBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginRight: 8,
+    gap: 3,
+  },
+  qualityDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+  },
+  qualityText: {
+    fontSize: 9,
+    fontWeight: '600',
   },
   deviceBadge: {
     backgroundColor: COLORS.accentBlueSubtle,
