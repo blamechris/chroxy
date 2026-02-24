@@ -1544,6 +1544,31 @@ export class WsServer {
       }
 
       case 'launch_web_task': {
+        // Validate cwd if provided (same rules as create_session)
+        if (msg.cwd) {
+          try {
+            const cwdStat = statSync(msg.cwd)
+            if (!cwdStat.isDirectory()) {
+              this._send(ws, { type: 'web_task_error', taskId: null, message: `Not a directory: ${msg.cwd}` })
+              break
+            }
+          } catch {
+            this._send(ws, { type: 'web_task_error', taskId: null, message: `Directory does not exist: ${msg.cwd}` })
+            break
+          }
+          const home = homedir()
+          let realCwd
+          try {
+            realCwd = realpathSync(msg.cwd)
+          } catch {
+            this._send(ws, { type: 'web_task_error', taskId: null, message: `Cannot resolve path: ${msg.cwd}` })
+            break
+          }
+          if (!realCwd.startsWith(home + '/') && realCwd !== home) {
+            this._send(ws, { type: 'web_task_error', taskId: null, message: 'Task directory must be within your home directory' })
+            break
+          }
+        }
         try {
           const { taskId, task } = this._webTaskManager.launchTask(msg.prompt, { cwd: msg.cwd })
           console.log(`[ws] Web task launched: ${taskId} — "${msg.prompt.slice(0, 60)}"`)
