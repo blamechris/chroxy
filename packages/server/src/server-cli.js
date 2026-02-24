@@ -346,6 +346,8 @@ export async function startCliServer(config) {
       pid: process.pid,
     })
 
+  } else if (externalUrl) {
+    // Ready message already printed above
   } else if (!tunnelArg && !NO_AUTH) {
     console.log(`[✓] Server ready! (CLI headless mode, no tunnel)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)
