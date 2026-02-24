@@ -756,25 +756,58 @@ describe('SessionManager budget pause lifecycle', () => {
     assert.deepEqual(state.budgetPaused, ['s1'])
   })
 
-  it('restores cost and budget state from disk', () => {
+  it('restores cost and budget state remapped to new session IDs', () => {
     writeFileSync(stateFile, JSON.stringify({
       version: 1,
       timestamp: Date.now(),
-      sessions: [{ name: 'Test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
-      costs: { s1: 3.00, s2: 0.50 },
-      budgetWarned: ['s1'],
-      budgetExceeded: ['s1'],
-      budgetPaused: ['s1'],
+      sessions: [
+        { id: 'old-s1', name: 'Test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        { id: 'old-s2', name: 'Test 2', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+      ],
+      costs: { 'old-s1': 3.00, 'old-s2': 0.50 },
+      budgetWarned: ['old-s1'],
+      budgetExceeded: ['old-s1'],
+      budgetPaused: ['old-s1'],
     }))
 
     const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
     mgr.restoreState()
 
+    // Costs should be keyed by the NEW session IDs, not the old ones
+    const sessions = mgr.listSessions()
+    assert.equal(sessions.length, 2)
+    const newId1 = sessions[0].sessionId
+    const newId2 = sessions[1].sessionId
+    assert.notEqual(newId1, 'old-s1')
+    assert.notEqual(newId2, 'old-s2')
+
+    assert.equal(mgr._sessionCosts.get(newId1), 3.00)
+    assert.equal(mgr._sessionCosts.get(newId2), 0.50)
+    assert.equal(mgr._budgetWarned.has(newId1), true)
+    assert.equal(mgr._budgetExceeded.has(newId1), true)
+    assert.equal(mgr._budgetPaused.has(newId1), true)
+    // Old IDs should NOT be present
+    assert.equal(mgr._sessionCosts.has('old-s1'), false)
+    assert.equal(mgr._budgetWarned.has('old-s1'), false)
+
+    mgr.destroyAll()
+  })
+
+  it('restores costs with old format (no id field) using old keys', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [{ name: 'Test', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null }],
+      costs: { s1: 3.00 },
+      budgetWarned: ['s1'],
+    }))
+
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+
+    // Without id field in session, old keys are kept as-is (backwards compat)
     assert.equal(mgr._sessionCosts.get('s1'), 3.00)
-    assert.equal(mgr._sessionCosts.get('s2'), 0.50)
     assert.equal(mgr._budgetWarned.has('s1'), true)
-    assert.equal(mgr._budgetExceeded.has('s1'), true)
-    assert.equal(mgr._budgetPaused.has('s1'), true)
 
     mgr.destroyAll()
   })

@@ -36,7 +36,8 @@ export function parseDuration(str) {
 
   // Try plain number (treated as seconds)
   if (/^\d+$/.test(cleaned)) {
-    return parseInt(cleaned, 10) * 1000
+    const ms = parseInt(cleaned, 10) * 1000
+    return ms > 0 ? ms : null
   }
 
   // Strict: only allow valid duration chars (digits, s, m, h, d, and optional whitespace)
