@@ -76,10 +76,11 @@ export function ConnectScreen() {
   const loadSavedConnection = useConnectionStore((state) => state.loadSavedConnection);
   const clearSavedConnection = useConnectionStore((state) => state.clearSavedConnection);
   const viewCachedSession = useConnectionStore((state) => state.viewCachedSession);
-  const hasCachedMessages = useConnectionStore((state) => {
-    const sid = state.activeSessionId;
-    return !!(sid && state.sessionStates[sid]?.messages.length);
-  });
+  const hasCachedMessages = useConnectionStore((state) =>
+    Object.values(state.sessionStates).some(
+      (ss) => ss?.messages && ss.messages.length > 0,
+    ),
+  );
 
   // Load saved connection and auto-connect on mount
   useEffect(() => {
