@@ -195,6 +195,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
+  totalCost: null,
+  costBudget: null,
   isIdle: true,
   inputSettings: {
     chatEnterToSend: true,
@@ -222,6 +224,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       contextUsage: get().contextUsage,
       lastResultCost: get().lastResultCost,
       lastResultDuration: get().lastResultDuration,
+      sessionCost: null,
       isIdle: true,
       health: 'healthy' as const,
       activeAgents: [],
@@ -577,6 +580,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,
+      totalCost: null,
+      costBudget: null,
       savedConnection: null,
     });
   },

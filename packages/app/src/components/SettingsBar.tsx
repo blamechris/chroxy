@@ -23,6 +23,8 @@ export interface SettingsBarProps {
   availablePermissionModes: { id: string; label: string }[];
   lastResultCost: number | null;
   lastResultDuration: number | null;
+  sessionCost?: number | null;
+  costBudget?: number | null;
   contextUsage: ContextUsage | null;
   claudeStatus: ClaudeStatus | null;
   sessionCwd: string | null;
@@ -92,6 +94,8 @@ export function SettingsBar({
   availablePermissionModes,
   lastResultCost,
   lastResultDuration,
+  sessionCost,
+  costBudget,
   contextUsage,
   claudeStatus,
   sessionCwd,
@@ -195,7 +199,9 @@ export function SettingsBar({
       const permInfo = availablePermissionModes.find((m) => m.id === permissionMode);
       summaryParts.push(permInfo?.label || permissionMode);
     }
-    if (lastResultCost != null) {
+    if (sessionCost != null) {
+      summaryParts.push(`$${sessionCost.toFixed(2)}`);
+    } else if (lastResultCost != null) {
       summaryParts.push(`$${lastResultCost.toFixed(2)}`);
     }
     if (contextUsage) {
@@ -334,19 +340,33 @@ export function SettingsBar({
                   })}
                 </View>
               )}
-              {(lastResultCost != null || contextUsage) && (
+              {(lastResultCost != null || sessionCost != null || contextUsage) && (
                 <View style={styles.contextRow}>
-                  {lastResultCost != null && (
+                  {sessionCost != null ? (
+                    <Text style={styles.contextText}>
+                      Session: ${sessionCost.toFixed(4)}
+                      {costBudget != null ? ` / $${costBudget.toFixed(2)}` : ''}
+                      {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
+                    </Text>
+                  ) : lastResultCost != null ? (
                     <Text style={styles.contextText}>
                       ${lastResultCost.toFixed(4)}
                       {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
                     </Text>
-                  )}
+                  ) : null}
                   {contextUsage && (
                     <Text style={styles.contextText}>
                       {formatTokenCount(contextUsage.inputTokens + contextUsage.outputTokens)}
                     </Text>
                   )}
+                </View>
+              )}
+              {costBudget != null && sessionCost != null && (
+                <View style={styles.budgetBarContainer}>
+                  <View style={[styles.budgetBarFill, {
+                    width: `${Math.min(100, (sessionCost / costBudget) * 100)}%` as `${number}%`,
+                    backgroundColor: sessionCost / costBudget >= 1.0 ? COLORS.accentRed : sessionCost / costBudget >= 0.8 ? COLORS.accentOrange : COLORS.accentGreen,
+                  }]} />
                 </View>
               )}
             </>
@@ -552,6 +572,16 @@ const styles = StyleSheet.create({
   qualityText: {
     fontSize: 9,
     fontWeight: '600',
+  },
+  budgetBarContainer: {
+    height: 3,
+    backgroundColor: COLORS.backgroundCard,
+    borderRadius: 1.5,
+    overflow: 'hidden' as const,
+  },
+  budgetBarFill: {
+    height: 3,
+    borderRadius: 1.5,
   },
   deviceBadge: {
     backgroundColor: COLORS.accentBlueSubtle,

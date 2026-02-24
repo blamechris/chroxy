@@ -175,6 +175,11 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].mcpServers : EMPTY_MCP_SERVERS;
   });
+  const sessionCost = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].sessionCost : null;
+  });
+  const costBudget = useConnectionStore((s) => s.costBudget);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const latencyMs = useConnectionStore((s) => s.latencyMs);
   const connectionQuality = useConnectionStore((s) => s.connectionQuality);
@@ -547,6 +552,8 @@ export function SessionScreen() {
           availablePermissionModes={availablePermissionModes}
           lastResultCost={lastResultCost}
           lastResultDuration={lastResultDuration}
+          sessionCost={sessionCost}
+          costBudget={costBudget}
           contextUsage={contextUsage}
           claudeStatus={claudeStatus}
           sessionCwd={sessionCwd}

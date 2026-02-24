@@ -97,7 +97,7 @@ export class SessionDirectoryError extends SessionError {
  *   session_timeout   { sessionId, name, idleMs } — session destroyed due to idle timeout
  */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout, costBudget } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -117,6 +117,10 @@ export class SessionManager extends EventEmitter {
     this._maxHistory = 500
     this._historyTruncated = new Map() // sessionId -> boolean
     this._persistTimer = null
+    this._sessionCosts = new Map() // sessionId -> cumulative cost in dollars
+    this._budgetWarned = new Set() // sessionIds that have already received 80% warning
+    this._budgetExceeded = new Set() // sessionIds that have already received 100% exceeded
+    this._costBudget = typeof costBudget === 'number' && costBudget > 0 ? costBudget : null
     this._autoDiscovery = autoDiscovery
     this._discoveryIntervalMs = discoveryIntervalMs
     this._discoveryTimer = null
@@ -287,6 +291,9 @@ export class SessionManager extends EventEmitter {
         this._pendingStreams.delete(key)
       }
     }
+    this._sessionCosts.delete(sessionId)
+    this._budgetWarned.delete(sessionId)
+    this._budgetExceeded.delete(sessionId)
     this.emit('session_destroyed', { sessionId })
     this._schedulePersist()
     return true
@@ -811,6 +818,11 @@ export class SessionManager extends EventEmitter {
             data: { conversationId: session.resumeSessionId },
           })
         }
+
+        // Track cumulative cost and check budget on result events
+        if (event === 'result' && typeof data.cost === 'number') {
+          this._trackCost(sessionId, data.cost)
+        }
       })
     }
 
@@ -871,6 +883,68 @@ export class SessionManager extends EventEmitter {
     // Clear warning flag if session becomes active again
     if (this._sessionWarned.has(sessionId)) {
       this._sessionWarned.delete(sessionId)
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cost budget tracking
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Track cumulative cost for a session and check budget thresholds.
+   * @param {string} sessionId
+   * @param {number} cost - Cost of the latest query in dollars
+   */
+  _trackCost(sessionId, cost) {
+    const prev = this._sessionCosts.get(sessionId) || 0
+    const cumulative = prev + cost
+    this._sessionCosts.set(sessionId, cumulative)
+
+    // Emit cost_update for every result so app can track cumulative cost
+    const entry = this._sessions.get(sessionId)
+    this.emit('session_event', {
+      sessionId,
+      event: 'cost_update',
+      data: {
+        sessionCost: cumulative,
+        totalCost: this.getTotalCost(),
+        budget: this._costBudget,
+      },
+    })
+
+    if (!this._costBudget) return
+
+    const percent = cumulative / this._costBudget
+
+    // Hard limit at 100% (checked first to avoid dual-emit with warning)
+    if (percent >= 1.0 && !this._budgetExceeded.has(sessionId)) {
+      this._budgetExceeded.add(sessionId)
+      this.emit('session_event', {
+        sessionId,
+        event: 'budget_exceeded',
+        data: {
+          sessionCost: cumulative,
+          budget: this._costBudget,
+          percent: Math.round(percent * 100),
+          message: `Session "${entry?.name || sessionId}" has exceeded the $${this._costBudget.toFixed(2)} budget ($${cumulative.toFixed(4)})`,
+        },
+      })
+      return
+    }
+
+    // Warning at 80% (skipped if already at/past 100%)
+    if (percent >= 0.8 && !this._budgetWarned.has(sessionId)) {
+      this._budgetWarned.add(sessionId)
+      this.emit('session_event', {
+        sessionId,
+        event: 'budget_warning',
+        data: {
+          sessionCost: cumulative,
+          budget: this._costBudget,
+          percent: Math.round(percent * 100),
+          message: `Session "${entry?.name || sessionId}" has used ${Math.round(percent * 100)}% of the $${this._costBudget.toFixed(2)} budget ($${cumulative.toFixed(4)})`,
+        },
+      })
     }
   }
 
@@ -952,5 +1026,24 @@ export class SessionManager extends EventEmitter {
         })
       }
     }
+  }
+
+  /**
+   * Get cumulative cost for a specific session.
+   * @param {string} sessionId
+   * @returns {number} Cost in dollars
+   */
+  getSessionCost(sessionId) {
+    return this._sessionCosts.get(sessionId) || 0
+  }
+
+  /**
+   * Get total cumulative cost across all sessions.
+   * @returns {number} Cost in dollars
+   */
+  getTotalCost() {
+    let total = 0
+    for (const cost of this._sessionCosts.values()) total += cost
+    return total
   }
 }

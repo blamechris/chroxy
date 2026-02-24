@@ -36,6 +36,7 @@ const CONFIG_SCHEMA = {
   transforms: 'array',
   tokenExpiry: 'string',
   sessionTimeout: 'string',
+  costBudget: 'number',
 }
 
 /**
@@ -194,6 +195,7 @@ function envKeyForConfig(key) {
     transforms: 'CHROXY_TRANSFORMS',
     tokenExpiry: 'CHROXY_TOKEN_EXPIRY',
     sessionTimeout: 'CHROXY_SESSION_TIMEOUT',
+    costBudget: 'CHROXY_COST_BUDGET',
   }
   return envMap[key] || key.toUpperCase()
 }
@@ -208,7 +210,7 @@ function parseEnvValue(key, value) {
   const expectedType = CONFIG_SCHEMA[key]
 
   if (expectedType === 'number') {
-    const num = parseInt(value, 10)
+    const num = parseFloat(value)
     return isNaN(num) ? value : num
   }
 

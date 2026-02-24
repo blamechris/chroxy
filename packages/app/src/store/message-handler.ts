@@ -832,6 +832,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       } else {
         get().addMessage(newMsg);
       }
+      // Surface rate limit / usage limit errors prominently (#616)
+      if (msgType === 'error' && typeof msg.content === 'string') {
+        const content = (msg.content as string).toLowerCase();
+        if (content.includes('rate limit') || content.includes('usage limit') || content.includes('quota') || content.includes('overloaded')) {
+          Alert.alert('Usage Limit', msg.content as string);
+        }
+      }
       break;
     }
 
@@ -1524,6 +1531,58 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const servers = (msg.servers as McpServer[]) || [];
       if (mcpTargetId && get().sessionStates[mcpTargetId]) {
         updateSession(mcpTargetId, () => ({ mcpServers: servers }));
+      }
+      break;
+    }
+
+    case 'cost_update': {
+      const sessionCost = typeof msg.sessionCost === 'number' ? msg.sessionCost : null;
+      const totalCost = typeof msg.totalCost === 'number' ? msg.totalCost : null;
+      const budget = typeof msg.budget === 'number' ? msg.budget : null;
+      const costTargetId = (msg.sessionId as string) || get().activeSessionId;
+      if (costTargetId && get().sessionStates[costTargetId]) {
+        updateSession(costTargetId, () => ({ sessionCost }));
+      }
+      set({ totalCost, costBudget: budget });
+      break;
+    }
+
+    case 'budget_warning': {
+      const warningMessage = typeof msg.message === 'string' ? msg.message : 'Approaching cost budget limit';
+      Alert.alert('Budget Warning', warningMessage);
+      const budgetWarnMsg: ChatMessage = {
+        id: nextMessageId('system'),
+        type: 'system',
+        content: warningMessage,
+        timestamp: Date.now(),
+      };
+      const budgetWarnTargetId = (msg.sessionId as string) || get().activeSessionId;
+      if (budgetWarnTargetId && get().sessionStates[budgetWarnTargetId]) {
+        updateSession(budgetWarnTargetId, (ss) => ({
+          messages: [...ss.messages, budgetWarnMsg],
+        }));
+      } else {
+        get().addMessage(budgetWarnMsg);
+      }
+      break;
+    }
+
+    case 'budget_exceeded': {
+      const exceededMessage = typeof msg.message === 'string' ? msg.message : 'Cost budget exceeded';
+      Alert.alert('Budget Exceeded', exceededMessage);
+      const budgetExceededMsg: ChatMessage = {
+        id: nextMessageId('system'),
+        type: 'system',
+        content: exceededMessage,
+        timestamp: Date.now(),
+      };
+      const budgetExceededTargetId = (msg.sessionId as string) || get().activeSessionId;
+      if (budgetExceededTargetId && get().sessionStates[budgetExceededTargetId]) {
+        updateSession(budgetExceededTargetId, (ss) => ({
+          messages: [...ss.messages, budgetExceededMsg],
+        }));
+      } else {
+        get().addMessage(budgetExceededMsg);
       }
       break;
     }

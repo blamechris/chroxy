@@ -73,6 +73,7 @@ export function createEmptySessionState(): SessionState {
     contextUsage: null,
     lastResultCost: null,
     lastResultDuration: null,
+    sessionCost: null,
     isIdle: true,
     health: 'healthy',
     activeAgents: [],
