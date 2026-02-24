@@ -10,12 +10,15 @@ import {
   persistViewMode,
   persistActiveSession,
   persistTerminalBuffer,
+  persistSessionList,
   loadPersistedState,
   loadSessionMessages,
+  loadSessionList,
+  loadAllSessionMessages,
   clearPersistedState,
   _resetForTesting,
 } from '../../store/persistence';
-import type { ChatMessage } from '../../store/types';
+import type { ChatMessage, SessionInfo } from '../../store/types';
 
 function makeMsg(id: string, overrides?: Partial<ChatMessage>): ChatMessage {
   return {
@@ -245,5 +248,89 @@ describe('clearPersistedState', () => {
 
   it('does not fail when no persist keys exist', async () => {
     await expect(clearPersistedState()).resolves.not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// persistSessionList / loadSessionList
+// ---------------------------------------------------------------------------
+
+function makeSession(id: string, overrides?: Partial<SessionInfo>): SessionInfo {
+  return {
+    sessionId: id,
+    name: `Session ${id}`,
+    cwd: '/tmp',
+    type: 'cli',
+    hasTerminal: false,
+    model: 'claude-opus-4-6',
+    permissionMode: 'approve',
+    isBusy: false,
+    createdAt: Date.now(),
+    conversationId: null,
+    ...overrides,
+  };
+}
+
+describe('persistSessionList', () => {
+  it('persists and loads session list', async () => {
+    const sessions = [makeSession('s1'), makeSession('s2')];
+    persistSessionList(sessions);
+    await jest.advanceTimersByTimeAsync(500);
+
+    const loaded = await loadSessionList();
+    expect(loaded).toHaveLength(2);
+    expect(loaded[0].sessionId).toBe('s1');
+    expect(loaded[1].sessionId).toBe('s2');
+  });
+
+  it('debounces rapid updates', async () => {
+    persistSessionList([makeSession('a')]);
+    persistSessionList([makeSession('b')]);
+    persistSessionList([makeSession('c')]);
+    await jest.advanceTimersByTimeAsync(500);
+
+    const loaded = await loadSessionList();
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].sessionId).toBe('c');
+  });
+
+  it('returns empty array when nothing persisted', async () => {
+    const loaded = await loadSessionList();
+    expect(loaded).toEqual([]);
+  });
+
+  it('returns empty array for corrupt JSON', async () => {
+    await AsyncStorage.setItem('chroxy_persist_session_list', 'not json');
+    const loaded = await loadSessionList();
+    expect(loaded).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// loadAllSessionMessages
+// ---------------------------------------------------------------------------
+
+describe('loadAllSessionMessages', () => {
+  it('loads messages for multiple sessions', async () => {
+    // Persist s1, flush, then persist s2 (single debouncer — must flush between)
+    persistSessionMessages('s1', [makeMsg('m1')]);
+    await jest.advanceTimersByTimeAsync(500);
+    persistSessionMessages('s2', [makeMsg('m2'), makeMsg('m3')]);
+    await jest.advanceTimersByTimeAsync(500);
+
+    const result = await loadAllSessionMessages(['s1', 's2']);
+    expect(result['s1']).toHaveLength(1);
+    expect(result['s1'][0].id).toBe('m1');
+    expect(result['s2']).toHaveLength(2);
+  });
+
+  it('returns empty arrays for sessions with no cached messages', async () => {
+    const result = await loadAllSessionMessages(['nonexistent']);
+    expect(result['nonexistent']).toEqual([]);
+  });
+
+  it('handles empty session list', async () => {
+    const result = await loadAllSessionMessages([]);
+    expect(Object.keys(result)).toHaveLength(0);
   });
 });

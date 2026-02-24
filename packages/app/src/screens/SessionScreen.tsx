@@ -144,6 +144,10 @@ export function SessionScreen() {
 
   const sessions = useConnectionStore((s) => s.sessions);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
+  const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);
+  const exitCachedSession = useConnectionStore((s) => s.exitCachedSession);
+  const savedConnection = useConnectionStore((s) => s.savedConnection);
+  const connect = useConnectionStore((s) => s.connect);
   const isIdle = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].isIdle : s.isIdle;
@@ -728,6 +732,34 @@ export function SessionScreen() {
         />
       )}
 
+      {/* Offline cached session banner */}
+      {viewingCachedSession && (
+        <View style={styles.reconnectingBanner}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Text style={styles.reconnectingText}>Viewing cached history</Text>
+            <View style={{ flexDirection: 'row', gap: 12 }}>
+              {savedConnection && (
+                <TouchableOpacity
+                  onPress={() => {
+                    exitCachedSession();
+                    connect(savedConnection.url, savedConnection.token);
+                  }}
+                  style={{ paddingHorizontal: 10, paddingVertical: 4, backgroundColor: COLORS.accentGreen, borderRadius: 6 }}
+                >
+                  <Text style={{ color: COLORS.textPrimary, fontSize: 13, fontWeight: '600' }}>Reconnect</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                onPress={exitCachedSession}
+                style={{ paddingHorizontal: 10, paddingVertical: 4, backgroundColor: COLORS.backgroundSecondary, borderRadius: 6, borderWidth: 1, borderColor: COLORS.borderPrimary }}
+              >
+                <Text style={{ color: COLORS.textSecondary, fontSize: 13 }}>Back</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
+
       {/* Reconnecting / restarting banner */}
       {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting') && (
         <View style={styles.reconnectingBanner}>
@@ -909,7 +941,7 @@ export function SessionScreen() {
         hasTerminal={hasTerminal}
         bottomPadding={bottomPadding}
         disabled={connectionPhase !== 'connected'}
-        disabledPlaceholder={connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
+        disabledPlaceholder={viewingCachedSession ? 'Offline — viewing cached history' : connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
         slashCommands={slashCommands}
         isRecognizing={isRecognizing}
         onMicPress={speechAvailable ? handleMicPress : undefined}

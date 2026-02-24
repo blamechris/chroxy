@@ -75,6 +75,11 @@ export function ConnectScreen() {
   const savedConnection = useConnectionStore((state) => state.savedConnection);
   const loadSavedConnection = useConnectionStore((state) => state.loadSavedConnection);
   const clearSavedConnection = useConnectionStore((state) => state.clearSavedConnection);
+  const viewCachedSession = useConnectionStore((state) => state.viewCachedSession);
+  const hasCachedMessages = useConnectionStore((state) => {
+    const sid = state.activeSessionId;
+    return !!(sid && state.sessionStates[sid]?.messages.length);
+  });
 
   // Load saved connection and auto-connect on mount
   useEffect(() => {
@@ -339,6 +344,14 @@ export function ConnectScreen() {
         </View>
       )}
 
+      {/* View cached session history offline */}
+      {hasCachedMessages && !autoConnecting && (
+        <TouchableOpacity style={styles.cachedButton} onPress={viewCachedSession}>
+          <Text style={styles.cachedButtonText}>View Last Session</Text>
+          <Text style={styles.cachedButtonDetail}>Browse cached chat history offline</Text>
+        </TouchableOpacity>
+      )}
+
       <TouchableOpacity style={styles.qrButton} onPress={handleScanQR}>
         <Text style={styles.qrButtonText}>{ICON_CAMERA} Scan QR Code</Text>
       </TouchableOpacity>
@@ -520,6 +533,26 @@ const styles = StyleSheet.create({
   forgetButtonText: {
     color: COLORS.accentRed,
     fontSize: 14,
+  },
+  cachedButton: {
+    backgroundColor: COLORS.backgroundSecondary,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+    marginBottom: 16,
+  },
+  cachedButtonText: {
+    color: COLORS.textPrimary,
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  cachedButtonDetail: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    marginTop: 2,
   },
   // QR and manual
   qrButton: {

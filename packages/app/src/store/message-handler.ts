@@ -552,6 +552,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // On reconnect, preserve messages and terminal buffer
       const connectedState = {
         connectionPhase: 'connected' as const,
+        viewingCachedSession: false,
         wsUrl: ctx.url,
         apiToken: ctx.token,
         socket: ctx.socket,

@@ -8,12 +8,13 @@
  * Data is debounced to avoid excessive writes on rapid message streams.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { ChatMessage } from './types';
+import type { ChatMessage, SessionInfo } from './types';
 
 const KEY_PREFIX = 'chroxy_persist_';
 const KEY_VIEW_MODE = `${KEY_PREFIX}view_mode`;
 const KEY_ACTIVE_SESSION = `${KEY_PREFIX}active_session_id`;
 const KEY_TERMINAL_BUFFER = `${KEY_PREFIX}terminal_buffer`;
+const KEY_SESSION_LIST = `${KEY_PREFIX}session_list`;
 
 /** Max messages to persist per session (keeps storage bounded) */
 const MAX_MESSAGES = 100;
@@ -70,6 +71,7 @@ function createDebouncedPersist(delayMs: number): DebouncedPersister {
 // Separate debounce instances per data stream — prevents cross-clobbering
 const _messagesPersister = createDebouncedPersist(500);
 const _terminalPersister = createDebouncedPersist(1000);
+const _sessionListPersister = createDebouncedPersist(500);
 
 // ---------------------------------------------------------------------------
 // Save helpers
@@ -113,6 +115,13 @@ export function persistTerminalBuffer(buffer: string): void {
       ? buffer.slice(-MAX_TERMINAL_SIZE)
       : buffer;
     await AsyncStorage.setItem(KEY_TERMINAL_BUFFER, trimmed);
+  });
+}
+
+/** Persist the session list (debounced) */
+export function persistSessionList(sessions: SessionInfo[]): void {
+  _sessionListPersister.schedule(async () => {
+    await AsyncStorage.setItem(KEY_SESSION_LIST, JSON.stringify(sessions));
   });
 }
 
@@ -162,6 +171,31 @@ export async function loadSessionMessages(sessionId: string): Promise<ChatMessag
   }
 }
 
+/** Load persisted session list */
+export async function loadSessionList(): Promise<SessionInfo[]> {
+  try {
+    const raw = await AsyncStorage.getItem(KEY_SESSION_LIST);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Load cached messages for multiple sessions at once */
+export async function loadAllSessionMessages(
+  sessionIds: string[],
+): Promise<Record<string, ChatMessage[]>> {
+  const result: Record<string, ChatMessage[]> = {};
+  await Promise.all(
+    sessionIds.map(async (id) => {
+      result[id] = await loadSessionMessages(id);
+    }),
+  );
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Clear
 // ---------------------------------------------------------------------------
@@ -197,6 +231,7 @@ export async function clearPersistedState(): Promise<void> {
 export function _resetForTesting(): void {
   _messagesPersister.cancel();
   _terminalPersister.cancel();
+  _sessionListPersister.cancel();
 }
 
 /** Strip base64 image data from messages to keep storage bounded */
