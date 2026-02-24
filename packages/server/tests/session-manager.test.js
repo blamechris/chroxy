@@ -691,12 +691,12 @@ describe('SessionManager budget pause lifecycle', () => {
   })
 
   it('isBudgetPaused returns false for unknown session', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
     assert.equal(mgr.isBudgetPaused('nonexistent'), false)
   })
 
   it('isBudgetPaused returns true after adding to _budgetPaused', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
     mgr._budgetPaused.add('s1')
     assert.equal(mgr.isBudgetPaused('s1'), true)
   })
@@ -710,7 +710,7 @@ describe('SessionManager budget pause lifecycle', () => {
   })
 
   it('destroySession cleans up budget state', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
     const session = new EventEmitter()
     session.isRunning = false
     session.destroy = () => {}
@@ -726,6 +726,12 @@ describe('SessionManager budget pause lifecycle', () => {
     assert.equal(mgr._budgetWarned.has('s1'), false)
     assert.equal(mgr._budgetExceeded.has('s1'), false)
     assert.equal(mgr._sessionCosts.has('s1'), false)
+
+    // destroySession schedules a debounced persist; clear it to avoid writes after cleanup
+    if (mgr._persistTimer) {
+      clearTimeout(mgr._persistTimer)
+      mgr._persistTimer = null
+    }
   })
 
   it('serializes cost and budget state', () => {
