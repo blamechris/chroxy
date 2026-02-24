@@ -69,17 +69,25 @@ function createDebouncedPersist(delayMs: number): DebouncedPersister {
 }
 
 // Separate debounce instances per data stream — prevents cross-clobbering
-const _messagesPersister = createDebouncedPersist(500);
+const _messagePersisters: Record<string, DebouncedPersister> = {};
 const _terminalPersister = createDebouncedPersist(1000);
 const _sessionListPersister = createDebouncedPersist(500);
+
+/** Get or create a per-session message debouncer */
+function getMessagePersister(sessionId: string): DebouncedPersister {
+  if (!_messagePersisters[sessionId]) {
+    _messagePersisters[sessionId] = createDebouncedPersist(500);
+  }
+  return _messagePersisters[sessionId];
+}
 
 // ---------------------------------------------------------------------------
 // Save helpers
 // ---------------------------------------------------------------------------
 
-/** Persist messages for a specific session */
+/** Persist messages for a specific session (per-session debounce to prevent cross-clobbering) */
 export function persistSessionMessages(sessionId: string, messages: ChatMessage[]): void {
-  _messagesPersister.schedule(async () => {
+  getMessagePersister(sessionId).schedule(async () => {
     // Keep only the last N messages, strip large base64 data
     const trimmed = messages.slice(-MAX_MESSAGES).map(stripLargeData);
     await AsyncStorage.setItem(sessionMessagesKey(sessionId), JSON.stringify(trimmed));
@@ -229,7 +237,13 @@ export async function clearPersistedState(): Promise<void> {
 
 /** Reset module-level debounce state for deterministic testing */
 export function _resetForTesting(): void {
-  _messagesPersister.cancel();
+  for (const persister of Object.values(_messagePersisters)) {
+    persister.cancel();
+  }
+  // Clear the per-session map so tests start fresh
+  for (const key of Object.keys(_messagePersisters)) {
+    delete _messagePersisters[key];
+  }
   _terminalPersister.cancel();
   _sessionListPersister.cancel();
 }
