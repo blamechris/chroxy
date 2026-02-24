@@ -61,6 +61,7 @@ import type {
   ConnectionContext,
   ConnectionState,
   MessageAttachment,
+  SessionInfo,
 } from './types';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
 import {
@@ -117,10 +118,6 @@ const ERROR_RECONNECT_DELAY = 2000;
 
 export const selectShowSession = (s: ConnectionState): boolean =>
   s.connectionPhase !== 'disconnected' || s.viewingCachedSession;
-
-/** Whether the user is viewing cached offline history */
-export const selectViewingCached = (s: ConnectionState): boolean =>
-  s.viewingCachedSession;
 
 // Stable device ID persisted across sessions
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
@@ -652,6 +649,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       webFeatures: { available: false, remote: false, teleport: false },
       webTasks: [],
       savedConnection: null,
+      viewingCachedSession: false,
     });
   },
 
@@ -672,6 +670,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverVersion: null,
       latestVersion: null,
       serverCommit: null,
+      viewingCachedSession: false,
     });
   },
 
@@ -1118,7 +1117,7 @@ setStore({
 let _prevActiveSessionId: string | null = null;
 const _prevMessageCounts: Record<string, number> = {};
 let _prevTerminalBufferLen = 0;
-let _prevSessionCount = 0;
+let _prevSessions: SessionInfo[] = [];
 useConnectionStore.subscribe((state) => {
   // Persist active session ID changes
   if (state.activeSessionId !== _prevActiveSessionId) {
@@ -1143,9 +1142,9 @@ useConnectionStore.subscribe((state) => {
     }
   }
 
-  // Persist session list when it changes
-  if (state.sessions.length !== _prevSessionCount) {
-    _prevSessionCount = state.sessions.length;
+  // Persist session list when it changes (reference equality — catches renames, model changes, etc.)
+  if (state.sessions !== _prevSessions) {
+    _prevSessions = state.sessions;
     if (state.sessions.length > 0) {
       persistSessionList(state.sessions);
     }
