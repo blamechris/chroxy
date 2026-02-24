@@ -14,7 +14,8 @@ export function parseDuration(str) {
 
   // Pure numeric → treat as seconds
   if (/^\d+$/.test(cleaned)) {
-    return parseInt(cleaned, 10) * 1000
+    const ms = parseInt(cleaned, 10) * 1000
+    return ms > 0 ? ms : null
   }
 
   const pattern = /^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/
