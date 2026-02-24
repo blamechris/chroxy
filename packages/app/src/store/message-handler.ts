@@ -202,13 +202,16 @@ export function clearTerminalWriteBatching(): void {
 let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let _pongTimeout: ReturnType<typeof setTimeout> | null = null;
 let _lastPingSentAt = 0;
+let _ewmaRtt: number | null = null; // EWMA-smoothed RTT for stable quality display
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 5_000;
+const EWMA_ALPHA = 0.3; // Weight for new samples (higher = more responsive)
 
 export function stopHeartbeat(): void {
   if (_heartbeatInterval) { clearInterval(_heartbeatInterval); _heartbeatInterval = null; }
   if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
   _lastPingSentAt = 0;
+  _ewmaRtt = null; // Reset smoothed RTT on disconnect
 }
 
 export function startHeartbeat(socket: WebSocket): void {
@@ -229,12 +232,15 @@ export function startHeartbeat(socket: WebSocket): void {
 
 function _onPong(): void {
   if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
-  // Measure RTT and update connection quality
+  // Measure RTT and update connection quality using EWMA for stability
   if (_lastPingSentAt > 0) {
     const rttMs = Date.now() - _lastPingSentAt;
     _lastPingSentAt = 0;
-    const quality: 'good' | 'fair' | 'poor' = rttMs < 200 ? 'good' : rttMs < 500 ? 'fair' : 'poor';
-    getStore().setState({ latencyMs: rttMs, connectionQuality: quality });
+    // EWMA: smoothed = alpha * new + (1 - alpha) * prev (first sample bootstraps)
+    _ewmaRtt = _ewmaRtt === null ? rttMs : EWMA_ALPHA * rttMs + (1 - EWMA_ALPHA) * _ewmaRtt;
+    const smoothed = Math.round(_ewmaRtt);
+    const quality: 'good' | 'fair' | 'poor' = smoothed < 200 ? 'good' : smoothed < 500 ? 'fair' : 'poor';
+    getStore().setState({ latencyMs: smoothed, connectionQuality: quality });
   }
 }
 
@@ -1597,20 +1603,50 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'budget_exceeded': {
       const exceededMessage = typeof msg.message === 'string' ? msg.message : 'Cost budget exceeded';
-      Alert.alert('Budget Exceeded', exceededMessage);
+      const budgetExceededTargetId = (msg.sessionId as string) || get().activeSessionId;
+      // Show alert with "Resume" option to override the pause
+      Alert.alert('Budget Exceeded', `${exceededMessage}\n\nNew messages are paused.`, [
+        { text: 'OK', style: 'cancel' },
+        {
+          text: 'Resume',
+          onPress: () => {
+            const socket = get().socket;
+            if (socket && budgetExceededTargetId) {
+              wsSend(socket, { type: 'resume_budget', sessionId: budgetExceededTargetId });
+            }
+          },
+        },
+      ]);
       const budgetExceededMsg: ChatMessage = {
         id: nextMessageId('system'),
         type: 'system',
-        content: exceededMessage,
+        content: `${exceededMessage} — session paused`,
         timestamp: Date.now(),
       };
-      const budgetExceededTargetId = (msg.sessionId as string) || get().activeSessionId;
       if (budgetExceededTargetId && get().sessionStates[budgetExceededTargetId]) {
         updateSession(budgetExceededTargetId, (ss) => ({
           messages: [...ss.messages, budgetExceededMsg],
         }));
       } else {
         get().addMessage(budgetExceededMsg);
+      }
+      break;
+    }
+
+    case 'budget_resumed': {
+      const resumedSessionId = (msg.sessionId as string) || get().activeSessionId;
+      const resumedMsg: ChatMessage = {
+        id: nextMessageId('system'),
+        type: 'system',
+        content: 'Cost budget override — session resumed',
+        timestamp: Date.now(),
+      };
+      if (resumedSessionId && get().sessionStates[resumedSessionId]) {
+        updateSession(resumedSessionId, (ss) => ({
+          messages: [...ss.messages, resumedMsg],
+        }));
+      } else {
+        get().addMessage(resumedMsg);
       }
       break;
     }

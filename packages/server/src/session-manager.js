@@ -136,6 +136,7 @@ export class SessionManager extends EventEmitter {
     this._budgetWarned = new Set() // sessionIds that have already received 80% warning
     this._budgetExceeded = new Set() // sessionIds that have already received 100% exceeded
     this._costBudget = typeof costBudget === 'number' && costBudget > 0 ? costBudget : null
+    this._budgetPaused = new Set() // sessionIds paused due to budget exceeded
     this._autoDiscovery = autoDiscovery
     this._discoveryIntervalMs = discoveryIntervalMs
     this._discoveryTimer = null
@@ -309,6 +310,8 @@ export class SessionManager extends EventEmitter {
     this._sessionCosts.delete(sessionId)
     this._budgetWarned.delete(sessionId)
     this._budgetExceeded.delete(sessionId)
+    this._budgetPaused.delete(sessionId)
+    this._schedulePersist()
     this.emit('session_destroyed', { sessionId })
     this._schedulePersist()
     return true
@@ -499,6 +502,15 @@ export class SessionManager extends EventEmitter {
       })
     }
 
+    // Persist cost tracking so budget survives restarts
+    state.costs = {}
+    for (const [sessionId, cost] of this._sessionCosts) {
+      state.costs[sessionId] = cost
+    }
+    state.budgetWarned = [...this._budgetWarned]
+    state.budgetExceeded = [...this._budgetExceeded]
+    state.budgetPaused = [...this._budgetPaused]
+
     const dir = dirname(this._stateFilePath)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
     const tmpPath = this._stateFilePath + '.tmp'
@@ -565,6 +577,24 @@ export class SessionManager extends EventEmitter {
       } catch (err) {
         console.error(`[session-manager] Failed to restore session "${saved.name}": ${err.message}`)
       }
+    }
+
+    // Restore cost tracking data (v1+)
+    if (state.costs && typeof state.costs === 'object') {
+      for (const [sessionId, cost] of Object.entries(state.costs)) {
+        if (typeof cost === 'number' && cost > 0) {
+          this._sessionCosts.set(sessionId, cost)
+        }
+      }
+    }
+    if (Array.isArray(state.budgetWarned)) {
+      for (const id of state.budgetWarned) this._budgetWarned.add(id)
+    }
+    if (Array.isArray(state.budgetExceeded)) {
+      for (const id of state.budgetExceeded) this._budgetExceeded.add(id)
+    }
+    if (Array.isArray(state.budgetPaused)) {
+      for (const id of state.budgetPaused) this._budgetPaused.add(id)
     }
 
     return firstId
@@ -942,6 +972,7 @@ export class SessionManager extends EventEmitter {
     // Hard limit at 100% (checked first to avoid dual-emit with warning)
     if (percent >= 1.0 && !this._budgetExceeded.has(sessionId)) {
       this._budgetExceeded.add(sessionId)
+      this._budgetPaused.add(sessionId)
       this.emit('session_event', {
         sessionId,
         event: 'budget_exceeded',
@@ -1076,5 +1107,24 @@ export class SessionManager extends EventEmitter {
     let total = 0
     for (const cost of this._sessionCosts.values()) total += cost
     return total
+  }
+
+  /**
+   * Check if a session is paused due to exceeding the cost budget.
+   * @param {string} sessionId
+   * @returns {boolean}
+   */
+  isBudgetPaused(sessionId) {
+    return this._budgetPaused.has(sessionId)
+  }
+
+  /**
+   * Resume a budget-paused session (user override).
+   * @param {string} sessionId
+   */
+  resumeBudget(sessionId) {
+    this._budgetPaused.delete(sessionId)
+    this._schedulePersist()
+    console.log(`[session-manager] Budget pause overridden for session ${sessionId}`)
   }
 }

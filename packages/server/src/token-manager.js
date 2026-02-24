@@ -39,6 +39,9 @@ export function parseDuration(str) {
     return parseInt(cleaned, 10) * 1000
   }
 
+  // Strict: only allow valid duration chars (digits, s, m, h, d, and optional whitespace)
+  if (/[^0-9smhd\s]/.test(cleaned)) return null
+
   let total = 0
   const regex = /(\d+)\s*(s|m|h|d)/g
   let match
@@ -74,6 +77,12 @@ export class TokenManager extends EventEmitter {
     this._rotationTimer = null
     this._graceTimer = null
     this._expiryMs = parseDuration(tokenExpiry)
+    // Minimum expiry floor: 5 minutes (prevents excessive rotation spam)
+    const MIN_EXPIRY_MS = 5 * 60 * 1000
+    if (this._expiryMs != null && this._expiryMs < MIN_EXPIRY_MS) {
+      console.warn(`[token-manager] tokenExpiry ${tokenExpiry} (${this._expiryMs}ms) is below minimum ${MIN_EXPIRY_MS}ms — clamping to 5 minutes`)
+      this._expiryMs = MIN_EXPIRY_MS
+    }
     this._expiresAt = null
   }
 
