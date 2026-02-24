@@ -8,6 +8,7 @@ import { ConnectScreen } from './screens/ConnectScreen';
 import { OnboardingScreen } from './screens/OnboardingScreen';
 import { SessionScreen } from './screens/SessionScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
+import { PermissionHistoryScreen } from './screens/PermissionHistoryScreen';
 import { LockScreen } from './components/LockScreen';
 import { useConnectionStore, selectShowSession } from './store/connection';
 import { setupNotificationResponseListener } from './notifications';
@@ -19,6 +20,7 @@ export type RootStackParamList = {
   Connect: undefined;
   Session: undefined;
   Settings: undefined;
+  PermissionHistory: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -87,6 +89,11 @@ export default function App() {
               name="Settings"
               component={SettingsScreen}
               options={{ title: 'Settings' }}
+            />
+            <Stack.Screen
+              name="PermissionHistory"
+              component={PermissionHistoryScreen}
+              options={{ title: 'Permission History' }}
             />
           </>
         )}

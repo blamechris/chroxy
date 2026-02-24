@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -11,10 +11,13 @@ import {
   Pressable,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import Constants from 'expo-constants';
 import * as Clipboard from 'expo-clipboard';
 import { useConnectionStore } from '../store/connection';
 import { COLORS } from '../constants/colors';
+import type { RootStackParamList } from '../App';
 import { getSpeechLang, setSpeechLang } from '../hooks/useSpeechRecognition';
 import {
   isBiometricAvailable,
@@ -46,6 +49,7 @@ const SPEECH_LANGUAGES = [
 
 export function SettingsScreen() {
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [speechLang, setSpeechLangState] = useState<string>('en-US');
   const [showLangPicker, setShowLangPicker] = useState(false);
   const [biometricAvail, setBiometricAvail] = useState(false);
@@ -97,6 +101,32 @@ export function SettingsScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].conversationId : null;
   });
+
+  // Permission history summary counts
+  const sessions = useConnectionStore((s) => s.sessions);
+  const sessionStates = useConnectionStore((s) => s.sessionStates);
+  const legacyMessages = useConnectionStore((s) => s.messages);
+
+  const permissionSummary = useMemo(() => {
+    let allowed = 0;
+    let denied = 0;
+    let total = 0;
+
+    const countMsg = (msg: { type: string; requestId?: string; answered?: string }) => {
+      if (msg.type !== 'prompt' || !msg.requestId) return;
+      total++;
+      if (msg.answered === 'allow' || msg.answered === 'allowAlways') allowed++;
+      else if (msg.answered === 'deny') denied++;
+    };
+
+    for (const s of sessions) {
+      const ss = sessionStates[s.sessionId];
+      if (ss) ss.messages.forEach(countMsg);
+    }
+    if (total === 0) legacyMessages.forEach(countMsg);
+
+    return { allowed, denied, total };
+  }, [sessions, sessionStates, legacyMessages]);
 
   // Simple semver comparison: check if latest > current (not just different)
   const updateAvailable = (() => {
@@ -165,6 +195,24 @@ export function SettingsScreen() {
           <Text style={styles.destructiveText}>Clear Session History</Text>
         </TouchableOpacity>
       </View>
+
+      {/* PERMISSIONS */}
+      {permissionSummary.total > 0 && (
+        <>
+          <Text style={styles.sectionHeader}>PERMISSIONS</Text>
+          <View style={styles.section}>
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => navigation.navigate('PermissionHistory')}
+            >
+              <Text style={styles.rowLabel}>Permission History</Text>
+              <Text style={styles.rowValue}>
+                {permissionSummary.allowed} allowed{permissionSummary.denied > 0 ? `, ${permissionSummary.denied} denied` : ''}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </>
+      )}
 
       {/* CONNECTION */}
       <Text style={styles.sectionHeader}>CONNECTION</Text>

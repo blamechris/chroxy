@@ -20,6 +20,7 @@ import { FormattedResponse } from './MarkdownRenderer';
 import { ImageViewer } from './ImageViewer';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOSE, ICON_CHECK, ICON_DOCUMENT } from '../constants/icons';
 import { COLORS } from '../constants/colors';
+import { PermissionDetailOrFallback, PermissionCountdown, PermissionPill, permissionStyles } from './PermissionDetail';
 
 /**
  * Format a tool name for display. MCP tools show as "tool_name" with server noted separately.
@@ -460,189 +461,10 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpe
   );
 }
 
-// -- Permission detail renderer (plain helper, not a React component) --
+// Permission detail rendering, countdown, summary, and pill components
+// are imported from ./PermissionDetail
 
-function renderPermissionDetail(tool?: string, toolInput?: Record<string, unknown>) {
-  if (!toolInput || !tool) return null;
-
-  const toolName = tool.toLowerCase();
-
-  // Bash: show command in code block
-  if (toolName === 'bash' && typeof toolInput.command === 'string') {
-    return (
-      <View style={styles.permDetailBlock}>
-        <Text style={styles.permDetailLabel}>Command</Text>
-        <Text selectable style={styles.permDetailCode}>{toolInput.command}</Text>
-      </View>
-    );
-  }
-
-  // Edit/Write: show file path and content preview
-  if ((toolName === 'edit' || toolName === 'write') && typeof toolInput.file_path === 'string') {
-    const preview = typeof toolInput.new_string === 'string'
-      ? toolInput.new_string
-      : typeof toolInput.content === 'string'
-        ? toolInput.content
-        : null;
-    return (
-      <View style={styles.permDetailBlock}>
-        <Text style={styles.permDetailLabel}>File</Text>
-        <Text selectable style={styles.permDetailCode}>{toolInput.file_path}</Text>
-        {preview && (
-          <>
-            <Text style={[styles.permDetailLabel, { marginTop: 6 }]}>
-              {toolName === 'edit' ? 'Change' : 'Content'}
-            </Text>
-            <Text selectable style={styles.permDetailCode} numberOfLines={6}>
-              {preview.slice(0, 500)}
-            </Text>
-          </>
-        )}
-      </View>
-    );
-  }
-
-  // Read/Glob/Grep: show path or pattern with correct label
-  if (toolName === 'read' || toolName === 'glob' || toolName === 'grep') {
-    let target: string | null = null;
-    let label = 'Path';
-    if (typeof toolInput.file_path === 'string') {
-      target = toolInput.file_path;
-    } else if (typeof toolInput.pattern === 'string') {
-      target = toolInput.pattern;
-      label = 'Pattern';
-    } else if (typeof toolInput.path === 'string') {
-      target = toolInput.path;
-    }
-    if (target) {
-      return (
-        <View style={styles.permDetailBlock}>
-          <Text style={styles.permDetailLabel}>{label}</Text>
-          <Text selectable style={styles.permDetailCode}>{target}</Text>
-        </View>
-      );
-    }
-  }
-
-  // Fallback: show description or first meaningful field
-  const desc = typeof toolInput.description === 'string'
-    ? toolInput.description
-    : null;
-  if (desc) {
-    return (
-      <View style={styles.permDetailBlock}>
-        <Text selectable style={styles.permDetailCode}>{desc}</Text>
-      </View>
-    );
-  }
-
-  return null;
-}
-
-function PermissionDetailOrFallback({ tool, toolInput, fallback }: { tool?: string; toolInput?: Record<string, unknown>; fallback: string }) {
-  const detail = renderPermissionDetail(tool, toolInput);
-  if (detail) return detail;
-  return <Text selectable style={styles.messageText}>{fallback}</Text>;
-}
-
-// -- Permission countdown timer --
-
-function PermissionCountdown({ expiresAt, onExpire }: { expiresAt: number; onExpire?: () => void }) {
-  const [remaining, setRemaining] = useState(() => Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000)));
-  const onExpireRef = useRef(onExpire);
-  onExpireRef.current = onExpire;
-
-  useEffect(() => {
-    if (remaining <= 0) return;
-    const id = setInterval(() => {
-      const left = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
-      setRemaining(left);
-      if (left <= 0) {
-        clearInterval(id);
-        onExpireRef.current?.();
-      }
-    }, 1000);
-    return () => clearInterval(id);
-  }, [expiresAt, remaining <= 0]);
-
-  if (remaining <= 0) {
-    return <Text style={styles.countdownExpired} accessibilityRole="timer">Timed out</Text>;
-  }
-
-  const minutes = Math.floor(remaining / 60);
-  const seconds = remaining % 60;
-  const label = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-  const isUrgent = remaining <= 30;
-
-  return (
-    <Text
-      style={[styles.countdownText, isUrgent && styles.countdownUrgent]}
-      accessibilityRole="timer"
-      accessibilityLabel={`Permission expires in ${minutes} minutes ${seconds} seconds`}
-      accessibilityLiveRegion="polite"
-    >
-      {label}
-    </Text>
-  );
-}
-
-// -- Permission summary for compact pill --
-
-function getPermissionSummary(tool?: string, toolInput?: Record<string, unknown>): string {
-  if (!tool) return 'Permission';
-  const name = tool.toLowerCase();
-  if (name === 'bash' && typeof toolInput?.command === 'string') {
-    const cmd = toolInput.command.length > 40
-      ? toolInput.command.slice(0, 40) + '...'
-      : toolInput.command;
-    return `Bash(${cmd})`;
-  }
-  if ((name === 'edit' || name === 'write' || name === 'read') && typeof toolInput?.file_path === 'string') {
-    const parts = (toolInput.file_path as string).split('/');
-    return `${tool}(${parts[parts.length - 1]})`;
-  }
-  if ((name === 'glob' || name === 'grep') && typeof toolInput?.pattern === 'string') {
-    return `${tool}(${toolInput.pattern})`;
-  }
-  return tool;
-}
-
-// -- Compact permission pill for answered prompts --
-
-function PermissionPill({ message, onExpand }: {
-  message: ChatMessage;
-  onExpand: () => void;
-}) {
-  const answer = message.answered || '';
-  const isAllowed = answer === 'allow' || answer === 'allowAlways';
-  const isDenied = answer === 'deny';
-  const summary = getPermissionSummary(message.tool, message.toolInput);
-
-  const pillStyle = isAllowed
-    ? styles.permissionPillAllowed
-    : isDenied
-      ? styles.permissionPillDenied
-      : styles.permissionPillResolved;
-  const textStyle = isAllowed
-    ? styles.permissionPillTextAllowed
-    : isDenied
-      ? styles.permissionPillTextDenied
-      : styles.permissionPillTextResolved;
-  const icon = isAllowed ? ICON_CHECK : isDenied ? ICON_CLOSE : ICON_CHECK;
-  const label = isAllowed ? 'Allowed' : isDenied ? 'Denied' : 'Resolved';
-
-  return (
-    <TouchableOpacity
-      onPress={onExpand}
-      activeOpacity={0.7}
-      style={[styles.permissionPill, pillStyle]}
-      accessibilityRole="button"
-      accessibilityLabel={`${label}: ${summary}. Tap to expand.`}
-    >
-      <Text style={textStyle}>{icon} {label}: {summary}</Text>
-    </TouchableOpacity>
-  );
-}
+// PermissionPill imported from ./PermissionDetail
 
 // -- Single message bubble --
 
@@ -782,7 +604,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
         </View>
       )}
       {isPrompt && message.requestId && message.answered && permissionExpanded && (
-        <Text style={styles.permissionInfoNote}>
+        <Text style={permissionStyles.permissionInfoNote}>
           Claude sees the tool result, not your approval decision.
         </Text>
       )}
@@ -792,9 +614,9 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
             LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
             setPermissionExpanded(false);
           }}
-          style={styles.collapseLink}
+          style={permissionStyles.collapseLink}
         >
-          <Text style={styles.collapseLinkText}>Collapse</Text>
+          <Text style={permissionStyles.collapseLinkText}>Collapse</Text>
         </TouchableOpacity>
       )}
     </TouchableOpacity>
@@ -1188,19 +1010,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 4,
   },
-  countdownText: {
-    color: COLORS.accentOrange,
-    fontSize: 12,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  countdownUrgent: {
-    color: COLORS.accentRed,
-    fontWeight: 'bold',
-  },
-  countdownExpired: {
-    color: COLORS.accentRed,
-    fontSize: 12,
-  },
+  // countdownText, countdownUrgent, countdownExpired → PermissionDetail.tsx
   promptOptions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1488,24 +1298,7 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
   },
-  permDetailBlock: {
-    marginTop: 4,
-  },
-  permDetailLabel: {
-    color: COLORS.accentOrange,
-    fontSize: 11,
-    fontWeight: '600',
-    marginBottom: 2,
-  },
-  permDetailCode: {
-    color: COLORS.textPrimary,
-    fontSize: 13,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    backgroundColor: COLORS.backgroundTertiary,
-    padding: 8,
-    borderRadius: 6,
-    overflow: 'hidden',
-  },
+  // permDetailBlock, permDetailLabel, permDetailCode → PermissionDetail.tsx
   planCard: {
     backgroundColor: COLORS.accentGreenLight,
     borderColor: COLORS.accentGreenBorder,
@@ -1569,59 +1362,5 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  // -- Permission pill (collapsed answered prompts) --
-  permissionPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 20,
-    marginBottom: 8,
-    minHeight: 44,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-  },
-  permissionPillAllowed: {
-    backgroundColor: COLORS.accentGreenLight,
-    borderColor: COLORS.accentGreenBorder,
-  },
-  permissionPillDenied: {
-    backgroundColor: COLORS.accentRedLight,
-    borderColor: COLORS.accentRedBorder,
-  },
-  permissionPillResolved: {
-    backgroundColor: COLORS.accentGrayLight,
-    borderColor: COLORS.accentGrayBorder,
-  },
-  permissionPillTextAllowed: {
-    color: COLORS.accentGreen,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  permissionPillTextDenied: {
-    color: COLORS.accentRed,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  permissionPillTextResolved: {
-    color: COLORS.accentGray,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  collapseLink: {
-    marginTop: 8,
-    alignSelf: 'flex-end',
-    minHeight: 44,
-    justifyContent: 'center',
-  },
-  collapseLinkText: {
-    color: COLORS.textMuted,
-    fontSize: 12,
-  },
-  permissionInfoNote: {
-    color: COLORS.textMuted,
-    fontSize: 12,
-    fontStyle: 'italic',
-    marginTop: 8,
-  },
+  // permissionPill*, collapseLink*, permissionInfoNote → PermissionDetail.tsx
 });
