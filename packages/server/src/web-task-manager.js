@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events'
-import { exec } from 'child_process'
+import { execFile } from 'child_process'
 import { randomUUID } from 'crypto'
 
 /**
@@ -28,6 +28,7 @@ export class WebTaskManager extends EventEmitter {
     super()
     this._cwd = cwd || process.cwd()
     this._tasks = new Map()
+    this._childProcesses = new Set()
     this._remoteAvailable = false
     this._teleportAvailable = false
     this._detected = false
@@ -55,7 +56,7 @@ export class WebTaskManager extends EventEmitter {
    */
   async detectFeatures() {
     try {
-      const stdout = await execAsync('claude --help')
+      const stdout = await execFileAsync('claude', ['--help'])
       this._remoteAvailable = stdout.includes('--remote')
       this._teleportAvailable = stdout.includes('--teleport')
     } catch {
@@ -152,7 +153,7 @@ export class WebTaskManager extends EventEmitter {
     }
 
     try {
-      const stdout = await execAsync(`claude --teleport ${task.taskId}`, { cwd: task.cwd })
+      const stdout = await execFileAsync('claude', ['--teleport', task.taskId], { cwd: task.cwd })
       return { success: true, output: stdout }
     } catch (err) {
       throw new Error(`Teleport failed: ${err.message}`)
@@ -164,10 +165,10 @@ export class WebTaskManager extends EventEmitter {
    * @private
    */
   _spawnRemoteTask(task) {
-    const escaped = task.prompt.replace(/'/g, "'\\''")
-    const cmd = `claude --remote '${escaped}'`
+    // Use execFile with args array to prevent command injection
+    const child = execFile('claude', ['--remote', task.prompt], { cwd: task.cwd, timeout: 300_000 }, (err, stdout, stderr) => {
+      this._childProcesses.delete(child)
 
-    exec(cmd, { cwd: task.cwd, timeout: 300_000 }, (err, stdout, stderr) => {
       if (err) {
         task.status = 'failed'
         task.error = err.message || stderr || 'Unknown error'
@@ -190,6 +191,8 @@ export class WebTaskManager extends EventEmitter {
       // Start polling if not already
       this._startPolling()
     })
+
+    this._childProcesses.add(child)
   }
 
   /**
@@ -235,6 +238,11 @@ export class WebTaskManager extends EventEmitter {
    */
   destroy() {
     this._stopPolling()
+    // Kill any in-flight child processes
+    for (const child of this._childProcesses) {
+      try { child.kill() } catch {}
+    }
+    this._childProcesses.clear()
     this._tasks.clear()
     this.removeAllListeners()
   }
@@ -252,12 +260,12 @@ export class WebTaskUnavailableError extends Error {
 }
 
 /**
- * Promisified exec helper.
+ * Promisified execFile helper (no shell — safe from injection).
  * @private
  */
-function execAsync(cmd, opts = {}) {
+function execFileAsync(cmd, args = [], opts = {}) {
   return new Promise((resolve, reject) => {
-    exec(cmd, { timeout: 15_000, ...opts }, (err, stdout, stderr) => {
+    execFile(cmd, args, { timeout: 15_000, ...opts }, (err, stdout) => {
       if (err) return reject(err)
       resolve(stdout)
     })

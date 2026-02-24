@@ -622,6 +622,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       lastResultDuration: null,
       totalCost: null,
       costBudget: null,
+      webFeatures: { available: false, remote: false, teleport: false },
+      webTasks: [],
       savedConnection: null,
     });
   },
