@@ -1444,12 +1444,10 @@ export class WsServer {
           break
         }
         // Guard: reject restore while session is actively processing (#818)
-        {
-          const entry = this.sessionManager.getSession(sid)
-          if (entry?.session?.isRunning) {
-            this._send(ws, { type: 'session_error', message: 'Cannot restore checkpoint while session is busy. Wait for the current task to finish or interrupt first.' })
-            break
-          }
+        const currentEntry = this.sessionManager.getSession(sid)
+        if (currentEntry?.session?.isRunning) {
+          this._send(ws, { type: 'session_error', message: 'Cannot restore checkpoint while session is busy. Wait for the current task to finish or interrupt first.' })
+          break
         }
         try {
           // Restore file state and get checkpoint data
