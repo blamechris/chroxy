@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage, ConnectionPhase, AgentInfo, McpServer } from '../store/connection';
+import { useConnectionStore, ChatMessage, ConnectionPhase, AgentInfo, McpServer, stripAnsi } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
@@ -30,8 +30,9 @@ import { SessionNotificationBanner } from '../components/SessionNotificationBann
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
-import { ICON_CLOSE, ICON_GEAR, ICON_DIFF } from '../constants/icons';
+import { ICON_CLOSE, ICON_GEAR, ICON_DIFF, ICON_SEARCH, ICON_EXPORT, ICON_ARROW_UP, ICON_ARROW_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
+import { useLayout } from '../hooks/useLayout';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
 import type { Attachment } from '../utils/attachments';
@@ -103,6 +104,7 @@ export function SessionScreen() {
   const terminalRef = useRef<TerminalHandle>(null);
   const insets = useSafeAreaInsets();
   const keyboardHeight = useKeyboardHeight();
+  const layout = useLayout();
 
   const {
     viewMode,
@@ -196,6 +198,12 @@ export function SessionScreen() {
   const [showDiffViewer, setShowDiffViewer] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
 
+  // Search state
+  const [searchVisible, setSearchVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
+  const searchInputRef = useRef<TextInput>(null);
+
   // Speech recognition
   const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition();
   const dictationStartRef = useRef(inputText.length);
@@ -207,6 +215,73 @@ export function SessionScreen() {
       Alert.alert('Voice Input Error', speechError);
     }
   }, [speechError]);
+
+  // Search: compute matching message IDs
+  const searchMatchIds = useMemo(() => {
+    if (!searchQuery.trim()) return new Set<string>();
+    const q = searchQuery.toLowerCase();
+    const ids = new Set<string>();
+    for (const m of messages) {
+      if (m.type === 'thinking') continue;
+      if (m.content?.toLowerCase().includes(q) || m.toolResult?.toLowerCase().includes(q)) {
+        ids.add(m.id);
+      }
+    }
+    return ids;
+  }, [messages, searchQuery]);
+
+  const searchMatchArray = useMemo(
+    () => messages.filter((m) => searchMatchIds.has(m.id)).map((m) => m.id),
+    [messages, searchMatchIds],
+  );
+
+  // Clamp match index when matches shrink (avoid stale index pointing past end).
+  // Does NOT reset to 0 on growth — prevents highlight jumping during streaming.
+  useEffect(() => {
+    setCurrentMatchIndex((prev) => {
+      if (searchMatchArray.length === 0) return 0;
+      return prev >= searchMatchArray.length ? searchMatchArray.length - 1 : prev;
+    });
+  }, [searchMatchArray.length]);
+
+  const currentMatchId = searchMatchArray.length > 0 ? searchMatchArray[currentMatchIndex] ?? null : null;
+
+  const handleSearchPrev = useCallback(() => {
+    if (searchMatchArray.length === 0) return;
+    setCurrentMatchIndex((i) => (i > 0 ? i - 1 : searchMatchArray.length - 1));
+  }, [searchMatchArray.length]);
+
+  const handleSearchNext = useCallback(() => {
+    if (searchMatchArray.length === 0) return;
+    setCurrentMatchIndex((i) => (i < searchMatchArray.length - 1 ? i + 1 : 0));
+  }, [searchMatchArray.length]);
+
+  const handleSearchClose = useCallback(() => {
+    setSearchVisible(false);
+    setSearchQuery('');
+    setCurrentMatchIndex(0);
+  }, []);
+
+  const handleSearchOpen = useCallback(() => {
+    setSearchVisible(true);
+    setTimeout(() => searchInputRef.current?.focus(), 100);
+  }, []);
+
+  // Terminal scrollback export
+  const handleExportTerminal = useCallback(async () => {
+    // Use the larger raw buffer (100KB) and strip ANSI for readable export
+    const raw = useConnectionStore.getState().terminalRawBuffer;
+    const buffer = stripAnsi(raw);
+    if (!buffer.trim()) {
+      Alert.alert('Nothing to export', 'Terminal buffer is empty.');
+      return;
+    }
+    try {
+      await Share.share({ message: buffer, title: 'Terminal Output' });
+    } catch (err: unknown) {
+      Alert.alert('Export failed', `Unable to share terminal output: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  }, []);
 
   // Countdown for server restart ETA
   const [restartCountdown, setRestartCountdown] = useState<number | null>(null);
@@ -230,9 +305,10 @@ export function SessionScreen() {
   const activeSession = sessions.find((s) => s.sessionId === activeSessionId);
   const hasTerminal = !isCliMode || (activeSession?.hasTerminal ?? false);
 
-  // Wire up terminal write callback when terminal view is visible
+  // Wire up terminal write callback when terminal view is visible (including split view)
+  const terminalVisible = (viewMode === 'terminal' || (layout.isSplitView && viewMode !== 'files')) && hasTerminal;
   useEffect(() => {
-    if (viewMode !== 'terminal' || !hasTerminal) return;
+    if (!terminalVisible) return;
 
     const writeCallback = (data: string) => {
       terminalRef.current?.write(data);
@@ -242,7 +318,7 @@ export function SessionScreen() {
     return () => {
       setTerminalWriteCallback(null);
     };
-  }, [viewMode, hasTerminal, activeSessionId, setTerminalWriteCallback]);
+  }, [terminalVisible, activeSessionId, setTerminalWriteCallback]);
 
   // Replay raw buffer into xterm.js when it becomes ready (initial mount, view switch, or crash recovery)
   const handleTerminalReady = useCallback(() => {
@@ -529,11 +605,52 @@ export function SessionScreen() {
           <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)}>
             <Text style={styles.diffButtonText}>{ICON_DIFF}</Text>
           </TouchableOpacity>
+          {viewMode === 'chat' && (
+            <TouchableOpacity style={styles.diffButton} onPress={handleSearchOpen} accessibilityRole="button" accessibilityLabel="Search messages">
+              <Text style={styles.diffButtonText}>{ICON_SEARCH}</Text>
+            </TouchableOpacity>
+          )}
+          {viewMode === 'terminal' && (
+            <TouchableOpacity style={styles.diffButton} onPress={handleExportTerminal} accessibilityRole="button" accessibilityLabel="Export terminal output">
+              <Text style={styles.diffButtonText}>{ICON_EXPORT}</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
             <Text style={styles.settingsButtonText}>{ICON_GEAR}</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
             <Text style={styles.disconnectButtonText}>{ICON_CLOSE}</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Search bar */}
+      {searchVisible && (
+        <View style={styles.searchBar}>
+          <TextInput
+            ref={searchInputRef}
+            style={styles.searchInput}
+            placeholder="Search messages..."
+            placeholderTextColor={COLORS.textDim}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            returnKeyType="search"
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          {searchMatchArray.length > 0 && (
+            <Text style={styles.searchCount}>
+              {currentMatchIndex + 1}/{searchMatchArray.length}
+            </Text>
+          )}
+          <TouchableOpacity onPress={handleSearchPrev} style={styles.searchNavButton} accessibilityLabel="Previous match">
+            <Text style={styles.searchNavText}>{ICON_ARROW_UP}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={handleSearchNext} style={styles.searchNavButton} accessibilityLabel="Next match">
+            <Text style={styles.searchNavText}>{ICON_ARROW_DOWN}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={handleSearchClose} style={styles.searchNavButton} accessibilityLabel="Close search">
+            <Text style={styles.searchNavText}>{ICON_CLOSE}</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -674,8 +791,36 @@ export function SessionScreen() {
       {/* Background session notifications */}
       <SessionNotificationBanner />
 
-      {/* Content area */}
-      {viewMode === 'chat' ? (
+      {/* Content area — split view on tablets in landscape */}
+      {layout.isSplitView && hasTerminal && viewMode !== 'files' ? (
+        <View style={styles.splitContainer}>
+          <View style={styles.splitPane}>
+            <ChatView
+              messages={messages}
+              scrollViewRef={scrollViewRef}
+              claudeReady={claudeReady}
+              onSelectOption={handleSelectOption}
+              isCliMode={isCliMode}
+              selectedIds={selectedIds}
+              isSelecting={isSelecting}
+              isSelectingRef={isSelectingRef}
+              onToggleSelection={toggleSelection}
+              streamingMessageId={streamingMessageId}
+              isPlanPending={isPlanPending}
+              planAllowedPrompts={planAllowedPrompts}
+              onApprovePlan={handleApprovePlan}
+              onFocusInput={handleFocusInput}
+              searchQuery={searchVisible ? searchQuery : undefined}
+              searchMatchIds={searchVisible ? searchMatchIds : undefined}
+              currentMatchId={searchVisible ? currentMatchId : undefined}
+            />
+          </View>
+          <View style={styles.splitDivider} />
+          <View style={styles.splitPane}>
+            <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+          </View>
+        </View>
+      ) : viewMode === 'chat' ? (
         <ChatView
           messages={messages}
           scrollViewRef={scrollViewRef}
@@ -691,6 +836,9 @@ export function SessionScreen() {
           planAllowedPrompts={planAllowedPrompts}
           onApprovePlan={handleApprovePlan}
           onFocusInput={handleFocusInput}
+          searchQuery={searchVisible ? searchQuery : undefined}
+          searchMatchIds={searchVisible ? searchMatchIds : undefined}
+          currentMatchId={searchVisible ? currentMatchId : undefined}
         />
       ) : viewMode === 'files' ? (
         <FileBrowser />
@@ -768,6 +916,40 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.backgroundPrimary,
+  },
+  searchBar: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    padding: 8,
+    backgroundColor: COLORS.backgroundSecondary,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.backgroundCard,
+    gap: 4,
+  },
+  searchInput: {
+    flex: 1,
+    backgroundColor: COLORS.backgroundCard,
+    color: COLORS.textPrimary,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 14,
+  },
+  searchCount: {
+    color: COLORS.textDim,
+    fontSize: 12,
+    marginHorizontal: 4,
+  },
+  searchNavButton: {
+    padding: 6,
+    minWidth: 32,
+    minHeight: 32,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+  },
+  searchNavText: {
+    color: COLORS.textSecondary,
+    fontSize: 16,
   },
   modeToggle: {
     flexDirection: 'row',
@@ -934,5 +1116,16 @@ const styles = StyleSheet.create({
   },
   sheetCancelText: {
     color: COLORS.accentRed,
+  },
+  splitContainer: {
+    flex: 1,
+    flexDirection: 'row',
+  },
+  splitPane: {
+    flex: 1,
+  },
+  splitDivider: {
+    width: 1,
+    backgroundColor: COLORS.backgroundCard,
   },
 });
