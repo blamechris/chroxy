@@ -860,6 +860,19 @@ export function ChatView({
   const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
+  // Track message layout positions for search scroll-to-match
+  const messageLayoutsRef = useRef<Map<string, number>>(new Map());
+
+  // Scroll to the current search match when it changes
+  useEffect(() => {
+    if (!currentMatchId) return;
+    const y = messageLayoutsRef.current.get(currentMatchId);
+    if (y != null) {
+      scrollViewRef.current?.scrollTo({ y: Math.max(0, y - 80), animated: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef is a stable ref
+  }, [currentMatchId]);
+
   // Pause auto-scroll when an unanswered prompt is visible — user needs to read context
   const hasUnansweredPrompt = useMemo(
     () => messages.some((m) => m.type === 'prompt' && !m.answered),
@@ -949,7 +962,13 @@ export function ChatView({
           const isSearchMatch = searchMatchIds?.has(msg.id) ?? false;
           const isCurrentMatch = currentMatchId === msg.id;
           return (
-            <View key={msg.id} style={isSearchMatch ? (isCurrentMatch ? styles.searchMatchCurrent : styles.searchMatch) : undefined}>
+            <View
+              key={msg.id}
+              style={isSearchMatch ? (isCurrentMatch ? styles.searchMatchCurrent : styles.searchMatch) : undefined}
+              onLayout={(e) => {
+                messageLayoutsRef.current.set(msg.id, e.nativeEvent.layout.y);
+              }}
+            >
               <MessageBubble
                 message={msg}
                 onSelectOption={onSelectOption}
