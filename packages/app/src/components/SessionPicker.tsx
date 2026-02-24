@@ -273,8 +273,8 @@ const styles = StyleSheet.create({
     borderColor: COLORS.accentPurpleSubtle,
   },
   pillCodexActive: {
-    backgroundColor: '#a78bfa22',
-    borderColor: '#a78bfa66',
+    backgroundColor: COLORS.accentPurpleLight,
+    borderColor: COLORS.accentPurpleBorderStrong,
   },
   ptyIcon: {
     color: COLORS.accentGreenBorderStrong,
@@ -284,7 +284,7 @@ const styles = StyleSheet.create({
     color: COLORS.accentGreen,
   },
   codexBadge: {
-    color: '#a78bfa66',
+    color: COLORS.accentPurpleBorderStrong,
     fontSize: 9,
     fontWeight: '700' as const,
   },

@@ -150,7 +150,7 @@ export async function startServer(config) {
   console.log(`\nOr connect manually:`);
   console.log(`   URL:   ${wsUrl}`);
   console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`);
-  console.log(`   Dashboard: ${httpUrl}/dashboard?token=${API_TOKEN}`);
+  console.log(`   Dashboard: ${httpUrl}/dashboard?token=${API_TOKEN.slice(0, 8)}...`);
   console.log("\nPress Ctrl+C to stop.\n");
 
   // Graceful shutdown
