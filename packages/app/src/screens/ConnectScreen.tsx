@@ -347,7 +347,12 @@ export function ConnectScreen() {
 
       {/* View cached session history offline */}
       {hasCachedMessages && !autoConnecting && (
-        <TouchableOpacity style={styles.cachedButton} onPress={viewCachedSession}>
+        <TouchableOpacity
+          style={styles.cachedButton}
+          onPress={viewCachedSession}
+          accessibilityRole="button"
+          accessibilityLabel="View cached session history offline"
+        >
           <Text style={styles.cachedButtonText}>View Last Session</Text>
           <Text style={styles.cachedButtonDetail}>Browse cached chat history offline</Text>
         </TouchableOpacity>
