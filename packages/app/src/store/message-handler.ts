@@ -44,6 +44,7 @@ import type {
   ToolResultImage,
 } from './types';
 import { createEmptySessionState } from './utils';
+import { clearPersistedSession } from './persistence';
 
 // ---------------------------------------------------------------------------
 // Late-bound store reference — set once by connection.ts after store creation
@@ -1735,15 +1736,45 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const timeoutSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
       const name = typeof msg.name === 'string' ? msg.name : 'Unknown';
       Alert.alert('Session Closed', `Session "${name}" was closed due to inactivity.`);
-      // If the timed-out session was active, the server will have destroyed it.
-      // The session_destroyed handler (if present) or next session_list will update state.
-      if (timeoutSessionId && get().activeSessionId === timeoutSessionId) {
-        // Switch to first available session or clear
-        const sessions = get().sessionStates;
-        const remaining = Object.keys(sessions).filter((id) => id !== timeoutSessionId);
-        if (remaining.length > 0) {
-          set({ activeSessionId: remaining[0] });
+      if (timeoutSessionId) {
+        // Clean up sessionStates entry for the destroyed session (#816)
+        const { sessionStates, sessions } = get();
+        const newStates = { ...sessionStates };
+        delete newStates[timeoutSessionId];
+        const newSessions = sessions.filter((s) => s.sessionId !== timeoutSessionId);
+        const patch: Partial<ConnectionState> = { sessionStates: newStates, sessions: newSessions };
+        // If the timed-out session was active, switch to next and sync flat fields (#816)
+        if (get().activeSessionId === timeoutSessionId) {
+          const remaining = Object.keys(newStates);
+          const nextId = remaining.length > 0 ? remaining[0] : null;
+          patch.activeSessionId = nextId;
+          if (nextId && newStates[nextId]) {
+            const ss = newStates[nextId];
+            patch.messages = ss.messages;
+            patch.streamingMessageId = ss.streamingMessageId;
+            patch.claudeReady = ss.claudeReady;
+            patch.activeModel = ss.activeModel;
+            patch.permissionMode = ss.permissionMode;
+            patch.contextUsage = ss.contextUsage;
+            patch.lastResultCost = ss.lastResultCost;
+            patch.lastResultDuration = ss.lastResultDuration;
+            patch.isIdle = ss.isIdle;
+          } else {
+            // No sessions remain — clear flat fields
+            patch.messages = [];
+            patch.streamingMessageId = null;
+            patch.claudeReady = false;
+            patch.activeModel = null;
+            patch.permissionMode = null;
+            patch.contextUsage = null;
+            patch.lastResultCost = null;
+            patch.lastResultDuration = null;
+            patch.isIdle = true;
+          }
         }
+        set(patch);
+        // Garbage-collect persisted messages for the deleted session (#797)
+        void clearPersistedSession(timeoutSessionId);
       }
       break;
     }

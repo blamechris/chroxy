@@ -96,6 +96,21 @@ export class SessionDirectoryError extends SessionError {
  *   session_warning   { sessionId, name, reason, message, remainingMs } — session nearing idle timeout
  *   session_timeout   { sessionId, name, idleMs } — session destroyed due to idle timeout
  */
+/**
+ * Format milliseconds into a human-friendly duration string.
+ * Examples: "2 minutes", "1 hour 30 minutes", "45 seconds"
+ */
+function _formatIdleDuration(ms) {
+  const totalSeconds = Math.round(ms / 1000)
+  if (totalSeconds < 60) return `${totalSeconds} second${totalSeconds !== 1 ? 's' : ''}`
+  const totalMinutes = Math.round(totalSeconds / 60)
+  if (totalMinutes < 60) return `${totalMinutes} minute${totalMinutes !== 1 ? 's' : ''}`
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  const hPart = `${hours} hour${hours !== 1 ? 's' : ''}`
+  return minutes > 0 ? `${hPart} ${minutes} minute${minutes !== 1 ? 's' : ''}` : hPart
+}
+
 export class SessionManager extends EventEmitter {
   constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout, costBudget } = {}) {
     super()
@@ -992,6 +1007,9 @@ export class SessionManager extends EventEmitter {
     // Warning threshold: 2 minutes before timeout (or half the timeout, whichever is smaller)
     const warningMs = Math.min(2 * 60_000, Math.floor(this._sessionTimeoutMs / 2))
 
+    // Collect candidates before destroying to avoid Map mutation during iteration (#815)
+    const toDestroy = []
+
     for (const [sessionId, entry] of this._sessions) {
       const lastActive = this._lastActivity.get(sessionId) || entry.createdAt
       const idleMs = now - lastActive
@@ -1008,31 +1026,36 @@ export class SessionManager extends EventEmitter {
         continue
       }
 
-      // Already warned — check if timeout has fully elapsed
-      if (this._sessionWarned.has(sessionId) && idleMs >= this._sessionTimeoutMs) {
-        console.log(`[session-manager] Session ${sessionId} timed out after ${Math.round(idleMs / 1000)}s idle`)
-        this.emit('session_timeout', {
-          sessionId,
-          name: entry.name,
-          idleMs,
-        })
-        this.destroySession(sessionId)
+      // Timeout fully elapsed — destroy (whether or not a warning was sent).
+      // Handles both the normal warned->timeout path and the edge case where
+      // the session jumped past the warning threshold (clock jump, stall). (#815)
+      if (idleMs >= this._sessionTimeoutMs) {
+        toDestroy.push({ sessionId, name: entry.name, idleMs })
         continue
       }
 
-      // Warning threshold reached — send warning
+      // Warning threshold reached — send warning (#817: human-friendly durations)
       if (!this._sessionWarned.has(sessionId) && idleMs >= this._sessionTimeoutMs - warningMs) {
-        const remainingMs = this._sessionTimeoutMs - idleMs
-        console.log(`[session-manager] Session ${sessionId} idle warning (${Math.round(remainingMs / 1000)}s remaining)`)
+        const remainingMs = Math.max(0, this._sessionTimeoutMs - idleMs)
+        const friendly = _formatIdleDuration(remainingMs)
+        console.log(`[session-manager] Session ${sessionId} idle warning (${friendly} remaining)`)
         this._sessionWarned.add(sessionId)
         this.emit('session_warning', {
           sessionId,
           name: entry.name,
           reason: 'idle_timeout',
-          message: `Session "${entry.name}" will be closed in ${Math.round(remainingMs / 1000)}s due to inactivity`,
+          message: `Session "${entry.name}" will be closed in ${friendly} due to inactivity`,
           remainingMs,
         })
       }
+    }
+
+    // Destroy outside the iteration loop (#815)
+    for (const { sessionId, name, idleMs } of toDestroy) {
+      const friendly = _formatIdleDuration(idleMs)
+      console.log(`[session-manager] Session ${sessionId} timed out after ${friendly} idle`)
+      this.emit('session_timeout', { sessionId, name, idleMs })
+      this.destroySession(sessionId)
     }
   }
 

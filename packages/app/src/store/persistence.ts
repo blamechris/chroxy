@@ -161,6 +161,16 @@ export async function loadSessionMessages(sessionId: string): Promise<ChatMessag
 // Clear
 // ---------------------------------------------------------------------------
 
+/** Clear persisted data for a specific destroyed/timed-out session (#797) */
+export async function clearPersistedSession(sessionId: string): Promise<void> {
+  try {
+    const key = sessionMessagesKey(sessionId);
+    await AsyncStorage.removeItem(key);
+  } catch {
+    // Storage not available
+  }
+}
+
 /** Clear all persisted session data (e.g., on "Clear Session History") */
 export async function clearPersistedState(): Promise<void> {
   try {
