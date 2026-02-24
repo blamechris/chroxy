@@ -38,6 +38,15 @@ describe('parseDuration', () => {
     assert.equal(parseDuration('0h0m'), null)
   })
 
+  it('rejects all zero durations', () => {
+    assert.equal(parseDuration('0'), null)
+    assert.equal(parseDuration('0s'), null)
+    assert.equal(parseDuration('0m'), null)
+    assert.equal(parseDuration('0h'), null)
+    assert.equal(parseDuration('0d'), null)
+    assert.equal(parseDuration('0d0h0m0s'), null)
+  })
+
   it('trims whitespace', () => {
     assert.equal(parseDuration('  2h  '), 2 * 60 * 60 * 1000)
   })
