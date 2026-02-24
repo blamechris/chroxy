@@ -32,36 +32,7 @@ jest.spyOn(AppState, 'addEventListener').mockImplementation((_event, callback) =
   return { remove: removeSpy } as any;
 });
 
-const TestRenderer = require('react-test-renderer');
-
-function renderHookSimple<T>(hookFn: () => T): { result: { current: T }; unmount: () => void } {
-  const resultRef = { current: null as any as T };
-  function TestComponent() {
-    resultRef.current = hookFn();
-    return null;
-  }
-  let renderer: any;
-  TestRenderer.act(() => {
-    renderer = TestRenderer.create(React.createElement(TestComponent));
-  });
-  return {
-    result: resultRef,
-    unmount: () => {
-      TestRenderer.act(() => {
-        renderer.unmount();
-      });
-    },
-  };
-}
-
-async function actAsync(fn: () => Promise<void>) {
-  await TestRenderer.act(fn);
-}
-
-/** Flush microtask queue (resolved promises) */
-function flushMicrotasks(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
+import { renderHookSimple, actAsync, flushMicrotasks } from '../test-helpers';
 
 beforeEach(() => {
   jest.clearAllMocks();

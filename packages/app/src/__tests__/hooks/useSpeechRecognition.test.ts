@@ -27,37 +27,7 @@ beforeEach(() => {
 
 // Import after mock setup
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
-
-// Minimal hook runner using React.createElement — no @testing-library needed
-function renderHookSimple<T>(hookFn: () => T): { result: { current: T }; unmount: () => void } {
-  const resultRef = { current: null as any as T };
-
-  function TestComponent() {
-    resultRef.current = hookFn();
-    return null;
-  }
-
-  // Use React's test renderer to mount the component
-  const TestRenderer = require('react-test-renderer');
-  let renderer: any;
-  TestRenderer.act(() => {
-    renderer = TestRenderer.create(React.createElement(TestComponent));
-  });
-
-  return {
-    result: resultRef,
-    unmount: () => {
-      TestRenderer.act(() => {
-        renderer.unmount();
-      });
-    },
-  };
-}
-
-async function actAsync(fn: () => Promise<void>) {
-  const TestRenderer = require('react-test-renderer');
-  await TestRenderer.act(fn);
-}
+import { renderHookSimple, actAsync } from '../test-helpers';
 
 function actSync(fn: () => void) {
   const TestRenderer = require('react-test-renderer');
