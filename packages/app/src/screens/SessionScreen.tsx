@@ -403,6 +403,33 @@ export function SessionScreen() {
     const text = inputText.trim();
     setInputText('');
 
+    // Detect & prefix for Claude Code Web tasks — check before addUserMessage
+    // to avoid adding a thinking indicator for fire-and-forget operations
+    if (text && text.startsWith('&') && !hasTerminal && !hasAttachments) {
+      const webPrompt = text.slice(1).trim();
+      if (webPrompt) {
+        const { addMessage } = useConnectionStore.getState();
+        // Show the user's message without a thinking indicator
+        addMessage({
+          id: `web-user-${Date.now()}`,
+          type: 'user_input',
+          content: `& ${webPrompt}`,
+          timestamp: Date.now(),
+        });
+        if (!webFeatures.available) {
+          addMessage({
+            id: `web-unavail-${Date.now()}`,
+            type: 'system',
+            content: 'Claude Code Web is not available on this server. The Claude CLI needs --remote support — update your CLI to enable cloud tasks.',
+            timestamp: Date.now(),
+          });
+          return;
+        }
+        launchWebTask(webPrompt, sessionCwd || undefined);
+        return;
+      }
+    }
+
     // Build attachment metadata for the chat message (without base64 data)
     const msgAttachments = hasAttachments
       ? pendingAttachments.map(({ id, type, uri, name, mediaType, size }) => ({ id, type, uri, name, mediaType, size }))
@@ -420,27 +447,6 @@ export function SessionScreen() {
 
     // Clear pending attachments (frees base64 memory)
     if (hasAttachments) setPendingAttachments([]);
-
-    // Detect & prefix for Claude Code Web tasks
-    if (text && text.startsWith('&') && !hasTerminal) {
-      const webPrompt = text.slice(1).trim();
-      if (webPrompt) {
-        if (!webFeatures.available) {
-          addUserMessage(`& ${webPrompt}`);
-          // Show as system message — feature not yet available
-          const { addMessage } = useConnectionStore.getState();
-          addMessage({
-            id: `web-unavail-${Date.now()}`,
-            type: 'system',
-            content: 'Claude Code Web is not available on this server. The Claude CLI needs --remote support — update your CLI to enable cloud tasks.',
-            timestamp: Date.now(),
-          });
-          return;
-        }
-        launchWebTask(webPrompt, sessionCwd || undefined);
-        return;
-      }
-    }
 
     // PTY sessions: append CR so text + submit arrive as a single atomic write.
     // CLI sessions: the server handles the full message directly (no CR needed).
