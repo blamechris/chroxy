@@ -23,6 +23,7 @@ import { registerForPushNotifications } from '../notifications';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
 import type {
   ChatMessage,
+  Checkpoint,
   ConnectedClient,
   ConnectionContext,
   ConnectionState,
@@ -1523,6 +1524,31 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (Array.isArray(msg.agents)) {
         set({ customAgents: msg.agents as CustomAgent[] });
       }
+      break;
+    }
+
+    case 'checkpoint_created': {
+      const cpSid = (msg.sessionId as string) || get().activeSessionId;
+      if (cpSid !== get().activeSessionId) break;
+      if (msg.checkpoint && typeof msg.checkpoint === 'object') {
+        const cp = msg.checkpoint as Checkpoint;
+        set({ checkpoints: [...get().checkpoints, cp] });
+      }
+      break;
+    }
+
+    case 'checkpoint_list': {
+      const listSid = (msg.sessionId as string) || get().activeSessionId;
+      if (listSid !== get().activeSessionId) break;
+      if (Array.isArray(msg.checkpoints)) {
+        set({ checkpoints: msg.checkpoints as Checkpoint[] });
+      }
+      break;
+    }
+
+    case 'checkpoint_restored': {
+      // Server has created a new session from the checkpoint
+      // The session_list update will follow from the server
       break;
     }
 

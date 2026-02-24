@@ -576,7 +576,15 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Check if the ring buffer for a session has dropped older messages.
+   * Get the count of messages in the ring buffer for a session.
+   * @param {string} sessionId
+   * @returns {number}
+   */
+  getHistoryCount(sessionId) {
+    return (this._messageHistory.get(sessionId) || []).length
+  }
+
+  /**
    * @param {string} sessionId
    * @returns {boolean}
    */

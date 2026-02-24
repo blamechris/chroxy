@@ -15,6 +15,7 @@ import { ClientMessageSchema, AuthSchema, KeyExchangeSchema, EncryptedEnvelopeSc
 import { EventNormalizer } from './event-normalizer.js'
 import { readConnectionInfo } from './connection-info.js'
 import { getDashboardHtml } from './dashboard.js'
+import { CheckpointManager } from './checkpoint-manager.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -158,6 +159,10 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'list_agents' }                             — request available custom agents
  *   { type: 'request_full_history', sessionId? }         — request full JSONL history for a session
  *   { type: 'key_exchange', publicKey }                  — client's ephemeral X25519 public key (E2E encryption)
+ *   { type: 'create_checkpoint', name?, description? }  — create a checkpoint for active session
+ *   { type: 'list_checkpoints' }                         — request checkpoint list for active session
+ *   { type: 'restore_checkpoint', checkpointId }         — rewind to a checkpoint (creates new session)
+ *   { type: 'delete_checkpoint', checkpointId }          — delete a checkpoint
  *   { type: 'ping' }                                    — client heartbeat (server responds with pong)
  *
  * Server -> Client:
@@ -210,6 +215,9 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'agent_list', agents: [{ name, description, source }] } — available custom agents
  *   { type: 'client_joined', client: { clientId, deviceName, deviceType, platform } } — new client connected
  *   { type: 'client_left', clientId }                — client disconnected
+ *   { type: 'checkpoint_created', sessionId, checkpoint } — checkpoint created (auto or manual)
+ *   { type: 'checkpoint_list', sessionId, checkpoints }   — list of checkpoints
+ *   { type: 'checkpoint_restored', checkpointId, newSessionId, name } — checkpoint restored (new session created)
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
  *   { type: 'pong' }                                    — heartbeat response
  *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
@@ -251,6 +259,18 @@ export class WsServer {
     // Multi-session support: prefer sessionManager, fall back to single cliSession
     this.sessionManager = sessionManager || null
     this.defaultSessionId = defaultSessionId || null
+    this._checkpointManager = new CheckpointManager()
+
+    // Clean up checkpoints when sessions are destroyed
+    if (sessionManager && typeof sessionManager.on === 'function') {
+      sessionManager.on('session_destroyed', (sessionId) => {
+        try {
+          this._checkpointManager.clearCheckpoints(sessionId)
+        } catch (err) {
+          console.warn(`[ws] Failed to clear checkpoints for destroyed session ${sessionId}: ${err.message}`)
+        }
+      })
+    }
 
     // Legacy single-session mode: wrap cliSession in a minimal shim
     if (!sessionManager && cliSession) {
@@ -940,6 +960,16 @@ export class WsServer {
           const trimmed = text?.trim() || ''
           const attCount = attachments?.length || 0
           console.log(`[ws] Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
+          // Auto-checkpoint before each user message (fire-and-forget)
+          if (entry.session.resumeSessionId) {
+            this._checkpointManager.createCheckpoint({
+              sessionId: targetSessionId,
+              resumeSessionId: entry.session.resumeSessionId,
+              cwd: entry.cwd,
+              description: trimmed.slice(0, 100),
+              messageCount: this.sessionManager.getHistoryCount(targetSessionId),
+            }).catch((err) => console.warn(`[ws] Auto-checkpoint failed: ${err.message}`))
+          }
           // Record user input in history (without base64 blobs)
           const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
           this.sessionManager.recordUserInput(targetSessionId, historyText)
@@ -1339,6 +1369,109 @@ export class WsServer {
         } catch (err) {
           console.warn(`[ws] Failed to read session context: ${err.message}`)
           this._send(ws, { type: 'session_error', message: `Failed to read session context: ${err.message}` })
+        }
+        break
+      }
+
+      case 'create_checkpoint': {
+        const sid = client.activeSessionId
+        if (!sid || !this.sessionManager) {
+          this._send(ws, { type: 'session_error', message: 'No active session' })
+          break
+        }
+        const entry = this.sessionManager.getSession(sid)
+        if (!entry) {
+          this._send(ws, { type: 'session_error', message: `Session not found: ${sid}` })
+          break
+        }
+        if (!entry.session.resumeSessionId) {
+          this._send(ws, { type: 'session_error', message: 'Cannot create checkpoint before first message' })
+          break
+        }
+        try {
+          const checkpoint = await this._checkpointManager.createCheckpoint({
+            sessionId: sid,
+            resumeSessionId: entry.session.resumeSessionId,
+            cwd: entry.cwd,
+            name: typeof msg.name === 'string' ? msg.name.slice(0, 100) : undefined,
+            description: typeof msg.description === 'string' ? msg.description.slice(0, 500) : undefined,
+            messageCount: this.sessionManager.getHistoryCount(sid),
+          })
+          this._send(ws, {
+            type: 'checkpoint_created',
+            sessionId: sid,
+            checkpoint: {
+              id: checkpoint.id,
+              name: checkpoint.name,
+              description: checkpoint.description,
+              messageCount: checkpoint.messageCount,
+              createdAt: checkpoint.createdAt,
+              hasGitSnapshot: !!checkpoint.gitRef,
+            },
+          })
+        } catch (err) {
+          this._send(ws, { type: 'session_error', message: `Failed to create checkpoint: ${err.message}` })
+        }
+        break
+      }
+
+      case 'list_checkpoints': {
+        const sid = client.activeSessionId
+        if (!sid) {
+          this._send(ws, { type: 'checkpoint_list', sessionId: null, checkpoints: [] })
+          break
+        }
+        const checkpoints = this._checkpointManager.listCheckpoints(sid)
+        this._send(ws, { type: 'checkpoint_list', sessionId: sid, checkpoints })
+        break
+      }
+
+      case 'restore_checkpoint': {
+        const sid = client.activeSessionId
+        if (!sid || !this.sessionManager) {
+          this._send(ws, { type: 'session_error', message: 'No active session' })
+          break
+        }
+        if (typeof msg.checkpointId !== 'string') {
+          this._send(ws, { type: 'session_error', message: 'Missing checkpointId' })
+          break
+        }
+        try {
+          // Restore file state and get checkpoint data
+          const checkpoint = await this._checkpointManager.restoreCheckpoint(sid, msg.checkpointId)
+
+          // Create a new session that resumes from the checkpoint's conversation state
+          const newSessionId = await this.sessionManager.createSession({
+            resumeSessionId: checkpoint.resumeSessionId,
+            cwd: checkpoint.cwd,
+            name: `Rewind: ${checkpoint.name}`,
+          })
+
+          // Switch client to the new session
+          client.activeSessionId = newSessionId
+          const newEntry = this.sessionManager.getSession(newSessionId)
+          this._send(ws, {
+            type: 'checkpoint_restored',
+            checkpointId: checkpoint.id,
+            newSessionId,
+            name: newEntry?.name || `Rewind: ${checkpoint.name}`,
+          })
+
+          // Send updated session list
+          this._broadcastSessionList()
+        } catch (err) {
+          this._send(ws, { type: 'session_error', message: `Failed to restore checkpoint: ${err.message}` })
+        }
+        break
+      }
+
+      case 'delete_checkpoint': {
+        const sid = client.activeSessionId
+        if (!sid) break
+        if (typeof msg.checkpointId === 'string') {
+          this._checkpointManager.deleteCheckpoint(sid, msg.checkpointId)
+          const checkpoints = this._checkpointManager.listCheckpoints(sid)
+          this._send(ws, { type: 'checkpoint_list', sessionId: sid, checkpoints })
         }
         break
       }

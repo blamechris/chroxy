@@ -130,6 +130,15 @@ export interface FileContent {
   error: string | null;
 }
 
+export interface Checkpoint {
+  id: string;
+  name: string;
+  description: string;
+  messageCount: number;
+  createdAt: number;
+  hasGitSnapshot: boolean;
+}
+
 export interface DiffHunkLine {
   type: 'context' | 'addition' | 'deletion';
   content: string;
@@ -339,6 +348,9 @@ export interface ConnectionState {
   // Custom agents from server
   customAgents: CustomAgent[];
 
+  // Checkpoints for session rewind
+  checkpoints: Checkpoint[];
+
   // Directory listing callback for file browser
   _directoryListingCallback: ((listing: DirectoryListing) => void) | null;
 
@@ -419,6 +431,12 @@ export interface ConnectionState {
 
   // Full history sync (session portability)
   requestFullHistory: (sessionId?: string) => void;
+
+  // Checkpoint actions
+  createCheckpoint: (name?: string) => void;
+  listCheckpoints: () => void;
+  restoreCheckpoint: (checkpointId: string) => void;
+  deleteCheckpoint: (checkpointId: string) => void;
 
   // Plan mode actions
   clearPlanState: () => void;
