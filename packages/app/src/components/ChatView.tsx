@@ -236,7 +236,6 @@ function ActivityGroup({
   selectedIds,
   onToggleSelection,
   searchMatchIds,
-  onLayoutMessage,
 }: {
   messages: ChatMessage[];
   isActive: boolean;
@@ -244,7 +243,6 @@ function ActivityGroup({
   selectedIds: Set<string>;
   onToggleSelection: (id: string) => void;
   searchMatchIds?: Set<string>;
-  onLayoutMessage?: (id: string, y: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const toolCount = activityMessages.filter((m) => m.type === 'tool_use').length;
@@ -979,7 +977,6 @@ export function ChatView({
                   selectedIds={selectedIds}
                   onToggleSelection={onToggleSelection}
                   searchMatchIds={searchMatchIds}
-                  onLayoutMessage={(id, y) => messageLayoutsRef.current.set(id, y)}
                 />
               </View>
             );
