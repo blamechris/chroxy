@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore } from '../store/connection';
-import { ChatMessage, SessionInfo } from '../store/types';
+import { ChatMessage } from '../store/types';
 import { renderPermissionDetail, getPermissionSummary } from '../components/PermissionDetail';
 import { ICON_CHECK, ICON_CLOSE } from '../constants/icons';
 import { COLORS } from '../constants/colors';
@@ -389,6 +389,8 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.backgroundSecondary,
     borderWidth: 1,
     borderColor: COLORS.borderPrimary,
+    minHeight: 36,
+    justifyContent: 'center',
   },
   filterChipActive: {
     backgroundColor: COLORS.accentBlue,
@@ -400,7 +402,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   filterChipTextActive: {
-    color: '#fff',
+    color: COLORS.textPrimary,
   },
 
   // Entry row

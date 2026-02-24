@@ -227,7 +227,7 @@ export function renderPermissionDetail(tool?: string, toolInput?: Record<string,
         {url && (
           <>
             <Text style={styles.permDetailLabel}>URL</Text>
-            <TouchableOpacity onPress={() => Linking.openURL(url)} accessibilityRole="link">
+            <TouchableOpacity onPress={() => void Linking.openURL(url).catch(() => {})} accessibilityRole="link">
               <Text selectable style={[styles.permDetailCode, styles.linkText]}>{url}</Text>
             </TouchableOpacity>
           </>
@@ -557,7 +557,7 @@ const styles = StyleSheet.create({
   // Expand/collapse
   showMoreLink: {
     marginTop: 4,
-    minHeight: 32,
+    minHeight: 44,
     justifyContent: 'center',
   },
   showMoreText: {
