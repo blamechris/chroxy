@@ -115,6 +115,8 @@ export function listProviders() {
 // Register built-in providers
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
+import { CodexSession } from './codex-session.js'
 
 registerProvider('claude-cli', CliSession)
 registerProvider('claude-sdk', SdkSession)
+registerProvider('codex', CodexSession)
