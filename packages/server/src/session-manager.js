@@ -145,7 +145,7 @@ export class SessionManager extends EventEmitter {
    * Create a new session.
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       console.error(`[session-manager] Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -171,7 +171,8 @@ export class SessionManager extends EventEmitter {
     const sessionId = randomUUID().slice(0, 8)
     const sessionName = name || `Session ${this._sessions.size + 1}`
 
-    const ProviderClass = getProvider(this._providerType)
+    const resolvedProvider = provider || this._providerType
+    const ProviderClass = getProvider(resolvedProvider)
     const providerOpts = {
       cwd: resolvedCwd,
       model: resolvedModel,
@@ -189,6 +190,7 @@ export class SessionManager extends EventEmitter {
       type: 'cli',
       name: sessionName,
       cwd: resolvedCwd,
+      provider: resolvedProvider,
       createdAt: Date.now(),
     }
 
@@ -230,7 +232,7 @@ export class SessionManager extends EventEmitter {
         isBusy: entry.session.isRunning,
         createdAt: entry.createdAt,
         conversationId: entry.session.resumeSessionId || null,
-        provider: this._providerType,
+        provider: entry.provider || this._providerType,
         capabilities: ProviderClass.capabilities || {},
       })
     }
@@ -479,6 +481,7 @@ export class SessionManager extends EventEmitter {
         cwd: entry.cwd,
         model: entry.session.model,
         permissionMode: entry.session.permissionMode,
+        provider: entry.provider || null,
         name: entry.name,
         history,
       })
@@ -540,6 +543,7 @@ export class SessionManager extends EventEmitter {
           model: saved.model,
           permissionMode: saved.permissionMode,
           resumeSessionId: saved.sdkSessionId,
+          provider: saved.provider || undefined,
         })
         // Restore message history if present (v1+)
         if (hasVersion && Array.isArray(saved.history) && saved.history.length > 0) {

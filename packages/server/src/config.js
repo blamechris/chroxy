@@ -37,6 +37,7 @@ const CONFIG_SCHEMA = {
   tokenExpiry: 'string',
   sessionTimeout: 'string',
   costBudget: 'number',
+  externalUrl: 'string',
 }
 
 /**
@@ -196,6 +197,7 @@ function envKeyForConfig(key) {
     tokenExpiry: 'CHROXY_TOKEN_EXPIRY',
     sessionTimeout: 'CHROXY_SESSION_TIMEOUT',
     costBudget: 'CHROXY_COST_BUDGET',
+    externalUrl: 'CHROXY_EXTERNAL_URL',
   }
   return envMap[key] || key.toUpperCase()
 }

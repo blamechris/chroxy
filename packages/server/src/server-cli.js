@@ -233,9 +233,35 @@ export async function startCliServer(config) {
     }
   }
 
+  // External URL mode: reverse proxy / custom domain (skip tunnel entirely)
+  const externalUrl = config.externalUrl || null
+  if (externalUrl) {
+    const wsUrl = externalUrl.replace(/^https?:\/\//, 'wss://')
+    const httpUrl = externalUrl.replace(/^wss?:\/\//, 'https://')
+    const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
+
+    console.log(`\n[✓] Server ready! (CLI headless mode, external URL)\n`)
+    console.log('📱 Scan this QR code with the Chroxy app:\n')
+    qrcode.generate(connectionUrl, { small: true })
+    console.log(`\nOr connect manually:`)
+    console.log(`   URL:   ${wsUrl}`)
+    console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
+    console.log(`   Dashboard: ${httpUrl}/dashboard?token=${API_TOKEN.slice(0, 8)}...`)
+
+    writeConnectionInfo({
+      wsUrl,
+      httpUrl,
+      apiToken: API_TOKEN,
+      connectionUrl,
+      tunnelMode: 'external',
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    })
+  }
+
   // Determine tunnel mode
   const tunnelArg = parseTunnelArg(config.tunnel || 'quick')
-  const SKIP_TUNNEL = NO_AUTH || !tunnelArg
+  const SKIP_TUNNEL = NO_AUTH || !tunnelArg || !!externalUrl
 
   let tunnel = null
   let currentWsUrl = null
@@ -307,7 +333,7 @@ export async function startCliServer(config) {
     console.log(`\nOr connect manually:`)
     console.log(`   URL:   ${wsUrl}`)
     console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
-    console.log(`   Dashboard: ${httpUrl}/dashboard?token=${API_TOKEN}`)
+    console.log(`   Dashboard: ${httpUrl}/dashboard?token=${API_TOKEN.slice(0, 8)}...`)
 
     // 7b. Write connection info file for programmatic access
     writeConnectionInfo({
@@ -324,7 +350,7 @@ export async function startCliServer(config) {
     console.log(`[✓] Server ready! (CLI headless mode, no tunnel)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)
     console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
-    console.log(`   Dashboard: http://localhost:${PORT}/dashboard?token=${API_TOKEN}`)
+    console.log(`   Dashboard: http://localhost:${PORT}/dashboard?token=${API_TOKEN.slice(0, 8)}...`)
   } else {
     console.log(`[✓] Server ready! (CLI headless mode, no auth)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)
