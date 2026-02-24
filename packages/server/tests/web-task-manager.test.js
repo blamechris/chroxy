@@ -70,6 +70,7 @@ describe('WebTaskManager', () => {
     it('launches task when feature is available', () => {
       manager = new WebTaskManager()
       manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {} // no-op — don't spawn real processes
 
       const events = []
       manager.on('task_created', (task) => events.push(task))
@@ -90,6 +91,7 @@ describe('WebTaskManager', () => {
     it('lists all tasks', () => {
       manager = new WebTaskManager()
       manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {} // no-op
 
       manager.launchTask('task 1')
       manager.launchTask('task 2')
@@ -103,6 +105,7 @@ describe('WebTaskManager', () => {
     it('gets a single task by ID', () => {
       manager = new WebTaskManager()
       manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {} // no-op
 
       const { taskId } = manager.launchTask('specific task')
       const task = manager.getTask(taskId)
@@ -115,6 +118,7 @@ describe('WebTaskManager', () => {
     it('returns copies of tasks (not references)', () => {
       manager = new WebTaskManager()
       manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {} // no-op
 
       const { taskId } = manager.launchTask('test')
       const task1 = manager.getTask(taskId)
@@ -128,6 +132,7 @@ describe('WebTaskManager', () => {
     it('throws when teleport not available', async () => {
       manager = new WebTaskManager()
       manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {} // no-op
 
       const { taskId } = manager.launchTask('test')
       await assert.rejects(
@@ -151,6 +156,7 @@ describe('WebTaskManager', () => {
     it('clears tasks and listeners', () => {
       manager = new WebTaskManager()
       manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {} // no-op
       manager.launchTask('test')
       manager.on('task_created', () => {})
 
