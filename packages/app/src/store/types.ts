@@ -387,6 +387,9 @@ export interface ConnectionState {
   // Diff viewer callback
   _diffCallback: ((result: DiffResult) => void) | null;
 
+  // Offline cached session viewing (shows session screen when disconnected)
+  viewingCachedSession: boolean;
+
   // View mode
   viewMode: 'chat' | 'terminal' | 'files';
 
@@ -480,6 +483,10 @@ export interface ConnectionState {
   launchWebTask: (prompt: string, cwd?: string) => 'sent' | false;
   listWebTasks: () => void;
   teleportWebTask: (taskId: string) => void;
+
+  // Offline cached session viewing
+  viewCachedSession: () => void;
+  exitCachedSession: () => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;

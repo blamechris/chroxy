@@ -28,6 +28,7 @@ beforeEach(() => {
     connectionPhase: 'disconnected',
     sessionStates: {},
     activeSessionId: null,
+    viewingCachedSession: false,
     _directoryListingCallback: null,
   });
 });
@@ -145,7 +146,7 @@ describe('selectShowSession', () => {
 
   it('returns false only for disconnected', () => {
     for (const phase of phases) {
-      useConnectionStore.setState({ connectionPhase: phase });
+      useConnectionStore.setState({ connectionPhase: phase, viewingCachedSession: false });
       const result = selectShowSession(useConnectionStore.getState());
       if (phase === 'disconnected') {
         expect(result).toBe(false);
@@ -153,6 +154,11 @@ describe('selectShowSession', () => {
         expect(result).toBe(true);
       }
     }
+  });
+
+  it('returns true when viewingCachedSession even if disconnected', () => {
+    useConnectionStore.setState({ connectionPhase: 'disconnected', viewingCachedSession: true });
+    expect(selectShowSession(useConnectionStore.getState())).toBe(true);
   });
 });
 
@@ -234,6 +240,61 @@ describe('store actions', () => {
       expect(useConnectionStore.getState()._terminalWriteCallback).not.toBeNull();
       useConnectionStore.getState().disconnect();
       expect(useConnectionStore.getState()._terminalWriteCallback).toBeNull();
+    });
+  });
+
+  describe('viewCachedSession', () => {
+    it('sets viewingCachedSession when active session has cached messages', () => {
+      useConnectionStore.setState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            messages: [{ id: 'm1', type: 'response', content: 'hi', timestamp: 1 }],
+          },
+        },
+      });
+      useConnectionStore.getState().viewCachedSession();
+      expect(useConnectionStore.getState().viewingCachedSession).toBe(true);
+    });
+
+    it('does nothing when no cached messages exist', () => {
+      useConnectionStore.setState({
+        activeSessionId: 's1',
+        sessionStates: { s1: createEmptySessionState() },
+      });
+      useConnectionStore.getState().viewCachedSession();
+      expect(useConnectionStore.getState().viewingCachedSession).toBe(false);
+    });
+
+    it('does nothing when no active session', () => {
+      useConnectionStore.setState({ activeSessionId: null });
+      useConnectionStore.getState().viewCachedSession();
+      expect(useConnectionStore.getState().viewingCachedSession).toBe(false);
+    });
+  });
+
+  describe('exitCachedSession', () => {
+    it('resets viewingCachedSession to false', () => {
+      useConnectionStore.setState({ viewingCachedSession: true });
+      useConnectionStore.getState().exitCachedSession();
+      expect(useConnectionStore.getState().viewingCachedSession).toBe(false);
+    });
+  });
+
+  describe('disconnect resets viewingCachedSession', () => {
+    it('clears viewingCachedSession on disconnect', () => {
+      useConnectionStore.setState({ viewingCachedSession: true });
+      useConnectionStore.getState().disconnect();
+      expect(useConnectionStore.getState().viewingCachedSession).toBe(false);
+    });
+  });
+
+  describe('forgetSession resets viewingCachedSession', () => {
+    it('clears viewingCachedSession on forgetSession', () => {
+      useConnectionStore.setState({ viewingCachedSession: true });
+      useConnectionStore.getState().forgetSession();
+      expect(useConnectionStore.getState().viewingCachedSession).toBe(false);
     });
   });
 

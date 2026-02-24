@@ -144,6 +144,10 @@ export function SessionScreen() {
 
   const sessions = useConnectionStore((s) => s.sessions);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
+  const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);
+  const exitCachedSession = useConnectionStore((s) => s.exitCachedSession);
+  const savedConnection = useConnectionStore((s) => s.savedConnection);
+  const connect = useConnectionStore((s) => s.connect);
   const isIdle = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].isIdle : s.isIdle;
@@ -728,6 +732,38 @@ export function SessionScreen() {
         />
       )}
 
+      {/* Offline cached session banner */}
+      {viewingCachedSession && (
+        <View style={styles.reconnectingBanner}>
+          <View style={styles.cachedBannerRow}>
+            <Text style={styles.reconnectingText}>Viewing cached history</Text>
+            <View style={styles.cachedBannerActions}>
+              {savedConnection && (
+                <TouchableOpacity
+                  onPress={() => {
+                    exitCachedSession();
+                    connect(savedConnection.url, savedConnection.token);
+                  }}
+                  style={styles.cachedReconnectButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Reconnect to server"
+                >
+                  <Text style={styles.cachedReconnectText}>Reconnect</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                onPress={exitCachedSession}
+                style={styles.cachedBackButton}
+                accessibilityRole="button"
+                accessibilityLabel="Go back to connect screen"
+              >
+                <Text style={styles.cachedBackText}>Back</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
+
       {/* Reconnecting / restarting banner */}
       {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting') && (
         <View style={styles.reconnectingBanner}>
@@ -909,7 +945,7 @@ export function SessionScreen() {
         hasTerminal={hasTerminal}
         bottomPadding={bottomPadding}
         disabled={connectionPhase !== 'connected'}
-        disabledPlaceholder={connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
+        disabledPlaceholder={viewingCachedSession ? 'Offline — viewing cached history' : connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
         slashCommands={slashCommands}
         isRecognizing={isRecognizing}
         onMicPress={speechAvailable ? handleMicPress : undefined}
@@ -1094,6 +1130,44 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accentOrangeMedium,
     paddingVertical: 6,
     alignItems: 'center',
+  },
+  cachedBannerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: 12,
+  },
+  cachedBannerActions: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  cachedReconnectButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: COLORS.accentGreen,
+    borderRadius: 6,
+    minHeight: 36,
+    justifyContent: 'center',
+  },
+  cachedReconnectText: {
+    color: COLORS.textPrimary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  cachedBackButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: COLORS.backgroundSecondary,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+    minHeight: 36,
+    justifyContent: 'center',
+  },
+  cachedBackText: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
   },
   reconnectingText: {
     color: COLORS.accentOrange,

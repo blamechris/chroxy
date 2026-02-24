@@ -61,6 +61,7 @@ import type {
   ConnectionContext,
   ConnectionState,
   MessageAttachment,
+  SessionInfo,
 } from './types';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
 import {
@@ -98,10 +99,13 @@ import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto
 import {
   loadPersistedState,
   loadSessionMessages,
+  loadSessionList,
+  loadAllSessionMessages,
   persistSessionMessages,
   persistViewMode,
   persistActiveSession,
   persistTerminalBuffer,
+  persistSessionList,
   clearPersistedState,
 } from './persistence';
 
@@ -113,7 +117,7 @@ const AUTO_RECONNECT_DELAY = 1500;
 const ERROR_RECONNECT_DELAY = 2000;
 
 export const selectShowSession = (s: ConnectionState): boolean =>
-  s.connectionPhase !== 'disconnected';
+  s.connectionPhase !== 'disconnected' || s.viewingCachedSession;
 
 // Stable device ID persisted across sessions
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
@@ -205,6 +209,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     terminalEnterToSend: false,
   },
   savedConnection: null,
+  viewingCachedSession: false,
   viewMode: 'chat',
   messages: [],
   terminalBuffer: '',
@@ -245,6 +250,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'teleport_web_task', taskId });
     }
+  },
+
+  viewCachedSession: () => {
+    const { activeSessionId, sessionStates } = get();
+    if (activeSessionId && sessionStates[activeSessionId]?.messages.length > 0) {
+      set({ viewingCachedSession: true });
+    }
+  },
+
+  exitCachedSession: () => {
+    set({ viewingCachedSession: false });
   },
 
   getActiveSessionState: () => {
@@ -293,27 +309,35 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     } catch {
       // Storage not available or corrupt — use defaults
     }
-    // Load persisted session state (view mode, active session, terminal buffer)
+    // Load persisted session state (view mode, active session, terminal buffer, session list)
     try {
-      const persisted = await loadPersistedState();
+      const [persisted, cachedSessions] = await Promise.all([
+        loadPersistedState(),
+        loadSessionList(),
+      ]);
       const updates: Partial<ReturnType<typeof get>> = {};
       if (persisted.viewMode) updates.viewMode = persisted.viewMode;
       if (persisted.activeSessionId) updates.activeSessionId = persisted.activeSessionId;
       if (persisted.terminalBuffer) updates.terminalBuffer = persisted.terminalBuffer;
+      if (cachedSessions.length > 0) updates.sessions = cachedSessions;
       if (Object.keys(updates).length > 0) set(updates);
 
-      // Load cached messages for the active session
-      if (persisted.activeSessionId) {
-        const messages = await loadSessionMessages(persisted.activeSessionId);
-        if (messages.length > 0) {
+      // Load cached messages for all sessions (not just active)
+      const sessionIds = cachedSessions.map((s) => s.sessionId);
+      if (persisted.activeSessionId && !sessionIds.includes(persisted.activeSessionId)) {
+        sessionIds.push(persisted.activeSessionId);
+      }
+      if (sessionIds.length > 0) {
+        const allMessages = await loadAllSessionMessages(sessionIds);
+        const sessionStates: Record<string, ReturnType<typeof createEmptySessionState>> = {};
+        for (const [id, messages] of Object.entries(allMessages)) {
+          if (messages.length > 0) {
+            sessionStates[id] = { ...createEmptySessionState(), messages };
+          }
+        }
+        if (Object.keys(sessionStates).length > 0) {
           set((state) => ({
-            sessionStates: {
-              ...state.sessionStates,
-              [persisted.activeSessionId!]: {
-                ...createEmptySessionState(),
-                messages,
-              },
-            },
+            sessionStates: { ...state.sessionStates, ...sessionStates },
           }));
         }
       }
@@ -625,6 +649,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       webFeatures: { available: false, remote: false, teleport: false },
       webTasks: [],
       savedConnection: null,
+      viewingCachedSession: false,
     });
   },
 
@@ -645,6 +670,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverVersion: null,
       latestVersion: null,
       serverCommit: null,
+      viewingCachedSession: false,
     });
   },
 
@@ -1087,10 +1113,11 @@ setStore({
   setState: useConnectionStore.setState as StoreApi['setState'],
 });
 
-// Persist session messages and active session when they change
+// Persist session messages, active session, session list when they change
 let _prevActiveSessionId: string | null = null;
 const _prevMessageCounts: Record<string, number> = {};
 let _prevTerminalBufferLen = 0;
+let _prevSessions: SessionInfo[] = [];
 useConnectionStore.subscribe((state) => {
   // Persist active session ID changes
   if (state.activeSessionId !== _prevActiveSessionId) {
@@ -1106,13 +1133,20 @@ useConnectionStore.subscribe((state) => {
     persistActiveSession(state.activeSessionId).catch(() => {});
   }
 
-  // Persist messages for the active session (debounced internally, per-session tracking)
-  if (state.activeSessionId) {
-    const ss = state.sessionStates[state.activeSessionId];
-    const prevCount = _prevMessageCounts[state.activeSessionId] ?? 0;
-    if (ss && ss.messages.length !== prevCount) {
-      _prevMessageCounts[state.activeSessionId] = ss.messages.length;
-      persistSessionMessages(state.activeSessionId, ss.messages);
+  // Persist messages for ALL sessions with changed message counts (not just active)
+  for (const [sessionId, ss] of Object.entries(state.sessionStates)) {
+    const prevCount = _prevMessageCounts[sessionId] ?? 0;
+    if (ss.messages.length !== prevCount) {
+      _prevMessageCounts[sessionId] = ss.messages.length;
+      persistSessionMessages(sessionId, ss.messages);
+    }
+  }
+
+  // Persist session list when it changes (reference equality — catches renames, model changes, etc.)
+  if (state.sessions !== _prevSessions) {
+    _prevSessions = state.sessions;
+    if (state.sessions.length > 0) {
+      persistSessionList(state.sessions);
     }
   }
 
