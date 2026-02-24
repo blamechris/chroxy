@@ -64,6 +64,18 @@ import {
   ServerShutdownSchema,
   ServerPongSchema,
   ServerMcpServersSchema,
+  ServerCostUpdateSchema,
+  ServerBudgetWarningSchema,
+  ServerBudgetExceededSchema,
+  // Web task schemas
+  LaunchWebTaskSchema,
+  ListWebTasksSchema,
+  TeleportWebTaskSchema,
+  ServerWebFeatureStatusSchema,
+  ServerWebTaskCreatedSchema,
+  ServerWebTaskUpdatedSchema,
+  ServerWebTaskErrorSchema,
+  ServerWebTaskListSchema,
 } from '../src/ws-schemas.js'
 
 
@@ -1076,5 +1088,215 @@ describe('ServerShutdownSchema', () => {
 describe('ServerPongSchema', () => {
   it('accepts valid pong', () => {
     assert.ok(ServerPongSchema.safeParse({ type: 'pong' }).success)
+  })
+})
+
+
+// ============================================================
+// Web task schemas (client -> server)
+// ============================================================
+
+describe('LaunchWebTaskSchema', () => {
+  it('accepts valid launch_web_task', () => {
+    const result = LaunchWebTaskSchema.safeParse({ type: 'launch_web_task', prompt: 'fix the bug' })
+    assert.ok(result.success)
+    assert.equal(result.data.prompt, 'fix the bug')
+  })
+
+  it('accepts with optional cwd', () => {
+    const result = LaunchWebTaskSchema.safeParse({ type: 'launch_web_task', prompt: 'test', cwd: '/tmp' })
+    assert.ok(result.success)
+    assert.equal(result.data.cwd, '/tmp')
+  })
+
+  it('rejects missing prompt', () => {
+    assert.ok(!LaunchWebTaskSchema.safeParse({ type: 'launch_web_task' }).success)
+  })
+
+  it('rejects empty prompt', () => {
+    assert.ok(!LaunchWebTaskSchema.safeParse({ type: 'launch_web_task', prompt: '' }).success)
+  })
+})
+
+describe('ListWebTasksSchema', () => {
+  it('accepts valid list_web_tasks', () => {
+    assert.ok(ListWebTasksSchema.safeParse({ type: 'list_web_tasks' }).success)
+  })
+})
+
+describe('TeleportWebTaskSchema', () => {
+  it('accepts valid teleport_web_task', () => {
+    const result = TeleportWebTaskSchema.safeParse({ type: 'teleport_web_task', taskId: 'abc123' })
+    assert.ok(result.success)
+    assert.equal(result.data.taskId, 'abc123')
+  })
+
+  it('rejects missing taskId', () => {
+    assert.ok(!TeleportWebTaskSchema.safeParse({ type: 'teleport_web_task' }).success)
+  })
+
+  it('rejects empty taskId', () => {
+    assert.ok(!TeleportWebTaskSchema.safeParse({ type: 'teleport_web_task', taskId: '' }).success)
+  })
+})
+
+
+// ============================================================
+// Web task schemas (server -> client)
+// ============================================================
+
+describe('ServerWebFeatureStatusSchema', () => {
+  it('accepts valid web_feature_status', () => {
+    const result = ServerWebFeatureStatusSchema.safeParse({
+      type: 'web_feature_status',
+      available: true,
+      remote: true,
+      teleport: false,
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing available field', () => {
+    assert.ok(!ServerWebFeatureStatusSchema.safeParse({
+      type: 'web_feature_status',
+      remote: true,
+      teleport: false,
+    }).success)
+  })
+})
+
+describe('ServerWebTaskCreatedSchema', () => {
+  it('accepts valid web_task_created', () => {
+    const result = ServerWebTaskCreatedSchema.safeParse({
+      type: 'web_task_created',
+      task: {
+        taskId: 'abc12345',
+        prompt: 'fix the bug',
+        status: 'pending',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        result: null,
+        error: null,
+      },
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts task with cwd field', () => {
+    const result = ServerWebTaskCreatedSchema.safeParse({
+      type: 'web_task_created',
+      task: {
+        taskId: 'abc12345',
+        prompt: 'fix the bug',
+        status: 'pending',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        result: null,
+        error: null,
+        cwd: '/home/user/project',
+      },
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.task.cwd, '/home/user/project')
+  })
+
+  it('rejects invalid task status', () => {
+    assert.ok(!ServerWebTaskCreatedSchema.safeParse({
+      type: 'web_task_created',
+      task: {
+        taskId: 'abc12345',
+        prompt: 'fix',
+        status: 'queued',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        result: null,
+        error: null,
+      },
+    }).success)
+  })
+
+  it('rejects missing task', () => {
+    assert.ok(!ServerWebTaskCreatedSchema.safeParse({ type: 'web_task_created' }).success)
+  })
+})
+
+describe('ServerWebTaskUpdatedSchema', () => {
+  it('accepts valid web_task_updated', () => {
+    const result = ServerWebTaskUpdatedSchema.safeParse({
+      type: 'web_task_updated',
+      task: {
+        taskId: 'abc12345',
+        prompt: 'fix the bug',
+        status: 'running',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        result: null,
+        error: null,
+      },
+    })
+    assert.ok(result.success)
+  })
+})
+
+describe('ServerWebTaskErrorSchema', () => {
+  it('accepts with taskId', () => {
+    const result = ServerWebTaskErrorSchema.safeParse({
+      type: 'web_task_error',
+      taskId: 'abc12345',
+      message: 'Task failed',
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts with null taskId', () => {
+    const result = ServerWebTaskErrorSchema.safeParse({
+      type: 'web_task_error',
+      taskId: null,
+      message: 'Feature not available',
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts without taskId (optional)', () => {
+    const result = ServerWebTaskErrorSchema.safeParse({
+      type: 'web_task_error',
+      message: 'Error occurred',
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing message', () => {
+    assert.ok(!ServerWebTaskErrorSchema.safeParse({ type: 'web_task_error', taskId: 'x' }).success)
+  })
+})
+
+describe('ServerWebTaskListSchema', () => {
+  it('accepts valid web_task_list with tasks', () => {
+    const result = ServerWebTaskListSchema.safeParse({
+      type: 'web_task_list',
+      tasks: [{
+        taskId: 't1',
+        prompt: 'do stuff',
+        status: 'completed',
+        createdAt: 1000,
+        updatedAt: 2000,
+        result: 'done',
+        error: null,
+      }],
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.tasks.length, 1)
+  })
+
+  it('accepts empty tasks array', () => {
+    const result = ServerWebTaskListSchema.safeParse({
+      type: 'web_task_list',
+      tasks: [],
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing tasks', () => {
+    assert.ok(!ServerWebTaskListSchema.safeParse({ type: 'web_task_list' }).success)
   })
 })

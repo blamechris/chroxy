@@ -191,6 +191,23 @@ export const CloseDevPreviewSchema = z.object({
   sessionId: z.string().optional(),
 })
 
+// -- Web task schemas (Claude Code Web / cloud delegation) --
+
+export const LaunchWebTaskSchema = z.object({
+  type: z.literal('launch_web_task'),
+  prompt: z.string().min(1),
+  cwd: z.string().optional(),
+})
+
+export const ListWebTasksSchema = z.object({
+  type: z.literal('list_web_tasks'),
+})
+
+export const TeleportWebTaskSchema = z.object({
+  type: z.literal('teleport_web_task'),
+  taskId: z.string().min(1),
+})
+
 // Encrypted envelope — validated separately (before decryption)
 export const EncryptedEnvelopeSchema = z.object({
   type: z.literal('encrypted'),
@@ -395,6 +412,47 @@ export const ServerBudgetExceededSchema = z.object({
   message: z.string(),
 })
 
+// -- Web task server→client schemas --
+
+const WebTaskSchema = z.object({
+  taskId: z.string(),
+  prompt: z.string(),
+  status: z.enum(['pending', 'running', 'completed', 'failed']),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  result: z.string().nullable(),
+  error: z.string().nullable(),
+  cwd: z.string().optional(),
+})
+
+export const ServerWebFeatureStatusSchema = z.object({
+  type: z.literal('web_feature_status'),
+  available: z.boolean(),
+  remote: z.boolean(),
+  teleport: z.boolean(),
+})
+
+export const ServerWebTaskCreatedSchema = z.object({
+  type: z.literal('web_task_created'),
+  task: WebTaskSchema,
+})
+
+export const ServerWebTaskUpdatedSchema = z.object({
+  type: z.literal('web_task_updated'),
+  task: WebTaskSchema,
+})
+
+export const ServerWebTaskErrorSchema = z.object({
+  type: z.literal('web_task_error'),
+  taskId: z.string().nullable().optional(),
+  message: z.string(),
+})
+
+export const ServerWebTaskListSchema = z.object({
+  type: z.literal('web_task_list'),
+  tasks: z.array(WebTaskSchema),
+})
+
 // -- Discriminated union of all client->server message types --
 // Note: auth, key_exchange, and encrypted are handled before the main
 // switch and are not included in this union. They are validated inline
@@ -432,4 +490,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   CreateCheckpointSchema,
   DeleteCheckpointSchema,
   CloseDevPreviewSchema,
+  LaunchWebTaskSchema,
+  ListWebTasksSchema,
+  TeleportWebTaskSchema,
 ])

@@ -42,6 +42,7 @@ import type {
   SessionState,
   SlashCommand,
   ToolResultImage,
+  WebTask,
 } from './types';
 import { createEmptySessionState } from './utils';
 import { clearPersistedSession } from './persistence';
@@ -540,6 +541,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           isSelf: c.clientId === myClientId,
         }));
 
+      // Parse web feature status from auth_ok
+      const webFeaturesRaw = msg.webFeatures as Record<string, unknown> | undefined;
+      const webFeatures = webFeaturesRaw ? {
+        available: !!webFeaturesRaw.available,
+        remote: !!webFeaturesRaw.remote,
+        teleport: !!webFeaturesRaw.teleport,
+      } : { available: false, remote: false, teleport: false };
+
       // On reconnect, preserve messages and terminal buffer
       const connectedState = {
         connectionPhase: 'connected' as const,
@@ -561,6 +570,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         shutdownReason: null,
         restartEtaMs: null,
         restartingSince: null,
+        webFeatures,
       };
       if (ctx.isReconnect) {
         set(connectedState);
@@ -1717,6 +1727,66 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           devPreviews: s.devPreviews.filter((p) => p.port !== stoppedPort),
         }));
       }
+      break;
+    }
+
+    // -- Web tasks (Claude Code Web) --
+
+    case 'web_feature_status': {
+      set({
+        webFeatures: {
+          available: !!msg.available,
+          remote: !!msg.remote,
+          teleport: !!msg.teleport,
+        },
+      });
+      break;
+    }
+
+    case 'web_task_created':
+    case 'web_task_updated': {
+      const task = msg.task as WebTask;
+      if (!task || !task.taskId) break;
+      set((state: ConnectionState) => {
+        const existing = state.webTasks.filter((t) => t.taskId !== task.taskId);
+        return { webTasks: [...existing, task] };
+      });
+      break;
+    }
+
+    case 'web_task_error': {
+      const errTaskId = msg.taskId as string | null;
+      if (errTaskId) {
+        // Update task status to failed
+        set((state: ConnectionState) => ({
+          webTasks: state.webTasks.map((t) =>
+            t.taskId === errTaskId
+              ? { ...t, status: 'failed' as const, error: (msg.message as string) || 'Unknown error', updatedAt: Date.now() }
+              : t,
+          ),
+        }));
+      }
+      // Show error as system message in chat
+      const errorMsg: ChatMessage = {
+        id: nextMessageId('web'),
+        type: 'system',
+        content: (msg.message as string) || 'Web task error',
+        timestamp: Date.now(),
+      };
+      const activeSid = get().activeSessionId;
+      if (activeSid && get().sessionStates[activeSid]) {
+        updateActiveSession((ss) => ({
+          messages: [...ss.messages, errorMsg],
+        }));
+      } else {
+        get().addMessage(errorMsg);
+      }
+      break;
+    }
+
+    case 'web_task_list': {
+      const tasks = Array.isArray(msg.tasks) ? (msg.tasks as WebTask[]) : [];
+      set({ webTasks: tasks });
       break;
     }
 

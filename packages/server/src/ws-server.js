@@ -17,6 +17,7 @@ import { readConnectionInfo } from './connection-info.js'
 import { getDashboardHtml } from './dashboard.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
+import { WebTaskManager, WebTaskUnavailableError } from './web-task-manager.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -165,6 +166,9 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'restore_checkpoint', checkpointId }         — rewind to a checkpoint (creates new session)
  *   { type: 'delete_checkpoint', checkpointId }          — delete a checkpoint
  *   { type: 'close_dev_preview', port, sessionId? }     — close a dev server preview tunnel
+ *   { type: 'launch_web_task', prompt, cwd? }           — launch a Claude Code Web cloud task
+ *   { type: 'list_web_tasks' }                          — request list of web tasks
+ *   { type: 'teleport_web_task', taskId }               — pull cloud task into local session
  *   { type: 'ping' }                                    — client heartbeat (server responds with pong)
  *
  * Server -> Client:
@@ -228,6 +232,10 @@ const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
  *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
  *   { type: 'dev_preview', port, url, sessionId }       — dev server preview tunnel opened
  *   { type: 'dev_preview_stopped', port, sessionId }    — dev server preview tunnel closed
+ *   { type: 'web_task_created', task }                  — cloud task launched
+ *   { type: 'web_task_updated', task }                  — cloud task status changed
+ *   { type: 'web_task_error', taskId?, message }        — cloud task error
+ *   { type: 'web_task_list', tasks }                    — response to list_web_tasks
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
@@ -278,6 +286,9 @@ export class WsServer {
 
     // Dev server preview tunneling
     this._devPreview = new DevPreviewManager()
+
+    // Web task manager (Claude Code Web cloud delegation)
+    this._webTaskManager = new WebTaskManager({ cwd: sessionManager?._defaultCwd || process.cwd() })
 
     // Legacy single-session mode: wrap cliSession in a minimal shim
     if (!sessionManager && cliSession) {
@@ -569,6 +580,18 @@ export class WsServer {
 
     this.httpServer.listen(this.port, host)
 
+    // Detect Claude Code Web features (non-blocking)
+    this._webTaskManager.detectFeatures().then(({ remote, teleport }) => {
+      if (remote || teleport) {
+        console.log(`[ws] Claude Code Web features detected: remote=${remote}, teleport=${teleport}`)
+      }
+    }).catch(() => {})
+
+    // Forward web task events to all authenticated clients
+    this._webTaskManager.on('task_created', (task) => this._broadcast({ type: 'web_task_created', task }))
+    this._webTaskManager.on('task_updated', (task) => this._broadcast({ type: 'web_task_updated', task }))
+    this._webTaskManager.on('task_error', ({ taskId, message }) => this._broadcast({ type: 'web_task_error', taskId, message }))
+
     // Wire up unified event forwarding via EventNormalizer
     this._setupForwarding()
 
@@ -646,6 +669,7 @@ export class WsServer {
       cwd: sessionInfo.cwd,
       connectedClients: this._getConnectedClientList(),
       encryption: requireEncryption ? 'required' : 'disabled',
+      webFeatures: this._webTaskManager.getFeatureStatus(),
     })
 
     // If encryption required, queue all subsequent messages until key exchange completes
@@ -1516,6 +1540,60 @@ export class WsServer {
         if (previewSessionId && typeof msg.port === 'number') {
           this._devPreview.closePreview(previewSessionId, msg.port)
         }
+        break
+      }
+
+      case 'launch_web_task': {
+        // Validate cwd if provided (same rules as create_session)
+        if (msg.cwd) {
+          try {
+            const cwdStat = statSync(msg.cwd)
+            if (!cwdStat.isDirectory()) {
+              this._send(ws, { type: 'web_task_error', taskId: null, message: `Not a directory: ${msg.cwd}` })
+              break
+            }
+          } catch {
+            this._send(ws, { type: 'web_task_error', taskId: null, message: `Directory does not exist: ${msg.cwd}` })
+            break
+          }
+          const home = homedir()
+          let realCwd
+          try {
+            realCwd = realpathSync(msg.cwd)
+          } catch {
+            this._send(ws, { type: 'web_task_error', taskId: null, message: `Cannot resolve path: ${msg.cwd}` })
+            break
+          }
+          if (!realCwd.startsWith(home + '/') && realCwd !== home) {
+            this._send(ws, { type: 'web_task_error', taskId: null, message: 'Task directory must be within your home directory' })
+            break
+          }
+        }
+        try {
+          const { taskId, task } = this._webTaskManager.launchTask(msg.prompt, { cwd: msg.cwd })
+          console.log(`[ws] Web task launched: ${taskId} — "${msg.prompt.slice(0, 60)}"`)
+        } catch (err) {
+          const errorMsg = err instanceof WebTaskUnavailableError
+            ? err.message
+            : `Failed to launch web task: ${err.message}`
+          this._send(ws, { type: 'web_task_error', taskId: null, message: errorMsg })
+        }
+        break
+      }
+
+      case 'list_web_tasks': {
+        const tasks = this._webTaskManager.listTasks()
+        this._send(ws, { type: 'web_task_list', tasks })
+        break
+      }
+
+      case 'teleport_web_task': {
+        this._webTaskManager.teleportTask(msg.taskId).then(({ success, output }) => {
+          console.log(`[ws] Teleported task ${msg.taskId}`)
+          this._send(ws, { type: 'server_status', message: `Task ${msg.taskId} teleported to local session` })
+        }).catch(err => {
+          this._send(ws, { type: 'web_task_error', taskId: msg.taskId, message: err.message })
+        })
         break
       }
 
@@ -3055,6 +3133,9 @@ export class WsServer {
     // Clean up all dev preview tunnels (fire-and-forget; close() is synchronous
     // by contract, and tunnel process cleanup is best-effort before exit)
     void this._devPreview.closeAll()
+
+    // Clean up web task manager
+    this._webTaskManager.destroy()
 
     for (const [ws] of this.clients) {
       ws.close()

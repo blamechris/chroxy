@@ -218,6 +218,35 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // Web tasks (Claude Code Web)
+  webFeatures: { available: false, remote: false, teleport: false },
+  webTasks: [],
+
+  launchWebTask: (prompt: string, cwd?: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const payload: Record<string, unknown> = { type: 'launch_web_task', prompt };
+      if (cwd) payload.cwd = cwd;
+      wsSend(socket, payload);
+      return 'sent';
+    }
+    return false;
+  },
+
+  listWebTasks: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'list_web_tasks' });
+    }
+  },
+
+  teleportWebTask: (taskId: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'teleport_web_task', taskId });
+    }
+  },
+
   getActiveSessionState: () => {
     const { activeSessionId, sessionStates } = get();
     if (activeSessionId && sessionStates[activeSessionId]) {
@@ -593,6 +622,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       lastResultDuration: null,
       totalCost: null,
       costBudget: null,
+      webFeatures: { available: false, remote: false, teleport: false },
+      webTasks: [],
       savedConnection: null,
     });
   },

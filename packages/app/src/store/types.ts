@@ -195,6 +195,22 @@ export interface DevPreview {
   url: string;
 }
 
+export interface WebTask {
+  taskId: string;
+  prompt: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  createdAt: number;
+  updatedAt: number;
+  result: string | null;
+  error: string | null;
+}
+
+export interface WebFeatureStatus {
+  available: boolean;
+  remote: boolean;
+  teleport: boolean;
+}
+
 export interface SessionState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
@@ -340,6 +356,10 @@ export interface ConnectionState {
   // Background session notifications (permission, question, completed, error)
   sessionNotifications: SessionNotification[];
 
+  // Claude Code Web (cloud task delegation)
+  webFeatures: WebFeatureStatus;
+  webTasks: WebTask[];
+
   // Shutdown state (reason + ETA for restarting banner countdown)
   shutdownReason: 'restart' | 'shutdown' | null;
   restartEtaMs: number | null;
@@ -455,6 +475,11 @@ export interface ConnectionState {
 
   // Dev server preview
   closeDevPreview: (port: number) => void;
+
+  // Web tasks (Claude Code Web)
+  launchWebTask: (prompt: string, cwd?: string) => 'sent' | false;
+  listWebTasks: () => void;
+  teleportWebTask: (taskId: string) => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;
