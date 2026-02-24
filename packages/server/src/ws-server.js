@@ -1008,7 +1008,11 @@ export class WsServer {
 
       case 'resume_budget': {
         const budgetSessionId = msg.sessionId || client.activeSessionId
-        if (budgetSessionId && this.sessionManager.isBudgetPaused(budgetSessionId)) {
+        if (!budgetSessionId || !this.sessionManager.getSession(budgetSessionId)) {
+          this._send(ws, { type: 'session_error', message: 'No valid session for budget resume' })
+          break
+        }
+        if (this.sessionManager.isBudgetPaused(budgetSessionId)) {
           this.sessionManager.resumeBudget(budgetSessionId)
           this._broadcastToSession(budgetSessionId, { type: 'budget_resumed', sessionId: budgetSessionId })
           console.log(`[ws] Budget resumed for session ${budgetSessionId} by ${client.id}`)

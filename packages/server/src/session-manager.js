@@ -296,6 +296,7 @@ export class SessionManager extends EventEmitter {
     this._budgetWarned.delete(sessionId)
     this._budgetExceeded.delete(sessionId)
     this._budgetPaused.delete(sessionId)
+    this._schedulePersist()
     this.emit('session_destroyed', { sessionId })
     this._schedulePersist()
     return true
@@ -1100,6 +1101,7 @@ export class SessionManager extends EventEmitter {
    */
   resumeBudget(sessionId) {
     this._budgetPaused.delete(sessionId)
+    this._schedulePersist()
     console.log(`[session-manager] Budget pause overridden for session ${sessionId}`)
   }
 }

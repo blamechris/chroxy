@@ -1185,6 +1185,7 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
     manager.recordUserInput = () => {}
     manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     manager.getSessionContext = async () => null
 
     // Add firstSessionId getter
@@ -1468,6 +1469,7 @@ describe('WsServer attach_session message flow', () => {
     manager.recordUserInput = () => {}
     manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     manager.getSessionContext = async () => null
 
     // Mock attachSession behavior
@@ -1965,6 +1967,7 @@ describe('user_question_response forwarding (multi-session)', () => {
     manager.recordUserInput = () => {}
     manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
@@ -2130,6 +2133,7 @@ describe('background session sync (_broadcastToSession)', () => {
     manager.recordUserInput = () => {}
     manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.keys().next().value
     })
@@ -2380,6 +2384,7 @@ describe('agent idle/busy notifications', () => {
     manager.recordUserInput = () => {}
     manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.keys().next().value
@@ -2550,6 +2555,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
     manager.recordUserInput = () => {}
     manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
@@ -2949,6 +2955,7 @@ describe('primary client tracking', () => {
     manager.recordUserInput = () => {}
     manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
     })
@@ -3518,6 +3525,7 @@ describe('auto permission mode confirmation handshake', () => {
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
     server = new WsServer({
@@ -3712,6 +3720,7 @@ describe('directory listing', () => {
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
     server = new WsServer({
@@ -3988,6 +3997,7 @@ describe('resize validation', () => {
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
     server = new WsServer({
@@ -4137,6 +4147,7 @@ describe('slash commands', () => {
       manager.getHistory = () => []
       manager.recordUserInput = () => {}
       manager.getFullHistoryAsync = async () => []
+      manager.isBudgetPaused = () => false
       Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
       server = new WsServer({
@@ -4321,6 +4332,7 @@ describe('agent listing', () => {
       manager.getHistory = () => []
       manager.recordUserInput = () => {}
       manager.getFullHistoryAsync = async () => []
+      manager.isBudgetPaused = () => false
       Object.defineProperty(manager, 'firstSessionId', { get: () => 'sess-1' })
 
       server = new WsServer({
@@ -4437,6 +4449,7 @@ describe('permission/question routing to originating session', () => {
     manager.recordUserInput = () => {}
     manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => 'sess-a'
@@ -4662,6 +4675,7 @@ describe('request_session_context error paths', () => {
     manager.recordUserInput = () => {}
     manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
@@ -5035,6 +5049,7 @@ describe('POST /permission-response HTTP endpoint', () => {
     manager.getHistory = () => []
     manager.recordUserInput = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => 'sess-1'
@@ -6618,6 +6633,7 @@ function createHistoryMockManager({ history = [], truncated = false, sessions = 
   manager.recordUserInput = () => {}
   manager.touchActivity = () => {}
   manager.getFullHistoryAsync = async () => []
+  manager.isBudgetPaused = () => false
   manager.getSessionContext = async () => null
 
   Object.defineProperty(manager, 'firstSessionId', {
@@ -8243,6 +8259,7 @@ describe('session-targeted routing (#611)', () => {
     manager.recordUserInput = () => {}
     manager.touchActivity = () => {}
     manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
     manager.getSessionContext = async () => null
     Object.defineProperty(manager, 'firstSessionId', {
       get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
