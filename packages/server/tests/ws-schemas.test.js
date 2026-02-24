@@ -1182,6 +1182,24 @@ describe('ServerWebTaskCreatedSchema', () => {
     assert.ok(result.success)
   })
 
+  it('accepts task with cwd field', () => {
+    const result = ServerWebTaskCreatedSchema.safeParse({
+      type: 'web_task_created',
+      task: {
+        taskId: 'abc12345',
+        prompt: 'fix the bug',
+        status: 'pending',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        result: null,
+        error: null,
+        cwd: '/home/user/project',
+      },
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.task.cwd, '/home/user/project')
+  })
+
   it('rejects invalid task status', () => {
     assert.ok(!ServerWebTaskCreatedSchema.safeParse({
       type: 'web_task_created',

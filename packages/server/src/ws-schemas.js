@@ -422,6 +422,7 @@ const WebTaskSchema = z.object({
   updatedAt: z.number(),
   result: z.string().nullable(),
   error: z.string().nullable(),
+  cwd: z.string().optional(),
 })
 
 export const ServerWebFeatureStatusSchema = z.object({
