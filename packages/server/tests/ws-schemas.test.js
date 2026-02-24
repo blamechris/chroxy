@@ -29,6 +29,12 @@ import {
   PingSchema,
   RequestSessionContextSchema,
   GetDiffSchema,
+  ResumeBudgetSchema,
+  ListCheckpointsSchema,
+  RestoreCheckpointSchema,
+  CreateCheckpointSchema,
+  DeleteCheckpointSchema,
+  CloseDevPreviewSchema,
   EncryptedEnvelopeSchema,
   ClientMessageSchema,
   // Server -> Client schemas
@@ -578,6 +584,61 @@ describe('EncryptedEnvelopeSchema', () => {
 })
 
 
+// -- CreateCheckpointSchema --
+describe('CreateCheckpointSchema', () => {
+  it('accepts minimal create_checkpoint', () => {
+    const result = CreateCheckpointSchema.safeParse({ type: 'create_checkpoint' })
+    assert.ok(result.success)
+  })
+
+  it('accepts create_checkpoint with name and description', () => {
+    const result = CreateCheckpointSchema.safeParse({ type: 'create_checkpoint', name: 'v1', description: 'First checkpoint' })
+    assert.ok(result.success)
+    assert.equal(result.data.name, 'v1')
+    assert.equal(result.data.description, 'First checkpoint')
+  })
+})
+
+// -- DeleteCheckpointSchema --
+describe('DeleteCheckpointSchema', () => {
+  it('accepts valid delete_checkpoint', () => {
+    const result = DeleteCheckpointSchema.safeParse({ type: 'delete_checkpoint', checkpointId: 'cp-1' })
+    assert.ok(result.success)
+    assert.equal(result.data.checkpointId, 'cp-1')
+  })
+
+  it('rejects missing checkpointId', () => {
+    const result = DeleteCheckpointSchema.safeParse({ type: 'delete_checkpoint' })
+    assert.ok(!result.success)
+  })
+})
+
+// -- CloseDevPreviewSchema --
+describe('CloseDevPreviewSchema', () => {
+  it('accepts valid close_dev_preview', () => {
+    const result = CloseDevPreviewSchema.safeParse({ type: 'close_dev_preview', port: 3000 })
+    assert.ok(result.success)
+    assert.equal(result.data.port, 3000)
+  })
+
+  it('accepts close_dev_preview with sessionId', () => {
+    const result = CloseDevPreviewSchema.safeParse({ type: 'close_dev_preview', port: 8080, sessionId: 's-1' })
+    assert.ok(result.success)
+    assert.equal(result.data.sessionId, 's-1')
+  })
+
+  it('rejects missing port', () => {
+    const result = CloseDevPreviewSchema.safeParse({ type: 'close_dev_preview' })
+    assert.ok(!result.success)
+  })
+
+  it('rejects non-integer port', () => {
+    const result = CloseDevPreviewSchema.safeParse({ type: 'close_dev_preview', port: 3.14 })
+    assert.ok(!result.success)
+  })
+})
+
+
 // -- ClientMessageSchema (discriminated union) --
 describe('ClientMessageSchema', () => {
   it('dispatches input messages correctly', () => {
@@ -622,6 +683,8 @@ describe('ClientMessageSchema', () => {
       'list_slash_commands',
       'list_agents',
       'get_diff',
+      'list_checkpoints',
+      'create_checkpoint',
     ]
     for (const type of simpleTypes) {
       const result = ClientMessageSchema.safeParse({ type })

@@ -160,6 +160,37 @@ export const GetDiffSchema = z.object({
   type: z.literal('get_diff'),
 }).passthrough()
 
+export const ResumeBudgetSchema = z.object({
+  type: z.literal('resume_budget'),
+  sessionId: z.string().optional(),
+})
+
+export const ListCheckpointsSchema = z.object({
+  type: z.literal('list_checkpoints'),
+})
+
+export const RestoreCheckpointSchema = z.object({
+  type: z.literal('restore_checkpoint'),
+  checkpointId: z.string(),
+})
+
+export const CreateCheckpointSchema = z.object({
+  type: z.literal('create_checkpoint'),
+  name: z.string().optional(),
+  description: z.string().optional(),
+})
+
+export const DeleteCheckpointSchema = z.object({
+  type: z.literal('delete_checkpoint'),
+  checkpointId: z.string(),
+})
+
+export const CloseDevPreviewSchema = z.object({
+  type: z.literal('close_dev_preview'),
+  port: z.number().int(),
+  sessionId: z.string().optional(),
+})
+
 // Encrypted envelope — validated separately (before decryption)
 export const EncryptedEnvelopeSchema = z.object({
   type: z.literal('encrypted'),
@@ -395,4 +426,10 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   RequestFullHistorySchema,
   RequestSessionContextSchema,
   GetDiffSchema,
+  ResumeBudgetSchema,
+  ListCheckpointsSchema,
+  RestoreCheckpointSchema,
+  CreateCheckpointSchema,
+  DeleteCheckpointSchema,
+  CloseDevPreviewSchema,
 ])
