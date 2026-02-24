@@ -204,7 +204,6 @@ export class WsServer {
     this._permissionSessionMap = new Map() // requestId -> sessionId (for routing responses to correct session)
     this._questionSessionMap = new Map() // toolUseId -> sessionId (for routing question responses)
     this._primaryClients = new Map() // sessionId -> clientId (last-writer-wins)
-    this._cwdRealCache = new Map() // cwd string -> resolved realpath (avoids repeated realpath syscalls)
     // Late-binding wrappers: allows tests to monkey-patch _send/_broadcast
     const self = this
     const sendFn = (ws, msg) => self._send(ws, msg)
@@ -303,10 +302,6 @@ export class WsServer {
       }
       this._tokenManager.on('token_rotated', this._tokenRotatedHandler)
     }
-  }
-
-  _formatStatusLog(status) {
-    return `[ws] Broadcasting status_update: $${status.cost} | ${status.model} | msgs:${status.messageCount} | ${status.contextTokens} (${status.contextPercent}%)`
   }
 
   /**

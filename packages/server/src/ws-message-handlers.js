@@ -1,6 +1,6 @@
 import { statSync, realpathSync } from 'fs'
 import { homedir } from 'os'
-import { ALLOWED_MODEL_IDS, toShortModelId, getModels } from './models.js'
+import { ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { WebTaskUnavailableError } from './web-task-manager.js'
 
 // -- Permission modes --
