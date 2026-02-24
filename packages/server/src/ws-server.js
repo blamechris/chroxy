@@ -316,7 +316,18 @@ export class WsServer {
     this.httpServer = createServer((req, res) => {
       // Health check endpoint — Cloudflare and the app verify connectivity via GET / and GET /health
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
-        res.writeHead(200, { 'Content-Type': 'application/json' })
+        // Browser visitors (Accept: text/html) get redirected to the dashboard
+        const accept = req.headers['accept'] || ''
+        if (req.url === '/' && accept.includes('text/html') && this.apiToken) {
+          res.writeHead(302, {
+            'Location': '/dashboard',
+            'Cache-Control': 'no-store',
+            'Vary': 'Accept',
+          })
+          res.end()
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Vary': 'Accept' })
         res.end(JSON.stringify({ status: 'ok', mode: this.serverMode, version: SERVER_VERSION }))
         return
       }

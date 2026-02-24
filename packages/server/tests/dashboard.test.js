@@ -881,3 +881,22 @@ describe('#733 — status bar busy indicator', () => {
       'claude_ready should update busy indicator')
   })
 })
+
+describe('#610 — responsive CSS for mobile browsers', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has responsive media query for small screens', () => {
+    assert.ok(html.includes('@media (max-width: 600px)'),
+      'should have mobile-specific media query')
+  })
+
+  it('adjusts message width for small screens', () => {
+    assert.ok(html.includes('max-width: 92%'),
+      'should widen messages on mobile screens')
+  })
+
+  it('has viewport meta tag', () => {
+    assert.ok(html.includes('name="viewport"'),
+      'should have viewport meta tag for mobile rendering')
+  })
+})

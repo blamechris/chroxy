@@ -786,6 +786,23 @@ function getDashboardCss() {
       margin-top: 6px;
     }
     .question-prompt.answered .q-answer-text { display: block; }
+
+    /* Responsive: mobile browsers */
+    @media (max-width: 600px) {
+      #header { padding: 8px 12px; }
+      .logo { font-size: 16px; }
+      .header-right select { font-size: 12px; padding: 3px 6px; }
+      #session-bar { padding: 4px 10px; }
+      #chat-messages { padding: 10px; gap: 8px; }
+      .msg, .tool-bubble, .permission-prompt, .question-prompt { max-width: 92%; font-size: 13px; }
+      #input-bar { padding: 8px 10px; gap: 6px; }
+      #message-input { padding: 8px 10px; font-size: 13px; }
+      #send-btn, #interrupt-btn { padding: 8px 12px; font-size: 13px; }
+      #status-bar { gap: 8px; padding: 4px 10px; font-size: 11px; }
+      .modal-content { min-width: 0; max-width: 90vw; margin: 0 16px; padding: 16px; }
+      #toast-container { right: 10px; left: 10px; max-width: none; }
+      #plan-approval-card { margin: 6px 10px; }
+    }
   `
 }
 
