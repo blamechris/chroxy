@@ -310,6 +310,41 @@ describe('session_list GC handler', () => {
     expect(state.activeSessionId).toBe('s2');
     expect(state.messages).toEqual(s2State.messages);
   });
+
+  it('clears flat fields when all sessions removed via empty list', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [{ id: 'm1', type: 'response' as const, content: 'test', timestamp: 1 }],
+      claudeReady: true,
+      activeModel: 'claude-sonnet',
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'session_list',
+      sessions: [],
+    });
+
+    expect(clearPersistedSession).toHaveBeenCalledWith('s1');
+    expect(clearPersistedSession).toHaveBeenCalledWith('s2');
+    expect(clearPersistedSession).toHaveBeenCalledTimes(2);
+
+    const state = store.getState();
+    expect(state.activeSessionId).toBeNull();
+    expect(state.messages).toEqual([]);
+    expect(state.claudeReady).toBe(false);
+    expect(state.activeModel).toBeNull();
+  });
 });
 
 afterAll(() => {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import { EventEmitter } from 'events'
 import { safeTokenCompare } from './crypto.js'
+import { parseDuration } from './duration.js'
 
 /**
  * Manages token lifecycle with optional rotation and expiry.
@@ -24,42 +25,8 @@ function rotationLeadTime(expiryMs) {
   return lead
 }
 
-/**
- * Parse a duration string like '24h', '7d', '1h30m' into milliseconds.
- * Supported units: s (seconds), m (minutes), h (hours), d (days).
- * Returns null for invalid or empty input.
- */
-export function parseDuration(str) {
-  if (!str || typeof str !== 'string') return null
-  const cleaned = str.trim().toLowerCase()
-  if (!cleaned) return null
-
-  // Try plain number (treated as seconds)
-  if (/^\d+$/.test(cleaned)) {
-    const ms = parseInt(cleaned, 10) * 1000
-    return ms > 0 ? ms : null
-  }
-
-  // Strict: only allow valid duration chars (digits, s, m, h, d, and optional whitespace)
-  if (/[^0-9smhd\s]/.test(cleaned)) return null
-
-  let total = 0
-  const regex = /(\d+)\s*(s|m|h|d)/g
-  let match
-  let found = false
-  while ((match = regex.exec(cleaned)) !== null) {
-    found = true
-    const value = parseInt(match[1], 10)
-    switch (match[2]) {
-      case 's': total += value * 1000; break
-      case 'm': total += value * 60 * 1000; break
-      case 'h': total += value * 60 * 60 * 1000; break
-      case 'd': total += value * 24 * 60 * 60 * 1000; break
-    }
-  }
-
-  return found && total > 0 ? total : null
-}
+// Re-export so existing `import { parseDuration } from './token-manager.js'` keeps working
+export { parseDuration }
 
 export class TokenManager extends EventEmitter {
   /**
