@@ -6,8 +6,10 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { ConnectScreen } from './screens/ConnectScreen';
 import { SessionScreen } from './screens/SessionScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
+import { LockScreen } from './components/LockScreen';
 import { useConnectionStore, selectShowSession } from './store/connection';
 import { setupNotificationResponseListener } from './notifications';
+import { useBiometricLock } from './hooks/useBiometricLock';
 
 export type RootStackParamList = {
   Connect: undefined;
@@ -19,6 +21,7 @@ const Stack = createNativeStackNavigator<RootStackParamList>();
 
 export default function App() {
   const showSession = useConnectionStore(selectShowSession);
+  const { isLocked, unlock } = useBiometricLock();
 
   useEffect(() => {
     const sub = setupNotificationResponseListener();
@@ -56,6 +59,7 @@ export default function App() {
           </>
         )}
       </Stack.Navigator>
+      {isLocked && <LockScreen onUnlock={unlock} />}
     </NavigationContainer>
   );
 }

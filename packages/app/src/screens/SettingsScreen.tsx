@@ -16,6 +16,12 @@ import * as Clipboard from 'expo-clipboard';
 import { useConnectionStore } from '../store/connection';
 import { COLORS } from '../constants/colors';
 import { getSpeechLang, setSpeechLang } from '../hooks/useSpeechRecognition';
+import {
+  isBiometricAvailable,
+  getBiometricEnabled,
+  setBiometricEnabled,
+  authenticate,
+} from '../hooks/useBiometricLock';
 
 const APP_VERSION = Constants.expoConfig?.version ?? 'unknown';
 
@@ -42,6 +48,8 @@ export function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const [speechLang, setSpeechLangState] = useState<string>('en-US');
   const [showLangPicker, setShowLangPicker] = useState(false);
+  const [biometricAvail, setBiometricAvail] = useState(false);
+  const [biometricOn, setBiometricOn] = useState(false);
 
   useEffect(() => {
     getSpeechLang()
@@ -49,6 +57,19 @@ export function SettingsScreen() {
       .catch(() => {
         // Ignore — falls back to default 'en-US'
       });
+    isBiometricAvailable().then((avail) => {
+      setBiometricAvail(avail);
+      // Auto-disable if biometrics became unavailable (e.g., enrollment removed)
+      if (!avail) {
+        getBiometricEnabled().then((wasOn) => {
+          if (wasOn) {
+            setBiometricEnabled(false);
+            setBiometricOn(false);
+          }
+        });
+      }
+    });
+    getBiometricEnabled().then(setBiometricOn);
   }, []);
 
   const handleSelectLang = async (tag: string) => {
@@ -152,6 +173,41 @@ export function SettingsScreen() {
           <Text style={styles.destructiveText}>Clear Saved Connection</Text>
         </TouchableOpacity>
       </View>
+
+      {/* SECURITY — show when hardware available, or when preference is
+           still enabled (so user can disable it even if biometrics were revoked) */}
+      {(biometricAvail || biometricOn) && (
+        <>
+          <Text style={styles.sectionHeader}>SECURITY</Text>
+          <View style={styles.section}>
+            <View style={styles.row}>
+              <Text style={styles.rowLabel}>Biometric Lock</Text>
+              <Switch
+                value={biometricOn}
+                disabled={!biometricAvail && !biometricOn}
+                onValueChange={async (value) => {
+                  if (value) {
+                    // Verify biometric before enabling
+                    const ok = await authenticate();
+                    if (!ok) return;
+                  }
+                  setBiometricOn(value);
+                  await setBiometricEnabled(value);
+                }}
+                trackColor={{ false: COLORS.backgroundCard, true: COLORS.accentBlue }}
+              />
+            </View>
+            <View style={styles.separator} />
+            <View style={styles.row}>
+              <Text style={[styles.rowLabel, styles.rowHint]}>
+                {biometricAvail
+                  ? 'Require Face ID / Touch ID when returning to the app'
+                  : 'Biometric hardware unavailable — toggle off to disable lock'}
+              </Text>
+            </View>
+          </View>
+        </>
+      )}
 
       {/* PORTABILITY */}
       {conversationId != null && (
@@ -349,6 +405,11 @@ const styles = StyleSheet.create({
   rowValueSmall: {
     fontSize: 13,
     maxWidth: 200,
+  },
+  rowHint: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    flex: 1,
   },
   destructiveText: {
     color: COLORS.accentRed,
