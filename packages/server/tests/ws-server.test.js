@@ -8660,3 +8660,44 @@ describe('restore_checkpoint idle guard', () => {
     ws.close()
   })
 })
+
+describe('session_destroyed checkpoint cleanup', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('calls clearCheckpoints with string sessionId (not object)', async () => {
+    const manager = new EventEmitter()
+    const mockSession = createMockSession()
+    const sessionsMap = new Map()
+    sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: '/tmp', type: 'cli' })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => []
+    manager._sessions = sessionsMap
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      authRequired: true,
+    })
+
+    // Track clearCheckpoints calls
+    const clearCalls = []
+    server._checkpointManager.clearCheckpoints = (sessionId) => {
+      clearCalls.push(sessionId)
+    }
+
+    // Emit session_destroyed the way session-manager.js does: { sessionId }
+    manager.emit('session_destroyed', { sessionId: 'sess-1' })
+
+    assert.equal(clearCalls.length, 1, 'clearCheckpoints should be called once')
+    assert.equal(clearCalls[0], 'sess-1', 'clearCheckpoints should receive the string sessionId, not an object')
+    assert.equal(typeof clearCalls[0], 'string', 'sessionId must be a string')
+  })
+})
