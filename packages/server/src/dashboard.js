@@ -958,6 +958,7 @@ function getDashboardJs() {
   var persistTimer = null;
   var messageLog = [];
   var restoredFromCache = false;
+  var activeCountdowns = [];
 
   // ---- Terminal state ----
   var currentView = "chat";
@@ -1589,6 +1590,7 @@ function getDashboardJs() {
         var remaining = Math.max(0, expiresAt - Date.now());
         if (remaining <= 0) {
           clearInterval(countdownInterval);
+          activeCountdowns = activeCountdowns.filter(function(id) { return id !== countdownInterval; });
           countdownEl.textContent = "Timed out";
           countdownEl.classList.add("expired");
           return;
@@ -1602,11 +1604,15 @@ function getDashboardJs() {
       }
       updateCountdown();
       countdownInterval = setInterval(updateCountdown, 1000);
+      activeCountdowns.push(countdownInterval);
     }
 
     div.querySelectorAll("button").forEach(function(btn) {
       btn.addEventListener("click", function() {
-        if (countdownInterval) clearInterval(countdownInterval);
+        if (countdownInterval) {
+          clearInterval(countdownInterval);
+          activeCountdowns = activeCountdowns.filter(function(id) { return id !== countdownInterval; });
+        }
         var decision = btn.getAttribute("data-decision");
         sendPermissionResponse(requestId, decision);
         div.classList.add("answered");
@@ -2105,6 +2111,9 @@ function getDashboardJs() {
       case "session_switched":
         // Save messages for old session before switching
         saveMessages();
+        // Clear active countdown intervals before wiping DOM
+        activeCountdowns.forEach(function(id) { clearInterval(id); });
+        activeCountdowns = [];
         activeSessionId = msg.sessionId;
         messagesEl.innerHTML = "";
         messageLog = [];
