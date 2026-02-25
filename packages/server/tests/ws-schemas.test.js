@@ -678,7 +678,7 @@ describe('ServerAuthOkSchema', () => {
     const result = ServerAuthOkSchema.safeParse({
       type: 'auth_ok',
       clientId: 'abc',
-      serverMode: 'terminal',
+      serverMode: 'cli',
       serverVersion: '0.1.0',
       latestVersion: '0.2.0',
       serverCommit: 'abc',
@@ -695,18 +695,20 @@ describe('ServerAuthOkSchema', () => {
   })
 
   it('rejects invalid serverMode', () => {
-    const result = ServerAuthOkSchema.safeParse({
-      type: 'auth_ok',
-      clientId: 'abc',
-      serverMode: 'pty',
-      serverVersion: '0.1.0',
-      latestVersion: null,
-      serverCommit: 'abc',
-      cwd: null,
-      connectedClients: [],
-      encryption: 'disabled',
-    })
-    assert.ok(!result.success)
+    for (const badMode of ['pty', 'terminal', 'unknown']) {
+      const result = ServerAuthOkSchema.safeParse({
+        type: 'auth_ok',
+        clientId: 'abc',
+        serverMode: badMode,
+        serverVersion: '0.1.0',
+        latestVersion: null,
+        serverCommit: 'abc',
+        cwd: null,
+        connectedClients: [],
+        encryption: 'disabled',
+      })
+      assert.ok(!result.success, `Expected '${badMode}' to be rejected`)
+    }
   })
 })
 

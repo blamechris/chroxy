@@ -1147,10 +1147,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       break;
 
-    case 'status_update':
-      // PTY mode status_update — no longer used in CLI-only mode
-      break;
-
     case 'raw':
       get().appendTerminalData(msg.data as string);
       break;

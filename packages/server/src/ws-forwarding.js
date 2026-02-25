@@ -108,7 +108,7 @@ function setupCliForwarding(normalizer, ctx) {
     'ready', 'stream_start', 'stream_delta', 'stream_end',
     'message', 'tool_start', 'tool_result', 'result', 'error',
     'user_question', 'agent_spawned', 'agent_completed',
-    'plan_started', 'plan_ready', 'status_update', 'mcp_servers',
+    'plan_started', 'plan_ready', 'mcp_servers',
   ]
   for (const event of FORWARDED_EVENTS) {
     cliSession.on(event, (data) => {
