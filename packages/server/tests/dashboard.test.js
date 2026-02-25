@@ -888,7 +888,7 @@ describe('#886 — syntax highlighting', () => {
   it('defines SYNTAX_COLORS map with all token types', () => {
     assert.ok(html.includes('var SYNTAX_COLORS = {'),
       'should define SYNTAX_COLORS')
-    for (const type of ['keyword', 'string', 'comment', 'number', 'operator', 'punctuation', 'type', 'property', 'plain', 'diff_add', 'diff_remove']) {
+    for (const type of ['keyword', 'string', 'comment', 'number', 'function', 'operator', 'punctuation', 'type', 'property', 'plain', 'diff_add', 'diff_remove']) {
       assert.ok(html.includes(`${type}: "`),
         `SYNTAX_COLORS should include ${type}`)
     }
