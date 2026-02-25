@@ -48,6 +48,7 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
 
     <div id="reconnect-banner" class="hidden">
       <span id="reconnect-text">Disconnected. Reconnecting...</span>
+      <button id="reconnect-retry-btn" class="hidden">Retry</button>
     </div>
 
     <!-- Create session modal -->
@@ -228,7 +229,22 @@ function getDashboardCss() {
       padding: 8px;
       font-size: 13px;
       flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
     }
+    #reconnect-retry-btn {
+      background: #f59e0b;
+      color: #1a1a2e;
+      border: none;
+      border-radius: 4px;
+      padding: 3px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #reconnect-retry-btn:hover { opacity: 0.85; }
     .hidden { display: none !important; }
 
     /* Chat messages */
@@ -643,6 +659,40 @@ function getDashboardCss() {
       width: 100px;
       outline: none;
     }
+    .tab-busy-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #22c55e;
+      animation: pulse 1.5s infinite;
+      flex-shrink: 0;
+    }
+    .tab-cwd {
+      color: #666;
+      font-size: 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 60px;
+    }
+    .tab-model {
+      color: #888;
+      font-size: 9px;
+      background: #1a1a2e;
+      border-radius: 3px;
+      padding: 1px 4px;
+      flex-shrink: 0;
+    }
+
+    /* Permission countdown */
+    .perm-countdown {
+      font-size: 12px;
+      color: #888;
+      margin-top: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    .perm-countdown.urgent { color: #ff4a4a; font-weight: bold; }
+    .perm-countdown.expired { color: #666; font-style: italic; }
 
     /* Create session modal */
     .modal-overlay {
@@ -890,6 +940,9 @@ function getDashboardJs() {
   var claudeReady = false;
   var userScrolledUp = false;
   var reconnectTimer = null;
+  var RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000];
+  var MAX_RETRIES = 8;
+  var reconnectAttempt = 0;
   var statusCost = 0;
   var statusContext = "";
   var statusModel = "";
@@ -922,6 +975,7 @@ function getDashboardJs() {
   var statusDot = document.getElementById("connection-status");
   var reconnectBanner = document.getElementById("reconnect-banner");
   var reconnectText = document.getElementById("reconnect-text");
+  var reconnectRetryBtn = document.getElementById("reconnect-retry-btn");
   var modelSelect = document.getElementById("model-select");
   var permissionSelect = document.getElementById("permission-select");
   var sessionTabs = document.getElementById("session-tabs");
@@ -945,30 +999,293 @@ function getDashboardJs() {
   var viewSwitcher = document.getElementById("view-switcher");
   var terminalContainer = document.getElementById("terminal-container");
 
+  // ---- Syntax highlighting ----
+  var SYNTAX_COLORS = {
+    keyword: "#c4a5ff", string: "#4eca6a", comment: "#7a7a7a",
+    number: "#ff9a52", "function": "#4a9eff", operator: "#e0e0e0",
+    punctuation: "#888888", type: "#4a9eff", property: "#4eca6a",
+    plain: "#a0d0ff", diff_add: "#4eca6a", diff_remove: "#ff5b5b"
+  };
+
+  function stickyRe(pattern) {
+    var flags = pattern.flags.indexOf("y") >= 0 ? pattern.flags : pattern.flags + "y";
+    return new RegExp(pattern.source, flags);
+  }
+
+  var LANG_JS = [
+    { p: stickyRe(/\\/\\/[^\\n]*/), t: "comment" },
+    { p: stickyRe(/\\/\\*[\\s\\S]*?\\*\\//), t: "comment" },
+    { p: stickyRe(/(["'\\\`])(?:(?!\\1|\\\\).|\\\\.)*.?\\1/), t: "string" },
+    { p: stickyRe(/\\b(?:abstract|as|async|await|break|case|catch|class|const|continue|debugger|default|delete|do|else|enum|export|extends|finally|for|from|function|get|if|implements|import|in|instanceof|interface|let|new|of|package|private|protected|public|return|set|static|super|switch|this|throw|try|typeof|var|void|while|with|yield)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:true|false|null|undefined|NaN|Infinity)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:Array|Boolean|Date|Error|Function|JSON|Map|Math|Number|Object|Promise|Proxy|RegExp|Set|String|Symbol|WeakMap|WeakSet|console|window|document|global|globalThis|process)\\b/), t: "type" },
+    { p: stickyRe(/\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*\\b/), t: "number" },
+    { p: stickyRe(/\\b0[oO][0-7][0-7_]*\\b/), t: "number" },
+    { p: stickyRe(/\\b0[bB][01][01_]*\\b/), t: "number" },
+    { p: stickyRe(/\\b\\d[\\d_]*(?:\\.[\\d_]*)?(?:[eE][+-]?\\d[\\d_]*)?\\b/), t: "number" },
+    { p: stickyRe(/[a-zA-Z_$][\\w$]*(?=\\s*\\()/), t: "function" },
+    { p: stickyRe(/=>|[+\\-*/%=!<>&|^~?:]+/), t: "operator" },
+    { p: stickyRe(/[{}()\\[\\];,.]/), t: "punctuation" }
+  ];
+  var LANG_TS = [
+    { p: stickyRe(/\\/\\/[^\\n]*/), t: "comment" },
+    { p: stickyRe(/\\/\\*[\\s\\S]*?\\*\\//), t: "comment" },
+    { p: stickyRe(/(["'\\\`])(?:(?!\\1|\\\\).|\\\\.)*.?\\1/), t: "string" },
+    { p: stickyRe(/\\b(?:abstract|as|async|await|break|case|catch|class|const|continue|debugger|declare|default|delete|do|else|enum|export|extends|finally|for|from|function|get|if|implements|import|in|infer|instanceof|interface|is|keyof|let|module|namespace|never|new|of|override|package|private|protected|public|readonly|return|satisfies|set|static|super|switch|this|throw|try|type|typeof|var|void|while|with|yield)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:true|false|null|undefined|NaN|Infinity)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:any|bigint|boolean|number|object|string|symbol|unknown|void|never)\\b/), t: "type" },
+    { p: stickyRe(/\\b(?:Array|Boolean|Date|Error|Function|JSON|Map|Math|Number|Object|Promise|Proxy|Record|Partial|Required|Readonly|Pick|Omit|Exclude|Extract|NonNullable|ReturnType|Parameters|RegExp|Set|String|Symbol|WeakMap|WeakSet|console)\\b/), t: "type" },
+    { p: stickyRe(/\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*\\b/), t: "number" },
+    { p: stickyRe(/\\b0[oO][0-7][0-7_]*\\b/), t: "number" },
+    { p: stickyRe(/\\b0[bB][01][01_]*\\b/), t: "number" },
+    { p: stickyRe(/\\b\\d[\\d_]*(?:\\.[\\d_]*)?(?:[eE][+-]?\\d[\\d_]*)?\\b/), t: "number" },
+    { p: stickyRe(/[a-zA-Z_$][\\w$]*(?=\\s*[<(])/), t: "function" },
+    { p: stickyRe(/=>|[+\\-*/%=!<>&|^~?:]+/), t: "operator" },
+    { p: stickyRe(/[{}()\\[\\];,.]/), t: "punctuation" }
+  ];
+  var LANG_PY = [
+    { p: stickyRe(/#[^\\n]*/), t: "comment" },
+    { p: stickyRe(/"""[\\s\\S]*?"""/), t: "string" },
+    { p: stickyRe(/'''[\\s\\S]*?'''/), t: "string" },
+    { p: stickyRe(/[fFrRbBuU]?(["'])(?:(?!\\1|\\\\).|\\\\.)*\\1/), t: "string" },
+    { p: stickyRe(/\\b(?:and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:True|False|None)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:int|float|str|bool|list|dict|tuple|set|frozenset|bytes|bytearray|type|object|range|complex|memoryview|Exception|TypeError|ValueError|KeyError|IndexError|AttributeError|RuntimeError|StopIteration)\\b/), t: "type" },
+    { p: stickyRe(/\\b(?:print|len|range|enumerate|zip|map|filter|sorted|reversed|isinstance|issubclass|hasattr|getattr|setattr|super|property|staticmethod|classmethod|open|input)\\b(?=\\s*\\()/), t: "function" },
+    { p: stickyRe(/\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*\\b/), t: "number" },
+    { p: stickyRe(/\\b0[oO][0-7][0-7_]*\\b/), t: "number" },
+    { p: stickyRe(/\\b0[bB][01][01_]*\\b/), t: "number" },
+    { p: stickyRe(/\\b\\d[\\d_]*(?:\\.[\\d_]*)?(?:[eE][+-]?\\d[\\d_]*)?\\b/), t: "number" },
+    { p: stickyRe(/[a-zA-Z_]\\w*(?=\\s*\\()/), t: "function" },
+    { p: stickyRe(/[-+*/%=!<>&|^~@:]+/), t: "operator" },
+    { p: stickyRe(/[{}()\\[\\];,.]/), t: "punctuation" }
+  ];
+  var LANG_BASH = [
+    { p: stickyRe(/#[^\\n]*/), t: "comment" },
+    { p: stickyRe(/(["'])(?:(?!\\1|\\\\).|\\\\.)*\\1/), t: "string" },
+    { p: stickyRe(/\\$\\{[^}]*\\}/), t: "string" },
+    { p: stickyRe(/\\$[a-zA-Z_]\\w*/), t: "string" },
+    { p: stickyRe(/\\b(?:if|then|else|elif|fi|for|while|do|done|case|esac|in|function|return|local|export|source|alias|unalias|declare|typeset|readonly|shift|break|continue|exit|eval|exec|trap|set|unset)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:echo|printf|cd|ls|cat|grep|sed|awk|find|xargs|sort|uniq|wc|head|tail|cut|tr|tee|mkdir|rmdir|rm|cp|mv|ln|chmod|chown|chgrp|touch|test|read|write|kill|ps|bg|fg|jobs|wait|nohup|true|false)\\b/), t: "function" },
+    { p: stickyRe(/\\b\\d+\\b/), t: "number" },
+    { p: stickyRe(/[|&;><!=]+/), t: "operator" },
+    { p: stickyRe(/[{}()\\[\\]]/), t: "punctuation" }
+  ];
+  var LANG_JSON = [
+    { p: stickyRe(/"(?:[^"\\\\]|\\\\.)*"\\s*(?=:)/), t: "property" },
+    { p: stickyRe(/"(?:[^"\\\\]|\\\\.)*"/), t: "string" },
+    { p: stickyRe(/\\b(?:true|false|null)\\b/), t: "keyword" },
+    { p: stickyRe(/-?\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b/), t: "number" },
+    { p: stickyRe(/:/), t: "operator" },
+    { p: stickyRe(/[{}()\\[\\],]/), t: "punctuation" }
+  ];
+  var LANG_DIFF = [
+    { p: stickyRe(/^\\+\\+\\+[^\\n]*/m), t: "keyword" },
+    { p: stickyRe(/^---[^\\n]*/m), t: "keyword" },
+    { p: stickyRe(/^@@[^\\n]*@@[^\\n]*/m), t: "keyword" },
+    { p: stickyRe(/^\\+[^\\n]*/m), t: "diff_add" },
+    { p: stickyRe(/^-[^\\n]*/m), t: "diff_remove" }
+  ];
+  var LANG_HTML = [
+    { p: stickyRe(/<!--[\\s\\S]*?-->/), t: "comment" },
+    { p: stickyRe(/(["'])(?:(?!\\1|\\\\).|\\\\.)*\\1/), t: "string" },
+    { p: stickyRe(/<\\/?[a-zA-Z][\\w-]*/), t: "keyword" },
+    { p: stickyRe(/\\/?>/), t: "keyword" },
+    { p: stickyRe(/[a-zA-Z][\\w-]*(?=\\s*=)/), t: "property" },
+    { p: stickyRe(/[=]/), t: "operator" }
+  ];
+  var LANG_CSS = [
+    { p: stickyRe(/\\/\\*[\\s\\S]*?\\*\\//), t: "comment" },
+    { p: stickyRe(/(["'])(?:(?!\\1|\\\\).|\\\\.)*\\1/), t: "string" },
+    { p: stickyRe(/@[a-zA-Z][\\w-]*/), t: "keyword" },
+    { p: stickyRe(/\\b(?:important|inherit|initial|unset|revert)\\b/), t: "keyword" },
+    { p: stickyRe(/#[0-9a-fA-F]{3,8}\\b/), t: "number" },
+    { p: stickyRe(/\\b\\d[\\d_]*(?:\\.[\\d_]*)?(?:px|em|rem|%|vh|vw|vmin|vmax|ch|ex|cm|mm|in|pt|pc|deg|rad|s|ms|Hz|kHz|fr)?\\b/), t: "number" },
+    { p: stickyRe(/[a-zA-Z][\\w-]*(?=\\s*\\()/), t: "function" },
+    { p: stickyRe(/[a-zA-Z-]+(?=\\s*:)/), t: "property" },
+    { p: stickyRe(/[.#][a-zA-Z][\\w-]*/), t: "type" },
+    { p: stickyRe(/[:;{}(),>+~*=]/), t: "punctuation" }
+  ];
+  var LANG_YAML = [
+    { p: stickyRe(/#[^\\n]*/), t: "comment" },
+    { p: stickyRe(/(["'])(?:(?!\\1|\\\\).|\\\\.)*\\1/), t: "string" },
+    { p: stickyRe(/[a-zA-Z_][\\w.-]*(?=\\s*:)/), t: "property" },
+    { p: stickyRe(/\\b(?:true|false|null|yes|no|on|off)\\b/i), t: "keyword" },
+    { p: stickyRe(/\\b\\d[\\d_]*(?:\\.[\\d_]*)?\\b/), t: "number" },
+    { p: stickyRe(/[:\\-|>]/), t: "operator" }
+  ];
+  var LANG_GO = [
+    { p: stickyRe(/\\/\\/[^\\n]*/), t: "comment" },
+    { p: stickyRe(/\\/\\*[\\s\\S]*?\\*\\//), t: "comment" },
+    { p: stickyRe(/(["'\\\`])(?:(?!\\1|\\\\).|\\\\.)*.?\\1/), t: "string" },
+    { p: stickyRe(/\\b(?:break|case|chan|const|continue|default|defer|else|fallthrough|for|func|go|goto|if|import|interface|map|package|range|return|select|struct|switch|type|var)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:true|false|nil|iota)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:bool|byte|complex64|complex128|error|float32|float64|int|int8|int16|int32|int64|rune|string|uint|uint8|uint16|uint32|uint64|uintptr)\\b/), t: "type" },
+    { p: stickyRe(/\\b(?:append|cap|close|copy|delete|len|make|new|panic|print|println|recover)\\b(?=\\s*\\()/), t: "function" },
+    { p: stickyRe(/\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*\\b/), t: "number" },
+    { p: stickyRe(/\\b\\d[\\d_]*(?:\\.[\\d_]*)?(?:[eE][+-]?\\d[\\d_]*)?\\b/), t: "number" },
+    { p: stickyRe(/[a-zA-Z_]\\w*(?=\\s*\\()/), t: "function" },
+    { p: stickyRe(/:=|[+\\-*/%=!<>&|^~]+/), t: "operator" },
+    { p: stickyRe(/[{}()\\[\\];,.]/), t: "punctuation" }
+  ];
+  var LANG_RUST = [
+    { p: stickyRe(/\\/\\/[^\\n]*/), t: "comment" },
+    { p: stickyRe(/\\/\\*[\\s\\S]*?\\*\\//), t: "comment" },
+    { p: stickyRe(/(["'])(?:(?!\\1|\\\\).|\\\\.)*\\1/), t: "string" },
+    { p: stickyRe(/\\b(?:as|async|await|break|const|continue|crate|dyn|else|enum|extern|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|type|unsafe|use|where|while|yield)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:true|false)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64|bool|char|str|String|Vec|Option|Result|Box|Rc|Arc|Cell|RefCell|HashMap|HashSet|BTreeMap|BTreeSet)\\b/), t: "type" },
+    { p: stickyRe(/\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*\\b/), t: "number" },
+    { p: stickyRe(/\\b\\d[\\d_]*(?:\\.[\\d_]*)?(?:[eE][+-]?\\d[\\d_]*)?\\b/), t: "number" },
+    { p: stickyRe(/[a-zA-Z_]\\w*(?=\\s*[!(<])/), t: "function" },
+    { p: stickyRe(/=>|->|[+\\-*/%=!<>&|^~?:]+/), t: "operator" },
+    { p: stickyRe(/[{}()\\[\\];,.#]/), t: "punctuation" }
+  ];
+  var LANG_JAVA = [
+    { p: stickyRe(/\\/\\/[^\\n]*/), t: "comment" },
+    { p: stickyRe(/\\/\\*[\\s\\S]*?\\*\\//), t: "comment" },
+    { p: stickyRe(/(["'])(?:(?!\\1|\\\\).|\\\\.)*\\1/), t: "string" },
+    { p: stickyRe(/\\b(?:abstract|assert|break|case|catch|class|const|continue|default|do|else|enum|extends|final|finally|for|goto|if|implements|import|instanceof|interface|native|new|package|private|protected|public|return|static|strictfp|super|switch|synchronized|this|throw|throws|transient|try|void|volatile|while)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:true|false|null)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:boolean|byte|char|double|float|int|long|short|var|String|Integer|Long|Double|Float|Boolean|Character|Object|Class|System|List|Map|Set|ArrayList|HashMap|HashSet|Optional|Stream)\\b/), t: "type" },
+    { p: stickyRe(/\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*[lL]?\\b/), t: "number" },
+    { p: stickyRe(/\\b\\d[\\d_]*(?:\\.[\\d_]*)?(?:[eE][+-]?\\d[\\d_]*)?[lLfFdD]?\\b/), t: "number" },
+    { p: stickyRe(/[a-zA-Z_]\\w*(?=\\s*\\()/), t: "function" },
+    { p: stickyRe(/[+\\-*/%=!<>&|^~?:]+/), t: "operator" },
+    { p: stickyRe(/[{}()\\[\\];,.@]/), t: "punctuation" }
+  ];
+  var LANG_RUBY = [
+    { p: stickyRe(/#[^\\n]*/), t: "comment" },
+    { p: stickyRe(/(["'])(?:(?!\\1|\\\\).|\\\\.)*\\1/), t: "string" },
+    { p: stickyRe(/\\bdefined\\?/), t: "keyword" },
+    { p: stickyRe(/\\b(?:alias|and|begin|break|case|class|def|do|else|elsif|end|ensure|for|if|in|module|next|nil|not|or|redo|require|rescue|retry|return|self|super|then|undef|unless|until|when|while|yield)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:true|false|nil)\\b/), t: "keyword" },
+    { p: stickyRe(/:[a-zA-Z_]\\w*/), t: "string" },
+    { p: stickyRe(/\\b\\d[\\d_]*(?:\\.[\\d_]*)?\\b/), t: "number" },
+    { p: stickyRe(/[a-zA-Z_]\\w*(?=\\s*[({])/), t: "function" },
+    { p: stickyRe(/[+\\-*/%=!<>&|^~?:]+/), t: "operator" },
+    { p: stickyRe(/[{}()\\[\\];,.@]/), t: "punctuation" }
+  ];
+  var LANG_C = [
+    { p: stickyRe(/\\/\\/[^\\n]*/), t: "comment" },
+    { p: stickyRe(/\\/\\*[\\s\\S]*?\\*\\//), t: "comment" },
+    { p: stickyRe(/(["'])(?:(?!\\1|\\\\).|\\\\.)*\\1/), t: "string" },
+    { p: stickyRe(/#\\s*(?:include|define|ifdef|ifndef|endif|if|else|elif|undef|pragma|error|warning)[^\\n]*/), t: "keyword" },
+    { p: stickyRe(/\\b(?:auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|goto|if|inline|int|long|register|restrict|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while|_Bool|_Complex|_Imaginary)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:NULL|true|false)\\b/), t: "keyword" },
+    { p: stickyRe(/\\b(?:size_t|ptrdiff_t|int8_t|int16_t|int32_t|int64_t|uint8_t|uint16_t|uint32_t|uint64_t|FILE|bool)\\b/), t: "type" },
+    { p: stickyRe(/\\b0[xX][0-9a-fA-F][0-9a-fA-F]*[uUlL]*\\b/), t: "number" },
+    { p: stickyRe(/\\b\\d[\\d]*(?:\\.[\\d]*)?(?:[eE][+-]?\\d+)?[uUlLfF]*\\b/), t: "number" },
+    { p: stickyRe(/[a-zA-Z_]\\w*(?=\\s*\\()/), t: "function" },
+    { p: stickyRe(/->|[+\\-*/%=!<>&|^~?:]+/), t: "operator" },
+    { p: stickyRe(/[{}()\\[\\];,.]/), t: "punctuation" }
+  ];
+  var LANG_SQL = [
+    { p: stickyRe(/--[^\\n]*/), t: "comment" },
+    { p: stickyRe(/\\/\\*[\\s\\S]*?\\*\\//), t: "comment" },
+    { p: stickyRe(/'(?:[^'\\\\]|\\\\.)*'/), t: "string" },
+    { p: stickyRe(/\\b(?:SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|ALTER|DROP|TABLE|INDEX|VIEW|DATABASE|SCHEMA|JOIN|INNER|LEFT|RIGHT|OUTER|CROSS|ON|AND|OR|NOT|IN|IS|NULL|AS|ORDER|BY|GROUP|HAVING|LIMIT|OFFSET|UNION|ALL|DISTINCT|CASE|WHEN|THEN|ELSE|END|EXISTS|BETWEEN|LIKE|PRIMARY|KEY|FOREIGN|REFERENCES|UNIQUE|CHECK|DEFAULT|CONSTRAINT|BEGIN|COMMIT|ROLLBACK|TRANSACTION|WITH|RETURNING|ASC|DESC)\\b/i), t: "keyword" },
+    { p: stickyRe(/\\b(?:INT|INTEGER|BIGINT|SMALLINT|TINYINT|FLOAT|DOUBLE|DECIMAL|NUMERIC|REAL|CHAR|VARCHAR|TEXT|BLOB|BOOLEAN|BOOL|DATE|TIME|TIMESTAMP|DATETIME|SERIAL|UUID|JSON|JSONB|ARRAY|BYTEA)\\b/i), t: "type" },
+    { p: stickyRe(/\\b(?:COUNT|SUM|AVG|MIN|MAX|COALESCE|NULLIF|CAST|TRIM|UPPER|LOWER|LENGTH|SUBSTR|SUBSTRING|REPLACE|CONCAT|NOW|ROW_NUMBER|RANK|DENSE_RANK|LAG|LEAD|OVER|PARTITION)\\b(?=\\s*\\()/i), t: "function" },
+    { p: stickyRe(/\\b\\d+(?:\\.\\d+)?\\b/), t: "number" },
+    { p: stickyRe(/[=<>!]+|[+\\-*/%]/), t: "operator" },
+    { p: stickyRe(/[();,.]/), t: "punctuation" }
+  ];
+
+  var SYNTAX_LANGS = {
+    javascript: LANG_JS, typescript: LANG_TS, jsx: LANG_JS, tsx: LANG_TS,
+    python: LANG_PY, bash: LANG_BASH, json: LANG_JSON, diff: LANG_DIFF,
+    html: LANG_HTML, xml: LANG_HTML, css: LANG_CSS, yaml: LANG_YAML,
+    go: LANG_GO, rust: LANG_RUST, java: LANG_JAVA, ruby: LANG_RUBY,
+    c: LANG_C, cpp: LANG_C, sql: LANG_SQL
+  };
+  var SYNTAX_ALIASES = {
+    js: "javascript", ts: "typescript", py: "python", sh: "bash",
+    shell: "bash", zsh: "bash", yml: "yaml", htm: "html", rb: "ruby",
+    rs: "rust", "c++": "cpp", h: "c", hpp: "cpp", cc: "cpp", cxx: "cpp",
+    patch: "diff", mysql: "sql", postgresql: "sql", postgres: "sql",
+    sqlite: "sql", kt: "java", kotlin: "java", scala: "java",
+    cs: "java", csharp: "java", swift: "c", jsonc: "json", json5: "json",
+    toml: "yaml"
+  };
+
+  function getSyntaxRules(lang) {
+    if (!lang) return null;
+    var key = lang.toLowerCase();
+    return SYNTAX_LANGS[key] || SYNTAX_LANGS[SYNTAX_ALIASES[key] || ""] || null;
+  }
+
+  var MAX_HIGHLIGHT_LENGTH = 5000;
+
+  function tokenize(code, lang) {
+    if (!lang || code.length > MAX_HIGHLIGHT_LENGTH) return [{ text: code, type: "plain" }];
+    var rules = getSyntaxRules(lang);
+    if (!rules) return [{ text: code, type: "plain" }];
+    var tokens = [];
+    var pos = 0;
+    var plainStart = 0;
+    while (pos < code.length) {
+      var matched = false;
+      for (var ri = 0; ri < rules.length; ri++) {
+        rules[ri].p.lastIndex = pos;
+        var m = rules[ri].p.exec(code);
+        if (m) {
+          if (pos > plainStart) pushToken(tokens, code.slice(plainStart, pos), "plain");
+          pushToken(tokens, m[0], rules[ri].t);
+          pos += m[0].length;
+          plainStart = pos;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) pos++;
+    }
+    if (pos > plainStart) pushToken(tokens, code.slice(plainStart, pos), "plain");
+    return tokens;
+  }
+
+  function pushToken(tokens, text, type) {
+    var last = tokens.length > 0 ? tokens[tokens.length - 1] : null;
+    if (last && last.type === type) { last.text += text; }
+    else { tokens.push({ text: text, type: type }); }
+  }
+
+  function highlightCode(code, lang) {
+    var tokens = tokenize(code, lang);
+    var out = "";
+    for (var i = 0; i < tokens.length; i++) {
+      var color = SYNTAX_COLORS[tokens[i].type] || SYNTAX_COLORS.plain;
+      out += '<span style="color:' + color + '">' + escapeHtml(tokens[i].text) + '</span>';
+    }
+    return out;
+  }
+
   // ---- Markdown renderer ----
   function renderMarkdown(text) {
     if (!text) return "";
-    // Escape HTML first
-    var html = text
+
+    // Extract fenced code blocks BEFORE HTML-escaping (so highlighter gets raw code)
+    var codeBlocks = [];
+    var raw = text.replace(/\\\`\\\`\\\`(\\w*)?\\n([\\s\\S]*?)\\\`\\\`\\\`/g, function(m, lang, code) {
+      var placeholder = "\\x00CB" + codeBlocks.length + "\\x00";
+      var cls = lang ? ' class="language-' + lang + '"' : "";
+      var highlighted = lang ? highlightCode(code, lang) : escapeHtml(code);
+      codeBlocks.push('<pre><code' + cls + '>' + highlighted + '</code></pre>');
+      return placeholder;
+    });
+
+    // Extract inline code before escaping
+    raw = raw.replace(/\\\`([^\\\`\\n]+)\\\`/g, function(m, code) {
+      var placeholder = "\\x00CB" + codeBlocks.length + "\\x00";
+      codeBlocks.push("<code>" + escapeHtml(code) + "</code>");
+      return placeholder;
+    });
+
+    // Now HTML-escape the remaining text
+    var html = raw
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
-
-    // Extract code blocks into placeholders to protect from later transforms
-    var codeBlocks = [];
-    html = html.replace(/\`\`\`(\\w*)?\\n([\\s\\S]*?)\`\`\`/g, function(m, lang, code) {
-      var cls = lang ? ' class="language-' + lang + '"' : "";
-      var placeholder = "\x00CB" + codeBlocks.length + "\x00";
-      codeBlocks.push('<pre><code' + cls + '>' + code + '</code></pre>');
-      return placeholder;
-    });
-
-    // Extract inline code into placeholders
-    html = html.replace(/\`([^\`\\n]+)\`/g, function(m, code) {
-      var placeholder = "\x00CB" + codeBlocks.length + "\x00";
-      codeBlocks.push("<code>" + code + "</code>");
-      return placeholder;
-    });
 
     // Headers
     html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
@@ -1007,7 +1324,7 @@ function getDashboardJs() {
 
     // Restore code blocks from placeholders
     for (var i = 0; i < codeBlocks.length; i++) {
-      html = html.replace("\x00CB" + i + "\x00", codeBlocks[i]);
+      html = html.replace("\\x00CB" + i + "\\x00", codeBlocks[i]);
     }
 
     return html;
@@ -1076,7 +1393,7 @@ function getDashboardJs() {
           if (resultDiv) resultDiv.textContent = entry.result;
         }
       } else if (entry.type === "permission") {
-        addPermissionPrompt(entry.requestId || "", entry.tool || "Unknown", entry.description || "", true);
+        addPermissionPrompt(entry.requestId || "", entry.tool || "Unknown", entry.description || "", null, true);
       } else {
         addMessage(entry.msgType || "system", entry.content || "", { skipLog: true });
       }
@@ -1249,25 +1566,53 @@ function getDashboardJs() {
     return div;
   }
 
-  function addPermissionPrompt(requestId, tool, description, skipLog) {
+  function addPermissionPrompt(requestId, tool, description, remainingMs, skipLog) {
     var div = document.createElement("div");
     div.className = "permission-prompt";
     div.setAttribute("data-request-id", sanitizeId(requestId));
     div.innerHTML =
       '<div class="perm-desc"><span class="perm-tool">' + escapeHtml(tool) + '</span>: ' +
       escapeHtml(description || "Permission requested") + '</div>' +
+      '<div class="perm-countdown"></div>' +
       '<div class="perm-buttons">' +
       '<button class="btn-allow" data-decision="allow">Allow</button>' +
       '<button class="btn-deny" data-decision="deny">Deny</button>' +
       '</div>' +
       '<div class="perm-answer" style="display:none"></div>';
+
+    // Countdown timer (skip for restored prompts — already expired)
+    var countdownEl = div.querySelector(".perm-countdown");
+    var countdownInterval = null;
+    if (remainingMs && remainingMs > 0 && !skipLog) {
+      var expiresAt = Date.now() + remainingMs;
+      function updateCountdown() {
+        var remaining = Math.max(0, expiresAt - Date.now());
+        if (remaining <= 0) {
+          clearInterval(countdownInterval);
+          countdownEl.textContent = "Timed out";
+          countdownEl.classList.add("expired");
+          return;
+        }
+        var mins = Math.floor(remaining / 60000);
+        var secs = Math.floor((remaining % 60000) / 1000);
+        countdownEl.textContent = mins + ":" + (secs < 10 ? "0" : "") + secs;
+        if (remaining <= 30000) {
+          countdownEl.classList.add("urgent");
+        }
+      }
+      updateCountdown();
+      countdownInterval = setInterval(updateCountdown, 1000);
+    }
+
     div.querySelectorAll("button").forEach(function(btn) {
       btn.addEventListener("click", function() {
+        if (countdownInterval) clearInterval(countdownInterval);
         var decision = btn.getAttribute("data-decision");
         sendPermissionResponse(requestId, decision);
         div.classList.add("answered");
         div.querySelector(".perm-answer").textContent = decision === "allow" ? "Allowed" : "Denied";
         div.querySelector(".perm-answer").style.display = "block";
+        countdownEl.style.display = "none";
       });
     });
     messagesEl.appendChild(div);
@@ -1366,10 +1711,36 @@ function getDashboardJs() {
       var tab = document.createElement("div");
       tab.className = "session-tab" + (s.sessionId === activeSessionId ? " active" : "");
 
+      // Busy indicator dot
+      if (s.isBusy) {
+        var dot = document.createElement("span");
+        dot.className = "tab-busy-dot";
+        tab.appendChild(dot);
+      }
+
       var nameSpan = document.createElement("span");
       nameSpan.className = "tab-name";
       nameSpan.textContent = s.name || "Default";
       tab.appendChild(nameSpan);
+
+      // Abbreviated cwd
+      if (s.cwd) {
+        var cwdSpan = document.createElement("span");
+        cwdSpan.className = "tab-cwd";
+        var parts = s.cwd.split("/");
+        cwdSpan.textContent = parts[parts.length - 1] || s.cwd;
+        cwdSpan.title = s.cwd;
+        tab.appendChild(cwdSpan);
+      }
+
+      // Model badge (short name)
+      if (s.model) {
+        var modelBadge = document.createElement("span");
+        modelBadge.className = "tab-model";
+        var short = s.model.replace(/^claude-/, "").replace(/-\\d.*$/, "");
+        modelBadge.textContent = short;
+        tab.appendChild(modelBadge);
+      }
 
       // Close button (hidden when only 1 session)
       var closeBtn = document.createElement("button");
@@ -1571,6 +1942,7 @@ function getDashboardJs() {
     connected = state === "connected";
     if (state === "connected") {
       hadInitialConnect = true;
+      reconnectAttempt = 0;
       reconnectBanner.classList.add("hidden");
     }
     updateButtons();
@@ -1620,16 +1992,29 @@ function getDashboardJs() {
       isBusy = false;
       updateBusyIndicator();
       updateButtons();
-      // Show reconnect banner if we were previously connected
-      if (hadInitialConnect) {
-        reconnectText.textContent = "Disconnected. Reconnecting...";
-        reconnectBanner.classList.remove("hidden");
-      }
-      // Auto-reconnect
+      // Auto-reconnect with escalating backoff
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(function() {
-        connect();
-      }, 2000);
+      if (hadInitialConnect) {
+        reconnectRetryBtn.classList.add("hidden");
+        if (reconnectAttempt < MAX_RETRIES) {
+          var delay = RETRY_DELAYS[Math.min(reconnectAttempt, RETRY_DELAYS.length - 1)];
+          reconnectText.textContent = "Disconnected. Reconnecting in " + Math.round(delay / 1000) + "s (" + (reconnectAttempt + 1) + "/" + MAX_RETRIES + ")...";
+          reconnectBanner.classList.remove("hidden");
+          reconnectTimer = setTimeout(function() {
+            reconnectAttempt++;
+            connect();
+          }, delay);
+        } else {
+          reconnectText.textContent = "Connection lost.";
+          reconnectRetryBtn.classList.remove("hidden");
+          reconnectBanner.classList.remove("hidden");
+        }
+      } else {
+        // Initial connection attempt — retry quickly
+        reconnectTimer = setTimeout(function() {
+          connect();
+        }, 1000);
+      }
     };
 
     ws.onerror = function(err) {
@@ -1850,7 +2235,7 @@ function getDashboardJs() {
       }
 
       case "permission_request":
-        addPermissionPrompt(msg.requestId, msg.tool || "Unknown", msg.description || "");
+        addPermissionPrompt(msg.requestId, msg.tool || "Unknown", msg.description || "", msg.remainingMs);
         // Desktop notification when tab not focused
         if (!document.hasFocus() && "Notification" in window && Notification.permission === "granted") {
           var permNote = new Notification("Chroxy: Permission Required", {
@@ -1961,6 +2346,8 @@ function getDashboardJs() {
           ? "Server restarting..."
           : "Server shutting down...";
         reconnectBanner.classList.remove("hidden");
+        // Reset backoff for server-initiated restarts
+        if (msg.reason === "restart") reconnectAttempt = 0;
         break;
 
       case "token_rotated":
@@ -2015,6 +2402,13 @@ function getDashboardJs() {
 
   interruptBtn.addEventListener("click", function() {
     sendInterrupt();
+  });
+
+  reconnectRetryBtn.addEventListener("click", function() {
+    reconnectAttempt = 0;
+    reconnectRetryBtn.classList.add("hidden");
+    reconnectText.textContent = "Reconnecting...";
+    connect();
   });
 
   inputEl.addEventListener("keydown", function(e) {
