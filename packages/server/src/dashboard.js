@@ -1715,6 +1715,11 @@ function getDashboardJs() {
         messageLog = [];
         restoredFromCache = false;
         restoreMessages(activeSessionId);
+        // Clear terminal buffer for new session
+        terminalBuffer = "";
+        if (term) {
+          try { term.clear(); } catch(e) {}
+        }
         renderSessions();
         break;
 
