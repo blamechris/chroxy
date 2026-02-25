@@ -157,13 +157,6 @@ const EVENT_MAP = {
     messages: [{ msg: { type: 'budget_exceeded', sessionCost: data.sessionCost, budget: data.budget, percent: data.percent, message: data.message } }],
   }),
 
-  raw: (data, ctx) => ({
-    messages: [
-      { msg: { type: 'raw', data }, filter: (client) => client.mode === 'terminal' && client.activeSessionId === ctx.sessionId },
-      { msg: { type: 'raw_background', data }, filter: (client) => client.mode === 'chat' && client.activeSessionId === ctx.sessionId },
-    ],
-  }),
-
   status_update: (data, ctx) => {
     const formatLog = `[ws] Broadcasting status_update: $${data.cost} | ${data.model} | msgs:${data.messageCount} | ${data.contextTokens} (${data.contextPercent}%)`
     const filter = ctx.mode === 'multi'

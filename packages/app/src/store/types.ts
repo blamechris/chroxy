@@ -58,15 +58,6 @@ export interface ContextUsage {
   cacheRead: number;
 }
 
-export interface ClaudeStatus {
-  cost: number;
-  model: string;
-  messageCount: number;
-  contextTokens: string;
-  contextPercent: number;
-  compactPercent: number | null;
-}
-
 export interface InputSettings {
   chatEnterToSend: boolean;
   terminalEnterToSend: boolean;
@@ -82,7 +73,7 @@ export interface SessionInfo {
   sessionId: string;
   name: string;
   cwd: string;
-  type: 'cli' | 'pty';
+  type: 'cli';
   hasTerminal: boolean;
   model: string | null;
   permissionMode: string | null;
@@ -90,12 +81,6 @@ export interface SessionInfo {
   createdAt: number;
   conversationId: string | null;
   provider?: string;
-}
-
-export interface DiscoveredSession {
-  sessionName: string;
-  cwd: string;
-  pid: number;
 }
 
 export interface DirectoryEntry {
@@ -333,12 +318,6 @@ export interface ConnectionState {
   // Available permission modes from server (CLI mode)
   availablePermissionModes: { id: string; label: string }[];
 
-  // Discovered host tmux sessions (from discover_sessions)
-  discoveredSessions: DiscoveredSession[] | null;
-
-  // Claude Code status bar metadata (PTY mode)
-  claudeStatus: ClaudeStatus | null;
-
   // Connected clients (multi-client awareness)
   myClientId: string | null;
   connectedClients: ConnectedClient[];
@@ -450,8 +429,6 @@ export interface ConnectionState {
   createSession: (name: string, cwd?: string) => void;
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
-  discoverSessions: () => void;
-  attachSession: (tmuxSession: string, name?: string) => void;
   forgetSession: () => void;
 
   // Slash commands

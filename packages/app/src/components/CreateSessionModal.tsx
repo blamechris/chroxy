@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,10 +8,9 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
-  ActivityIndicator,
   ScrollView,
 } from 'react-native';
-import { useConnectionStore, DiscoveredSession } from '../store/connection';
+import { useConnectionStore } from '../store/connection';
 import { FolderBrowser } from './FolderBrowser';
 import { COLORS } from '../constants/colors';
 
@@ -25,16 +24,11 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const [cwd, setCwd] = useState('');
   const createSession = useConnectionStore((s) => s.createSession);
   const sessions = useConnectionStore((s) => s.sessions);
-  const discoverSessions = useConnectionStore((s) => s.discoverSessions);
-  const attachSession = useConnectionStore((s) => s.attachSession);
-  const discoveredSessions = useConnectionStore((s) => s.discoveredSessions);
-  const [isDiscovering, setIsDiscovering] = useState(false);
   const [showBrowser, setShowBrowser] = useState(false);
 
   // Reset state when modal opens
   useEffect(() => {
     if (visible) {
-      setIsDiscovering(false);
       setShowBrowser(false);
     }
   }, [visible]);
@@ -51,43 +45,6 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const handleCancel = () => {
     setName('');
     setCwd('');
-    onClose();
-  };
-
-  const discoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const handleDiscover = () => {
-    // Clear any prior timeout (e.g. user tapped Scan multiple times)
-    if (discoverTimeoutRef.current) clearTimeout(discoverTimeoutRef.current);
-    setIsDiscovering(true);
-    discoverSessions();
-    // Safety timeout: clear loading state if no response arrives (e.g. session_error, disconnect)
-    discoverTimeoutRef.current = setTimeout(() => {
-      discoverTimeoutRef.current = null;
-      setIsDiscovering(false);
-    }, 10_000);
-  };
-
-  // Clear discovering state when results arrive
-  useEffect(() => {
-    if (discoveredSessions !== null) {
-      setIsDiscovering(false);
-      if (discoverTimeoutRef.current) {
-        clearTimeout(discoverTimeoutRef.current);
-        discoverTimeoutRef.current = null;
-      }
-    }
-  }, [discoveredSessions]);
-
-  // Clear timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (discoverTimeoutRef.current) clearTimeout(discoverTimeoutRef.current);
-    };
-  }, []);
-
-  const handleAttach = (session: DiscoveredSession) => {
-    attachSession(session.sessionName);
     onClose();
   };
 
@@ -118,7 +75,6 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
         ) : (
         <ScrollView contentContainerStyle={styles.scrollContent} bounces={false}>
           <View style={styles.modal}>
-            <>
             <Text style={styles.title}>New Session</Text>
 
             <Text style={styles.label}>Session Name</Text>
@@ -159,46 +115,6 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
               </TouchableOpacity>
             </View>
 
-            {/* Host session discovery */}
-            <View style={styles.divider} />
-            <Text style={styles.sectionTitle}>Attach to Host Session</Text>
-            <Text style={styles.sectionHint}>
-              Discover tmux sessions running Claude on the server
-            </Text>
-
-            <TouchableOpacity
-              style={styles.discoverButton}
-              onPress={handleDiscover}
-              disabled={isDiscovering}
-            >
-              {isDiscovering ? (
-                <ActivityIndicator size="small" color="#4a9eff" />
-              ) : (
-                <Text style={styles.discoverButtonText}>Scan for Sessions</Text>
-              )}
-            </TouchableOpacity>
-
-            {discoveredSessions !== null && discoveredSessions.length === 0 && (
-              <Text style={styles.noSessions}>
-                No Claude sessions found. Start Claude in a tmux session first.
-              </Text>
-            )}
-
-            {discoveredSessions !== null && discoveredSessions.length > 0 && (
-              <View style={styles.discoveredList}>
-                {discoveredSessions.map((s) => (
-                  <TouchableOpacity
-                    key={`${s.sessionName}-${s.pid}`}
-                    style={styles.discoveredItem}
-                    onPress={() => handleAttach(s)}
-                  >
-                    <Text style={styles.discoveredName} numberOfLines={1}>{s.sessionName}</Text>
-                    <Text style={styles.discoveredCwd} numberOfLines={1}>{s.cwd}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            )}
-            </>
           </View>
         </ScrollView>
         )}
@@ -308,63 +224,5 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontSize: 15,
     fontWeight: '600',
-  },
-  divider: {
-    height: 1,
-    backgroundColor: COLORS.borderPrimary,
-    marginVertical: 16,
-  },
-  sectionTitle: {
-    color: COLORS.textPrimary,
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  sectionHint: {
-    color: COLORS.textDisabled,
-    fontSize: 12,
-    marginBottom: 12,
-  },
-  discoverButton: {
-    paddingVertical: 10,
-    borderRadius: 10,
-    backgroundColor: COLORS.backgroundCard,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: COLORS.borderSecondary,
-    minHeight: 40,
-    justifyContent: 'center',
-  },
-  discoverButtonText: {
-    color: COLORS.accentBlue,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  noSessions: {
-    color: COLORS.textDisabled,
-    fontSize: 13,
-    textAlign: 'center',
-    marginTop: 10,
-  },
-  discoveredList: {
-    marginTop: 10,
-    gap: 6,
-  },
-  discoveredItem: {
-    backgroundColor: COLORS.backgroundInput,
-    borderRadius: 10,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: COLORS.accentGreenBorder,
-  },
-  discoveredName: {
-    color: COLORS.accentGreen,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  discoveredCwd: {
-    color: COLORS.textDim,
-    fontSize: 12,
-    marginTop: 2,
   },
 });

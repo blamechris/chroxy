@@ -9,7 +9,7 @@ import {
   LayoutChangeEvent,
 } from 'react-native';
 import { useConnectionStore, SessionInfo, SessionHealth } from '../store/connection';
-import { ICON_SQUARE, ICON_PLUS } from '../constants/icons';
+import { ICON_PLUS } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 
@@ -24,7 +24,6 @@ interface SessionPillProps {
 }
 
 function SessionPill({ session, isActive, health, hasNotification, onPress, onLongPress, onLayout }: SessionPillProps) {
-  const isPty = session.type === 'pty';
   const isCodex = session.provider === 'codex';
   const isCrashed = health === 'crashed';
   return (
@@ -32,8 +31,6 @@ function SessionPill({ session, isActive, health, hasNotification, onPress, onLo
       style={[
         styles.pill,
         isActive && styles.pillActive,
-        isPty && styles.pillPty,
-        isActive && isPty && styles.pillPtyActive,
         isCodex && styles.pillCodex,
         isActive && isCodex && styles.pillCodexActive,
         isCrashed && styles.pillCrashed,
@@ -45,7 +42,6 @@ function SessionPill({ session, isActive, health, hasNotification, onPress, onLo
       activeOpacity={0.7}
     >
       {isCrashed ? <View style={styles.crashDot} /> : hasNotification && !isActive ? <View style={styles.attentionDot} /> : session.isBusy && <View style={styles.busyDot} />}
-      {isPty && <Text style={[styles.ptyIcon, isActive && styles.ptyIconActive]}>{ICON_SQUARE} </Text>}
       {isCodex && <Text style={[styles.codexBadge, isActive && styles.codexBadgeActive]}>CX </Text>}
       <Text style={[styles.pillText, isActive && styles.pillTextActive, isActive && isCodex && styles.pillTextCodexActive, isCrashed && styles.pillTextCrashed]} numberOfLines={1}>
         {session.name}
@@ -262,26 +258,12 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accentBlueLight,
     borderColor: COLORS.accentBlueBorderStrong,
   },
-  pillPty: {
-    borderColor: COLORS.accentGreenBorder,
-  },
-  pillPtyActive: {
-    backgroundColor: COLORS.accentGreenLight,
-    borderColor: COLORS.accentGreenBorderStrong,
-  },
   pillCodex: {
     borderColor: COLORS.accentPurpleSubtle,
   },
   pillCodexActive: {
     backgroundColor: COLORS.accentPurpleLight,
     borderColor: COLORS.accentPurpleBorderStrong,
-  },
-  ptyIcon: {
-    color: COLORS.accentGreenBorderStrong,
-    fontSize: 8,
-  },
-  ptyIconActive: {
-    color: COLORS.accentGreen,
   },
   codexBadge: {
     color: COLORS.accentPurpleBorderStrong,

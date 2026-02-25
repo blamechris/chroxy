@@ -128,7 +128,6 @@ export function SessionScreen() {
     contextUsage,
     lastResultCost,
     lastResultDuration,
-    claudeStatus,
     setModel,
     setPermissionMode,
     confirmPermissionMode,
@@ -691,7 +690,7 @@ export function SessionScreen() {
       )}
 
       {/* Collapsible settings bar (CLI mode or PTY mode with status data) */}
-      {((isCliMode && !activeSession?.hasTerminal && (availableModels.length > 0 || lastResultCost != null || contextUsage)) || (activeSession?.hasTerminal && claudeStatus)) && (
+      {(isCliMode && !activeSession?.hasTerminal && (availableModels.length > 0 || lastResultCost != null || contextUsage)) && (
         <SettingsBar
           expanded={settingsExpanded}
           onToggle={() => {
@@ -707,7 +706,6 @@ export function SessionScreen() {
           sessionCost={sessionCost}
           costBudget={costBudget}
           contextUsage={contextUsage}
-          claudeStatus={claudeStatus}
           sessionCwd={sessionCwd}
           serverMode={serverMode}
           isIdle={isIdle}

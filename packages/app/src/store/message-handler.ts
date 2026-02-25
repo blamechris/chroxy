@@ -30,7 +30,6 @@ import type {
   CustomAgent,
   DevPreview,
   DiffFile,
-  DiscoveredSession,
   DirectoryEntry,
   FileEntry,
   McpServer,
@@ -787,31 +786,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'discovered_sessions':
-      if (Array.isArray(msg.tmux)) {
-        set({ discoveredSessions: msg.tmux as DiscoveredSession[] });
-        if ((msg.tmux as DiscoveredSession[]).length > 0) {
-          const names = (msg.tmux as DiscoveredSession[]).map((s: DiscoveredSession) => s.sessionName).join(', ');
-          const discoveryMsg: ChatMessage = {
-            id: nextMessageId('discovery'),
-            type: 'system',
-            content: (msg.tmux as DiscoveredSession[]).length === 1
-              ? `New Claude session found: ${names}. Open session picker to attach.`
-              : `${(msg.tmux as DiscoveredSession[]).length} new Claude sessions found: ${names}. Open session picker to attach.`,
-            timestamp: Date.now(),
-          };
-          const activeId = get().activeSessionId;
-          if (activeId && get().sessionStates[activeId]) {
-            updateActiveSession((ss) => ({
-              messages: [...ss.messages, discoveryMsg],
-            }));
-          } else {
-            get().addMessage(discoveryMsg);
-          }
-        }
-      }
-      break;
-
     // --- History replay ---
 
     case 'history_replay_start':
@@ -1173,21 +1147,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       break;
 
-    case 'status_update': {
-      const statusSid = (msg.sessionId as string) || get().activeSessionId;
-      if (statusSid && statusSid !== get().activeSessionId) break;
-      set({
-        claudeStatus: {
-          cost: msg.cost as number,
-          model: msg.model as string,
-          messageCount: msg.messageCount as number,
-          contextTokens: msg.contextTokens as string,
-          contextPercent: msg.contextPercent as number,
-          compactPercent: (msg.compactPercent as number) ?? null,
-        },
-      });
+    case 'status_update':
+      // PTY mode status_update — no longer used in CLI-only mode
       break;
-    }
 
     case 'raw':
       get().appendTerminalData(msg.data as string);

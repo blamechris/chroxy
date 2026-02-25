@@ -265,22 +265,6 @@ describe('EventNormalizer', () => {
     })
   })
 
-  // ---- EVENT_MAP: raw ----
-
-  describe('raw event', () => {
-    it('emits raw + raw_background with filters in multi mode', () => {
-      const result = normalizer.normalize('raw', 'terminal-data', makeCtx())
-      assert.equal(result.messages.length, 2)
-      assert.equal(result.messages[0].msg.type, 'raw')
-      assert.equal(result.messages[1].msg.type, 'raw_background')
-      // raw filter: terminal mode + active session
-      assert.ok(result.messages[0].filter({ mode: 'terminal', activeSessionId: 'sess-1' }))
-      assert.ok(!result.messages[0].filter({ mode: 'chat', activeSessionId: 'sess-1' }))
-      assert.ok(!result.messages[0].filter({ mode: 'terminal', activeSessionId: 'other' }))
-    })
-
-  })
-
   // ---- EVENT_MAP: status_update ----
 
   describe('status_update event', () => {
@@ -406,7 +390,7 @@ describe('EVENT_MAP', () => {
     const expectedEvents = [
       'ready', 'conversation_id', 'stream_start', 'stream_delta', 'stream_end',
       'message', 'tool_start', 'tool_result', 'agent_spawned', 'agent_completed',
-      'mcp_servers', 'plan_started', 'plan_ready', 'result', 'raw', 'status_update',
+      'mcp_servers', 'plan_started', 'plan_ready', 'result', 'status_update',
       'user_question', 'permission_request', 'error',
     ]
     for (const event of expectedEvents) {
@@ -432,7 +416,6 @@ describe('EVENT_MAP', () => {
       plan_started: {},
       plan_ready: { allowedPrompts: [] },
       result: { cost: 0, duration: 0, usage: {} },
-      raw: 'data',
       status_update: { cost: '0', model: 'm', messageCount: 0, contextTokens: 0, contextPercent: 0 },
       user_question: { toolUseId: 'tu1', questions: [] },
       permission_request: { requestId: 'r1', tool: 'Bash', description: 'd', input: 'i', remainingMs: 60000 },
