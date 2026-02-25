@@ -27,6 +27,10 @@
     "ws": "^8.16.0",
     "zod": "^4.3.6"
   },
+  "devDependencies": {
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.10.0"
+  },
   "engines": {
     "node": ">=22"
   },

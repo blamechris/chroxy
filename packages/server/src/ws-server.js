@@ -405,6 +405,47 @@ export class WsServer {
         return
       }
 
+      // Static assets for dashboard (xterm.js, etc.)
+      if (req.method === 'GET' && req.url?.startsWith('/assets/')) {
+        // Resolve from local or hoisted (monorepo root) node_modules
+        const readModule = (pkg, file) => {
+          const paths = [
+            join(__dirname, '../node_modules', pkg, file),
+            join(__dirname, '../../../node_modules', pkg, file),
+          ]
+          for (const p of paths) {
+            try { return readFileSync(p) } catch {}
+          }
+          return null
+        }
+        const assetMap = {
+          '/assets/xterm/xterm.js': { read: () => readModule('@xterm/xterm', 'lib/xterm.js'), type: 'application/javascript' },
+          '/assets/xterm/xterm.css': { read: () => readModule('@xterm/xterm', 'css/xterm.css'), type: 'text/css' },
+          '/assets/xterm/addon-fit.js': { read: () => readModule('@xterm/addon-fit', 'lib/addon-fit.js'), type: 'application/javascript' },
+        }
+        const assetPath = req.url.split('?')[0]
+        const asset = assetMap[assetPath]
+        if (asset) {
+          try {
+            const content = asset.read()
+            if (!content) throw new Error('Module not found')
+            res.writeHead(200, {
+              'Content-Type': asset.type,
+              'Cache-Control': 'public, max-age=86400',
+              'X-Content-Type-Options': 'nosniff',
+            })
+            res.end(content)
+          } catch (e) {
+            res.writeHead(404)
+            res.end('Asset not found')
+          }
+        } else {
+          res.writeHead(404)
+          res.end('Not found')
+        }
+        return
+      }
+
       // Dashboard endpoint
       if (req.method === 'GET' && req.url?.startsWith('/dashboard')) {
         const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)

@@ -206,14 +206,21 @@ fn update_menu_state(app: &tauri::AppHandle, running: bool) {
 
 fn handle_start(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
-    let result = {
+    let (result, port, token) = {
         let mut mgr = lock_or_recover(&state);
-        mgr.start()
+        let r = mgr.start();
+        let p = mgr.port();
+        let t = mgr.token();
+        (r, p, t)
     };
 
     match result {
         Ok(()) => {
             update_menu_state(app, true);
+
+            // Show loading page immediately with port/token so it can poll for health
+            window::show_fallback(app, Some(port), token.as_deref());
+
             let app_handle = app.clone();
             std::thread::spawn(move || {
                 for _ in 0..60 {
@@ -249,7 +256,7 @@ fn handle_stop(app: &tauri::AppHandle) {
     mgr.stop();
     drop(mgr);
     update_menu_state(app, false);
-    window::show_fallback(app);
+    window::show_fallback(app, None, None);
 }
 
 fn handle_restart(app: &tauri::AppHandle) {
@@ -273,7 +280,7 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let mgr = lock_or_recover(&state);
     if !mgr.is_running() {
-        window::show_fallback(app);
+        window::show_fallback(app, None, None);
         return;
     }
 

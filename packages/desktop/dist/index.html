@@ -8,7 +8,7 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #1a1a2e;
+      background: #0f0f1a;
       color: #e0e0e0;
       display: flex;
       align-items: center;
@@ -18,45 +18,209 @@
     .container {
       text-align: center;
       padding: 2rem;
+      max-width: 420px;
     }
-    h1 {
-      font-size: 1.5rem;
-      margin-bottom: 1rem;
-      color: #fff;
+    .logo {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #4a9eff;
+      margin-bottom: 1.5rem;
     }
-    p {
-      font-size: 0.95rem;
-      color: #999;
-      line-height: 1.6;
-    }
-    .status {
-      display: inline-block;
-      width: 10px;
-      height: 10px;
+
+    /* Spinner */
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid #252540;
+      border-top-color: #4a9eff;
       border-radius: 50%;
-      background: #666;
-      margin-right: 8px;
-      vertical-align: middle;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 1.5rem;
     }
-    .hint {
-      margin-top: 1.5rem;
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Stages */
+    .stages {
+      list-style: none;
+      text-align: left;
+      margin: 0 auto 1.5rem;
+      max-width: 280px;
+    }
+    .stages li {
+      padding: 6px 0;
+      font-size: 0.9rem;
+      color: #444;
+      transition: color 0.3s;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .stages li.active {
+      color: #4a9eff;
+    }
+    .stages li.done {
+      color: #22c55e;
+    }
+    .stages li .check {
+      display: inline-block;
+      width: 16px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    /* Error state */
+    .error-box {
+      display: none;
+      background: #1e1215;
+      border: 1px solid #4a2020;
+      border-radius: 8px;
+      padding: 16px;
+      text-align: left;
+      margin-top: 1rem;
+    }
+    .error-box.visible { display: block; }
+    .error-box h3 {
+      color: #f87171;
+      font-size: 0.95rem;
+      margin-bottom: 8px;
+    }
+    .error-box p {
       font-size: 0.85rem;
-      color: #666;
+      color: #999;
+      line-height: 1.5;
+      margin-bottom: 6px;
     }
     code {
-      background: #2a2a3e;
+      background: #1a1a2e;
       padding: 2px 6px;
       border-radius: 3px;
       font-size: 0.85rem;
+      color: #c8d0e0;
     }
+    .status-text {
+      font-size: 0.95rem;
+      color: #888;
+      margin-bottom: 1rem;
+    }
+    .hidden { display: none; }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1><span class="status"></span>Server Not Running</h1>
-    <p>The Chroxy server is not currently running.</p>
-    <p>Use the tray menu to start the server, or run:</p>
-    <p class="hint"><code>npx chroxy start</code></p>
+    <div class="logo">Chroxy</div>
+    <div id="spinner" class="spinner"></div>
+    <div id="status-text" class="status-text">Starting...</div>
+
+    <ul class="stages">
+      <li id="stage-1" class="active">
+        <span class="check">&#9679;</span> Starting server...
+      </li>
+      <li id="stage-2">
+        <span class="check">&#9679;</span> Waiting for health check...
+      </li>
+      <li id="stage-3">
+        <span class="check">&#9679;</span> Almost ready...
+      </li>
+    </ul>
+
+    <div id="error-box" class="error-box">
+      <h3>Server failed to start</h3>
+      <p>The server didn't respond within 30 seconds.</p>
+      <p>Try starting manually: <code>npx chroxy start</code></p>
+      <p>Check the tray menu for error details.</p>
+      <p style="margin-top:8px;color:#666;font-size:0.8rem;">Requires Node 22 &mdash; <code>node@22</code></p>
+    </div>
   </div>
+
+  <script>
+  (function() {
+    var params = new URLSearchParams(window.location.search);
+    var port = params.get('port') || '8765';
+    var token = params.get('token') || '';
+    var startTime = Date.now();
+    var polling = false;
+
+    var stage1 = document.getElementById('stage-1');
+    var stage2 = document.getElementById('stage-2');
+    var stage3 = document.getElementById('stage-3');
+    var spinner = document.getElementById('spinner');
+    var statusText = document.getElementById('status-text');
+    var errorBox = document.getElementById('error-box');
+
+    function setStage(n) {
+      [stage1, stage2, stage3].forEach(function(el, i) {
+        if (i + 1 < n) {
+          el.className = 'done';
+          el.querySelector('.check').innerHTML = '&#10003;';
+        } else if (i + 1 === n) {
+          el.className = 'active';
+        } else {
+          el.className = '';
+        }
+      });
+    }
+
+    function showError() {
+      polling = false;
+      spinner.style.display = 'none';
+      statusText.textContent = 'Server not responding';
+      statusText.style.color = '#f87171';
+      errorBox.className = 'error-box visible';
+    }
+
+    // Callable from Tauri Rust via win.eval()
+    window.__startPolling = function(p, t) {
+      port = String(p);
+      token = t || '';
+      startTime = Date.now();
+      // Reset UI
+      spinner.style.display = '';
+      statusText.textContent = 'Starting...';
+      statusText.style.color = '#888';
+      errorBox.className = 'error-box';
+      setStage(1);
+      if (!polling) pollHealth();
+    };
+
+    function pollHealth() {
+      polling = true;
+      fetch('http://localhost:' + port + '/')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.status === 'ok') {
+            setStage(3);
+            statusText.textContent = 'Connected!';
+            statusText.style.color = '#22c55e';
+            spinner.style.display = 'none';
+            setTimeout(function() {
+              var dashUrl = '/dashboard';
+              if (token) dashUrl += '?token=' + encodeURIComponent(token);
+              window.location.href = 'http://localhost:' + port + dashUrl;
+            }, 300);
+          } else if (data.status === 'restarting') {
+            statusText.textContent = 'Server restarting...';
+            setTimeout(pollHealth, 1000);
+          } else {
+            setTimeout(pollHealth, 1000);
+          }
+        })
+        .catch(function() {
+          var elapsed = Date.now() - startTime;
+          if (elapsed > 2000) setStage(2);
+          if (elapsed > 10000) setStage(3);
+          if (elapsed > 30000) {
+            showError();
+            return;
+          }
+          setTimeout(pollHealth, 1000);
+        });
+    }
+
+    setStage(1);
+    pollHealth();
+  })();
+  </script>
 </body>
 </html>
