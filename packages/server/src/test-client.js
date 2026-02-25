@@ -5,7 +5,6 @@
  * This lets you validate the server works before building the mobile app.
  */
 import WebSocket from "ws";
-import readline from "readline";
 import "dotenv/config";
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from "./crypto.js";
 
@@ -19,7 +18,6 @@ if (!url) {
 }
 
 const ws = new WebSocket(url);
-const _rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
 /** E2E encryption state */
 let encryptionState = null;
