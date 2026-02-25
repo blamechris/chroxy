@@ -2,6 +2,34 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { getDashboardHtml } from '../src/dashboard.js'
 
+/**
+ * Assert that html contains the given string or matches the given regex.
+ * @param {string} html - The HTML string to search
+ * @param {string|RegExp} pattern - Substring or regex to match
+ * @param {string} message - Assertion failure message
+ */
+function assertHtml(html, pattern, message) {
+  if (typeof pattern === 'string') {
+    assert.ok(html.includes(pattern), message)
+  } else {
+    assert.ok(pattern.test(html), message)
+  }
+}
+
+/**
+ * Assert that html does NOT contain the given string or match the given regex.
+ * @param {string} html - The HTML string to search
+ * @param {string|RegExp} pattern - Substring or regex that should NOT match
+ * @param {string} message - Assertion failure message
+ */
+function assertHtmlNot(html, pattern, message) {
+  if (typeof pattern === 'string') {
+    assert.ok(!html.includes(pattern), message)
+  } else {
+    assert.ok(!pattern.test(html), message)
+  }
+}
+
 describe('getDashboardHtml', () => {
   it('returns valid HTML document', () => {
     const html = getDashboardHtml(8765, 'test-token', false)
@@ -219,13 +247,13 @@ describe('#762 — querySelector calls use sanitized IDs', () => {
 
   it('does not use raw IDs in data-msg-id selectors', () => {
     // Ensure no unsanitized data-msg-id selectors remain
-    const msgIdQueries = html.match(/querySelector\('[^']*data-msg-id[^']*'\s*\+\s*(?!sanitizeId)\w/g)
-    assert.ok(!msgIdQueries, 'all data-msg-id querySelector calls should use sanitizeId')
+    assertHtmlNot(html, /querySelector\('[^']*data-msg-id[^']*'\s*\+\s*(?!sanitizeId)\w/g,
+      'all data-msg-id querySelector calls should use sanitizeId')
   })
 
   it('does not use raw IDs in data-tool-id selectors', () => {
-    const toolIdQueries = html.match(/querySelector\('[^']*data-tool-id[^']*'\s*\+\s*(?!sanitizeId)\w/g)
-    assert.ok(!toolIdQueries, 'all data-tool-id querySelector calls should use sanitizeId')
+    assertHtmlNot(html, /querySelector\('[^']*data-tool-id[^']*'\s*\+\s*(?!sanitizeId)\w/g,
+      'all data-tool-id querySelector calls should use sanitizeId')
   })
 
   it('stores sanitized IDs in data-msg-id attributes', () => {
@@ -1163,6 +1191,61 @@ describe('#886 — reconnect backoff', () => {
   it('gets reconnectRetryBtn element by ID', () => {
     assert.ok(html.includes('document.getElementById("reconnect-retry-btn")'),
       'should get retry button element')
+  })
+})
+
+describe('#891 — negative assertions for week 2 features', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('syntax highlighting falls back to plain for unknown languages', () => {
+    // tokenize returns plain tokens when lang has no rules (getSyntaxRules returns null)
+    assertHtml(html, '!rules) return [{ text: code, type: "plain" }]',
+      'tokenize should return plain tokens when language rules are not found')
+  })
+
+  it('syntax highlighting falls back to plain when lang is falsy', () => {
+    assertHtml(html, '!lang || code.length > MAX_HIGHLIGHT_LENGTH) return [{ text: code, type: "plain" }]',
+      'tokenize should return plain tokens when lang is falsy')
+  })
+
+  it('countdown is hidden (not just empty) when remainingMs is non-numeric', () => {
+    // The else branch (no remainingMs) sets display:none, not just leaves it empty
+    const hideBranch = html.match(/No remainingMs[\s\S]*?display = "none"/) ||
+                        html.match(/} else \{[\s\S]*?countdownEl\.style\.display = "none"/)
+    assert.ok(hideBranch,
+      'countdown should be display:none when remainingMs is not a number, not just empty')
+  })
+
+  it('retry button is explicitly hidden during active backoff', () => {
+    // Before starting backoff loop, retry button is hidden
+    assertHtml(html, 'reconnectRetryBtn.classList.add("hidden")',
+      'retry button should be hidden when backoff starts (not just on initial render)')
+  })
+
+  it('model badge is not rendered when s.model is falsy', () => {
+    // The s.model check is an if guard — no badge created when falsy
+    const modelGuard = html.match(/if \(s\.model\)/)
+    assert.ok(modelGuard,
+      'model badge rendering should be guarded by if (s.model)')
+  })
+
+  it('busy dot is not rendered when s.isBusy is false', () => {
+    // The s.isBusy check is an if guard — no dot created when false
+    const busyGuard = html.match(/if \(s\.isBusy\)/)
+    assert.ok(busyGuard,
+      'busy dot rendering should be guarded by if (s.isBusy)')
+  })
+
+  it('cwd span is not rendered when s.cwd is falsy', () => {
+    const cwdGuard = html.match(/if \(s\.cwd\)/)
+    assert.ok(cwdGuard,
+      'cwd span rendering should be guarded by if (s.cwd)')
+  })
+
+  it('countdown interval is not created for non-numeric remainingMs', () => {
+    // typeof check ensures only numbers trigger setInterval
+    assertHtml(html, 'typeof remainingMs === "number"',
+      'interval creation should be guarded by typeof check')
   })
 })
 
