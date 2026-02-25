@@ -14,36 +14,29 @@ Essential development notes for working with Claude on Chroxy.
 chroxy/
 ├── packages/
 │   ├── server/     # Node.js daemon + CLI (ES modules, no TypeScript)
-│   └── app/        # React Native mobile app (TypeScript, Expo 54)
+│   ├── app/        # React Native mobile app (TypeScript, Expo 54)
+│   └── desktop/    # Tauri tray app (Rust + web dashboard)
 ├── docs/           # Setup guides, architecture
 └── scripts/        # Install helpers
 ```
 
-**Current Status (v0.1.0):**
-- Server works: CLI headless mode (default), PTY/tmux mode, WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, session management, model switching, auto-discovery, plan mode detection, background agent tracking
+**Current Status (v0.2.0):**
+- Server works: CLI headless mode, WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, session management, model switching, plan mode detection, background agent tracking, web dashboard
+- Desktop works: Tauri tray app, web dashboard with syntax highlighting, xterm.js terminal, notifications, session tabs
 - App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal, xterm.js terminal emulation (WebView), plan approval UI, agent monitoring, settings screen, voice-to-text input
 - **Dev build required** — `expo-speech-recognition` native module means Expo Go no longer works. Use `npx expo run:ios` or `npx expo run:android`.
-- Priority: permission handling UI improvements
 
 ## Critical Dev Notes
 
 ### Node 22 Required
 
-**node-pty does not compile on Node 25.** Always use Node 22:
+Node 22 is the minimum supported version. Always use Node 22:
 
 ```bash
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 ```
 
 Or prefix any npm/node commands with the Node 22 path when running the server.
-
-### tmux Dependency (PTY mode only)
-
-tmux is only required when using `--terminal` flag (PTY mode). The default CLI headless mode does not require tmux.
-
-```bash
-brew install tmux
-```
 
 ### Cloudflare Tunnel Dependency
 
@@ -97,7 +90,7 @@ Commit messages should be clean and professional:
 ```
 feat(server): add graceful shutdown on SIGTERM
 
-- Clean up tmux session on exit
+- Clean up child processes on exit
 - Close WebSocket connections
 ```
 
@@ -174,11 +167,11 @@ When `gh pr merge` fails with "base branch policy prohibits the merge":
 
 ## Architecture
 
-Two server modes, both stream through `ws-server.js` → Cloudflare tunnel → mobile app:
+Server streams through `ws-server.js` → Cloudflare tunnel → mobile app / desktop dashboard:
 
-- **CLI Headless (default):** `server-cli.js` → `sdk-session.js` (Agent SDK) or `cli-session.js` (legacy `claude -p`). No tmux/node-pty needed. Provider selected via `providers.js` registry.
-- **PTY/tmux (`--terminal`):** `server.js` → `pty-manager.js` + `output-parser.js`. Spawns tmux session, parses raw ANSI output.
+- **Server:** `server-cli.js` → `sdk-session.js` (Agent SDK) or `cli-session.js` (legacy `claude -p`). Provider selected via `providers.js` registry.
 - **Shared:** `ws-server.js` (WebSocket + auth + E2E encryption), `tunnel.js` (Cloudflare), `session-manager.js`, `providers.js`, `config.js`, `push.js`
+- **Desktop:** Tauri tray app wrapping the web dashboard served by the server
 - **App:** ConnectScreen → SessionScreen (ChatView + TerminalView), Zustand store (`connection.ts`)
 
 For component tables, WS protocol messages, data flow diagrams, and file listings: see `docs/architecture/reference.md`
@@ -291,5 +284,5 @@ For detailed component tables, WebSocket protocol messages, file listings, and s
 
 ---
 
-*Last Updated: 2026-02-15*
-*Version: 0.1.0*
+*Last Updated: 2026-02-24*
+*Version: 0.2.0*

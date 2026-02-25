@@ -14,28 +14,26 @@ import { toShortModelId } from './models.js'
  *
  * ctx shape:
  *   { sessionId, mode, getSessionEntry, listSessions, getSessionContext }
- *   mode: 'multi' | 'legacy-cli' | 'pty'
+ *   mode: 'multi' | 'legacy-cli'
  */
 
 const EVENT_MAP = {
   ready: (data, ctx) => {
     const messages = [{ msg: { type: 'claude_ready' } }]
-    if (ctx.mode !== 'pty') {
-      const entry = ctx.getSessionEntry?.()
-      if (entry) {
-        messages.push({
-          msg: {
-            type: 'model_changed',
-            model: entry.session.model ? toShortModelId(entry.session.model) : null,
-          },
-        })
-        messages.push({
-          msg: {
-            type: 'permission_mode_changed',
-            mode: entry.session.permissionMode || 'approve',
-          },
-        })
-      }
+    const entry = ctx.getSessionEntry?.()
+    if (entry) {
+      messages.push({
+        msg: {
+          type: 'model_changed',
+          model: entry.session.model ? toShortModelId(entry.session.model) : null,
+        },
+      })
+      messages.push({
+        msg: {
+          type: 'permission_mode_changed',
+          mode: entry.session.permissionMode || 'approve',
+        },
+      })
     }
     return { messages }
   },
@@ -92,11 +90,7 @@ const EVENT_MAP = {
       options: data.options,
       timestamp: data.timestamp,
     }
-    // PTY mode: filter messages to only reach clients connected after the message was generated
-    const filter = ctx.mode === 'pty'
-      ? (client) => client.mode === 'chat' && data.timestamp > (client.authTime || 0)
-      : undefined
-    return { messages: [{ msg, filter }] }
+    return { messages: [{ msg }] }
   },
 
   tool_start: (data) => {
@@ -163,23 +157,12 @@ const EVENT_MAP = {
     messages: [{ msg: { type: 'budget_exceeded', sessionCost: data.sessionCost, budget: data.budget, percent: data.percent, message: data.message } }],
   }),
 
-  raw: (data, ctx) => {
-    if (ctx.mode === 'multi') {
-      return {
-        messages: [
-          { msg: { type: 'raw', data }, filter: (client) => client.mode === 'terminal' && client.activeSessionId === ctx.sessionId },
-          { msg: { type: 'raw_background', data }, filter: (client) => client.mode === 'chat' && client.activeSessionId === ctx.sessionId },
-        ],
-      }
-    }
-    // PTY mode
-    return {
-      messages: [
-        { msg: { type: 'raw', data }, filter: (client) => client.mode === 'terminal' },
-        { msg: { type: 'raw_background', data }, filter: (client) => client.mode === 'chat' },
-      ],
-    }
-  },
+  raw: (data, ctx) => ({
+    messages: [
+      { msg: { type: 'raw', data }, filter: (client) => client.mode === 'terminal' && client.activeSessionId === ctx.sessionId },
+      { msg: { type: 'raw_background', data }, filter: (client) => client.mode === 'chat' && client.activeSessionId === ctx.sessionId },
+    ],
+  }),
 
   status_update: (data, ctx) => {
     const formatLog = `[ws] Broadcasting status_update: $${data.cost} | ${data.model} | msgs:${data.messageCount} | ${data.contextTokens} (${data.contextPercent}%)`
@@ -232,10 +215,6 @@ const EVENT_MAP = {
     }],
   }),
 
-  // PTY-only: claude_ready from output parser
-  claude_ready: () => ({
-    messages: [{ msg: { type: 'claude_ready' } }],
-  }),
 }
 
 /**

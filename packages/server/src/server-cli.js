@@ -57,7 +57,6 @@ export async function startCliServer(config) {
   }
 
   // 1. Create session manager
-  const discoveryIntervalMs = config.discoveryInterval ? config.discoveryInterval * 1000 : 45000
   const sessionManager = new SessionManager({
     maxSessions: 5,
     port: PORT,
@@ -65,7 +64,6 @@ export async function startCliServer(config) {
     defaultCwd: config.cwd || process.cwd(),
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
-    discoveryIntervalMs,
     providerType,
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],
@@ -80,38 +78,9 @@ export async function startCliServer(config) {
     console.log(`[cli] Restored sessions from previous server instance`)
   }
 
-  // 3. Auto-discover tmux sessions running Claude (if no restore)
+  // 3. Create default session if no restore
   if (!defaultSessionId) {
-    if (config.noDiscovery) {
-      console.log('[cli] Tmux auto-discovery disabled (--no-discovery)')
-      defaultSessionId = sessionManager.createSession({ name: 'Default' })
-    } else {
-      const discovered = sessionManager.discoverSessions()
-      if (discovered.length > 0) {
-        console.log(`[cli] Found ${discovered.length} tmux session(s) running Claude`)
-        for (const tmux of discovered) {
-          try {
-            const sid = await sessionManager.attachSession({ tmuxSession: tmux.sessionName, name: tmux.sessionName })
-            if (!defaultSessionId) defaultSessionId = sid
-            console.log(`[cli] Attached to tmux session: ${tmux.sessionName}`)
-          } catch (err) {
-            // Log brief message — full stack traces for PTY failures are noise in CLI mode
-            const reason = err.details?.originalError?.message || err.message
-            console.log(`[cli] Skipping tmux session '${tmux.sessionName}': ${reason}`)
-          }
-        }
-      }
-
-      // Fall back to a default CLI session if no sessions attached (none found or all failed)
-      if (!defaultSessionId) {
-        if (discovered.length > 0) {
-          console.log('[cli] All tmux attachments failed, creating default CLI session')
-        } else {
-          console.log('[cli] No tmux sessions found, creating default CLI session')
-        }
-        defaultSessionId = sessionManager.createSession({ name: 'Default' })
-      }
-    }
+    defaultSessionId = sessionManager.createSession({ name: 'Default' })
   }
 
   let wsServer
@@ -360,11 +329,6 @@ export async function startCliServer(config) {
   }
 
   console.log('\nPress Ctrl+C to stop.\n')
-
-  // 8. Start auto-discovery of new tmux sessions
-  if (!config.noDiscovery) {
-    sessionManager.startAutoDiscovery()
-  }
 
   // Graceful shutdown
   const shutdown = async (signal) => {

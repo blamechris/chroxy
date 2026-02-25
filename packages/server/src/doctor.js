@@ -23,7 +23,7 @@ export async function runDoctorChecks({ port, verbose } = {}) {
   if (major === 22) {
     checks.push({ name: 'Node.js', status: 'pass', message: `v${nodeVersion}` })
   } else if (major > 22) {
-    checks.push({ name: 'Node.js', status: 'warn', message: `v${nodeVersion} — node-pty requires Node 22 (PTY mode only)` })
+    checks.push({ name: 'Node.js', status: 'warn', message: `v${nodeVersion} — Node 22 is recommended` })
   } else {
     checks.push({ name: 'Node.js', status: 'fail', message: `v${nodeVersion} — Node 22 required` })
   }
@@ -37,16 +37,7 @@ export async function runDoctorChecks({ port, verbose } = {}) {
       : 'see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/',
   }))
 
-  // 3. tmux (optional — only needed for PTY mode)
-  checks.push(checkBinary('tmux', ['-V'], {
-    parseVersion: (out) => `${out.trim()} (optional — PTY mode only)`,
-    required: false,
-    installHint: isMac ? 'brew install tmux'
-      : isLinux ? 'install via your package manager (e.g. apt install tmux)'
-      : 'install tmux for your platform',
-  }))
-
-  // 4. claude CLI
+  // 3. claude CLI
   checks.push(checkBinary('claude', ['--version'], {
     parseVersion: (out) => out.trim().split('\n')[0],
     required: true,

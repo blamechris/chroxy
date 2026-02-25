@@ -176,7 +176,7 @@ describe('SessionManager.serializeState', () => {
     assert.equal(existsSync(stateFile + '.tmp'), false, '.tmp file should not remain')
   })
 
-  it('skips PTY sessions', () => {
+  it('serializes CLI sessions', () => {
     const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
 
     const cliSession = new EventEmitter()
@@ -184,15 +184,10 @@ describe('SessionManager.serializeState', () => {
     cliSession.permissionMode = 'approve'
     Object.defineProperty(cliSession, 'resumeSessionId', { get: () => null })
     cliSession.destroy = () => {}
-    mgr._sessions.set('cli-1', { session: cliSession, type: 'cli', name: 'CLI', cwd: '/tmp' })
-
-    const ptySession = new EventEmitter()
-    ptySession.model = null
-    ptySession.destroy = () => {}
-    mgr._sessions.set('pty-1', { session: ptySession, type: 'pty', name: 'PTY', cwd: '/tmp' })
+    mgr._sessions.set('cli-1', { session: cliSession, name: 'CLI', cwd: '/tmp' })
 
     const state = mgr.serializeState()
-    assert.equal(state.sessions.length, 1, 'PTY session should be skipped')
+    assert.equal(state.sessions.length, 1)
     assert.equal(state.sessions[0].sdkSessionId, null)
   })
 

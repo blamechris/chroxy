@@ -8,6 +8,10 @@ import readline from 'readline'
 import { validateConfig, mergeConfig } from './config.js'
 import { isWindows, defaultShell, writeFileRestricted } from './platform.js'
 import { parseTunnelArg, getTunnel, listTunnels } from './tunnel/registry.js'
+import { createRequire } from 'module'
+
+const require = createRequire(import.meta.url)
+const { version } = require('../package.json')
 
 const CONFIG_DIR = join(homedir(), '.chroxy')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -17,7 +21,7 @@ const program = new Command()
 program
   .name('chroxy')
   .description('Remote terminal for Claude Code from your phone')
-  .version('0.1.0')
+  .version(version)
 
 /**
  * Interactive prompt helper
@@ -71,15 +75,10 @@ program
     const portInput = await prompt('   Port (default 8765): ')
     const port = parseInt(portInput, 10) || 8765
 
-    // tmux session name (only used with --terminal flag)
-    console.log('\n2. tmux session name (only for --terminal mode)')
-    const sessionName = (await prompt('   Session (default \'claude-code\'): ')) || 'claude-code'
-
     // Build config
     const config = {
       apiToken,
       port,
-      tmuxSession: sessionName,
       shell: defaultShell(),
     }
 
@@ -98,7 +97,7 @@ program
  * Shared between `chroxy start` and `chroxy dev` commands.
  *
  * @param {object} options - Commander options object
- * @param {object} [extraOverrides] - Additional CLI overrides (e.g. terminal, discoveryInterval)
+ * @param {object} [extraOverrides] - Additional CLI overrides
  * @returns {object} Merged and validated config
  */
 function loadAndMergeConfig(options, extraOverrides = {}) {
@@ -128,7 +127,6 @@ function loadAndMergeConfig(options, extraOverrides = {}) {
 
   // Build CLI overrides from common command-line flags
   const cliOverrides = { ...extraOverrides }
-  if (options.resume !== undefined) cliOverrides.resume = options.resume
   if (options.cwd !== undefined) cliOverrides.cwd = options.cwd
   if (options.model !== undefined) cliOverrides.model = options.model
   if (options.allowedTools !== undefined) {
@@ -145,9 +143,7 @@ function loadAndMergeConfig(options, extraOverrides = {}) {
 
   const defaults = {
     port: 8765,
-    tmuxSession: 'claude-code',
     shell: defaultShell(),
-    resume: false,
     noAuth: false,
   }
 
@@ -175,7 +171,6 @@ function loadAndMergeConfig(options, extraOverrides = {}) {
   // Set environment variables for backward compatibility with server code
   if (config.apiToken) process.env.API_TOKEN = config.apiToken
   if (config.port) process.env.PORT = String(config.port)
-  if (config.tmuxSession) process.env.TMUX_SESSION = config.tmuxSession
   if (config.shell) process.env.SHELL_CMD = config.shell
 
   return config
@@ -189,27 +184,20 @@ function loadAndMergeConfig(options, extraOverrides = {}) {
  * 2. Environment variables (PORT, API_TOKEN, etc.)
  * 3. Config file (~/.chroxy/config.json)
  * 4. Defaults
- *
- * Default: CLI headless mode (claude -p, no tmux/PTY needed)
- * --terminal: Legacy PTY/tmux mode (requires node-pty + tmux)
  */
 program
   .command('start')
   .description('Start the Chroxy server')
   .option('-c, --config <path>', 'Path to config file', CONFIG_FILE)
-  .option('-t, --terminal', '[DEPRECATED] Use PTY/tmux mode instead of CLI headless mode')
-  .option('-r, --resume', '[DEPRECATED] Resume a PTY-mode session (PTY mode is deprecated)')
-  .option('--cwd <path>', 'Working directory for Claude (CLI mode)')
-  .option('--model <model>', 'Model to use (CLI mode)')
-  .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve (CLI mode)')
-  .option('--discovery-interval <seconds>', '[DEPRECATED] Auto-discovery polling interval in seconds (PTY mode)')
+  .option('--cwd <path>', 'Working directory for Claude')
+  .option('--model <model>', 'Model to use')
+  .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve')
   .option('--max-restarts <count>', 'Max supervisor restart attempts before exit (default: 10)')
   .option('--tunnel <mode>', 'Tunnel: quick (default), named, none, or provider:mode (e.g., cloudflare:named)')
   .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
   .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
   .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
   .option('--no-encrypt', 'Disable end-to-end encryption (dev/testing only)')
-  .option('--no-discovery', '[DEPRECATED] Skip tmux auto-discovery (PTY mode only)')
   .option('--no-supervisor', 'Disable supervisor mode (direct server, no auto-restart)')
   .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
   .option('--provider <name>', 'Session provider to use (e.g. claude-sdk, claude-cli)')
@@ -221,7 +209,6 @@ program
   .action(async (options) => {
     // Build start-specific overrides
     const extraOverrides = {}
-    if (options.terminal !== undefined) extraOverrides.terminal = options.terminal
     if (options.maxPayload !== undefined) {
       const parsed = parseInt(options.maxPayload, 10)
       extraOverrides.maxPayload = Number.isNaN(parsed) ? options.maxPayload : parsed
@@ -234,56 +221,22 @@ program
       const parsed = parseFloat(options.costBudget)
       extraOverrides.costBudget = Number.isNaN(parsed) ? options.costBudget : parsed
     }
-    if (options.discoveryInterval !== undefined) {
-      const parsed = parseInt(options.discoveryInterval, 10)
-      extraOverrides.discoveryInterval = Number.isNaN(parsed) ? options.discoveryInterval : parsed
-    }
     if (options.sessionTimeout !== undefined) extraOverrides.sessionTimeout = options.sessionTimeout
     if (options.auth === false) extraOverrides.noAuth = true
-    if (options.discovery === false) extraOverrides.noDiscovery = true
     if (options.encrypt === false) extraOverrides.noEncrypt = true
 
     const config = loadAndMergeConfig(options, extraOverrides)
-
-    // Deprecation warning for PTY/tmux mode
-    if (config.terminal) {
-      console.warn('⚠️  PTY/tmux mode (--terminal) is deprecated and will be removed in a future release.')
-      console.warn('   The default CLI headless mode is recommended for all new usage.')
-      console.warn('   See: https://github.com/blamechris/chroxy#server-modes')
-    }
-    if (config.resume) {
-      console.warn('⚠️  --resume is deprecated (PTY mode only). Use the default CLI headless mode.')
-    }
-    if (config.noDiscovery) {
-      console.warn('⚠️  --no-discovery is deprecated (PTY mode only). Use the default CLI headless mode.')
-    }
-
-    // Block PTY/tmux mode on Windows
-    if (isWindows && config.terminal) {
-      console.error('PTY/tmux mode (--terminal) is not supported on Windows.')
-      console.error('Use the default CLI headless mode instead: npx chroxy start')
-      process.exit(1)
-    }
 
     // Determine if supervisor should be used
     const parsedTunnel = parseTunnelArg(config.tunnel || 'quick')
     const isNamedTunnel = parsedTunnel && parsedTunnel.mode === 'named'
     const useSupervisor = isNamedTunnel
-      && !config.terminal
       && !config.noAuth
       && options.supervisor !== false
       && process.env.CHROXY_SUPERVISED !== '1'
 
     // Launch appropriate server mode
-    if (config.terminal) {
-      // Legacy PTY/tmux mode — --no-auth is not supported
-      if (config.noAuth) {
-        console.error('❌ --no-auth is only supported in CLI headless mode (remove --terminal).')
-        process.exit(1)
-      }
-      const { startServer } = await import('./server.js')
-      await startServer(config)
-    } else if (useSupervisor) {
+    if (useSupervisor) {
       // Named tunnel with supervisor: auto-restart server child on crash
       const { startSupervisor } = await import('./supervisor.js')
       await startSupervisor(config)
@@ -311,7 +264,6 @@ program
     console.log('\n📋 Current Configuration\n')
     console.log(`   Config file: ${CONFIG_FILE}`)
     console.log(`   Port: ${config.port}`)
-    console.log(`   tmux session: ${config.tmuxSession}`)
     const tunnelMode = config.tunnel || 'quick'
     if (tunnelMode === 'named') {
       console.log(`   Tunnel: Named (${config.tunnelName || '?'} -> ${config.tunnelHostname || '?'})`)
@@ -451,74 +403,6 @@ async function _setupCloudflare() {
 }
 
 /**
- * chroxy wrap — Create a discoverable tmux session running Claude Code
- */
-program
-  .command('wrap')
-  .description('Create a tmux session running Claude Code (discoverable by chroxy start)')
-  .requiredOption('-n, --name <name>', 'Session name (alphanumeric, hyphens, underscores)')
-  .option('--cwd <path>', 'Working directory for Claude', process.cwd())
-  .action(async (options) => {
-    const { execFileSync } = await import('child_process')
-    const { existsSync, statSync } = await import('fs')
-    const { resolve } = await import('path')
-
-    const name = options.name
-
-    // Validate name: alphanumeric, hyphens, underscores only
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-      console.error('❌ Session name must contain only letters, numbers, hyphens, and underscores.')
-      process.exit(1)
-    }
-
-    // Check tmux is installed
-    try {
-      execFileSync('which', ['tmux'], { stdio: 'pipe' })
-    } catch {
-      console.error('❌ tmux is not installed. Install it with your system package manager.')
-      process.exit(1)
-    }
-
-    const sessionName = `chroxy-${name}`
-
-    // Check session doesn't already exist
-    try {
-      execFileSync('tmux', ['has-session', '-t', sessionName], { stdio: 'pipe' })
-      console.error(`❌ tmux session '${sessionName}' already exists.`)
-      console.error(`  Attach to it:  tmux attach -t ${sessionName}`)
-      console.error(`  Or kill it:    tmux kill-session -t ${sessionName}`)
-      process.exit(1)
-    } catch {
-      // Session doesn't exist — good, we can create it
-    }
-
-    // Resolve and validate cwd
-    const cwd = resolve(options.cwd)
-    if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
-      console.error(`❌ Directory does not exist: ${cwd}`)
-      process.exit(1)
-    }
-
-    // Create tmux session and launch Claude
-    try {
-      execFileSync('tmux', ['new-session', '-d', '-s', sessionName, '-c', cwd])
-      execFileSync('tmux', ['send-keys', '-t', sessionName, 'claude', 'Enter'])
-    } catch (err) {
-      // Clean up stray session on failure
-      try { execFileSync('tmux', ['kill-session', '-t', sessionName], { stdio: 'pipe' }) } catch {}
-      console.error(`❌ Failed to create tmux session: ${err.message}`)
-      process.exit(1)
-    }
-
-    console.log(`\nSession '${sessionName}' created in ${cwd}`)
-    console.log(`Claude Code is starting inside the tmux session.\n`)
-    console.log(`  Attach to it:  tmux attach -t ${sessionName}`)
-    console.log(`  Kill it:       tmux kill-session -t ${sessionName}`)
-    console.log(`\nRun 'npx chroxy start' to connect from your phone.`)
-    console.log(`The session will be auto-discovered.\n`)
-  })
-
-/**
  * chroxy dev — Development mode with supervisor auto-restart
  *
  * Like `chroxy start` but always uses the supervisor process for auto-restart,
@@ -527,12 +411,11 @@ program
  */
 program
   .command('dev')
-  .description('Start in development mode (supervisor + auto-restart, no terminal/PTY)')
+  .description('Start in development mode (supervisor + auto-restart)')
   .option('-c, --config <path>', 'Path to config file', CONFIG_FILE)
-  .option('-r, --resume', 'Resume an existing Claude Code session instead of starting fresh')
-  .option('--cwd <path>', 'Working directory for Claude (CLI mode)')
-  .option('--model <model>', 'Model to use (CLI mode)')
-  .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve (CLI mode)')
+  .option('--cwd <path>', 'Working directory for Claude')
+  .option('--model <model>', 'Model to use')
+  .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve')
   .option('--max-restarts <count>', 'Max supervisor restart attempts before exit (default: 10)')
   .option('--tunnel <mode>', 'Tunnel: quick (default), named, none, or provider:mode (e.g., cloudflare:named)')
   .option('--tunnel-name <name>', 'Named tunnel name (requires cloudflared login)')
@@ -560,12 +443,6 @@ program
       extraOverrides.costBudget = Number.isNaN(parsed) ? options.costBudget : parsed
     }
     const config = loadAndMergeConfig(options, extraOverrides)
-
-    // Dev mode does not support terminal (PTY) mode
-    if (config.terminal) {
-      console.error('❌ chroxy dev does not support terminal (PTY) mode; remove "terminal" from your config')
-      process.exit(1)
-    }
 
     // Dev mode requires an API token (supervisor needs it)
     if (config.noAuth) {

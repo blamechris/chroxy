@@ -13,7 +13,7 @@ import { readConnectionInfo } from './connection-info.js'
 import { createFileOps } from './ws-file-ops.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
-import { handleSessionMessage, handleCliMessage, handlePtyMessage, validateAttachments, PERMISSION_MODES, ALLOWED_PERMISSION_MODE_IDS } from './ws-message-handlers.js'
+import { handleSessionMessage, handleCliMessage, PERMISSION_MODES } from './ws-message-handlers.js'
 import { getDashboardHtml } from './dashboard.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
@@ -185,13 +185,11 @@ function getGitInfo() {
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
  */
 export class WsServer {
-  constructor({ port, apiToken, ptyManager, outputParser, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
     this._maxPayload = maxPayload || 10 * 1024 * 1024 // default 10MB (supports image/doc attachments)
-    this.ptyManager = ptyManager || null
-    this.outputParser = outputParser || null
     this.authRequired = authRequired
     this._encryptionEnabled = !noEncrypt
     this._keyExchangeTimeoutMs = keyExchangeTimeoutMs ?? 10_000
@@ -226,8 +224,6 @@ export class WsServer {
       broadcastSessionList: () => self._broadcast({ type: 'session_list', sessions: self.sessionManager.listSessions() }),
       get sessionManager() { return self.sessionManager },
       get cliSession() { return self.cliSession },
-      get ptyManager() { return self.ptyManager },
-      get outputParser() { return self.outputParser },
       get pushManager() { return self.pushManager },
       get checkpointManager() { return self._checkpointManager },
       get devPreview() { return self._devPreview },
@@ -279,7 +275,7 @@ export class WsServer {
       this.cliSession = null
     }
 
-    this.serverMode = (this.sessionManager || this.cliSession) ? 'cli' : 'terminal'
+    this.serverMode = 'cli'
     this._normalizer = new EventNormalizer()
     this._gitInfo = getGitInfo()
     this._startedAt = Date.now()
@@ -616,7 +612,6 @@ export class WsServer {
       normalizer: this._normalizer,
       sessionManager: this.sessionManager,
       cliSession: this.cliSession,
-      outputParser: this.outputParser,
       devPreview: this._devPreview,
       pushManager: this.pushManager,
       permissionSessionMap: this._permissionSessionMap,
@@ -677,7 +672,6 @@ export class WsServer {
       // Legacy single CLI mode
       sessionInfo.cwd = this.cliSession.cwd
     }
-    // PTY mode: no session manager, no cliSession — cwd is unknown; prefer null to avoid a misleading value
     if (!sessionInfo.cwd) {
       sessionInfo.cwd = null
     }
@@ -753,12 +747,6 @@ export class WsServer {
     }
 
     // Legacy single-session mode
-    // In PTY mode, tell client if Claude Code is already ready
-    if (this.outputParser && this.outputParser.claudeReady) {
-      this._send(ws, { type: 'claude_ready' })
-    }
-
-    // In CLI mode, gate on actual process readiness (may be respawning)
     if (this.cliSession) {
       if (this.cliSession.isReady) {
         this._send(ws, { type: 'claude_ready' })
@@ -973,8 +961,6 @@ export class WsServer {
       handleSessionMessage(ws, client, validatedMsg, this._handlerCtx)
     } else if (this.cliSession) {
       handleCliMessage(ws, client, validatedMsg, this._handlerCtx)
-    } else {
-      handlePtyMessage(ws, client, validatedMsg, this._handlerCtx)
     }
   }
 

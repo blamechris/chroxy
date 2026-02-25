@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   AuthSchema,
   InputSchema,
-  ResizeSchema,
+
   ModeSchema,
   InterruptSchema,
   SetModelSchema,
@@ -14,9 +14,6 @@ import {
   CreateSessionSchema,
   DestroySessionSchema,
   RenameSessionSchema,
-  DiscoverSessionsSchema,
-  TriggerDiscoverySchema,
-  AttachSessionSchema,
   RegisterPushTokenSchema,
   UserQuestionResponseSchema,
   ListDirectorySchema,
@@ -160,30 +157,6 @@ describe('InputSchema', () => {
       data: 'test',
       attachments: [{ bad: true }],
     })
-    assert.ok(!result.success)
-  })
-})
-
-
-// -- ResizeSchema --
-describe('ResizeSchema', () => {
-  it('accepts valid resize', () => {
-    const result = ResizeSchema.safeParse({ type: 'resize', cols: 120, rows: 40 })
-    assert.ok(result.success)
-  })
-
-  it('rejects non-integer cols', () => {
-    const result = ResizeSchema.safeParse({ type: 'resize', cols: 1.5, rows: 40 })
-    assert.ok(!result.success)
-  })
-
-  it('rejects zero rows', () => {
-    const result = ResizeSchema.safeParse({ type: 'resize', cols: 80, rows: 0 })
-    assert.ok(!result.success)
-  })
-
-  it('rejects missing cols', () => {
-    const result = ResizeSchema.safeParse({ type: 'resize', rows: 40 })
     assert.ok(!result.success)
   })
 })
@@ -362,39 +335,6 @@ describe('RenameSessionSchema', () => {
 
   it('rejects missing name', () => {
     const result = RenameSessionSchema.safeParse({ type: 'rename_session', sessionId: 'sess-1' })
-    assert.ok(!result.success)
-  })
-})
-
-
-// -- Discovery schemas --
-describe('DiscoverSessionsSchema', () => {
-  it('accepts valid message', () => {
-    const result = DiscoverSessionsSchema.safeParse({ type: 'discover_sessions' })
-    assert.ok(result.success)
-  })
-})
-
-describe('TriggerDiscoverySchema', () => {
-  it('accepts valid message', () => {
-    const result = TriggerDiscoverySchema.safeParse({ type: 'trigger_discovery' })
-    assert.ok(result.success)
-  })
-})
-
-describe('AttachSessionSchema', () => {
-  it('accepts with tmuxSession only', () => {
-    const result = AttachSessionSchema.safeParse({ type: 'attach_session', tmuxSession: 'my-session' })
-    assert.ok(result.success)
-  })
-
-  it('accepts with name', () => {
-    const result = AttachSessionSchema.safeParse({ type: 'attach_session', tmuxSession: 'my-session', name: 'Dev' })
-    assert.ok(result.success)
-  })
-
-  it('rejects missing tmuxSession', () => {
-    const result = AttachSessionSchema.safeParse({ type: 'attach_session' })
     assert.ok(!result.success)
   })
 })
@@ -690,8 +630,6 @@ describe('ClientMessageSchema', () => {
     const simpleTypes = [
       'interrupt',
       'list_sessions',
-      'discover_sessions',
-      'trigger_discovery',
       'list_slash_commands',
       'list_agents',
       'get_diff',

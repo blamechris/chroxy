@@ -356,68 +356,12 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       break
     }
 
-    case 'discover_sessions': {
-      try {
-        const tmuxSessions = ctx.sessionManager.discoverSessions()
-        ctx.send(ws, { type: 'discovered_sessions', tmux: tmuxSessions })
-      } catch (err) {
-        ctx.send(ws, { type: 'session_error', message: err.message })
-      }
-      break
-    }
-
-    case 'trigger_discovery':
-      if (ctx.sessionManager) {
-        console.log(`[ws] Triggering on-demand discovery from ${client.id}`)
-        ctx.send(ws, { type: 'discovery_triggered' })
-        ctx.sessionManager.pollForNewSessions()
-      }
-      break
-
-    case 'attach_session': {
-      const tmuxSession = typeof msg.tmuxSession === 'string' ? msg.tmuxSession.trim() : null
-      if (!tmuxSession) {
-        ctx.send(ws, { type: 'session_error', message: 'tmuxSession is required' })
-        break
-      }
-      if (!/^[a-zA-Z0-9_.-]+$/.test(tmuxSession)) {
-        ctx.send(ws, { type: 'session_error', message: 'Invalid tmux session name' })
-        break
-      }
-
-      try {
-        const name = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : undefined
-        const sessionId = await ctx.sessionManager.attachSession({ tmuxSession, name })
-        client.activeSessionId = sessionId
-        const entry = ctx.sessionManager.getSession(sessionId)
-        ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session?.resumeSessionId || null })
-        ctx.sendSessionInfo(ws, sessionId)
-        ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
-      } catch (err) {
-        console.error(`[ws] Failed to attach session (tmux: '${tmuxSession}'):`, err)
-        ctx.send(ws, { type: 'session_error', message: err.message })
-      }
-      break
-    }
-
-    case 'resize': {
-      const cols = msg.cols
-      const rows = msg.rows
-      if (!Number.isInteger(cols) || cols < 1 || !Number.isInteger(rows) || rows < 1) break
-      const resizeSessionId = msg.sessionId || client.activeSessionId
-      const entry = ctx.sessionManager.getSession(resizeSessionId)
-      if (entry && entry.type === 'pty' && entry.session.resize) {
-        entry.session.resize(cols, rows)
-      }
-      break
-    }
-
     case 'user_question_response': {
       const questionSessionId = (msg.toolUseId && ctx.questionSessionMap.get(msg.toolUseId))
         || client.activeSessionId
       if (msg.toolUseId) ctx.questionSessionMap.delete(msg.toolUseId)
       const entry = ctx.sessionManager.getSession(questionSessionId)
-      if (entry && entry.type !== 'pty' && typeof entry.session.respondToQuestion === 'function' && typeof msg.answer === 'string') {
+      if (entry && typeof entry.session.respondToQuestion === 'function' && typeof msg.answer === 'string') {
         entry.session.respondToQuestion(msg.answer)
       }
       break
@@ -798,65 +742,3 @@ export function handleCliMessage(ws, client, msg, ctx) {
   }
 }
 
-/** Handle messages in PTY mode */
-export function handlePtyMessage(ws, client, msg, ctx) {
-  switch (msg.type) {
-    case 'input':
-      if (msg.data && msg.data !== '\r' && msg.data !== '\n') {
-        console.log(`[ws] Input from ${client.id}: "${msg.data.replace(/[\r\n]/g, '\\n').slice(0, 80)}"`)
-      }
-      if (typeof msg.data === 'string') {
-        if (ctx.outputParser) ctx.outputParser.expectEcho(msg.data)
-        ctx.ptyManager.write(msg.data)
-        ctx.updatePrimary('default', client.id)
-      }
-      break
-
-    case 'resize':
-      if (Number.isInteger(msg.cols) && msg.cols > 0 && Number.isInteger(msg.rows) && msg.rows > 0) {
-        ctx.ptyManager.resize(msg.cols, msg.rows)
-      }
-      break
-
-    case 'permission_response': {
-      const { requestId, decision } = msg
-      if (requestId && decision) {
-        ctx.permissions.resolvePermission(requestId, decision)
-      }
-      break
-    }
-
-    case 'list_directory':
-      ctx.fileOps.listDirectory(ws, msg.path)
-      break
-
-    case 'browse_files':
-      ctx.fileOps.browseFiles(ws, msg.path, null)
-      break
-
-    case 'read_file':
-      ctx.fileOps.readFile(ws, msg.path, null)
-      break
-
-    case 'get_diff':
-      ctx.fileOps.getDiff(ws, msg.base, null)
-      break
-
-    case 'list_slash_commands':
-      ctx.fileOps.listSlashCommands(ws, null, null)
-      break
-
-    case 'list_agents':
-      ctx.fileOps.listAgents(ws, null, null)
-      break
-
-    case 'mode':
-      if (msg.mode === 'terminal' || msg.mode === 'chat') {
-        client.mode = msg.mode
-      }
-      break
-
-    default:
-      console.log(`[ws] Unknown message type: ${msg.type}`)
-  }
-}
