@@ -22,9 +22,12 @@ jobs:
   validate:
     name: Validate Trigger
     runs-on: ubuntu-24.04
-    if: github.event_name == 'push' || github.event.inputs.confirm == 'release'
     steps:
-      - run: echo "Release trigger validated"
+      - name: Validate manual trigger confirmation
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm != 'release'
+        run: |
+          echo "Error: To trigger this workflow manually, you must type 'release' in the confirmation field."
+          exit 1
 
   test:
     name: Test Suite
