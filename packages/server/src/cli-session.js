@@ -659,7 +659,7 @@ export class CliSession extends EventEmitter {
           console.warn('[cli-session] Process did not exit after 10s, force-killing')
           try {
             forceKill(oldChild)
-          } catch (err) {
+          } catch (_err) {
             // Process may already be gone, that's fine
           }
           respawn()
@@ -739,7 +739,7 @@ export class CliSession extends EventEmitter {
           console.warn('[cli-session] Process did not exit after 10s, force-killing')
           try {
             forceKill(oldChild)
-          } catch (err) {
+          } catch (_err) {
             // Process may already be gone, that's fine
           }
           respawn()

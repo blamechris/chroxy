@@ -62,7 +62,7 @@ const EVENT_MAP = {
     }
   },
 
-  stream_delta: (data, ctx) => {
+  stream_delta: (data, _ctx) => {
     // Delta buffering is handled externally — normalizer returns the raw delta
     // and the caller decides whether to buffer or flush.
     return {
@@ -81,7 +81,7 @@ const EVENT_MAP = {
     }
   },
 
-  message: (data, ctx) => {
+  message: (data, _ctx) => {
     const msg = {
       type: 'message',
       messageType: data.type,

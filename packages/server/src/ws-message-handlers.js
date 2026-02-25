@@ -587,7 +587,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         }
       }
       try {
-        const { taskId, task } = ctx.webTaskManager.launchTask(msg.prompt, { cwd: msg.cwd })
+        const { taskId } = ctx.webTaskManager.launchTask(msg.prompt, { cwd: msg.cwd })
         console.log(`[ws] Web task launched: ${taskId} — "${msg.prompt.slice(0, 60)}"`)
       } catch (err) {
         const errorMsg = err instanceof WebTaskUnavailableError
@@ -605,7 +605,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
     }
 
     case 'teleport_web_task': {
-      ctx.webTaskManager.teleportTask(msg.taskId).then(({ success, output }) => {
+      ctx.webTaskManager.teleportTask(msg.taskId).then(() => {
         console.log(`[ws] Teleported task ${msg.taskId}`)
         ctx.send(ws, { type: 'server_status', message: `Task ${msg.taskId} teleported to local session` })
       }).catch(err => {

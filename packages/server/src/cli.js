@@ -296,7 +296,7 @@ tunnelCmd
     let TunnelAdapter
     try {
       TunnelAdapter = getTunnel(providerName)
-    } catch (err) {
+    } catch (_err) {
       const available = listTunnels().map(t => t.name).join(', ')
       console.error(`❌ Unknown tunnel provider "${providerName}". Available: ${available}`)
       process.exit(1)
@@ -340,7 +340,7 @@ async function _setupCloudflare() {
 
   try {
     execFileSync('cloudflared', ['tunnel', 'login'], { stdio: 'inherit' })
-  } catch (err) {
+  } catch (_err) {
     console.error('\n❌ Login failed. Run \'cloudflared tunnel login\' manually.')
     process.exit(1)
   }
