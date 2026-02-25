@@ -188,7 +188,7 @@ export function resolveNode22Path() {
     'Could not find Node.js 22. Install it via:\n' +
     '  brew install node@22\n' +
     '  or use nvm: nvm install 22\n' +
-    'Node 22 is required because node-pty does not compile on newer versions.'
+    'Node 22 is the minimum supported version.'
   )
 }
 

@@ -16,7 +16,6 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { mergeConfig } from './config.js'
-import { defaultShell } from './platform.js'
 
 const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
 
@@ -33,9 +32,6 @@ async function main() {
 
   const defaults = {
     port: 8765,
-    tmuxSession: 'claude-code',
-    shell: defaultShell(),
-    resume: false,
     noAuth: false,
   }
 
@@ -47,8 +43,6 @@ async function main() {
   // Set environment variables for backward compatibility
   if (config.apiToken) process.env.API_TOKEN = config.apiToken
   if (config.port) process.env.PORT = String(config.port)
-  if (config.tmuxSession) process.env.TMUX_SESSION = config.tmuxSession
-  if (config.shell) process.env.SHELL_CMD = config.shell
 
   const { startCliServer } = await import('./server-cli.js')
   const refs = await startCliServer(config)

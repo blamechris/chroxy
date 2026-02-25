@@ -31,12 +31,6 @@ export const InputSchema = z.object({
   isVoice: z.boolean().optional(),
 }).passthrough()
 
-export const ResizeSchema = z.object({
-  type: z.literal('resize'),
-  cols: z.number().int().min(1),
-  rows: z.number().int().min(1),
-}).passthrough()
-
 export const ModeSchema = z.object({
   type: z.literal('mode'),
   mode: z.enum(['terminal', 'chat']),
@@ -446,7 +440,6 @@ export const ServerWebTaskListSchema = z.object({
 // earlier but is only checked by type, not validated with PingSchema.
 export const ClientMessageSchema = z.discriminatedUnion('type', [
   InputSchema,
-  ResizeSchema,
   ModeSchema,
   InterruptSchema,
   SetModelSchema,

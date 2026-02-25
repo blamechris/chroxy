@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   AuthSchema,
   InputSchema,
-  ResizeSchema,
+
   ModeSchema,
   InterruptSchema,
   SetModelSchema,
@@ -157,30 +157,6 @@ describe('InputSchema', () => {
       data: 'test',
       attachments: [{ bad: true }],
     })
-    assert.ok(!result.success)
-  })
-})
-
-
-// -- ResizeSchema --
-describe('ResizeSchema', () => {
-  it('accepts valid resize', () => {
-    const result = ResizeSchema.safeParse({ type: 'resize', cols: 120, rows: 40 })
-    assert.ok(result.success)
-  })
-
-  it('rejects non-integer cols', () => {
-    const result = ResizeSchema.safeParse({ type: 'resize', cols: 1.5, rows: 40 })
-    assert.ok(!result.success)
-  })
-
-  it('rejects zero rows', () => {
-    const result = ResizeSchema.safeParse({ type: 'resize', cols: 80, rows: 0 })
-    assert.ok(!result.success)
-  })
-
-  it('rejects missing cols', () => {
-    const result = ResizeSchema.safeParse({ type: 'resize', rows: 40 })
     assert.ok(!result.success)
   })
 })
