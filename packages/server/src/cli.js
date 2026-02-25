@@ -8,6 +8,10 @@ import readline from 'readline'
 import { validateConfig, mergeConfig } from './config.js'
 import { isWindows, defaultShell, writeFileRestricted } from './platform.js'
 import { parseTunnelArg, getTunnel, listTunnels } from './tunnel/registry.js'
+import { createRequire } from 'module'
+
+const require = createRequire(import.meta.url)
+const { version } = require('../package.json')
 
 const CONFIG_DIR = join(homedir(), '.chroxy')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -17,7 +21,7 @@ const program = new Command()
 program
   .name('chroxy')
   .description('Remote terminal for Claude Code from your phone')
-  .version('0.1.0')
+  .version(version)
 
 /**
  * Interactive prompt helper
