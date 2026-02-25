@@ -336,6 +336,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         }
       }
 
+      ctx.broadcast({ type: 'session_destroyed', sessionId: targetId })
       ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
       break
     }
