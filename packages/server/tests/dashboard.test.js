@@ -888,10 +888,14 @@ describe('#886 — syntax highlighting', () => {
   it('defines SYNTAX_COLORS map with all token types', () => {
     assert.ok(html.includes('var SYNTAX_COLORS = {'),
       'should define SYNTAX_COLORS')
-    for (const type of ['keyword', 'string', 'comment', 'number', 'function', 'operator', 'punctuation', 'type', 'property', 'plain', 'diff_add', 'diff_remove']) {
+    // Note: 'function' is quoted as '"function"' in JS (reserved word)
+    for (const type of ['keyword', 'string', 'comment', 'number', 'operator', 'punctuation', 'type', 'property', 'plain', 'diff_add', 'diff_remove']) {
       assert.ok(html.includes(`${type}: "`),
         `SYNTAX_COLORS should include ${type}`)
     }
+    // 'function' is a reserved word, so it's quoted differently in the object literal
+    assert.ok(html.includes('"function": "#4a9eff"'),
+      'SYNTAX_COLORS should include function token type (quoted key)')
   })
 
   it('uses mobile app color theme', () => {
@@ -955,8 +959,8 @@ describe('#886 — syntax highlighting', () => {
   })
 
   it('highlightCode uses inline style for coloring', () => {
-    assert.ok(html.includes('style="color:'),
-      'highlightCode should output inline style color on spans')
+    assert.ok(html.includes('SYNTAX_COLORS[tokens[i].type]'),
+      'highlightCode should look up color from SYNTAX_COLORS per token type')
   })
 
   it('uses highlightCode in renderMarkdown for code blocks', () => {
@@ -1025,13 +1029,13 @@ describe('#886 — permission countdown timer', () => {
   })
 
   it('adds countdown element in permission prompt HTML', () => {
-    assert.ok(html.includes('perm-countdown'),
-      'should include perm-countdown div in permission prompt')
+    assert.ok(html.includes('<div class="perm-countdown"'),
+      'should include perm-countdown div element in permission prompt markup')
   })
 
-  it('addPermissionPrompt accepts remainingMs parameter', () => {
-    assert.ok(html.includes('function addPermissionPrompt(requestId, tool, description, remainingMs'),
-      'addPermissionPrompt should accept remainingMs parameter')
+  it('addPermissionPrompt accepts remainingMs and skipLog parameters', () => {
+    assert.ok(html.includes('function addPermissionPrompt(requestId, tool, description, remainingMs, skipLog)'),
+      'addPermissionPrompt should accept remainingMs and skipLog parameters')
   })
 
   it('handles active countdown with interval', () => {
@@ -1056,8 +1060,11 @@ describe('#886 — permission countdown timer', () => {
   })
 
   it('handles immediately expired countdown (remainingMs <= 0)', () => {
-    const expiredBlock = html.match(/Zero or negative remaining[\s\S]*?Timed out/)
-    assert.ok(expiredBlock, 'should show "Timed out" for zero/negative remainingMs')
+    // The else branch of `remainingMs > 0` handles zero/negative values
+    // It should set "Timed out" text and add the expired class
+    const expiredBlock = html.match(/} else \{[\s\S]*?Timed out[\s\S]*?expired/)
+    assert.ok(expiredBlock,
+      'should show "Timed out" and add expired class for zero/negative remainingMs')
   })
 
   it('hides countdown when remainingMs is not provided', () => {
