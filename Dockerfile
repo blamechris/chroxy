@@ -25,9 +25,9 @@ COPY package.json package-lock.json ./
 COPY packages/server/package.json packages/server/
 
 # Stub app package.json so npm workspace resolution succeeds
-RUN mkdir -p packages/app && echo '{"name":"@chroxy/app","version":"0.1.0","private":true}' > packages/app/package.json
+RUN mkdir -p packages/app && echo '{"name":"@chroxy/app","version":"0.2.0","private":true}' > packages/app/package.json
 
-# Install server dependencies only (skip node-pty native compilation)
+# Install server dependencies only (skip native compilation for optional deps)
 RUN npm ci --workspace=@chroxy/server --omit=dev --ignore-scripts
 
 # Copy server source
