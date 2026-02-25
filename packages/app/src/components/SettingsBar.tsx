@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { ModelInfo, ClaudeStatus, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer } from '../store/connection';
+import { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer } from '../store/connection';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
@@ -26,7 +26,6 @@ export interface SettingsBarProps {
   sessionCost?: number | null;
   costBudget?: number | null;
   contextUsage: ContextUsage | null;
-  claudeStatus: ClaudeStatus | null;
   sessionCwd: string | null;
   serverMode: 'cli' | 'terminal' | null;
   isIdle: boolean;
@@ -97,7 +96,6 @@ export function SettingsBar({
   sessionCost,
   costBudget,
   contextUsage,
-  claudeStatus,
   sessionCwd,
   serverMode,
   isIdle,
@@ -178,38 +176,24 @@ export function SettingsBar({
     summaryParts.push(serverMode);
   }
 
-  // PTY mode: use claudeStatus if available
-  if (claudeStatus) {
-    if (claudeStatus.model) {
-      summaryParts.push(claudeStatus.model);
-    }
-    if (typeof claudeStatus.cost === 'number') {
-      summaryParts.push(`$${claudeStatus.cost.toFixed(2)}`);
-    }
-    if (claudeStatus.contextTokens) {
-      summaryParts.push(claudeStatus.contextTokens);
-    }
-  } else {
-    // CLI mode: use existing fields
-    if (activeModel) {
-      const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
-      summaryParts.push(modelInfo?.label || activeModel);
-    }
-    if (permissionMode) {
-      const permInfo = availablePermissionModes.find((m) => m.id === permissionMode);
-      summaryParts.push(permInfo?.label || permissionMode);
-    }
-    if (sessionCost != null) {
-      summaryParts.push(`$${sessionCost.toFixed(2)}`);
-    } else if (lastResultCost != null) {
-      summaryParts.push(`$${lastResultCost.toFixed(2)}`);
-    }
-    if (contextUsage) {
-      const total = contextUsage.inputTokens + contextUsage.outputTokens;
-      if (total >= 1_000_000) summaryParts.push(`${(total / 1_000_000).toFixed(1)}M`);
-      else if (total >= 1_000) summaryParts.push(`${(total / 1_000).toFixed(1)}k`);
-      else summaryParts.push(`${total}`);
-    }
+  if (activeModel) {
+    const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
+    summaryParts.push(modelInfo?.label || activeModel);
+  }
+  if (permissionMode) {
+    const permInfo = availablePermissionModes.find((m) => m.id === permissionMode);
+    summaryParts.push(permInfo?.label || permissionMode);
+  }
+  if (sessionCost != null) {
+    summaryParts.push(`$${sessionCost.toFixed(2)}`);
+  } else if (lastResultCost != null) {
+    summaryParts.push(`$${lastResultCost.toFixed(2)}`);
+  }
+  if (contextUsage) {
+    const total = contextUsage.inputTokens + contextUsage.outputTokens;
+    if (total >= 1_000_000) summaryParts.push(`${(total / 1_000_000).toFixed(1)}M`);
+    else if (total >= 1_000) summaryParts.push(`${(total / 1_000).toFixed(1)}k`);
+    else summaryParts.push(`${total}`);
   }
 
   return (
@@ -274,35 +258,7 @@ export function SettingsBar({
               </Text>
             </View>
           )}
-          {claudeStatus ? (
-            // PTY mode: display claudeStatus data
-            <View style={styles.contextRow}>
-              {(claudeStatus.model || typeof claudeStatus.cost === 'number') && (
-                <Text style={styles.contextText}>
-                  {claudeStatus.model || 'Unknown'}
-                  {typeof claudeStatus.cost === 'number' && ` \u00B7 $${claudeStatus.cost.toFixed(4)}`}
-                </Text>
-              )}
-              {claudeStatus.contextTokens && typeof claudeStatus.contextPercent === 'number' && (
-                <Text style={styles.contextText}>
-                  {claudeStatus.contextTokens} ({claudeStatus.contextPercent}%)
-                </Text>
-              )}
-              {typeof claudeStatus.compactPercent === 'number' && (
-                <Text style={styles.contextText}>
-                  {claudeStatus.compactPercent}% til compact
-                </Text>
-              )}
-              {typeof claudeStatus.messageCount === 'number' && claudeStatus.messageCount > 0 && (
-                <Text style={styles.contextText}>
-                  {claudeStatus.messageCount} msg{claudeStatus.messageCount !== 1 ? 's' : ''}
-                </Text>
-              )}
-            </View>
-          ) : (
-            // CLI mode: display existing fields
-            <>
-              {availableModels.length > 0 && (
+          {availableModels.length > 0 && (
                 <View style={styles.chipRow}>
                   {availableModels.map((m) => {
                     const isActive = activeModel === m.id || activeModel === m.fullId;
@@ -369,8 +325,6 @@ export function SettingsBar({
                   }]} />
                 </View>
               )}
-            </>
-          )}
           {conversationId && (
             <TouchableOpacity
               style={styles.conversationIdRow}

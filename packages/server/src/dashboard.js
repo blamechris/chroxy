@@ -1481,7 +1481,7 @@ function getDashboardJs() {
       terminalContainer.classList.remove("hidden");
       if (serverMode === "cli") {
         if (!terminalContainer.querySelector(".terminal-notice")) {
-          terminalContainer.innerHTML = '<div class="terminal-notice"><div class="notice-title">Terminal Not Available</div><div>Terminal view requires PTY mode (--terminal flag).<br>The server is running in CLI mode.</div></div>';
+          terminalContainer.innerHTML = '<div class="terminal-notice"><div class="notice-title">Terminal Not Available</div><div>Terminal view is not available for this session.</div></div>';
         }
       } else {
         initTerminal();

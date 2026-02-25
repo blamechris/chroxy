@@ -20,10 +20,8 @@ export type {
   ToolResultImage,
   ChatMessage,
   ContextUsage,
-  ClaudeStatus,
   ModelInfo,
   SessionInfo,
-  DiscoveredSession,
   DirectoryEntry,
   DirectoryListing,
   FileEntry,
@@ -176,8 +174,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   availableModels: [],
   permissionMode: null,
   availablePermissionModes: [],
-  discoveredSessions: null,
-  claudeStatus: null,
   myClientId: null,
   connectedClients: [],
   primaryClientId: null,
@@ -621,8 +617,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       availableModels: [],
       permissionMode: null,
       availablePermissionModes: [],
-      discoveredSessions: null,
-      claudeStatus: null,
       myClientId: null,
       connectedClients: [],
       primaryClientId: null,
@@ -1024,23 +1018,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'rename_session', sessionId, name });
-    }
-  },
-
-  discoverSessions: () => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      set({ discoveredSessions: null });
-      wsSend(socket, { type: 'discover_sessions' });
-    }
-  },
-
-  attachSession: (tmuxSession: string, name?: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const msg: Record<string, string> = { type: 'attach_session', tmuxSession };
-      if (name) msg.name = name;
-      wsSend(socket, msg);
     }
   },
 

@@ -1669,50 +1669,6 @@ describe('background session sync (_broadcastToSession)', () => {
     ws.close()
   })
 
-  it('raw PTY data is NOT sent for inactive sessions', async () => {
-    const mockManager = createTwoSessionManager()
-
-    server = new WsServer({
-      port: 0,
-      apiToken: 'test-token',
-      sessionManager: mockManager,
-      defaultSessionId: 'sess-1',
-      authRequired: true,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    // Switch client to terminal mode
-    send(ws, { type: 'mode', mode: 'terminal' })
-    await new Promise(r => setTimeout(r, 50))
-
-    // Emit raw data for sess-2 (inactive)
-    mockManager.emit('session_event', {
-      sessionId: 'sess-2',
-      event: 'raw',
-      data: 'background raw data',
-    })
-    await new Promise(r => setTimeout(r, 100))
-
-    const rawMsg = messages.find(m => m.type === 'raw' && m.data === 'background raw data')
-    assert.equal(rawMsg, undefined, 'Raw PTY data should NOT be sent for inactive sessions')
-
-    // Emit raw data for sess-1 (active) — should be received
-    mockManager.emit('session_event', {
-      sessionId: 'sess-1',
-      event: 'raw',
-      data: 'active raw data',
-    })
-    await new Promise(r => setTimeout(r, 100))
-
-    const activeRaw = messages.find(m => m.type === 'raw' && m.data === 'active raw data')
-    assert.ok(activeRaw, 'Raw PTY data should be sent for active session')
-
-    ws.close()
-  })
 })
 
 describe('public broadcast method', () => {

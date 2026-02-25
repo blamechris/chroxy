@@ -72,17 +72,15 @@ function getGitInfo() {
 /**
  * WebSocket server that bridges the phone client to the backend.
  *
- * Supports three modes:
+ * Supports two modes:
  *   - Multi-session (sessionManager): multiple concurrent CliSession instances
  *   - Single CLI (cliSession): headless `claude -p` with structured JSON (legacy)
- *   - PTY mode (ptyManager + outputParser): existing tmux/PTY behavior
  *
  * Protocol (JSON messages over WebSocket):
  *
  * Client -> Server:
  *   { type: 'auth',      token: '...', deviceInfo? }   — authenticate (deviceInfo: { deviceId, deviceName, deviceType, platform })
  *   { type: 'input',     data: '...' }               — send text to active session
- *   { type: 'resize',    cols: 120, rows: 40 }       — resize PTY (PTY mode only)
  *   { type: 'mode',      mode: 'terminal'|'chat' }   — switch view mode
  *   { type: 'interrupt' }                             — interrupt active session
  *   { type: 'set_model', model: '...' }              — change model on active session
@@ -93,9 +91,6 @@ function getGitInfo() {
  *   { type: 'create_session', name?, cwd? }           — create a new session
  *   { type: 'destroy_session', sessionId }            — destroy a session
  *   { type: 'rename_session', sessionId, name }       — rename a session
- *   { type: 'discover_sessions' }                     — scan for host tmux sessions
- *   { type: 'trigger_discovery' }                     — trigger on-demand tmux session discovery
- *   { type: 'attach_session', tmuxSession, name? }    — attach to a tmux session
  *   { type: 'register_push_token', token }             — register Expo push token for notifications
  *   { type: 'user_question_response', answer }         — respond to AskUserQuestion prompt
  *   { type: 'list_directory', path? }                  — request directory listing for file browser
@@ -120,8 +115,7 @@ function getGitInfo() {
  *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, connectedClients, encryption } — auth succeeded (encryption: 'required'|'disabled')
  *   { type: 'key_exchange_ok', publicKey }               — server's ephemeral X25519 public key (E2E encryption)
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
- *   { type: 'server_mode',  mode: 'cli'|'terminal' }  — which backend mode is active
- *   { type: 'raw',          data: '...' }             — raw PTY output (terminal view)
+ *   { type: 'server_mode',  mode: 'cli' }             — which backend mode is active
  *   { type: 'message',      ... }                     — parsed chat message
  *   { type: 'stream_start', messageId: '...' }        — beginning of streaming response
  *   { type: 'stream_delta', messageId, delta }         — token-by-token text
@@ -143,12 +137,9 @@ function getGitInfo() {
  *   { type: 'session_created', sessionId, name }      — new session created
  *   { type: 'session_destroyed', sessionId }          — session removed
  *   { type: 'session_error', message, category?, sessionId?, recoverable? } — session operation error
- *   { type: 'discovered_sessions', tmux: [...] }     — host tmux session scan results
- *   { type: 'discovery_triggered' }                  — ack that on-demand discovery started
  *   { type: 'history_replay_start', sessionId, fullHistory?, truncated? } — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
  *   { type: 'conversation_id', sessionId, conversationId } — SDK conversation ID for session portability
- *   { type: 'raw_background', data: '...' }           — raw PTY data for chat-mode clients
  *   { type: 'status_update', model, cost, ... }       — Claude Code status bar metadata
  *   { type: 'user_question', toolUseId, questions }   — AskUserQuestion prompt from Claude
  *   { type: 'agent_busy' }                           — agent started processing (per-session)
