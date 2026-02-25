@@ -13,7 +13,6 @@ import {
   Modal,
   Pressable,
   LayoutAnimation,
-  UIManager,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -48,9 +47,6 @@ const EMPTY_PROMPTS: { tool: string; prompt: string }[] = [];
 
 // Message sent when user taps "Approve" on a plan approval card
 const PLAN_APPROVAL_MESSAGE = 'Go ahead with the plan';
-
-// Enable LayoutAnimation on Android
-UIManager.setLayoutAnimationEnabledExperimental?.(true);
 
 function useKeyboardHeight() {
   const [keyboardHeight, setKeyboardHeight] = useState(0);

@@ -75,9 +75,15 @@ pub fn show_fallback(app: &AppHandle, port: Option<u16>, token: Option<&str>) {
         // Inject port/token and trigger health polling via JS eval
         if let Some(p) = port {
             let t = token.unwrap_or("");
+            // Escape token for safe JS string interpolation (defense-in-depth)
+            let escaped = t
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r");
             let _ = win.eval(&format!(
                 "if (typeof window.__startPolling === 'function') {{ window.__startPolling({}, '{}'); }}",
-                p, t
+                p, escaped
             ));
         }
         let _ = win.show();

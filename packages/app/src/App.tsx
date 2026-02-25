@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Platform, UIManager } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -13,6 +14,11 @@ import { LockScreen } from './components/LockScreen';
 import { useConnectionStore, selectShowSession } from './store/connection';
 import { setupNotificationResponseListener } from './notifications';
 import { useBiometricLock } from './hooks/useBiometricLock';
+
+// Enable LayoutAnimation on Android (must be called before any component uses it)
+if (Platform.OS === 'android') {
+  UIManager.setLayoutAnimationEnabledExperimental?.(true);
+}
 
 const ONBOARDING_KEY = 'onboarding_complete';
 
