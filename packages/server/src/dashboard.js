@@ -15,6 +15,7 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chroxy Dashboard</title>
   <style>${getDashboardCss()}</style>
+  <link rel="stylesheet" href="/assets/xterm/xterm.css">
 </head>
 <body>
   <div id="app">
@@ -38,6 +39,11 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
     <div id="session-bar">
       <div id="session-tabs"></div>
       <button id="new-session-btn" title="New session (Ctrl+N)">+</button>
+    </div>
+
+    <div id="view-switcher">
+      <button class="view-tab active" data-view="chat">Chat</button>
+      <button class="view-tab" data-view="terminal">Terminal</button>
     </div>
 
     <div id="reconnect-banner" class="hidden">
@@ -73,6 +79,7 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
     </div>
 
     <div id="chat-messages"></div>
+    <div id="terminal-container" class="hidden"></div>
 
     <div id="status-bar">
       <span id="status-busy" class="busy-indicator hidden"></span>
@@ -88,6 +95,8 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
       <button id="interrupt-btn" title="Interrupt (Escape)">Stop</button>
     </div>
   </div>
+  <script src="/assets/xterm/xterm.js"></script>
+  <script src="/assets/xterm/addon-fit.js"></script>
   <script>
     window.__CHROXY_CONFIG__ = {
       port: ${port},
@@ -787,6 +796,57 @@ function getDashboardCss() {
     }
     .question-prompt.answered .q-answer-text { display: block; }
 
+    /* View switcher */
+    #view-switcher {
+      display: flex;
+      padding: 0 16px;
+      background: #12121f;
+      border-bottom: 1px solid #252540;
+      flex-shrink: 0;
+      gap: 0;
+    }
+    .view-tab {
+      padding: 6px 16px;
+      font-size: 13px;
+      color: #888;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .view-tab:hover { color: #ccc; }
+    .view-tab.active {
+      color: #4a9eff;
+      border-bottom-color: #4a9eff;
+    }
+
+    /* Terminal container */
+    #terminal-container {
+      flex: 1;
+      background: #0f0f1a;
+      position: relative;
+      overflow: hidden;
+    }
+    #terminal-container .xterm {
+      height: 100%;
+    }
+    .terminal-notice {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      color: #666;
+      font-size: 14px;
+    }
+    .terminal-notice .notice-title {
+      font-size: 16px;
+      color: #888;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
     /* Responsive: mobile browsers */
     @media (max-width: 600px) {
       #header { padding: 8px 12px; }
@@ -838,6 +898,22 @@ function getDashboardJs() {
   var modalOpen = false;
   var hadInitialConnect = false;
 
+  // ---- localStorage persistence ----
+  var STORAGE_PREFIX = "chroxy_";
+  var MAX_STORED_MESSAGES = 100;
+  var MAX_ENTRY_SIZE = 50000;
+  var persistTimer = null;
+  var messageLog = [];
+  var restoredFromCache = false;
+
+  // ---- Terminal state ----
+  var currentView = "chat";
+  var term = null;
+  var fitAddon = null;
+  var terminalBuffer = "";
+  var TERMINAL_BUFFER_MAX = 102400;
+  var serverMode = null;
+
   // ---- DOM refs ----
   var messagesEl = document.getElementById("chat-messages");
   var inputEl = document.getElementById("message-input");
@@ -866,6 +942,8 @@ function getDashboardJs() {
   var modalCreateBtn = document.getElementById("modal-create-btn");
   var modalCancelBtn = document.getElementById("modal-cancel-btn");
   var toastContainer = document.getElementById("toast-container");
+  var viewSwitcher = document.getElementById("view-switcher");
+  var terminalContainer = document.getElementById("terminal-container");
 
   // ---- Markdown renderer ----
   function renderMarkdown(text) {
@@ -948,6 +1026,165 @@ function getDashboardJs() {
     }
   }
 
+  // ---- Persistence functions ----
+  function saveMessages() {
+    if (!activeSessionId) return;
+    try {
+      var toStore = messageLog.slice(-MAX_STORED_MESSAGES).map(function(entry) {
+        var e = Object.assign({}, entry);
+        if (e.content && e.content.length > MAX_ENTRY_SIZE) {
+          e.content = e.content.slice(0, MAX_ENTRY_SIZE) + "\\n[truncated]";
+        }
+        if (e.result && e.result.length > MAX_ENTRY_SIZE) {
+          e.result = e.result.slice(0, MAX_ENTRY_SIZE) + "\\n[truncated]";
+        }
+        return e;
+      });
+      localStorage.setItem(STORAGE_PREFIX + "messages_" + activeSessionId, JSON.stringify(toStore));
+      localStorage.setItem(STORAGE_PREFIX + "active_session", activeSessionId);
+    } catch (e) {
+      console.warn("[dashboard] Failed to save messages:", e);
+    }
+  }
+
+  function debouncedSave() {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(saveMessages, 500);
+  }
+
+  function loadMessages(sessionId) {
+    try {
+      var data = localStorage.getItem(STORAGE_PREFIX + "messages_" + sessionId);
+      return data ? JSON.parse(data) : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function restoreMessages(sessionId) {
+    if (!sessionId) return;
+    if (messageLog.length > 0) return; // already have messages
+    var stored = loadMessages(sessionId);
+    if (stored.length === 0) return;
+    restoredFromCache = true;
+    messageLog = stored;
+    stored.forEach(function(entry) {
+      if (entry.type === "tool") {
+        var bubble = addToolBubble(entry.tool || "tool", entry.toolUseId || "", entry.input || null, true);
+        if (entry.result && bubble) {
+          var resultDiv = bubble.querySelector(".tool-result");
+          if (resultDiv) resultDiv.textContent = entry.result;
+        }
+      } else if (entry.type === "permission") {
+        addPermissionPrompt(entry.requestId || "", entry.tool || "Unknown", entry.description || "", true);
+      } else {
+        addMessage(entry.msgType || "system", entry.content || "", { skipLog: true });
+      }
+    });
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function logMessage(entry) {
+    messageLog.push(entry);
+    debouncedSave();
+  }
+
+  // ---- Terminal functions ----
+  function initTerminal() {
+    if (term) return;
+    if (typeof Terminal === "undefined") {
+      terminalContainer.innerHTML = '<div class="terminal-notice"><div class="notice-title">Terminal Unavailable</div><div>xterm.js could not be loaded</div></div>';
+      return;
+    }
+    term = new Terminal({
+      cursorBlink: true,
+      disableStdin: true,
+      scrollback: 5000,
+      fontSize: 14,
+      fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', monospace",
+      theme: {
+        background: "#0f0f1a",
+        foreground: "#f8f8f2",
+        cursor: "#f8f8f0",
+        black: "#000000",
+        red: "#ff5555",
+        green: "#50fa7b",
+        yellow: "#f1fa8c",
+        blue: "#bd93f9",
+        magenta: "#ff79c6",
+        cyan: "#8be9fd",
+        white: "#bfbfbf",
+        brightBlack: "#4d4d4d",
+        brightRed: "#ff6e67",
+        brightGreen: "#5af78e",
+        brightYellow: "#f4f99d",
+        brightBlue: "#caa9fa",
+        brightMagenta: "#ff92d0",
+        brightCyan: "#9aedfe",
+        brightWhite: "#e6e6e6"
+      }
+    });
+    if (typeof FitAddon !== "undefined") {
+      fitAddon = new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+    }
+    term.open(terminalContainer);
+    if (fitAddon) {
+      try { fitAddon.fit(); } catch(e) {}
+    }
+    // Resize on container resize
+    var resizeTimer = null;
+    var ro = new ResizeObserver(function() {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(function() {
+        if (fitAddon && currentView === "terminal") {
+          try { fitAddon.fit(); } catch(e) {}
+        }
+      }, 250);
+    });
+    ro.observe(terminalContainer);
+  }
+
+  function switchView(view) {
+    if (view === currentView) return;
+    currentView = view;
+    // Update tab active states
+    viewSwitcher.querySelectorAll(".view-tab").forEach(function(tab) {
+      tab.classList.toggle("active", tab.getAttribute("data-view") === view);
+    });
+    if (view === "chat") {
+      messagesEl.classList.remove("hidden");
+      terminalContainer.classList.add("hidden");
+      scrollToBottom();
+    } else {
+      messagesEl.classList.add("hidden");
+      terminalContainer.classList.remove("hidden");
+      if (serverMode === "cli") {
+        if (!terminalContainer.querySelector(".terminal-notice")) {
+          terminalContainer.innerHTML = '<div class="terminal-notice"><div class="notice-title">Terminal Not Available</div><div>Terminal view requires PTY mode (--terminal flag).<br>The server is running in CLI mode.</div></div>';
+        }
+      } else {
+        initTerminal();
+        if (term && terminalBuffer) {
+          term.reset();
+          term.write(terminalBuffer);
+        }
+        if (fitAddon) {
+          try { fitAddon.fit(); } catch(e) {}
+        }
+      }
+    }
+    // Tell server which view we want
+    send({ type: "mode", mode: view === "terminal" ? "terminal" : "chat" });
+  }
+
+  // View switcher click handler
+  viewSwitcher.addEventListener("click", function(e) {
+    var tab = e.target.closest(".view-tab");
+    if (!tab) return;
+    switchView(tab.getAttribute("data-view"));
+  });
+
   // ---- Textarea auto-resize ----
   inputEl.addEventListener("input", function() {
     this.style.height = "auto";
@@ -976,10 +1213,13 @@ function getDashboardJs() {
     if (opts.id) div.setAttribute("data-msg-id", sanitizeId(opts.id));
     messagesEl.appendChild(div);
     scrollToBottom();
+    if (!opts.skipLog) {
+      logMessage({ msgType: type, content: content, timestamp: Date.now() });
+    }
     return div;
   }
 
-  function addToolBubble(tool, toolUseId, input) {
+  function addToolBubble(tool, toolUseId, input, skipLog) {
     var div = document.createElement("div");
     div.className = "tool-bubble";
     div.setAttribute("data-tool-id", sanitizeId(toolUseId || ""));
@@ -1001,10 +1241,13 @@ function getDashboardJs() {
     });
     messagesEl.appendChild(div);
     scrollToBottom();
+    if (!skipLog) {
+      logMessage({ type: "tool", tool: tool, toolUseId: toolUseId, input: inputSummary, timestamp: Date.now() });
+    }
     return div;
   }
 
-  function addPermissionPrompt(requestId, tool, description) {
+  function addPermissionPrompt(requestId, tool, description, skipLog) {
     var div = document.createElement("div");
     div.className = "permission-prompt";
     div.setAttribute("data-request-id", sanitizeId(requestId));
@@ -1027,6 +1270,9 @@ function getDashboardJs() {
     });
     messagesEl.appendChild(div);
     scrollToBottom();
+    if (!skipLog) {
+      logMessage({ type: "permission", requestId: requestId, tool: tool, description: description, timestamp: Date.now() });
+    }
     return div;
   }
 
@@ -1399,7 +1645,7 @@ function getDashboardJs() {
     if (!text || !text.trim()) return;
     if (!connected || !claudeReady) return;
     send({ type: "input", data: text.trim() });
-    addMessage("user", text.trim());
+    addMessage("user", text.trim(), { skipLog: false });
     inputEl.value = "";
     inputEl.style.height = "auto";
     isBusy = true;
@@ -1428,12 +1674,24 @@ function getDashboardJs() {
       case "auth_ok":
         setConnectionState("connected");
         if (msg.serverMode) {
-          // Could display mode indicator
+          serverMode = msg.serverMode;
         }
         break;
 
       case "server_mode":
-        // Display info
+        serverMode = msg.mode || null;
+        break;
+
+      case "raw":
+        if (msg.data) {
+          terminalBuffer += msg.data;
+          if (terminalBuffer.length > TERMINAL_BUFFER_MAX) {
+            terminalBuffer = terminalBuffer.slice(-TERMINAL_BUFFER_MAX);
+          }
+          if (term && currentView === "terminal") {
+            term.write(msg.data);
+          }
+        }
         break;
 
       case "status":
@@ -1445,13 +1703,31 @@ function getDashboardJs() {
       case "session_list":
         if (Array.isArray(msg.sessions)) {
           sessions = msg.sessions;
+          // Validate restored activeSessionId still exists on the server
+          if (activeSessionId && !sessions.some(function(s) { return s && s.sessionId === activeSessionId; })) {
+            activeSessionId = sessions.length > 0 ? sessions[0].sessionId : null;
+            messagesEl.innerHTML = "";
+            messageLog = [];
+            restoredFromCache = false;
+            if (activeSessionId) restoreMessages(activeSessionId);
+          }
           renderSessions();
         }
         break;
 
       case "session_switched":
+        // Save messages for old session before switching
+        saveMessages();
         activeSessionId = msg.sessionId;
         messagesEl.innerHTML = "";
+        messageLog = [];
+        restoredFromCache = false;
+        restoreMessages(activeSessionId);
+        // Clear terminal buffer for new session
+        terminalBuffer = "";
+        if (term) {
+          try { term.clear(); } catch(e) {}
+        }
         renderSessions();
         break;
 
@@ -1524,9 +1800,18 @@ function getDashboardJs() {
         break;
       }
 
-      case "stream_end":
+      case "stream_end": {
+        // Log the completed streamed message
+        if (streamingMsgId) {
+          var streamEl = messagesEl.querySelector('[data-msg-id="' + sanitizeId(streamingMsgId) + '"]');
+          if (streamEl) {
+            var rawText = streamEl.getAttribute("data-raw") || streamEl.textContent || "";
+            logMessage({ msgType: "assistant", content: rawText, timestamp: Date.now() });
+          }
+        }
         streamingMsgId = null;
         break;
+      }
 
       case "tool_start":
         addToolBubble(msg.tool || "tool", msg.toolUseId || msg.messageId || "", msg.input || null);
@@ -1544,11 +1829,28 @@ function getDashboardJs() {
             }
           }
         }
+        // Update messageLog entry with result
+        for (var ri = messageLog.length - 1; ri >= 0; ri--) {
+          if (messageLog[ri].type === "tool" && messageLog[ri].toolUseId === toolId) {
+            messageLog[ri].result = msg.result || "";
+            debouncedSave();
+            break;
+          }
+        }
         break;
       }
 
       case "permission_request":
         addPermissionPrompt(msg.requestId, msg.tool || "Unknown", msg.description || "");
+        // Desktop notification when tab not focused
+        if (!document.hasFocus() && "Notification" in window && Notification.permission === "granted") {
+          var permNote = new Notification("Chroxy: Permission Required", {
+            body: (msg.tool || "Tool") + ": " + (msg.description || "").slice(0, 100),
+            tag: "chroxy-permission-" + msg.requestId,
+            requireInteraction: true
+          });
+          permNote.onclick = function() { window.focus(); };
+        }
         break;
 
       case "user_question": {
@@ -1556,6 +1858,15 @@ function getDashboardJs() {
           var q = msg.questions[0];
           var questionOptions = Array.isArray(q.options) ? q.options : null;
           addQuestionPrompt(q.question || "Question from Claude", msg.toolUseId || "", questionOptions);
+          // Desktop notification when tab not focused
+          if (!document.hasFocus() && "Notification" in window && Notification.permission === "granted") {
+            var qNote = new Notification("Chroxy: Question from Claude", {
+              body: (q.question || "").slice(0, 100),
+              tag: "chroxy-question-" + (msg.toolUseId || Date.now()),
+              requireInteraction: true
+            });
+            qNote.onclick = function() { window.focus(); };
+          }
         }
         break;
       }
@@ -1615,6 +1926,14 @@ function getDashboardJs() {
         removeThinking();
         updateBusyIndicator();
         updateButtons();
+        // Notify if window not focused
+        if (!document.hasFocus() && "Notification" in window && Notification.permission === "granted") {
+          var idleNote = new Notification("Chroxy: Claude is waiting", {
+            body: "Claude is waiting for input.",
+            tag: "chroxy-idle"
+          });
+          idleNote.onclick = function() { window.focus(); };
+        }
         break;
 
       case "error":
@@ -1724,6 +2043,13 @@ function getDashboardJs() {
       return;
     }
 
+    // Ctrl+backtick: toggle chat/terminal view
+    if (e.key === "\\\`" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      switchView(currentView === "chat" ? "terminal" : "chat");
+      return;
+    }
+
     // Ctrl/Cmd+1-9: switch to session by index
     if ((e.ctrlKey || e.metaKey) && e.key >= "1" && e.key <= "9") {
       e.preventDefault();
@@ -1750,6 +2076,25 @@ function getDashboardJs() {
   // ---- Init ----
   updateButtons();
   updateBusyIndicator();
+
+  // Defer notification permission request until first user interaction
+  if ("Notification" in window && Notification.permission === "default") {
+    var requestNotifOnce = function() {
+      document.removeEventListener("click", requestNotifOnce);
+      document.removeEventListener("keydown", requestNotifOnce);
+      Notification.requestPermission().catch(function() {});
+    };
+    document.addEventListener("click", requestNotifOnce);
+    document.addEventListener("keydown", requestNotifOnce);
+  }
+
+  // Restore last active session ID and messages
+  var savedSessionId = localStorage.getItem(STORAGE_PREFIX + "active_session");
+  if (savedSessionId) {
+    activeSessionId = savedSessionId;
+    restoreMessages(activeSessionId);
+  }
+
   connect();
 })();
 `
