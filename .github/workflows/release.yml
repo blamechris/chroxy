@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "release" to confirm manual release trigger'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -14,8 +19,19 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  validate:
+    name: Validate Trigger
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate manual trigger confirmation
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm != 'release'
+        run: |
+          echo "Error: To trigger this workflow manually, you must type 'release' in the confirmation field."
+          exit 1
+
   test:
     name: Test Suite
+    needs: validate
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -127,7 +143,7 @@ jobs:
 
   github-release:
     name: GitHub Release
-    needs: [docker, desktop-macos]
+    needs: [validate, docker, desktop-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     steps:
