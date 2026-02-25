@@ -19,7 +19,7 @@ if (!url) {
 }
 
 const ws = new WebSocket(url);
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const _rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
 /** E2E encryption state */
 let encryptionState = null;

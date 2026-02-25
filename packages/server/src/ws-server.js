@@ -431,7 +431,7 @@ export class WsServer {
               'X-Content-Type-Options': 'nosniff',
             })
             res.end(content)
-          } catch (e) {
+          } catch (_e) {
             res.writeHead(404)
             res.end('Asset not found')
           }

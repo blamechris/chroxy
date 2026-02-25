@@ -28,7 +28,7 @@ export function deriveSharedKey(theirPubBase64, mySecretKey) {
   let theirPub
   try {
     theirPub = decodeBase64(theirPubBase64)
-  } catch (err) {
+  } catch (_err) {
     throw new Error('deriveSharedKey: failed to decode peer public key from base64')
   }
   if (!theirPub || theirPub.length !== nacl.box.publicKeyLength) {

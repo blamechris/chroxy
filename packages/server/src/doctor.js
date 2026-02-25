@@ -12,7 +12,7 @@ const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
  * @param {{ port?: number, verbose?: boolean }} options
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string }>, passed: boolean }}
  */
-export async function runDoctorChecks({ port, verbose } = {}) {
+export async function runDoctorChecks({ port, verbose: _verbose } = {}) {
   const checks = []
   const isMac = platform() === 'darwin'
   const isLinux = platform() === 'linux'
