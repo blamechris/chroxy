@@ -882,6 +882,283 @@ describe('#733 — status bar busy indicator', () => {
   })
 })
 
+describe('#886 — syntax highlighting', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('defines SYNTAX_COLORS map with all token types', () => {
+    assert.ok(html.includes('var SYNTAX_COLORS = {'),
+      'should define SYNTAX_COLORS')
+    for (const type of ['keyword', 'string', 'comment', 'number', 'operator', 'punctuation', 'type', 'property', 'plain', 'diff_add', 'diff_remove']) {
+      assert.ok(html.includes(`${type}: "`),
+        `SYNTAX_COLORS should include ${type}`)
+    }
+  })
+
+  it('uses mobile app color theme', () => {
+    assert.ok(html.includes('#c4a5ff'), 'keyword color')
+    assert.ok(html.includes('#4eca6a'), 'string color')
+    assert.ok(html.includes('#7a7a7a'), 'comment color')
+    assert.ok(html.includes('#ff9a52'), 'number color')
+    assert.ok(html.includes('#a0d0ff'), 'plain color')
+    assert.ok(html.includes('#ff5b5b'), 'diff_remove color')
+  })
+
+  it('defines stickyRe helper', () => {
+    assert.ok(html.includes('function stickyRe(pattern)'),
+      'should define stickyRe for adding sticky flag to regex')
+  })
+
+  it('defines language rule sets', () => {
+    for (const lang of ['LANG_JS', 'LANG_TS', 'LANG_PY', 'LANG_BASH', 'LANG_JSON', 'LANG_DIFF', 'LANG_HTML', 'LANG_CSS', 'LANG_YAML', 'LANG_GO', 'LANG_RUST', 'LANG_JAVA', 'LANG_RUBY', 'LANG_C', 'LANG_SQL']) {
+      assert.ok(html.includes(`var ${lang} = [`),
+        `should define ${lang} language rules`)
+    }
+  })
+
+  it('defines SYNTAX_LANGS lookup map', () => {
+    assert.ok(html.includes('var SYNTAX_LANGS = {'),
+      'should define SYNTAX_LANGS map')
+    assert.ok(html.includes('javascript: LANG_JS'),
+      'should map javascript to LANG_JS')
+    assert.ok(html.includes('python: LANG_PY'),
+      'should map python to LANG_PY')
+  })
+
+  it('defines SYNTAX_ALIASES for common abbreviations', () => {
+    assert.ok(html.includes('var SYNTAX_ALIASES = {'),
+      'should define SYNTAX_ALIASES')
+    assert.ok(html.includes('js: "javascript"'), 'js → javascript alias')
+    assert.ok(html.includes('ts: "typescript"'), 'ts → typescript alias')
+    assert.ok(html.includes('py: "python"'), 'py → python alias')
+    assert.ok(html.includes('sh: "bash"'), 'sh → bash alias')
+    assert.ok(html.includes('rs: "rust"'), 'rs → rust alias')
+    assert.ok(html.includes('yml: "yaml"'), 'yml → yaml alias')
+  })
+
+  it('defines getSyntaxRules function', () => {
+    assert.ok(html.includes('function getSyntaxRules(lang)'),
+      'should define getSyntaxRules lookup function')
+  })
+
+  it('defines tokenize function with MAX_HIGHLIGHT_LENGTH guard', () => {
+    assert.ok(html.includes('function tokenize(code, lang)'),
+      'should define tokenize function')
+    assert.ok(html.includes('var MAX_HIGHLIGHT_LENGTH = 5000'),
+      'should set MAX_HIGHLIGHT_LENGTH to 5000')
+  })
+
+  it('defines pushToken and highlightCode functions', () => {
+    assert.ok(html.includes('function pushToken(tokens, text, type)'),
+      'should define pushToken helper')
+    assert.ok(html.includes('function highlightCode(code, lang)'),
+      'should define highlightCode function')
+  })
+
+  it('highlightCode uses inline style for coloring', () => {
+    assert.ok(html.includes('style="color:'),
+      'highlightCode should output inline style color on spans')
+  })
+
+  it('uses highlightCode in renderMarkdown for code blocks', () => {
+    assert.ok(html.includes('highlightCode(code, lang)'),
+      'renderMarkdown should call highlightCode for fenced code blocks')
+  })
+})
+
+describe('#886 — enriched session tabs', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has tab-busy-dot CSS', () => {
+    assert.ok(html.includes('.tab-busy-dot'),
+      'should have CSS for busy dot in session tabs')
+  })
+
+  it('renders busy dot when session is busy', () => {
+    assert.ok(html.includes('s.isBusy'),
+      'should check isBusy flag on session')
+    const busyBlock = html.match(/s\.isBusy[\s\S]*?tab-busy-dot/)
+    assert.ok(busyBlock, 'should create tab-busy-dot element when s.isBusy is true')
+  })
+
+  it('has tab-cwd CSS', () => {
+    assert.ok(html.includes('.tab-cwd'),
+      'should have CSS for cwd display in session tabs')
+  })
+
+  it('renders abbreviated cwd from session', () => {
+    assert.ok(html.includes('s.cwd'),
+      'should check cwd on session')
+    // Uses platform-safe path splitting (in rendered HTML, \\\\ becomes \\)
+    assert.ok(html.includes('.split(/[\\/]/)'),
+      'should split cwd on both forward and back slashes')
+  })
+
+  it('shows full cwd path on hover via title attribute', () => {
+    assert.ok(html.includes('cwdSpan.title = s.cwd'),
+      'should set title to full cwd for hover tooltip')
+  })
+
+  it('has tab-model CSS', () => {
+    assert.ok(html.includes('.tab-model'),
+      'should have CSS for model badge in session tabs')
+  })
+
+  it('renders shortened model name', () => {
+    assert.ok(html.includes('s.model'),
+      'should check model on session')
+    // Strips "claude-" prefix and version suffix
+    assert.ok(html.includes('.replace(/^claude-/, "")'),
+      'should strip claude- prefix from model name')
+  })
+})
+
+describe('#886 — permission countdown timer', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has perm-countdown CSS', () => {
+    assert.ok(html.includes('.perm-countdown'),
+      'should have CSS for permission countdown')
+    assert.ok(html.includes('.perm-countdown.urgent'),
+      'should have CSS for urgent (red) countdown state')
+    assert.ok(html.includes('.perm-countdown.expired'),
+      'should have CSS for expired countdown state')
+  })
+
+  it('adds countdown element in permission prompt HTML', () => {
+    assert.ok(html.includes('perm-countdown'),
+      'should include perm-countdown div in permission prompt')
+  })
+
+  it('addPermissionPrompt accepts remainingMs parameter', () => {
+    assert.ok(html.includes('function addPermissionPrompt(requestId, tool, description, remainingMs'),
+      'addPermissionPrompt should accept remainingMs parameter')
+  })
+
+  it('handles active countdown with interval', () => {
+    assert.ok(html.includes('typeof remainingMs === "number"'),
+      'should check typeof remainingMs for numeric guard')
+    assert.ok(html.includes('setInterval(updateCountdown, 1000)'),
+      'should create 1-second interval for countdown updates')
+  })
+
+  it('shows minutes and seconds in countdown', () => {
+    assert.ok(html.includes('Math.floor(remaining / 60000)'),
+      'should compute minutes from remaining ms')
+    assert.ok(html.includes('Math.floor((remaining % 60000) / 1000)'),
+      'should compute seconds from remaining ms')
+  })
+
+  it('adds urgent class when 30 seconds or less remain', () => {
+    assert.ok(html.includes('remaining <= 30000'),
+      'should check for 30-second threshold')
+    const urgentBlock = html.match(/remaining <= 30000[\s\S]*?urgent/)
+    assert.ok(urgentBlock, 'should add urgent class at 30s threshold')
+  })
+
+  it('handles immediately expired countdown (remainingMs <= 0)', () => {
+    const expiredBlock = html.match(/Zero or negative remaining[\s\S]*?Timed out/)
+    assert.ok(expiredBlock, 'should show "Timed out" for zero/negative remainingMs')
+  })
+
+  it('hides countdown when remainingMs is not provided', () => {
+    assert.ok(html.includes('countdownEl.style.display = "none"'),
+      'should hide countdown element when no remainingMs (older servers)')
+  })
+
+  it('tracks active countdown intervals for cleanup', () => {
+    assert.ok(html.includes('var activeCountdowns = []'),
+      'should track active countdown intervals in an array')
+    assert.ok(html.includes('activeCountdowns.push(countdownInterval)'),
+      'should push new intervals to activeCountdowns')
+  })
+
+  it('clears countdown intervals on session switch', () => {
+    const switchBlock = html.match(/case "session_switched"[\s\S]*?activeCountdowns = \[\]/)
+    assert.ok(switchBlock, 'should clear activeCountdowns on session_switched')
+    assert.ok(switchBlock[0].includes('clearInterval'),
+      'should call clearInterval on each active countdown')
+  })
+
+  it('clears countdown interval when permission is answered', () => {
+    const answerBlock = html.match(/clearInterval\(countdownInterval\)[\s\S]*?sendPermissionResponse/)
+    assert.ok(answerBlock, 'should clear interval before sending permission response')
+  })
+
+  it('passes remainingMs from permission_request message', () => {
+    assert.ok(html.includes('addPermissionPrompt(msg.requestId, msg.tool || "Unknown", msg.description || "", msg.remainingMs)'),
+      'permission_request handler should pass msg.remainingMs to addPermissionPrompt')
+  })
+})
+
+describe('#886 — reconnect backoff', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('defines RETRY_DELAYS array', () => {
+    assert.ok(html.includes('var RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000]'),
+      'should define escalating retry delays')
+  })
+
+  it('defines MAX_RETRIES constant', () => {
+    assert.ok(html.includes('var MAX_RETRIES = 8'),
+      'should allow up to 8 reconnect attempts')
+  })
+
+  it('tracks reconnect attempt count', () => {
+    assert.ok(html.includes('var reconnectAttempt = 0'),
+      'should track reconnect attempts starting at 0')
+  })
+
+  it('has reconnect retry button element', () => {
+    assert.ok(html.includes('id="reconnect-retry-btn"'),
+      'should have retry button in reconnect banner')
+  })
+
+  it('retry button is hidden by default', () => {
+    assert.ok(html.includes('id="reconnect-retry-btn" class="hidden"'),
+      'retry button should be hidden initially')
+  })
+
+  it('has retry button CSS', () => {
+    assert.ok(html.includes('#reconnect-retry-btn'),
+      'should have CSS for reconnect retry button')
+  })
+
+  it('uses escalating delay from RETRY_DELAYS', () => {
+    assert.ok(html.includes('RETRY_DELAYS[Math.min(reconnectAttempt, RETRY_DELAYS.length - 1)]'),
+      'should pick delay from RETRY_DELAYS clamped to array bounds')
+  })
+
+  it('shows attempt counter in reconnect text', () => {
+    assert.ok(html.includes('(reconnectAttempt + 1) + "/" + MAX_RETRIES'),
+      'should display attempt number / max retries')
+  })
+
+  it('shows "Connection lost." when max retries exhausted', () => {
+    assert.ok(html.includes('Connection lost.'),
+      'should show connection lost message after max retries')
+  })
+
+  it('shows retry button when max retries exhausted', () => {
+    const exhaustedBlock = html.match(/Connection lost[\s\S]*?reconnectRetryBtn[\s\S]*?remove\("hidden"\)/)
+    assert.ok(exhaustedBlock, 'should show retry button when connection lost')
+  })
+
+  it('resets reconnect attempt on successful auth', () => {
+    assert.ok(html.includes('reconnectAttempt = 0'),
+      'should reset reconnectAttempt to 0 on auth_ok or server restart')
+  })
+
+  it('increments reconnect attempt before each retry', () => {
+    const retryBlock = html.match(/reconnectAttempt\+\+[\s\S]*?connect\(\)/)
+    assert.ok(retryBlock, 'should increment reconnectAttempt then call connect()')
+  })
+
+  it('gets reconnectRetryBtn element by ID', () => {
+    assert.ok(html.includes('document.getElementById("reconnect-retry-btn")'),
+      'should get retry button element')
+  })
+})
+
 describe('#610 — responsive CSS for mobile browsers', () => {
   const html = getDashboardHtml(8765, 'test-token', false)
 
