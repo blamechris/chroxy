@@ -25,9 +25,7 @@
     "tweetnacl-util": "^0.15.1",
     "uuid": "^9.0.0",
     "ws": "^8.16.0",
-    "zod": "^4.3.6"
-  },
-  "devDependencies": {
+    "zod": "^4.3.6",
     "@xterm/xterm": "^5.5.0",
     "@xterm/addon-fit": "^0.10.0"
   },
