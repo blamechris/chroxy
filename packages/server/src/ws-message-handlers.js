@@ -605,7 +605,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
     }
 
     case 'teleport_web_task': {
-      ctx.webTaskManager.teleportTask(msg.taskId).then(({ success: _success, output: _output }) => {
+      ctx.webTaskManager.teleportTask(msg.taskId).then(() => {
         console.log(`[ws] Teleported task ${msg.taskId}`)
         ctx.send(ws, { type: 'server_status', message: `Task ${msg.taskId} teleported to local session` })
       }).catch(err => {
