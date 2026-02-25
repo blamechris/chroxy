@@ -122,7 +122,7 @@ type(scope): Short summary in present tense
 ```
 
 **Types:** feat, fix, refactor, docs, test, chore, style, perf
-**Scopes:** server, app, parser, tunnel, ws, cli, docs
+**Scopes:** server, app, desktop, tunnel, ws, cli, ci, docs
 
 ### PR Workflow
 
