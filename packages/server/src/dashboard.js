@@ -1581,30 +1581,39 @@ function getDashboardJs() {
       '</div>' +
       '<div class="perm-answer" style="display:none"></div>';
 
-    // Countdown timer (skip for restored prompts — already expired)
+    // Countdown timer — handle expired, active, and missing states
     var countdownEl = div.querySelector(".perm-countdown");
     var countdownInterval = null;
-    if (remainingMs && remainingMs > 0 && !skipLog) {
-      var expiresAt = Date.now() + remainingMs;
-      function updateCountdown() {
-        var remaining = Math.max(0, expiresAt - Date.now());
-        if (remaining <= 0) {
-          clearInterval(countdownInterval);
-          activeCountdowns = activeCountdowns.filter(function(id) { return id !== countdownInterval; });
-          countdownEl.textContent = "Timed out";
-          countdownEl.classList.add("expired");
-          return;
+    if (typeof remainingMs === "number") {
+      if (remainingMs > 0 && !skipLog) {
+        var expiresAt = Date.now() + remainingMs;
+        function updateCountdown() {
+          var remaining = Math.max(0, expiresAt - Date.now());
+          if (remaining <= 0) {
+            clearInterval(countdownInterval);
+            activeCountdowns = activeCountdowns.filter(function(id) { return id !== countdownInterval; });
+            countdownEl.textContent = "Timed out";
+            countdownEl.classList.add("expired");
+            return;
+          }
+          var mins = Math.floor(remaining / 60000);
+          var secs = Math.floor((remaining % 60000) / 1000);
+          countdownEl.textContent = mins + ":" + (secs < 10 ? "0" : "") + secs;
+          if (remaining <= 30000) {
+            countdownEl.classList.add("urgent");
+          }
         }
-        var mins = Math.floor(remaining / 60000);
-        var secs = Math.floor((remaining % 60000) / 1000);
-        countdownEl.textContent = mins + ":" + (secs < 10 ? "0" : "") + secs;
-        if (remaining <= 30000) {
-          countdownEl.classList.add("urgent");
-        }
+        updateCountdown();
+        countdownInterval = setInterval(updateCountdown, 1000);
+        activeCountdowns.push(countdownInterval);
+      } else {
+        // Zero or negative remaining — immediately expired
+        countdownEl.textContent = "Timed out";
+        countdownEl.classList.add("expired");
       }
-      updateCountdown();
-      countdownInterval = setInterval(updateCountdown, 1000);
-      activeCountdowns.push(countdownInterval);
+    } else {
+      // No remainingMs (older servers or restored prompts) — hide countdown
+      countdownEl.style.display = "none";
     }
 
     div.querySelectorAll("button").forEach(function(btn) {
@@ -1733,7 +1742,7 @@ function getDashboardJs() {
       if (s.cwd) {
         var cwdSpan = document.createElement("span");
         cwdSpan.className = "tab-cwd";
-        var parts = s.cwd.split("/");
+        var parts = s.cwd.split(/[\\/]/);
         cwdSpan.textContent = parts[parts.length - 1] || s.cwd;
         cwdSpan.title = s.cwd;
         tab.appendChild(cwdSpan);
