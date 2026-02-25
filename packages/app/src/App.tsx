@@ -1,5 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Platform, UIManager } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+
+// Enable LayoutAnimation on Android (must be called before any component uses it)
+if (Platform.OS === 'android') {
+  UIManager.setLayoutAnimationEnabledExperimental?.(true);
+}
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import * as SecureStore from 'expo-secure-store';

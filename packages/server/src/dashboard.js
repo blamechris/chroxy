@@ -41,9 +41,9 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
       <button id="new-session-btn" title="New session (Ctrl+N)">+</button>
     </div>
 
-    <div id="view-switcher">
-      <button class="view-tab active" data-view="chat">Chat</button>
-      <button class="view-tab" data-view="terminal">Terminal</button>
+    <div id="view-switcher" role="tablist">
+      <button class="view-tab active" data-view="chat" role="tab" aria-selected="true" aria-controls="chat-messages" id="tab-chat">Chat</button>
+      <button class="view-tab" data-view="terminal" role="tab" aria-selected="false" aria-controls="terminal-container" id="tab-terminal">Terminal</button>
     </div>
 
     <div id="reconnect-banner" class="hidden">
@@ -78,8 +78,8 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
       </div>
     </div>
 
-    <div id="chat-messages"></div>
-    <div id="terminal-container" class="hidden"></div>
+    <div id="chat-messages" role="tabpanel" aria-labelledby="tab-chat"></div>
+    <div id="terminal-container" class="hidden" role="tabpanel" aria-labelledby="tab-terminal"></div>
 
     <div id="status-bar">
       <span id="status-busy" class="busy-indicator hidden"></span>
@@ -1148,9 +1148,11 @@ function getDashboardJs() {
   function switchView(view) {
     if (view === currentView) return;
     currentView = view;
-    // Update tab active states
+    // Update tab active states and ARIA
     viewSwitcher.querySelectorAll(".view-tab").forEach(function(tab) {
-      tab.classList.toggle("active", tab.getAttribute("data-view") === view);
+      var isActive = tab.getAttribute("data-view") === view;
+      tab.classList.toggle("active", isActive);
+      tab.setAttribute("aria-selected", isActive ? "true" : "false");
     });
     if (view === "chat") {
       messagesEl.classList.remove("hidden");
@@ -1731,6 +1733,13 @@ function getDashboardJs() {
         renderSessions();
         break;
 
+      case "session_destroyed":
+        // Clean up persisted messages for destroyed session
+        if (msg.sessionId) {
+          localStorage.removeItem(STORAGE_PREFIX + "messages_" + msg.sessionId);
+        }
+        break;
+
       case "claude_ready":
         claudeReady = true;
         isBusy = false;
@@ -2087,6 +2096,9 @@ function getDashboardJs() {
     document.addEventListener("click", requestNotifOnce);
     document.addEventListener("keydown", requestNotifOnce);
   }
+
+  // Flush pending saves before page unload
+  window.addEventListener("beforeunload", saveMessages);
 
   // Restore last active session ID and messages
   var savedSessionId = localStorage.getItem(STORAGE_PREFIX + "active_session");
