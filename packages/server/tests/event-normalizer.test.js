@@ -63,13 +63,6 @@ describe('EventNormalizer', () => {
       assert.equal(result.messages[0].msg.type, 'claude_ready')
     })
 
-    it('emits only claude_ready in pty mode', () => {
-      const ctx = makeCtx({ mode: 'pty', getSessionEntry: null })
-      const result = normalizer.normalize('ready', {}, ctx)
-      assert.equal(result.messages.length, 1)
-      assert.equal(result.messages[0].msg.type, 'claude_ready')
-    })
-
     it('handles missing session entry gracefully', () => {
       const ctx = makeCtx({ getSessionEntry: () => null })
       const result = normalizer.normalize('ready', {}, ctx)
@@ -136,16 +129,6 @@ describe('EventNormalizer', () => {
       assert.equal(msg.messageType, 'response')
       assert.equal(msg.content, 'Hello!')
       assert.equal(msg.timestamp, 1000)
-    })
-
-    it('adds authTime filter in pty mode', () => {
-      const data = { type: 'response', content: 'Hi', timestamp: 5000 }
-      const result = normalizer.normalize('message', data, makeCtx({ mode: 'pty' }))
-      assert.ok(result.messages[0].filter)
-      // Filter should accept clients with authTime < message timestamp
-      assert.ok(result.messages[0].filter({ mode: 'chat', authTime: 4000 }))
-      assert.ok(!result.messages[0].filter({ mode: 'chat', authTime: 6000 }))
-      assert.ok(!result.messages[0].filter({ mode: 'terminal', authTime: 4000 }))
     })
 
     it('has no filter in multi mode', () => {
@@ -296,13 +279,6 @@ describe('EventNormalizer', () => {
       assert.ok(!result.messages[0].filter({ mode: 'terminal', activeSessionId: 'other' }))
     })
 
-    it('emits raw + raw_background with mode-only filters in pty mode', () => {
-      const result = normalizer.normalize('raw', 'data', makeCtx({ mode: 'pty' }))
-      assert.ok(result.messages[0].filter({ mode: 'terminal' }))
-      assert.ok(!result.messages[0].filter({ mode: 'chat' }))
-      assert.ok(result.messages[1].filter({ mode: 'chat' }))
-      assert.ok(!result.messages[1].filter({ mode: 'terminal' }))
-    })
   })
 
   // ---- EVENT_MAP: status_update ----
@@ -362,15 +338,6 @@ describe('EventNormalizer', () => {
       assert.equal(result.messages[0].msg.type, 'message')
       assert.equal(result.messages[0].msg.messageType, 'error')
       assert.equal(result.messages[0].msg.content, 'Something went wrong')
-    })
-  })
-
-  // ---- EVENT_MAP: claude_ready (PTY only) ----
-
-  describe('claude_ready event (PTY)', () => {
-    it('emits claude_ready', () => {
-      const result = normalizer.normalize('claude_ready', {}, makeCtx({ mode: 'pty' }))
-      assert.equal(result.messages[0].msg.type, 'claude_ready')
     })
   })
 
@@ -440,7 +407,7 @@ describe('EVENT_MAP', () => {
       'ready', 'conversation_id', 'stream_start', 'stream_delta', 'stream_end',
       'message', 'tool_start', 'tool_result', 'agent_spawned', 'agent_completed',
       'mcp_servers', 'plan_started', 'plan_ready', 'result', 'raw', 'status_update',
-      'user_question', 'permission_request', 'error', 'claude_ready',
+      'user_question', 'permission_request', 'error',
     ]
     for (const event of expectedEvents) {
       assert.ok(EVENT_MAP[event], `EVENT_MAP missing handler for '${event}'`)
@@ -470,7 +437,6 @@ describe('EVENT_MAP', () => {
       user_question: { toolUseId: 'tu1', questions: [] },
       permission_request: { requestId: 'r1', tool: 'Bash', description: 'd', input: 'i', remainingMs: 60000 },
       error: { message: 'err' },
-      claude_ready: {},
     }
     for (const [event, data] of Object.entries(testData)) {
       const result = EVENT_MAP[event](data, ctx)

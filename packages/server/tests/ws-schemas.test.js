@@ -14,9 +14,6 @@ import {
   CreateSessionSchema,
   DestroySessionSchema,
   RenameSessionSchema,
-  DiscoverSessionsSchema,
-  TriggerDiscoverySchema,
-  AttachSessionSchema,
   RegisterPushTokenSchema,
   UserQuestionResponseSchema,
   ListDirectorySchema,
@@ -367,39 +364,6 @@ describe('RenameSessionSchema', () => {
 })
 
 
-// -- Discovery schemas --
-describe('DiscoverSessionsSchema', () => {
-  it('accepts valid message', () => {
-    const result = DiscoverSessionsSchema.safeParse({ type: 'discover_sessions' })
-    assert.ok(result.success)
-  })
-})
-
-describe('TriggerDiscoverySchema', () => {
-  it('accepts valid message', () => {
-    const result = TriggerDiscoverySchema.safeParse({ type: 'trigger_discovery' })
-    assert.ok(result.success)
-  })
-})
-
-describe('AttachSessionSchema', () => {
-  it('accepts with tmuxSession only', () => {
-    const result = AttachSessionSchema.safeParse({ type: 'attach_session', tmuxSession: 'my-session' })
-    assert.ok(result.success)
-  })
-
-  it('accepts with name', () => {
-    const result = AttachSessionSchema.safeParse({ type: 'attach_session', tmuxSession: 'my-session', name: 'Dev' })
-    assert.ok(result.success)
-  })
-
-  it('rejects missing tmuxSession', () => {
-    const result = AttachSessionSchema.safeParse({ type: 'attach_session' })
-    assert.ok(!result.success)
-  })
-})
-
-
 // -- Push token --
 describe('RegisterPushTokenSchema', () => {
   it('accepts valid token', () => {
@@ -690,8 +654,6 @@ describe('ClientMessageSchema', () => {
     const simpleTypes = [
       'interrupt',
       'list_sessions',
-      'discover_sessions',
-      'trigger_discovery',
       'list_slash_commands',
       'list_agents',
       'get_diff',

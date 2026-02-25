@@ -13,20 +13,19 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | ServerCLI | `src/server-cli.js` | CLI mode orchestrator |
 | CliSession | `src/cli-session.js` | Claude Code headless executor (stream-json) |
 | SdkSession | `src/sdk-session.js` | Claude Agent SDK executor |
-| Server | `src/server.js` | PTY mode orchestrator |
 | WsServer | `src/ws-server.js` | WebSocket protocol with auth |
-| PushManager | `src/push.js` | Push notifications via Expo Push API (CLI mode) |
-| PtyManager | `src/pty-manager.js` | tmux session management (PTY mode) |
-| OutputParser | `src/output-parser.js` | Terminal output parser (PTY mode) |
-| NoisePatterns | `src/noise-patterns.js` | Terminal noise filter patterns (PTY mode) |
+| WsMessageHandlers | `src/ws-message-handlers.js` | WS message handler dispatch |
+| WsForwarding | `src/ws-forwarding.js` | Session event → WS broadcast wiring |
+| WsSchemas | `src/ws-schemas.js` | Zod schemas for WebSocket message validation |
+| EventNormalizer | `src/event-normalizer.js` | Normalize SDK/CLI events into unified format |
+| PushManager | `src/push.js` | Push notifications via Expo Push API |
 | TunnelRegistry | `src/tunnel/registry.js` | Tunnel adapter registry (`registerTunnel`/`getTunnel`/`parseTunnelArg`) |
 | BaseTunnelAdapter | `src/tunnel/base.js` | Base class with shared recovery logic (backoff, events) |
 | CloudflareTunnelAdapter | `src/tunnel/cloudflare.js` | Cloudflare adapter (quick/named modes) |
 | TunnelManager | `src/tunnel.js` | Backward-compat shim re-exporting CloudflareTunnelAdapter |
 | TunnelEvents | `src/tunnel-events.js` | Tunnel event wiring helpers |
 | ProviderRegistry | `src/providers.js` | Provider adapter interface + built-in registrations |
-| SessionManager | `src/session-manager.js` | Session lifecycle management + auto-discovery |
-| SessionDiscovery | `src/session-discovery.js` | tmux session discovery utilities |
+| SessionManager | `src/session-manager.js` | Session lifecycle management |
 | Models | `src/models.js` | Model switching utilities |
 | ContentBlocks | `src/content-blocks.js` | Content block builder for structured output |
 | PermissionHook | `src/permission-hook.js` | Permission hook management (CLI mode) |
@@ -64,24 +63,14 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 
 ## Data Flow
 
-**CLI Headless Mode:**
 ```
-[Mobile App] ←WebSocket→ [Cloudflare] ←→ [WsServer]
-                                            ↕
-                                      [CliSession]
-                                            ↕
-                              [claude -p --output-format stream-json]
-                                            ↕
-                                    [Streaming JSON Events]
-```
-
-**PTY/tmux Mode:**
-```
-[Mobile App] ←WebSocket→ [Cloudflare] ←→ [WsServer]
-                                            ↕
-                                  [PtyManager] → [OutputParser]
-                                       ↕              ↕
-                                  [tmux/Claude]   [Parsed Messages]
+[Mobile App / Desktop] ←WebSocket→ [Cloudflare] ←→ [WsServer]
+                                                       ↕
+                                                 [CliSession / SdkSession]
+                                                       ↕
+                                         [claude -p / Agent SDK]
+                                                       ↕
+                                               [Streaming JSON Events]
 ```
 
 ## WebSocket Protocol
@@ -91,11 +80,9 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | Type | Purpose |
 |------|---------|
 | `auth` | Authenticate with server token and device info |
-| `attach_session` | Attach to existing tmux session by name |
 | `browse_files` | Request file/directory listing within project |
 | `create_session` | Create new session with optional name/cwd |
 | `destroy_session` | Delete session by ID |
-| `discover_sessions` | Scan host for available tmux sessions |
 | `encrypted` | Encrypted message envelope (E2E encryption) |
 | `get_diff` | Request git diff for uncommitted changes |
 | `input` | Send text or voice message to session |
@@ -113,11 +100,9 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `rename_session` | Rename existing session by ID |
 | `request_full_history` | Request complete JSONL history for session |
 | `request_session_context` | Get context info for specific session |
-| `resize` | Resize PTY terminal (cols/rows) |
 | `set_model` | Change active Claude model |
 | `set_permission_mode` | Change permission handling mode |
 | `switch_session` | Switch to different active session |
-| `trigger_discovery` | Trigger on-demand tmux discovery scan |
 | `user_question_response` | Respond to AskUserQuestion prompt |
 
 ### Server → Client
@@ -140,8 +125,6 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `conversation_id` | SDK conversation ID for session portability |
 | `diff_result` | Git diff for uncommitted changes |
 | `directory_listing` | Home directory listing response |
-| `discovered_sessions` | Available tmux sessions on host |
-| `discovery_triggered` | On-demand discovery scan started |
 | `encrypted` | Encrypted message envelope (E2E encryption) |
 | `file_content` | File content with syntax metadata |
 | `file_listing` | Project file/directory listing response |
@@ -157,8 +140,6 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `plan_started` | Claude entered plan mode |
 | `pong` | Heartbeat response to client ping |
 | `primary_changed` | Last-writer-wins primary client changed |
-| `raw` | Raw PTY output (terminal view) |
-| `raw_background` | Raw PTY data for chat-mode clients |
 | `result` | Query stats (cost/duration/tokens) |
 | `server_error` | Server-side error forwarded to app |
 | `server_mode` | Which backend mode active (cli/terminal) |
@@ -185,8 +166,6 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 - `list_directory` requests a directory listing; `directory_listing` returns sorted non-hidden subdirectories (or error)
 - `server_shutdown` sent before server goes down; `reason` is `'restart'` (coming back) or `'shutdown'` (not coming back); `restartEtaMs` is estimated ms until server is available (0 for permanent shutdown); supervisor standby health check also includes `restartEtaMs` for crash recovery
 - `server_status` for non-error updates; `server_error` for error conditions
-- `discovered_sessions` sent proactively when auto-discovery finds new tmux sessions (configurable via `--discovery-interval`, default 45s)
-- `trigger_discovery` requests an immediate discovery scan
 - `permission_request` includes an `input` field (always present, defaults to `{}`) with structured tool input for rich UI rendering; `remainingMs` (milliseconds until auto-deny) lets the client compute a local deadline without clock skew
 - `user_question` forwards `AskUserQuestion` prompts from plan mode; `user_question_response` sends the user's answer back
 - `agent_spawned` fires when the Task tool is detected (description truncated to 200 chars); `agent_completed` fires per-agent when the turn's `result` arrives or on process crash/destroy
@@ -217,12 +196,9 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `permission-hook.js` | Permission hook management (CLI mode) |
 | `push.js` | Push notifications via Expo Push API |
 | `platform.js` | Cross-platform utilities (Windows/macOS/Linux) |
-| `server.js` | PTY mode orchestrator |
-| `pty-manager.js` | PTY/tmux management |
-| `pty-session.js` | PTY session state + I/O handling |
-| `output-parser.js` | Terminal output parser |
-| `noise-patterns.js` | Terminal noise filter patterns |
 | `ws-server.js` | WebSocket protocol with auth |
+| `ws-message-handlers.js` | WS message handler dispatch |
+| `ws-forwarding.js` | Session event → WS broadcast wiring |
 | `ws-schemas.js` | Zod schemas for WebSocket message validation |
 | `diff-parser.js` | Unified diff parser for git output |
 | `crypto.js` | ECDH key exchange + AES-GCM encryption |
@@ -235,7 +211,6 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `tunnel-check.js` | Tunnel health verification |
 | `tunnel-events.js` | Tunnel event wiring helpers |
 | `session-manager.js` | Session lifecycle management |
-| `session-discovery.js` | Session discovery utilities |
 | `models.js` | Model switching utilities |
 | `logger.js` | Shared logging utility |
 

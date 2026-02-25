@@ -4,7 +4,6 @@ import { statSync, readFileSync, unlinkSync, renameSync, existsSync, mkdirSync }
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { getProvider } from './providers.js'
-import { discoverTmuxSessions } from './session-discovery.js'
 import { resolveJsonlPath, readConversationHistory, readConversationHistoryAsync } from './jsonl-reader.js'
 import { isWindows, writeFileRestricted } from './platform.js'
 import { readSessionContext } from './session-context.js'
@@ -34,27 +33,6 @@ export class SessionNotFoundError extends SessionError {
   }
 }
 
-/**
- * Thrown when attempting to create a session that already exists.
- */
-export class SessionExistsError extends SessionError {
-  constructor(tmuxSession) {
-    super(`Already attached to tmux session: ${tmuxSession}`, 'SESSION_EXISTS')
-    this.name = 'SessionExistsError'
-    this.tmuxSession = tmuxSession
-  }
-}
-
-/**
- * Thrown when session attachment fails.
- */
-export class SessionAttachError extends SessionError {
-  constructor(message, details) {
-    super(message, 'SESSION_ATTACH_FAILED')
-    this.name = 'SessionAttachError'
-    this.details = details
-  }
-}
 
 /**
  * Thrown when maximum session limit is reached.
@@ -79,20 +57,14 @@ export class SessionDirectoryError extends SessionError {
 }
 
 /**
- * Manages the lifecycle of multiple sessions (CliSession and PtySession).
- *
- * Two session types:
- *   - 'cli': headless `claude -p` process (CliSession) — chat only
- *   - 'pty': tmux attachment (PtySession) — terminal + chat views
+ * Manages the lifecycle of multiple CLI sessions.
  *
  * Events emitted:
  *   session_event     { sessionId, event, data }   — proxied from each session
- *     CLI events: ready, stream_start, stream_delta, stream_end, message, tool_start, result, error
- *     PTY events: ready, message, error, raw
+ *     Events: ready, stream_start, stream_delta, stream_end, message, tool_start, result, error
  *   session_created   { sessionId, name, cwd }
  *   session_destroyed { sessionId }
  *   session_updated   { sessionId, name }
- *   new_sessions_discovered { tmux: [...] } — new tmux sessions found during polling
  *   session_warning   { sessionId, name, reason, message, remainingMs } — session nearing idle timeout
  *   session_timeout   { sessionId, name, idleMs } — session destroyed due to idle timeout
  */
@@ -112,7 +84,7 @@ export function formatIdleDuration(ms) {
 }
 
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, autoDiscovery = true, discoveryIntervalMs = 45000, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout, costBudget } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout, costBudget } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -126,7 +98,7 @@ export class SessionManager extends EventEmitter {
     this._stateFilePath = stateFilePath || DEFAULT_STATE_FILE
     this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000 // 24 hours
     this._persistDebounceMs = persistDebounceMs
-    this._sessions = new Map() // sessionId -> { session, type: 'cli'|'pty', name, cwd, createdAt, tmuxSession? }
+    this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
     this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
     this._maxHistory = 500
@@ -137,10 +109,6 @@ export class SessionManager extends EventEmitter {
     this._budgetExceeded = new Set() // sessionIds that have already received 100% exceeded
     this._costBudget = typeof costBudget === 'number' && costBudget > 0 ? costBudget : null
     this._budgetPaused = new Set() // sessionIds paused due to budget exceeded
-    this._autoDiscovery = autoDiscovery
-    this._discoveryIntervalMs = discoveryIntervalMs
-    this._discoveryTimer = null
-    this._lastDiscoveredSessions = new Set() // Track tmux session names we've seen
 
     // Session idle timeout
     const parsedTimeout = sessionTimeout ? parseDuration(sessionTimeout) : null
@@ -203,7 +171,6 @@ export class SessionManager extends EventEmitter {
 
     const entry = {
       session,
-      type: 'cli',
       name: sessionName,
       cwd: resolvedCwd,
       provider: resolvedProvider,
@@ -223,7 +190,7 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Get a session entry by ID.
-   * @returns {{ session: CliSession, name: string, cwd: string, createdAt: number } | null}
+   * @returns {{ session: object, name: string, cwd: string, createdAt: number } | null}
    */
   getSession(sessionId) {
     return this._sessions.get(sessionId) || null
@@ -241,10 +208,8 @@ export class SessionManager extends EventEmitter {
         sessionId,
         name: entry.name,
         cwd: entry.cwd,
-        type: entry.type,
-        hasTerminal: entry.type === 'pty',
         model: entry.session.model || null,
-        permissionMode: entry.type === 'pty' ? null : (entry.session.permissionMode || 'approve'),
+        permissionMode: entry.session.permissionMode || 'approve',
         isBusy: entry.session.isRunning,
         createdAt: entry.createdAt,
         conversationId: entry.session.resumeSessionId || null,
@@ -323,7 +288,6 @@ export class SessionManager extends EventEmitter {
    * Destroy all sessions (shutdown cleanup).
    */
   destroyAll() {
-    this.stopAutoDiscovery()
     this.stopSessionTimeouts()
     clearTimeout(this._persistTimer)
     this._persistTimer = null
@@ -347,143 +311,6 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Attach to an existing tmux session running Claude.
-   * Creates a PtySession and adds it to the session map.
-   * @returns {Promise<string>} sessionId
-   */
-  async attachSession({ tmuxSession, name, cols, rows }) {
-    if (this._sessions.size >= this.maxSessions) {
-      console.error(`[session-manager] Cannot attach session: limit reached (${this._sessions.size}/${this.maxSessions})`)
-      throw new SessionLimitError(this.maxSessions)
-    }
-
-    console.log(`[session-manager] Attempting to attach to tmux session '${tmuxSession}'`)
-
-    // Prevent duplicate attachments to the same tmux session
-    for (const [, entry] of this._sessions) {
-      if (entry.tmuxSession === tmuxSession) {
-        throw new SessionExistsError(tmuxSession)
-      }
-    }
-
-    const sessionId = randomUUID().slice(0, 8)
-    const sessionName = name || tmuxSession
-
-    // Dynamic import: node-pty is a native module that may not be available (e.g. Docker)
-    const { PtySession } = await import('./pty-session.js')
-    const session = new PtySession({
-      tmuxSession,
-      cols: cols || 120,
-      rows: rows || 40,
-      port: this._port,
-      apiToken: this._apiToken,
-    })
-
-    const entry = {
-      session,
-      type: 'pty',
-      name: sessionName,
-      cwd: process.cwd(),
-      tmuxSession,
-      createdAt: Date.now(),
-    }
-
-    this._sessions.set(sessionId, entry)
-    this._lastActivity.set(sessionId, Date.now())
-    this._wireSessionEvents(sessionId, session)
-
-    try {
-      // Wait for PTY start to complete — surface failures synchronously
-      await session.start()
-      console.log(`[session-manager] Successfully attached session ${sessionId} to tmux '${tmuxSession}'`)
-    } catch (err) {
-      // Clean up failed session entry before rethrowing
-      this._sessions.delete(sessionId)
-      throw new SessionAttachError(`Failed to attach to tmux session '${tmuxSession}': ${err.message}`, { tmuxSession, sessionId, originalError: err })
-    }
-
-    this.emit('session_created', { sessionId, name: sessionName, cwd: entry.cwd })
-    return sessionId
-  }
-
-  /**
-   * Discover tmux sessions running Claude on the host.
-   * Filters out sessions we're already attached to.
-   * @returns {Array<{ sessionName: string, cwd: string, pid: number }>}
-   */
-  discoverSessions() {
-    const discovered = discoverTmuxSessions()
-
-    // Filter out already-attached sessions
-    const attachedTmux = new Set()
-    for (const [, entry] of this._sessions) {
-      if (entry.tmuxSession) attachedTmux.add(entry.tmuxSession)
-    }
-
-    return discovered.filter((s) => !attachedTmux.has(s.sessionName))
-  }
-
-  /**
-   * Start periodic auto-discovery of new tmux sessions.
-   * Only runs if autoDiscovery is enabled.
-   */
-  startAutoDiscovery() {
-    if (!this._autoDiscovery) return
-    if (this._discoveryTimer) return // Already running
-
-    console.log(`[session-manager] Starting auto-discovery (interval: ${this._discoveryIntervalMs}ms)`)
-
-    // Initialize tracking with current discovered sessions
-    const initial = this.discoverSessions()
-    for (const session of initial) {
-      this._lastDiscoveredSessions.add(session.sessionName)
-    }
-
-    this._discoveryTimer = setInterval(() => {
-      this.pollForNewSessions()
-    }, this._discoveryIntervalMs)
-  }
-
-  /**
-   * Stop periodic auto-discovery.
-   */
-  stopAutoDiscovery() {
-    if (this._discoveryTimer) {
-      clearInterval(this._discoveryTimer)
-      this._discoveryTimer = null
-      console.log('[session-manager] Stopped auto-discovery')
-    }
-  }
-
-  /**
-   * Poll for new tmux sessions and emit event if any are found.
-   */
-  pollForNewSessions() {
-    const current = this.discoverSessions()
-    const newSessions = []
-
-    for (const session of current) {
-      if (!this._lastDiscoveredSessions.has(session.sessionName)) {
-        newSessions.push(session)
-        this._lastDiscoveredSessions.add(session.sessionName)
-      }
-    }
-
-    // Prune sessions that no longer exist
-    const currentNames = new Set(current.map((s) => s.sessionName))
-    for (const name of this._lastDiscoveredSessions) {
-      if (!currentNames.has(name)) {
-        this._lastDiscoveredSessions.delete(name)
-      }
-    }
-
-    if (newSessions.length > 0) {
-      console.log(`[session-manager] Discovered ${newSessions.length} new tmux session(s): ${newSessions.map((s) => s.sessionName).join(', ')}`)
-      this.emit('new_sessions_discovered', { tmux: newSessions })
-    }
-  }
-
-  /**
    * Serialize session state to disk for graceful restart.
    * Called during drain before the process exits.
    * @returns {object} The serialized state
@@ -491,7 +318,6 @@ export class SessionManager extends EventEmitter {
   serializeState() {
     const state = { version: 1, timestamp: Date.now(), sessions: [] }
     for (const [id, entry] of this._sessions) {
-      if (entry.type === 'pty') continue // PTY sessions can't be serialized
       const history = (this._messageHistory.get(id) || []).map(e => this._truncateEntry(e))
       state.sessions.push({
         id,
@@ -927,22 +753,6 @@ export class SessionManager extends EventEmitter {
     // models_updated is global (not per-session) — forward as transient event
     session.on('models_updated', (data) => {
       this.emit('session_event', { sessionId, event: 'models_updated', data })
-    })
-
-    // PtySession emits 'raw' for terminal view — forward it (not recorded in history)
-    session.on('raw', (data) => {
-      this.emit('session_event', { sessionId, event: 'raw', data })
-    })
-
-    // PtySession emits 'status_update' for Claude Code status bar metadata (not recorded in history)
-    session.on('status_update', (data) => {
-      this.emit('session_event', { sessionId, event: 'status_update', data })
-    })
-
-    // PtySession emits 'session_crashed' when health checks detect a crashed Claude process
-    session.on('session_crashed', (data) => {
-      console.error(`[session-manager] Session ${sessionId} crashed: ${data.error}`)
-      this.emit('session_crashed', { sessionId, reason: data.reason, error: data.error })
     })
   }
 

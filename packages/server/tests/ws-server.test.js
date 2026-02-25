@@ -1027,31 +1027,6 @@ describe('auth_ok payload fields (single-session mode)', () => {
     ws.close()
   })
 
-  it('includes serverMode "terminal" when only ptyManager is provided', async () => {
-    const mockPty = new EventEmitter()
-    mockPty.write = () => {}
-    mockPty.resize = () => {}
-
-    const mockParser = new EventEmitter()
-
-    server = new WsServer({
-      port: 0,
-      apiToken: 'test-token',
-      ptyManager: mockPty,
-      outputParser: mockParser,
-      authRequired: true,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token' })
-
-    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
-    assert.equal(authOk.serverMode, 'terminal', 'serverMode should be "terminal" when only ptyManager is provided')
-
-    ws.close()
-  })
-
   it('includes serverVersion as a semver string', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
@@ -1114,17 +1089,9 @@ describe('auth_ok payload fields (single-session mode)', () => {
   })
 
   it('sets cwd to null when no session cwd is available', async () => {
-    const mockPty = new EventEmitter()
-    mockPty.write = () => {}
-    mockPty.resize = () => {}
-
-    const mockParser = new EventEmitter()
-
     server = new WsServer({
       port: 0,
       apiToken: 'test-token',
-      ptyManager: mockPty,
-      outputParser: mockParser,
       authRequired: true,
     })
     const port = await startServerAndGetPort(server)
@@ -1133,7 +1100,7 @@ describe('auth_ok payload fields (single-session mode)', () => {
     send(ws, { type: 'auth', token: 'test-token' })
 
     const authOk = await waitForMessage(messages, 'auth_ok', 2000)
-    assert.equal(authOk.cwd, null, 'cwd should be null in PTY mode (no session cwd)')
+    assert.equal(authOk.cwd, null, 'cwd should be null when no session is available')
 
     ws.close()
   })
@@ -1416,7 +1383,9 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
   })
 })
 
-describe('WsServer attach_session message flow', () => {
+// PTY attach_session tests removed in v0.2.0 (PTY mode deleted)
+
+describe.skip('WsServer attach_session message flow [REMOVED]', () => {
   let server
 
   afterEach(() => {
@@ -2007,36 +1976,6 @@ describe('user_question_response forwarding (multi-session)', () => {
     ws.close()
   })
 
-  it('ignores user_question_response for pty sessions', async () => {
-    const { manager, sessionsMap } = createMockSessionManagerForQuestion([
-      { id: 'sess-pty', name: 'PTY', cwd: '/tmp', type: 'pty' },
-    ])
-
-    const entry = sessionsMap.get('sess-pty')
-    let called = false
-    entry.session.respondToQuestion = () => { called = true }
-
-    server = new WsServer({
-      port: 0,
-      apiToken: 'test-token',
-      sessionManager: manager,
-      defaultSessionId: 'sess-pty',
-      authRequired: true,
-    })
-
-    const port = await startServerAndGetPort(server)
-    const { ws, messages } = await createClient(port, false)
-
-    send(ws, { type: 'auth', token: 'test-token' })
-    await waitForMessage(messages, 'auth_ok', 2000)
-
-    send(ws, { type: 'user_question_response', answer: 'Option B' })
-    await new Promise(r => setTimeout(r, 100))
-
-    assert.equal(called, false, 'respondToQuestion should NOT be called for PTY sessions')
-
-    ws.close()
-  })
 })
 
 describe('user_question_response forwarding (single-session)', () => {
@@ -3071,7 +3010,8 @@ describe('primary client tracking', () => {
   })
 })
 
-describe('PTY mode permission_response', () => {
+// PTY mode permission_response tests removed in v0.2.0 (PTY mode deleted)
+describe.skip('PTY mode permission_response [REMOVED]', () => {
   let server
 
   afterEach(() => {
@@ -3845,7 +3785,8 @@ describe('directory listing', () => {
   })
 })
 
-describe('resize validation', () => {
+// PTY resize tests removed in v0.2.0 (PTY mode deleted)
+describe.skip('resize validation [REMOVED]', () => {
   const TOKEN = 'test-token'
   let server
 

@@ -1,6 +1,6 @@
 {
   "productName": "Chroxy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.chroxy.desktop",
   "build": {
     "frontendDist": "../dist"
@@ -23,6 +23,14 @@
     "trayIcon": {
       "iconPath": "icons/icon.png",
       "iconAsTemplate": true
+    }
+  },
+  "bundle": {
+    "macOS": {
+      "signingIdentity": "$APPLE_SIGNING_IDENTITY",
+      "notarization": {
+        "teamId": "$APPLE_TEAM_ID"
+      }
     }
   },
   "plugins": {

@@ -5,7 +5,6 @@
  * @param {EventNormalizer} ctx.normalizer
  * @param {Object|null} ctx.sessionManager
  * @param {Object|null} ctx.cliSession
- * @param {Object|null} ctx.outputParser
  * @param {Object|null} ctx.devPreview
  * @param {Object|null} ctx.pushManager
  * @param {Map} ctx.permissionSessionMap
@@ -18,11 +17,6 @@ export function setupForwarding(ctx) {
     normalizer,
     sessionManager,
     cliSession,
-    outputParser,
-    devPreview,
-    pushManager,
-    permissionSessionMap,
-    questionSessionMap,
     broadcast,
     broadcastToSession,
   } = ctx
@@ -42,8 +36,6 @@ export function setupForwarding(ctx) {
     setupSessionForwarding(normalizer, ctx)
   } else if (cliSession) {
     setupCliForwarding(normalizer, ctx)
-  } else {
-    setupPtyForwarding(normalizer, ctx)
   }
 }
 
@@ -106,16 +98,6 @@ function setupSessionForwarding(normalizer, ctx) {
     devPreview.closeSession(sessionId)
   })
 
-  // Handle session crashes detected by health checks
-  sessionManager.on('session_crashed', ({ sessionId, reason, error }) => {
-    console.log(`[ws] Session ${sessionId} crashed (${reason}): ${error}`)
-    broadcastToSession(sessionId, {
-      type: 'session_error',
-      message: `Session crashed: ${error}`,
-      category: 'crash',
-      recoverable: false,
-    })
-  })
 }
 
 /** Legacy single CLI session forwarding via normalizer */
@@ -179,51 +161,6 @@ function setupCliForwarding(normalizer, ctx) {
   cliSession.on('models_updated', (data) => {
     if (data?.models) {
       broadcast({ type: 'available_models', models: data.models })
-    }
-  })
-}
-
-/** PTY/tmux forwarding via normalizer */
-function setupPtyForwarding(normalizer, ctx) {
-  const { outputParser, broadcast } = ctx
-
-  // raw events from outputParser
-  outputParser.on('raw', (data) => {
-    const normCtx = { sessionId: null, mode: 'pty' }
-    const result = normalizer.normalize('raw', data, normCtx)
-    if (!result) return
-    for (const { msg, filter } of result.messages) {
-      broadcast(msg, filter || (() => true))
-    }
-  })
-
-  // message events from outputParser
-  outputParser.on('message', (message) => {
-    const normCtx = { sessionId: null, mode: 'pty' }
-    const result = normalizer.normalize('message', message, normCtx)
-    if (!result) return
-    for (const { msg, filter } of result.messages) {
-      broadcast(msg, filter || (() => true))
-    }
-  })
-
-  // claude_ready from outputParser
-  outputParser.on('claude_ready', () => {
-    const result = normalizer.normalize('claude_ready', {}, { sessionId: null, mode: 'pty' })
-    if (!result) return
-    for (const { msg } of result.messages) {
-      broadcast(msg)
-    }
-  })
-
-  // status_update from outputParser
-  outputParser.on('status_update', (status) => {
-    const normCtx = { sessionId: null, mode: 'pty' }
-    const result = normalizer.normalize('status_update', status, normCtx)
-    if (!result) return
-    executeSideEffects(result.sideEffects, null, ctx)
-    for (const { msg, filter } of result.messages) {
-      broadcast(msg, filter || (() => true))
     }
   })
 }

@@ -12,7 +12,7 @@ describe('runDoctorChecks', () => {
     const result = await runDoctorChecks()
     assert.ok(Array.isArray(result.checks))
     assert.equal(typeof result.passed, 'boolean')
-    assert.ok(result.checks.length >= 7, 'Should have at least 7 checks')
+    assert.ok(result.checks.length >= 6, 'Should have at least 6 checks')
   })
 
   it('each check has name, status, and message', async () => {
@@ -39,14 +39,6 @@ describe('runDoctorChecks', () => {
     assert.ok(cfCheck)
     // Status depends on whether cloudflared is in PATH
     assert.ok(['pass', 'fail'].includes(cfCheck.status))
-  })
-
-  it('tmux check is present and optional', async () => {
-    const { checks } = await runDoctorChecks()
-    const tmuxCheck = checks.find(c => c.name === 'tmux')
-    assert.ok(tmuxCheck)
-    // tmux is optional — status should be pass or warn (never fail)
-    assert.ok(['pass', 'warn'].includes(tmuxCheck.status))
   })
 
   it('claude CLI check is present', async () => {

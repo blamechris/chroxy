@@ -89,20 +89,6 @@ export const RenameSessionSchema = z.object({
   name: z.string(),
 })
 
-export const DiscoverSessionsSchema = z.object({
-  type: z.literal('discover_sessions'),
-})
-
-export const TriggerDiscoverySchema = z.object({
-  type: z.literal('trigger_discovery'),
-})
-
-export const AttachSessionSchema = z.object({
-  type: z.literal('attach_session'),
-  tmuxSession: z.string(),
-  name: z.string().optional(),
-})
-
 export const RegisterPushTokenSchema = z.object({
   type: z.literal('register_push_token'),
   token: z.string(),
@@ -471,9 +457,6 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   CreateSessionSchema,
   DestroySessionSchema,
   RenameSessionSchema,
-  DiscoverSessionsSchema,
-  TriggerDiscoverySchema,
-  AttachSessionSchema,
   RegisterPushTokenSchema,
   UserQuestionResponseSchema,
   ListDirectorySchema,

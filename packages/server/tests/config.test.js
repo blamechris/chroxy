@@ -7,12 +7,10 @@ describe('validateConfig', () => {
     const config = {
       apiToken: 'abc123',
       port: 8765,
-      tmuxSession: 'my-session',
       shell: '/bin/bash',
       cwd: '/home/user',
       model: 'sonnet',
       allowedTools: ['bash', 'read'],
-      resume: true,
       noAuth: false,
     }
     const result = validateConfig(config)
@@ -36,14 +34,12 @@ describe('validateConfig', () => {
   it('warns about type mismatches', () => {
     const config = {
       port: '8765',
-      resume: 'yes',
       allowedTools: 'bash,read',
     }
     const result = validateConfig(config)
     assert.equal(result.valid, false)
-    assert.equal(result.warnings.length, 3)
+    assert.equal(result.warnings.length, 2)
     assert.ok(result.warnings.some(w => w.includes('port') && w.includes('number')))
-    assert.ok(result.warnings.some(w => w.includes('resume') && w.includes('boolean')))
     assert.ok(result.warnings.some(w => w.includes('allowedTools') && w.includes('array')))
   })
 
@@ -123,7 +119,7 @@ describe('validateConfig', () => {
 
 describe('mergeConfig', () => {
   let originalEnv
-  const envKeys = ['API_TOKEN', 'PORT', 'TMUX_SESSION', 'SHELL_CMD', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_RESUME', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME']
+  const envKeys = ['API_TOKEN', 'PORT', 'SHELL_CMD', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_NO_AUTH', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME', 'CHROXY_LEGACY_CLI', 'CHROXY_PROVIDER']
 
   beforeEach(() => {
     originalEnv = {}
@@ -176,29 +172,26 @@ describe('mergeConfig', () => {
   })
 
   it('precedence order: CLI > ENV > file > defaults', () => {
-    process.env.TMUX_SESSION = 'env-session'
-    const defaults = { 
-      port: 8765, 
-      tmuxSession: 'default-session',
+    process.env.SHELL_CMD = '/bin/zsh'
+    const defaults = {
+      port: 8765,
       apiToken: 'default-token',
       shell: '/bin/bash',
     }
-    const fileConfig = { 
+    const fileConfig = {
       port: 9000,
-      tmuxSession: 'file-session',
       apiToken: 'file-token',
     }
-    const cliOverrides = { 
+    const cliOverrides = {
       port: 5555,
       apiToken: 'cli-token',
     }
-    
+
     const merged = mergeConfig({ defaults, fileConfig, cliOverrides })
-    
+
     assert.equal(merged.port, 5555)
     assert.equal(merged.apiToken, 'cli-token')
-    assert.equal(merged.tmuxSession, 'env-session')
-    assert.equal(merged.shell, '/bin/bash')
+    assert.equal(merged.shell, '/bin/zsh')
   })
 
   it('parses environment variable types correctly', () => {
@@ -213,11 +206,11 @@ describe('mergeConfig', () => {
   })
 
   it('handles boolean environment variables', () => {
-    process.env.CHROXY_RESUME = 'true'
-    
-    const merged = mergeConfig({ defaults: { resume: false } })
-    
-    assert.equal(merged.resume, true)
+    process.env.CHROXY_NO_AUTH = 'true'
+
+    const merged = mergeConfig({ defaults: { noAuth: false } })
+
+    assert.equal(merged.noAuth, true)
   })
 
   it('handles invalid number in environment variable gracefully', () => {
@@ -239,7 +232,7 @@ describe('mergeConfig', () => {
 
     assert.equal(merged.port, 8765)
     assert.equal(merged.apiToken, 'token')
-    assert.equal(merged.tmuxSession, undefined)
+    assert.equal(merged.shell, undefined)
   })
 
   it('merges tunnel config from file', () => {
