@@ -118,7 +118,10 @@ jobs:
           workspaces: packages/desktop/src-tauri
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2"
+        run: |
+          # Use cargo-binstall for pre-built binary (seconds vs 5-10 min compile)
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall tauri-cli --version "^2" --no-confirm
 
       - name: Import signing certificate
         if: env.APPLE_CERTIFICATE != ''
