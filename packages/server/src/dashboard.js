@@ -1703,6 +1703,14 @@ function getDashboardJs() {
       case "session_list":
         if (Array.isArray(msg.sessions)) {
           sessions = msg.sessions;
+          // Validate restored activeSessionId still exists on the server
+          if (activeSessionId && !sessions.some(function(s) { return s && s.sessionId === activeSessionId; })) {
+            activeSessionId = sessions.length > 0 ? sessions[0].sessionId : null;
+            messagesEl.innerHTML = "";
+            messageLog = [];
+            restoredFromCache = false;
+            if (activeSessionId) restoreMessages(activeSessionId);
+          }
           renderSessions();
         }
         break;
