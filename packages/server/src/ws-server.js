@@ -978,8 +978,8 @@ export class WsServer {
   /**
    * Broadcast a session-scoped message to all authenticated clients.
    * Tags the message with `sessionId` so clients can route it to the correct
-   * session state. The optional `filter` callback restricts delivery (e.g.,
-   * raw PTY data is only sent to clients actively viewing the session).
+   * session state. The optional `filter` callback restricts delivery to
+   * a subset of connected clients (e.g., status updates scoped to one session).
    */
   _broadcastToSession(sessionId, message, filter = () => true) {
     const tagged = { ...message, sessionId }

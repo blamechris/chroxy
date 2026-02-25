@@ -75,7 +75,6 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
         ) : (
         <ScrollView contentContainerStyle={styles.scrollContent} bounces={false}>
           <View style={styles.modal}>
-            <>
             <Text style={styles.title}>New Session</Text>
 
             <Text style={styles.label}>Session Name</Text>
@@ -116,7 +115,6 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
               </TouchableOpacity>
             </View>
 
-</>
           </View>
         </ScrollView>
         )}
