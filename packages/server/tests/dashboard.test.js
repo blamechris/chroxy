@@ -2,6 +2,34 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { getDashboardHtml } from '../src/dashboard.js'
 
+/**
+ * Assert that html contains the given string or matches the given regex.
+ * @param {string} html - The HTML string to search
+ * @param {string|RegExp} pattern - Substring or regex to match
+ * @param {string} message - Assertion failure message
+ */
+function assertHtml(html, pattern, message) {
+  if (typeof pattern === 'string') {
+    assert.ok(html.includes(pattern), message)
+  } else {
+    assert.ok(pattern.test(html), message)
+  }
+}
+
+/**
+ * Assert that html does NOT contain the given string or match the given regex.
+ * @param {string} html - The HTML string to search
+ * @param {string|RegExp} pattern - Substring or regex that should NOT match
+ * @param {string} message - Assertion failure message
+ */
+function assertHtmlNot(html, pattern, message) {
+  if (typeof pattern === 'string') {
+    assert.ok(!html.includes(pattern), message)
+  } else {
+    assert.ok(!pattern.test(html), message)
+  }
+}
+
 describe('getDashboardHtml', () => {
   it('returns valid HTML document', () => {
     const html = getDashboardHtml(8765, 'test-token', false)
@@ -219,13 +247,13 @@ describe('#762 — querySelector calls use sanitized IDs', () => {
 
   it('does not use raw IDs in data-msg-id selectors', () => {
     // Ensure no unsanitized data-msg-id selectors remain
-    const msgIdQueries = html.match(/querySelector\('[^']*data-msg-id[^']*'\s*\+\s*(?!sanitizeId)\w/g)
-    assert.ok(!msgIdQueries, 'all data-msg-id querySelector calls should use sanitizeId')
+    assertHtmlNot(html, /querySelector\('[^']*data-msg-id[^']*'\s*\+\s*(?!sanitizeId)\w/g,
+      'all data-msg-id querySelector calls should use sanitizeId')
   })
 
   it('does not use raw IDs in data-tool-id selectors', () => {
-    const toolIdQueries = html.match(/querySelector\('[^']*data-tool-id[^']*'\s*\+\s*(?!sanitizeId)\w/g)
-    assert.ok(!toolIdQueries, 'all data-tool-id querySelector calls should use sanitizeId')
+    assertHtmlNot(html, /querySelector\('[^']*data-tool-id[^']*'\s*\+\s*(?!sanitizeId)\w/g,
+      'all data-tool-id querySelector calls should use sanitizeId')
   })
 
   it('stores sanitized IDs in data-msg-id attributes', () => {
@@ -879,6 +907,345 @@ describe('#733 — status bar busy indicator', () => {
     assert.ok(readyBlock, 'claude_ready handler should exist')
     assert.ok(readyBlock[0].includes('updateBusyIndicator'),
       'claude_ready should update busy indicator')
+  })
+})
+
+describe('#886 — syntax highlighting', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('defines SYNTAX_COLORS map with all token types', () => {
+    assert.ok(html.includes('var SYNTAX_COLORS = {'),
+      'should define SYNTAX_COLORS')
+    // Note: 'function' is quoted as '"function"' in JS (reserved word)
+    for (const type of ['keyword', 'string', 'comment', 'number', 'operator', 'punctuation', 'type', 'property', 'plain', 'diff_add', 'diff_remove']) {
+      assert.ok(html.includes(`${type}: "`),
+        `SYNTAX_COLORS should include ${type}`)
+    }
+    // 'function' is a reserved word, so it's quoted differently in the object literal
+    assert.ok(html.includes('"function": "#4a9eff"'),
+      'SYNTAX_COLORS should include function token type (quoted key)')
+  })
+
+  it('uses mobile app color theme', () => {
+    assert.ok(html.includes('#c4a5ff'), 'keyword color')
+    assert.ok(html.includes('#4eca6a'), 'string color')
+    assert.ok(html.includes('#7a7a7a'), 'comment color')
+    assert.ok(html.includes('#ff9a52'), 'number color')
+    assert.ok(html.includes('#a0d0ff'), 'plain color')
+    assert.ok(html.includes('#ff5b5b'), 'diff_remove color')
+  })
+
+  it('defines stickyRe helper', () => {
+    assert.ok(html.includes('function stickyRe(pattern)'),
+      'should define stickyRe for adding sticky flag to regex')
+  })
+
+  it('defines language rule sets', () => {
+    for (const lang of ['LANG_JS', 'LANG_TS', 'LANG_PY', 'LANG_BASH', 'LANG_JSON', 'LANG_DIFF', 'LANG_HTML', 'LANG_CSS', 'LANG_YAML', 'LANG_GO', 'LANG_RUST', 'LANG_JAVA', 'LANG_RUBY', 'LANG_C', 'LANG_SQL']) {
+      assert.ok(html.includes(`var ${lang} = [`),
+        `should define ${lang} language rules`)
+    }
+  })
+
+  it('defines SYNTAX_LANGS lookup map', () => {
+    assert.ok(html.includes('var SYNTAX_LANGS = {'),
+      'should define SYNTAX_LANGS map')
+    assert.ok(html.includes('javascript: LANG_JS'),
+      'should map javascript to LANG_JS')
+    assert.ok(html.includes('python: LANG_PY'),
+      'should map python to LANG_PY')
+  })
+
+  it('defines SYNTAX_ALIASES for common abbreviations', () => {
+    assert.ok(html.includes('var SYNTAX_ALIASES = {'),
+      'should define SYNTAX_ALIASES')
+    assert.ok(html.includes('js: "javascript"'), 'js → javascript alias')
+    assert.ok(html.includes('ts: "typescript"'), 'ts → typescript alias')
+    assert.ok(html.includes('py: "python"'), 'py → python alias')
+    assert.ok(html.includes('sh: "bash"'), 'sh → bash alias')
+    assert.ok(html.includes('rs: "rust"'), 'rs → rust alias')
+    assert.ok(html.includes('yml: "yaml"'), 'yml → yaml alias')
+  })
+
+  it('defines getSyntaxRules function', () => {
+    assert.ok(html.includes('function getSyntaxRules(lang)'),
+      'should define getSyntaxRules lookup function')
+  })
+
+  it('defines tokenize function with MAX_HIGHLIGHT_LENGTH guard', () => {
+    assert.ok(html.includes('function tokenize(code, lang)'),
+      'should define tokenize function')
+    assert.ok(html.includes('var MAX_HIGHLIGHT_LENGTH = 5000'),
+      'should set MAX_HIGHLIGHT_LENGTH to 5000')
+  })
+
+  it('defines pushToken and highlightCode functions', () => {
+    assert.ok(html.includes('function pushToken(tokens, text, type)'),
+      'should define pushToken helper')
+    assert.ok(html.includes('function highlightCode(code, lang)'),
+      'should define highlightCode function')
+  })
+
+  it('highlightCode uses inline style for coloring', () => {
+    assert.ok(html.includes('SYNTAX_COLORS[tokens[i].type]'),
+      'highlightCode should look up color from SYNTAX_COLORS per token type')
+  })
+
+  it('uses highlightCode in renderMarkdown for code blocks', () => {
+    assert.ok(html.includes('highlightCode(code, lang)'),
+      'renderMarkdown should call highlightCode for fenced code blocks')
+  })
+})
+
+describe('#886 — enriched session tabs', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has tab-busy-dot CSS', () => {
+    assert.ok(html.includes('.tab-busy-dot'),
+      'should have CSS for busy dot in session tabs')
+  })
+
+  it('renders busy dot when session is busy', () => {
+    assert.ok(html.includes('s.isBusy'),
+      'should check isBusy flag on session')
+    const busyBlock = html.match(/s\.isBusy[\s\S]*?tab-busy-dot/)
+    assert.ok(busyBlock, 'should create tab-busy-dot element when s.isBusy is true')
+  })
+
+  it('has tab-cwd CSS', () => {
+    assert.ok(html.includes('.tab-cwd'),
+      'should have CSS for cwd display in session tabs')
+  })
+
+  it('renders abbreviated cwd from session', () => {
+    assert.ok(html.includes('s.cwd'),
+      'should check cwd on session')
+    // Uses platform-safe path splitting (in rendered HTML, \\\\ becomes \\)
+    assert.ok(html.includes('.split(/[\\/]/)'),
+      'should split cwd on both forward and back slashes')
+  })
+
+  it('shows full cwd path on hover via title attribute', () => {
+    assert.ok(html.includes('cwdSpan.title = s.cwd'),
+      'should set title to full cwd for hover tooltip')
+  })
+
+  it('has tab-model CSS', () => {
+    assert.ok(html.includes('.tab-model'),
+      'should have CSS for model badge in session tabs')
+  })
+
+  it('renders shortened model name', () => {
+    assert.ok(html.includes('s.model'),
+      'should check model on session')
+    // Strips "claude-" prefix and version suffix
+    assert.ok(html.includes('.replace(/^claude-/, "")'),
+      'should strip claude- prefix from model name')
+  })
+})
+
+describe('#886 — permission countdown timer', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('has perm-countdown CSS', () => {
+    assert.ok(html.includes('.perm-countdown'),
+      'should have CSS for permission countdown')
+    assert.ok(html.includes('.perm-countdown.urgent'),
+      'should have CSS for urgent (red) countdown state')
+    assert.ok(html.includes('.perm-countdown.expired'),
+      'should have CSS for expired countdown state')
+  })
+
+  it('adds countdown element in permission prompt HTML', () => {
+    assert.ok(html.includes('<div class="perm-countdown"'),
+      'should include perm-countdown div element in permission prompt markup')
+  })
+
+  it('addPermissionPrompt accepts remainingMs and skipLog parameters', () => {
+    assert.ok(html.includes('function addPermissionPrompt(requestId, tool, description, remainingMs, skipLog)'),
+      'addPermissionPrompt should accept remainingMs and skipLog parameters')
+  })
+
+  it('handles active countdown with interval', () => {
+    assert.ok(html.includes('typeof remainingMs === "number"'),
+      'should check typeof remainingMs for numeric guard')
+    assert.ok(html.includes('setInterval(updateCountdown, 1000)'),
+      'should create 1-second interval for countdown updates')
+  })
+
+  it('shows minutes and seconds in countdown', () => {
+    assert.ok(html.includes('Math.floor(remaining / 60000)'),
+      'should compute minutes from remaining ms')
+    assert.ok(html.includes('Math.floor((remaining % 60000) / 1000)'),
+      'should compute seconds from remaining ms')
+  })
+
+  it('adds urgent class when 30 seconds or less remain', () => {
+    assert.ok(html.includes('remaining <= 30000'),
+      'should check for 30-second threshold')
+    const urgentBlock = html.match(/remaining <= 30000[\s\S]*?urgent/)
+    assert.ok(urgentBlock, 'should add urgent class at 30s threshold')
+  })
+
+  it('handles immediately expired countdown (remainingMs <= 0)', () => {
+    // The else branch of `remainingMs > 0` handles zero/negative values
+    // It should set "Timed out" text and add the expired class
+    const expiredBlock = html.match(/} else \{[\s\S]*?Timed out[\s\S]*?expired/)
+    assert.ok(expiredBlock,
+      'should show "Timed out" and add expired class for zero/negative remainingMs')
+  })
+
+  it('hides countdown when remainingMs is not provided', () => {
+    assert.ok(html.includes('countdownEl.style.display = "none"'),
+      'should hide countdown element when no remainingMs (older servers)')
+  })
+
+  it('tracks active countdown intervals for cleanup', () => {
+    assert.ok(html.includes('var activeCountdowns = []'),
+      'should track active countdown intervals in an array')
+    assert.ok(html.includes('activeCountdowns.push(countdownInterval)'),
+      'should push new intervals to activeCountdowns')
+  })
+
+  it('clears countdown intervals on session switch', () => {
+    const switchBlock = html.match(/case "session_switched"[\s\S]*?activeCountdowns = \[\]/)
+    assert.ok(switchBlock, 'should clear activeCountdowns on session_switched')
+    assert.ok(switchBlock[0].includes('clearInterval'),
+      'should call clearInterval on each active countdown')
+  })
+
+  it('clears countdown interval when permission is answered', () => {
+    const answerBlock = html.match(/clearInterval\(countdownInterval\)[\s\S]*?sendPermissionResponse/)
+    assert.ok(answerBlock, 'should clear interval before sending permission response')
+  })
+
+  it('passes remainingMs from permission_request message', () => {
+    assert.ok(html.includes('addPermissionPrompt(msg.requestId, msg.tool || "Unknown", msg.description || "", msg.remainingMs)'),
+      'permission_request handler should pass msg.remainingMs to addPermissionPrompt')
+  })
+})
+
+describe('#886 — reconnect backoff', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('defines RETRY_DELAYS array', () => {
+    assert.ok(html.includes('var RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000]'),
+      'should define escalating retry delays')
+  })
+
+  it('defines MAX_RETRIES constant', () => {
+    assert.ok(html.includes('var MAX_RETRIES = 8'),
+      'should allow up to 8 reconnect attempts')
+  })
+
+  it('tracks reconnect attempt count', () => {
+    assert.ok(html.includes('var reconnectAttempt = 0'),
+      'should track reconnect attempts starting at 0')
+  })
+
+  it('has reconnect retry button element', () => {
+    assert.ok(html.includes('id="reconnect-retry-btn"'),
+      'should have retry button in reconnect banner')
+  })
+
+  it('retry button is hidden by default', () => {
+    assert.ok(html.includes('id="reconnect-retry-btn" class="hidden"'),
+      'retry button should be hidden initially')
+  })
+
+  it('has retry button CSS', () => {
+    assert.ok(html.includes('#reconnect-retry-btn'),
+      'should have CSS for reconnect retry button')
+  })
+
+  it('uses escalating delay from RETRY_DELAYS', () => {
+    assert.ok(html.includes('RETRY_DELAYS[Math.min(reconnectAttempt, RETRY_DELAYS.length - 1)]'),
+      'should pick delay from RETRY_DELAYS clamped to array bounds')
+  })
+
+  it('shows attempt counter in reconnect text', () => {
+    assert.ok(html.includes('(reconnectAttempt + 1) + "/" + MAX_RETRIES'),
+      'should display attempt number / max retries')
+  })
+
+  it('shows "Connection lost." when max retries exhausted', () => {
+    assert.ok(html.includes('Connection lost.'),
+      'should show connection lost message after max retries')
+  })
+
+  it('shows retry button when max retries exhausted', () => {
+    const exhaustedBlock = html.match(/Connection lost[\s\S]*?reconnectRetryBtn[\s\S]*?remove\("hidden"\)/)
+    assert.ok(exhaustedBlock, 'should show retry button when connection lost')
+  })
+
+  it('resets reconnect attempt on successful auth', () => {
+    assert.ok(html.includes('reconnectAttempt = 0'),
+      'should reset reconnectAttempt to 0 on auth_ok or server restart')
+  })
+
+  it('increments reconnect attempt before each retry', () => {
+    const retryBlock = html.match(/reconnectAttempt\+\+[\s\S]*?connect\(\)/)
+    assert.ok(retryBlock, 'should increment reconnectAttempt then call connect()')
+  })
+
+  it('gets reconnectRetryBtn element by ID', () => {
+    assert.ok(html.includes('document.getElementById("reconnect-retry-btn")'),
+      'should get retry button element')
+  })
+})
+
+describe('#891 — negative assertions for week 2 features', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('syntax highlighting falls back to plain for unknown languages', () => {
+    // tokenize returns plain tokens when lang has no rules (getSyntaxRules returns null)
+    assertHtml(html, '!rules) return [{ text: code, type: "plain" }]',
+      'tokenize should return plain tokens when language rules are not found')
+  })
+
+  it('syntax highlighting falls back to plain when lang is falsy', () => {
+    assertHtml(html, '!lang || code.length > MAX_HIGHLIGHT_LENGTH) return [{ text: code, type: "plain" }]',
+      'tokenize should return plain tokens when lang is falsy')
+  })
+
+  it('countdown is hidden (not just empty) when remainingMs is non-numeric', () => {
+    // The else branch (no remainingMs) sets display:none, not just leaves it empty
+    const hideBranch = html.match(/No remainingMs[\s\S]*?display = "none"/) ||
+                        html.match(/} else \{[\s\S]*?countdownEl\.style\.display = "none"/)
+    assert.ok(hideBranch,
+      'countdown should be display:none when remainingMs is not a number, not just empty')
+  })
+
+  it('retry button is explicitly hidden during active backoff', () => {
+    // Before starting backoff loop, retry button is hidden
+    assertHtml(html, 'reconnectRetryBtn.classList.add("hidden")',
+      'retry button should be hidden when backoff starts (not just on initial render)')
+  })
+
+  it('model badge is not rendered when s.model is falsy', () => {
+    // The s.model check is an if guard — no badge created when falsy
+    const modelGuard = html.match(/if \(s\.model\)/)
+    assert.ok(modelGuard,
+      'model badge rendering should be guarded by if (s.model)')
+  })
+
+  it('busy dot is not rendered when s.isBusy is false', () => {
+    // The s.isBusy check is an if guard — no dot created when false
+    const busyGuard = html.match(/if \(s\.isBusy\)/)
+    assert.ok(busyGuard,
+      'busy dot rendering should be guarded by if (s.isBusy)')
+  })
+
+  it('cwd span is not rendered when s.cwd is falsy', () => {
+    const cwdGuard = html.match(/if \(s\.cwd\)/)
+    assert.ok(cwdGuard,
+      'cwd span rendering should be guarded by if (s.cwd)')
+  })
+
+  it('countdown interval is not created for non-numeric remainingMs', () => {
+    // typeof check ensures only numbers trigger setInterval
+    assertHtml(html, 'typeof remainingMs === "number"',
+      'interval creation should be guarded by typeof check')
   })
 })
 
