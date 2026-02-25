@@ -2077,9 +2077,15 @@ function getDashboardJs() {
   updateButtons();
   updateBusyIndicator();
 
-  // Request notification permission
+  // Defer notification permission request until first user interaction
   if ("Notification" in window && Notification.permission === "default") {
-    Notification.requestPermission();
+    var requestNotifOnce = function() {
+      document.removeEventListener("click", requestNotifOnce);
+      document.removeEventListener("keydown", requestNotifOnce);
+      Notification.requestPermission().catch(function() {});
+    };
+    document.addEventListener("click", requestNotifOnce);
+    document.addEventListener("keydown", requestNotifOnce);
   }
 
   // Restore last active session ID and messages
