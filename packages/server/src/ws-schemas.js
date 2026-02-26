@@ -188,6 +188,19 @@ export const TeleportWebTaskSchema = z.object({
   taskId: z.string().min(1),
 })
 
+// -- Conversation history schemas --
+
+export const ListConversationsSchema = z.object({
+  type: z.literal('list_conversations'),
+})
+
+export const ResumeConversationSchema = z.object({
+  type: z.literal('resume_conversation'),
+  conversationId: z.string(),
+  cwd: z.string().optional(),
+  name: z.string().optional(),
+})
+
 // Encrypted envelope — validated separately (before decryption)
 export const EncryptedEnvelopeSchema = z.object({
   type: z.literal('encrypted'),
@@ -460,4 +473,6 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   LaunchWebTaskSchema,
   ListWebTasksSchema,
   TeleportWebTaskSchema,
+  ListConversationsSchema,
+  ResumeConversationSchema,
 ])
