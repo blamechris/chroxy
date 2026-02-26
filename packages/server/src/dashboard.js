@@ -33,6 +33,9 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
           <option value="plan">Plan</option>
           <option value="auto">Auto</option>
         </select>
+        <button id="history-btn" class="header-btn" title="Conversation history">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        </button>
         <button id="qr-btn" class="header-btn" title="Pair phone via QR">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="8" height="8" rx="1"/><rect x="14" y="2" width="8" height="8" rx="1"/><rect x="2" y="14" width="8" height="8" rx="1"/><rect x="14" y="14" width="4" height="4"/><line x1="22" y1="14" x2="22" y2="18"/><line x1="18" y1="22" x2="22" y2="22"/></svg>
         </button>
@@ -74,6 +77,17 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
         <div id="qr-modal-container" style="width:200px;height:200px;margin:0 auto 12px;background:#12121f;border-radius:12px;display:flex;align-items:center;justify-content:center;overflow:hidden;"></div>
         <p id="qr-modal-hint" style="color:#888;font-size:13px;margin-bottom:16px;">Scan with Chroxy app to connect</p>
         <button id="qr-modal-close" class="btn-modal-cancel">Close</button>
+      </div>
+    </div>
+
+    <!-- History modal -->
+    <div id="history-modal" class="modal-overlay hidden">
+      <div class="modal-content" style="max-width:520px;max-height:70vh;display:flex;flex-direction:column;">
+        <h3 class="modal-title">Conversation History</h3>
+        <div id="history-list" style="overflow-y:auto;flex:1;"></div>
+        <div style="margin-top:12px;text-align:right;">
+          <button id="history-modal-close" class="btn-modal-cancel">Close</button>
+        </div>
       </div>
     </div>
 
@@ -792,6 +806,66 @@ function getDashboardCss() {
     }
     .btn-modal-create:hover { background: #3a8eef; }
 
+    /* History modal */
+    .history-group { margin-bottom: 16px; }
+    .history-group-name {
+      font-size: 11px;
+      font-weight: 600;
+      color: #4a9eff;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 0 0 6px;
+      border-bottom: 1px solid #252540;
+      margin-bottom: 6px;
+    }
+    .history-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .history-item:hover { background: #252540; }
+    .history-item-body { flex: 1; min-width: 0; }
+    .history-item-preview {
+      font-size: 13px;
+      color: #ccc;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .history-item-meta {
+      font-size: 11px;
+      color: #666;
+      margin-top: 2px;
+    }
+    .history-item-resume {
+      padding: 4px 12px;
+      border-radius: 4px;
+      border: 1px solid #333355;
+      background: transparent;
+      color: #4a9eff;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .history-item-resume:hover { background: #1a1a2e; border-color: #4a9eff; }
+    .history-empty {
+      color: #555;
+      font-size: 13px;
+      text-align: center;
+      padding: 32px 0;
+    }
+    .history-loading {
+      color: #888;
+      font-size: 13px;
+      text-align: center;
+      padding: 32px 0;
+    }
+
     /* Toast notifications */
     #toast-container {
       position: fixed;
@@ -1031,6 +1105,10 @@ function getDashboardJs() {
   var qrModalContainer = document.getElementById("qr-modal-container");
   var qrModalHint = document.getElementById("qr-modal-hint");
   var qrModalClose = document.getElementById("qr-modal-close");
+  var historyBtn = document.getElementById("history-btn");
+  var historyModal = document.getElementById("history-modal");
+  var historyList = document.getElementById("history-list");
+  var historyModalClose = document.getElementById("history-modal-close");
   var toastContainer = document.getElementById("toast-container");
   var viewSwitcher = document.getElementById("view-switcher");
   var terminalContainer = document.getElementById("terminal-container");
@@ -1937,6 +2015,98 @@ function getDashboardJs() {
     if (e.key === "Escape") { e.preventDefault(); closeQrModal(); }
   });
 
+  // ---- History modal ----
+  function relativeTime(isoStr) {
+    var ms = Date.now() - new Date(isoStr).getTime();
+    var s = Math.floor(ms / 1000);
+    if (s < 60) return "just now";
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + "m ago";
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + "h ago";
+    var d = Math.floor(h / 24);
+    if (d === 1) return "yesterday";
+    if (d < 30) return d + "d ago";
+    return new Date(isoStr).toLocaleDateString();
+  }
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + "B";
+    if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + "KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + "MB";
+  }
+
+  function openHistoryModal() {
+    historyList.innerHTML = '<div class="history-loading">Scanning conversations...</div>';
+    historyModal.classList.remove("hidden");
+    modalOpen = true;
+    send({ type: "list_conversations" });
+  }
+
+  function closeHistoryModal() {
+    historyModal.classList.add("hidden");
+    modalOpen = false;
+  }
+
+  function renderConversations(conversations) {
+    if (!conversations || conversations.length === 0) {
+      historyList.innerHTML = '<div class="history-empty">No conversation history found</div>';
+      return;
+    }
+    // Group by projectName
+    var groups = {};
+    var groupOrder = [];
+    conversations.forEach(function(c) {
+      var key = c.projectName || "Unknown";
+      if (!groups[key]) {
+        groups[key] = [];
+        groupOrder.push(key);
+      }
+      groups[key].push(c);
+    });
+
+    var html = "";
+    groupOrder.forEach(function(name) {
+      html += '<div class="history-group">';
+      html += '<div class="history-group-name">' + escapeHtml(name) + '</div>';
+      groups[name].forEach(function(c) {
+        var preview = c.preview ? escapeHtml(c.preview.slice(0, 80)) : '<em style="color:#555">No preview</em>';
+        var time = relativeTime(c.modifiedAt);
+        var size = formatSize(c.sizeBytes);
+        html += '<div class="history-item" data-conv-id="' + escapeHtml(c.conversationId) + '" data-cwd="' + escapeHtml(c.cwd || "") + '">';
+        html += '<div class="history-item-body">';
+        html += '<div class="history-item-preview">' + preview + '</div>';
+        html += '<div class="history-item-meta">' + time + ' &middot; ' + size + '</div>';
+        html += '</div>';
+        html += '<button class="history-item-resume">Resume</button>';
+        html += '</div>';
+      });
+      html += '</div>';
+    });
+    historyList.innerHTML = html;
+
+    // Attach click handlers
+    historyList.querySelectorAll(".history-item-resume").forEach(function(btn) {
+      btn.addEventListener("click", function(e) {
+        e.stopPropagation();
+        var item = btn.closest(".history-item");
+        var convId = item.getAttribute("data-conv-id");
+        var cwd = item.getAttribute("data-cwd");
+        send({ type: "resume_conversation", conversationId: convId, cwd: cwd || undefined });
+        closeHistoryModal();
+      });
+    });
+  }
+
+  historyBtn.addEventListener("click", openHistoryModal);
+  historyModalClose.addEventListener("click", closeHistoryModal);
+  historyModal.addEventListener("click", function(e) {
+    if (e.target === historyModal) closeHistoryModal();
+  });
+  historyModal.addEventListener("keydown", function(e) {
+    if (e.key === "Escape") { e.preventDefault(); closeHistoryModal(); }
+  });
+
   // ---- Model + permission selects ----
   modelSelect.addEventListener("change", function() {
     if (modelSelect.value) {
@@ -2219,6 +2389,10 @@ function getDashboardJs() {
         if (msg.sessionId) {
           localStorage.removeItem(STORAGE_PREFIX + "messages_" + msg.sessionId);
         }
+        break;
+
+      case "conversations_list":
+        renderConversations(msg.conversations);
         break;
 
       case "claude_ready":
