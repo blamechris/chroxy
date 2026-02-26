@@ -2,6 +2,7 @@ import { statSync, realpathSync } from 'fs'
 import { homedir } from 'os'
 import { ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { WebTaskUnavailableError } from './web-task-manager.js'
+import { scanConversations } from './conversation-scanner.js'
 
 // -- Permission modes --
 export const PERMISSION_MODES = [
@@ -420,6 +421,54 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         }
       }
       ctx.send(ws, { type: 'history_replay_end', sessionId: targetId })
+      break
+    }
+
+    case 'list_conversations': {
+      try {
+        const conversations = await scanConversations()
+        ctx.send(ws, { type: 'conversations_list', conversations })
+      } catch (err) {
+        console.warn(`[ws] Failed to scan conversations: ${err.message}`)
+        ctx.send(ws, { type: 'conversations_list', conversations: [] })
+      }
+      break
+    }
+
+    case 'resume_conversation': {
+      const { conversationId, cwd } = msg
+      if (!conversationId || typeof conversationId !== 'string') {
+        ctx.send(ws, { type: 'session_error', message: 'Missing conversationId' })
+        break
+      }
+      // Validate conversationId is a UUID to prevent path traversal
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(conversationId)) {
+        ctx.send(ws, { type: 'session_error', message: 'Invalid conversationId format' })
+        break
+      }
+      if (cwd) {
+        const cwdError = validateCwdWithinHome(cwd)
+        if (cwdError) {
+          ctx.send(ws, { type: 'session_error', message: cwdError })
+          break
+        }
+      }
+      try {
+        const name = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : 'Resumed'
+        const sessionId = ctx.sessionManager.createSession({
+          resumeSessionId: conversationId,
+          cwd: cwd || undefined,
+          name,
+        })
+        client.activeSessionId = sessionId
+        const entry = ctx.sessionManager.getSession(sessionId)
+        ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
+        ctx.sendSessionInfo(ws, sessionId)
+        ctx.replayHistory(ws, sessionId)
+        ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+      } catch (err) {
+        ctx.send(ws, { type: 'session_error', message: err.message })
+      }
       break
     }
 
