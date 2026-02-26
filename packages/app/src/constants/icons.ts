@@ -29,3 +29,4 @@ export const ICON_EXPORT = '\uD83D\uDCE4';       // Outbox tray 📤
 export const ICON_CLOUD = '\u2601';               // Cloud ☁
 export const ICON_CROSS = '\u2717';               // Ballot X ✗
 export const ICON_DOWNLOAD = '\u21E9';            // Downwards arrow ⇩
+export const ICON_CLOCK = '\uD83D\uDD53';           // Clock 🕓
