@@ -1276,14 +1276,14 @@ describe('#934 — dynamic permission mode select', () => {
       'should have acceptEdits option in permission select')
   })
 
-  it('lists permission options in correct order: approve, acceptEdits, plan, auto', () => {
+  it('lists permission options in server-canonical order: approve, acceptEdits, auto, plan', () => {
     const approveIdx = html.indexOf('<option value="approve">')
     const acceptEditsIdx = html.indexOf('<option value="acceptEdits">')
-    const planIdx = html.indexOf('<option value="plan">')
     const autoIdx = html.indexOf('<option value="auto">')
+    const planIdx = html.indexOf('<option value="plan">')
     assert.ok(approveIdx < acceptEditsIdx, 'approve should come before acceptEdits')
-    assert.ok(acceptEditsIdx < planIdx, 'acceptEdits should come before plan')
-    assert.ok(planIdx < autoIdx, 'plan should come before auto')
+    assert.ok(acceptEditsIdx < autoIdx, 'acceptEdits should come before auto')
+    assert.ok(autoIdx < planIdx, 'auto should come before plan')
   })
 
   it('dynamically populates permission select from available_permission_modes message', () => {
@@ -1295,7 +1295,11 @@ describe('#934 — dynamic permission mode select', () => {
   })
 
   it('preserves current selection when updating permission options', () => {
+    assertHtml(html, 'var previousValue = permissionSelect.value',
+      'should capture current selection before clearing options')
+    assertHtml(html, 'permissionSelect.value = previousValue',
+      'should restore captured selection after rebuilding options')
     assertHtml(html, 'permissionSelect.value = permissionMode',
-      'should restore selected mode after rebuilding options')
+      'should fall back to permissionMode state if previous value no longer available')
   })
 })
