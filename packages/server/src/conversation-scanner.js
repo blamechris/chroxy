@@ -13,6 +13,7 @@ const CACHE_TTL_MS = 5000       // cache results for 5 seconds
 let _cache = null
 let _cacheKey = null
 let _cacheTime = 0
+let _pendingScan = null
 
 /**
  * Clear the scan results cache. Useful for testing or forcing a fresh scan.
@@ -21,6 +22,7 @@ export function clearScanCache() {
   _cache = null
   _cacheKey = null
   _cacheTime = 0
+  _pendingScan = null
 }
 
 /**
@@ -130,16 +132,7 @@ async function runWithConcurrency(tasks, limit) {
  *   cwd: string|null,
  * }>>}
  */
-export async function scanConversations(opts = {}) {
-  const projectsDir = opts.projectsDir || PROJECTS_DIR
-  const maxResults = opts.maxResults || 0
-
-  // Check cache
-  const now = Date.now()
-  if (_cache && _cacheKey === projectsDir && (now - _cacheTime) < CACHE_TTL_MS) {
-    return maxResults > 0 ? _cache.slice(0, maxResults) : _cache
-  }
-
+async function performScan(projectsDir) {
   let projectDirs
   try {
     projectDirs = await readdir(projectsDir, { withFileTypes: true })
@@ -206,11 +199,37 @@ export async function scanConversations(opts = {}) {
   const conversations = results.filter(Boolean)
 
   conversations.sort((a, b) => b.modifiedAtMs - a.modifiedAtMs)
+  return conversations
+}
+
+export async function scanConversations(opts = {}) {
+  const projectsDir = opts.projectsDir || PROJECTS_DIR
+  const maxResults = opts.maxResults || 0
+
+  // Check cache
+  const now = Date.now()
+  if (_cache && _cacheKey === projectsDir && (now - _cacheTime) < CACHE_TTL_MS) {
+    return maxResults > 0 ? _cache.slice(0, maxResults) : [..._cache]
+  }
+
+  // Deduplicate concurrent scans — subsequent callers wait for the first scan
+  if (_pendingScan) {
+    const conversations = await _pendingScan
+    return maxResults > 0 ? conversations.slice(0, maxResults) : [...conversations]
+  }
+
+  _pendingScan = performScan(projectsDir)
+  let conversations
+  try {
+    conversations = await _pendingScan
+  } finally {
+    _pendingScan = null
+  }
 
   // Update cache
   _cache = conversations
   _cacheKey = projectsDir
   _cacheTime = Date.now()
 
-  return maxResults > 0 ? conversations.slice(0, maxResults) : conversations
+  return maxResults > 0 ? conversations.slice(0, maxResults) : [...conversations]
 }
