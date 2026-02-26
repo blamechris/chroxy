@@ -7915,4 +7915,39 @@ describe('conversation history messages', () => {
 
     ws.close()
   })
+
+  it('resume_conversation with cwd outside home returns session_error', async () => {
+    const mockSession = createMockSession()
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    sessionsMap.set('default', { session: mockSession, name: 'Default', cwd: '/tmp', type: 'cli' })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => []
+    manager._sessions = sessionsMap
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, {
+      type: 'resume_conversation',
+      conversationId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+      cwd: '/etc',
+    })
+
+    const error = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(error, 'Should receive session_error for cwd outside home')
+    assert.ok(error.message.includes('home directory') || error.message.includes('Directory'),
+      'Error should mention directory constraint')
+
+    ws.close()
+  })
 })
