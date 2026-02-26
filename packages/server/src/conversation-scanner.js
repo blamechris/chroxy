@@ -32,7 +32,10 @@ async function extractMetadata(filePath) {
     handle = await open(filePath, 'r')
     const buf = Buffer.alloc(PREVIEW_BYTES)
     const { bytesRead } = await handle.read(buf, 0, PREVIEW_BYTES, 0)
-    const text = buf.toString('utf-8', 0, bytesRead)
+    // Use TextDecoder with stream: true to avoid replacement characters
+    // when the read boundary splits a multi-byte UTF-8 character
+    const decoder = new TextDecoder('utf-8', { fatal: false })
+    const text = decoder.decode(buf.subarray(0, bytesRead), { stream: true })
     const lines = text.split('\n')
 
     let preview = null

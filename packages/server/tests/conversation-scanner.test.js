@@ -264,6 +264,67 @@ describe('scanConversations', () => {
     assert.equal(result[0].preview, 'Plain string message')
   })
 
+  it('handles multi-byte UTF-8 characters near the 32KB read boundary', async () => {
+    // Build a JSONL file where multi-byte characters straddle the 32KB boundary.
+    // The user message (preview source) is early in the file, padding fills to 32KB+.
+    const userLine = JSON.stringify(userEntry('Preview with emoji 🎉'))
+    // Pad with assistant entries containing multi-byte characters (3-byte CJK chars)
+    const paddingLines = []
+    let totalBytes = Buffer.byteLength(userLine, 'utf-8') + 1 // +1 for newline
+    const target = 32 * 1024 + 512 // exceed 32KB to ensure boundary is crossed
+    while (totalBytes < target) {
+      // Use 3-byte CJK characters (日本語) to maximize chance of boundary split
+      const line = JSON.stringify(assistantEntry('日本語テスト'.repeat(30)))
+      paddingLines.push(line)
+      totalBytes += Buffer.byteLength(line, 'utf-8') + 1
+    }
+
+    const content = [userLine, ...paddingLines].join('\n')
+    makeProject('test-project', { 'conv.jsonl': content })
+
+    const result = await scanConversations({ projectsDir: tempDir })
+    assert.equal(result.length, 1)
+    assert.equal(result[0].preview, 'Preview with emoji 🎉')
+    // Ensure no U+FFFD replacement characters appear in the CWD
+    assert.ok(!result[0].cwd.includes('\uFFFD'), 'CWD should not contain replacement characters')
+  })
+
+  it('does not produce replacement characters when buffer splits multi-byte char', async () => {
+    // Construct content where a 4-byte emoji (🎉 = F0 9F 8E 89) is positioned
+    // so the 32KB boundary falls in its middle
+    const BOUNDARY = 32 * 1024
+    const userLine = JSON.stringify(userEntry('Hello'))
+    const userLineBytes = Buffer.byteLength(userLine, 'utf-8') + 1 // +1 newline
+
+    // Create padding to get close to 32KB boundary
+    // Leave room for one more line that will contain the boundary-spanning emoji
+    const paddingText = 'x'.repeat(200)
+    const paddingLine = JSON.stringify(assistantEntry(paddingText))
+    const paddingLineBytes = Buffer.byteLength(paddingLine, 'utf-8') + 1
+
+    const paddingLines = []
+    let currentBytes = userLineBytes
+    // Fill up to within one padding line of the boundary
+    while (currentBytes + paddingLineBytes < BOUNDARY - 10) {
+      paddingLines.push(paddingLine)
+      currentBytes += paddingLineBytes
+    }
+
+    // Now add a line with emoji that will span the boundary
+    const remaining = BOUNDARY - currentBytes
+    // Fill remaining bytes with ASCII, then add multi-byte characters at the end
+    const filler = 'a'.repeat(Math.max(0, remaining - 50))
+    const boundaryLine = JSON.stringify(assistantEntry(filler + '🎉🎊🎈🎁'))
+    paddingLines.push(boundaryLine)
+
+    const content = [userLine, ...paddingLines].join('\n')
+    makeProject('test-project', { 'conv.jsonl': content })
+
+    const result = await scanConversations({ projectsDir: tempDir })
+    assert.equal(result.length, 1)
+    assert.equal(result[0].preview, 'Hello')
+  })
+
   it('uses encoded directory name as projectName when CWD not available', async () => {
     makeProject('unknown-project', {
       'conv.jsonl': jsonlLines({
