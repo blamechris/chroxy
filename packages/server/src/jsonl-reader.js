@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'fs'
+import { readFileSync, statSync, existsSync } from 'fs'
 import { readFile } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
@@ -12,6 +12,19 @@ const MAX_MESSAGES = 500
  */
 export function encodeProjectPath(cwd) {
   return cwd.replace(/\//g, '-')
+}
+
+/**
+ * Decode an encoded project directory name back to a filesystem path.
+ * Claude Code encodes paths by replacing all `/` with `-`.
+ * Falls back to null if the decoded path doesn't exist on disk.
+ */
+export function decodeProjectPath(encoded) {
+  const decoded = encoded.replace(/-/g, '/')
+  try {
+    if (existsSync(decoded) && statSync(decoded).isDirectory()) return decoded
+  } catch { /* path doesn't exist */ }
+  return null
 }
 
 /**

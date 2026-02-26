@@ -1,24 +1,11 @@
 import { readdir, stat, open } from 'fs/promises'
-import { existsSync, statSync } from 'fs'
 import { join, basename } from 'path'
 import { homedir } from 'os'
+import { decodeProjectPath } from './jsonl-reader.js'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const PREVIEW_BYTES = 32 * 1024 // read first 32KB for preview extraction
 const MIN_FILE_SIZE = 100       // skip tiny/empty files
-
-/**
- * Decode an encoded project directory name back to a filesystem path.
- * Claude Code encodes paths by replacing all `/` with `-`.
- * Falls back to null if the decoded path doesn't exist on disk.
- */
-export function decodeProjectPath(encoded) {
-  const decoded = encoded.replace(/-/g, '/')
-  try {
-    if (existsSync(decoded) && statSync(decoded).isDirectory()) return decoded
-  } catch { /* path doesn't exist */ }
-  return null
-}
 
 /**
  * Extract a preview (first user message text) and CWD from the beginning of a JSONL file.
