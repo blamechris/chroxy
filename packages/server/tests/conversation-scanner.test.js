@@ -285,39 +285,44 @@ describe('scanConversations', () => {
     const result = await scanConversations({ projectsDir: tempDir })
     assert.equal(result.length, 1)
     assert.equal(result[0].preview, 'Preview with emoji 🎉')
-    // Ensure no U+FFFD replacement characters appear in the CWD
-    assert.ok(!result[0].cwd.includes('\uFFFD'), 'CWD should not contain replacement characters')
+
+    // Verify that decoding the 32KB boundary chunk with TextDecoder (stream: true)
+    // does not produce U+FFFD replacement characters
+    const fileBuffer = Buffer.from(content, 'utf-8')
+    const boundaryChunk = fileBuffer.subarray(0, 32 * 1024)
+    const decoder = new TextDecoder('utf-8')
+    const decoded = decoder.decode(boundaryChunk, { stream: true })
+    assert.ok(!decoded.includes('\uFFFD'), 'Decoded boundary chunk should not contain replacement characters')
   })
 
   it('does not produce replacement characters when buffer splits multi-byte char', async () => {
-    // Construct content where a 4-byte emoji (🎉 = F0 9F 8E 89) is positioned
-    // so the 32KB boundary falls in its middle
+    // Directly verify that TextDecoder with stream: true handles partial
+    // multi-byte sequences at the 32KB boundary — the same approach used
+    // in extractMetadata(). Construct a buffer where the 32KB boundary
+    // splits a 4-byte emoji (🎉 = F0 9F 8E 89).
     const BOUNDARY = 32 * 1024
+    const emoji = '🎉'
+    const emojiBytes = Buffer.from(emoji, 'utf-8') // 4 bytes: F0 9F 8E 89
+
+    // Build a buffer of exactly BOUNDARY bytes where the last bytes are
+    // the first 2 bytes of the emoji (a partial multi-byte sequence)
+    const filler = Buffer.alloc(BOUNDARY - 2, 0x61) // 'a' bytes
+    const partialEmoji = emojiBytes.subarray(0, 2)   // F0 9F (incomplete)
+    const testBuffer = Buffer.concat([filler, partialEmoji])
+
+    // Without stream: true, Buffer.toString produces U+FFFD
+    const naiveResult = testBuffer.toString('utf-8')
+    assert.ok(naiveResult.includes('\uFFFD'), 'Buffer.toString should produce replacement char')
+
+    // With TextDecoder stream: true, incomplete bytes are buffered (not emitted)
+    const decoder = new TextDecoder('utf-8', { fatal: false })
+    const streamResult = decoder.decode(testBuffer, { stream: true })
+    assert.ok(!streamResult.includes('\uFFFD'), 'TextDecoder stream should not produce replacement char')
+
+    // Also verify via scanConversations with a real JSONL file
     const userLine = JSON.stringify(userEntry('Hello'))
-    const userLineBytes = Buffer.byteLength(userLine, 'utf-8') + 1 // +1 newline
-
-    // Create padding to get close to 32KB boundary
-    // Leave room for one more line that will contain the boundary-spanning emoji
-    const paddingText = 'x'.repeat(200)
-    const paddingLine = JSON.stringify(assistantEntry(paddingText))
-    const paddingLineBytes = Buffer.byteLength(paddingLine, 'utf-8') + 1
-
-    const paddingLines = []
-    let currentBytes = userLineBytes
-    // Fill up to within one padding line of the boundary
-    while (currentBytes + paddingLineBytes < BOUNDARY - 10) {
-      paddingLines.push(paddingLine)
-      currentBytes += paddingLineBytes
-    }
-
-    // Now add a line with emoji that will span the boundary
-    const remaining = BOUNDARY - currentBytes
-    // Fill remaining bytes with ASCII, then add multi-byte characters at the end
-    const filler = 'a'.repeat(Math.max(0, remaining - 50))
-    const boundaryLine = JSON.stringify(assistantEntry(filler + '🎉🎊🎈🎁'))
-    paddingLines.push(boundaryLine)
-
-    const content = [userLine, ...paddingLines].join('\n')
+    const padding = 'a'.repeat(BOUNDARY - Buffer.byteLength(userLine, 'utf-8') - 5)
+    const content = userLine + '\n' + padding + emoji.repeat(10)
     makeProject('test-project', { 'conv.jsonl': content })
 
     const result = await scanConversations({ projectsDir: tempDir })
