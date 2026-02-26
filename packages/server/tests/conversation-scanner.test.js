@@ -6,14 +6,19 @@ import { tmpdir } from 'os'
 import { scanConversations, decodeProjectPath } from '../src/conversation-scanner.js'
 
 describe('decodeProjectPath', () => {
-  it('decodes standard macOS project path', () => {
-    // This test only passes if the path actually exists on disk,
-    // so we test the null fallback for nonexistent paths
+  it('decodes path that exists on disk', () => {
+    // /tmp always exists on macOS/Linux
+    const result = decodeProjectPath('-tmp')
+    assert.equal(result, '/tmp')
+  })
+
+  it('returns null for nonexistent path', () => {
     const result = decodeProjectPath('-nonexistent-path-that-does-not-exist')
     assert.equal(result, null)
   })
 
-  it('returns null for completely invalid path', () => {
+  it('returns null for path that decodes to a file, not directory', () => {
+    // Even if the decoded path exists, it must be a directory
     assert.equal(decodeProjectPath('no-leading-slash'), null)
   })
 })
@@ -159,7 +164,6 @@ describe('scanConversations', () => {
     const projectDir = join(tempDir, 'test-project')
     mkdirSync(projectDir, { recursive: true })
 
-    // Write files with slight delays to ensure different mtimes
     writeFileSync(
       join(projectDir, 'old.jsonl'),
       jsonlLines(userEntry('Old conversation')),
@@ -275,9 +279,8 @@ describe('scanConversations', () => {
     })
 
     const result = await scanConversations({ projectsDir: tempDir })
-    if (result.length > 0) {
-      assert.equal(result[0].cwd, null)
-      assert.equal(result[0].projectName, 'unknown-project')
-    }
+    assert.equal(result.length, 1)
+    assert.equal(result[0].cwd, null)
+    assert.equal(result[0].projectName, 'unknown-project')
   })
 })

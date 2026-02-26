@@ -59,20 +59,18 @@ async function extractMetadata(filePath) {
         // Handle string content (older format)
         if (typeof content === 'string') {
           preview = content.slice(0, 200)
-          continue
-        }
+        } else if (Array.isArray(content)) {
+          const hasToolResult = content.some((b) => b.type === 'tool_result')
+          if (!hasToolResult) {
+            const textParts = content
+              .filter((b) => b.type === 'text')
+              .map((b) => b.text)
+              .join('\n')
 
-        if (!Array.isArray(content)) continue
-        const hasToolResult = content.some((b) => b.type === 'tool_result')
-        if (hasToolResult) continue
-
-        const textParts = content
-          .filter((b) => b.type === 'text')
-          .map((b) => b.text)
-          .join('\n')
-
-        if (textParts) {
-          preview = textParts.slice(0, 200)
+            if (textParts) {
+              preview = textParts.slice(0, 200)
+            }
+          }
         }
       }
 

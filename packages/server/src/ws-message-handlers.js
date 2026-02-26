@@ -441,6 +441,11 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         ctx.send(ws, { type: 'session_error', message: 'Missing conversationId' })
         break
       }
+      // Validate conversationId is a UUID to prevent path traversal
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(conversationId)) {
+        ctx.send(ws, { type: 'session_error', message: 'Invalid conversationId format' })
+        break
+      }
       if (cwd) {
         const cwdError = validateCwdWithinHome(cwd)
         if (cwdError) {
@@ -459,6 +464,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         const entry = ctx.sessionManager.getSession(sessionId)
         ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
         ctx.sendSessionInfo(ws, sessionId)
+        ctx.replayHistory(ws, sessionId)
         ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
       } catch (err) {
         ctx.send(ws, { type: 'session_error', message: err.message })
