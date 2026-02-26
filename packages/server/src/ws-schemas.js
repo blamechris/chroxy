@@ -343,15 +343,6 @@ export const ServerSessionListSchema = z.object({
   sessions: z.array(z.any()),
 })
 
-export const ServerStatusUpdateSchema = z.object({
-  type: z.literal('status_update'),
-  model: z.string().optional(),
-  cost: z.any().optional(),
-  messageCount: z.number().optional(),
-  contextTokens: z.number().optional(),
-  contextPercent: z.number().optional(),
-}).passthrough()
-
 export const ServerErrorSchema = z.object({
   type: z.literal('server_error'),
   category: z.string().optional(),
