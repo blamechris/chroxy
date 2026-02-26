@@ -145,11 +145,21 @@ Study these examples. Your replies must match this structure exactly.
 > - Same pattern used in React docs for "run once then stop" effects
 > - The expression evaluates to a stable `true`/`false`, not a changing number
 
+#### Example: FALSE POSITIVE reply
+
+> **FALSE POSITIVE**
+>
+> **Reason:** Per CLAUDE.md: no semicolons, single quotes for server code.
+>
+> **Evidence:**
+> - Server follows ES modules style without semicolons
+> - Consistent with existing codebase pattern in `server/**/*.js`
+
 #### Example: FOLLOW-UP ISSUE reply
 
 > **FOLLOW-UP ISSUE**
 >
-> Created https://github.com/blamechris/chroxy/issues/525 to track this.
+> Created https://github.com/owner/repo/issues/123 to track this.
 >
 > **Reason for deferral:** Switching from absolute `expiresAt` to relative `remainingMs` requires changing the WS protocol contract and both server broadcast paths — out of scope for this countdown UI PR.
 
@@ -310,7 +320,7 @@ gh pr comment ${PR_NUM} --body "$(cat <<'EOF'
 |---|---------|---------|-----------|
 | 1 | Comment 1 summary | FIX | `abc1234` |
 | 2 | Comment 2 summary | FALSE POSITIVE | Evidence: [brief] |
-| 3 | Comment 3 summary | FOLLOW-UP | #456 |
+| 3 | Comment 3 summary | FOLLOW-UP | [#456](https://github.com/OWNER/REPO/issues/456) |
 
 **Total:** X comments addressed
 - Fixed: Y (commit hashes above)
@@ -381,3 +391,4 @@ Then below the table, list:
 9. Post summary table (all Reference cells filled)
 10. Report to user
 ```
+<!-- skill-templates: check-pr 5ca75a0 2026-02-25 -->
