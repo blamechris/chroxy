@@ -33,6 +33,9 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
           <option value="plan">Plan</option>
           <option value="auto">Auto</option>
         </select>
+        <button id="qr-btn" class="header-btn" title="Pair phone via QR">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="8" height="8" rx="1"/><rect x="14" y="2" width="8" height="8" rx="1"/><rect x="2" y="14" width="8" height="8" rx="1"/><rect x="14" y="14" width="4" height="4"/><line x1="22" y1="14" x2="22" y2="18"/><line x1="18" y1="22" x2="22" y2="22"/></svg>
+        </button>
       </div>
     </header>
 
@@ -61,6 +64,16 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
           <button id="modal-cancel-btn" class="btn-modal-cancel">Cancel</button>
           <button id="modal-create-btn" class="btn-modal-create">Create</button>
         </div>
+      </div>
+    </div>
+
+    <!-- QR pairing modal -->
+    <div id="qr-modal" class="modal-overlay hidden">
+      <div class="modal-content" style="text-align:center;">
+        <h3 class="modal-title">Pair Phone</h3>
+        <div id="qr-modal-container" style="width:200px;height:200px;margin:0 auto 12px;background:#12121f;border-radius:12px;display:flex;align-items:center;justify-content:center;overflow:hidden;"></div>
+        <p id="qr-modal-hint" style="color:#888;font-size:13px;margin-bottom:16px;">Scan with Chroxy app to connect</p>
+        <button id="qr-modal-close" class="btn-modal-cancel">Close</button>
       </div>
     </div>
 
@@ -169,6 +182,22 @@ function getDashboardCss() {
       padding: 4px 8px;
       font-size: 13px;
       cursor: pointer;
+    }
+    .header-btn {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      border: 1px solid #333355;
+      border-radius: 6px;
+      padding: 4px 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .header-btn:hover {
+      border-color: #4a9eff;
+      background: #222244;
     }
 
     /* Session bar */
@@ -902,6 +931,7 @@ function getDashboardCss() {
       #header { padding: 8px 12px; }
       .logo { font-size: 16px; }
       .header-right select { font-size: 12px; padding: 3px 6px; }
+      .header-btn { padding: 3px 5px; }
       #session-bar { padding: 4px 10px; }
       #chat-messages { padding: 10px; gap: 8px; }
       .msg, .tool-bubble, .permission-prompt, .question-prompt { max-width: 92%; font-size: 13px; }
@@ -996,6 +1026,11 @@ function getDashboardJs() {
   var modalSessionCwd = document.getElementById("modal-session-cwd");
   var modalCreateBtn = document.getElementById("modal-create-btn");
   var modalCancelBtn = document.getElementById("modal-cancel-btn");
+  var qrBtn = document.getElementById("qr-btn");
+  var qrModal = document.getElementById("qr-modal");
+  var qrModalContainer = document.getElementById("qr-modal-container");
+  var qrModalHint = document.getElementById("qr-modal-hint");
+  var qrModalClose = document.getElementById("qr-modal-close");
   var toastContainer = document.getElementById("toast-container");
   var viewSwitcher = document.getElementById("view-switcher");
   var terminalContainer = document.getElementById("terminal-container");
@@ -1857,6 +1892,47 @@ function getDashboardJs() {
   createSessionModal.addEventListener("keydown", function(e) {
     if (e.key === "Enter") { e.preventDefault(); submitCreateSession(); }
     if (e.key === "Escape") { e.preventDefault(); closeCreateSessionModal(); }
+  });
+
+  // ---- QR pairing modal ----
+  function openQrModal() {
+    qrModalContainer.innerHTML = '<span style="color:#555;font-size:13px;">Loading...</span>';
+    qrModalHint.textContent = 'Scan with Chroxy app to connect';
+    qrModal.classList.remove("hidden");
+    modalOpen = true;
+
+    fetch('/qr')
+      .then(function(r) {
+        if (!r.ok) throw new Error(r.status);
+        return r.text();
+      })
+      .then(function(svg) {
+        qrModalContainer.innerHTML = svg;
+        // Scale SVG to fill container
+        var svgEl = qrModalContainer.querySelector('svg');
+        if (svgEl) {
+          svgEl.setAttribute('width', '180');
+          svgEl.setAttribute('height', '180');
+        }
+      })
+      .catch(function() {
+        qrModalContainer.innerHTML = '<span style="color:#f87171;font-size:13px;">QR unavailable</span>';
+        qrModalHint.textContent = 'Connection info not available. Is a tunnel configured?';
+      });
+  }
+
+  function closeQrModal() {
+    qrModal.classList.add("hidden");
+    modalOpen = false;
+  }
+
+  qrBtn.addEventListener("click", openQrModal);
+  qrModalClose.addEventListener("click", closeQrModal);
+  qrModal.addEventListener("click", function(e) {
+    if (e.target === qrModal) closeQrModal();
+  });
+  qrModal.addEventListener("keydown", function(e) {
+    if (e.key === "Escape") { e.preventDefault(); closeQrModal(); }
   });
 
   // ---- Model + permission selects ----
