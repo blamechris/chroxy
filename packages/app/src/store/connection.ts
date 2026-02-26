@@ -1031,6 +1031,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ conversationHistoryLoading: true });
       wsSend(socket, { type: 'list_conversations' });
+    } else {
+      // Ensure loading state is cleared when not connected
+      set({ conversationHistoryLoading: false });
     }
   },
 
