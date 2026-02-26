@@ -7756,3 +7756,163 @@ describe('session_destroyed checkpoint cleanup', () => {
     assert.equal(typeof clearCalls[0], 'string', 'sessionId must be a string')
   })
 })
+
+// ── conversation history messages ──────────────────────────────────
+describe('conversation history messages', () => {
+  let server
+  const TOKEN = 'test-token'
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('list_conversations passes schema validation and returns conversations_list', async () => {
+    const mockSession = createMockSession()
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    sessionsMap.set('default', { session: mockSession, name: 'Default', cwd: '/tmp', type: 'cli' })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => []
+    manager._sessions = sessionsMap
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, { type: 'list_conversations' })
+
+    // Should get conversations_list, NOT an error/INVALID_MESSAGE
+    const result = await waitForMessage(messages, 'conversations_list', 5000)
+    assert.ok(result, 'Should receive conversations_list response')
+    assert.ok(Array.isArray(result.conversations), 'conversations should be an array')
+
+    // Must NOT have received an INVALID_MESSAGE error
+    const error = messages.find(m => m.type === 'error' && m.code === 'INVALID_MESSAGE')
+    assert.equal(error, undefined, 'list_conversations should not produce INVALID_MESSAGE')
+
+    ws.close()
+  })
+
+  it('resume_conversation with valid UUID passes schema validation', async () => {
+    const mockSession = createMockSession()
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    sessionsMap.set('default', { session: mockSession, name: 'Default', cwd: '/tmp', type: 'cli' })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => Array.from(sessionsMap.entries()).map(([id, e]) => ({
+      id, name: e.name, cwd: e.cwd, type: e.type,
+    }))
+    manager.createSession = (opts) => {
+      const newId = 'resumed-session'
+      sessionsMap.set(newId, { session: mockSession, name: opts.name || 'Resumed', cwd: opts.cwd || '/tmp', type: 'cli' })
+      return newId
+    }
+    manager._sessions = sessionsMap
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, {
+      type: 'resume_conversation',
+      conversationId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+      name: 'Resumed Chat',
+    })
+
+    // Should get session_switched, NOT INVALID_MESSAGE
+    const switched = await waitForMessage(messages, 'session_switched', 2000)
+    assert.ok(switched, 'Should receive session_switched')
+    assert.equal(switched.name, 'Resumed Chat')
+
+    // Must NOT have received an INVALID_MESSAGE error
+    const error = messages.find(m => m.type === 'error' && m.code === 'INVALID_MESSAGE')
+    assert.equal(error, undefined, 'resume_conversation should not produce INVALID_MESSAGE')
+
+    ws.close()
+  })
+
+  it('resume_conversation with invalid UUID returns session_error', async () => {
+    const mockSession = createMockSession()
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    sessionsMap.set('default', { session: mockSession, name: 'Default', cwd: '/tmp', type: 'cli' })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => []
+    manager._sessions = sessionsMap
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, {
+      type: 'resume_conversation',
+      conversationId: 'not-a-valid-uuid',
+    })
+
+    const error = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(error, 'Should receive session_error for invalid UUID')
+    assert.ok(error.message.includes('Invalid conversationId'), 'Error should mention invalid conversationId')
+
+    ws.close()
+  })
+
+  it('resume_conversation without conversationId fails schema validation', async () => {
+    const mockSession = createMockSession()
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    sessionsMap.set('default', { session: mockSession, name: 'Default', cwd: '/tmp', type: 'cli' })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => []
+    manager._sessions = sessionsMap
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, {
+      type: 'resume_conversation',
+    })
+
+    // Missing conversationId fails Zod schema validation
+    const error = await waitForMessage(messages, 'error', 2000)
+    assert.ok(error, 'Should receive error for missing conversationId')
+    assert.equal(error.code, 'INVALID_MESSAGE')
+
+    ws.close()
+  })
+})

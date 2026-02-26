@@ -424,6 +424,17 @@ export const ServerWebTaskListSchema = z.object({
   tasks: z.array(WebTaskSchema),
 })
 
+export const ListConversationsSchema = z.object({
+  type: z.literal('list_conversations'),
+})
+
+export const ResumeConversationSchema = z.object({
+  type: z.literal('resume_conversation'),
+  conversationId: z.string(),
+  cwd: z.string().optional(),
+  name: z.string().optional(),
+})
+
 // -- Discriminated union of all client->server message types --
 // Note: auth, key_exchange, and encrypted are handled before the main
 // switch and are not included in this union. They are validated inline
@@ -460,4 +471,6 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   LaunchWebTaskSchema,
   ListWebTasksSchema,
   TeleportWebTaskSchema,
+  ListConversationsSchema,
+  ResumeConversationSchema,
 ])
