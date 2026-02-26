@@ -647,6 +647,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       webTasks: [],
       savedConnection: null,
       viewingCachedSession: false,
+      conversationHistory: [],
+      conversationHistoryLoading: false,
     });
   },
 
