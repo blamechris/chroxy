@@ -1,4 +1,4 @@
-import { describe, it, mock, beforeEach } from 'node:test'
+import { describe, it, after, mock, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import os from 'os'
 
@@ -7,6 +7,9 @@ const mockNetworkInterfaces = mock.method(os, 'networkInterfaces')
 
 // Dynamic import so the mock is in place
 const { getLanIp } = await import('../src/lan-ip.js')
+
+// Restore original os.networkInterfaces after all tests complete
+after(() => mockNetworkInterfaces.mock.restore())
 
 function iface(address, family = 'IPv4', internal = false) {
   return { address, family, internal }
