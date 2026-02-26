@@ -1267,3 +1267,35 @@ describe('#610 — responsive CSS for mobile browsers', () => {
       'should have viewport meta tag for mobile rendering')
   })
 })
+
+describe('#934 — dynamic permission mode select', () => {
+  const html = getDashboardHtml(8765, 'test-token', false)
+
+  it('includes acceptEdits in initial permission select options', () => {
+    assertHtml(html, '<option value="acceptEdits">Accept Edits</option>',
+      'should have acceptEdits option in permission select')
+  })
+
+  it('lists permission options in correct order: approve, acceptEdits, plan, auto', () => {
+    const approveIdx = html.indexOf('<option value="approve">')
+    const acceptEditsIdx = html.indexOf('<option value="acceptEdits">')
+    const planIdx = html.indexOf('<option value="plan">')
+    const autoIdx = html.indexOf('<option value="auto">')
+    assert.ok(approveIdx < acceptEditsIdx, 'approve should come before acceptEdits')
+    assert.ok(acceptEditsIdx < planIdx, 'acceptEdits should come before plan')
+    assert.ok(planIdx < autoIdx, 'plan should come before auto')
+  })
+
+  it('dynamically populates permission select from available_permission_modes message', () => {
+    assertHtml(html, 'case "available_permission_modes"',
+      'should handle available_permission_modes WS message')
+    // Should rebuild select options from msg.modes array
+    assertHtml(html, 'permissionSelect.innerHTML',
+      'should clear and rebuild permission select options')
+  })
+
+  it('preserves current selection when updating permission options', () => {
+    assertHtml(html, 'permissionSelect.value = permissionMode',
+      'should restore selected mode after rebuilding options')
+  })
+})

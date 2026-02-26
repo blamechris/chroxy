@@ -30,6 +30,7 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
         </select>
         <select id="permission-select" title="Permission mode">
           <option value="approve">Approve</option>
+          <option value="acceptEdits">Accept Edits</option>
           <option value="plan">Plan</option>
           <option value="auto">Auto</option>
         </select>
@@ -2566,7 +2567,16 @@ function getDashboardJs() {
       }
 
       case "available_permission_modes":
-        // Could update permission select options dynamically
+        if (Array.isArray(msg.modes) && msg.modes.length > 0) {
+          permissionSelect.innerHTML = "";
+          msg.modes.forEach(function(m) {
+            var opt = document.createElement("option");
+            opt.value = m.id || m;
+            opt.textContent = m.label || m.id || m;
+            permissionSelect.appendChild(opt);
+          });
+          permissionSelect.value = permissionMode;
+        }
         break;
 
       case "agent_busy":
