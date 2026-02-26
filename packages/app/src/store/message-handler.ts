@@ -40,6 +40,7 @@ import type {
   SessionNotification,
   SessionState,
   SlashCommand,
+  ConversationSummary,
   ToolResultImage,
   WebTask,
 } from './types';
@@ -1750,7 +1751,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'conversations_list': {
-      const conversations = Array.isArray(msg.conversations) ? msg.conversations : [];
+      const conversations = Array.isArray(msg.conversations) ? (msg.conversations as ConversationSummary[]) : [];
       set({ conversationHistory: conversations, conversationHistoryLoading: false });
       break;
     }
