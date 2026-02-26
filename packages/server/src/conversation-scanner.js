@@ -204,7 +204,7 @@ async function performScan(projectsDir) {
 
 export async function scanConversations(opts = {}) {
   const projectsDir = opts.projectsDir || PROJECTS_DIR
-  const maxResults = opts.maxResults || 0
+  const maxResults = Math.max(0, Math.floor(opts.maxResults || 0))
 
   // Check cache
   const now = Date.now()
