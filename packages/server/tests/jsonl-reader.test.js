@@ -5,6 +5,7 @@ import { join } from 'path'
 import { tmpdir, homedir } from 'os'
 import {
   encodeProjectPath,
+  decodeProjectPath,
   resolveJsonlPath,
   getJsonlMtime,
   readConversationHistory,
@@ -25,6 +26,24 @@ describe('encodeProjectPath', () => {
 
   it('handles path without leading slash', () => {
     assert.equal(encodeProjectPath('foo/bar'), 'foo-bar')
+  })
+})
+
+describe('decodeProjectPath', () => {
+  it('decodes path that exists on disk', () => {
+    // /tmp always exists on macOS/Linux
+    const result = decodeProjectPath('-tmp')
+    assert.equal(result, '/tmp')
+  })
+
+  it('returns null for nonexistent path', () => {
+    const result = decodeProjectPath('-nonexistent-path-that-does-not-exist')
+    assert.equal(result, null)
+  })
+
+  it('returns null for path that decodes to a file, not directory', () => {
+    // Even if the decoded path exists, it must be a directory
+    assert.equal(decodeProjectPath('no-leading-slash'), null)
   })
 })
 

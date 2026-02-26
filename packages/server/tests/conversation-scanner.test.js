@@ -3,25 +3,7 @@ import assert from 'node:assert/strict'
 import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { scanConversations, decodeProjectPath } from '../src/conversation-scanner.js'
-
-describe('decodeProjectPath', () => {
-  it('decodes path that exists on disk', () => {
-    // /tmp always exists on macOS/Linux
-    const result = decodeProjectPath('-tmp')
-    assert.equal(result, '/tmp')
-  })
-
-  it('returns null for nonexistent path', () => {
-    const result = decodeProjectPath('-nonexistent-path-that-does-not-exist')
-    assert.equal(result, null)
-  })
-
-  it('returns null for path that decodes to a file, not directory', () => {
-    // Even if the decoded path exists, it must be a directory
-    assert.equal(decodeProjectPath('no-leading-slash'), null)
-  })
-})
+import { scanConversations } from '../src/conversation-scanner.js'
 
 describe('scanConversations', () => {
   let tempDir
