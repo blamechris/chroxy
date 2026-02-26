@@ -117,6 +117,16 @@ if (process.send) {
   })
 }
 
+process.on('uncaughtException', (err) => {
+  console.error('[fatal] Uncaught exception:', err)
+  process.exit(1)
+})
+
+process.on('unhandledRejection', (err) => {
+  console.error('[fatal] Unhandled rejection:', err)
+  process.exit(1)
+})
+
 main().catch((err) => {
   console.error('[child] Fatal error:', err)
   process.exit(1)
