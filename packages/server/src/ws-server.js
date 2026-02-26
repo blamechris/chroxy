@@ -393,9 +393,9 @@ export class WsServer {
       }
 
       // QR code endpoint — generates SVG QR from connection URL
-      // No auth required: only reachable on localhost, and QR data is equivalent
-      // to what's already in ~/.chroxy/connection.json
-      if (req.method === 'GET' && req.url === '/qr') {
+      // Auth required: QR contains the connection token
+      if (req.method === 'GET' && req.url?.startsWith('/qr')) {
+        if (!this._validateBearerAuth(req, res)) return
         const connInfo = readConnectionInfo()
         if (!connInfo || !connInfo.connectionUrl) {
           res.writeHead(503, { 'Content-Type': 'application/json' })

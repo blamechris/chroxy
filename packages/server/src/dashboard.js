@@ -1901,7 +1901,7 @@ function getDashboardJs() {
     qrModal.classList.remove("hidden");
     modalOpen = true;
 
-    fetch('/qr')
+    fetch('/qr', { headers: token ? { 'Authorization': 'Bearer ' + token } : {} })
       .then(function(r) {
         if (!r.ok) throw new Error(r.status);
         return r.text();

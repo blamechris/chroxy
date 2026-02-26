@@ -338,7 +338,9 @@
       var timeoutMs = tunnelMode !== 'none' ? 45000 : 10000;
 
       function poll() {
-        fetch('http://localhost:' + port + '/qr')
+        fetch('http://localhost:' + port + '/qr', {
+            headers: token ? { 'Authorization': 'Bearer ' + token } : {}
+          })
           .then(function(r) {
             if (r.ok) return r.text();
             if (r.status === 503) throw new Error('not_ready');
