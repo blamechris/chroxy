@@ -153,7 +153,6 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `session_switched` | Switched to active session |
 | `slash_commands` | Available slash command definitions |
 | `status` | Connection status (connected: true/false) |
-| `status_update` | Claude Code status bar metadata |
 | `stream_delta` | Token-by-token streaming response text |
 | `stream_end` | Streaming response complete |
 | `stream_start` | Beginning of streaming response |
