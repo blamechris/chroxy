@@ -115,23 +115,6 @@ async function runWithConcurrency(tasks, limit) {
   return results
 }
 
-/**
- * Scan ~/.claude/projects/ for JSONL conversation files.
- * Returns metadata for each conversation, sorted by most recently modified.
- * Results are cached for 5 seconds to avoid redundant scans.
- *
- * @param {{ projectsDir?: string, maxResults?: number }} [opts]
- * @returns {Promise<Array<{
- *   conversationId: string,
- *   project: string|null,
- *   projectName: string,
- *   modifiedAt: string,
- *   modifiedAtMs: number,
- *   sizeBytes: number,
- *   preview: string|null,
- *   cwd: string|null,
- * }>>}
- */
 async function performScan(projectsDir) {
   let projectDirs
   try {
@@ -202,6 +185,25 @@ async function performScan(projectsDir) {
   return conversations
 }
 
+/**
+ * Scan ~/.claude/projects/ for JSONL conversation files.
+ * Returns metadata for each conversation, sorted by most recently modified.
+ * Results are cached for 5 seconds to avoid redundant scans.
+ *
+ * @param {Object} [opts] - Options controlling the scan behavior.
+ * @param {string} [opts.projectsDir] - Root directory to scan. Defaults to the Claude projects directory.
+ * @param {number} [opts.maxResults] - Maximum number of conversations to return. If 0 or omitted, returns all conversations.
+ * @returns {Promise<Array<{
+ *   conversationId: string,
+ *   project: string|null,
+ *   projectName: string,
+ *   modifiedAt: string,
+ *   modifiedAtMs: number,
+ *   sizeBytes: number,
+ *   preview: string|null,
+ *   cwd: string|null,
+ * }>>}
+ */
 export async function scanConversations(opts = {}) {
   const projectsDir = opts.projectsDir || PROJECTS_DIR
   const maxResults = Math.max(0, Math.floor(opts.maxResults || 0))
