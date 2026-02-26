@@ -7951,3 +7951,137 @@ describe('conversation history messages', () => {
     ws.close()
   })
 })
+
+// ── provider capability gates ─────────────────────────────────────
+describe('provider capability gates', () => {
+  let server
+  const TOKEN = 'test-token'
+
+  // Mock session class with configurable capabilities
+  class MockSessionWithCaps extends EventEmitter {
+    static _caps = {}
+    static get capabilities() { return MockSessionWithCaps._caps }
+    constructor() {
+      super()
+      this.isReady = true
+      this.model = 'claude-sonnet-4-20250514'
+      this.permissionMode = 'approve'
+    }
+    sendMessage() {}
+    interrupt() {}
+    setModel() {}
+    setPermissionMode() {}
+    respondToQuestion() {}
+    respondToPermission() {}
+  }
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('rejects set_permission_mode plan when planMode capability is false', async () => {
+    MockSessionWithCaps._caps = { planMode: false, resume: true, permissionModeSwitch: true }
+    const mockSession = new MockSessionWithCaps()
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: '/tmp', type: 'sdk' })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => []
+    manager._sessions = sessionsMap
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, { type: 'set_permission_mode', mode: 'plan', sessionId: 'sess-1' })
+
+    const error = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(error, 'Should receive session_error')
+    assert.ok(error.message.includes('plan mode'), 'Error should mention plan mode')
+
+    ws.close()
+  })
+
+  it('allows set_permission_mode plan when planMode capability is true', async () => {
+    MockSessionWithCaps._caps = { planMode: true, resume: false, permissionModeSwitch: true }
+    const mockSession = new MockSessionWithCaps()
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: '/tmp', type: 'cli' })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => []
+    manager._sessions = sessionsMap
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    send(ws, { type: 'set_permission_mode', mode: 'plan', sessionId: 'sess-1' })
+
+    const changed = await waitForMessage(messages, 'permission_mode_changed', 2000)
+    assert.ok(changed, 'Should receive permission_mode_changed')
+    assert.equal(changed.mode, 'plan')
+
+    ws.close()
+  })
+
+  it('rejects resume_conversation when resume capability is false', async () => {
+    MockSessionWithCaps._caps = { planMode: true, resume: false, permissionModeSwitch: true }
+    const mockSession = new MockSessionWithCaps()
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: '/tmp', type: 'cli' })
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => [{ id: 'sess-1', name: 'Test', cwd: '/tmp', type: 'cli' }]
+    manager.getHistory = () => []
+    manager.getFullHistoryAsync = async () => []
+    manager._sessions = sessionsMap
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: TOKEN })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    // Switch to sess-1 so client has an active session with capabilities
+    send(ws, { type: 'switch_session', sessionId: 'sess-1' })
+    await waitForMessage(messages, 'session_switched', 2000)
+    messages.length = 0
+
+    send(ws, {
+      type: 'resume_conversation',
+      conversationId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    })
+
+    const error = await waitForMessage(messages, 'session_error', 2000)
+    assert.ok(error, 'Should receive session_error')
+    assert.ok(error.message.includes('resume'), 'Error should mention resume')
+
+    ws.close()
+  })
+})

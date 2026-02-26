@@ -194,6 +194,10 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         const permModeSessionId = msg.sessionId || client.activeSessionId
         const entry = ctx.sessionManager.getSession(permModeSessionId)
         if (entry) {
+          if (msg.mode === 'plan' && !entry.session.constructor.capabilities?.planMode) {
+            ctx.send(ws, { type: 'session_error', message: 'This provider does not support plan mode' })
+            break
+          }
           if (msg.mode === 'auto' && !msg.confirmed) {
             console.log(`[ws] Auto mode requested by ${client.id}, awaiting confirmation`)
             ctx.send(ws, {
@@ -436,6 +440,12 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
     }
 
     case 'resume_conversation': {
+      // Check resume capability on the active session's provider
+      const activeEntry = client.activeSessionId && ctx.sessionManager.getSession(client.activeSessionId)
+      if (activeEntry && !activeEntry.session.constructor.capabilities?.resume) {
+        ctx.send(ws, { type: 'session_error', message: 'This provider does not support conversation resume' })
+        break
+      }
       const { conversationId, cwd } = msg
       if (!conversationId || typeof conversationId !== 'string') {
         ctx.send(ws, { type: 'session_error', message: 'Missing conversationId' })
