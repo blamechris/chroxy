@@ -347,6 +347,51 @@ describe('session_list GC handler', () => {
   });
 });
 
+describe('conversations_list handler', () => {
+  it('populates conversationHistory and clears loading flag', () => {
+    const store = createMockStore({
+      conversationHistory: [],
+      conversationHistoryLoading: true,
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const mockConversations = [
+      { conversationId: 'conv-1', projectName: 'project-a', lastModified: Date.now(), preview: 'hello', sizeBytes: 1024 },
+      { conversationId: 'conv-2', projectName: 'project-b', lastModified: Date.now(), preview: 'world', sizeBytes: 2048 },
+    ];
+
+    _testMessageHandler.handle({
+      type: 'conversations_list',
+      conversations: mockConversations,
+    });
+
+    const state = store.getState();
+    expect(state.conversationHistory).toEqual(mockConversations);
+    expect(state.conversationHistoryLoading).toBe(false);
+  });
+
+  it('falls back to empty array when conversations is not an array', () => {
+    const store = createMockStore({
+      conversationHistory: [{ conversationId: 'old' } as any],
+      conversationHistoryLoading: true,
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'conversations_list',
+      conversations: 'invalid',
+    });
+
+    const state = store.getState();
+    expect(state.conversationHistory).toEqual([]);
+    expect(state.conversationHistoryLoading).toBe(false);
+  });
+});
+
 afterAll(() => {
   _testMessageHandler.clearContext();
 });
