@@ -157,17 +157,6 @@ const EVENT_MAP = {
     messages: [{ msg: { type: 'budget_exceeded', sessionCost: data.sessionCost, budget: data.budget, percent: data.percent, message: data.message } }],
   }),
 
-  status_update: (data, ctx) => {
-    const formatLog = `[ws] Broadcasting status_update: $${data.cost} | ${data.model} | msgs:${data.messageCount} | ${data.contextTokens} (${data.contextPercent}%)`
-    const filter = ctx.mode === 'multi'
-      ? (client) => client.activeSessionId === ctx.sessionId
-      : undefined
-    return {
-      messages: [{ msg: { type: 'status_update', ...data }, filter }],
-      sideEffects: [{ type: 'log', message: formatLog }],
-    }
-  },
-
   user_question: (data, ctx) => ({
     messages: [{
       msg: { type: 'user_question', toolUseId: data.toolUseId, questions: data.questions },

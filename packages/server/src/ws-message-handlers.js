@@ -115,41 +115,29 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         }
       }
 
-      if (entry.type === 'pty') {
-        if (attachments?.length) {
-          ctx.send(ws, { type: 'session_error', message: 'File attachments are not supported in terminal mode' })
-        }
-        if (typeof text !== 'string') break
-        if (text && text !== '\r' && text !== '\n') {
-          console.log(`[ws] PTY input from ${client.id} to session ${targetSessionId}: "${text.replace(/[\r\n]/g, '\\n').slice(0, 80)}"`)
-        }
-        entry.session.expectEcho?.(text)
-        entry.session.writeRaw(text)
-      } else {
-        if ((!text || !text.trim()) && !attachments?.length) break
-        const trimmed = text?.trim() || ''
-        const attCount = attachments?.length || 0
-        console.log(`[ws] Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
+      if ((!text || !text.trim()) && !attachments?.length) break
+      const trimmed = text?.trim() || ''
+      const attCount = attachments?.length || 0
+      console.log(`[ws] Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
 
-        if (ctx.sessionManager.isBudgetPaused(targetSessionId)) {
-          ctx.send(ws, { type: 'session_error', message: 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.' })
-          break
-        }
-
-        if (entry.session.resumeSessionId) {
-          ctx.checkpointManager.createCheckpoint({
-            sessionId: targetSessionId,
-            resumeSessionId: entry.session.resumeSessionId,
-            cwd: entry.cwd,
-            description: trimmed.slice(0, 100),
-            messageCount: ctx.sessionManager.getHistoryCount(targetSessionId),
-          }).catch((err) => console.warn(`[ws] Auto-checkpoint failed: ${err.message}`))
-        }
-        const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
-        ctx.sessionManager.recordUserInput(targetSessionId, historyText)
-        ctx.sessionManager.touchActivity(targetSessionId)
-        entry.session.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
+      if (ctx.sessionManager.isBudgetPaused(targetSessionId)) {
+        ctx.send(ws, { type: 'session_error', message: 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.' })
+        break
       }
+
+      if (entry.session.resumeSessionId) {
+        ctx.checkpointManager.createCheckpoint({
+          sessionId: targetSessionId,
+          resumeSessionId: entry.session.resumeSessionId,
+          cwd: entry.cwd,
+          description: trimmed.slice(0, 100),
+          messageCount: ctx.sessionManager.getHistoryCount(targetSessionId),
+        }).catch((err) => console.warn(`[ws] Auto-checkpoint failed: ${err.message}`))
+      }
+      const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
+      ctx.sessionManager.recordUserInput(targetSessionId, historyText)
+      ctx.sessionManager.touchActivity(targetSessionId)
+      entry.session.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
 
       ctx.updatePrimary(targetSessionId, client.id)
       break
@@ -187,14 +175,9 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         const modelSessionId = msg.sessionId || client.activeSessionId
         const entry = ctx.sessionManager.getSession(modelSessionId)
         if (entry) {
-          if (entry.type === 'pty') {
-            console.warn(`[ws] Rejected model change on PTY session ${modelSessionId} from ${client.id}`)
-            ctx.send(ws, { type: 'session_error', message: 'Cannot change model on PTY sessions' })
-          } else {
-            console.log(`[ws] Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
-            entry.session.setModel(msg.model)
-            ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
-          }
+          console.log(`[ws] Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+          entry.session.setModel(msg.model)
+          ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
         }
       } else {
         console.warn(`[ws] Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
@@ -210,10 +193,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         const permModeSessionId = msg.sessionId || client.activeSessionId
         const entry = ctx.sessionManager.getSession(permModeSessionId)
         if (entry) {
-          if (entry.type === 'pty') {
-            console.warn(`[ws] Rejected permission mode change on PTY session ${permModeSessionId} from ${client.id}`)
-            ctx.send(ws, { type: 'session_error', message: 'Cannot change permission mode on PTY sessions' })
-          } else if (msg.mode === 'auto' && !msg.confirmed) {
+          if (msg.mode === 'auto' && !msg.confirmed) {
             console.log(`[ws] Auto mode requested by ${client.id}, awaiting confirmation`)
             ctx.send(ws, {
               type: 'confirm_permission_mode',

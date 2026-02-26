@@ -209,7 +209,7 @@ const ClientInfoSchema = z.object({
 export const ServerAuthOkSchema = z.object({
   type: z.literal('auth_ok'),
   clientId: z.string(),
-  serverMode: z.enum(['cli', 'terminal']),
+  serverMode: z.literal('cli'),
   serverVersion: z.string(),
   latestVersion: z.string().nullable(),
   serverCommit: z.string(),

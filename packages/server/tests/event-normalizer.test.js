@@ -265,24 +265,6 @@ describe('EventNormalizer', () => {
     })
   })
 
-  // ---- EVENT_MAP: status_update ----
-
-  describe('status_update event', () => {
-    it('adds activeSessionId filter in multi mode', () => {
-      const data = { cost: '0.01', model: 'sonnet', messageCount: 5, contextTokens: 1000, contextPercent: 10 }
-      const result = normalizer.normalize('status_update', data, makeCtx())
-      assert.ok(result.messages[0].filter)
-      assert.ok(result.messages[0].filter({ activeSessionId: 'sess-1' }))
-      assert.ok(!result.messages[0].filter({ activeSessionId: 'other' }))
-    })
-
-    it('has no filter in legacy-cli mode', () => {
-      const data = { cost: '0.01', model: 'sonnet', messageCount: 5, contextTokens: 1000, contextPercent: 10 }
-      const result = normalizer.normalize('status_update', data, makeCtx({ mode: 'legacy-cli' }))
-      assert.equal(result.messages[0].filter, undefined)
-    })
-  })
-
   // ---- EVENT_MAP: user_question ----
 
   describe('user_question event', () => {
@@ -390,7 +372,7 @@ describe('EVENT_MAP', () => {
     const expectedEvents = [
       'ready', 'conversation_id', 'stream_start', 'stream_delta', 'stream_end',
       'message', 'tool_start', 'tool_result', 'agent_spawned', 'agent_completed',
-      'mcp_servers', 'plan_started', 'plan_ready', 'result', 'status_update',
+      'mcp_servers', 'plan_started', 'plan_ready', 'result',
       'user_question', 'permission_request', 'error',
     ]
     for (const event of expectedEvents) {
@@ -416,7 +398,6 @@ describe('EVENT_MAP', () => {
       plan_started: {},
       plan_ready: { allowedPrompts: [] },
       result: { cost: 0, duration: 0, usage: {} },
-      status_update: { cost: '0', model: 'm', messageCount: 0, contextTokens: 0, contextPercent: 0 },
       user_question: { toolUseId: 'tu1', questions: [] },
       permission_request: { requestId: 'r1', tool: 'Bash', description: 'd', input: 'i', remainingMs: 60000 },
       error: { message: 'err' },
