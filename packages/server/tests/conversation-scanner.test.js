@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { scanConversations } from '../src/conversation-scanner.js'
+import { scanConversations, clearScanCache } from '../src/conversation-scanner.js'
 
 describe('scanConversations', () => {
   let tempDir
@@ -46,6 +46,7 @@ describe('scanConversations', () => {
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true })
+    clearScanCache()
   })
 
   it('returns empty array when projects directory does not exist', async () => {
@@ -330,5 +331,91 @@ describe('scanConversations', () => {
     assert.equal(result.length, 1)
     assert.equal(result[0].cwd, null)
     assert.equal(result[0].projectName, 'unknown-project')
+  })
+
+  it('respects maxResults parameter', async () => {
+    makeProject('test-project', {
+      'conv-1.jsonl': jsonlLines(userEntry('First', { cwd: '/tmp/a' })),
+      'conv-2.jsonl': jsonlLines(userEntry('Second', { cwd: '/tmp/a' })),
+      'conv-3.jsonl': jsonlLines(userEntry('Third', { cwd: '/tmp/a' })),
+    })
+
+    const result = await scanConversations({ projectsDir: tempDir, maxResults: 2 })
+    assert.equal(result.length, 2)
+  })
+
+  it('returns cached results on rapid successive calls', async () => {
+    makeProject('test-project', {
+      'conv.jsonl': jsonlLines(userEntry('Cached test')),
+    })
+
+    const result1 = await scanConversations({ projectsDir: tempDir })
+    assert.equal(result1.length, 1)
+
+    // Delete the project directory — if cached, second call still returns data
+    rmSync(join(tempDir, 'test-project'), { recursive: true, force: true })
+
+    const result2 = await scanConversations({ projectsDir: tempDir })
+    assert.equal(result2.length, 1, 'Second call should return cached results')
+    assert.deepEqual(result2, result1)
+  })
+
+  it('cache handles different maxResults values across calls', async () => {
+    const files = {}
+    for (let i = 0; i < 10; i++) {
+      files[`conv-${i}.jsonl`] = jsonlLines(
+        userEntry(`Conversation ${i}`, { cwd: '/tmp/cache-max-results' }),
+      )
+    }
+
+    makeProject('test-project', files)
+
+    const limitedResults = await scanConversations({
+      projectsDir: tempDir,
+      maxResults: 5,
+    })
+    assert.equal(
+      limitedResults.length,
+      5,
+      'First call should respect maxResults and return 5 results',
+    )
+
+    const allResults = await scanConversations({ projectsDir: tempDir })
+    assert.equal(
+      allResults.length,
+      10,
+      'Second call without maxResults should return all results, not the cached limited subset',
+    )
+  })
+
+  it('clearScanCache forces fresh scan', async () => {
+    makeProject('test-project', {
+      'conv.jsonl': jsonlLines(userEntry('Before clear')),
+    })
+
+    await scanConversations({ projectsDir: tempDir })
+
+    // Delete project, clear cache, re-scan
+    rmSync(join(tempDir, 'test-project'), { recursive: true, force: true })
+    clearScanCache()
+
+    const result = await scanConversations({ projectsDir: tempDir })
+    assert.equal(result.length, 0, 'After cache clear, should re-scan and find nothing')
+  })
+
+  it('processes many files across projects efficiently', async () => {
+    // Create 5 projects with 4 files each = 20 files (tests parallel processing)
+    for (let p = 0; p < 5; p++) {
+      const files = {}
+      for (let f = 0; f < 4; f++) {
+        files[`conv-${f}.jsonl`] = jsonlLines(
+          userEntry(`Project ${p} conv ${f}`, { cwd: `/tmp/p${p}` }),
+        )
+      }
+      makeProject(`project-${p}`, files)
+    }
+
+    const result = await scanConversations({ projectsDir: tempDir })
+    assert.equal(result.length, 20)
   })
 })

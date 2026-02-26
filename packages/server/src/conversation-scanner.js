@@ -6,6 +6,24 @@ import { decodeProjectPath } from './jsonl-reader.js'
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const PREVIEW_BYTES = 32 * 1024 // read first 32KB for preview extraction
 const MIN_FILE_SIZE = 100       // skip tiny/empty files
+const CONCURRENCY = 15          // max parallel file reads
+const CACHE_TTL_MS = 5000       // cache results for 5 seconds
+
+// Simple TTL cache keyed by projectsDir
+let _cache = null
+let _cacheKey = null
+let _cacheTime = 0
+let _pendingScan = null
+
+/**
+ * Clear the scan results cache. Useful for testing or forcing a fresh scan.
+ */
+export function clearScanCache() {
+  _cache = null
+  _cacheKey = null
+  _cacheTime = 0
+  _pendingScan = null
+}
 
 /**
  * Extract a preview (first user message text) and CWD from the beginning of a JSONL file.
@@ -76,24 +94,28 @@ async function extractMetadata(filePath) {
 }
 
 /**
- * Scan ~/.claude/projects/ for JSONL conversation files.
- * Returns metadata for each conversation, sorted by most recently modified.
- *
- * @param {{ projectsDir?: string }} [opts] - Override projects dir (for testing)
- * @returns {Promise<Array<{
- *   conversationId: string,
- *   project: string|null,
- *   projectName: string,
- *   modifiedAt: string,
- *   modifiedAtMs: number,
- *   sizeBytes: number,
- *   preview: string|null,
- *   cwd: string|null,
- * }>>}
+ * Run async tasks with a concurrency limit.
+ * @param {Array<() => Promise>} tasks - Array of thunks returning promises
+ * @param {number} limit - Max concurrent tasks
+ * @returns {Promise<Array>} Results in order
  */
-export async function scanConversations(opts = {}) {
-  const projectsDir = opts.projectsDir || PROJECTS_DIR
+async function runWithConcurrency(tasks, limit) {
+  const results = new Array(tasks.length)
+  let nextIndex = 0
 
+  async function worker() {
+    while (nextIndex < tasks.length) {
+      const idx = nextIndex++
+      results[idx] = await tasks[idx]()
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker())
+  await Promise.all(workers)
+  return results
+}
+
+async function performScan(projectsDir) {
   let projectDirs
   try {
     projectDirs = await readdir(projectsDir, { withFileTypes: true })
@@ -101,7 +123,8 @@ export async function scanConversations(opts = {}) {
     return []
   }
 
-  const conversations = []
+  // Collect all file candidates across projects
+  const candidates = []
 
   for (const dir of projectDirs) {
     if (!dir.isDirectory()) continue
@@ -121,33 +144,94 @@ export async function scanConversations(opts = {}) {
     const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'))
 
     for (const file of jsonlFiles) {
-      const filePath = join(dirPath, file)
-      const conversationId = file.replace('.jsonl', '')
-
-      let fileStat
-      try {
-        fileStat = await stat(filePath)
-      } catch {
-        continue
-      }
-
-      if (fileStat.size < MIN_FILE_SIZE) continue
-
-      const { preview, cwd } = await extractMetadata(filePath)
-
-      conversations.push({
-        conversationId,
-        project: cwd || decodedPath,
-        projectName: cwd ? basename(cwd) : projectName,
-        modifiedAt: fileStat.mtime.toISOString(),
-        modifiedAtMs: fileStat.mtimeMs,
-        sizeBytes: fileStat.size,
-        preview,
-        cwd,
+      candidates.push({
+        filePath: join(dirPath, file),
+        conversationId: file.replace('.jsonl', ''),
+        decodedPath,
+        projectName,
       })
     }
   }
 
+  // Process files in parallel with concurrency limit
+  const tasks = candidates.map((c) => async () => {
+    let fileStat
+    try {
+      fileStat = await stat(c.filePath)
+    } catch {
+      return null
+    }
+
+    if (fileStat.size < MIN_FILE_SIZE) return null
+
+    const { preview, cwd } = await extractMetadata(c.filePath)
+
+    return {
+      conversationId: c.conversationId,
+      project: cwd || c.decodedPath,
+      projectName: cwd ? basename(cwd) : c.projectName,
+      modifiedAt: fileStat.mtime.toISOString(),
+      modifiedAtMs: fileStat.mtimeMs,
+      sizeBytes: fileStat.size,
+      preview,
+      cwd,
+    }
+  })
+
+  const results = await runWithConcurrency(tasks, CONCURRENCY)
+  const conversations = results.filter(Boolean)
+
   conversations.sort((a, b) => b.modifiedAtMs - a.modifiedAtMs)
   return conversations
+}
+
+/**
+ * Scan ~/.claude/projects/ for JSONL conversation files.
+ * Returns metadata for each conversation, sorted by most recently modified.
+ * Results are cached for 5 seconds to avoid redundant scans.
+ *
+ * @param {Object} [opts] - Options controlling the scan behavior.
+ * @param {string} [opts.projectsDir] - Root directory to scan. Defaults to the Claude projects directory.
+ * @param {number} [opts.maxResults] - Maximum number of conversations to return. If 0 or omitted, returns all conversations.
+ * @returns {Promise<Array<{
+ *   conversationId: string,
+ *   project: string|null,
+ *   projectName: string,
+ *   modifiedAt: string,
+ *   modifiedAtMs: number,
+ *   sizeBytes: number,
+ *   preview: string|null,
+ *   cwd: string|null,
+ * }>>}
+ */
+export async function scanConversations(opts = {}) {
+  const projectsDir = opts.projectsDir || PROJECTS_DIR
+  const maxResults = Math.max(0, Math.floor(opts.maxResults || 0))
+
+  // Check cache
+  const now = Date.now()
+  if (_cache && _cacheKey === projectsDir && (now - _cacheTime) < CACHE_TTL_MS) {
+    return maxResults > 0 ? _cache.slice(0, maxResults) : [..._cache]
+  }
+
+  // Deduplicate concurrent scans — subsequent callers wait for the first scan
+  if (_pendingScan) {
+    const conversations = await _pendingScan
+    return maxResults > 0 ? conversations.slice(0, maxResults) : [...conversations]
+  }
+
+  _pendingScan = performScan(projectsDir)
+  let conversations
+  try {
+    conversations = await _pendingScan
+  } finally {
+    _pendingScan = null
+  }
+
+  // Update cache
+  _cache = conversations
+  _cacheKey = projectsDir
+  _cacheTime = Date.now()
+
+  return maxResults > 0 ? conversations.slice(0, maxResults) : [...conversations]
 }
