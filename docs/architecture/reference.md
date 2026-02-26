@@ -100,8 +100,8 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `register_push_token` | Register Expo push token for notifications |
 | `rename_session` | Rename existing session by ID |
 | `request_full_history` | Request complete JSONL history for session |
-| `resume_conversation` | Resume a past conversation by creating a new session with `resumeSessionId` |
 | `request_session_context` | Get context info for specific session |
+| `resume_conversation` | Resume a past conversation by creating a new session with `resumeSessionId` |
 | `set_model` | Change active Claude model |
 | `set_permission_mode` | Change permission handling mode |
 | `switch_session` | Switch to different active session |
@@ -170,7 +170,7 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 - `server_status` for non-error updates; `server_error` for error conditions
 - `permission_request` includes an `input` field (always present, defaults to `{}`) with structured tool input for rich UI rendering; `remainingMs` (milliseconds until auto-deny) lets the client compute a local deadline without clock skew
 - `list_conversations` triggers a scan of `~/.claude/projects/` JSONL files; `conversations_list` returns `{ conversations: [{ conversationId, project, projectName, modifiedAt, modifiedAtMs, sizeBytes, preview, cwd }] }` sorted by most recently modified
-- `resume_conversation` requires `{ conversationId, cwd? }` where `conversationId` is a UUID; creates a new session with `resumeSessionId` and responds with `session_switched`
+- `resume_conversation` accepts `{ conversationId, cwd?, name? }` where `conversationId` is a UUID and `name` (optional) labels the new session (defaults to `'Resumed'`); creates a new session with `resumeSessionId` and responds with `session_switched`
 - `user_question` forwards `AskUserQuestion` prompts from plan mode; `user_question_response` sends the user's answer back
 - `agent_spawned` fires when the Task tool is detected (description truncated to 200 chars); `agent_completed` fires per-agent when the turn's `result` arrives or on process crash/destroy
 - `plan_started` fires on `EnterPlanMode` tool; `plan_ready` fires on `ExitPlanMode`, includes `allowedPrompts` payload — both are transient events (not recorded in history or replayed)
