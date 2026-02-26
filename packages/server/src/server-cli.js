@@ -11,6 +11,7 @@ import { dirname, join } from 'path'
 import qrcode from 'qrcode-terminal'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
+import { getLanIp } from './lan-ip.js'
 import { writeFileRestricted } from './platform.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -318,10 +319,26 @@ export async function startCliServer(config) {
   } else if (externalUrl) {
     // Ready message already printed above
   } else if (!tunnelArg && !NO_AUTH) {
+    const lanIp = getLanIp()
+    const host = lanIp || 'localhost'
+    const connectionUrl = `chroxy://${host}:${PORT}?token=${API_TOKEN}`
+
     console.log(`[✓] Server ready! (CLI headless mode, no tunnel)\n`)
-    console.log(`   Connect: ws://localhost:${PORT}`)
+    console.log(`   Connect: ws://${host}:${PORT}`)
     console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
     console.log(`   Dashboard: http://localhost:${PORT}/dashboard?token=${API_TOKEN.slice(0, 8)}...`)
+
+    writeConnectionInfo({
+      wsUrl: `ws://${host}:${PORT}`,
+      httpUrl: `http://${host}:${PORT}`,
+      apiToken: API_TOKEN,
+      connectionUrl,
+      tunnelMode: 'none',
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    })
+  } else if (!NO_AUTH) {
+    // tunnelArg is set but SKIP_TUNNEL is true due to externalUrl — already handled above
   } else {
     console.log(`[✓] Server ready! (CLI headless mode, no auth)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)

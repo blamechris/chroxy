@@ -12,6 +12,8 @@ pub struct DesktopSettings {
     pub show_notifications: bool,
     #[serde(default)]
     pub node_path: Option<String>,
+    #[serde(default = "default_tunnel_mode")]
+    pub tunnel_mode: String,
     #[serde(default)]
     pub last_window_x: Option<f64>,
     #[serde(default)]
@@ -26,11 +28,16 @@ fn default_true() -> bool {
     true
 }
 
+fn default_tunnel_mode() -> String {
+    "quick".to_string()
+}
+
 impl Default for DesktopSettings {
     fn default() -> Self {
         Self {
             auto_start_server: true,
             show_notifications: true,
+            tunnel_mode: "quick".to_string(),
             node_path: None,
             last_window_x: None,
             last_window_y: None,

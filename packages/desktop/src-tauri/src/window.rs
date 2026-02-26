@@ -64,17 +64,18 @@ pub fn open_dashboard(app: &AppHandle, port: u16, token: Option<&str>) {
     }
 }
 
-/// Show the fallback/loading page with optional port and token for health polling.
-pub fn show_fallback(app: &AppHandle, port: Option<u16>, token: Option<&str>) {
+/// Show the fallback/loading page with optional port, token, and tunnel mode for health+QR polling.
+pub fn show_fallback(app: &AppHandle, port: Option<u16>, token: Option<&str>, tunnel_mode: Option<&str>) {
     // Hide dashboard if open
     if let Some(dash) = app.get_webview_window(DASHBOARD_LABEL) {
         let _ = dash.hide();
     }
 
     if let Some(win) = app.get_webview_window(FALLBACK_LABEL) {
-        // Inject port/token and trigger health polling via JS eval
+        // Inject port/token/tunnelMode and trigger health polling via JS eval
         if let Some(p) = port {
             let t = token.unwrap_or("");
+            let tm = tunnel_mode.unwrap_or("none");
             // Escape token for safe JS string interpolation (defense-in-depth)
             let escaped = t
                 .replace('\\', "\\\\")
@@ -82,8 +83,8 @@ pub fn show_fallback(app: &AppHandle, port: Option<u16>, token: Option<&str>) {
                 .replace('\n', "\\n")
                 .replace('\r', "\\r");
             let _ = win.eval(&format!(
-                "if (typeof window.__startPolling === 'function') {{ window.__startPolling({}, '{}'); }}",
-                p, escaped
+                "if (typeof window.__startPolling === 'function') {{ window.__startPolling({}, '{}', '{}'); }}",
+                p, escaped, tm
             ));
         }
         let _ = win.show();
@@ -109,6 +110,6 @@ pub fn toggle_window(app: &AppHandle, server_running: bool) {
     } else if server_running {
         // Dashboard window doesn't exist yet — will be created via handle_dashboard
     } else {
-        show_fallback(app, None, None);
+        show_fallback(app, None, None, None);
     }
 }

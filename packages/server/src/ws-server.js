@@ -15,6 +15,7 @@ import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage, PERMISSION_MODES } from './ws-message-handlers.js'
 import { getDashboardHtml } from './dashboard.js'
+import QRCode from 'qrcode'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
@@ -319,7 +320,7 @@ export class WsServer {
 
   start(host) {
     // Create HTTP server that handles health checks, permission hooks, and WebSocket upgrades
-    this.httpServer = createServer((req, res) => {
+    this.httpServer = createServer(async (req, res) => {
       // Health check endpoint — Cloudflare and the app verify connectivity via GET / and GET /health
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
         // Browser visitors (Accept: text/html) get redirected to the dashboard
@@ -388,6 +389,34 @@ export class WsServer {
         }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(connInfo))
+        return
+      }
+
+      // QR code endpoint — generates SVG QR from connection URL
+      // Auth required: QR contains the connection token
+      if (req.method === 'GET' && req.url?.startsWith('/qr')) {
+        if (!this._validateBearerAuth(req, res)) return
+        const connInfo = readConnectionInfo()
+        if (!connInfo || !connInfo.connectionUrl) {
+          res.writeHead(503, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Connection info not available yet' }))
+          return
+        }
+        try {
+          const svg = await QRCode.toString(connInfo.connectionUrl, {
+            type: 'svg',
+            color: { dark: '#e0e0e0', light: '#00000000' },
+            margin: 1,
+          })
+          res.writeHead(200, {
+            'Content-Type': 'image/svg+xml',
+            'Cache-Control': 'no-store',
+          })
+          res.end(svg)
+        } catch (_err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Failed to generate QR code' }))
+        }
         return
       }
 

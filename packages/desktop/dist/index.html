@@ -18,7 +18,7 @@
     .container {
       text-align: center;
       padding: 2rem;
-      max-width: 420px;
+      max-width: 460px;
     }
     .logo {
       font-size: 2rem;
@@ -70,6 +70,50 @@
       flex-shrink: 0;
     }
 
+    /* QR section */
+    #qr-section {
+      display: none;
+    }
+    #qr-section.visible {
+      display: block;
+    }
+    #qr-container {
+      width: 220px;
+      height: 220px;
+      margin: 0 auto 1rem;
+      background: #1a1a2e;
+      border-radius: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    #qr-container svg {
+      width: 200px;
+      height: 200px;
+    }
+    #qr-label {
+      font-size: 0.9rem;
+      color: #888;
+      margin-bottom: 1.5rem;
+      line-height: 1.4;
+    }
+    #open-dashboard-btn {
+      display: inline-block;
+      background: transparent;
+      color: #4a9eff;
+      border: 1px solid #333355;
+      border-radius: 8px;
+      padding: 10px 24px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    #open-dashboard-btn:hover {
+      background: #1a1a2e;
+      border-color: #4a9eff;
+    }
+
     /* Error state */
     .error-box {
       display: none;
@@ -110,21 +154,33 @@
 <body>
   <div class="container">
     <div class="logo">Chroxy</div>
-    <div id="spinner" class="spinner"></div>
-    <div id="status-text" class="status-text">Starting...</div>
 
-    <ul class="stages">
-      <li id="stage-1" class="active">
-        <span class="check">&#9679;</span> Starting server...
-      </li>
-      <li id="stage-2">
-        <span class="check">&#9679;</span> Waiting for health check...
-      </li>
-      <li id="stage-3">
-        <span class="check">&#9679;</span> Almost ready...
-      </li>
-    </ul>
+    <!-- Startup stages (shown during boot) -->
+    <div id="startup-section">
+      <div id="spinner" class="spinner"></div>
+      <div id="status-text" class="status-text">Starting...</div>
 
+      <ul class="stages">
+        <li id="stage-1" class="active">
+          <span class="check">&#9679;</span> Starting server...
+        </li>
+        <li id="stage-2">
+          <span class="check">&#9679;</span> Waiting for health check...
+        </li>
+        <li id="stage-3">
+          <span class="check">&#9679;</span> Almost ready...
+        </li>
+      </ul>
+    </div>
+
+    <!-- QR section (shown after server is ready) -->
+    <div id="qr-section">
+      <div id="qr-container"></div>
+      <div id="qr-label">Scan with Chroxy app to pair your phone</div>
+      <button id="open-dashboard-btn">Open Dashboard</button>
+    </div>
+
+    <!-- Error states -->
     <div id="error-box" class="error-box">
       <h3>Server failed to start</h3>
       <p>The server didn't respond within 30 seconds.</p>
@@ -132,22 +188,36 @@
       <p>Check the tray menu for error details.</p>
       <p style="margin-top:8px;color:#666;font-size:0.8rem;">Requires Node 22 &mdash; <code>node@22</code></p>
     </div>
+
+    <div id="tunnel-error-box" class="error-box">
+      <h3>Tunnel failed to establish</h3>
+      <p>The Cloudflare tunnel didn't become available within 45 seconds.</p>
+      <p>Ensure <code>cloudflared</code> is installed: <code>brew install cloudflared</code></p>
+      <p>Or switch to <strong>Local Only</strong> mode in the tray menu.</p>
+    </div>
   </div>
 
   <script>
   (function() {
-    var params = new URLSearchParams(window.location.search);
-    var port = params.get('port') || '8765';
-    var token = params.get('token') || '';
+    var port = '8765';
+    var token = '';
+    var tunnelMode = 'none';
     var startTime = Date.now();
     var polling = false;
+    var healthPassed = false;
 
+    var startupSection = document.getElementById('startup-section');
     var stage1 = document.getElementById('stage-1');
     var stage2 = document.getElementById('stage-2');
     var stage3 = document.getElementById('stage-3');
     var spinner = document.getElementById('spinner');
     var statusText = document.getElementById('status-text');
     var errorBox = document.getElementById('error-box');
+    var tunnelErrorBox = document.getElementById('tunnel-error-box');
+    var qrSection = document.getElementById('qr-section');
+    var qrContainer = document.getElementById('qr-container');
+    var qrLabel = document.getElementById('qr-label');
+    var dashBtn = document.getElementById('open-dashboard-btn');
 
     function setStage(n) {
       [stage1, stage2, stage3].forEach(function(el, i) {
@@ -170,16 +240,55 @@
       errorBox.className = 'error-box visible';
     }
 
+    function showTunnelError() {
+      polling = false;
+      spinner.style.display = 'none';
+      statusText.textContent = 'Tunnel unavailable';
+      statusText.style.color = '#f87171';
+      tunnelErrorBox.className = 'error-box visible';
+      // Still show dashboard button as fallback
+      showDashboardButton();
+    }
+
+    function showQr(svgHtml) {
+      startupSection.style.display = 'none';
+      qrContainer.innerHTML = svgHtml;
+      qrSection.className = 'visible';
+    }
+
+    function showDashboardButton() {
+      // Show QR section with just the button (no QR)
+      if (!qrSection.classList.contains('visible')) {
+        startupSection.style.display = 'none';
+        qrSection.className = 'visible';
+      }
+    }
+
+    function openDashboard() {
+      var dashUrl = '/dashboard';
+      if (token) dashUrl += '?token=' + encodeURIComponent(token);
+      window.location.href = 'http://localhost:' + port + dashUrl;
+    }
+
+    dashBtn.addEventListener('click', openDashboard);
+
     // Callable from Tauri Rust via win.eval()
-    window.__startPolling = function(p, t) {
+    window.__startPolling = function(p, t, tm) {
       port = String(p);
       token = t || '';
+      tunnelMode = tm || 'none';
       startTime = Date.now();
+      healthPassed = false;
       // Reset UI
+      startupSection.style.display = '';
       spinner.style.display = '';
       statusText.textContent = 'Starting...';
       statusText.style.color = '#888';
       errorBox.className = 'error-box';
+      tunnelErrorBox.className = 'error-box';
+      qrSection.className = '';
+      qrSection.style.display = '';
+      qrContainer.innerHTML = '';
       setStage(1);
       if (!polling) pollHealth();
     };
@@ -190,15 +299,21 @@
         .then(function(r) { return r.json(); })
         .then(function(data) {
           if (data.status === 'ok') {
-            setStage(3);
-            statusText.textContent = 'Connected!';
-            statusText.style.color = '#22c55e';
-            spinner.style.display = 'none';
-            setTimeout(function() {
-              var dashUrl = '/dashboard';
-              if (token) dashUrl += '?token=' + encodeURIComponent(token);
-              window.location.href = 'http://localhost:' + port + dashUrl;
-            }, 300);
+            if (!healthPassed) {
+              healthPassed = true;
+              setStage(3);
+              statusText.style.color = '#22c55e';
+
+              if (tunnelMode !== 'none') {
+                // Tunnel mode: poll for QR (tunnel needs extra time)
+                statusText.textContent = 'Establishing tunnel...';
+                pollQr();
+              } else {
+                // Local-only: poll for QR with LAN IP
+                statusText.textContent = 'Connected!';
+                pollQr();
+              }
+            }
           } else if (data.status === 'restarting') {
             statusText.textContent = 'Server restarting...';
             setTimeout(pollHealth, 1000);
@@ -216,6 +331,55 @@
           }
           setTimeout(pollHealth, 1000);
         });
+    }
+
+    function pollQr() {
+      var qrStart = Date.now();
+      var timeoutMs = tunnelMode !== 'none' ? 45000 : 10000;
+
+      function poll() {
+        fetch('http://localhost:' + port + '/qr', {
+            headers: token ? { 'Authorization': 'Bearer ' + token } : {}
+          })
+          .then(function(r) {
+            if (r.ok) return r.text();
+            if (r.status === 503) throw new Error('not_ready');
+            throw new Error('qr_error');
+          })
+          .then(function(svg) {
+            spinner.style.display = 'none';
+            statusText.textContent = 'Ready!';
+            statusText.style.color = '#22c55e';
+
+            if (tunnelMode === 'none') {
+              qrLabel.textContent = 'Scan with Chroxy app (same WiFi network)';
+            } else {
+              qrLabel.textContent = 'Scan with Chroxy app to pair your phone';
+            }
+            showQr(svg);
+          })
+          .catch(function(err) {
+            var elapsed = Date.now() - qrStart;
+            if (elapsed > timeoutMs) {
+              if (tunnelMode !== 'none') {
+                showTunnelError();
+              } else {
+                // Local mode QR failed — just go to dashboard
+                spinner.style.display = 'none';
+                statusText.textContent = 'Ready!';
+                statusText.style.color = '#22c55e';
+                qrLabel.textContent = 'QR unavailable — open dashboard to get started';
+                showDashboardButton();
+              }
+              return;
+            }
+            if (tunnelMode !== 'none') {
+              statusText.textContent = 'Establishing tunnel...';
+            }
+            setTimeout(poll, 1500);
+          });
+      }
+      poll();
     }
 
     setStage(1);

@@ -15,7 +15,7 @@ pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 use tauri::{
-    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder},
+    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
@@ -29,6 +29,9 @@ struct TrayMenuItems {
     dashboard: MenuItem<tauri::Wry>,
     auto_start_login: CheckMenuItem<tauri::Wry>,
     auto_start_server: CheckMenuItem<tauri::Wry>,
+    tunnel_quick: CheckMenuItem<tauri::Wry>,
+    tunnel_named: CheckMenuItem<tauri::Wry>,
+    tunnel_none: CheckMenuItem<tauri::Wry>,
 }
 
 pub fn run() {
@@ -107,11 +110,35 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             .build(app)?;
 
     let settings = app.state::<Mutex<DesktopSettings>>();
-    let auto_start_server_checked = lock_or_recover(&settings).auto_start_server;
+    let settings_guard = lock_or_recover(&settings);
+    let auto_start_server_checked = settings_guard.auto_start_server;
+    let current_tunnel = settings_guard.tunnel_mode.clone();
+    drop(settings_guard);
+
     let auto_start_server =
         CheckMenuItemBuilder::with_id("auto_start_server", "Auto-start Server")
             .checked(auto_start_server_checked)
             .build(app)?;
+
+    // Tunnel mode submenu
+    let tunnel_quick =
+        CheckMenuItemBuilder::with_id("tunnel_quick", "Quick Tunnel")
+            .checked(current_tunnel == "quick")
+            .build(app)?;
+    let tunnel_named =
+        CheckMenuItemBuilder::with_id("tunnel_named", "Named Tunnel")
+            .checked(current_tunnel == "named")
+            .build(app)?;
+    let tunnel_none =
+        CheckMenuItemBuilder::with_id("tunnel_none", "Local Only")
+            .checked(current_tunnel == "none")
+            .build(app)?;
+
+    let tunnel_submenu = SubmenuBuilder::with_id(app, "tunnel_mode", "Tunnel Mode")
+        .item(&tunnel_quick)
+        .item(&tunnel_named)
+        .item(&tunnel_none)
+        .build()?;
 
     let quit = MenuItemBuilder::with_id("quit", "Quit Chroxy").build(app)?;
 
@@ -122,6 +149,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .separator()
         .item(&auto_start_login)
         .item(&auto_start_server)
+        .item(&tunnel_submenu)
         .separator()
         .items(&[&quit])
         .build()?;
@@ -133,6 +161,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         dashboard: dashboard.clone(),
         auto_start_login: auto_start_login.clone(),
         auto_start_server: auto_start_server.clone(),
+        tunnel_quick: tunnel_quick.clone(),
+        tunnel_named: tunnel_named.clone(),
+        tunnel_none: tunnel_none.clone(),
     }));
 
     let _tray = TrayIconBuilder::new()
@@ -147,6 +178,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 "dashboard" => handle_dashboard(app),
                 "auto_start_login" => handle_toggle_login(app),
                 "auto_start_server" => handle_toggle_auto_start(app),
+                "tunnel_quick" => handle_set_tunnel_mode(app, "quick"),
+                "tunnel_named" => handle_set_tunnel_mode(app, "named"),
+                "tunnel_none" => handle_set_tunnel_mode(app, "none"),
                 "quit" => {
                     if let Some(mgr) = app.try_state::<Mutex<ServerManager>>() {
                         let mut mgr = lock_or_recover(&mgr);
@@ -205,9 +239,32 @@ fn update_menu_state(app: &tauri::AppHandle, running: bool) {
 }
 
 fn handle_start(app: &tauri::AppHandle) {
+    // Read tunnel mode from settings and apply to server manager
+    let tunnel_mode = app
+        .try_state::<Mutex<DesktopSettings>>()
+        .map(|s| lock_or_recover(&s).tunnel_mode.clone())
+        .unwrap_or_else(|| "quick".to_string());
+
+    // Validate cloudflared for tunnel modes
+    if tunnel_mode != "none" && !ServerManager::check_cloudflared() {
+        send_notification(
+            app,
+            "Tunnel Unavailable",
+            "cloudflared not found. Install with: brew install cloudflared",
+        );
+        // Fall back to local-only mode for this start
+    }
+
     let state = app.state::<Mutex<ServerManager>>();
     let (result, port, token) = {
         let mut mgr = lock_or_recover(&state);
+        // Only use tunnel mode if cloudflared is available, otherwise fall back to none
+        let effective_mode = if tunnel_mode != "none" && !ServerManager::check_cloudflared() {
+            "none"
+        } else {
+            &tunnel_mode
+        };
+        mgr.set_tunnel_mode(effective_mode);
         let r = mgr.start();
         let p = mgr.port();
         let t = mgr.token();
@@ -218,8 +275,12 @@ fn handle_start(app: &tauri::AppHandle) {
         Ok(()) => {
             update_menu_state(app, true);
 
-            // Show loading page immediately with port/token so it can poll for health
-            window::show_fallback(app, Some(port), token.as_deref());
+            // Show loading page immediately with port/token/tunnelMode so it can poll for health+QR
+            let effective_mode = {
+                let mgr = lock_or_recover(&state);
+                mgr.tunnel_mode().to_string()
+            };
+            window::show_fallback(app, Some(port), token.as_deref(), Some(&effective_mode));
 
             let app_handle = app.clone();
             std::thread::spawn(move || {
@@ -256,7 +317,7 @@ fn handle_stop(app: &tauri::AppHandle) {
     mgr.stop();
     drop(mgr);
     update_menu_state(app, false);
-    window::show_fallback(app, None, None);
+    window::show_fallback(app, None, None, None);
 }
 
 fn handle_restart(app: &tauri::AppHandle) {
@@ -280,7 +341,7 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let mgr = lock_or_recover(&state);
     if !mgr.is_running() {
-        window::show_fallback(app, None, None);
+        window::show_fallback(app, None, None, None);
         return;
     }
 
@@ -323,6 +384,55 @@ fn handle_toggle_auto_start(app: &tauri::AppHandle) {
                 .set_checked(settings.auto_start_server);
         }
     }
+}
+
+fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
+    // Validate cloudflared for tunnel modes
+    if mode != "none" && !ServerManager::check_cloudflared() {
+        send_notification(
+            app,
+            "Tunnel Unavailable",
+            "cloudflared not found. Install with: brew install cloudflared",
+        );
+        // Revert the checkbox to current mode
+        if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
+            let items = lock_or_recover(&items);
+            let current = app
+                .try_state::<Mutex<DesktopSettings>>()
+                .map(|s| lock_or_recover(&s).tunnel_mode.clone())
+                .unwrap_or_else(|| "quick".to_string());
+            let _ = items.tunnel_quick.set_checked(current == "quick");
+            let _ = items.tunnel_named.set_checked(current == "named");
+            let _ = items.tunnel_none.set_checked(current == "none");
+        }
+        return;
+    }
+
+    // Update settings
+    if let Some(settings_state) = app.try_state::<Mutex<DesktopSettings>>() {
+        let mut settings = lock_or_recover(&settings_state);
+        settings.tunnel_mode = mode.to_string();
+        let _ = settings.save();
+    }
+
+    // Update checkboxes (radio-style: only one checked at a time)
+    if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
+        let items = lock_or_recover(&items);
+        let _ = items.tunnel_quick.set_checked(mode == "quick");
+        let _ = items.tunnel_named.set_checked(mode == "named");
+        let _ = items.tunnel_none.set_checked(mode == "none");
+    }
+
+    send_notification(
+        app,
+        "Tunnel Mode Changed",
+        &format!("Restart server for {} mode to take effect.", match mode {
+            "quick" => "Quick Tunnel",
+            "named" => "Named Tunnel",
+            "none" => "Local Only",
+            _ => mode,
+        }),
+    );
 }
 
 fn send_notification(app: &tauri::AppHandle, title: &str, body: &str) {

@@ -37,6 +37,7 @@ pub struct ServerManager {
     log_buffer: Arc<Mutex<VecDeque<String>>>,
     node_path: Option<PathBuf>,
     config: ChroxyConfig,
+    tunnel_mode: String,
     health_running: Arc<Mutex<bool>>,
 }
 
@@ -48,6 +49,7 @@ impl ServerManager {
             log_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(100))),
             node_path: None,
             config: ChroxyConfig::default(),
+            tunnel_mode: "quick".to_string(),
             health_running: Arc::new(Mutex::new(false)),
         }
     }
@@ -66,6 +68,25 @@ impl ServerManager {
 
     pub fn token(&self) -> Option<String> {
         self.config.api_token.clone()
+    }
+
+    pub fn tunnel_mode(&self) -> &str {
+        &self.tunnel_mode
+    }
+
+    pub fn set_tunnel_mode(&mut self, mode: &str) {
+        self.tunnel_mode = mode.to_string();
+    }
+
+    /// Check whether `cloudflared` is available on PATH.
+    pub fn check_cloudflared() -> bool {
+        Command::new("which")
+            .arg("cloudflared")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 
     /// Start the Chroxy server as a child process.
@@ -114,8 +135,8 @@ impl ServerManager {
         if let Some(ref model) = self.config.model {
             cmd.env("CHROXY_MODEL", model);
         }
-        // No tunnel — tray app connects locally
-        cmd.env("CHROXY_TUNNEL", "none");
+        // Tunnel mode: "quick", "named", or "none"
+        cmd.env("CHROXY_TUNNEL", &self.tunnel_mode);
         // No supervisor — tray app IS the supervisor
         cmd.arg("--no-supervisor");
 
