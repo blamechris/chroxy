@@ -342,7 +342,11 @@
             headers: token ? { 'Authorization': 'Bearer ' + token } : {}
           })
           .then(function(r) {
-            if (r.ok) return r.text();
+            if (r.ok) {
+              var ct = (r.headers.get('content-type') || '').toLowerCase();
+              if (!ct.includes('image/svg+xml')) throw new Error('unexpected_content_type');
+              return r.text();
+            }
             if (r.status === 503) throw new Error('not_ready');
             throw new Error('qr_error');
           })

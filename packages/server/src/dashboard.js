@@ -1904,6 +1904,8 @@ function getDashboardJs() {
     fetch('/qr', { headers: token ? { 'Authorization': 'Bearer ' + token } : {} })
       .then(function(r) {
         if (!r.ok) throw new Error(r.status);
+        var ct = (r.headers.get('content-type') || '').toLowerCase();
+        if (!ct.includes('image/svg+xml')) throw new Error('unexpected_content_type');
         return r.text();
       })
       .then(function(svg) {
