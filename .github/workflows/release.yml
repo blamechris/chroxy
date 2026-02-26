@@ -117,10 +117,19 @@ jobs:
         with:
           workspaces: packages/desktop/src-tauri
 
+      - name: Cache Tauri CLI binary
+        id: cache-tauri
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: cargo-tauri-v2-macos-${{ runner.arch }}-${{ hashFiles('packages/desktop/src-tauri/Cargo.lock') }}
+
       - name: Install cargo-binstall
+        if: steps.cache-tauri.outputs.cache-hit != 'true'
         uses: cargo-bins/cargo-binstall@7691a5b29cda4f5499b819e5618012ba4b6c3334 # v1.17.5
 
       - name: Install Tauri CLI
+        if: steps.cache-tauri.outputs.cache-hit != 'true'
         run: cargo binstall tauri-cli --version "^2" --no-confirm
 
       - name: Import signing certificate
