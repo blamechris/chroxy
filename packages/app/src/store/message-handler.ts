@@ -1749,6 +1749,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'conversations_list': {
+      const conversations = Array.isArray(msg.conversations) ? msg.conversations : [];
+      set({ conversationHistory: conversations, conversationHistoryLoading: false });
+      break;
+    }
+
     case 'server_error': {
       const allowedCategories = new Set<ServerError['category']>([
         'tunnel', 'session', 'permission', 'general',

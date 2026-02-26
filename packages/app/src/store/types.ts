@@ -149,6 +149,17 @@ export interface DiffResult {
   error: string | null;
 }
 
+export interface ConversationSummary {
+  conversationId: string;
+  project: string | null;
+  projectName: string;
+  modifiedAt: string;
+  modifiedAtMs: number;
+  sizeBytes: number;
+  preview: string | null;
+  cwd: string | null;
+}
+
 export interface AgentInfo {
   toolUseId: string;
   description: string;
@@ -355,6 +366,10 @@ export interface ConnectionState {
   // Custom agents from server
   customAgents: CustomAgent[];
 
+  // Conversation history (for resuming past conversations)
+  conversationHistory: ConversationSummary[];
+  conversationHistoryLoading: boolean;
+
   // Checkpoints for session rewind
   checkpoints: Checkpoint[];
 
@@ -436,6 +451,10 @@ export interface ConnectionState {
 
   // Custom agents
   fetchCustomAgents: () => void;
+
+  // Conversation history (resume past conversations)
+  fetchConversationHistory: () => void;
+  resumeConversation: (conversationId: string, cwd?: string) => void;
 
   // Full history sync (session portability)
   requestFullHistory: (sessionId?: string) => void;

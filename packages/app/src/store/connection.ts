@@ -44,6 +44,7 @@ export type {
   CustomAgent,
   ConnectionPhase,
   ConnectionContext,
+  ConversationSummary,
   ConnectionState,
 } from './types';
 
@@ -194,6 +195,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _fileBrowserCallback: null,
   _fileContentCallback: null,
   _diffCallback: null,
+  conversationHistory: [],
+  conversationHistoryLoading: false,
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -1018,6 +1021,23 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'rename_session', sessionId, name });
+    }
+  },
+
+  fetchConversationHistory: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ conversationHistoryLoading: true });
+      wsSend(socket, { type: 'list_conversations' });
+    }
+  },
+
+  resumeConversation: (conversationId: string, cwd?: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const payload: Record<string, unknown> = { type: 'resume_conversation', conversationId };
+      if (cwd) payload.cwd = cwd;
+      wsSend(socket, payload);
     }
   },
 

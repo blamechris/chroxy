@@ -31,7 +31,7 @@ import { DevPreviewBanner } from '../components/DevPreviewBanner';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
-import { ICON_CLOSE, ICON_GEAR, ICON_DIFF, ICON_SEARCH, ICON_EXPORT, ICON_ARROW_UP, ICON_ARROW_DOWN } from '../constants/icons';
+import { ICON_CLOSE, ICON_GEAR, ICON_DIFF, ICON_SEARCH, ICON_EXPORT, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOCK } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 import { useLayout } from '../hooks/useLayout';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
@@ -649,6 +649,9 @@ export function SessionScreen() {
               <Text style={styles.diffButtonText}>{ICON_EXPORT}</Text>
             </TouchableOpacity>
           )}
+          <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('History')}>
+            <Text style={styles.settingsButtonText}>{ICON_CLOCK}</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
             <Text style={styles.settingsButtonText}>{ICON_GEAR}</Text>
           </TouchableOpacity>
