@@ -42,6 +42,7 @@ describe('decodeProjectPath', () => {
   })
 
   it('returns null for path that decodes to a file, not directory', () => {
+    // Even if the decoded path exists, it must be a directory
     assert.equal(decodeProjectPath('no-leading-slash'), null)
   })
 })
