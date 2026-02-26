@@ -89,6 +89,7 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `interrupt` | Interrupt active Claude task |
 | `key_exchange` | Send client X25519 public key for encryption |
 | `list_agents` | Request available custom agent definitions |
+| `list_conversations` | Request scan of conversation history files |
 | `list_directory` | Request home directory listing for browsing |
 | `list_sessions` | Request list of all sessions |
 | `list_slash_commands` | Request available slash command definitions |
@@ -100,6 +101,7 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `rename_session` | Rename existing session by ID |
 | `request_full_history` | Request complete JSONL history for session |
 | `request_session_context` | Get context info for specific session |
+| `resume_conversation` | Resume a past conversation by creating a new session with `resumeSessionId` |
 | `set_model` | Change active Claude model |
 | `set_permission_mode` | Change permission handling mode |
 | `switch_session` | Switch to different active session |
@@ -123,6 +125,7 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 | `client_left` | Client disconnected from server |
 | `confirm_permission_mode` | Challenge auto mode (needs confirmation) |
 | `conversation_id` | SDK conversation ID for session portability |
+| `conversations_list` | List of conversation metadata (id, project, preview, mtime, size) |
 | `diff_result` | Git diff for uncommitted changes |
 | `directory_listing` | Home directory listing response |
 | `encrypted` | Encrypted message envelope (E2E encryption) |
@@ -166,6 +169,8 @@ Key state: `connectionPhase` (ConnectionPhase enum), `wsUrl`, `apiToken`, `viewM
 - `server_shutdown` sent before server goes down; `reason` is `'restart'` (coming back) or `'shutdown'` (not coming back); `restartEtaMs` is estimated ms until server is available (0 for permanent shutdown); supervisor standby health check also includes `restartEtaMs` for crash recovery
 - `server_status` for non-error updates; `server_error` for error conditions
 - `permission_request` includes an `input` field (always present, defaults to `{}`) with structured tool input for rich UI rendering; `remainingMs` (milliseconds until auto-deny) lets the client compute a local deadline without clock skew
+- `list_conversations` triggers a scan of `~/.claude/projects/` JSONL files; `conversations_list` returns `{ conversations: [{ conversationId, project, projectName, modifiedAt, modifiedAtMs, sizeBytes, preview, cwd }] }` sorted by most recently modified
+- `resume_conversation` accepts `{ conversationId, cwd?, name? }` where `conversationId` is a UUID and `name` (optional) labels the new session (defaults to `'Resumed'`); creates a new session with `resumeSessionId` and responds with `session_switched`
 - `user_question` forwards `AskUserQuestion` prompts from plan mode; `user_question_response` sends the user's answer back
 - `agent_spawned` fires when the Task tool is detected (description truncated to 200 chars); `agent_completed` fires per-agent when the turn's `result` arrives or on process crash/destroy
 - `plan_started` fires on `EnterPlanMode` tool; `plan_ready` fires on `ExitPlanMode`, includes `allowedPrompts` payload — both are transient events (not recorded in history or replayed)
