@@ -30,8 +30,9 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
         </select>
         <select id="permission-select" title="Permission mode">
           <option value="approve">Approve</option>
-          <option value="plan">Plan</option>
+          <option value="acceptEdits">Accept Edits</option>
           <option value="auto">Auto</option>
+          <option value="plan">Plan</option>
         </select>
         <button id="history-btn" class="header-btn" title="Conversation history">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -2566,7 +2567,18 @@ function getDashboardJs() {
       }
 
       case "available_permission_modes":
-        // Could update permission select options dynamically
+        if (Array.isArray(msg.modes) && msg.modes.length > 0) {
+          var previousValue = permissionSelect.value;
+          permissionSelect.innerHTML = "";
+          msg.modes.forEach(function(m) {
+            var opt = document.createElement("option");
+            opt.value = m.id || m;
+            opt.textContent = m.label || m.id || m;
+            permissionSelect.appendChild(opt);
+          });
+          permissionSelect.value = previousValue;
+          if (!permissionSelect.value) permissionSelect.value = permissionMode;
+        }
         break;
 
       case "agent_busy":
