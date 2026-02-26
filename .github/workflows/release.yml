@@ -117,8 +117,11 @@ jobs:
         with:
           workspaces: packages/desktop/src-tauri
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@7691a5b29cda4f5499b819e5618012ba4b6c3334 # v1.17.5
+
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2"
+        run: cargo binstall tauri-cli --version "^2" --no-confirm
 
       - name: Import signing certificate
         if: env.APPLE_CERTIFICATE != ''
