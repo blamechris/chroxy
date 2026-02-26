@@ -1,4 +1,4 @@
-import { networkInterfaces } from 'os'
+import os from 'os'
 
 /** Interface name prefixes commonly used by VPN clients (macOS/Linux). */
 const VPN_PREFIXES = ['utun', 'tun', 'tap', 'tailscale', 'ts', 'wg']
@@ -18,7 +18,7 @@ function isVpnInterface(name) {
  * non-internal IPv4 address (including VPN) if no non-VPN interface is found.
  */
 export function getLanIp() {
-  const nets = networkInterfaces()
+  const nets = os.networkInterfaces()
   let fallback = null
 
   for (const name of Object.keys(nets)) {
