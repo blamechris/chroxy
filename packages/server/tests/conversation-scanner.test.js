@@ -360,6 +360,34 @@ describe('scanConversations', () => {
     assert.deepEqual(result2, result1)
   })
 
+  it('cache handles different maxResults values across calls', async () => {
+    const files = {}
+    for (let i = 0; i < 10; i++) {
+      files[`conv-${i}.jsonl`] = jsonlLines(
+        userEntry(`Conversation ${i}`, { cwd: '/tmp/cache-max-results' }),
+      )
+    }
+
+    makeProject('test-project', files)
+
+    const limitedResults = await scanConversations({
+      projectsDir: tempDir,
+      maxResults: 5,
+    })
+    assert.equal(
+      limitedResults.length,
+      5,
+      'First call should respect maxResults and return 5 results',
+    )
+
+    const allResults = await scanConversations({ projectsDir: tempDir })
+    assert.equal(
+      allResults.length,
+      10,
+      'Second call without maxResults should return all results, not the cached limited subset',
+    )
+  })
+
   it('clearScanCache forces fresh scan', async () => {
     makeProject('test-project', {
       'conv.jsonl': jsonlLines(userEntry('Before clear')),
