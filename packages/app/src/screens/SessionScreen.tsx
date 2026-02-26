@@ -649,7 +649,7 @@ export function SessionScreen() {
               <Text style={styles.diffButtonText}>{ICON_EXPORT}</Text>
             </TouchableOpacity>
           )}
-          <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('History')}>
+          <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('History')} accessibilityRole="button" accessibilityLabel="Conversation history">
             <Text style={styles.settingsButtonText}>{ICON_CLOCK}</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
