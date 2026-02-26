@@ -9,12 +9,13 @@ function isVpnInterface(name) {
 }
 
 /**
- * Return the first non-internal, non-VPN IPv4 address, or null if none found.
- * Used for connection URLs when running without a tunnel.
+ * Return the first non-internal, non-VPN IPv4 address, falling back to a VPN
+ * IPv4 address if no non-VPN address exists, or null if no non-internal IPv4
+ * address exists at all. Used for connection URLs when running without a tunnel.
  *
  * VPN interfaces (WireGuard, OpenVPN, Tailscale) are skipped because phones
  * on the local WiFi cannot reach VPN-only addresses. Falls back to any
- * non-internal address if no non-VPN interface is found.
+ * non-internal IPv4 address (including VPN) if no non-VPN interface is found.
  */
 export function getLanIp() {
   const nets = networkInterfaces()
