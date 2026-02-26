@@ -2317,15 +2317,6 @@ function getDashboardJs() {
         // Could update permission select options dynamically
         break;
 
-      case "status_update":
-        if (msg.cost !== undefined) statusCost = msg.cost;
-        if (msg.model) statusModel = msg.model;
-        if (msg.contextPercent !== undefined) {
-          statusContext = msg.contextPercent + "% context";
-        }
-        updateStatusBar();
-        break;
-
       case "agent_busy":
         isBusy = true;
         showThinking();

@@ -56,7 +56,6 @@ import {
   ServerPlanStartedSchema,
   ServerPlanReadySchema,
   ServerSessionListSchema,
-  ServerStatusUpdateSchema,
   ServerErrorSchema,
   ServerShutdownSchema,
   ServerPongSchema,
@@ -975,20 +974,6 @@ describe('ServerSessionListSchema', () => {
     const result = ServerSessionListSchema.safeParse({
       type: 'session_list',
       sessions: [{ sessionId: 's1', name: 'Test', isBusy: false }],
-    })
-    assert.ok(result.success)
-  })
-})
-
-describe('ServerStatusUpdateSchema', () => {
-  it('accepts valid status_update', () => {
-    const result = ServerStatusUpdateSchema.safeParse({
-      type: 'status_update',
-      model: 'sonnet',
-      cost: '$0.05',
-      messageCount: 10,
-      contextTokens: 5000,
-      contextPercent: 25,
     })
     assert.ok(result.success)
   })

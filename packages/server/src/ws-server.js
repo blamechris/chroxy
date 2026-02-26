@@ -140,7 +140,6 @@ function getGitInfo() {
  *   { type: 'history_replay_start', sessionId, fullHistory?, truncated? } — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
  *   { type: 'conversation_id', sessionId, conversationId } — SDK conversation ID for session portability
- *   { type: 'status_update', model, cost, ... }       — Claude Code status bar metadata
  *   { type: 'user_question', toolUseId, questions }   — AskUserQuestion prompt from Claude
  *   { type: 'agent_busy' }                           — agent started processing (per-session)
  *   { type: 'agent_idle' }                           — agent finished processing (per-session)
