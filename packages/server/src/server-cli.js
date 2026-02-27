@@ -373,14 +373,14 @@ export async function startCliServer(config) {
     console.error('[fatal] Uncaught exception:', err)
     try { wsServer.broadcastShutdown('shutdown', 0) } catch {}
     try { wsServer.close() } catch {}
-    process.exit(1)
+    setTimeout(() => process.exit(1), 100)
   })
 
   process.on('unhandledRejection', (err) => {
     console.error('[fatal] Unhandled rejection:', err)
     try { wsServer.broadcastShutdown('shutdown', 0) } catch {}
     try { wsServer.close() } catch {}
-    process.exit(1)
+    setTimeout(() => process.exit(1), 100)
   })
 
   // Return references for supervised child drain protocol
