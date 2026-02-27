@@ -21,8 +21,6 @@ const SERVER_VERSION = packageJson.version
 
 /**
  * Start the Chroxy server in CLI headless mode.
- * Auto-discovers tmux sessions running Claude on startup.
- * Falls back to a default CLI session if none found.
  */
 export async function startCliServer(config) {
   const PORT = config.port || parseInt(process.env.PORT || '8765', 10)
@@ -122,14 +120,6 @@ export async function startCliServer(config) {
 
   sessionManager.on('session_destroyed', ({ sessionId }) => {
     console.log(`[cli] Session destroyed: ${sessionId}`)
-  })
-
-  sessionManager.on('new_sessions_discovered', ({ tmux }) => {
-    console.log(`[cli] Auto-discovered ${tmux.length} new tmux session(s): ${tmux.map((s) => s.sessionName).join(', ')}`)
-    // Broadcast to clients so they can show a notification or auto-attach
-    if (wsServer) {
-      wsServer.broadcast({ type: 'discovered_sessions', tmux })
-    }
   })
 
   sessionManager.on('session_warning', ({ sessionId, name, reason, message, remainingMs }) => {
