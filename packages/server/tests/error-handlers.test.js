@@ -26,6 +26,35 @@ describe('global error handlers', () => {
         'server-cli.js should register unhandledRejection handler'
       )
     })
+
+    it('uncaughtException handler includes best-effort shutdown broadcast', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      assert.ok(
+        source.includes('broadcastShutdown'),
+        'uncaughtException handler should attempt broadcastShutdown for graceful client notification'
+      )
+      // Verify the broadcastShutdown is near the uncaughtException handler (within 15 lines)
+      const lines = source.split('\n')
+      const handlerLine = lines.findIndex(l => l.includes("process.on('uncaughtException'"))
+      const broadcastLines = lines.slice(handlerLine, handlerLine + 15)
+      assert.ok(
+        broadcastLines.some(l => l.includes('broadcastShutdown')),
+        'broadcastShutdown should be within the uncaughtException handler body'
+      )
+    })
+
+    it('unhandledRejection handler includes best-effort shutdown broadcast', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const lines = source.split('\n')
+      const handlerLine = lines.findIndex(l => l.includes("process.on('unhandledRejection'"))
+      const broadcastLines = lines.slice(handlerLine, handlerLine + 15)
+      assert.ok(
+        broadcastLines.some(l => l.includes('broadcastShutdown')),
+        'broadcastShutdown should be within the unhandledRejection handler body'
+      )
+    })
   })
 
   describe('server-cli-child.js', () => {
