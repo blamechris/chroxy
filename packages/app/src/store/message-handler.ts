@@ -533,7 +533,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
       const authLatestVersion = typeof msg.latestVersion === 'string' ? msg.latestVersion : null;
       const authServerCommit = typeof msg.serverCommit === 'string' ? msg.serverCommit : null;
-      const authProtocolVersion = typeof msg.protocolVersion === 'number' ? msg.protocolVersion : null;
+      const authProtocolVersion =
+        typeof msg.protocolVersion === 'number' &&
+        Number.isFinite(msg.protocolVersion) &&
+        Number.isInteger(msg.protocolVersion) &&
+        msg.protocolVersion >= 1
+          ? msg.protocolVersion
+          : null;
       // Parse connected clients list with self-detection via clientId
       const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
       const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
