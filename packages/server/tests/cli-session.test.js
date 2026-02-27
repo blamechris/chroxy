@@ -525,3 +525,38 @@ describe('CliSession plan mode', () => {
     assert.equal(session._inPlanMode, false)
   })
 })
+
+describe('#988 — _killAndRespawn extraction', () => {
+  it('has _killAndRespawn as a prototype method', () => {
+    assert.equal(typeof CliSession.prototype._killAndRespawn, 'function',
+      '_killAndRespawn should be extracted as a shared method')
+  })
+
+  it('setModel uses _killAndRespawn instead of inline kill logic', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { dirname, join } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const dir = dirname(fileURLToPath(import.meta.url))
+    const source = readFileSync(join(dir, '../src/cli-session.js'), 'utf-8')
+    const setModelBlock = source.match(/setModel\(model\)\s*\{[\s\S]*?^  \}/m)
+    assert.ok(setModelBlock, 'setModel method should exist')
+    assert.ok(setModelBlock[0].includes('_killAndRespawn'),
+      'setModel should delegate to _killAndRespawn')
+    assert.ok(!setModelBlock[0].includes('forceKillTimer'),
+      'setModel should not contain inline kill logic (forceKillTimer)')
+  })
+
+  it('setPermissionMode uses _killAndRespawn instead of inline kill logic', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { dirname, join } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const dir = dirname(fileURLToPath(import.meta.url))
+    const source = readFileSync(join(dir, '../src/cli-session.js'), 'utf-8')
+    const setPermBlock = source.match(/setPermissionMode\(mode\)\s*\{[\s\S]*?^  \}/m)
+    assert.ok(setPermBlock, 'setPermissionMode method should exist')
+    assert.ok(setPermBlock[0].includes('_killAndRespawn'),
+      'setPermissionMode should delegate to _killAndRespawn')
+    assert.ok(!setPermBlock[0].includes('forceKillTimer'),
+      'setPermissionMode should not contain inline kill logic (forceKillTimer)')
+  })
+})

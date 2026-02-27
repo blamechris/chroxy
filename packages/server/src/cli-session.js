@@ -582,6 +582,66 @@ export class CliSession extends EventEmitter {
     }
   }
 
+  /**
+   * Kill the current child process (if any) and respawn.
+   * Suppresses auto-respawn during the kill, clears timers, and starts fresh.
+   */
+  _killAndRespawn() {
+    this._destroying = true
+    this._processReady = false
+    this._sessionId = null
+
+    if (this._interruptTimer) {
+      clearTimeout(this._interruptTimer)
+      this._interruptTimer = null
+    }
+
+    if (this._respawnTimer) {
+      clearTimeout(this._respawnTimer)
+      this._respawnTimer = null
+    }
+
+    this._cleanupReadlines()
+
+    if (this._child) {
+      const oldChild = this._child
+      this._child = null
+
+      let didClose = false
+      const respawn = () => {
+        if (didClose) return
+        didClose = true
+        this._destroying = false
+        this._respawnCount = 0
+        this.start()
+      }
+
+      oldChild.on('close', () => {
+        clearTimeout(forceKillTimer)
+        respawn()
+      })
+
+      // Force-kill after 10s if process doesn't exit cleanly
+      const forceKillTimer = setTimeout(() => {
+        if (!didClose) {
+          console.warn('[cli-session] Process did not exit after 10s, force-killing')
+          try {
+            forceKill(oldChild)
+          } catch (_err) {
+            // Process may already be gone, that's fine
+          }
+          respawn()
+        }
+      }, 10000)
+
+      oldChild.kill('SIGTERM')
+    } else {
+      this._destroying = false
+      this._respawnCount = 0
+      this.start()
+    }
+  }
+
   /** Clean up readline interfaces */
   _cleanupReadlines() {
     if (this._rl) {
@@ -614,64 +674,7 @@ export class CliSession extends EventEmitter {
     }
 
     console.log(`[cli-session] Model changed to ${this.model || 'default'}, restarting process`)
-
-    // Suppress auto-respawn while we kill the old process
-    this._destroying = true
-    this._processReady = false
-    this._sessionId = null
-
-    if (this._interruptTimer) {
-      clearTimeout(this._interruptTimer)
-      this._interruptTimer = null
-    }
-
-    if (this._respawnTimer) {
-      clearTimeout(this._respawnTimer)
-      this._respawnTimer = null
-    }
-
-    this._cleanupReadlines()
-
-    if (this._child) {
-      // Start the new process only after the old one is fully dead.
-      // The close handler from _spawnPersistentProcess sees _destroying=true
-      // and returns early. Our handler then starts the new process.
-      const oldChild = this._child
-      this._child = null
-
-      let didClose = false
-      const respawn = () => {
-        if (didClose) return
-        didClose = true
-        this._destroying = false
-        this._respawnCount = 0
-        this.start()
-      }
-
-      oldChild.on('close', () => {
-        clearTimeout(forceKillTimer)
-        respawn()
-      })
-
-      // Force-kill after 10s if process doesn't exit cleanly
-      const forceKillTimer = setTimeout(() => {
-        if (!didClose) {
-          console.warn('[cli-session] Process did not exit after 10s, force-killing')
-          try {
-            forceKill(oldChild)
-          } catch (_err) {
-            // Process may already be gone, that's fine
-          }
-          respawn()
-        }
-      }, 10000)
-
-      oldChild.kill('SIGTERM')
-    } else {
-      this._destroying = false
-      this._respawnCount = 0
-      this.start()
-    }
+    this._killAndRespawn()
   }
 
   /**
@@ -697,61 +700,7 @@ export class CliSession extends EventEmitter {
 
     console.log(`[cli-session] Permission mode changed to ${mode}, restarting process`)
     this.permissionMode = mode
-
-    // Same kill-and-respawn pattern as setModel()
-    this._destroying = true
-    this._processReady = false
-    this._sessionId = null
-
-    if (this._interruptTimer) {
-      clearTimeout(this._interruptTimer)
-      this._interruptTimer = null
-    }
-
-    if (this._respawnTimer) {
-      clearTimeout(this._respawnTimer)
-      this._respawnTimer = null
-    }
-
-    this._cleanupReadlines()
-
-    if (this._child) {
-      const oldChild = this._child
-      this._child = null
-
-      let didClose = false
-      const respawn = () => {
-        if (didClose) return
-        didClose = true
-        this._destroying = false
-        this._respawnCount = 0
-        this.start()
-      }
-
-      oldChild.on('close', () => {
-        clearTimeout(forceKillTimer)
-        respawn()
-      })
-
-      // Force-kill after 10s if process doesn't exit cleanly
-      const forceKillTimer = setTimeout(() => {
-        if (!didClose) {
-          console.warn('[cli-session] Process did not exit after 10s, force-killing')
-          try {
-            forceKill(oldChild)
-          } catch (_err) {
-            // Process may already be gone, that's fine
-          }
-          respawn()
-        }
-      }, 10000)
-
-      oldChild.kill('SIGTERM')
-    } else {
-      this._destroying = false
-      this._respawnCount = 0
-      this.start()
-    }
+    this._killAndRespawn()
   }
 
   /**
