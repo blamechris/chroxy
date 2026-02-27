@@ -1030,6 +1030,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ conversationHistoryLoading: true });
       wsSend(socket, { type: 'list_conversations' });
+      // Safety timeout — clear loading state if server never responds
+      setTimeout(() => {
+        if (get().conversationHistoryLoading) {
+          set({ conversationHistoryLoading: false });
+        }
+      }, 10_000);
     } else {
       // Ensure loading state is cleared when not connected
       set({ conversationHistoryLoading: false });

@@ -64,6 +64,7 @@ export function ConnectScreen() {
   const scrollRef = useRef<ScrollView>(null);
 
   const [scanning, setScanning] = useState(false);
+  const [scanCompleted, setScanCompleted] = useState(false);
   const [discoveredServers, setDiscoveredServers] = useState<DiscoveredServer[]>([]);
   const [scanProgress, setScanProgress] = useState(0);
   const [scanPort, setScanPort] = useState(String(DEFAULT_PORT));
@@ -72,6 +73,7 @@ export function ConnectScreen() {
   const connect = useConnectionStore((state) => state.connect);
   const connectionPhase = useConnectionStore((state) => state.connectionPhase);
   const connectionError = useConnectionStore((state) => state.connectionError);
+  const connectionRetryCount = useConnectionStore((state) => state.connectionRetryCount);
   const savedConnection = useConnectionStore((state) => state.savedConnection);
   const loadSavedConnection = useConnectionStore((state) => state.loadSavedConnection);
   const clearSavedConnection = useConnectionStore((state) => state.clearSavedConnection);
@@ -183,6 +185,7 @@ export function ConnectScreen() {
     }
 
     setScanning(true);
+    setScanCompleted(false);
     setDiscoveredServers([]);
     setScanProgress(0);
 
@@ -253,6 +256,7 @@ export function ConnectScreen() {
     if (!abort.signal.aborted) {
       setScanProgress(1);
       setScanning(false);
+      setScanCompleted(true);
     }
   }, [scanning, scanPort]);
 
@@ -271,6 +275,7 @@ export function ConnectScreen() {
         <ActivityIndicator size="large" color={COLORS.accentBlue} style={styles.autoConnectSpinner} />
         <Text style={styles.autoConnectText}>
           Connecting to {savedConnection ? formatUrl(savedConnection.url) : 'server'}...
+          {connectionRetryCount > 0 ? ` (attempt ${connectionRetryCount + 1}/6)` : ''}
         </Text>
         <TouchableOpacity
           style={styles.autoConnectCancel}
@@ -415,6 +420,12 @@ export function ConnectScreen() {
               <Text style={styles.discoveredArrow}>{ICON_TRIANGLE_RIGHT}</Text>
             </TouchableOpacity>
           ))}
+        </View>
+      )}
+
+      {scanCompleted && discoveredServers.length === 0 && !scanning && (
+        <View style={styles.discoveredSection}>
+          <Text style={styles.scanEmptyText}>No servers found on LAN (port {scanPort})</Text>
         </View>
       )}
 
@@ -666,6 +677,12 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginBottom: 4,
+  },
+  scanEmptyText: {
+    color: COLORS.textDim,
+    fontSize: 14,
+    textAlign: 'center',
+    paddingVertical: 8,
   },
   discoveredItem: {
     flexDirection: 'row',
