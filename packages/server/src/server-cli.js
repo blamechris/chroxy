@@ -369,6 +369,16 @@ export async function startCliServer(config) {
   process.on('SIGINT', () => shutdown('SIGINT'))
   process.on('SIGTERM', () => shutdown('SIGTERM'))
 
+  process.on('uncaughtException', (err) => {
+    console.error('[fatal] Uncaught exception:', err)
+    process.exit(1)
+  })
+
+  process.on('unhandledRejection', (err) => {
+    console.error('[fatal] Unhandled rejection:', err)
+    process.exit(1)
+  })
+
   // Return references for supervised child drain protocol
   return { sessionManager, wsServer }
 }
