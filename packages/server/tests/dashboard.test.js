@@ -1257,6 +1257,29 @@ describe('#975 — re-auth mechanism after token rotation', () => {
   })
 })
 
+describe('#978 — normalized dashboard.css indentation', () => {
+  it('no top-level selectors have 4+ space indent', () => {
+    const lines = css.split('\n')
+    const indentedSelectors = lines.filter(l => l.match(/^\s{4,}\S/) && l.includes('{'))
+    assert.equal(indentedSelectors.length, 0,
+      `Found ${indentedSelectors.length} selectors with 4+ space indent: ${indentedSelectors.slice(0, 3).map(l => l.trim()).join(', ')}`
+    )
+  })
+
+  it('properties use 2-space indentation', () => {
+    const lines = css.split('\n')
+    // Find property lines (lines with : that aren't selectors or comments)
+    const propertyLines = lines.filter(l => l.match(/^\s+\S/) && l.includes(':') && !l.includes('{') && !l.trim().startsWith('/*') && !l.trim().startsWith('*'))
+    const wrongIndent = propertyLines.filter(l => {
+      const indent = l.match(/^(\s*)/)[1].length
+      return indent !== 2
+    })
+    assert.equal(wrongIndent.length, 0,
+      `Found ${wrongIndent.length} properties with non-2-space indent: ${wrongIndent.slice(0, 3).map(l => `[${l.match(/^(\s*)/)[1].length}sp] ${l.trim()}`).join(', ')}`
+    )
+  })
+})
+
 describe('#891 — negative assertions for week 2 features', () => {
   const html = getFullContent(8765, 'test-token', false)
 
