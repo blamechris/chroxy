@@ -119,12 +119,18 @@ if (process.send) {
 
 process.on('uncaughtException', (err) => {
   console.error('[fatal] Uncaught exception:', err)
-  process.exit(1)
+  try { if (_wsServer) _wsServer.broadcastShutdown('crash', 0) } catch {}
+  try { if (_wsServer) _wsServer.close() } catch {}
+  try { if (_sessionManager) _sessionManager.destroyAll() } catch {}
+  setTimeout(() => process.exit(1), 100)
 })
 
 process.on('unhandledRejection', (err) => {
   console.error('[fatal] Unhandled rejection:', err)
-  process.exit(1)
+  try { if (_wsServer) _wsServer.broadcastShutdown('crash', 0) } catch {}
+  try { if (_wsServer) _wsServer.close() } catch {}
+  try { if (_sessionManager) _sessionManager.destroyAll() } catch {}
+  setTimeout(() => process.exit(1), 100)
 })
 
 main().catch((err) => {

@@ -177,3 +177,135 @@ describe('#986 — no tmux references in server source', () => {
       'JSDoc should not mention auto-discovering tmux sessions')
   })
 })
+
+describe('#990 — crash handler cleanup', () => {
+  describe('server-cli.js crash handlers', () => {
+    it('uncaughtException calls sessionManager.destroyAll()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const handler = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/)
+      assert.ok(handler, 'uncaughtException handler should exist')
+      assert.ok(handler[0].includes('sessionManager.destroyAll()'),
+        'uncaughtException should call sessionManager.destroyAll()')
+    })
+
+    it('uncaughtException calls removeConnectionInfo()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const handler = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/)
+      assert.ok(handler, 'uncaughtException handler should exist')
+      assert.ok(handler[0].includes('removeConnectionInfo()'),
+        'uncaughtException should call removeConnectionInfo()')
+    })
+
+    it('unhandledRejection calls sessionManager.destroyAll()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const handler = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/)
+      assert.ok(handler, 'unhandledRejection handler should exist')
+      assert.ok(handler[0].includes('sessionManager.destroyAll()'),
+        'unhandledRejection should call sessionManager.destroyAll()')
+    })
+
+    it('unhandledRejection calls removeConnectionInfo()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const handler = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/)
+      assert.ok(handler, 'unhandledRejection handler should exist')
+      assert.ok(handler[0].includes('removeConnectionInfo()'),
+        'unhandledRejection should call removeConnectionInfo()')
+    })
+
+    it('uncaughtException calls tunnel.stop()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const handler = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/)
+      assert.ok(handler, 'uncaughtException handler should exist')
+      assert.ok(handler[0].includes('tunnel.stop()'),
+        'uncaughtException should call tunnel.stop()')
+    })
+
+    it('unhandledRejection calls tunnel.stop()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const handler = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/)
+      assert.ok(handler, 'unhandledRejection handler should exist')
+      assert.ok(handler[0].includes('tunnel.stop()'),
+        'unhandledRejection should call tunnel.stop()')
+    })
+  })
+
+  describe('server-cli-child.js crash handlers', () => {
+    it('uncaughtException calls broadcastShutdown', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
+      const handler = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/)
+      assert.ok(handler, 'uncaughtException handler should exist')
+      assert.ok(handler[0].includes('broadcastShutdown'),
+        'uncaughtException should call broadcastShutdown')
+    })
+
+    it('uncaughtException calls destroyAll', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
+      const handler = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/)
+      assert.ok(handler, 'uncaughtException handler should exist')
+      assert.ok(handler[0].includes('destroyAll'),
+        'uncaughtException should call destroyAll')
+    })
+
+    it('uncaughtException calls wsServer.close()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
+      const handler = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/)
+      assert.ok(handler, 'uncaughtException handler should exist')
+      assert.ok(handler[0].includes('close()'),
+        'uncaughtException should call wsServer.close()')
+    })
+
+    it('uncaughtException defers process.exit via setTimeout', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
+      const handler = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/)
+      assert.ok(handler, 'uncaughtException handler should exist')
+      assert.ok(handler[0].includes('setTimeout'),
+        'uncaughtException should defer exit with setTimeout')
+    })
+
+    it('unhandledRejection calls broadcastShutdown', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
+      const handler = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/)
+      assert.ok(handler, 'unhandledRejection handler should exist')
+      assert.ok(handler[0].includes('broadcastShutdown'),
+        'unhandledRejection should call broadcastShutdown')
+    })
+
+    it('unhandledRejection calls destroyAll', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
+      const handler = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/)
+      assert.ok(handler, 'unhandledRejection handler should exist')
+      assert.ok(handler[0].includes('destroyAll'),
+        'unhandledRejection should call destroyAll')
+    })
+
+    it('unhandledRejection calls wsServer.close()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
+      const handler = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/)
+      assert.ok(handler, 'unhandledRejection handler should exist')
+      assert.ok(handler[0].includes('close()'),
+        'unhandledRejection should call wsServer.close()')
+    })
+
+    it('unhandledRejection defers process.exit via setTimeout', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
+      const handler = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/)
+      assert.ok(handler, 'unhandledRejection handler should exist')
+      assert.ok(handler[0].includes('setTimeout'),
+        'unhandledRejection should defer exit with setTimeout')
+    })
+  })
+})
