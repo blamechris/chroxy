@@ -7436,6 +7436,10 @@ describe('session-targeted routing (#611)', () => {
       { id: 'session-a', name: 'A', cwd: '/tmp/a' },
       { id: 'session-b', name: 'B', cwd: '/tmp/b' },
     ])
+    // Plan mode requires planMode capability on the target session
+    const MockClass = function() {}
+    MockClass.capabilities = { planMode: true }
+    Object.setPrototypeOf(sessionsMap.get('session-b').session, MockClass.prototype)
 
     server = new WsServer({
       port: 0,
