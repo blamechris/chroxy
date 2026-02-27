@@ -6870,8 +6870,12 @@ describe('dashboard endpoint', () => {
     const csp = res.headers.get('content-security-policy')
     assert.ok(csp, 'CSP header should be present')
     assert.ok(csp.includes("default-src 'self'"), 'CSP should restrict default-src')
-    assert.ok(csp.includes("script-src 'self' 'unsafe-inline'"), 'CSP should allow inline scripts')
-    assert.ok(csp.includes("style-src 'self' 'unsafe-inline'"), 'CSP should allow inline styles')
+    // Nonce-based CSP — no unsafe-inline
+    assert.ok(!csp.includes("'unsafe-inline'"), 'CSP should NOT use unsafe-inline')
+    const nonceMatch = csp.match(/'nonce-([A-Za-z0-9+/=]+)'/)
+    assert.ok(nonceMatch, 'CSP should include a nonce')
+    assert.ok(csp.includes(`script-src 'self' 'nonce-${nonceMatch[1]}'`), 'CSP script-src should use nonce')
+    assert.ok(csp.includes(`style-src 'self' 'nonce-${nonceMatch[1]}'`), 'CSP style-src should use nonce')
     assert.ok(csp.includes('connect-src'), 'CSP should restrict connect-src')
     assert.ok(csp.includes('ws://localhost:'), 'CSP connect-src should allow localhost WebSocket')
     assert.ok(csp.includes('wss://localhost:'), 'CSP connect-src should allow localhost secure WebSocket')
@@ -6879,6 +6883,10 @@ describe('dashboard endpoint', () => {
     assert.ok(csp.includes("frame-ancestors 'none'"), "CSP should forbid framing via frame-ancestors 'none'")
     assert.ok(csp.includes("base-uri 'none'"), "CSP should restrict base-uri to 'none'")
     assert.ok(csp.includes("form-action 'self'"), "CSP should restrict form-action to 'self'")
+
+    // Verify nonce is present in HTML body (on script/style tags)
+    const body = await res.clone().text()
+    assert.ok(body.includes(`nonce="${nonceMatch[1]}"`), 'HTML should include nonce attributes on inline tags')
   })
 
   it('response has X-Frame-Options: DENY header', async () => {

@@ -1,4 +1,5 @@
 import { createServer } from 'http'
+import { randomBytes } from 'crypto'
 import { execFileSync } from 'child_process'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
@@ -470,9 +471,12 @@ export class WsServer {
         const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
         const queryToken = dashUrl.searchParams.get('token')
 
+        // Generate a unique nonce per request for CSP
+        const nonce = randomBytes(16).toString('base64')
+
         // Security headers shared across all /dashboard responses (200 + 403)
         const securityHeaders = {
-          'Content-Security-Policy': `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:${this.port} wss://localhost:${this.port}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
+          'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}'; connect-src 'self' ws://localhost:${this.port} wss://localhost:${this.port}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
           'X-Frame-Options': 'DENY',
           'X-Content-Type-Options': 'nosniff',
         }
@@ -493,7 +497,7 @@ export class WsServer {
           'Cache-Control': 'no-store',
           ...securityHeaders,
         })
-        res.end(getDashboardHtml(this.port, this.apiToken, !this._encryptionEnabled))
+        res.end(getDashboardHtml(this.port, this.apiToken, !this._encryptionEnabled, nonce))
         return
       }
       res.writeHead(404)
