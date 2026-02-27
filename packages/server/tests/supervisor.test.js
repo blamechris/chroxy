@@ -446,6 +446,10 @@ describe('Supervisor', () => {
       supervisor._startStandbyServer()
       assert.equal(supervisor._standbyServer, null,
         'Should not start standby server after max retries exceeded')
+
+      // Counter resets so future restart cycles can attempt standby again
+      assert.equal(supervisor._standbyRetries, 0,
+        'Retry counter should reset after giving up so future cycles can retry')
     })
 
     it('resets retry counter on successful standby start', async () => {

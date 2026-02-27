@@ -385,6 +385,8 @@ export class Supervisor extends EventEmitter {
 
     if (this._standbyRetries >= MAX_STANDBY_EADDRINUSE_RETRIES) {
       this._log.error(`Standby server: giving up after ${MAX_STANDBY_EADDRINUSE_RETRIES} EADDRINUSE retries`)
+      // Reset so future restart cycles can attempt standby again
+      this._standbyRetries = 0
       return
     }
 
