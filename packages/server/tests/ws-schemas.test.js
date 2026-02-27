@@ -649,6 +649,7 @@ describe('ServerAuthOkSchema', () => {
       cwd: '/tmp',
       connectedClients: [],
       encryption: 'required',
+      protocolVersion: 1,
     })
     assert.ok(result.success)
   })
@@ -669,6 +670,7 @@ describe('ServerAuthOkSchema', () => {
         platform: 'ios',
       }],
       encryption: 'disabled',
+      protocolVersion: 1,
     })
     assert.ok(result.success)
   })
@@ -685,9 +687,42 @@ describe('ServerAuthOkSchema', () => {
         cwd: null,
         connectedClients: [],
         encryption: 'disabled',
+        protocolVersion: 1,
       })
       assert.ok(!result.success, `Expected '${badMode}' to be rejected`)
     }
+  })
+
+  it('requires protocolVersion as integer', () => {
+    const withVersion = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'abc',
+      serverMode: 'cli',
+      serverVersion: '0.1.0',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1,
+    })
+    assert.ok(withVersion.success, 'Should accept auth_ok with protocolVersion')
+    assert.equal(withVersion.data.protocolVersion, 1)
+
+    // Rejects non-integer protocolVersion
+    const withFloat = ServerAuthOkSchema.safeParse({
+      type: 'auth_ok',
+      clientId: 'abc',
+      serverMode: 'cli',
+      serverVersion: '0.1.0',
+      latestVersion: null,
+      serverCommit: 'abc',
+      cwd: null,
+      connectedClients: [],
+      encryption: 'disabled',
+      protocolVersion: 1.5,
+    })
+    assert.ok(!withFloat.success, 'Should reject non-integer protocolVersion')
   })
 })
 

@@ -718,6 +718,7 @@ export class WsServer {
       cwd: sessionInfo.cwd,
       connectedClients: this._getConnectedClientList(),
       encryption: requireEncryption ? 'required' : 'disabled',
+      protocolVersion: 1,
       webFeatures: this._webTaskManager.getFeatureStatus(),
     })
 
