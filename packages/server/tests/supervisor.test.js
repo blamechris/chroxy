@@ -434,6 +434,43 @@ describe('Supervisor', () => {
 
       assert.equal(supervisor._standbyServer, null)
     })
+
+    it('gives up after max EADDRINUSE retries', () => {
+      const { supervisor } = setup()
+      supervisor._port = 0
+
+      // Pre-set the retry counter to the limit
+      supervisor._standbyRetries = 20
+
+      // Attempt to start standby — should refuse due to exceeded retries
+      supervisor._startStandbyServer()
+      assert.equal(supervisor._standbyServer, null,
+        'Should not start standby server after max retries exceeded')
+
+      // Counter resets so future restart cycles can attempt standby again
+      assert.equal(supervisor._standbyRetries, 0,
+        'Retry counter should reset after giving up so future cycles can retry')
+    })
+
+    it('resets retry counter on successful standby start', async () => {
+      const { supervisor } = setup()
+      supervisor._port = 0
+
+      // Pre-set some retries
+      supervisor._standbyRetries = 5
+
+      // Start standby — should succeed on port 0 and reset counter
+      supervisor._startStandbyServer()
+      assert.ok(supervisor._standbyServer !== null)
+
+      // Wait for listen callback to fire (resets counter)
+      await new Promise((resolve) => {
+        supervisor._standbyServer.on('listening', () => setImmediate(resolve))
+      })
+
+      assert.equal(supervisor._standbyRetries, 0,
+        'Retry counter should reset on successful listen')
+    })
   })
 
   describe('deploy crash detection', () => {
