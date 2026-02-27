@@ -354,7 +354,7 @@ export interface ConnectionState {
   webTasks: WebTask[];
 
   // Shutdown state (reason + ETA for restarting banner countdown)
-  shutdownReason: 'restart' | 'shutdown' | null;
+  shutdownReason: 'restart' | 'shutdown' | 'crash' | null;
   restartEtaMs: number | null;
   restartingSince: number | null;
 

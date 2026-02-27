@@ -1599,6 +1599,8 @@
       case "server_shutdown":
         reconnectText.textContent = msg.reason === "restart"
           ? "Server restarting..."
+          : msg.reason === "crash"
+          ? "Server crashed. Reconnecting..."
           : "Server shutting down...";
         reconnectBanner.classList.remove("hidden");
         // Reset backoff for server-initiated restarts

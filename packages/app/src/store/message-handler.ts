@@ -1411,7 +1411,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'server_shutdown': {
-      const reason = msg.reason === 'restart' || msg.reason === 'shutdown' ? msg.reason : 'shutdown';
+      const reason = msg.reason === 'restart' || msg.reason === 'shutdown' || msg.reason === 'crash' ? msg.reason : 'shutdown';
       const eta = typeof msg.restartEtaMs === 'number' ? msg.restartEtaMs : 0;
       set({
         shutdownReason: reason,
