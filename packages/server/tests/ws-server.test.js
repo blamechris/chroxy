@@ -7597,11 +7597,11 @@ describe('WsServer with TokenManager', () => {
     send(ws, { type: 'auth', token: 'initial-token' })
     await waitForMessage(messages, 'auth_ok')
 
-    // Rotate — should broadcast
-    const newToken = tokenManager.rotate()
+    // Rotate — should broadcast notification without the new token
+    tokenManager.rotate()
     const rotated = await waitForMessage(messages, 'token_rotated')
     assert.ok(rotated, 'Should receive token_rotated message')
-    assert.equal(rotated.newToken, newToken)
+    assert.equal(rotated.newToken, undefined, 'newToken must NOT be broadcast')
     assert.ok(typeof rotated.expiresAt === 'number' || rotated.expiresAt === null)
 
     ws.close()
