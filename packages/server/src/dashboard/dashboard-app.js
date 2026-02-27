@@ -60,6 +60,9 @@
   var reconnectBanner = document.getElementById("reconnect-banner");
   var reconnectText = document.getElementById("reconnect-text");
   var reconnectRetryBtn = document.getElementById("reconnect-retry-btn");
+  var reauthContainer = document.getElementById("reauth-container");
+  var reauthInput = document.getElementById("reauth-input");
+  var reauthSubmitBtn = document.getElementById("reauth-submit-btn");
   var modelSelect = document.getElementById("model-select");
   var permissionSelect = document.getElementById("permission-select");
   var sessionTabs = document.getElementById("session-tabs");
@@ -1186,6 +1189,7 @@
       hadInitialConnect = true;
       reconnectAttempt = 0;
       reconnectBanner.classList.add("hidden");
+      reauthContainer.classList.add("hidden");
     }
     updateButtons();
   }
@@ -1607,8 +1611,13 @@
 
       case "token_rotated":
         // Token was rotated — the new token is NOT sent over the wire.
-        // Show notification that re-authentication is needed.
-        showToast("API token rotated — please re-authenticate with the new token");
+        // Stop reconnect loop and show re-auth UI.
+        clearTimeout(reconnectTimer);
+        reconnectBanner.classList.remove("hidden");
+        reconnectText.textContent = "API token rotated. Enter the new token to reconnect:";
+        reauthContainer.classList.remove("hidden");
+        reconnectRetryBtn.classList.add("hidden");
+        showToast("API token rotated — enter new token to re-authenticate");
         break;
 
       case "plan_started":
@@ -1662,6 +1671,25 @@
     reconnectRetryBtn.classList.add("hidden");
     reconnectText.textContent = "Reconnecting...";
     connect();
+  });
+
+  function submitReauth() {
+    var newToken = reauthInput.value.trim();
+    if (!newToken) return;
+    token = newToken;
+    reauthContainer.classList.add("hidden");
+    reauthInput.value = "";
+    reconnectAttempt = 0;
+    reconnectText.textContent = "Reconnecting with new token...";
+    connect();
+  }
+
+  reauthSubmitBtn.addEventListener("click", submitReauth);
+  reauthInput.addEventListener("keydown", function(e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submitReauth();
+    }
   });
 
   inputEl.addEventListener("keydown", function(e) {
