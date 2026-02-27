@@ -398,6 +398,7 @@ export async function startCliServer(config) {
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
     try { wsServer.close() } catch {}
     try { sessionManager.destroyAll() } catch {}
+    try { if (tunnel) tunnel.stop() } catch {}
     try { removeConnectionInfo() } catch {}
     setTimeout(() => process.exit(1), 100)
   })
@@ -407,6 +408,7 @@ export async function startCliServer(config) {
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
     try { wsServer.close() } catch {}
     try { sessionManager.destroyAll() } catch {}
+    try { if (tunnel) tunnel.stop() } catch {}
     try { removeConnectionInfo() } catch {}
     setTimeout(() => process.exit(1), 100)
   })

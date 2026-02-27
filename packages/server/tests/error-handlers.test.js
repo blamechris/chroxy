@@ -215,6 +215,24 @@ describe('#990 — crash handler cleanup', () => {
       assert.ok(handler[0].includes('removeConnectionInfo()'),
         'unhandledRejection should call removeConnectionInfo()')
     })
+
+    it('uncaughtException calls tunnel.stop()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const handler = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/)
+      assert.ok(handler, 'uncaughtException handler should exist')
+      assert.ok(handler[0].includes('tunnel.stop()'),
+        'uncaughtException should call tunnel.stop()')
+    })
+
+    it('unhandledRejection calls tunnel.stop()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const handler = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/)
+      assert.ok(handler, 'unhandledRejection handler should exist')
+      assert.ok(handler[0].includes('tunnel.stop()'),
+        'unhandledRejection should call tunnel.stop()')
+    })
   })
 
   describe('server-cli-child.js crash handlers', () => {
@@ -227,13 +245,22 @@ describe('#990 — crash handler cleanup', () => {
         'uncaughtException should call broadcastShutdown')
     })
 
-    it('uncaughtException calls serializeState', async () => {
+    it('uncaughtException calls destroyAll', async () => {
       const { readFileSync } = await import('node:fs')
       const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
       const handler = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/)
       assert.ok(handler, 'uncaughtException handler should exist')
-      assert.ok(handler[0].includes('serializeState'),
-        'uncaughtException should call serializeState')
+      assert.ok(handler[0].includes('destroyAll'),
+        'uncaughtException should call destroyAll')
+    })
+
+    it('uncaughtException calls wsServer.close()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
+      const handler = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/)
+      assert.ok(handler, 'uncaughtException handler should exist')
+      assert.ok(handler[0].includes('close()'),
+        'uncaughtException should call wsServer.close()')
     })
 
     it('uncaughtException defers process.exit via setTimeout', async () => {
@@ -254,13 +281,22 @@ describe('#990 — crash handler cleanup', () => {
         'unhandledRejection should call broadcastShutdown')
     })
 
-    it('unhandledRejection calls serializeState', async () => {
+    it('unhandledRejection calls destroyAll', async () => {
       const { readFileSync } = await import('node:fs')
       const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
       const handler = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/)
       assert.ok(handler, 'unhandledRejection handler should exist')
-      assert.ok(handler[0].includes('serializeState'),
-        'unhandledRejection should call serializeState')
+      assert.ok(handler[0].includes('destroyAll'),
+        'unhandledRejection should call destroyAll')
+    })
+
+    it('unhandledRejection calls wsServer.close()', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli-child.js'), 'utf-8')
+      const handler = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/)
+      assert.ok(handler, 'unhandledRejection handler should exist')
+      assert.ok(handler[0].includes('close()'),
+        'unhandledRejection should call wsServer.close()')
     })
 
     it('unhandledRejection defers process.exit via setTimeout', async () => {
