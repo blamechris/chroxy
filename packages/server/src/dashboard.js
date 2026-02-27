@@ -2224,6 +2224,7 @@ function getDashboardJs() {
     if (ws) {
       try { ws.close(); } catch(e) {}
     }
+    serverProtocolVersion = null;
     setConnectionState("connecting");
 
     var url = "ws://localhost:" + port;
@@ -2668,8 +2669,8 @@ function getDashboardJs() {
         break;
 
       default:
-        if (serverProtocolVersion && serverProtocolVersion > CLIENT_PROTOCOL_VERSION) {
-          console.warn("[ws] Unknown message type \"" + msg.type + "\" (server protocol v" + serverProtocolVersion + ", client v" + CLIENT_PROTOCOL_VERSION + ")");
+        if (serverProtocolVersion != null && serverProtocolVersion > CLIENT_PROTOCOL_VERSION) {
+          console.warn("[dashboard] Unknown message type \"" + msg.type + "\" (server protocol v" + serverProtocolVersion + ", client v" + CLIENT_PROTOCOL_VERSION + ")");
         }
         break;
     }
