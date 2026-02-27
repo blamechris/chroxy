@@ -134,7 +134,7 @@ Store files:
 | `input` | Send text or voice message to session |
 | `interrupt` | Interrupt active Claude task |
 | `key_exchange` | Send client X25519 public key for encryption |
-| `launch_web_task` | Launch a Claude Code Web cloud task (prompt capped at 10K chars) |
+| `launch_web_task` | Launch a Claude Code Web cloud task |
 | `list_agents` | Request available custom agent definitions |
 | `list_checkpoints` | Request list of checkpoints for session |
 | `list_conversations` | Request scan of conversation history files |
@@ -172,6 +172,7 @@ Store files:
 | `available_models` | List of models server accepts |
 | `available_permission_modes` | List of permission modes available |
 | `budget_exceeded` | Cost budget exceeded — session paused |
+| `budget_resumed` | Previously paused session resumed after budget increase |
 | `budget_warning` | Cost approaching budget limit |
 | `claude_ready` | Claude Code ready for input |
 | `checkpoint_created` | Checkpoint created (auto or manual) |
@@ -250,13 +251,13 @@ Store files:
 - `primary_changed` broadcasts last-writer-wins primary status per session (fires on `input`)
 - `set_permission_mode` accepts optional `confirmed: true` (required for `auto` mode); without it, server responds with `confirm_permission_mode` challenge containing a `warning` string
 - `cost_update` sent after each query with `{ sessionCost, totalCost, budget }` where budget is null if no cost budget configured
-- `budget_warning` sent when session cost exceeds 80% of budget; `budget_exceeded` when budget is hit (session paused); `resume_budget` from client to unpause
+- `budget_warning` sent when session cost exceeds 80% of budget; `budget_exceeded` when budget is hit (session paused); `resume_budget` from client to unpause; `budget_resumed` broadcast by server after successful resume
 - `session_warning` sent before session timeout with `{ sessionId, name, reason, message, remainingMs }`; `session_timeout` when session is destroyed
-- `token_rotated` broadcast when API token is rotated by TokenManager; includes new token value
-- `checkpoint_created` includes `{ checkpointId, sessionId, metadata }`; `checkpoint_list` returns array of checkpoints; `restore_checkpoint` creates a new session from checkpoint state
-- `launch_web_task` prompt field capped at 10,000 characters; `web_task_created` confirms task launch; `web_task_updated` streams status changes; `teleport_web_task` pulls completed task result into local session
-- `dev_preview` sent when a dev server tunnel is opened with `{ url, port }`; `close_dev_preview` from client to shut it down
-- `mcp_servers` lists connected MCP tool servers with their available tools
+- `token_rotated` broadcast when API token is rotated by TokenManager; includes `{ newToken, expiresAt }`
+- `checkpoint_created` payload: `{ sessionId, checkpoint: { id, name, description, messageCount, createdAt, hasGitSnapshot } }`; `checkpoint_list` returns array of checkpoints; `restore_checkpoint` creates a new session from checkpoint state
+- `launch_web_task` includes a `prompt` string field; `web_task_created` confirms task launch; `web_task_updated` streams status changes; `teleport_web_task` pulls completed task result into local session
+- `dev_preview` sent when a dev server tunnel is opened with `{ url, port }` (session-scoped via `broadcastToSession`); `close_dev_preview` from client to shut it down
+- `mcp_servers` lists connected MCP tool servers and their status
 
 ## Project Files
 
