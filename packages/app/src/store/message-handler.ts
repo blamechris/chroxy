@@ -1910,7 +1910,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     default: {
       // Log unknown message types when server protocol is newer (likely new features)
       const serverPV = getStore().getState().serverProtocolVersion;
-      if (serverPV && serverPV > CLIENT_PROTOCOL_VERSION) {
+      if (serverPV != null && serverPV > CLIENT_PROTOCOL_VERSION) {
         console.warn(`[ws] Unknown message type "${msg.type}" (server protocol v${serverPV}, client v${CLIENT_PROTOCOL_VERSION})`);
       }
       break;
