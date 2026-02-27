@@ -89,3 +89,27 @@ describe('global error handlers', () => {
     })
   })
 })
+
+describe('token rotation QR regeneration', () => {
+  it('registers token_rotated listener that regenerates QR code', async () => {
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+    assert.ok(
+      source.includes("token_rotated"),
+      'server-cli.js should listen for token_rotated events'
+    )
+    assert.ok(
+      /token_rotated[\s\S]*?qrcode\.generate/m.test(source),
+      'token_rotated handler should regenerate QR code'
+    )
+  })
+
+  it('updates connection info file on token rotation', async () => {
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+    assert.ok(
+      /token_rotated[\s\S]*?writeConnectionInfo/m.test(source),
+      'token_rotated handler should update connection info file'
+    )
+  })
+})
