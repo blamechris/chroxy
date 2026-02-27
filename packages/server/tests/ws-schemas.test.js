@@ -1021,6 +1021,18 @@ describe('LaunchWebTaskSchema', () => {
   it('rejects empty prompt', () => {
     assert.ok(!LaunchWebTaskSchema.safeParse({ type: 'launch_web_task', prompt: '' }).success)
   })
+
+  it('rejects prompt exceeding max length', () => {
+    const oversized = 'x'.repeat(10_001)
+    const result = LaunchWebTaskSchema.safeParse({ type: 'launch_web_task', prompt: oversized })
+    assert.ok(!result.success)
+  })
+
+  it('accepts prompt at max length', () => {
+    const atLimit = 'x'.repeat(10_000)
+    const result = LaunchWebTaskSchema.safeParse({ type: 'launch_web_task', prompt: atLimit })
+    assert.ok(result.success)
+  })
 })
 
 describe('ListWebTasksSchema', () => {

@@ -170,7 +170,7 @@ export const CloseDevPreviewSchema = z.object({
 
 export const LaunchWebTaskSchema = z.object({
   type: z.literal('launch_web_task'),
-  prompt: z.string().min(1),
+  prompt: z.string().min(1).max(10_000),
   cwd: z.string().optional(),
 })
 
