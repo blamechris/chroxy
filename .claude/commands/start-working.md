@@ -54,7 +54,7 @@ Categorize each open issue:
 |----------|-----------|
 | Blocked | Has label matching: `blocked`, `wontfix`, `needs-design` |
 | Assigned | Has assignees (someone is already working on it) |
-| Ready | Unblocked, unassigned `enhancement` and `from-review` issues |
+| Ready | Unblocked, unassigned `bug`, `enhancement`, and `from-review` issues |
 | Backlog | Open, unassigned, not blocked, but no explicit "ready" signal |
 
 For "Ready" and "Backlog" issues, read the issue body to check for acceptance criteria:
