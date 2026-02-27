@@ -89,11 +89,7 @@ gh pr checks ${PR_NUM} --json name,state --jq '[.[] | select(.state != "SUCCESS"
 
 #### 1c. Roadmap and Planning Files
 
-Scan for planning documents in common locations:
-
-```bash
-# Common roadmap/planning file patterns
-```
+Scan for planning documents in common locations.
 
 Search for these files (check existence, don't fail if missing):
 - `ROADMAP.md`, `TODO.md`, `CHANGELOG.md` (for recent/planned entries)
