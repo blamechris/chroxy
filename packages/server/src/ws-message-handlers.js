@@ -472,12 +472,6 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       break
     }
 
-    case 'mode':
-      if (msg.mode === 'terminal' || msg.mode === 'chat') {
-        client.mode = msg.mode
-      }
-      break
-
     case 'request_session_context': {
       const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
       if (!targetId) {
@@ -759,12 +753,6 @@ export function handleCliMessage(ws, client, msg, ctx) {
       ctx.fileOps.listAgents(ws, cwd, null)
       break
     }
-
-    case 'mode':
-      if (msg.mode === 'terminal' || msg.mode === 'chat') {
-        client.mode = msg.mode
-      }
-      break
 
     default:
       console.log(`[ws] Unknown message type: ${msg.type}`)
