@@ -470,7 +470,7 @@ export class WsServer {
 
         // Security headers shared across all /dashboard responses (200 + 403)
         const securityHeaders = {
-          'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+          'Content-Security-Policy': `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:${this.port} wss://localhost:${this.port}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
           'X-Frame-Options': 'DENY',
           'X-Content-Type-Options': 'nosniff',
         }
