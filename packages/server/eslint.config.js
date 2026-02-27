@@ -32,6 +32,29 @@ export default [
     },
   },
   {
+    files: ['src/dashboard/**/*.js'],
+    languageOptions: {
+      globals: {
+        // Browser globals
+        window: 'readonly',
+        document: 'readonly',
+        localStorage: 'readonly',
+        WebSocket: 'readonly',
+        Notification: 'readonly',
+        HTMLElement: 'readonly',
+        Element: 'readonly',
+        Event: 'readonly',
+        KeyboardEvent: 'readonly',
+        MutationObserver: 'readonly',
+        ResizeObserver: 'readonly',
+        navigator: 'readonly',
+        // xterm.js globals (loaded via separate script tags)
+        Terminal: 'readonly',
+        FitAddon: 'readonly',
+      },
+    },
+  },
+  {
     ignores: ['node_modules/', 'tests/'],
   },
 ]
