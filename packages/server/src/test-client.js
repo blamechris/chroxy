@@ -56,7 +56,7 @@ ws.on("message", (raw) => {
 
   switch (msg.type) {
     case "auth_ok":
-      console.log("[authenticated]", msg.encryption === "required" ? "E2E encryption required" : "No encryption");
+      console.log(`[authenticated] server v${msg.serverVersion} protocol v${msg.protocolVersion}`, msg.encryption === "required" ? "E2E encryption required" : "No encryption");
       if (msg.encryption === "required" && !noEncrypt) {
         pendingKeyPair = createKeyPair();
         ws.send(JSON.stringify({ type: "key_exchange", publicKey: pendingKeyPair.publicKey }));
