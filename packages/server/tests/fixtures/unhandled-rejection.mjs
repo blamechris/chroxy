@@ -3,7 +3,7 @@
 
 process.on('unhandledRejection', (err) => {
   console.error('[fatal] Unhandled rejection:', err)
-  process.exit(1)
+  setTimeout(() => process.exit(1), 100)
 })
 
 // Trigger an unhandled rejection

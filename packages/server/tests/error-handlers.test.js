@@ -62,6 +62,31 @@ describe('global error handlers', () => {
     })
   })
 
+  describe('#977 — deferred process.exit for flush', () => {
+    it('uncaughtException handler defers process.exit via setTimeout', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const handler = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/)
+      assert.ok(handler, 'uncaughtException handler should exist')
+      // process.exit should be inside a setTimeout, not called directly
+      assert.ok(
+        handler[0].includes('setTimeout'),
+        'uncaughtException handler should use setTimeout to defer process.exit'
+      )
+    })
+
+    it('unhandledRejection handler defers process.exit via setTimeout', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const handler = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/)
+      assert.ok(handler, 'unhandledRejection handler should exist')
+      assert.ok(
+        handler[0].includes('setTimeout'),
+        'unhandledRejection handler should use setTimeout to defer process.exit'
+      )
+    })
+  })
+
   describe('server-cli-child.js', () => {
     it('registers uncaughtException handler', async () => {
       const { readFileSync } = await import('node:fs')
