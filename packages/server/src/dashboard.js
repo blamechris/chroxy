@@ -59,7 +59,7 @@ export function getDashboardHtml(port, apiToken, noEncrypt, nonce) {
       <span id="reconnect-text">Disconnected. Reconnecting...</span>
       <button id="reconnect-retry-btn" class="hidden">Retry</button>
       <div id="reauth-container" class="hidden">
-        <input id="reauth-input" type="text" placeholder="Paste new API token" autocomplete="off">
+        <input id="reauth-input" type="password" placeholder="Paste new API token" aria-label="New API token" autocomplete="off">
         <button id="reauth-submit-btn">Connect</button>
       </div>
     </div>
