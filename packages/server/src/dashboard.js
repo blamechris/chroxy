@@ -1,6 +1,6 @@
 /**
  * Generate the web dashboard HTML with embedded configuration.
- * Self-contained — no external dependencies.
+ * Assets (CSS, JS, xterm) are served as separate static files via ws-server.
  *
  * @param {number} port - WsServer port
  * @param {string|null} apiToken - API token (embedded for WS auth)
