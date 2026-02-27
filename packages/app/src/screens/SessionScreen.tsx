@@ -451,7 +451,16 @@ export function SessionScreen() {
     // CLI sessions: the server handles the full message directly (no CR needed).
     const isVoice = usedVoiceRef.current;
     usedVoiceRef.current = false;
-    sendInput(hasTerminal ? (text || '') + '\r' : (text || ''), wire, { isVoice });
+    const result = sendInput(hasTerminal ? (text || '') + '\r' : (text || ''), wire, { isVoice });
+    if (result === 'queued') {
+      const { addMessage } = useConnectionStore.getState();
+      addMessage({
+        id: `queued-${Date.now()}`,
+        type: 'system',
+        content: 'Message queued — waiting for reconnection...',
+        timestamp: Date.now(),
+      });
+    }
   };
 
   const addAttachment = useCallback(async (picker: () => Promise<Attachment | null>) => {
