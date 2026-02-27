@@ -166,6 +166,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   serverVersion: null,
   latestVersion: null,
   serverCommit: null,
+  serverProtocolVersion: null,
   sessions: [],
   activeSessionId: null,
   sessionStates: {},
@@ -614,6 +615,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverVersion: null,
       latestVersion: null,
       serverCommit: null,
+      serverProtocolVersion: null,
       claudeReady: false,
       streamingMessageId: null,
       activeModel: null,
@@ -669,6 +671,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverVersion: null,
       latestVersion: null,
       serverCommit: null,
+      serverProtocolVersion: null,
       viewingCachedSession: false,
     });
   },

@@ -224,6 +224,7 @@ export const ServerAuthOkSchema = z.object({
   cwd: z.string().nullable(),
   connectedClients: z.array(ClientInfoSchema),
   encryption: z.enum(['required', 'disabled']),
+  protocolVersion: z.number().int().min(1),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({

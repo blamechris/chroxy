@@ -48,6 +48,11 @@ import { createEmptySessionState } from './utils';
 import { clearPersistedSession } from './persistence';
 
 // ---------------------------------------------------------------------------
+// Protocol version — bumped when the WS message set changes
+// ---------------------------------------------------------------------------
+export const CLIENT_PROTOCOL_VERSION = 1;
+
+// ---------------------------------------------------------------------------
 // Late-bound store reference — set once by connection.ts after store creation
 // ---------------------------------------------------------------------------
 type StoreApi = {
@@ -528,6 +533,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
       const authLatestVersion = typeof msg.latestVersion === 'string' ? msg.latestVersion : null;
       const authServerCommit = typeof msg.serverCommit === 'string' ? msg.serverCommit : null;
+      const authProtocolVersion =
+        typeof msg.protocolVersion === 'number' &&
+        Number.isFinite(msg.protocolVersion) &&
+        Number.isInteger(msg.protocolVersion) &&
+        msg.protocolVersion >= 1
+          ? msg.protocolVersion
+          : null;
       // Parse connected clients list with self-detection via clientId
       const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
       const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
@@ -562,6 +574,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         serverVersion: authServerVersion,
         latestVersion: authLatestVersion,
         serverCommit: authServerCommit,
+        serverProtocolVersion: authProtocolVersion,
         streamingMessageId: null,
         myClientId: myClientId,
         connectedClients: clients,
@@ -1890,6 +1903,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         set(patch);
         // Garbage-collect persisted messages for the deleted session (#797)
         void clearPersistedSession(timeoutSessionId);
+      }
+      break;
+    }
+
+    default: {
+      // Log unknown message types when server protocol is newer (likely new features)
+      const serverPV = getStore().getState().serverProtocolVersion;
+      if (serverPV != null && serverPV > CLIENT_PROTOCOL_VERSION) {
+        console.warn(`[ws] Unknown message type "${msg.type}" (server protocol v${serverPV}, client v${CLIENT_PROTOCOL_VERSION})`);
       }
       break;
     }

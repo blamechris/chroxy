@@ -25,6 +25,9 @@ const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
 const SERVER_VERSION = packageJson.version
 
+/** Protocol version — bumped when the WS message set changes */
+export const SERVER_PROTOCOL_VERSION = 1
+
 /** Cached latest version from npm registry (null if unavailable) */
 let _latestVersionCache = { version: null, checkedAt: 0 }
 const VERSION_CHECK_TTL = 3600_000 // 1 hour
@@ -718,6 +721,7 @@ export class WsServer {
       cwd: sessionInfo.cwd,
       connectedClients: this._getConnectedClientList(),
       encryption: requireEncryption ? 'required' : 'disabled',
+      protocolVersion: SERVER_PROTOCOL_VERSION,
       webFeatures: this._webTaskManager.getFeatureStatus(),
     })
 

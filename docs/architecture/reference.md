@@ -258,6 +258,7 @@ Store files:
 - `launch_web_task` includes a `prompt` string field; `web_task_created` confirms task launch; `web_task_updated` streams status changes; `teleport_web_task` pulls completed task result into local session
 - `dev_preview` sent when a dev server tunnel is opened with `{ url, port }` (session-scoped via `broadcastToSession`); `close_dev_preview` from client to shut it down
 - `mcp_servers` lists connected MCP tool servers and their status
+- `auth_ok` includes `protocolVersion` (integer, currently `1`) — bumped when the WS message set changes; the app stores this and logs unknown message types when the server version is newer, enabling graceful degradation when the app lags behind the server
 
 ## Project Files
 
