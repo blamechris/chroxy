@@ -203,6 +203,10 @@ export async function startCliServer(config) {
     }
   }
 
+  // Track current WebSocket URL across all modes (tunnel, external, LAN)
+  let tunnel = null
+  let currentWsUrl = null
+
   // External URL mode: reverse proxy / custom domain (skip tunnel entirely)
   const externalUrl = config.externalUrl || null
   if (externalUrl) {
@@ -234,8 +238,6 @@ export async function startCliServer(config) {
   const tunnelArg = parseTunnelArg(config.tunnel || 'quick')
   const SKIP_TUNNEL = NO_AUTH || !tunnelArg || !!externalUrl
 
-  let tunnel = null
-  let currentWsUrl = null
   if (!SKIP_TUNNEL) {
     // 4. Start the tunnel via adapter registry
     const TunnelAdapter = getTunnel(tunnelArg.provider)
