@@ -207,6 +207,7 @@ export async function startCliServer(config) {
   const externalUrl = config.externalUrl || null
   if (externalUrl) {
     const wsUrl = externalUrl.replace(/^https?:\/\//, 'wss://')
+    currentWsUrl = wsUrl
     const httpUrl = externalUrl.replace(/^wss?:\/\//, 'https://')
     const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
 
@@ -321,6 +322,7 @@ export async function startCliServer(config) {
   } else if (!tunnelArg && !NO_AUTH) {
     const lanIp = getLanIp()
     const host = lanIp || 'localhost'
+    currentWsUrl = `ws://${host}:${PORT}`
     const connectionUrl = `chroxy://${host}:${PORT}?token=${API_TOKEN}`
 
     console.log(`[✓] Server ready! (CLI headless mode, no tunnel)\n`)
@@ -343,6 +345,34 @@ export async function startCliServer(config) {
     console.log(`[✓] Server ready! (CLI headless mode, no auth)\n`)
     console.log(`   Connect: ws://localhost:${PORT}`)
     console.log(`   Dashboard: http://localhost:${PORT}/dashboard`)
+  }
+
+  // Regenerate QR code and update connection info when token rotates
+  if (tokenManager) {
+    tokenManager.on('token_rotated', ({ newToken }) => {
+      // Build the current connection URL base from whatever mode we're in
+      const wsBase = currentWsUrl || (externalUrl ? externalUrl.replace(/^https?:\/\//, 'wss://') : null)
+      if (!wsBase) return // no-auth or localhost-only — no QR to update
+
+      const newConnectionUrl = `chroxy://${wsBase.replace(/^wss?:\/\//, '')}?token=${newToken}`
+      console.log('\n[token] API token rotated. Updated QR code:\n')
+      qrcode.generate(newConnectionUrl, { small: true })
+      console.log(`\n   Token: ${newToken.slice(0, 8)}...`)
+      console.log('')
+
+      // Determine httpUrl from wsUrl
+      const httpBase = wsBase.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
+
+      writeConnectionInfo({
+        wsUrl: wsBase,
+        httpUrl: httpBase,
+        apiToken: newToken,
+        connectionUrl: newConnectionUrl,
+        tunnelMode: tunnel ? 'tunnel' : (externalUrl ? 'external' : 'none'),
+        startedAt: new Date().toISOString(),
+        pid: process.pid,
+      })
+    })
   }
 
   console.log('\nPress Ctrl+C to stop.\n')
