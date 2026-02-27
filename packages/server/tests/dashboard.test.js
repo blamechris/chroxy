@@ -1,6 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { getDashboardHtml } from '../src/dashboard.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const css = readFileSync(join(__dirname, '..', 'src', 'dashboard', 'dashboard.css'), 'utf8')
 
 /**
  * Assert that html contains the given string or matches the given regex.
@@ -57,20 +63,18 @@ describe('getDashboardHtml', () => {
     assert.ok(html.includes('noEncrypt: true'))
   })
 
-  it('includes CSS', () => {
-    const html = getDashboardHtml(8765, null, false, 'test-nonce')
-    assert.ok(html.includes('<style'))
-    assert.ok(html.includes('background'))
+  it('links external CSS', () => {
+    const html = getDashboardHtml(8765, null, false)
+    assert.ok(html.includes('<link rel="stylesheet" href="/assets/dashboard.css">'),
+      'should link to external dashboard.css')
   })
 
-  it('adds nonce attributes to inline style and script tags', () => {
+  it('adds nonce attributes to inline script tags', () => {
     const html = getDashboardHtml(8765, null, false, 'abc123')
     assert.ok(html.includes('nonce="abc123"'), 'should add nonce to inline tags')
-    assert.ok(!html.includes('<style>'), 'bare <style> without nonce should not exist')
-    assert.ok(html.includes('<style nonce="abc123">'), 'style tag should have nonce')
     // Config script and main JS script should both have nonce
     const nonceCount = (html.match(/nonce="abc123"/g) || []).length
-    assert.ok(nonceCount >= 3, `should have at least 3 nonce attributes (style + 2 scripts), got ${nonceCount}`)
+    assert.ok(nonceCount >= 2, `should have at least 2 nonce attributes (config + JS script), got ${nonceCount}`)
   })
 })
 
@@ -88,20 +92,17 @@ describe('getDashboardJs', () => {
   })
 })
 
-describe('getDashboardCss', () => {
-  it('returns complete CSS with dark theme', () => {
-    const html = getDashboardHtml(8765, null, false)
-    // Check for dark theme colors
-    assert.ok(html.includes('#0f0f1a'), 'should have dark background color')
-    assert.ok(html.includes('#1a1a2e'), 'should have assistant bubble color')
-    assert.ok(html.includes('#2a2a4e'), 'should have user bubble color')
-    assert.ok(html.includes('#4a9eff'), 'should have accent color')
+describe('dashboard.css', () => {
+  it('has complete CSS with dark theme', () => {
+    assert.ok(css.includes('#0f0f1a'), 'should have dark background color')
+    assert.ok(css.includes('#1a1a2e'), 'should have assistant bubble color')
+    assert.ok(css.includes('#2a2a4e'), 'should have user bubble color')
+    assert.ok(css.includes('#4a9eff'), 'should have accent color')
   })
 
   it('includes layout styles', () => {
-    const html = getDashboardHtml(8765, null, false)
-    assert.ok(html.includes('system-ui'), 'should use system-ui font')
-    assert.ok(html.includes('flex'), 'should use flexbox layout')
+    assert.ok(css.includes('system-ui'), 'should use system-ui font')
+    assert.ok(css.includes('flex'), 'should use flexbox layout')
   })
 })
 
@@ -378,12 +379,12 @@ describe('#761 — plan mode UI elements', () => {
   })
 
   it('has plan mode banner CSS', () => {
-    assert.ok(html.includes('#plan-mode-banner'),
+    assert.ok(css.includes('#plan-mode-banner'),
       'should have CSS rules for plan mode banner')
   })
 
   it('has plan approval card CSS', () => {
-    assert.ok(html.includes('#plan-approval-card'),
+    assert.ok(css.includes('#plan-approval-card'),
       'should have CSS rules for plan approval card')
   })
 })
@@ -452,7 +453,7 @@ describe('#761 — background agent UI elements', () => {
   })
 
   it('has agent badge CSS', () => {
-    assert.ok(html.includes('.agent-badge'),
+    assert.ok(css.includes('.agent-badge'),
       'should have CSS rules for agent badge')
   })
 })
@@ -549,9 +550,9 @@ describe('#733 — create session modal', () => {
   })
 
   it('has modal CSS styles', () => {
-    assert.ok(html.includes('.modal-overlay'),
+    assert.ok(css.includes('.modal-overlay'),
       'should have modal overlay CSS')
-    assert.ok(html.includes('.modal-content'),
+    assert.ok(css.includes('.modal-content'),
       'should have modal content CSS')
   })
 
@@ -603,7 +604,7 @@ describe('#733 — destroy session', () => {
   })
 
   it('has tab-close CSS styles', () => {
-    assert.ok(html.includes('.session-tab .tab-close'),
+    assert.ok(css.includes('.session-tab .tab-close'),
       'should have CSS for tab close button')
   })
 })
@@ -627,7 +628,7 @@ describe('#733 — rename session', () => {
   })
 
   it('has inline rename input CSS', () => {
-    assert.ok(html.includes('.tab-rename-input'),
+    assert.ok(css.includes('.tab-rename-input'),
       'should have CSS for inline rename input')
   })
 
@@ -710,19 +711,19 @@ describe('#733 — toast notifications', () => {
   })
 
   it('has toast CSS styles', () => {
-    assert.ok(html.includes('#toast-container'),
+    assert.ok(css.includes('#toast-container'),
       'should have toast container CSS')
-    assert.ok(html.includes('.toast'),
+    assert.ok(css.includes('.toast'),
       'should have toast CSS class')
   })
 
   it('has toast close button CSS', () => {
-    assert.ok(html.includes('.toast .toast-close'),
+    assert.ok(css.includes('.toast .toast-close'),
       'should have toast close button CSS')
   })
 
   it('has toast animation', () => {
-    assert.ok(html.includes('@keyframes toastIn'),
+    assert.ok(css.includes('@keyframes toastIn'),
       'should have toast entrance animation')
   })
 
@@ -850,17 +851,17 @@ describe('#733 — user question prompts with options', () => {
   })
 
   it('grays out question after answering', () => {
-    assert.ok(html.includes('.question-prompt.answered'),
+    assert.ok(css.includes('.question-prompt.answered'),
       'should have CSS for answered state')
   })
 
   it('has option button CSS styles', () => {
-    assert.ok(html.includes('.question-prompt .q-option-btn'),
+    assert.ok(css.includes('.question-prompt .q-option-btn'),
       'should have CSS for option buttons')
   })
 
   it('hides options after answering', () => {
-    assert.ok(html.includes('.question-prompt.answered .q-options'),
+    assert.ok(css.includes('.question-prompt.answered .q-options'),
       'should hide options when answered')
   })
 
@@ -894,12 +895,12 @@ describe('#733 — status bar busy indicator', () => {
   })
 
   it('has busy indicator CSS', () => {
-    assert.ok(html.includes('.busy-indicator'),
+    assert.ok(css.includes('.busy-indicator'),
       'should have busy-indicator CSS class')
   })
 
   it('has busy pulse animation', () => {
-    assert.ok(html.includes('@keyframes busyPulse'),
+    assert.ok(css.includes('@keyframes busyPulse'),
       'should have busyPulse animation keyframes')
   })
 
@@ -1028,7 +1029,7 @@ describe('#886 — enriched session tabs', () => {
   const html = getDashboardHtml(8765, 'test-token', false)
 
   it('has tab-busy-dot CSS', () => {
-    assert.ok(html.includes('.tab-busy-dot'),
+    assert.ok(css.includes('.tab-busy-dot'),
       'should have CSS for busy dot in session tabs')
   })
 
@@ -1040,7 +1041,7 @@ describe('#886 — enriched session tabs', () => {
   })
 
   it('has tab-cwd CSS', () => {
-    assert.ok(html.includes('.tab-cwd'),
+    assert.ok(css.includes('.tab-cwd'),
       'should have CSS for cwd display in session tabs')
   })
 
@@ -1058,7 +1059,7 @@ describe('#886 — enriched session tabs', () => {
   })
 
   it('has tab-model CSS', () => {
-    assert.ok(html.includes('.tab-model'),
+    assert.ok(css.includes('.tab-model'),
       'should have CSS for model badge in session tabs')
   })
 
@@ -1075,11 +1076,11 @@ describe('#886 — permission countdown timer', () => {
   const html = getDashboardHtml(8765, 'test-token', false)
 
   it('has perm-countdown CSS', () => {
-    assert.ok(html.includes('.perm-countdown'),
+    assert.ok(css.includes('.perm-countdown'),
       'should have CSS for permission countdown')
-    assert.ok(html.includes('.perm-countdown.urgent'),
+    assert.ok(css.includes('.perm-countdown.urgent'),
       'should have CSS for urgent (red) countdown state')
-    assert.ok(html.includes('.perm-countdown.expired'),
+    assert.ok(css.includes('.perm-countdown.expired'),
       'should have CSS for expired countdown state')
   })
 
@@ -1181,7 +1182,7 @@ describe('#886 — reconnect backoff', () => {
   })
 
   it('has retry button CSS', () => {
-    assert.ok(html.includes('#reconnect-retry-btn'),
+    assert.ok(css.includes('#reconnect-retry-btn'),
       'should have CSS for reconnect retry button')
   })
 
@@ -1280,12 +1281,12 @@ describe('#610 — responsive CSS for mobile browsers', () => {
   const html = getDashboardHtml(8765, 'test-token', false)
 
   it('has responsive media query for small screens', () => {
-    assert.ok(html.includes('@media (max-width: 600px)'),
+    assert.ok(css.includes('@media (max-width: 600px)'),
       'should have mobile-specific media query')
   })
 
   it('adjusts message width for small screens', () => {
-    assert.ok(html.includes('max-width: 92%'),
+    assert.ok(css.includes('max-width: 92%'),
       'should widen messages on mobile screens')
   })
 
