@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/cli.js start",
     "dev": "node --watch src/cli.js start",
-    "test": "node --test --test-force-exit ./tests/*.test.js",
+    "test": "node --test --test-force-exit './tests/**/*.test.js'",
     "test:integration": "node --test ./tests/*.integration.test.js",
     "lint": "eslint src/"
   },
