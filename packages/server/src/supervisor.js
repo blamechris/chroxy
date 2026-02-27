@@ -50,6 +50,7 @@ export class Supervisor extends EventEmitter {
     this._child = null
     this._restartCount = 0
     this._standbyServer = null
+    this._standbyRetries = 0
     this._shuttingDown = false
     this._draining = false
     this._childReady = false
@@ -380,6 +381,11 @@ export class Supervisor extends EventEmitter {
   _startStandbyServer() {
     if (this._standbyServer) return
 
+    if (this._standbyRetries >= 20) {
+      this._log.error('Standby server: giving up after 20 EADDRINUSE retries')
+      return
+    }
+
     this._standbyServer = createServer((req, res) => {
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
         // Calculate restart ETA: remaining backoff time + estimated child startup (~5s)
@@ -417,6 +423,7 @@ export class Supervisor extends EventEmitter {
 
     this._standbyServer.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
+        this._standbyRetries++
         setTimeout(() => {
           if (this._standbyServer) {
             this._standbyServer.close()
@@ -430,6 +437,7 @@ export class Supervisor extends EventEmitter {
     })
 
     this._standbyServer.listen(this._port, () => {
+      this._standbyRetries = 0
       this._log.info(`Standby health check server on port ${this._port}`)
     })
   }
