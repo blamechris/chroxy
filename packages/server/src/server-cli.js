@@ -371,14 +371,14 @@ export async function startCliServer(config) {
 
   process.on('uncaughtException', (err) => {
     console.error('[fatal] Uncaught exception:', err)
-    try { wsServer.broadcastShutdown('shutdown', 0) } catch {}
+    try { wsServer.broadcastShutdown('crash', 0) } catch {}
     try { wsServer.close() } catch {}
     process.exit(1)
   })
 
   process.on('unhandledRejection', (err) => {
     console.error('[fatal] Unhandled rejection:', err)
-    try { wsServer.broadcastShutdown('shutdown', 0) } catch {}
+    try { wsServer.broadcastShutdown('crash', 0) } catch {}
     try { wsServer.close() } catch {}
     process.exit(1)
   })
