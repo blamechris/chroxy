@@ -318,7 +318,7 @@ No actionable items found in the standard work sources. Here's what a quick code
 
 ### Want a Deep Audit?
 
-Run `/project-audit` for a comprehensive multi-agent analysis with detailed recommendations.
+Run `/swarm-audit` for a comprehensive multi-agent analysis with detailed recommendations.
 ```
 
 ## Critical Rules
