@@ -439,6 +439,7 @@ export class WsServer {
           return null
         }
         const assetMap = {
+          '/assets/dashboard-app.js': { read: () => readFileSync(join(__dirname, 'dashboard', 'dashboard-app.js')), type: 'application/javascript' },
           '/assets/xterm/xterm.js': { read: () => readModule('@xterm/xterm', 'lib/xterm.js'), type: 'application/javascript' },
           '/assets/xterm/xterm.css': { read: () => readModule('@xterm/xterm', 'css/xterm.css'), type: 'text/css' },
           '/assets/xterm/addon-fit.js': { read: () => readModule('@xterm/addon-fit', 'lib/addon-fit.js'), type: 'application/javascript' },

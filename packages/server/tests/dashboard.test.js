@@ -7,6 +7,12 @@ import { getDashboardHtml } from '../src/dashboard.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const css = readFileSync(join(__dirname, '..', 'src', 'dashboard', 'dashboard.css'), 'utf8')
+const dashboardJs = readFileSync(join(__dirname, '..', 'src', 'dashboard', 'dashboard-app.js'), 'utf8')
+
+/** Helper: returns html + JS combined for tests that check JS behavior */
+function getFullContent(port, token, noEncrypt) {
+  return getDashboardHtml(port, token, noEncrypt) + '\n' + dashboardJs
+}
 
 /**
  * Assert that html contains the given string or matches the given regex.
@@ -38,7 +44,7 @@ function assertHtmlNot(html, pattern, message) {
 
 describe('getDashboardHtml', () => {
   it('returns valid HTML document', () => {
-    const html = getDashboardHtml(8765, 'test-token', false)
+    const html = getFullContent(8765, 'test-token', false)
     assert.ok(html.includes('<!DOCTYPE html>'))
     assert.ok(html.includes('<title>Chroxy Dashboard</title>'))
   })
@@ -74,21 +80,17 @@ describe('getDashboardHtml', () => {
     assert.ok(html.includes('nonce="abc123"'), 'should add nonce to inline tags')
     // Config script and main JS script should both have nonce
     const nonceCount = (html.match(/nonce="abc123"/g) || []).length
-    assert.ok(nonceCount >= 2, `should have at least 2 nonce attributes (config + JS script), got ${nonceCount}`)
+    assert.ok(nonceCount >= 1, `should have at least 1 nonce attribute (config script), got ${nonceCount}`)
   })
 })
 
-describe('getDashboardJs', () => {
-  it('returns non-empty JavaScript', () => {
+describe('dashboard-app.js', () => {
+  it('links external JS and file has substantial content', () => {
     const html = getDashboardHtml(8765, 'token', false)
-    // The JS is embedded between the second <script> tags
-    // It should contain substantial code, not empty string
-    const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/g)
-    assert.ok(scriptMatch, 'should have script tags')
-    // Second script block contains the dashboard JS
-    assert.ok(scriptMatch.length >= 2, 'should have at least 2 script blocks')
-    const jsBlock = scriptMatch[1]
-    assert.ok(jsBlock.length > 100, 'dashboard JS should be substantial')
+    assert.ok(html.includes('<script src="/assets/dashboard-app.js">'),
+      'should link to external dashboard-app.js')
+    assert.ok(dashboardJs.length > 1000, 'dashboard JS file should be substantial')
+    assert.ok(dashboardJs.includes('"use strict"'), 'should use strict mode')
   })
 })
 
@@ -107,7 +109,7 @@ describe('dashboard.css', () => {
 })
 
 describe('dashboard UI elements', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has header with app name', () => {
     assert.ok(html.includes('Chroxy'), 'should show app name')
@@ -145,7 +147,7 @@ describe('dashboard UI elements', () => {
 })
 
 describe('dashboard WebSocket code', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('contains WebSocket connection code', () => {
     assert.ok(html.includes('WebSocket') || html.includes('new WebSocket'),
@@ -174,7 +176,7 @@ describe('dashboard WebSocket code', () => {
     // The default case should warn about unknown types when protocolVersion mismatch
     assertHtml(
       html,
-      /default:\s*[\s\S]*console\.warn\(\s*"\[dashboard\] Unknown message type/,
+      /default:\s*[\s\S]*console\.warn\(\s*['"]\[dashboard\] Unknown message type/,
       'default case should console.warn about unknown message types'
     )
   })
@@ -217,7 +219,7 @@ describe('dashboard WebSocket code', () => {
 })
 
 describe('dashboard markdown renderer', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('renders code blocks', () => {
     assert.ok(html.includes('```') || html.includes('code-block') || html.includes('<pre'),
@@ -241,7 +243,7 @@ describe('dashboard markdown renderer', () => {
 })
 
 describe('#762 — sanitizeId strips special characters', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('defines sanitizeId function', () => {
     assert.ok(html.includes('function sanitizeId(id)'),
@@ -256,7 +258,7 @@ describe('#762 — sanitizeId strips special characters', () => {
 })
 
 describe('#762 — querySelector calls use sanitized IDs', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('uses sanitizeId for data-msg-id queries', () => {
     assert.ok(html.includes('sanitizeId(msg.messageId)'),
@@ -304,7 +306,7 @@ describe('#762 — querySelector calls use sanitized IDs', () => {
 })
 
 describe('#760 — javascript: URI blocking in markdown links', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('blocks javascript: URIs', () => {
     // The link renderer should contain a regex test for javascript:
@@ -337,7 +339,7 @@ describe('#760 — javascript: URI blocking in markdown links', () => {
 })
 
 describe('#761 — plan mode UI elements', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has plan mode banner element', () => {
     assert.ok(html.includes('id="plan-mode-banner"'),
@@ -390,7 +392,7 @@ describe('#761 — plan mode UI elements', () => {
 })
 
 describe('#761 — plan mode message handlers', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('handles plan_started message', () => {
     assert.ok(html.includes('case "plan_started"'),
@@ -440,7 +442,7 @@ describe('#761 — plan mode message handlers', () => {
 })
 
 describe('#761 — background agent UI elements', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has agent badge element in status bar', () => {
     assert.ok(html.includes('id="status-agents"'),
@@ -459,7 +461,7 @@ describe('#761 — background agent UI elements', () => {
 })
 
 describe('#761 — background agent message handlers', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('handles agent_spawned message', () => {
     assert.ok(html.includes('case "agent_spawned"'),
@@ -504,7 +506,7 @@ describe('#761 — background agent message handlers', () => {
 })
 
 describe('#733 — create session modal', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has modal overlay element', () => {
     assert.ok(html.includes('id="create-session-modal"'),
@@ -581,7 +583,7 @@ describe('#733 — create session modal', () => {
 })
 
 describe('#733 — destroy session', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has close button in session tabs', () => {
     assert.ok(html.includes('tab-close'),
@@ -610,7 +612,7 @@ describe('#733 — destroy session', () => {
 })
 
 describe('#733 — rename session', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has double-click handler for renaming', () => {
     assert.ok(html.includes('dblclick'),
@@ -644,7 +646,7 @@ describe('#733 — rename session', () => {
 })
 
 describe('#733 — keyboard shortcuts', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has document keydown listener', () => {
     assert.ok(html.includes('document.addEventListener("keydown"'),
@@ -703,7 +705,7 @@ describe('#733 — keyboard shortcuts', () => {
 })
 
 describe('#733 — toast notifications', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has toast container element', () => {
     assert.ok(html.includes('id="toast-container"'),
@@ -780,7 +782,7 @@ describe('#733 — toast notifications', () => {
 })
 
 describe('#733 — reconnect banner', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has reconnect banner element', () => {
     assert.ok(html.includes('id="reconnect-banner"'),
@@ -823,7 +825,7 @@ describe('#733 — reconnect banner', () => {
 })
 
 describe('#733 — user question prompts with options', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('handles user_question message', () => {
     assert.ok(html.includes('case "user_question"'),
@@ -882,7 +884,7 @@ describe('#733 — user question prompts with options', () => {
 })
 
 describe('#733 — status bar busy indicator', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has busy indicator element', () => {
     assert.ok(html.includes('id="status-busy"'),
@@ -939,7 +941,7 @@ describe('#733 — status bar busy indicator', () => {
 })
 
 describe('#886 — syntax highlighting', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('defines SYNTAX_COLORS map with all token types', () => {
     assert.ok(html.includes('var SYNTAX_COLORS = {'),
@@ -1026,7 +1028,7 @@ describe('#886 — syntax highlighting', () => {
 })
 
 describe('#886 — enriched session tabs', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has tab-busy-dot CSS', () => {
     assert.ok(css.includes('.tab-busy-dot'),
@@ -1073,7 +1075,7 @@ describe('#886 — enriched session tabs', () => {
 })
 
 describe('#886 — permission countdown timer', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has perm-countdown CSS', () => {
     assert.ok(css.includes('.perm-countdown'),
@@ -1154,7 +1156,7 @@ describe('#886 — permission countdown timer', () => {
 })
 
 describe('#886 — reconnect backoff', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('defines RETRY_DELAYS array', () => {
     assert.ok(html.includes('var RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000]'),
@@ -1223,7 +1225,7 @@ describe('#886 — reconnect backoff', () => {
 })
 
 describe('#891 — negative assertions for week 2 features', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('syntax highlighting falls back to plain for unknown languages', () => {
     // tokenize returns plain tokens when lang has no rules (getSyntaxRules returns null)
@@ -1278,7 +1280,7 @@ describe('#891 — negative assertions for week 2 features', () => {
 })
 
 describe('#610 — responsive CSS for mobile browsers', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('has responsive media query for small screens', () => {
     assert.ok(css.includes('@media (max-width: 600px)'),
@@ -1297,7 +1299,7 @@ describe('#610 — responsive CSS for mobile browsers', () => {
 })
 
 describe('#934 — dynamic permission mode select', () => {
-  const html = getDashboardHtml(8765, 'test-token', false)
+  const html = getFullContent(8765, 'test-token', false)
 
   it('includes acceptEdits in initial permission select options', () => {
     assertHtml(html, '<option value="acceptEdits">Accept Edits</option>',
