@@ -674,12 +674,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   setViewMode: (mode) => {
-    const { socket } = get();
     set({ viewMode: mode });
     persistViewMode(mode).catch(() => {});
-    if (socket && socket.readyState === WebSocket.OPEN && (mode === 'chat' || mode === 'terminal')) {
-      wsSend(socket, { type: 'mode', mode });
-    }
   },
 
   addMessage: (message) => {

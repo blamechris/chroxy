@@ -82,7 +82,6 @@ function getGitInfo() {
  * Client -> Server:
  *   { type: 'auth',      token: '...', deviceInfo? }   — authenticate (deviceInfo: { deviceId, deviceName, deviceType, platform })
  *   { type: 'input',     data: '...' }               — send text to active session
- *   { type: 'mode',      mode: 'terminal'|'chat' }   — switch view mode
  *   { type: 'interrupt' }                             — interrupt active session
  *   { type: 'set_model', model: '...' }              — change model on active session
  *   { type: 'set_permission_mode', mode: '...', confirmed? } — change permission mode (confirmed: true required for 'auto')

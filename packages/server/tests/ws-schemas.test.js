@@ -4,7 +4,6 @@ import {
   AuthSchema,
   InputSchema,
 
-  ModeSchema,
   InterruptSchema,
   SetModelSchema,
   SetPermissionModeSchema,
@@ -156,25 +155,6 @@ describe('InputSchema', () => {
       data: 'test',
       attachments: [{ bad: true }],
     })
-    assert.ok(!result.success)
-  })
-})
-
-
-// -- ModeSchema --
-describe('ModeSchema', () => {
-  it('accepts terminal mode', () => {
-    const result = ModeSchema.safeParse({ type: 'mode', mode: 'terminal' })
-    assert.ok(result.success)
-  })
-
-  it('accepts chat mode', () => {
-    const result = ModeSchema.safeParse({ type: 'mode', mode: 'chat' })
-    assert.ok(result.success)
-  })
-
-  it('rejects invalid mode value', () => {
-    const result = ModeSchema.safeParse({ type: 'mode', mode: 'debug' })
     assert.ok(!result.success)
   })
 })
@@ -1223,5 +1203,36 @@ describe('ServerWebTaskListSchema', () => {
 
   it('rejects missing tasks', () => {
     assert.ok(!ServerWebTaskListSchema.safeParse({ type: 'web_task_list' }).success)
+  })
+})
+
+// -- Dead code removal verification (#940) --
+describe('dead code removal', () => {
+  it('rejects mode message type in ClientMessageSchema', () => {
+    const result = ClientMessageSchema.safeParse({ type: 'mode', mode: 'terminal' })
+    assert.ok(!result.success, 'mode message type should no longer be accepted')
+  })
+
+  it('does not export ModeSchema', async () => {
+    const exports = await import('../src/ws-schemas.js')
+    assert.equal(exports.ModeSchema, undefined, 'ModeSchema should not be exported')
+  })
+
+  it('codex-session.js does not exist', async () => {
+    try {
+      await import('../src/codex-session.js')
+      assert.fail('codex-session.js should have been deleted')
+    } catch (err) {
+      assert.ok(err.code === 'ERR_MODULE_NOT_FOUND' || err.message.includes('Cannot find'))
+    }
+  })
+
+  it('session-db.js does not exist', async () => {
+    try {
+      await import('../src/session-db.js')
+      assert.fail('session-db.js should have been deleted')
+    } catch (err) {
+      assert.ok(err.code === 'ERR_MODULE_NOT_FOUND' || err.message.includes('Cannot find'))
+    }
   })
 })
