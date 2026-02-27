@@ -465,12 +465,19 @@ export class WsServer {
         const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
         const queryToken = dashUrl.searchParams.get('token')
 
+        // Security headers shared across all /dashboard responses (200 + 403)
+        const securityHeaders = {
+          'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+          'X-Frame-Options': 'DENY',
+          'X-Content-Type-Options': 'nosniff',
+        }
+
         if (this.authRequired) {
           const bearerToken = (req.headers['authorization'] || '').startsWith('Bearer ')
             ? req.headers['authorization'].slice(7) : null
           const token = queryToken || bearerToken
           if (!token || !this._isTokenValid(token)) {
-            res.writeHead(403, { 'Content-Type': 'text/html' })
+            res.writeHead(403, { 'Content-Type': 'text/html', ...securityHeaders })
             res.end('<h1>403 Forbidden</h1><p>Invalid or missing token. Append ?token=YOUR_TOKEN to the URL.</p>')
             return
           }
@@ -479,7 +486,7 @@ export class WsServer {
         res.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8',
           'Cache-Control': 'no-store',
-          'X-Content-Type-Options': 'nosniff',
+          ...securityHeaders,
         })
         res.end(getDashboardHtml(this.port, this.apiToken, !this._encryptionEnabled))
         return

@@ -6856,6 +6856,57 @@ describe('dashboard endpoint', () => {
     const body = await res.text()
     assert.ok(body.includes('Chroxy Dashboard'))
   })
+
+  it('response has Content-Security-Policy header', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-csp',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
+    const csp = res.headers.get('content-security-policy')
+    assert.ok(csp, 'CSP header should be present')
+    assert.ok(csp.includes("default-src 'self'"), 'CSP should restrict default-src')
+    assert.ok(csp.includes("script-src 'self' 'unsafe-inline'"), 'CSP should allow inline scripts')
+    assert.ok(csp.includes("style-src 'self' 'unsafe-inline'"), 'CSP should allow inline styles')
+    assert.ok(csp.includes('connect-src'), 'CSP should restrict connect-src')
+    assert.ok(csp.includes('ws:') || csp.includes('wss:'), 'CSP should allow WebSocket connections')
+    assert.ok(csp.includes("frame-ancestors 'none'"), "CSP should forbid framing via frame-ancestors 'none'")
+    assert.ok(csp.includes("base-uri 'none'"), "CSP should restrict base-uri to 'none'")
+    assert.ok(csp.includes("form-action 'self'"), "CSP should restrict form-action to 'self'")
+  })
+
+  it('response has X-Frame-Options: DENY header', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-frame',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
+    assert.equal(res.headers.get('x-frame-options'), 'DENY')
+  })
+
+  it('403 response includes security headers', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-403-headers',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
+    assert.equal(res.status, 403)
+    assert.ok(res.headers.get('content-security-policy'), '403 should include CSP header')
+    assert.equal(res.headers.get('x-frame-options'), 'DENY')
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
+  })
 })
 
 // ---------------------------------------------------------------------------
