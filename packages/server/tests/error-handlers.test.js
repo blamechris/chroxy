@@ -46,6 +46,20 @@ describe('global error handlers', () => {
         'broadcastShutdown should be within the unhandledRejection handler body'
       )
     })
+
+    it('crash handlers use "crash" reason, not "shutdown"', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+      const uncaughtBlock = source.match(/process\.on\('uncaughtException',[\s\S]*?\}\)/m)
+      assert.ok(uncaughtBlock, 'uncaughtException handler should exist')
+      assert.ok(uncaughtBlock[0].includes("broadcastShutdown('crash'"),
+        'uncaughtException should broadcast crash reason')
+
+      const rejectionBlock = source.match(/process\.on\('unhandledRejection',[\s\S]*?\}\)/m)
+      assert.ok(rejectionBlock, 'unhandledRejection handler should exist')
+      assert.ok(rejectionBlock[0].includes("broadcastShutdown('crash'"),
+        'unhandledRejection should broadcast crash reason')
+    })
   })
 
   describe('server-cli-child.js', () => {
