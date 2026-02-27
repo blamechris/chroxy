@@ -222,7 +222,7 @@ Store files:
 | `stream_delta` | Token-by-token streaming response text |
 | `stream_end` | Streaming response complete |
 | `stream_start` | Beginning of streaming response |
-| `token_rotated` | API token was rotated (new token) |
+| `token_rotated` | API token was rotated (client must re-authenticate) |
 | `tool_result` | Tool execution result output |
 | `tool_start` | Tool invocation started |
 | `user_question` | AskUserQuestion prompt from Claude |
@@ -253,7 +253,7 @@ Store files:
 - `cost_update` sent after each query with `{ sessionCost, totalCost, budget }` where budget is null if no cost budget configured
 - `budget_warning` sent when session cost exceeds 80% of budget; `budget_exceeded` when budget is hit (session paused); `resume_budget` from client to unpause; `budget_resumed` broadcast by server after successful resume
 - `session_warning` sent before session timeout with `{ sessionId, name, reason, message, remainingMs }`; `session_timeout` when session is destroyed
-- `token_rotated` broadcast when API token is rotated by TokenManager; includes `{ newToken, expiresAt }`
+- `token_rotated` broadcast when API token is rotated by TokenManager; includes `{ expiresAt }` only — the new token is NOT sent over the wire for security; clients must re-authenticate
 - `checkpoint_created` payload: `{ sessionId, checkpoint: { id, name, description, messageCount, createdAt, hasGitSnapshot } }`; `checkpoint_list` returns array of checkpoints; `restore_checkpoint` creates a new session from checkpoint state
 - `launch_web_task` includes a `prompt` string field; `web_task_created` confirms task launch; `web_task_updated` streams status changes; `teleport_web_task` pulls completed task result into local session
 - `dev_preview` sent when a dev server tunnel is opened with `{ url, port }` (session-scoped via `broadcastToSession`); `close_dev_preview` from client to shut it down

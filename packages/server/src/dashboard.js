@@ -2624,13 +2624,9 @@ function getDashboardJs() {
         break;
 
       case "token_rotated":
-        if (msg.newToken) {
-          token = msg.newToken;
-          // Update URL bar so bookmarking works with new token
-          var newUrl = new URL(window.location);
-          newUrl.searchParams.set("token", token);
-          window.history.replaceState(null, "", newUrl.toString());
-        }
+        // Token was rotated — the new token is NOT sent over the wire.
+        // Show notification that re-authentication is needed.
+        showToast("API token rotated — please re-authenticate with the new token");
         break;
 
       case "plan_started":

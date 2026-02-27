@@ -164,7 +164,7 @@ function getGitInfo() {
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
  *   { type: 'pong' }                                    — heartbeat response
  *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
- *   { type: 'token_rotated', newToken, expiresAt }     — API token was rotated, client should update stored token
+ *   { type: 'token_rotated', expiresAt }                — API token was rotated, client must re-authenticate
  *   { type: 'session_warning', sessionId, name, reason, message, remainingMs } — session about to timeout
  *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
  *   { type: 'dev_preview', port, url, sessionId }       — dev server preview tunnel opened
@@ -286,8 +286,10 @@ export class WsServer {
       this._tokenRotatedHandler = ({ newToken, expiresAt }) => {
         // Update our reference so subsequent auth checks use the new token
         this.apiToken = newToken
-        this._broadcast({ type: 'token_rotated', newToken, expiresAt })
-        console.log(`[ws] Broadcasted token_rotated to all clients`)
+        // Notify clients that a rotation occurred — do NOT broadcast the new token.
+        // Clients must re-authenticate (re-scan QR or re-enter token).
+        this._broadcast({ type: 'token_rotated', expiresAt })
+        console.log(`[ws] Broadcasted token_rotated notification to all clients`)
       }
       this._tokenManager.on('token_rotated', this._tokenRotatedHandler)
     }

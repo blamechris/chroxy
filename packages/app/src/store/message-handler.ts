@@ -1815,17 +1815,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'token_rotated': {
-      const newToken = msg.newToken;
-      if (typeof newToken === 'string' && newToken.length > 0) {
-        // Update in-memory token so reconnects use the new one
-        set({ apiToken: newToken });
-        // Persist to secure storage
-        const wsUrl = get().wsUrl;
-        if (wsUrl) {
-          saveConnection(wsUrl, newToken).catch(() => {});
-        }
-        console.log(`[ws] Token rotated, updated stored token`);
-      }
+      // Token was rotated on the server — the new token is NOT sent over the wire.
+      // The client must re-authenticate (re-scan QR or re-enter token).
+      console.log('[ws] Server token rotated — re-authentication required');
       break;
     }
 
