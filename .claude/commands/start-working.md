@@ -261,10 +261,10 @@ When the queue is truly empty, perform a lightweight codebase scan to surface po
 #### 4a. Test Coverage Gaps
 
 ```bash
-# Server tests
-npm test
-# App tests
-npx jest
+# Server tests (run from workspace root)
+npm test -w packages/server
+# App tests (run from workspace root)
+npm test -w packages/app
 ```
 
 - Check which source directories have corresponding test files
