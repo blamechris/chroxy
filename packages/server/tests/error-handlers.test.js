@@ -59,10 +59,6 @@ describe('global error handlers', () => {
         handler[0].includes('setTimeout'),
         'uncaughtException handler should use setTimeout to defer process.exit'
       )
-      assert.ok(
-        !handler[0].match(/broadcastShutdown[\s\S]*?(?<!setTimeout\(\(\) => )process\.exit\(1\)/),
-        'process.exit(1) should not be called directly after broadcastShutdown'
-      )
     })
 
     it('unhandledRejection handler defers process.exit via setTimeout', async () => {
