@@ -4,7 +4,7 @@ import { statSync, readFileSync, unlinkSync, renameSync, existsSync, mkdirSync }
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { getProvider } from './providers.js'
-import { resolveJsonlPath, readConversationHistory, readConversationHistoryAsync } from './jsonl-reader.js'
+import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
 import { isWindows, writeFileRestricted } from './platform.js'
 import { readSessionContext } from './session-context.js'
 import { parseDuration } from './duration.js'
@@ -21,18 +21,6 @@ export class SessionError extends Error {
     this.code = code
   }
 }
-
-/**
- * Thrown when attempting to retrieve or operate on a non-existent session.
- */
-export class SessionNotFoundError extends SessionError {
-  constructor(sessionId) {
-    super(`Session not found: ${sessionId}`, 'SESSION_NOT_FOUND')
-    this.name = 'SessionNotFoundError'
-    this.sessionId = sessionId
-  }
-}
-
 
 /**
  * Thrown when maximum session limit is reached.
@@ -278,7 +266,6 @@ export class SessionManager extends EventEmitter {
     this._budgetWarned.delete(sessionId)
     this._budgetExceeded.delete(sessionId)
     this._budgetPaused.delete(sessionId)
-    this._schedulePersist()
     this.emit('session_destroyed', { sessionId })
     this._schedulePersist()
     return true
@@ -508,26 +495,6 @@ export class SessionManager extends EventEmitter {
     const entry = this._sessions.get(sessionId)
     if (!entry) return null
     return entry.session.resumeSessionId || null
-  }
-
-  /**
-   * Get full conversation history by reading the JSONL file.
-   * Falls back to the ring buffer if JSONL is unavailable.
-   * @returns {Array<{ type, content, tool?, timestamp, messageId? }>}
-   */
-  getFullHistory(sessionId) {
-    const entry = this._sessions.get(sessionId)
-    if (!entry) return []
-
-    const conversationId = entry.session.resumeSessionId
-    if (conversationId) {
-      const filePath = resolveJsonlPath(entry.cwd, conversationId)
-      const history = readConversationHistory(filePath)
-      if (history.length > 0) return history
-    }
-
-    // Fallback to ring buffer
-    return this.getHistory(sessionId)
   }
 
   /**

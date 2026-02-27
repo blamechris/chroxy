@@ -833,3 +833,46 @@ describe('SessionManager budget pause lifecycle', () => {
     mgr.destroyAll()
   })
 })
+
+describe('#987 — dead code removal in session-manager', () => {
+  it('does not export SessionNotFoundError', async () => {
+    const mod = await import('../src/session-manager.js')
+    assert.equal(mod.SessionNotFoundError, undefined,
+      'SessionNotFoundError should be removed — it is never used')
+  })
+
+  it('does not have a sync getFullHistory method', async () => {
+    const { readFileSync: readFs } = await import('node:fs')
+    const { dirname: dn, join: joinPath } = await import('node:path')
+    const { fileURLToPath: toPath } = await import('node:url')
+    const dir = dn(toPath(import.meta.url))
+    const source = readFs(joinPath(dir, '../src/session-manager.js'), 'utf-8')
+    // Should have getFullHistoryAsync but NOT a standalone getFullHistory method
+    const syncMethod = /^\s+getFullHistory\(sessionId\)\s*\{/m.test(source)
+    assert.ok(!syncMethod,
+      'getFullHistory (sync) should be removed — only getFullHistoryAsync is used')
+  })
+
+  it('does not import readConversationHistory (sync)', async () => {
+    const { readFileSync: readFs } = await import('node:fs')
+    const { dirname: dn, join: joinPath } = await import('node:path')
+    const { fileURLToPath: toPath } = await import('node:url')
+    const dir = dn(toPath(import.meta.url))
+    const source = readFs(joinPath(dir, '../src/session-manager.js'), 'utf-8')
+    assert.ok(!source.includes('readConversationHistory,'),
+      'Should not import sync readConversationHistory (only async variant needed)')
+  })
+
+  it('calls _schedulePersist only once in destroySession', async () => {
+    const { readFileSync: readFs } = await import('node:fs')
+    const { dirname: dn, join: joinPath } = await import('node:path')
+    const { fileURLToPath: toPath } = await import('node:url')
+    const dir = dn(toPath(import.meta.url))
+    const source = readFs(joinPath(dir, '../src/session-manager.js'), 'utf-8')
+    const destroyMethod = source.match(/destroySession\(sessionId\)\s*\{[\s\S]*?^\s{2}\}/m)
+    assert.ok(destroyMethod, 'destroySession method should exist')
+    const persistCalls = (destroyMethod[0].match(/_schedulePersist\(\)/g) || []).length
+    assert.equal(persistCalls, 1,
+      `destroySession should call _schedulePersist once, found ${persistCalls} calls`)
+  })
+})
