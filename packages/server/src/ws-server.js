@@ -442,6 +442,7 @@ export class WsServer {
           '/assets/xterm/xterm.js': { read: () => readModule('@xterm/xterm', 'lib/xterm.js'), type: 'application/javascript' },
           '/assets/xterm/xterm.css': { read: () => readModule('@xterm/xterm', 'css/xterm.css'), type: 'text/css' },
           '/assets/xterm/addon-fit.js': { read: () => readModule('@xterm/addon-fit', 'lib/addon-fit.js'), type: 'application/javascript' },
+          '/assets/dashboard.css': { read: () => readFileSync(join(__dirname, 'dashboard', 'dashboard.css')), type: 'text/css' },
         }
         const assetPath = req.url.split('?')[0]
         const asset = assetMap[assetPath]
