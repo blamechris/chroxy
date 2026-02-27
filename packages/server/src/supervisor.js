@@ -21,6 +21,8 @@ const DRAIN_TIMEOUT = 30000
 const RESTART_BACKOFFS = [2000, 2000, 3000, 3000, 5000, 5000, 8000, 8000, 10000, 10000]
 const DEPLOY_CRASH_WINDOW = 60000
 const MAX_DEPLOY_FAILURES = 3
+const MAX_STANDBY_EADDRINUSE_RETRIES = 20
+const STANDBY_EADDRINUSE_RETRY_DELAY_MS = 500
 
 /**
  * Supervisor process: owns the tunnel, restarts the server child on crash.
@@ -381,8 +383,8 @@ export class Supervisor extends EventEmitter {
   _startStandbyServer() {
     if (this._standbyServer) return
 
-    if (this._standbyRetries >= 20) {
-      this._log.error('Standby server: giving up after 20 EADDRINUSE retries')
+    if (this._standbyRetries >= MAX_STANDBY_EADDRINUSE_RETRIES) {
+      this._log.error(`Standby server: giving up after ${MAX_STANDBY_EADDRINUSE_RETRIES} EADDRINUSE retries`)
       return
     }
 
@@ -430,7 +432,7 @@ export class Supervisor extends EventEmitter {
             this._standbyServer = null
             this._startStandbyServer()
           }
-        }, 500)
+        }, STANDBY_EADDRINUSE_RETRY_DELAY_MS)
         return
       }
       this._log.error(`Standby server error: ${err.message}`)
