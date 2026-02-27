@@ -203,15 +203,17 @@ export async function startCliServer(config) {
     }
   }
 
-  // Track current WebSocket URL across all modes (tunnel, external, LAN)
+  // Track current WebSocket URL and mode label across all modes (tunnel, external, LAN)
   let tunnel = null
   let currentWsUrl = null
+  let currentTunnelMode = 'none'
 
   // External URL mode: reverse proxy / custom domain (skip tunnel entirely)
   const externalUrl = config.externalUrl || null
   if (externalUrl) {
     const wsUrl = externalUrl.replace(/^https?:\/\//, 'wss://')
     currentWsUrl = wsUrl
+    currentTunnelMode = 'external'
     const httpUrl = externalUrl.replace(/^wss?:\/\//, 'https://')
     const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
 
@@ -299,6 +301,7 @@ export async function startCliServer(config) {
     // 7. Generate connection info
     const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
     const modeLabel = `${tunnelArg.provider}:${tunnelArg.mode}`
+    currentTunnelMode = modeLabel
 
     console.log(`\n[✓] Server ready! (CLI headless mode, ${modeLabel})\n`)
     console.log('📱 Scan this QR code with the Chroxy app:\n')
@@ -350,28 +353,27 @@ export async function startCliServer(config) {
   }
 
   // Regenerate QR code and update connection info when token rotates
+  const serverStartedAt = new Date().toISOString()
   if (tokenManager) {
     tokenManager.on('token_rotated', ({ newToken }) => {
-      // Build the current connection URL base from whatever mode we're in
-      const wsBase = currentWsUrl || (externalUrl ? externalUrl.replace(/^https?:\/\//, 'wss://') : null)
-      if (!wsBase) return // no-auth or localhost-only — no QR to update
+      if (!currentWsUrl) return // no-auth or localhost-only — no QR to update
 
-      const newConnectionUrl = `chroxy://${wsBase.replace(/^wss?:\/\//, '')}?token=${newToken}`
+      const newConnectionUrl = `chroxy://${currentWsUrl.replace(/^wss?:\/\//, '')}?token=${newToken}`
       console.log('\n[token] API token rotated. Updated QR code:\n')
       qrcode.generate(newConnectionUrl, { small: true })
       console.log(`\n   Token: ${newToken.slice(0, 8)}...`)
       console.log('')
 
       // Determine httpUrl from wsUrl
-      const httpBase = wsBase.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
+      const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
 
       writeConnectionInfo({
-        wsUrl: wsBase,
+        wsUrl: currentWsUrl,
         httpUrl: httpBase,
         apiToken: newToken,
         connectionUrl: newConnectionUrl,
-        tunnelMode: tunnel ? 'tunnel' : (externalUrl ? 'external' : 'none'),
-        startedAt: new Date().toISOString(),
+        tunnelMode: currentTunnelMode,
+        startedAt: serverStartedAt,
         pid: process.pid,
       })
     })
