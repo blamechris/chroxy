@@ -1224,6 +1224,39 @@ describe('#886 — reconnect backoff', () => {
   })
 })
 
+describe('#975 — re-auth mechanism after token rotation', () => {
+  const html = getFullContent(8765, 'test-token', false)
+
+  it('stops reconnect loop on token_rotated message', () => {
+    const handler = html.match(/case "token_rotated"[\s\S]*?break;/)
+    assert.ok(handler, 'should handle token_rotated message')
+    assert.ok(handler[0].includes('clearTimeout(reconnectTimer)'),
+      'should clear reconnect timer on token rotation')
+  })
+
+  it('shows token input field for re-authentication', () => {
+    assert.ok(html.includes('id="reauth-input"'),
+      'should have a token input field for re-authentication')
+  })
+
+  it('has re-auth container in reconnect banner', () => {
+    assert.ok(html.includes('id="reauth-container"'),
+      'should have a reauth container element')
+  })
+
+  it('updates token and reconnects on re-auth submit', () => {
+    assert.ok(html.includes('function submitReauth'),
+      'should define submitReauth function')
+  })
+
+  it('has re-auth CSS styles', () => {
+    assert.ok(css.includes('#reauth-container'),
+      'should have CSS for reauth container')
+    assert.ok(css.includes('#reauth-input'),
+      'should have CSS for reauth input')
+  })
+})
+
 describe('#891 — negative assertions for week 2 features', () => {
   const html = getFullContent(8765, 'test-token', false)
 

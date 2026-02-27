@@ -147,6 +147,36 @@
       cursor: pointer;
     }
     #reconnect-retry-btn:hover { opacity: 0.85; }
+    #reauth-container {
+      display: flex;
+      gap: 6px;
+      margin-top: 6px;
+      align-items: center;
+    }
+    #reauth-input {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      border: 1px solid #4a9eff;
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-family: monospace;
+      flex: 1;
+      min-width: 180px;
+    }
+    #reauth-input::placeholder { color: #666; }
+    #reauth-submit-btn {
+      background: #4a9eff;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 4px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    #reauth-submit-btn:hover { opacity: 0.85; }
     .hidden { display: none !important; }
 
     /* Chat messages */
