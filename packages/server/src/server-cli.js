@@ -397,6 +397,8 @@ export async function startCliServer(config) {
     console.error('[fatal] Uncaught exception:', err)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
     try { wsServer.close() } catch {}
+    try { sessionManager.destroyAll() } catch {}
+    try { removeConnectionInfo() } catch {}
     setTimeout(() => process.exit(1), 100)
   })
 
@@ -404,6 +406,8 @@ export async function startCliServer(config) {
     console.error('[fatal] Unhandled rejection:', err)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
     try { wsServer.close() } catch {}
+    try { sessionManager.destroyAll() } catch {}
+    try { removeConnectionInfo() } catch {}
     setTimeout(() => process.exit(1), 100)
   })
 
