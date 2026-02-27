@@ -5,7 +5,7 @@
  * with a mock Zustand store.
  */
 import { Alert } from 'react-native';
-import { _testMessageHandler, setStore } from '../../store/message-handler';
+import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION } from '../../store/message-handler';
 import { createEmptySessionState } from '../../store/utils';
 import { clearPersistedSession } from '../../store/persistence';
 import type { ConnectionState } from '../../store/types';
@@ -389,6 +389,72 @@ describe('conversations_list handler', () => {
     const state = store.getState();
     expect(state.conversationHistory).toEqual([]);
     expect(state.conversationHistoryLoading).toBe(false);
+  });
+});
+
+describe('unknown message type (default case)', () => {
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('logs warning when server protocol version is newer than client', () => {
+    const store = createMockStore({
+      serverProtocolVersion: CLIENT_PROTOCOL_VERSION + 1,
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'some_future_feature' });
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Unknown message type "some_future_feature"')
+    );
+  });
+
+  it('does not log when server protocol version matches client', () => {
+    const store = createMockStore({
+      serverProtocolVersion: CLIENT_PROTOCOL_VERSION,
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'some_future_feature' });
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not log when server protocol version is null', () => {
+    const store = createMockStore({
+      serverProtocolVersion: null,
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'some_future_feature' });
+
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });
 
