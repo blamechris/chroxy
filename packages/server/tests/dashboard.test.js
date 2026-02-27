@@ -1258,9 +1258,8 @@ describe('#975 — re-auth mechanism after token rotation', () => {
 })
 
 describe('#978 — normalized dashboard.css indentation', () => {
-  it('selectors start at column 0 (no leading spaces)', () => {
+  it('no top-level selectors have 4+ space indent', () => {
     const lines = css.split('\n')
-    const selectorLines = lines.filter(l => l.match(/^(\s*)[^\s\/\*]/) && l.includes('{') && !l.startsWith(' '))
     const indentedSelectors = lines.filter(l => l.match(/^\s{4,}\S/) && l.includes('{'))
     assert.equal(indentedSelectors.length, 0,
       `Found ${indentedSelectors.length} selectors with 4+ space indent: ${indentedSelectors.slice(0, 3).map(l => l.trim()).join(', ')}`
