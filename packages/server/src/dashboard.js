@@ -5,6 +5,7 @@
  * @param {number} port - WsServer port
  * @param {string|null} apiToken - API token (embedded for WS auth)
  * @param {boolean} noEncrypt - Whether E2E encryption is disabled
+ * @param {string} [nonce] - Optional CSP nonce to apply to inline style and script tags
  * @returns {string} Complete HTML document
  */
 export function getDashboardHtml(port, apiToken, noEncrypt, nonce) {
