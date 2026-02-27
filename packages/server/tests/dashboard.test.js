@@ -151,6 +151,23 @@ describe('dashboard WebSocket code', () => {
     assert.ok(html.includes('auth_ok'), 'should handle auth_ok')
   })
 
+  it('extracts protocolVersion from auth_ok', () => {
+    assertHtml(
+      html,
+      /case\s+["']auth_ok["'][\s\S]*protocolVersion/,
+      'should reference protocolVersion within the auth_ok handler'
+    )
+  })
+
+  it('logs unknown message types when server protocol version is newer', () => {
+    // The default case should warn about unknown types when protocolVersion mismatch
+    assertHtml(
+      html,
+      /default:\s*[\s\S]*console\.warn\(\s*"\[dashboard\] Unknown message type/,
+      'default case should console.warn about unknown message types'
+    )
+  })
+
   it('handles stream messages', () => {
     assert.ok(html.includes('stream_start'), 'should handle stream_start')
     assert.ok(html.includes('stream_delta'), 'should handle stream_delta')

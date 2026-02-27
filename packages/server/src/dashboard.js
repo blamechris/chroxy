@@ -1072,6 +1072,8 @@ function getDashboardJs() {
   var terminalBuffer = "";
   var TERMINAL_BUFFER_MAX = 102400;
   var serverMode = null;
+  var CLIENT_PROTOCOL_VERSION = 1;
+  var serverProtocolVersion = null;
 
   // ---- DOM refs ----
   var messagesEl = document.getElementById("chat-messages");
@@ -2222,6 +2224,7 @@ function getDashboardJs() {
     if (ws) {
       try { ws.close(); } catch(e) {}
     }
+    serverProtocolVersion = null;
     setConnectionState("connecting");
 
     var url = "ws://localhost:" + port;
@@ -2326,6 +2329,9 @@ function getDashboardJs() {
         setConnectionState("connected");
         if (msg.serverMode) {
           serverMode = msg.serverMode;
+        }
+        if (typeof msg.protocolVersion === "number") {
+          serverProtocolVersion = msg.protocolVersion;
         }
         break;
 
@@ -2659,7 +2665,9 @@ function getDashboardJs() {
         break;
 
       default:
-        // Ignore unhandled message types
+        if (serverProtocolVersion != null && serverProtocolVersion > CLIENT_PROTOCOL_VERSION) {
+          console.warn("[dashboard] Unknown message type \"" + msg.type + "\" (server protocol v" + serverProtocolVersion + ", client v" + CLIENT_PROTOCOL_VERSION + ")");
+        }
         break;
     }
   }
