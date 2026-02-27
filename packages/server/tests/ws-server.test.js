@@ -6856,6 +6856,38 @@ describe('dashboard endpoint', () => {
     const body = await res.text()
     assert.ok(body.includes('Chroxy Dashboard'))
   })
+
+  it('response has Content-Security-Policy header', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-csp',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
+    const csp = res.headers.get('content-security-policy')
+    assert.ok(csp, 'CSP header should be present')
+    assert.ok(csp.includes("default-src 'self'"), 'CSP should restrict default-src')
+    assert.ok(csp.includes("script-src 'self' 'unsafe-inline'"), 'CSP should allow inline scripts')
+    assert.ok(csp.includes("style-src 'self' 'unsafe-inline'"), 'CSP should allow inline styles')
+    assert.ok(csp.includes('connect-src'), 'CSP should restrict connect-src')
+    assert.ok(csp.includes('ws:') || csp.includes('wss:'), 'CSP should allow WebSocket connections')
+  })
+
+  it('response has X-Frame-Options: DENY header', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-frame',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
+    assert.equal(res.headers.get('x-frame-options'), 'DENY')
+  })
 })
 
 // ---------------------------------------------------------------------------
