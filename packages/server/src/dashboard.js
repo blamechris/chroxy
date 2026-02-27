@@ -7,14 +7,15 @@
  * @param {boolean} noEncrypt - Whether E2E encryption is disabled
  * @returns {string} Complete HTML document
  */
-export function getDashboardHtml(port, apiToken, noEncrypt) {
+export function getDashboardHtml(port, apiToken, noEncrypt, nonce) {
+  const n = nonce ? ` nonce="${nonce}"` : ''
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chroxy Dashboard</title>
-  <style>${getDashboardCss()}</style>
+  <style${n}>${getDashboardCss()}</style>
   <link rel="stylesheet" href="/assets/xterm/xterm.css">
 </head>
 <body>
@@ -126,14 +127,14 @@ export function getDashboardHtml(port, apiToken, noEncrypt) {
   </div>
   <script src="/assets/xterm/xterm.js"></script>
   <script src="/assets/xterm/addon-fit.js"></script>
-  <script>
+  <script${n}>
     window.__CHROXY_CONFIG__ = {
       port: ${port},
       token: ${apiToken ? JSON.stringify(apiToken).replace(/</g, '\\u003c') : '""'},
       noEncrypt: ${!!noEncrypt},
     };
   </script>
-  <script>${getDashboardJs()}</script>
+  <script${n}>${getDashboardJs()}</script>
 </body>
 </html>`
 }

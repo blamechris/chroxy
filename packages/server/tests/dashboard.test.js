@@ -58,9 +58,19 @@ describe('getDashboardHtml', () => {
   })
 
   it('includes CSS', () => {
-    const html = getDashboardHtml(8765, null, false)
-    assert.ok(html.includes('<style>'))
+    const html = getDashboardHtml(8765, null, false, 'test-nonce')
+    assert.ok(html.includes('<style'))
     assert.ok(html.includes('background'))
+  })
+
+  it('adds nonce attributes to inline style and script tags', () => {
+    const html = getDashboardHtml(8765, null, false, 'abc123')
+    assert.ok(html.includes('nonce="abc123"'), 'should add nonce to inline tags')
+    assert.ok(!html.includes('<style>'), 'bare <style> without nonce should not exist')
+    assert.ok(html.includes('<style nonce="abc123">'), 'style tag should have nonce')
+    // Config script and main JS script should both have nonce
+    const nonceCount = (html.match(/nonce="abc123"/g) || []).length
+    assert.ok(nonceCount >= 3, `should have at least 3 nonce attributes (style + 2 scripts), got ${nonceCount}`)
   })
 })
 
