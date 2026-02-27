@@ -439,7 +439,7 @@ describe('Supervisor', () => {
       const { supervisor } = setup()
       supervisor._port = 0
 
-      // Pre-set the retry counter past the limit
+      // Pre-set the retry counter to the limit
       supervisor._standbyRetries = 20
 
       // Attempt to start standby — should refuse due to exceeded retries
