@@ -297,9 +297,7 @@ describe('store actions', () => {
       expect(useConnectionStore.getState().userDisconnected).toBe(true);
     });
 
-    it('userDisconnected prevents auto-connect from savedConnection', () => {
-      // After disconnect, savedConnection may still exist in SecureStore
-      // but userDisconnected=true should prevent auto-reconnect
+    it('disconnect sets both userDisconnected and connectionPhase', () => {
       useConnectionStore.setState({ connectionPhase: 'connected', userDisconnected: false });
       useConnectionStore.getState().disconnect();
       expect(useConnectionStore.getState().userDisconnected).toBe(true);
