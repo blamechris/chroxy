@@ -622,6 +622,8 @@ export function SessionScreen() {
           <TouchableOpacity
             style={[styles.modeButton, viewMode === 'chat' && styles.modeButtonActive]}
             onPress={() => setViewMode('chat')}
+            accessibilityRole="button"
+            accessibilityLabel="Chat"
           >
             <Text style={[styles.modeButtonText, viewMode === 'chat' && styles.modeButtonTextActive]}>
               Chat
@@ -631,6 +633,8 @@ export function SessionScreen() {
             <TouchableOpacity
               style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
               onPress={() => setViewMode('terminal')}
+              accessibilityRole="button"
+              accessibilityLabel="Terminal"
             >
               <Text style={[styles.modeButtonText, viewMode === 'terminal' && styles.modeButtonTextActive]}>
                 Term
@@ -640,6 +644,8 @@ export function SessionScreen() {
           <TouchableOpacity
             style={[styles.modeButton, viewMode === 'files' && styles.modeButtonActive]}
             onPress={() => setViewMode('files')}
+            accessibilityRole="button"
+            accessibilityLabel="Files"
           >
             <Text style={[styles.modeButtonText, viewMode === 'files' && styles.modeButtonTextActive]}>
               Files
