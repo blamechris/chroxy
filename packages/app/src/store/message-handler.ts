@@ -21,6 +21,7 @@ import {
 } from '../utils/crypto';
 import { registerForPushNotifications } from '../notifications';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
+import { hapticSuccess } from '../utils/haptics';
 import type {
   ChatMessage,
   Checkpoint,
@@ -524,6 +525,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       _receivingHistoryReplay = false;
       _isSessionSwitchReplay = false;
       _pendingSwitchSessionId = null;
+      if (!ctx.isReconnect) hapticSuccess();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
       // Extract server context from auth_ok

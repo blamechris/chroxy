@@ -13,6 +13,7 @@ import { Alert, AppState, Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as Device from 'expo-device';
 import { type EncryptedEnvelope } from '../utils/crypto';
+import { hapticLight, hapticMedium, hapticWarning } from '../utils/haptics';
 
 // Re-export all types for backward compatibility
 export type {
@@ -779,6 +780,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       payload.isVoice = true;
     }
     if (socket && socket.readyState === WebSocket.OPEN) {
+      hapticLight();
       wsSend(socket, payload);
       return 'sent';
     }
@@ -790,6 +792,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const payload: Record<string, unknown> = { type: 'interrupt' };
     if (activeSessionId) payload.sessionId = activeSessionId;
     if (socket && socket.readyState === WebSocket.OPEN) {
+      hapticMedium();
       wsSend(socket, payload);
       return 'sent';
     }
@@ -800,6 +803,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     const payload = { type: 'permission_response', requestId, decision };
     if (socket && socket.readyState === WebSocket.OPEN) {
+      if (decision === 'deny') hapticWarning(); else hapticMedium();
       wsSend(socket, payload);
       return 'sent';
     }
@@ -972,6 +976,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket, activeSessionId, sessionStates } = get();
 
     if (sessionId === activeSessionId) return;
+    hapticLight();
 
     // Mark as user-initiated switch so session_switched handler uses session-switch dedup
     setPendingSwitchSessionId(sessionId);
