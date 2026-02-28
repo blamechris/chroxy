@@ -1,0 +1,76 @@
+import React from 'react';
+import { Ionicons } from '@expo/vector-icons';
+import { COLORS } from '../constants/colors';
+
+/**
+ * Icon name mapping — maps semantic keys to Ionicons glyph names.
+ * This serves as the single source of truth for all icons in the app.
+ */
+export const iconMap: Record<string, string> = {
+  // Navigation & Actions
+  camera: 'camera-outline',
+  search: 'search-outline',
+  settings: 'settings-outline',
+  close: 'close',
+  check: 'checkmark',
+  plus: 'add',
+  send: 'send',
+  stop: 'stop-circle-outline',
+  mic: 'mic-outline',
+  paperclip: 'attach-outline',
+  download: 'download-outline',
+  export: 'share-outline',
+
+  // Content & Files
+  folder: 'folder-outline',
+  folderOpen: 'folder-open-outline',
+  document: 'document-text-outline',
+  diff: 'git-compare-outline',
+  cloud: 'cloud-outline',
+  clock: 'time-outline',
+
+  // Communication
+  chatbubble: 'chatbubble-outline',
+  terminal: 'terminal-outline',
+  satellite: 'radio-outline',
+  link: 'link-outline',
+
+  // Directional
+  chevronDown: 'chevron-down',
+  chevronRight: 'chevron-forward',
+  chevronUp: 'chevron-up',
+  arrowUp: 'arrow-up',
+  arrowDown: 'arrow-down',
+  triangleDown: 'caret-down',
+  triangleRight: 'caret-forward',
+
+  // Status
+  checkCircle: 'checkmark-circle',
+  closeCircle: 'close-circle',
+  alertCircle: 'alert-circle-outline',
+  bullet: 'ellipse',
+  square: 'square',
+
+  // Misc
+  returnKey: 'return-down-back',
+  checkboxChecked: 'checkbox',
+  checkboxUnchecked: 'square-outline',
+};
+
+/** Look up an Ionicons glyph name by semantic key */
+export function getIconName(key: string): string | undefined {
+  return iconMap[key];
+}
+
+interface IconProps {
+  name: keyof typeof iconMap;
+  size?: number;
+  color?: string;
+}
+
+/** Render a vector icon by semantic name */
+export function Icon({ name, size = 20, color = COLORS.textMuted }: IconProps) {
+  const glyphName = iconMap[name];
+  if (!glyphName) return null;
+  return <Ionicons name={glyphName as keyof typeof Ionicons.glyphMap} size={size} color={color} />;
+}
