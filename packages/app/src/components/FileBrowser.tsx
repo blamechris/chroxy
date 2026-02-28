@@ -119,7 +119,7 @@ function FileViewerModal({
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={styles.viewerContainer}>
         <View style={[styles.viewerHeader, { paddingTop: insets.top + 12 }]}>
-          <TouchableOpacity style={styles.viewerCloseButton} onPress={onClose}>
+          <TouchableOpacity style={styles.viewerCloseButton} onPress={onClose} accessibilityRole="button" accessibilityLabel="Close file viewer">
             <Icon name="close" size={18} color={COLORS.textPrimary} />
           </TouchableOpacity>
           <View style={styles.viewerHeaderInfo}>

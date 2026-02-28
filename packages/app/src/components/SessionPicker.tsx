@@ -223,6 +223,8 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
           style={styles.addButton}
           onPress={onCreatePress}
           activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel="Create new session"
         >
           <Icon name="plus" size={20} color={COLORS.textPrimary} />
         </TouchableOpacity>

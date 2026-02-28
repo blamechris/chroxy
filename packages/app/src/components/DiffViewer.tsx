@@ -177,7 +177,7 @@ export function DiffViewer({
       <View style={styles.modalContainer}>
         {/* Header */}
         <View style={styles.modalHeader}>
-          <TouchableOpacity style={styles.closeButton} onPress={handleClose}>
+          <TouchableOpacity style={styles.closeButton} onPress={handleClose} accessibilityRole="button" accessibilityLabel="Close changes viewer">
             <Icon name="close" size={18} color={COLORS.textPrimary} />
           </TouchableOpacity>
           <View style={styles.modalHeaderInfo}>

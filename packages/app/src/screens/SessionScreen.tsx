@@ -612,7 +612,7 @@ export function SessionScreen() {
             <TouchableOpacity style={styles.selectionButton} onPress={handleExport}>
               <Text style={styles.selectionButtonText}>Share</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.selectionCancelButton} onPress={clearSelection}>
+            <TouchableOpacity style={styles.selectionCancelButton} onPress={clearSelection} accessibilityRole="button" accessibilityLabel="Cancel selection">
               <Icon name="close" size={16} color={COLORS.accentRed} />
             </TouchableOpacity>
           </View>
@@ -651,7 +651,7 @@ export function SessionScreen() {
               Files
             </Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)}>
+          <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)} accessibilityRole="button" accessibilityLabel="View changes">
             <Icon name="diff" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
           {(viewMode === 'chat' || (layout.isSplitView && viewMode !== 'files')) && (
@@ -667,10 +667,10 @@ export function SessionScreen() {
           <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('History')} accessibilityRole="button" accessibilityLabel="Conversation history">
             <Icon name="clock" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
+          <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')} accessibilityRole="button" accessibilityLabel="Open settings">
             <Icon name="settings" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
+          <TouchableOpacity style={styles.disconnectButton} onPress={disconnect} accessibilityRole="button" accessibilityLabel="Disconnect">
             <Icon name="close" size={16} color={COLORS.accentRed} />
           </TouchableOpacity>
         </View>
