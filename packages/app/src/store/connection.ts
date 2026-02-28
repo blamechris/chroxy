@@ -93,6 +93,7 @@ import {
   clearConnection,
   loadConnection,
   drainMessageQueue,
+  CLIENT_PROTOCOL_VERSION,
 } from './message-handler';
 import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto';
 import {
@@ -492,6 +493,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           socket.send(JSON.stringify({
             type: 'auth',
             token,
+            protocolVersion: CLIENT_PROTOCOL_VERSION,
             deviceInfo: { deviceId, ...info },
           }));
         }

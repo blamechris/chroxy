@@ -21,6 +21,7 @@ const DeviceInfoSchema = z.object({
 export const AuthSchema = z.object({
   type: z.literal('auth'),
   token: z.string(),
+  protocolVersion: z.number().int().min(1).optional(),
   deviceInfo: DeviceInfoSchema.optional(),
 }).passthrough()
 
@@ -225,6 +226,8 @@ export const ServerAuthOkSchema = z.object({
   connectedClients: z.array(ClientInfoSchema),
   encryption: z.enum(['required', 'disabled']),
   protocolVersion: z.number().int().min(1),
+  minProtocolVersion: z.number().int().min(1),
+  maxProtocolVersion: z.number().int().min(1),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({

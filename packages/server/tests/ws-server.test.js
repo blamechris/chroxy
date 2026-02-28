@@ -716,6 +716,100 @@ describe('WsServer with authRequired: true (default behavior)', () => {
     assert.notEqual(ws.readyState, WebSocket.OPEN, 'Connection should be closed')
   })
 
+  it('auth_ok includes protocol version negotiation fields', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token', protocolVersion: 1 })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.ok(authOk, 'Should receive auth_ok')
+    assert.equal(authOk.protocolVersion, 1, 'auth_ok should include negotiated protocolVersion')
+    assert.equal(typeof authOk.minProtocolVersion, 'number', 'auth_ok should include minProtocolVersion')
+    assert.equal(typeof authOk.maxProtocolVersion, 'number', 'auth_ok should include maxProtocolVersion')
+    assert.ok(authOk.minProtocolVersion <= authOk.protocolVersion, 'min <= negotiated')
+    assert.ok(authOk.maxProtocolVersion >= authOk.protocolVersion, 'max >= negotiated')
+
+    ws.close()
+  })
+
+  it('negotiates protocol version with old client (no version sent)', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    // Old client doesn't send protocolVersion
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.ok(authOk, 'Should receive auth_ok')
+    // Should default to version 1 for backward compatibility
+    assert.equal(authOk.protocolVersion, 1, 'Should default to v1 for old clients')
+    assert.equal(authOk.minProtocolVersion, 1)
+    assert.equal(authOk.maxProtocolVersion, 1)
+
+    ws.close()
+  })
+
+  it('stores client protocol version on connection', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token', protocolVersion: 1 })
+
+    await waitForMessage(messages, 'auth_ok', 2000)
+    const client = Array.from(server.clients.values())[0]
+    assert.equal(client.protocolVersion, 1, 'Client protocolVersion should be stored')
+
+    ws.close()
+  })
+
+  it('logs unknown message types without crashing (forward compatibility)', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token', protocolVersion: 1 })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Send an unknown message type — should not crash
+    send(ws, { type: 'future_message_type_v99', data: 'test' })
+
+    // Give server time to process — if it crashes, test will fail
+    await new Promise(r => setTimeout(r, 200))
+
+    // Connection should still be open
+    assert.equal(ws.readyState, WebSocket.OPEN, 'Connection should remain open after unknown message')
+
+    ws.close()
+  })
+
   it('tracks unauthenticated client before auth', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
