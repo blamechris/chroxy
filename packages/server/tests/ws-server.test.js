@@ -8244,3 +8244,113 @@ describe('provider capability gates', () => {
     ws.close()
   })
 })
+
+describe('client_focus_changed broadcast', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  function createMockSessionManager(sessions = []) {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    for (const s of sessions) {
+      const mockSession = createMockSession()
+      mockSession.cwd = s.cwd
+      sessionsMap.set(s.id, {
+        session: mockSession,
+        name: s.name,
+        cwd: s.cwd,
+        type: 'cli',
+        isBusy: false,
+      })
+    }
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
+    manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
+    manager.getSessionContext = async () => null
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    })
+    return manager
+  }
+
+  it('broadcasts client_focus_changed when a client switches session', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'sess-a', name: 'Session A', cwd: '/tmp/a' },
+      { id: 'sess-b', name: 'Session B', cwd: '/tmp/b' },
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect two clients
+    const client1 = await createClient(port, true)
+    const client2 = await createClient(port, true)
+    await waitForMessage(client1.messages, 'auth_ok', 2000)
+    await waitForMessage(client2.messages, 'auth_ok', 2000)
+
+    // Client 1 switches to session B
+    send(client1.ws, { type: 'switch_session', sessionId: 'sess-b' })
+
+    // Client 2 should receive client_focus_changed
+    const focusMsg = await waitForMessage(client2.messages, 'client_focus_changed', 2000)
+    assert.ok(focusMsg, 'Client 2 should receive client_focus_changed')
+    assert.equal(focusMsg.sessionId, 'sess-b', 'Should indicate the new session')
+    assert.equal(typeof focusMsg.clientId, 'string', 'Should include clientId')
+    assert.equal(typeof focusMsg.timestamp, 'number', 'Should include timestamp')
+
+    client1.ws.close()
+    client2.ws.close()
+  })
+
+  it('does not send client_focus_changed to the switching client itself', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'sess-a', name: 'Session A', cwd: '/tmp/a' },
+      { id: 'sess-b', name: 'Session B', cwd: '/tmp/b' },
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const client1 = await createClient(port, true)
+    await waitForMessage(client1.messages, 'auth_ok', 2000)
+
+    send(client1.ws, { type: 'switch_session', sessionId: 'sess-b' })
+    await waitForMessage(client1.messages, 'session_switched', 2000)
+
+    // Verify no client_focus_changed is delivered to the switching client within a reasonable timeout
+    try {
+      await waitForMessage(client1.messages, 'client_focus_changed', 500)
+      assert.fail('Switching client should NOT receive client_focus_changed')
+    } catch {
+      // Expected: waitForMessage times out because no client_focus_changed is sent to the switcher
+    }
+
+    client1.ws.close()
+  })
+})

@@ -265,6 +265,11 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       ctx.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
       ctx.sendSessionInfo(ws, targetId)
       ctx.replayHistory(ws, targetId)
+      // Notify other clients about this client's focus change
+      ctx.broadcast(
+        { type: 'client_focus_changed', clientId: client.id, sessionId: targetId, timestamp: Date.now() },
+        (c) => c.id !== client.id
+      )
       break
     }
 

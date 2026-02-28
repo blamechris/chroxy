@@ -333,6 +333,13 @@ export const ServerAgentCompletedSchema = z.object({
   toolUseId: z.string(),
 })
 
+export const ServerClientFocusChangedSchema = z.object({
+  type: z.literal('client_focus_changed'),
+  clientId: z.string(),
+  sessionId: z.string(),
+  timestamp: z.number(),
+})
+
 export const ServerMcpServersSchema = z.object({
   type: z.literal('mcp_servers'),
   servers: z.array(z.object({
