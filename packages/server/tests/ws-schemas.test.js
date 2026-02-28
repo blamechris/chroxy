@@ -650,6 +650,8 @@ describe('ServerAuthOkSchema', () => {
       connectedClients: [],
       encryption: 'required',
       protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
     })
     assert.ok(result.success)
   })
@@ -671,6 +673,8 @@ describe('ServerAuthOkSchema', () => {
       }],
       encryption: 'disabled',
       protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
     })
     assert.ok(result.success)
   })
@@ -688,6 +692,8 @@ describe('ServerAuthOkSchema', () => {
         connectedClients: [],
         encryption: 'disabled',
         protocolVersion: 1,
+        minProtocolVersion: 1,
+        maxProtocolVersion: 1,
       })
       assert.ok(!result.success, `Expected '${badMode}' to be rejected`)
     }
@@ -705,6 +711,8 @@ describe('ServerAuthOkSchema', () => {
       connectedClients: [],
       encryption: 'disabled',
       protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
     })
     assert.ok(withVersion.success, 'Should accept auth_ok with protocolVersion')
     assert.equal(withVersion.data.protocolVersion, 1)
@@ -721,6 +729,8 @@ describe('ServerAuthOkSchema', () => {
       connectedClients: [],
       encryption: 'disabled',
       protocolVersion: 1.5,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
     })
     assert.ok(!withFloat.success, 'Should reject non-integer protocolVersion')
   })
