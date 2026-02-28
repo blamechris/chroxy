@@ -272,7 +272,7 @@ program
     } else {
       console.log(`   Tunnel: Quick (random URL)`)
     }
-    console.log(`   API token: ${config.apiToken.slice(0, 8)}...`)
+    console.log(`   API token: ${config.apiToken}`)
     console.log('\nNote: CLI flags and environment variables can override these values.')
     console.log('Run \'npx chroxy start --verbose\' to see full config resolution.\n')
   })
@@ -1026,7 +1026,7 @@ serviceCmd
     if (status.connection) {
       console.log('  URL:        ' + status.connection.wsUrl)
       const token = status.connection.apiToken
-      if (token) console.log('  Token:      ' + token.slice(0, 8) + '...')
+      if (token) console.log('  Token:      ' + token)
     }
 
     if (status.recentLogs && status.recentLogs.length > 0) {

@@ -165,6 +165,31 @@ describe('Supervisor', () => {
       clearInterval(supervisor._heartbeatInterval)
     })
 
+    it('prints full API token and full dashboard URL (not truncated)', async () => {
+      const { supervisor } = setup({ apiToken: 'abcdef1234567890fulltoken' })
+      const logs = []
+      const origLog = console.log
+      console.log = (...args) => logs.push(args.join(' '))
+      try {
+        await supervisor.start()
+      } finally {
+        console.log = origLog
+      }
+
+      const tokenLine = logs.find(l => l.includes('Token:'))
+      assert.ok(tokenLine, 'Should print a Token: line')
+      assert.ok(tokenLine.includes('abcdef1234567890fulltoken'), 'Token should NOT be truncated')
+      assert.ok(!tokenLine.includes('...'), 'Token line should not contain ...')
+
+      const dashLine = logs.find(l => l.includes('Dashboard:'))
+      assert.ok(dashLine, 'Should print a Dashboard: line')
+      assert.ok(dashLine.includes('abcdef1234567890fulltoken'), 'Dashboard URL should contain full token')
+      assert.ok(!dashLine.includes('...'), 'Dashboard URL should not contain ...')
+
+      supervisor._shuttingDown = true
+      clearInterval(supervisor._heartbeatInterval)
+    })
+
     it('exits when no API token configured', async () => {
       const { supervisor } = setup({ apiToken: undefined })
       // Clear the token that constructor may have picked up from env
