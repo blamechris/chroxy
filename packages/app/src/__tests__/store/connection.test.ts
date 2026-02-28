@@ -290,6 +290,30 @@ describe('store actions', () => {
     });
   });
 
+  describe('disconnect sets userDisconnected flag', () => {
+    it('sets userDisconnected to true on explicit disconnect', () => {
+      useConnectionStore.setState({ connectionPhase: 'connected', userDisconnected: false });
+      useConnectionStore.getState().disconnect();
+      expect(useConnectionStore.getState().userDisconnected).toBe(true);
+    });
+
+    it('disconnect sets both userDisconnected and connectionPhase', () => {
+      useConnectionStore.setState({ connectionPhase: 'connected', userDisconnected: false });
+      useConnectionStore.getState().disconnect();
+      expect(useConnectionStore.getState().userDisconnected).toBe(true);
+      expect(useConnectionStore.getState().connectionPhase).toBe('disconnected');
+    });
+
+    it('connect() clears userDisconnected flag', () => {
+      useConnectionStore.setState({ userDisconnected: true, connectionPhase: 'disconnected' });
+      // connect() will fail (no server) but should clear the flag immediately
+      useConnectionStore.getState().connect('ws://localhost:9999', 'test-token');
+      expect(useConnectionStore.getState().userDisconnected).toBe(false);
+      // Clean up — disconnect to cancel any pending retries
+      useConnectionStore.getState().disconnect();
+    });
+  });
+
   describe('forgetSession resets viewingCachedSession', () => {
     it('clears viewingCachedSession on forgetSession', () => {
       useConnectionStore.setState({ viewingCachedSession: true });

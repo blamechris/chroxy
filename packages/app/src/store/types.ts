@@ -294,6 +294,9 @@ export interface ConnectionState {
   // Saved connection for quick reconnect
   savedConnection: SavedConnection | null;
 
+  // User explicitly disconnected — prevents auto-reconnect on ConnectScreen mount
+  userDisconnected: boolean;
+
   // Server mode: 'cli' (headless) or 'terminal' (PTY/tmux)
   serverMode: 'cli' | 'terminal' | null;
 

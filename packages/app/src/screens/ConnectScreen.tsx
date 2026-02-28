@@ -84,11 +84,12 @@ export function ConnectScreen() {
     ),
   );
 
-  // Load saved connection and auto-connect on mount
+  // Load saved connection and auto-connect on mount (skip auto-connect if user just disconnected)
   useEffect(() => {
     let mounted = true;
+    const { userDisconnected } = useConnectionStore.getState();
     loadSavedConnection().then(() => {
-      if (!mounted) return;
+      if (!mounted || userDisconnected) return;
       const saved = useConnectionStore.getState().savedConnection;
       if (saved) {
         setAutoConnecting(true);

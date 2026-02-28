@@ -209,6 +209,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     terminalEnterToSend: false,
   },
   savedConnection: null,
+  userDisconnected: false,
   viewingCachedSession: false,
   viewMode: 'chat',
   messages: [],
@@ -389,7 +390,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
     // Only clear connectionError on fresh user-initiated connections (not retries/reconnects)
     const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
-    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, ...errorPatch });
+    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, userDisconnected: false, ...errorPatch });
 
     if (_retryCount > 0) {
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
@@ -648,6 +649,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       webFeatures: { available: false, remote: false, teleport: false },
       webTasks: [],
       savedConnection: null,
+      userDisconnected: true,
       viewingCachedSession: false,
       conversationHistory: [],
       conversationHistoryLoading: false,
