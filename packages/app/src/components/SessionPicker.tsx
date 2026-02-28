@@ -62,6 +62,9 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
   const destroySession = useConnectionStore((s) => s.destroySession);
   const renameSession = useConnectionStore((s) => s.renameSession);
   const sessionNotifications = useConnectionStore((s) => s.sessionNotifications);
+  const followMode = useConnectionStore((s) => s.followMode);
+  const setFollowMode = useConnectionStore((s) => s.setFollowMode);
+  const connectedClients = useConnectionStore((s) => s.connectedClients);
 
   const scrollViewRef = useRef<ScrollView>(null);
   const pillLayouts = useRef<Map<string, { x: number; width: number }>>(new Map());
@@ -203,6 +206,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
         ref={scrollViewRef}
         horizontal
         showsHorizontalScrollIndicator={false}
+        style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
         onLayout={(e) => setViewportWidth(e.nativeEvent.layout.width)}
         onContentSizeChange={handleContentSizeChange}
@@ -227,15 +231,29 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
           <Text style={styles.addButtonText}>{ICON_PLUS}</Text>
         </TouchableOpacity>
       </ScrollView>
+      {connectedClients.some((c) => !c.isSelf) && (
+        <TouchableOpacity
+          style={[styles.followButton, followMode && styles.followButtonActive]}
+          onPress={() => setFollowMode(!followMode)}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.followButtonText}>{'\u{1F517}'}</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: COLORS.backgroundSecondary,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.backgroundCard,
+  },
+  scrollView: {
+    flex: 1,
   },
   scrollContent: {
     paddingHorizontal: 8,
@@ -329,5 +347,25 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '400',
     lineHeight: 20,
+  },
+  followButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.backgroundCard,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.borderSecondary,
+    marginRight: 8,
+    opacity: 0.5,
+  },
+  followButtonActive: {
+    backgroundColor: COLORS.accentBlueLight,
+    borderColor: COLORS.accentBlueBorderStrong,
+    opacity: 1,
+  },
+  followButtonText: {
+    fontSize: 14,
   },
 });

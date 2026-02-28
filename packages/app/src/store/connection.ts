@@ -180,6 +180,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   myClientId: null,
   connectedClients: [],
   primaryClientId: null,
+  followMode: false,
   connectionError: null,
   connectionRetryCount: 0,
   latencyMs: null,
@@ -263,6 +264,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   exitCachedSession: () => {
     set({ viewingCachedSession: false });
+  },
+
+  setFollowMode: (enabled: boolean) => {
+    set({ followMode: enabled });
   },
 
   getActiveSessionState: () => {
