@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer } from '../store/connection';
-import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN } from '../constants/icons';
+import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 
 // Connection quality → color mapping (consistent 13% opacity backgrounds)
@@ -244,7 +244,7 @@ export function SettingsBar({
         <Text style={styles.summaryText} numberOfLines={1}>
           {summaryParts.join(' \u00B7 ') || 'Settings'}
         </Text>
-        <Text style={styles.chevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
+        {expanded ? <Icon name="chevronDown" size={12} color={COLORS.textMuted} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
       </TouchableOpacity>
       {expanded && (
         <View style={styles.expandedContent}>

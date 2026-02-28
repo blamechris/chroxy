@@ -9,7 +9,7 @@ import {
   LayoutChangeEvent,
 } from 'react-native';
 import { useConnectionStore, SessionInfo, SessionHealth } from '../store/connection';
-import { ICON_PLUS } from '../constants/icons';
+import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 
 
@@ -227,8 +227,10 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
           style={styles.addButton}
           onPress={onCreatePress}
           activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel="Create new session"
         >
-          <Text style={styles.addButtonText}>{ICON_PLUS}</Text>
+          <Icon name="plus" size={20} color={COLORS.textPrimary} />
         </TouchableOpacity>
       </ScrollView>
       {connectedClients.some((c) => !c.isSelf) && (

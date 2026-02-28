@@ -46,6 +46,22 @@ jest.mock('expo-file-system', () => ({
   readAsStringAsync: jest.fn(() => Promise.resolve('')),
 }));
 
+// Mock @expo/vector-icons (native font loading not available in Jest)
+jest.mock('@expo/vector-icons', () => {
+  const React = require('react');
+  const { Text } = require('react-native');
+  const createIconMock = (name) => {
+    const IconComponent = (props) => React.createElement(Text, { testID: `icon-${name}` }, props.name);
+    IconComponent.glyphMap = {};
+    return IconComponent;
+  };
+  return {
+    Ionicons: createIconMock('Ionicons'),
+    MaterialCommunityIcons: createIconMock('MaterialCommunityIcons'),
+    FontAwesome: createIconMock('FontAwesome'),
+  };
+});
+
 // Mock react-native-webview (native module not available in Jest)
 jest.mock('react-native-webview', () => {
   const React = require('react');
