@@ -52,6 +52,7 @@ import {
   ServerAgentIdleSchema,
   ServerAgentSpawnedSchema,
   ServerAgentCompletedSchema,
+  ServerClientFocusChangedSchema,
   ServerPlanStartedSchema,
   ServerPlanReadySchema,
   ServerSessionListSchema,
@@ -650,6 +651,8 @@ describe('ServerAuthOkSchema', () => {
       connectedClients: [],
       encryption: 'required',
       protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
     })
     assert.ok(result.success)
   })
@@ -671,6 +674,8 @@ describe('ServerAuthOkSchema', () => {
       }],
       encryption: 'disabled',
       protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
     })
     assert.ok(result.success)
   })
@@ -688,6 +693,8 @@ describe('ServerAuthOkSchema', () => {
         connectedClients: [],
         encryption: 'disabled',
         protocolVersion: 1,
+        minProtocolVersion: 1,
+        maxProtocolVersion: 1,
       })
       assert.ok(!result.success, `Expected '${badMode}' to be rejected`)
     }
@@ -705,6 +712,8 @@ describe('ServerAuthOkSchema', () => {
       connectedClients: [],
       encryption: 'disabled',
       protocolVersion: 1,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
     })
     assert.ok(withVersion.success, 'Should accept auth_ok with protocolVersion')
     assert.equal(withVersion.data.protocolVersion, 1)
@@ -721,6 +730,8 @@ describe('ServerAuthOkSchema', () => {
       connectedClients: [],
       encryption: 'disabled',
       protocolVersion: 1.5,
+      minProtocolVersion: 1,
+      maxProtocolVersion: 1,
     })
     assert.ok(!withFloat.success, 'Should reject non-integer protocolVersion')
   })
@@ -961,6 +972,51 @@ describe('ServerAgentSpawnedSchema', () => {
 describe('ServerAgentCompletedSchema', () => {
   it('accepts valid agent_completed', () => {
     assert.ok(ServerAgentCompletedSchema.safeParse({ type: 'agent_completed', toolUseId: 'tu1' }).success)
+  })
+})
+
+describe('ServerClientFocusChangedSchema', () => {
+  it('accepts valid client_focus_changed', () => {
+    const result = ServerClientFocusChangedSchema.safeParse({
+      type: 'client_focus_changed',
+      clientId: 'client-1',
+      sessionId: 'sess-a',
+      timestamp: 1709100000000,
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing clientId', () => {
+    assert.ok(!ServerClientFocusChangedSchema.safeParse({
+      type: 'client_focus_changed',
+      sessionId: 'sess-a',
+      timestamp: 1709100000000,
+    }).success)
+  })
+
+  it('rejects missing sessionId', () => {
+    assert.ok(!ServerClientFocusChangedSchema.safeParse({
+      type: 'client_focus_changed',
+      clientId: 'client-1',
+      timestamp: 1709100000000,
+    }).success)
+  })
+
+  it('rejects missing timestamp', () => {
+    assert.ok(!ServerClientFocusChangedSchema.safeParse({
+      type: 'client_focus_changed',
+      clientId: 'client-1',
+      sessionId: 'sess-a',
+    }).success)
+  })
+
+  it('rejects wrong type literal', () => {
+    assert.ok(!ServerClientFocusChangedSchema.safeParse({
+      type: 'focus_changed',
+      clientId: 'client-1',
+      sessionId: 'sess-a',
+      timestamp: 1709100000000,
+    }).success)
   })
 })
 

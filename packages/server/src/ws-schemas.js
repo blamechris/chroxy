@@ -21,6 +21,7 @@ const DeviceInfoSchema = z.object({
 export const AuthSchema = z.object({
   type: z.literal('auth'),
   token: z.string(),
+  protocolVersion: z.number().int().min(1).optional(),
   deviceInfo: DeviceInfoSchema.optional(),
 }).passthrough()
 
@@ -225,6 +226,8 @@ export const ServerAuthOkSchema = z.object({
   connectedClients: z.array(ClientInfoSchema),
   encryption: z.enum(['required', 'disabled']),
   protocolVersion: z.number().int().min(1),
+  minProtocolVersion: z.number().int().min(1),
+  maxProtocolVersion: z.number().int().min(1),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({
@@ -328,6 +331,13 @@ export const ServerAgentSpawnedSchema = z.object({
 export const ServerAgentCompletedSchema = z.object({
   type: z.literal('agent_completed'),
   toolUseId: z.string(),
+})
+
+export const ServerClientFocusChangedSchema = z.object({
+  type: z.literal('client_focus_changed'),
+  clientId: z.string(),
+  sessionId: z.string(),
+  timestamp: z.number(),
 })
 
 export const ServerMcpServersSchema = z.object({
