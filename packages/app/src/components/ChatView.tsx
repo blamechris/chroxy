@@ -698,7 +698,7 @@ export function ChatView({
 
   // Animation: only animate messages arriving after initial mount
   const mountTimeRef = useRef(Date.now());
-  const [reduceMotion, setReduceMotion] = useState(false);
+  const [reduceMotion, setReduceMotion] = useState(true);
   useEffect(() => {
     const listener = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
     AccessibilityInfo.isReduceMotionEnabled().then(setReduceMotion);

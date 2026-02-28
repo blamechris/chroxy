@@ -18,7 +18,7 @@ export function getAnimationConfig(type: MessageType): AnimationConfig {
     case 'response':
       return { translateX: -30, translateY: 0, duration: 200 };
     case 'prompt':
-      return { translateX: 0, translateY: 20, duration: 250 };
+      return { translateX: 0, translateY: 20, duration: 240 };
     case 'system':
     case 'error':
       return { translateX: 0, translateY: 0, duration: 150 };
@@ -78,10 +78,6 @@ export function AnimatedMessage({ type, timestamp, mountTime, reduceMotion, chil
     ]).start();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  if (!animate) {
-    return <>{children}</>;
-  }
 
   return (
     <Animated.View style={{ opacity, transform: [{ translateX }, { translateY }] }}>
