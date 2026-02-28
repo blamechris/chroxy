@@ -48,6 +48,7 @@ export default [
         MutationObserver: 'readonly',
         ResizeObserver: 'readonly',
         navigator: 'readonly',
+        Blob: 'readonly',
         // xterm.js globals (loaded via separate script tags)
         Terminal: 'readonly',
         FitAddon: 'readonly',

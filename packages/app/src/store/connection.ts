@@ -46,6 +46,7 @@ export type {
   ConnectionPhase,
   ConnectionContext,
   ConversationSummary,
+  SearchResult,
   ConnectionState,
 } from './types';
 
@@ -111,6 +112,9 @@ import {
 } from './persistence';
 
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
+
+/** Monotonic counter to scope search timeout to the initiating request */
+let searchNonce = 0;
 
 /** Delay before auto-reconnecting after an unexpected socket close (ms) */
 const AUTO_RECONNECT_DELAY = 1500;
@@ -201,6 +205,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _diffCallback: null,
   conversationHistory: [],
   conversationHistoryLoading: false,
+  searchResults: [],
+  searchLoading: false,
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -661,6 +667,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       viewingCachedSession: false,
       conversationHistory: [],
       conversationHistoryLoading: false,
+      searchResults: [],
+      searchLoading: false,
     });
   },
 
@@ -1063,6 +1071,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (cwd) payload.cwd = cwd;
       wsSend(socket, payload);
     }
+  },
+
+  searchConversations: (query: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      searchNonce++;
+      const thisNonce = searchNonce;
+      set({ searchLoading: true, searchResults: [] });
+      wsSend(socket, { type: 'search_conversations', query });
+      // Timeout to clear loading if no response in 15s (only if same request)
+      setTimeout(() => {
+        if (get().searchLoading && searchNonce === thisNonce) {
+          set({ searchLoading: false });
+        }
+      }, 15000);
+    }
+  },
+
+  clearSearchResults: () => {
+    set({ searchResults: [], searchLoading: false });
   },
 
   requestFullHistory: (sessionId?: string) => {
