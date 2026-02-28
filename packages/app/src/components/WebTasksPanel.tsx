@@ -7,7 +7,8 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { COLORS } from '../constants/colors';
-import { ICON_CLOUD, ICON_CHECK, ICON_CROSS, ICON_DOWNLOAD } from '../constants/icons';
+import { ICON_CHECK, ICON_CROSS } from '../constants/icons';
+import { Icon } from './Icon';
 import type { WebTask, WebFeatureStatus } from '../store/types';
 
 interface WebTasksPanelProps {
@@ -51,7 +52,7 @@ export function WebTasksPanel({ tasks, webFeatures, onTeleport }: WebTasksPanelP
         accessibilityRole="button"
         accessibilityLabel={`Web Tasks (${tasks.length}), ${expanded ? 'collapse' : 'expand'}`}
       >
-        <Text style={styles.headerIcon}>{ICON_CLOUD}</Text>
+        <Icon name="cloud" size={16} color={COLORS.accentBlue} />
         <Text style={styles.headerText}>
           Web Tasks ({tasks.length})
         </Text>
@@ -96,7 +97,7 @@ export function WebTasksPanel({ tasks, webFeatures, onTeleport }: WebTasksPanelP
                     onPress={() => onTeleport(task.taskId)}
                     accessibilityLabel="Pull to local"
                   >
-                    <Text style={styles.teleportIcon}>{ICON_DOWNLOAD}</Text>
+                    <Icon name="download" size={14} color={COLORS.accentBlue} />
                     <Text style={styles.teleportText}>Pull</Text>
                   </TouchableOpacity>
                 )}

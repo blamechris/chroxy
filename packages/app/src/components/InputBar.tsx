@@ -1,6 +1,7 @@
 import React, { forwardRef, useMemo, useRef, useEffect } from 'react';
 import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, StyleSheet, Platform, Animated, Alert } from 'react-native';
-import { ICON_ARROW_UP, ICON_SQUARE, ICON_RETURN, ICON_PARAGRAPH, ICON_MICROPHONE, ICON_PAPERCLIP, ICON_CAMERA, ICON_CLOSE, ICON_DOCUMENT } from '../constants/icons';
+import { ICON_RETURN, ICON_PARAGRAPH } from '../constants/icons';
+import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 import type { SlashCommand } from '../store/connection';
 import type { Attachment } from '../utils/attachments';
@@ -159,7 +160,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
                 <Image source={{ uri: att.uri }} style={styles.attachmentImage} />
               ) : (
                 <View style={styles.attachmentDoc}>
-                  <Text style={styles.attachmentDocIcon}>{ICON_DOCUMENT}</Text>
+                  <Icon name="document" size={20} color={COLORS.textMuted} />
                   <Text style={styles.attachmentDocName} numberOfLines={1}>{att.name}</Text>
                 </View>
               )}
@@ -172,7 +173,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
                   accessibilityRole="button"
                   accessibilityLabel={`Remove ${att.name}`}
                 >
-                  <Text style={styles.attachmentRemoveText}>{ICON_CLOSE}</Text>
+                  <Icon name="close" size={10} color={COLORS.textPrimary} />
                 </TouchableOpacity>
               )}
             </View>
@@ -214,7 +215,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
             <View style={styles.cameraButton}>
-              <Text style={styles.cameraButtonText}>{ICON_CAMERA}</Text>
+              <Icon name="camera" size={20} color={COLORS.textMuted} />
             </View>
           </TouchableOpacity>
         )}
@@ -226,7 +227,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
             <View style={styles.attachButton}>
-              <Text style={styles.attachButtonText}>{ICON_PAPERCLIP}</Text>
+              <Icon name="paperclip" size={20} color={COLORS.textMuted} />
             </View>
           </TouchableOpacity>
         )}
@@ -250,7 +251,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
                 !onMicPress ? { opacity: 0.3 } : undefined,
               ]}
             >
-              <Text style={styles.micButtonText}>{ICON_MICROPHONE}</Text>
+              <Icon name="mic" size={18} color={COLORS.textMuted} />
             </Animated.View>
           </TouchableOpacity>
         )}
@@ -263,7 +264,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
             accessibilityLabel="Interrupt Claude"
             accessibilityState={a11yDisabled}
           >
-            <Text style={styles.interruptButtonText}>{ICON_SQUARE}</Text>
+            <Icon name="stop" size={16} color={COLORS.textPrimary} />
           </TouchableOpacity>
         ) : (
           <TouchableOpacity
@@ -274,7 +275,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
             accessibilityLabel="Send message"
             accessibilityState={a11yDisabled}
           >
-            <Text style={styles.sendButtonText}>{ICON_ARROW_UP}</Text>
+            <Icon name="arrowUp" size={20} color={COLORS.textPrimary} />
           </TouchableOpacity>
         )}
       </View>

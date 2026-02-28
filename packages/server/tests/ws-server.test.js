@@ -716,6 +716,100 @@ describe('WsServer with authRequired: true (default behavior)', () => {
     assert.notEqual(ws.readyState, WebSocket.OPEN, 'Connection should be closed')
   })
 
+  it('auth_ok includes protocol version negotiation fields', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token', protocolVersion: 1 })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.ok(authOk, 'Should receive auth_ok')
+    assert.equal(authOk.protocolVersion, 1, 'auth_ok should include server protocolVersion')
+    assert.equal(typeof authOk.minProtocolVersion, 'number', 'auth_ok should include minProtocolVersion')
+    assert.equal(typeof authOk.maxProtocolVersion, 'number', 'auth_ok should include maxProtocolVersion')
+    assert.ok(authOk.minProtocolVersion <= authOk.protocolVersion, 'min <= server version')
+    assert.ok(authOk.maxProtocolVersion >= authOk.protocolVersion, 'max >= server version')
+
+    ws.close()
+  })
+
+  it('negotiates protocol version with old client (no version sent)', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    // Old client doesn't send protocolVersion
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.ok(authOk, 'Should receive auth_ok')
+    // Should default to version 1 for backward compatibility
+    assert.equal(authOk.protocolVersion, 1, 'Should default to v1 for old clients')
+    assert.equal(authOk.minProtocolVersion, 1)
+    assert.equal(authOk.maxProtocolVersion, 1)
+
+    ws.close()
+  })
+
+  it('stores client protocol version on connection', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token', protocolVersion: 1 })
+
+    await waitForMessage(messages, 'auth_ok', 2000)
+    const client = Array.from(server.clients.values())[0]
+    assert.equal(client.protocolVersion, 1, 'Client protocolVersion should be stored')
+
+    ws.close()
+  })
+
+  it('keeps connection open on unknown message types (forward compatibility)', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token', protocolVersion: 1 })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Send an unknown message type — should not crash
+    send(ws, { type: 'future_message_type_v99', data: 'test' })
+
+    // Give server time to process — if it crashes, test will fail
+    await new Promise(r => setTimeout(r, 200))
+
+    // Connection should still be open
+    assert.equal(ws.readyState, WebSocket.OPEN, 'Connection should remain open after unknown message')
+
+    ws.close()
+  })
+
   it('tracks unauthenticated client before auth', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
@@ -8148,5 +8242,115 @@ describe('provider capability gates', () => {
     assert.ok(error.message.includes('resume'), 'Error should mention resume')
 
     ws.close()
+  })
+})
+
+describe('client_focus_changed broadcast', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  function createMockSessionManager(sessions = []) {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+    for (const s of sessions) {
+      const mockSession = createMockSession()
+      mockSession.cwd = s.cwd
+      sessionsMap.set(s.id, {
+        session: mockSession,
+        name: s.name,
+        cwd: s.cwd,
+        type: 'cli',
+        isBusy: false,
+      })
+    }
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
+    manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
+    manager.getSessionContext = async () => null
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    })
+    return manager
+  }
+
+  it('broadcasts client_focus_changed when a client switches session', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'sess-a', name: 'Session A', cwd: '/tmp/a' },
+      { id: 'sess-b', name: 'Session B', cwd: '/tmp/b' },
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect two clients
+    const client1 = await createClient(port, true)
+    const client2 = await createClient(port, true)
+    await waitForMessage(client1.messages, 'auth_ok', 2000)
+    await waitForMessage(client2.messages, 'auth_ok', 2000)
+
+    // Client 1 switches to session B
+    send(client1.ws, { type: 'switch_session', sessionId: 'sess-b' })
+
+    // Client 2 should receive client_focus_changed
+    const focusMsg = await waitForMessage(client2.messages, 'client_focus_changed', 2000)
+    assert.ok(focusMsg, 'Client 2 should receive client_focus_changed')
+    assert.equal(focusMsg.sessionId, 'sess-b', 'Should indicate the new session')
+    assert.equal(typeof focusMsg.clientId, 'string', 'Should include clientId')
+    assert.equal(typeof focusMsg.timestamp, 'number', 'Should include timestamp')
+
+    client1.ws.close()
+    client2.ws.close()
+  })
+
+  it('does not send client_focus_changed to the switching client itself', async () => {
+    const mockManager = createMockSessionManager([
+      { id: 'sess-a', name: 'Session A', cwd: '/tmp/a' },
+      { id: 'sess-b', name: 'Session B', cwd: '/tmp/b' },
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const client1 = await createClient(port, true)
+    await waitForMessage(client1.messages, 'auth_ok', 2000)
+
+    send(client1.ws, { type: 'switch_session', sessionId: 'sess-b' })
+    await waitForMessage(client1.messages, 'session_switched', 2000)
+
+    // Verify no client_focus_changed is delivered to the switching client within a reasonable timeout
+    try {
+      await waitForMessage(client1.messages, 'client_focus_changed', 500)
+      assert.fail('Switching client should NOT receive client_focus_changed')
+    } catch {
+      // Expected: waitForMessage times out because no client_focus_changed is sent to the switcher
+    }
+
+    client1.ws.close()
   })
 })

@@ -26,8 +26,10 @@ const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
 const SERVER_VERSION = packageJson.version
 
-/** Protocol version — bumped when the WS message set changes */
+/** Protocol version — bumped when the WS message set changes (additive only) */
 export const SERVER_PROTOCOL_VERSION = 1
+/** Minimum protocol version this server can speak */
+export const MIN_PROTOCOL_VERSION = 1
 
 /** Cached latest version from npm registry (null if unavailable) */
 let _latestVersionCache = { version: null, checkedAt: 0 }
@@ -730,6 +732,8 @@ export class WsServer {
       connectedClients: this._getConnectedClientList(),
       encryption: requireEncryption ? 'required' : 'disabled',
       protocolVersion: SERVER_PROTOCOL_VERSION,
+      minProtocolVersion: MIN_PROTOCOL_VERSION,
+      maxProtocolVersion: SERVER_PROTOCOL_VERSION,
       webFeatures: this._webTaskManager.getFeatureStatus(),
     })
 
@@ -890,6 +894,10 @@ export class WsServer {
         client.authTime = Date.now()
         // Clear rate limit on successful auth
         this._authFailures.delete(ip)
+        // Extract client protocol version (default to 1 for old clients)
+        client.protocolVersion = typeof msg.protocolVersion === 'number' &&
+          Number.isInteger(msg.protocolVersion) && msg.protocolVersion >= 1
+          ? msg.protocolVersion : 1
         // Extract optional device info from auth message
         if (msg.deviceInfo && typeof msg.deviceInfo === 'object') {
           client.deviceInfo = {
