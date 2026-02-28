@@ -28,6 +28,7 @@ import { FileBrowser } from '../components/FileBrowser';
 import { DiffViewer } from '../components/DiffViewer';
 import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
 import { DevPreviewBanner } from '../components/DevPreviewBanner';
+import { SessionOverview } from '../components/SessionOverview';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
@@ -207,6 +208,7 @@ export function SessionScreen() {
   const isCliMode = serverMode === 'cli';
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showDiffViewer, setShowDiffViewer] = useState(false);
+  const [showSessionOverview, setShowSessionOverview] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
 
   // Search state
@@ -595,7 +597,26 @@ export function SessionScreen() {
     <View style={styles.container}>
       {/* Session picker (CLI mode with multi-session support) */}
       {isCliMode && sessions.length > 0 && (
-        <SessionPicker onCreatePress={() => setShowCreateModal(true)} />
+        <View style={styles.sessionPickerRow}>
+          <View style={{ flex: 1 }}>
+            <SessionPicker onCreatePress={() => setShowCreateModal(true)} />
+          </View>
+          <TouchableOpacity
+            style={styles.overviewButton}
+            onPress={() => setShowSessionOverview(!showSessionOverview)}
+            accessibilityRole="button"
+            accessibilityLabel={showSessionOverview ? 'Hide session overview' : 'Show session overview'}
+          >
+            <Text style={[styles.overviewButtonText, showSessionOverview && styles.overviewButtonTextActive]}>
+              {'☰'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Session overview panel */}
+      {showSessionOverview && (
+        <SessionOverview visible={showSessionOverview} onClose={() => setShowSessionOverview(false)} />
       )}
 
       {/* Selection bar or view mode toggle */}
@@ -881,7 +902,7 @@ export function SessionScreen() {
       )}
 
       {/* Content area — split view on tablets in landscape */}
-      {layout.isSplitView && hasTerminal && viewMode !== 'files' ? (
+      {!showSessionOverview && layout.isSplitView && hasTerminal && viewMode !== 'files' ? (
         <View style={styles.splitContainer}>
           <View style={styles.splitPane}>
             <ChatView
@@ -909,7 +930,7 @@ export function SessionScreen() {
             <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
           </View>
         </View>
-      ) : viewMode === 'chat' ? (
+      ) : !showSessionOverview && viewMode === 'chat' ? (
         <ChatView
           messages={messages}
           scrollViewRef={scrollViewRef}
@@ -929,11 +950,11 @@ export function SessionScreen() {
           searchMatchIds={searchVisible ? searchMatchIds : undefined}
           currentMatchId={searchVisible ? currentMatchId : undefined}
         />
-      ) : viewMode === 'files' ? (
+      ) : !showSessionOverview && viewMode === 'files' ? (
         <FileBrowser />
-      ) : (
+      ) : !showSessionOverview ? (
         <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
-      )}
+      ) : null}
 
       {/* Input area */}
       <InputBar
@@ -1243,6 +1264,23 @@ const styles = StyleSheet.create({
   },
   sheetCancelText: {
     color: COLORS.accentRed,
+  },
+  sessionPickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  overviewButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  overviewButtonText: {
+    color: COLORS.textMuted,
+    fontSize: 18,
+  },
+  overviewButtonTextActive: {
+    color: COLORS.accentBlue,
   },
   splitContainer: {
     flex: 1,
