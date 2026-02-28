@@ -366,7 +366,10 @@ export function ConnectScreen() {
       )}
 
       <TouchableOpacity style={styles.qrButton} onPress={handleScanQR}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}><Icon name="camera" size={20} color={COLORS.textPrimary} /><Text style={styles.qrButtonText}>Scan QR Code</Text></View>
+        <View style={styles.qrButtonContent}>
+          <Icon name="camera" size={20} color={COLORS.textPrimary} />
+          <Text style={styles.qrButtonText}>Scan QR Code</Text>
+        </View>
       </TouchableOpacity>
 
       {/* LAN Discovery */}
@@ -581,6 +584,11 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
     marginBottom: 24,
+  },
+  qrButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   qrButtonText: {
     color: COLORS.textPrimary,
