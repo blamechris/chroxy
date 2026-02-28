@@ -6,7 +6,7 @@ import { COLORS } from '../constants/colors';
  * Icon name mapping — maps semantic keys to Ionicons glyph names.
  * This serves as the single source of truth for all icons in the app.
  */
-export const iconMap: Record<string, string> = {
+export const iconMap = {
   // Navigation & Actions
   camera: 'camera-outline',
   search: 'search-outline',
@@ -55,15 +55,18 @@ export const iconMap: Record<string, string> = {
   returnKey: 'return-down-back',
   checkboxChecked: 'checkbox',
   checkboxUnchecked: 'square-outline',
-};
+} as const satisfies Record<string, string>;
+
+/** Semantic icon name — use this to type-check icon references */
+export type IconName = keyof typeof iconMap;
 
 /** Look up an Ionicons glyph name by semantic key */
-export function getIconName(key: string): string | undefined {
+export function getIconName(key: IconName): string {
   return iconMap[key];
 }
 
 interface IconProps {
-  name: keyof typeof iconMap;
+  name: IconName;
   size?: number;
   color?: string;
 }
