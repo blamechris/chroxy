@@ -1,10 +1,10 @@
 import React from 'react';
-import { iconMap, getIconName } from '../../components/Icon';
+import { iconMap, getIconName, IconName } from '../../components/Icon';
 
 describe('Icon', () => {
   describe('iconMap', () => {
     it('maps all standard icon keys to Ionicons names', () => {
-      const requiredKeys = [
+      const requiredKeys: IconName[] = [
         'camera', 'search', 'settings', 'mic', 'close',
         'check', 'plus', 'folder', 'document', 'cloud',
         'chevronDown', 'chevronRight', 'arrowUp', 'arrowDown',
