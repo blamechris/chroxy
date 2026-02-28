@@ -231,15 +231,13 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
           <Text style={styles.addButtonText}>{ICON_PLUS}</Text>
         </TouchableOpacity>
       </ScrollView>
-      {connectedClients.filter((c) => !c.isSelf).length > 0 && (
+      {connectedClients.some((c) => !c.isSelf) && (
         <TouchableOpacity
           style={[styles.followButton, followMode && styles.followButtonActive]}
           onPress={() => setFollowMode(!followMode)}
           activeOpacity={0.7}
         >
-          <Text style={[styles.followButtonText, followMode && styles.followButtonTextActive]}>
-            {followMode ? '\u{1F517}' : '\u{1F517}'}
-          </Text>
+          <Text style={styles.followButtonText}>{'\u{1F517}'}</Text>
         </TouchableOpacity>
       )}
     </View>
@@ -368,9 +366,6 @@ const styles = StyleSheet.create({
     opacity: 1,
   },
   followButtonText: {
-    fontSize: 14,
-  },
-  followButtonTextActive: {
     fontSize: 14,
   },
 });

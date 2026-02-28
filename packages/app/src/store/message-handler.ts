@@ -1495,9 +1495,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const focusClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
       const focusSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
       if (!focusClientId || !focusSessionId) break;
-      // Auto-switch if follow mode is on, event is from another client, and not already on the target session
-      const { followMode, myClientId, activeSessionId } = get();
-      if (followMode && focusClientId !== myClientId && focusSessionId !== activeSessionId) {
+      // Auto-switch if follow mode is on, event is from another client, target session exists locally, and not already on it
+      const { followMode, myClientId, activeSessionId, sessionStates } = get();
+      if (followMode && focusClientId !== myClientId && focusSessionId !== activeSessionId && sessionStates[focusSessionId]) {
         get().switchSession(focusSessionId);
       }
       break;
