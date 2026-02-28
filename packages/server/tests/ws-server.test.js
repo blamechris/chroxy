@@ -731,11 +731,11 @@ describe('WsServer with authRequired: true (default behavior)', () => {
 
     const authOk = await waitForMessage(messages, 'auth_ok', 2000)
     assert.ok(authOk, 'Should receive auth_ok')
-    assert.equal(authOk.protocolVersion, 1, 'auth_ok should include negotiated protocolVersion')
+    assert.equal(authOk.protocolVersion, 1, 'auth_ok should include server protocolVersion')
     assert.equal(typeof authOk.minProtocolVersion, 'number', 'auth_ok should include minProtocolVersion')
     assert.equal(typeof authOk.maxProtocolVersion, 'number', 'auth_ok should include maxProtocolVersion')
-    assert.ok(authOk.minProtocolVersion <= authOk.protocolVersion, 'min <= negotiated')
-    assert.ok(authOk.maxProtocolVersion >= authOk.protocolVersion, 'max >= negotiated')
+    assert.ok(authOk.minProtocolVersion <= authOk.protocolVersion, 'min <= server version')
+    assert.ok(authOk.maxProtocolVersion >= authOk.protocolVersion, 'max >= server version')
 
     ws.close()
   })
@@ -784,7 +784,7 @@ describe('WsServer with authRequired: true (default behavior)', () => {
     ws.close()
   })
 
-  it('logs unknown message types without crashing (forward compatibility)', async () => {
+  it('keeps connection open on unknown message types (forward compatibility)', async () => {
     const mockSession = createMockSession()
     server = new WsServer({
       port: 0,
