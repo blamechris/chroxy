@@ -111,6 +111,9 @@ import {
 
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
+/** Monotonic counter to scope search timeout to the initiating request */
+let searchNonce = 0;
+
 /** Delay before auto-reconnecting after an unexpected socket close (ms) */
 const AUTO_RECONNECT_DELAY = 1500;
 /** Delay before reconnecting after a WebSocket error (ms) */
@@ -1061,11 +1064,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   searchConversations: (query: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
+      searchNonce++;
+      const thisNonce = searchNonce;
       set({ searchLoading: true, searchResults: [] });
       wsSend(socket, { type: 'search_conversations', query });
-      // Timeout to clear loading if no response in 15s
+      // Timeout to clear loading if no response in 15s (only if same request)
       setTimeout(() => {
-        if (get().searchLoading) set({ searchLoading: false });
+        if (get().searchLoading && searchNonce === thisNonce) {
+          set({ searchLoading: false });
+        }
       }, 15000);
     }
   },

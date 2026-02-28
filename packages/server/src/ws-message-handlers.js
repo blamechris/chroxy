@@ -463,7 +463,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       ctx.send(ws, {
         type: 'cost_summary',
         totalCost: ctx.sessionManager.getTotalCost(),
-        budget: ctx.sessionManager._costBudget,
+        budget: ctx.sessionManager.getCostBudget(),
         sessions: sessionCosts,
       })
       break

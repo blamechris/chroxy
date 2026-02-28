@@ -889,9 +889,6 @@ body {
   font-weight: 600;
 }
 
-/* Responsive: mobile browsers */
-@media (max-width: 600px) {
-  #header { padding: 8px 12px; }
 /* ---- Analytics panel ---- */
 
 .analytics-cards {
@@ -1019,6 +1016,9 @@ body {
   padding: 0 4px;
 }
 
+/* Responsive: mobile browsers */
+@media (max-width: 600px) {
+  #header { padding: 8px 12px; }
   .logo { font-size: 16px; }
   .header-right select { font-size: 12px; padding: 3px 6px; }
   .header-btn { padding: 3px 5px; }

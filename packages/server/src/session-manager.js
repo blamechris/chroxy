@@ -924,6 +924,14 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Get the configured cost budget, or null if none set.
+   * @returns {number|null}
+   */
+  getCostBudget() {
+    return this._costBudget
+  }
+
+  /**
    * Check if a session is paused due to exceeding the cost budget.
    * @param {string} sessionId
    * @returns {boolean}

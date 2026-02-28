@@ -1265,7 +1265,7 @@
           reconnectTimer = setTimeout(function() {
             reconnectAttempt++;
             loadCostEvents();
-  connect();
+            connect();
           }, delay);
         } else {
           reconnectText.textContent = "Connection lost.";
@@ -1276,7 +1276,7 @@
         // Initial connection attempt — retry quickly
         reconnectTimer = setTimeout(function() {
           loadCostEvents();
-  connect();
+          connect();
         }, 1000);
       }
     };
@@ -1719,7 +1719,7 @@
     reconnectRetryBtn.classList.add("hidden");
     reconnectText.textContent = "Reconnecting...";
     loadCostEvents();
-  connect();
+    connect();
   });
 
   function submitReauth() {
@@ -1733,7 +1733,7 @@
     reconnectAttempt = 0;
     reconnectText.textContent = "Reconnecting with new token...";
     loadCostEvents();
-  connect();
+    connect();
   }
 
   reauthSubmitBtn.addEventListener("click", submitReauth);
@@ -1815,8 +1815,13 @@
   function loadCostEvents() {
     try {
       var json = localStorage.getItem(COST_STORAGE_KEY);
-      if (json) costEvents = JSON.parse(json);
-    } catch (e) {
+      if (json) {
+        var parsed = JSON.parse(json);
+        costEvents = Array.isArray(parsed) ? parsed : [];
+      } else {
+        costEvents = [];
+      }
+    } catch (_e) {
       costEvents = [];
     }
   }
@@ -1860,8 +1865,8 @@
     html += '<div class="analytics-card"><div class="analytics-card-value">' + formatAnalyticsCost(total) + '</div><div class="analytics-card-label">Total Cost</div></div>';
     html += '<div class="analytics-card"><div class="analytics-card-value">' + (serverSessions.length || sessions.length) + '</div><div class="analytics-card-label">Sessions</div></div>';
     html += '<div class="analytics-card"><div class="analytics-card-value">' + costEvents.length + '</div><div class="analytics-card-label">Queries</div></div>';
-    if (budget) {
-      var pct = total && budget ? Math.round((total / budget) * 100) : 0;
+    if (typeof budget === "number") {
+      var pct = (typeof total === "number" && budget !== 0) ? Math.round((total / budget) * 100) : 0;
       html += '<div class="analytics-card"><div class="analytics-card-value">' + formatAnalyticsCost(budget - (total || 0)) + '</div><div class="analytics-card-label">Budget Remaining (' + pct + '%)</div></div>';
     }
     html += '</div>';
