@@ -633,7 +633,7 @@ export function SessionScreen() {
               onPress={() => setViewMode('terminal')}
             >
               <Text style={[styles.modeButtonText, viewMode === 'terminal' && styles.modeButtonTextActive]}>
-                Terminal
+                Term
               </Text>
             </TouchableOpacity>
           )}
