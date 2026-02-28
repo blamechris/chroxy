@@ -15,7 +15,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import * as Network from 'expo-network';
 import { useConnectionStore } from '../store/connection';
-import { ICON_SATELLITE, ICON_CAMERA, ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
+import { Icon } from '../components/Icon';
+import { ICON_SATELLITE, ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 const DEFAULT_PORT = 8765;
@@ -272,7 +273,7 @@ export function ConnectScreen() {
   if (autoConnecting) {
     return (
       <View style={styles.autoConnectContainer}>
-        <Text style={styles.logo}>{ICON_SATELLITE}</Text>
+        <Icon name="satellite" size={48} color={COLORS.accentBlue} />
         <ActivityIndicator size="large" color={COLORS.accentBlue} style={styles.autoConnectSpinner} />
         <Text style={styles.autoConnectText}>
           Connecting to {savedConnection ? formatUrl(savedConnection.url) : 'server'}...
@@ -324,7 +325,7 @@ export function ConnectScreen() {
       keyboardShouldPersistTaps="handled"
     >
       <View style={styles.header}>
-        <Text style={styles.logo}>{ICON_SATELLITE}</Text>
+        <Icon name="satellite" size={48} color={COLORS.accentBlue} />
         <Text style={styles.title}>Connect to Chroxy</Text>
         <Text style={styles.subtitle}>
           Run 'npx chroxy start' on your Mac, then scan the QR code
@@ -365,7 +366,7 @@ export function ConnectScreen() {
       )}
 
       <TouchableOpacity style={styles.qrButton} onPress={handleScanQR}>
-        <Text style={styles.qrButtonText}>{ICON_CAMERA} Scan QR Code</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}><Icon name="camera" size={20} color={COLORS.textPrimary} /><Text style={styles.qrButtonText}>Scan QR Code</Text></View>
       </TouchableOpacity>
 
       {/* LAN Discovery */}

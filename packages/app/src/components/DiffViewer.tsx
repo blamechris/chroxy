@@ -12,7 +12,8 @@ import {
 } from 'react-native';
 import { useConnectionStore, DiffResult, DiffFile, DiffHunk } from '../store/connection';
 import { COLORS } from '../constants/colors';
-import { ICON_CLOSE, ICON_DIFF } from '../constants/icons';
+import { ICON_DIFF } from '../constants/icons';
+import { Icon } from './Icon';
 
 /** Status badge color mapping */
 function statusColor(status: DiffFile['status']): string {
@@ -177,7 +178,7 @@ export function DiffViewer({
         {/* Header */}
         <View style={styles.modalHeader}>
           <TouchableOpacity style={styles.closeButton} onPress={handleClose}>
-            <Text style={styles.closeText}>{ICON_CLOSE}</Text>
+            <Icon name="close" size={18} color={COLORS.textPrimary} />
           </TouchableOpacity>
           <View style={styles.modalHeaderInfo}>
             <Text style={styles.modalTitle}>

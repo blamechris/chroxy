@@ -31,7 +31,7 @@ import { DevPreviewBanner } from '../components/DevPreviewBanner';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
-import { ICON_CLOSE, ICON_GEAR, ICON_DIFF, ICON_SEARCH, ICON_EXPORT, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOCK } from '../constants/icons';
+import { Icon } from '../components/Icon';
 import { COLORS } from '../constants/colors';
 import { useLayout } from '../hooks/useLayout';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
@@ -613,7 +613,7 @@ export function SessionScreen() {
               <Text style={styles.selectionButtonText}>Share</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.selectionCancelButton} onPress={clearSelection}>
-              <Text style={styles.selectionCancelText}>{ICON_CLOSE}</Text>
+              <Icon name="close" size={16} color={COLORS.accentRed} />
             </TouchableOpacity>
           </View>
         </View>
@@ -652,26 +652,26 @@ export function SessionScreen() {
             </Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)}>
-            <Text style={styles.diffButtonText}>{ICON_DIFF}</Text>
+            <Icon name="diff" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
           {(viewMode === 'chat' || (layout.isSplitView && viewMode !== 'files')) && (
             <TouchableOpacity style={styles.diffButton} onPress={handleSearchOpen} accessibilityRole="button" accessibilityLabel="Search messages">
-              <Text style={styles.diffButtonText}>{ICON_SEARCH}</Text>
+              <Icon name="search" size={16} color={COLORS.textMuted} />
             </TouchableOpacity>
           )}
           {(viewMode === 'terminal' || (layout.isSplitView && hasTerminal && viewMode !== 'files')) && (
             <TouchableOpacity style={styles.diffButton} onPress={handleExportTerminal} accessibilityRole="button" accessibilityLabel="Export terminal output">
-              <Text style={styles.diffButtonText}>{ICON_EXPORT}</Text>
+              <Icon name="export" size={16} color={COLORS.textMuted} />
             </TouchableOpacity>
           )}
           <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('History')} accessibilityRole="button" accessibilityLabel="Conversation history">
-            <Text style={styles.settingsButtonText}>{ICON_CLOCK}</Text>
+            <Icon name="clock" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
           <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
-            <Text style={styles.settingsButtonText}>{ICON_GEAR}</Text>
+            <Icon name="settings" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
           <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
-            <Text style={styles.disconnectButtonText}>{ICON_CLOSE}</Text>
+            <Icon name="close" size={16} color={COLORS.accentRed} />
           </TouchableOpacity>
         </View>
       )}
@@ -696,13 +696,13 @@ export function SessionScreen() {
             </Text>
           )}
           <TouchableOpacity onPress={handleSearchPrev} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Previous match">
-            <Text style={styles.searchNavText}>{ICON_ARROW_UP}</Text>
+            <Icon name="arrowUp" size={16} color={COLORS.textSecondary} />
           </TouchableOpacity>
           <TouchableOpacity onPress={handleSearchNext} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Next match">
-            <Text style={styles.searchNavText}>{ICON_ARROW_DOWN}</Text>
+            <Icon name="arrowDown" size={16} color={COLORS.textSecondary} />
           </TouchableOpacity>
           <TouchableOpacity onPress={handleSearchClose} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Close search">
-            <Text style={styles.searchNavText}>{ICON_CLOSE}</Text>
+            <Icon name="close" size={16} color={COLORS.textSecondary} />
           </TouchableOpacity>
         </View>
       )}
@@ -832,7 +832,7 @@ export function SessionScreen() {
               accessibilityRole="button"
               accessibilityLabel="Delete crashed session"
             >
-              <Text style={styles.errorBannerText}>{ICON_CLOSE}</Text>
+              <Icon name="close" size={14} color={COLORS.accentRed} />
             </TouchableOpacity>
           </View>
         </View>
@@ -863,9 +863,7 @@ export function SessionScreen() {
               accessibilityRole="button"
               accessibilityLabel="Dismiss server error"
             >
-              <Text style={err.recoverable ? styles.warningBannerText : styles.errorBannerText}>
-                {ICON_CLOSE}
-              </Text>
+              <Icon name="close" size={14} color={err.recoverable ? COLORS.accentOrange : COLORS.accentRed} />
             </TouchableOpacity>
           </View>
         </View>
