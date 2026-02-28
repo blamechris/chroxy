@@ -1,4 +1,4 @@
-import { readdir, stat, readFile } from 'fs/promises'
+import { readdir, stat, readFile, open } from 'fs/promises'
 import { join, basename } from 'path'
 import { homedir } from 'os'
 import { decodeProjectPath } from './jsonl-reader.js'
@@ -49,8 +49,7 @@ async function searchFile(filePath, queryLower, conversationId, projectName, dec
       text = await readFile(filePath, 'utf-8')
     } else {
       const buf = Buffer.alloc(MAX_FILE_READ)
-      const { open: openFile } = await import('fs/promises')
-      const handle = await openFile(filePath, 'r')
+      const handle = await open(filePath, 'r')
       try {
         const { bytesRead } = await handle.read(buf, 0, MAX_FILE_READ, 0)
         const decoder = new TextDecoder('utf-8', { fatal: false })
