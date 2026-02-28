@@ -18,6 +18,7 @@ import {
 import { ChatMessage, ToolResultImage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
 import { ImageViewer } from './ImageViewer';
+import { AnimatedMessage } from './AnimatedMessage';
 import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOSE, ICON_CHECK, ICON_DOCUMENT } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 import { PermissionDetailOrFallback, PermissionCountdown, PermissionPill, permissionStyles } from './PermissionDetail';
@@ -695,6 +696,15 @@ export function ChatView({
   const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
+  // Animation: only animate messages arriving after initial mount
+  const mountTimeRef = useRef(Date.now());
+  const [reduceMotion, setReduceMotion] = useState(false);
+  useEffect(() => {
+    const listener = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
+    AccessibilityInfo.isReduceMotionEnabled().then(setReduceMotion);
+    return () => listener.remove();
+  }, []);
+
   // Track message layout positions for search scroll-to-match
   const messageLayoutsRef = useRef<Map<string, number>>(new Map());
 
@@ -782,6 +792,7 @@ export function ChatView({
       ) : (
         displayGroups.map((group) => {
           if (group.type === 'activity') {
+            const firstMsg = group.messages[0];
             return (
               <View
                 key={group.key}
@@ -792,14 +803,21 @@ export function ChatView({
                   }
                 }}
               >
-                <ActivityGroup
-                  messages={group.messages}
-                  isActive={group.isActive}
-                  isSelecting={isSelecting}
-                  selectedIds={selectedIds}
-                  onToggleSelection={onToggleSelection}
-                  searchMatchIds={searchMatchIds}
-                />
+                <AnimatedMessage
+                  type={firstMsg.type}
+                  timestamp={firstMsg.timestamp}
+                  mountTime={mountTimeRef.current}
+                  reduceMotion={reduceMotion}
+                >
+                  <ActivityGroup
+                    messages={group.messages}
+                    isActive={group.isActive}
+                    isSelecting={isSelecting}
+                    selectedIds={selectedIds}
+                    onToggleSelection={onToggleSelection}
+                    searchMatchIds={searchMatchIds}
+                  />
+                </AnimatedMessage>
               </View>
             );
           }
@@ -814,16 +832,23 @@ export function ChatView({
                 messageLayoutsRef.current.set(msg.id, e.nativeEvent.layout.y);
               }}
             >
-              <MessageBubble
-                message={msg}
-                onSelectOption={onSelectOption}
-                isSelected={selectedIds.has(msg.id)}
-                isSelecting={isSelecting}
-                onLongPress={() => onToggleSelection(msg.id)}
-                onPress={() => onToggleSelection(msg.id)}
-                onOpenDetail={handleOpenDetail}
-                onImagePress={setViewerUri}
-              />
+              <AnimatedMessage
+                type={msg.type}
+                timestamp={msg.timestamp}
+                mountTime={mountTimeRef.current}
+                reduceMotion={reduceMotion}
+              >
+                <MessageBubble
+                  message={msg}
+                  onSelectOption={onSelectOption}
+                  isSelected={selectedIds.has(msg.id)}
+                  isSelecting={isSelecting}
+                  onLongPress={() => onToggleSelection(msg.id)}
+                  onPress={() => onToggleSelection(msg.id)}
+                  onOpenDetail={handleOpenDetail}
+                  onImagePress={setViewerUri}
+                />
+              </AnimatedMessage>
             </View>
           );
         })
