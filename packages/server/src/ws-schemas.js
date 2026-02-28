@@ -198,7 +198,7 @@ export const ResumeConversationSchema = z.object({
 
 export const SearchConversationsSchema = z.object({
   type: z.literal('search_conversations'),
-  query: z.string().min(1).max(500),
+  query: z.string().trim().min(1).max(500),
   maxResults: z.number().int().min(1).max(100).optional(),
 })
 

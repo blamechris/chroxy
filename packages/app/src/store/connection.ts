@@ -119,6 +119,10 @@ const ERROR_RECONNECT_DELAY = 2000;
 export const selectShowSession = (s: ConnectionState): boolean =>
   s.connectionPhase !== 'disconnected' || s.viewingCachedSession;
 
+// Search request tracking — prevents stale timeout/response races
+let searchNonce = 0;
+let searchTimeoutId: ReturnType<typeof setTimeout> | undefined;
+
 // Stable device ID persisted across sessions
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
 let _cachedDeviceId: string | null = null;
@@ -201,6 +205,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   conversationHistoryLoading: false,
   searchResults: [],
   searchLoading: false,
+  searchQuery: '',
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -658,6 +663,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       conversationHistoryLoading: false,
       searchResults: [],
       searchLoading: false,
+      searchQuery: '',
     });
   },
 
@@ -1061,17 +1067,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   searchConversations: (query: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      set({ searchLoading: true, searchResults: [] });
+      const nonce = ++searchNonce;
+      set({ searchLoading: true, searchResults: [], searchQuery: query });
       wsSend(socket, { type: 'search_conversations', query });
       // Timeout to clear loading if no response in 15s
-      setTimeout(() => {
-        if (get().searchLoading) set({ searchLoading: false });
+      clearTimeout(searchTimeoutId);
+      searchTimeoutId = setTimeout(() => {
+        if (searchNonce === nonce && get().searchLoading) set({ searchLoading: false });
       }, 15000);
     }
   },
 
   clearSearchResults: () => {
-    set({ searchResults: [], searchLoading: false });
+    set({ searchResults: [], searchLoading: false, searchQuery: '' });
   },
 
   requestFullHistory: (sessionId?: string) => {

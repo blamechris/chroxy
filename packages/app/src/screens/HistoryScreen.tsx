@@ -224,7 +224,10 @@ export function HistoryScreen() {
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.key, []);
-  const searchKeyExtractor = useCallback((item: SearchResult) => item.conversationId, []);
+  const searchKeyExtractor = useCallback(
+    (item: SearchResult) => `${item.projectName ?? ''}:${item.conversationId}`,
+    [],
+  );
 
   // Search bar
   const searchBar = (
