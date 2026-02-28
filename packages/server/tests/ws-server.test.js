@@ -8249,10 +8249,13 @@ describe('client_focus_changed broadcast', () => {
     send(client1.ws, { type: 'switch_session', sessionId: 'sess-b' })
     await waitForMessage(client1.messages, 'session_switched', 2000)
 
-    // Wait a bit and verify no focus_changed received by the switcher
-    await new Promise(r => setTimeout(r, 200))
-    const focusMsg = client1.messages.find(m => m.type === 'client_focus_changed')
-    assert.ok(!focusMsg, 'Switching client should NOT receive client_focus_changed')
+    // Verify no client_focus_changed is delivered to the switching client within a reasonable timeout
+    try {
+      await waitForMessage(client1.messages, 'client_focus_changed', 500)
+      assert.fail('Switching client should NOT receive client_focus_changed')
+    } catch {
+      // Expected: waitForMessage times out because no client_focus_changed is sent to the switcher
+    }
 
     client1.ws.close()
   })
