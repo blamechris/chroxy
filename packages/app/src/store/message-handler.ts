@@ -1491,6 +1491,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'client_focus_changed': {
+      const focusClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
+      const focusSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      if (!focusClientId || !focusSessionId) break;
+      // Auto-switch if follow mode is on, event is from another client, and not already on the target session
+      const { followMode, myClientId, activeSessionId } = get();
+      if (followMode && focusClientId !== myClientId && focusSessionId !== activeSessionId) {
+        get().switchSession(focusSessionId);
+      }
+      break;
+    }
+
     case 'directory_listing': {
       const cb = get()._directoryListingCallback;
       if (cb) {
