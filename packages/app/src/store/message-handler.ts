@@ -1767,6 +1767,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'search_results': {
+      const results = Array.isArray(msg.results) ? msg.results : [];
+      set({ searchResults: results, searchLoading: false });
+      break;
+    }
+
     case 'server_error': {
       const allowedCategories = new Set<ServerError['category']>([
         'tunnel', 'session', 'permission', 'general',

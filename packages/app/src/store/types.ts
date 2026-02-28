@@ -160,6 +160,16 @@ export interface ConversationSummary {
   cwd: string | null;
 }
 
+export interface SearchResult {
+  conversationId: string;
+  projectName: string;
+  project: string | null;
+  cwd: string | null;
+  preview: string | null;
+  snippet: string;
+  matchCount: number;
+}
+
 export interface AgentInfo {
   toolUseId: string;
   description: string;
@@ -374,6 +384,10 @@ export interface ConnectionState {
   conversationHistory: ConversationSummary[];
   conversationHistoryLoading: boolean;
 
+  // Cross-session search
+  searchResults: SearchResult[];
+  searchLoading: boolean;
+
   // Checkpoints for session rewind
   checkpoints: Checkpoint[];
 
@@ -459,6 +473,10 @@ export interface ConnectionState {
   // Conversation history (resume past conversations)
   fetchConversationHistory: () => void;
   resumeConversation: (conversationId: string, cwd?: string) => void;
+
+  // Cross-session search
+  searchConversations: (query: string) => void;
+  clearSearchResults: () => void;
 
   // Full history sync (session portability)
   requestFullHistory: (sessionId?: string) => void;

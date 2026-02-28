@@ -3,6 +3,7 @@ import { homedir } from 'os'
 import { ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { WebTaskUnavailableError } from './web-task-manager.js'
 import { scanConversations } from './conversation-scanner.js'
+import { searchConversations } from './conversation-search.js'
 
 // -- Permission modes --
 export const PERMISSION_MODES = [
@@ -435,6 +436,18 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       } catch (err) {
         console.warn(`[ws] Failed to scan conversations: ${err.message}`)
         ctx.send(ws, { type: 'conversations_list', conversations: [] })
+      }
+      break
+    }
+
+    case 'search_conversations': {
+      const { query, maxResults } = msg
+      try {
+        const results = await searchConversations(query, { maxResults })
+        ctx.send(ws, { type: 'search_results', query, results })
+      } catch (err) {
+        console.warn(`[ws] Failed to search conversations: ${err.message}`)
+        ctx.send(ws, { type: 'search_results', query, results: [] })
       }
       break
     }

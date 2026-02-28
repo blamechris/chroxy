@@ -45,6 +45,7 @@ export type {
   ConnectionPhase,
   ConnectionContext,
   ConversationSummary,
+  SearchResult,
   ConnectionState,
 } from './types';
 
@@ -198,6 +199,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _diffCallback: null,
   conversationHistory: [],
   conversationHistoryLoading: false,
+  searchResults: [],
+  searchLoading: false,
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -653,6 +656,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       viewingCachedSession: false,
       conversationHistory: [],
       conversationHistoryLoading: false,
+      searchResults: [],
+      searchLoading: false,
     });
   },
 
@@ -1051,6 +1056,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (cwd) payload.cwd = cwd;
       wsSend(socket, payload);
     }
+  },
+
+  searchConversations: (query: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ searchLoading: true, searchResults: [] });
+      wsSend(socket, { type: 'search_conversations', query });
+      // Timeout to clear loading if no response in 15s
+      setTimeout(() => {
+        if (get().searchLoading) set({ searchLoading: false });
+      }, 15000);
+    }
+  },
+
+  clearSearchResults: () => {
+    set({ searchResults: [], searchLoading: false });
   },
 
   requestFullHistory: (sessionId?: string) => {

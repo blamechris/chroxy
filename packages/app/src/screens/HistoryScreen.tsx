@@ -1,7 +1,8 @@
-import React, { useEffect, useCallback, useMemo } from 'react';
+import React, { useEffect, useCallback, useMemo, useState, useRef } from 'react';
 import {
   View,
   Text,
+  TextInput,
   FlatList,
   TouchableOpacity,
   ActivityIndicator,
@@ -13,7 +14,7 @@ import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
 import { useConnectionStore } from '../store/connection';
-import type { ConversationSummary } from '../store/types';
+import type { ConversationSummary, SearchResult } from '../store/types';
 import { COLORS } from '../constants/colors';
 
 // ---------------------------------------------------------------------------
@@ -85,6 +86,52 @@ function ConversationRow({
 }
 
 // ---------------------------------------------------------------------------
+// SearchResultRow
+// ---------------------------------------------------------------------------
+
+function SearchResultRow({
+  item,
+  onResume,
+}: {
+  item: SearchResult;
+  onResume: (conversationId: string, cwd?: string) => void;
+}) {
+  return (
+    <View style={styles.row}>
+      <View style={styles.rowContent}>
+        <Text style={styles.searchProjectName} numberOfLines={1}>
+          {item.projectName}
+        </Text>
+        <Text style={styles.searchSnippet} numberOfLines={3}>
+          {item.snippet}
+        </Text>
+        <View style={styles.metaRow}>
+          <Text style={styles.metaText}>
+            {item.matchCount} match{item.matchCount > 1 ? 'es' : ''}
+          </Text>
+          {item.preview && (
+            <>
+              <Text style={styles.metaDot}>{'\u00B7'}</Text>
+              <Text style={styles.metaText} numberOfLines={1}>
+                {item.preview.slice(0, 40)}
+              </Text>
+            </>
+          )}
+        </View>
+      </View>
+      <TouchableOpacity
+        style={styles.resumeButton}
+        onPress={() => onResume(item.conversationId, item.cwd || undefined)}
+        accessibilityRole="button"
+        accessibilityLabel={`Resume matching conversation in ${item.projectName}`}
+      >
+        <Text style={styles.resumeButtonText}>Resume</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // HistoryScreen
 // ---------------------------------------------------------------------------
 
@@ -96,11 +143,36 @@ export function HistoryScreen() {
   const conversationHistoryLoading = useConnectionStore((s) => s.conversationHistoryLoading);
   const fetchConversationHistory = useConnectionStore((s) => s.fetchConversationHistory);
   const resumeConversation = useConnectionStore((s) => s.resumeConversation);
+  const searchResults = useConnectionStore((s) => s.searchResults);
+  const searchLoading = useConnectionStore((s) => s.searchLoading);
+  const searchConversations = useConnectionStore((s) => s.searchConversations);
+  const clearSearchResults = useConnectionStore((s) => s.clearSearchResults);
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Fetch on mount
   useEffect(() => {
     fetchConversationHistory();
-  }, [fetchConversationHistory]);
+    return () => {
+      clearSearchResults();
+    };
+  }, [fetchConversationHistory, clearSearchResults]);
+
+  // Debounced search (300ms)
+  const handleSearchChange = useCallback((text: string) => {
+    setSearchQuery(text);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    if (text.trim().length >= 2) {
+      searchTimerRef.current = setTimeout(() => {
+        searchConversations(text.trim());
+      }, 300);
+    } else {
+      clearSearchResults();
+    }
+  }, [searchConversations, clearSearchResults]);
+
+  const isSearching = searchQuery.trim().length >= 2;
 
   // Build grouped list items: header + conversations per project
   const listItems = useMemo(() => {
@@ -143,14 +215,77 @@ export function HistoryScreen() {
     [handleResume],
   );
 
-  const keyExtractor = useCallback((item: ListItem) => item.key, []);
+  const renderSearchResult = useCallback(
+    ({ item }: { item: SearchResult }) => (
+      <SearchResultRow item={item} onResume={handleResume} />
+    ),
+    [handleResume],
+  );
 
-  // Loading state
-  if (conversationHistoryLoading && conversationHistory.length === 0) {
+  const keyExtractor = useCallback((item: ListItem) => item.key, []);
+  const searchKeyExtractor = useCallback((item: SearchResult) => item.conversationId, []);
+
+  // Search bar
+  const searchBar = (
+    <View style={styles.searchBar}>
+      <TextInput
+        style={styles.searchInput}
+        placeholder="Search across conversations..."
+        placeholderTextColor={COLORS.textDim}
+        value={searchQuery}
+        onChangeText={handleSearchChange}
+        returnKeyType="search"
+        autoCapitalize="none"
+        autoCorrect={false}
+      />
+      {searchQuery.length > 0 && (
+        <TouchableOpacity
+          style={styles.clearButton}
+          onPress={() => handleSearchChange('')}
+          accessibilityRole="button"
+          accessibilityLabel="Clear search"
+        >
+          <Text style={styles.clearButtonText}>{'\u2715'}</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+
+  // Loading state (initial load, no search active)
+  if (!isSearching && conversationHistoryLoading && conversationHistory.length === 0) {
     return (
-      <View style={[styles.container, styles.centered, { paddingBottom: insets.bottom }]}>
-        <ActivityIndicator size="large" color={COLORS.accentBlue} />
-        <Text style={styles.loadingText}>Loading conversations...</Text>
+      <View style={[styles.container, { paddingBottom: insets.bottom }]}>
+        {searchBar}
+        <View style={[styles.centered, { flex: 1 }]}>
+          <ActivityIndicator size="large" color={COLORS.accentBlue} />
+          <Text style={styles.loadingText}>Loading conversations...</Text>
+        </View>
+      </View>
+    );
+  }
+
+  // Search mode
+  if (isSearching) {
+    return (
+      <View style={[styles.container, { paddingBottom: insets.bottom }]}>
+        {searchBar}
+        {searchLoading ? (
+          <View style={[styles.centered, { flex: 1 }]}>
+            <ActivityIndicator size="small" color={COLORS.accentBlue} />
+            <Text style={styles.loadingText}>Searching...</Text>
+          </View>
+        ) : searchResults.length === 0 ? (
+          <View style={[styles.centered, { flex: 1 }]}>
+            <Text style={styles.emptyText}>No results found</Text>
+          </View>
+        ) : (
+          <FlatList
+            data={searchResults}
+            renderItem={renderSearchResult}
+            keyExtractor={searchKeyExtractor}
+            contentContainerStyle={styles.listContent}
+          />
+        )}
       </View>
     );
   }
@@ -158,14 +293,18 @@ export function HistoryScreen() {
   // Empty state
   if (!conversationHistoryLoading && conversationHistory.length === 0) {
     return (
-      <View style={[styles.container, styles.centered, { paddingBottom: insets.bottom }]}>
-        <Text style={styles.emptyText}>No conversation history found</Text>
+      <View style={[styles.container, { paddingBottom: insets.bottom }]}>
+        {searchBar}
+        <View style={[styles.centered, { flex: 1 }]}>
+          <Text style={styles.emptyText}>No conversation history found</Text>
+        </View>
       </View>
     );
   }
 
   return (
     <View style={[styles.container, { paddingBottom: insets.bottom }]}>
+      {searchBar}
       <FlatList
         data={listItems}
         renderItem={renderItem}
@@ -200,6 +339,34 @@ const styles = StyleSheet.create({
     color: COLORS.textDisabled,
     fontSize: 15,
     textAlign: 'center',
+  },
+  searchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.borderPrimary,
+    backgroundColor: COLORS.backgroundSecondary,
+  },
+  searchInput: {
+    flex: 1,
+    color: COLORS.textPrimary,
+    fontSize: 15,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: COLORS.backgroundPrimary,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+  },
+  clearButton: {
+    marginLeft: 8,
+    padding: 8,
+  },
+  clearButtonText: {
+    color: COLORS.textMuted,
+    fontSize: 14,
   },
   listContent: {
     paddingBottom: 16,
@@ -260,5 +427,17 @@ const styles = StyleSheet.create({
     color: COLORS.accentBlue,
     fontSize: 13,
     fontWeight: '600',
+  },
+  searchProjectName: {
+    color: COLORS.accentPurple,
+    fontSize: 12,
+    fontWeight: '600',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginBottom: 2,
+  },
+  searchSnippet: {
+    color: COLORS.textSecondary,
+    fontSize: 14,
+    lineHeight: 20,
   },
 });
