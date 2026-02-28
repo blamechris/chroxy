@@ -265,7 +265,7 @@ export async function startCliServer(config) {
         qrcode.generate(newConnectionUrl, { small: true })
         console.log(`\nOr connect manually:`)
         console.log(`   URL:   ${newWsUrl}`)
-        console.log(`   Token: ${currentApiToken.slice(0, 8)}...`)
+        console.log(`   Token: ${currentApiToken}`)
         console.log('')
         wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
 
