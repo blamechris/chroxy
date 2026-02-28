@@ -10,8 +10,8 @@ import {
   Animated,
 } from 'react-native';
 import { useConnectionStore } from '../store/connection';
-import type { SessionInfo, SessionHealth, SessionState, AgentInfo, SessionNotification } from '../store/types';
-import { Icon } from './Icon';
+import type { SessionInfo, SessionHealth, SessionState, SessionNotification } from '../store/types';
+import { Icon, type IconName } from './Icon';
 import { COLORS } from '../constants/colors';
 
 // -- Status classification --
@@ -70,13 +70,18 @@ const STATUS_LABELS: Record<SessionStatus, string> = {
   idle: 'Idle',
 };
 
-const STATUS_ICONS: Record<SessionStatus, string> = {
+const STATUS_ICONS: Record<SessionStatus, IconName> = {
   crashed: 'alertCircle',
   permission: 'alertCircle',
   attention: 'alertCircle',
   agents: 'bullet',
   busy: 'bullet',
   idle: 'checkCircle',
+};
+
+/** Priority order for sorting sessions — lower number = higher priority */
+const STATUS_PRIORITY: Record<SessionStatus, number> = {
+  permission: 0, attention: 1, crashed: 2, agents: 3, busy: 4, idle: 5,
 };
 
 // -- Elapsed time formatter --
@@ -153,7 +158,7 @@ function SessionCard({ session, sessionState, isActive, hasNotification, notific
             (status === 'permission' || status === 'attention') ? { opacity: pulseAnim } : undefined,
           ]}
         >
-          <Icon name={STATUS_ICONS[status] as any} size={10} color={colors.fg} />
+          <Icon name={STATUS_ICONS[status]} size={10} color={colors.fg} />
           <Text style={[styles.statusText, { color: colors.fg }]}>{STATUS_LABELS[status]}</Text>
         </Animated.View>
       </View>
@@ -256,10 +261,7 @@ export function SessionOverview({ visible, onClose }: SessionOverviewProps) {
       isPlanPending: sessionStates[b.sessionId]?.isPlanPending ?? false,
       hasNotification: notificationSet.has(b.sessionId),
     });
-    const priority: Record<SessionStatus, number> = {
-      permission: 0, attention: 1, crashed: 2, agents: 3, busy: 4, idle: 5,
-    };
-    if (priority[aStatus] !== priority[bStatus]) return priority[aStatus] - priority[bStatus];
+    if (STATUS_PRIORITY[aStatus] !== STATUS_PRIORITY[bStatus]) return STATUS_PRIORITY[aStatus] - STATUS_PRIORITY[bStatus];
     if (a.sessionId === activeSessionId) return -1;
     if (b.sessionId === activeSessionId) return 1;
     return b.createdAt - a.createdAt;
