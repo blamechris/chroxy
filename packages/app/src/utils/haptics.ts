@@ -7,20 +7,20 @@ function isNative(): boolean {
 
 /** Light tap — send message, switch tab, pull-to-refresh */
 export function hapticLight(): void {
-  if (isNative()) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  if (isNative()) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
 }
 
 /** Medium tap — approve permission, disconnect, interrupt, long-press */
 export function hapticMedium(): void {
-  if (isNative()) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+  if (isNative()) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
 }
 
-/** Success — connection established, response complete */
+/** Success — connection established */
 export function hapticSuccess(): void {
-  if (isNative()) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  if (isNative()) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
 }
 
 /** Warning — deny permission, destructive actions */
 export function hapticWarning(): void {
-  if (isNative()) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+  if (isNative()) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
 }

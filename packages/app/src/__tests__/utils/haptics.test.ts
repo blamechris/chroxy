@@ -6,8 +6,8 @@ import * as Haptics from 'expo-haptics';
 import { hapticLight, hapticMedium, hapticSuccess, hapticWarning } from '../../utils/haptics';
 
 jest.mock('expo-haptics', () => ({
-  impactAsync: jest.fn(),
-  notificationAsync: jest.fn(),
+  impactAsync: jest.fn().mockResolvedValue(undefined),
+  notificationAsync: jest.fn().mockResolvedValue(undefined),
   ImpactFeedbackStyle: {
     Light: 'LIGHT',
     Medium: 'MEDIUM',
