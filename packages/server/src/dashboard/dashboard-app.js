@@ -42,6 +42,14 @@
   var restoredFromCache = false;
   var activeCountdowns = [];
 
+  // ---- Analytics state ----
+  var costEvents = [];
+  var COST_EVENTS_MAX = 500;
+  var COST_STORAGE_KEY = STORAGE_PREFIX + "cost_events";
+  var sessionCost = 0;
+  var totalCost = 0;
+  var costBudget = null;
+
   // ---- Terminal state ----
   var currentView = "chat";
   var term = null;
@@ -92,6 +100,11 @@
   var historyModal = document.getElementById("history-modal");
   var historyList = document.getElementById("history-list");
   var historyModalClose = document.getElementById("history-modal-close");
+  var analyticsBtn = document.getElementById("analytics-btn");
+  var analyticsModal = document.getElementById("analytics-modal");
+  var analyticsContent = document.getElementById("analytics-content");
+  var analyticsCloseBtn = document.getElementById("analytics-close-btn");
+  var analyticsExportBtn = document.getElementById("analytics-export-btn");
   var toastContainer = document.getElementById("toast-container");
   var viewSwitcher = document.getElementById("view-switcher");
   var terminalContainer = document.getElementById("terminal-container");
@@ -1251,7 +1264,8 @@
           reconnectBanner.classList.remove("hidden");
           reconnectTimer = setTimeout(function() {
             reconnectAttempt++;
-            connect();
+            loadCostEvents();
+  connect();
           }, delay);
         } else {
           reconnectText.textContent = "Connection lost.";
@@ -1261,7 +1275,8 @@
       } else {
         // Initial connection attempt — retry quickly
         reconnectTimer = setTimeout(function() {
-          connect();
+          loadCostEvents();
+  connect();
         }, 1000);
       }
     };
@@ -1654,6 +1669,34 @@
         }
         break;
 
+      case "cost_update":
+        if (typeof msg.sessionCost === "number") sessionCost = msg.sessionCost;
+        if (typeof msg.totalCost === "number") totalCost = msg.totalCost;
+        if (typeof msg.budget === "number") costBudget = msg.budget;
+        statusCost = sessionCost;
+        updateStatusBar();
+        break;
+
+      case "cost_summary":
+        renderAnalytics(msg);
+        break;
+
+      case "result":
+        if (typeof msg.cost === "number" && msg.cost > 0) {
+          statusCost = msg.cost;
+          updateStatusBar();
+          recordCostEvent(msg.cost, msg.sessionId || activeSessionId, msg.duration || 0);
+        }
+        break;
+
+      case "budget_warning":
+        showToast("Budget warning: " + msg.message);
+        break;
+
+      case "budget_exceeded":
+        showToast("Budget exceeded: " + msg.message);
+        break;
+
       default:
         if (serverProtocolVersion != null && serverProtocolVersion > CLIENT_PROTOCOL_VERSION) {
           console.warn('[dashboard] Unknown message type "' + msg.type + '" (server protocol v' + serverProtocolVersion + ', client v' + CLIENT_PROTOCOL_VERSION + ')');
@@ -1675,7 +1718,8 @@
     reconnectAttempt = 0;
     reconnectRetryBtn.classList.add("hidden");
     reconnectText.textContent = "Reconnecting...";
-    connect();
+    loadCostEvents();
+  connect();
   });
 
   function submitReauth() {
@@ -1688,7 +1732,8 @@
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     reconnectAttempt = 0;
     reconnectText.textContent = "Reconnecting with new token...";
-    connect();
+    loadCostEvents();
+  connect();
   }
 
   reauthSubmitBtn.addEventListener("click", submitReauth);
@@ -1764,6 +1809,184 @@
     inputEl.focus();
   });
 
+
+  // ---- Cost analytics ----
+
+  function loadCostEvents() {
+    try {
+      var json = localStorage.getItem(COST_STORAGE_KEY);
+      if (json) costEvents = JSON.parse(json);
+    } catch (e) {
+      costEvents = [];
+    }
+  }
+
+  function saveCostEvents() {
+    try {
+      localStorage.setItem(COST_STORAGE_KEY, JSON.stringify(costEvents));
+    } catch (e) {}
+  }
+
+  function recordCostEvent(cost, sid, duration) {
+    costEvents.push({
+      sessionId: sid || "unknown",
+      cost: cost,
+      model: activeModel || "unknown",
+      timestamp: Date.now(),
+      duration: duration || 0,
+    });
+    if (costEvents.length > COST_EVENTS_MAX) {
+      costEvents = costEvents.slice(costEvents.length - COST_EVENTS_MAX);
+    }
+    saveCostEvents();
+  }
+
+  function formatAnalyticsCost(n) {
+    if (!n || n === 0) return "$0.00";
+    if (n < 0.01) return "$" + n.toFixed(4);
+    return "$" + n.toFixed(2);
+  }
+
+  function renderAnalytics(serverData) {
+    if (!analyticsContent) return;
+
+    // Merge server data with local events
+    var total = serverData ? serverData.totalCost : totalCost;
+    var budget = serverData ? serverData.budget : costBudget;
+    var serverSessions = serverData ? serverData.sessions : [];
+
+    // Summary cards
+    var html = '<div class="analytics-cards">';
+    html += '<div class="analytics-card"><div class="analytics-card-value">' + formatAnalyticsCost(total) + '</div><div class="analytics-card-label">Total Cost</div></div>';
+    html += '<div class="analytics-card"><div class="analytics-card-value">' + (serverSessions.length || sessions.length) + '</div><div class="analytics-card-label">Sessions</div></div>';
+    html += '<div class="analytics-card"><div class="analytics-card-value">' + costEvents.length + '</div><div class="analytics-card-label">Queries</div></div>';
+    if (budget) {
+      var pct = total && budget ? Math.round((total / budget) * 100) : 0;
+      html += '<div class="analytics-card"><div class="analytics-card-value">' + formatAnalyticsCost(budget - (total || 0)) + '</div><div class="analytics-card-label">Budget Remaining (' + pct + '%)</div></div>';
+    }
+    html += '</div>';
+
+    // Per-session cost breakdown (from server data)
+    if (serverSessions.length > 0) {
+      var sortedSessions = serverSessions.slice().sort(function(a, b) { return b.cost - a.cost; });
+      var maxCost = sortedSessions[0].cost || 1;
+
+      html += '<h4 class="analytics-section-title">Cost by Session</h4>';
+      html += '<div class="analytics-bars">';
+      for (var i = 0; i < sortedSessions.length; i++) {
+        var s = sortedSessions[i];
+        var barWidth = maxCost > 0 ? Math.max(2, Math.round((s.cost / maxCost) * 100)) : 0;
+        html += '<div class="analytics-bar-row">';
+        html += '<span class="analytics-bar-label">' + escapeHtml(s.name || s.sessionId.slice(0, 8)) + '</span>';
+        html += '<div class="analytics-bar-track"><div class="analytics-bar-fill" style="width:' + barWidth + '%"></div></div>';
+        html += '<span class="analytics-bar-value">' + formatAnalyticsCost(s.cost) + '</span>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+
+    // Model usage breakdown (from local events)
+    if (costEvents.length > 0) {
+      var modelCosts = {};
+      for (var j = 0; j < costEvents.length; j++) {
+        var m = costEvents[j].model || "unknown";
+        modelCosts[m] = (modelCosts[m] || 0) + costEvents[j].cost;
+      }
+      var modelEntries = Object.keys(modelCosts).map(function(k) { return { model: k, cost: modelCosts[k] }; });
+      modelEntries.sort(function(a, b) { return b.cost - a.cost; });
+
+      html += '<h4 class="analytics-section-title">Cost by Model</h4>';
+      html += '<div class="analytics-bars">';
+      var maxModelCost = modelEntries[0].cost || 1;
+      for (var mi = 0; mi < modelEntries.length; mi++) {
+        var me = modelEntries[mi];
+        var mBarWidth = maxModelCost > 0 ? Math.max(2, Math.round((me.cost / maxModelCost) * 100)) : 0;
+        html += '<div class="analytics-bar-row">';
+        html += '<span class="analytics-bar-label">' + escapeHtml(me.model) + '</span>';
+        html += '<div class="analytics-bar-track"><div class="analytics-bar-fill analytics-bar-fill-model" style="width:' + mBarWidth + '%"></div></div>';
+        html += '<span class="analytics-bar-value">' + formatAnalyticsCost(me.cost) + '</span>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+
+    // Cost timeline (hourly, from local events)
+    if (costEvents.length > 1) {
+      var hourBuckets = {};
+      for (var h = 0; h < costEvents.length; h++) {
+        var d = new Date(costEvents[h].timestamp);
+        var hourKey = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0") + " " + String(d.getHours()).padStart(2, "0") + ":00";
+        hourBuckets[hourKey] = (hourBuckets[hourKey] || 0) + costEvents[h].cost;
+      }
+      var hourKeys = Object.keys(hourBuckets).sort();
+      if (hourKeys.length > 1) {
+        var maxHourCost = 0;
+        for (var hk = 0; hk < hourKeys.length; hk++) {
+          if (hourBuckets[hourKeys[hk]] > maxHourCost) maxHourCost = hourBuckets[hourKeys[hk]];
+        }
+        html += '<h4 class="analytics-section-title">Cost Over Time</h4>';
+        html += '<div class="analytics-timeline">';
+        for (var tk = 0; tk < hourKeys.length; tk++) {
+          var barHeight = maxHourCost > 0 ? Math.max(4, Math.round((hourBuckets[hourKeys[tk]] / maxHourCost) * 100)) : 0;
+          html += '<div class="analytics-timeline-bar" title="' + hourKeys[tk] + ': ' + formatAnalyticsCost(hourBuckets[hourKeys[tk]]) + '">';
+          html += '<div class="analytics-timeline-fill" style="height:' + barHeight + '%"></div>';
+          html += '</div>';
+        }
+        html += '</div>';
+        html += '<div class="analytics-timeline-labels"><span>' + hourKeys[0].split(" ")[1] + '</span><span>' + hourKeys[hourKeys.length - 1].split(" ")[1] + '</span></div>';
+      }
+    }
+
+    if (costEvents.length === 0 && serverSessions.length === 0) {
+      html += '<div style="text-align:center;color:#888;padding:32px 0;">No cost data yet. Send some messages to start tracking.</div>';
+    }
+
+    analyticsContent.innerHTML = html;
+  }
+
+  function exportCostCsv() {
+    if (costEvents.length === 0) {
+      showToast("No cost data to export");
+      return;
+    }
+    var csv = "timestamp,session_id,model,cost,duration_ms\n";
+    for (var i = 0; i < costEvents.length; i++) {
+      var e = costEvents[i];
+      csv += new Date(e.timestamp).toISOString() + "," + e.sessionId + "," + e.model + "," + e.cost + "," + (e.duration || 0) + "\n";
+    }
+    var blob = new Blob([csv], { type: "text/csv" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "chroxy-cost-" + new Date().toISOString().slice(0, 10) + ".csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // ---- Analytics modal handlers ----
+
+  if (analyticsBtn) {
+    analyticsBtn.addEventListener("click", function() {
+      analyticsModal.classList.remove("hidden");
+      modalOpen = true;
+      // Request fresh data from server
+      send({ type: "request_cost_summary" });
+      // Also render with local data immediately
+      renderAnalytics(null);
+    });
+  }
+
+  if (analyticsCloseBtn) {
+    analyticsCloseBtn.addEventListener("click", function() {
+      analyticsModal.classList.add("hidden");
+      modalOpen = false;
+    });
+  }
+
+  if (analyticsExportBtn) {
+    analyticsExportBtn.addEventListener("click", exportCostCsv);
+  }
+
   // ---- Init ----
   updateButtons();
   updateBusyIndicator();
@@ -1780,7 +2003,7 @@
   }
 
   // Flush pending saves before page unload
-  window.addEventListener("beforeunload", saveMessages);
+  window.addEventListener("beforeunload", function() { saveMessages(); saveCostEvents(); });
 
   // Restore last active session ID and messages
   var savedSessionId = localStorage.getItem(STORAGE_PREFIX + "active_session");
@@ -1789,5 +2012,6 @@
     restoreMessages(activeSessionId);
   }
 
+  loadCostEvents();
   connect();
 })();

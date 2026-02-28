@@ -892,6 +892,133 @@ body {
 /* Responsive: mobile browsers */
 @media (max-width: 600px) {
   #header { padding: 8px 12px; }
+/* ---- Analytics panel ---- */
+
+.analytics-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.analytics-card {
+  background: #1a1a2e;
+  border: 1px solid #2a2a40;
+  border-radius: 10px;
+  padding: 14px 12px;
+  text-align: center;
+}
+
+.analytics-card-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #e0e0ff;
+  font-family: monospace;
+}
+
+.analytics-card-label {
+  font-size: 11px;
+  color: #888;
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.analytics-section-title {
+  font-size: 13px;
+  color: #aaa;
+  margin: 16px 0 8px;
+  font-weight: 600;
+}
+
+.analytics-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.analytics-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.analytics-bar-label {
+  font-size: 12px;
+  color: #ccc;
+  min-width: 80px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+}
+
+.analytics-bar-track {
+  flex: 1;
+  height: 16px;
+  background: #1a1a2e;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.analytics-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4a6cf7, #6366f1);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.analytics-bar-fill-model {
+  background: linear-gradient(90deg, #8b5cf6, #a78bfa);
+}
+
+.analytics-bar-value {
+  font-size: 12px;
+  color: #aaa;
+  min-width: 60px;
+  text-align: right;
+  font-family: monospace;
+}
+
+.analytics-timeline {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 80px;
+  padding: 0 4px;
+  margin-top: 8px;
+}
+
+.analytics-timeline-bar {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  cursor: pointer;
+}
+
+.analytics-timeline-fill {
+  width: 100%;
+  background: linear-gradient(180deg, #4a6cf7, #3451b2);
+  border-radius: 2px 2px 0 0;
+  min-height: 4px;
+  transition: height 0.3s ease;
+}
+
+.analytics-timeline-bar:hover .analytics-timeline-fill {
+  background: linear-gradient(180deg, #6366f1, #4a6cf7);
+}
+
+.analytics-timeline-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: #666;
+  margin-top: 4px;
+  padding: 0 4px;
+}
+
   .logo { font-size: 16px; }
   .header-right select { font-size: 12px; padding: 3px 6px; }
   .header-btn { padding: 3px 5px; }

@@ -452,6 +452,23 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       break
     }
 
+    case 'request_cost_summary': {
+      const costSessions = ctx.sessionManager.listSessions()
+      const sessionCosts = costSessions.map(s => ({
+        sessionId: s.sessionId,
+        name: s.name,
+        cost: ctx.sessionManager.getSessionCost(s.sessionId),
+        model: s.model || null,
+      }))
+      ctx.send(ws, {
+        type: 'cost_summary',
+        totalCost: ctx.sessionManager.getTotalCost(),
+        budget: ctx.sessionManager._costBudget,
+        sessions: sessionCosts,
+      })
+      break
+    }
+
     case 'resume_conversation': {
       // Check resume capability on the active session's provider
       const activeEntry = client.activeSessionId && ctx.sessionManager.getSession(client.activeSessionId)

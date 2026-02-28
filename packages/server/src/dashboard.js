@@ -39,6 +39,9 @@ export function getDashboardHtml(port, apiToken, noEncrypt, nonce) {
         <button id="history-btn" class="header-btn" title="Conversation history">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         </button>
+        <button id="analytics-btn" class="header-btn" title="Usage analytics">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+        </button>
         <button id="qr-btn" class="header-btn" title="Pair phone via QR">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="8" height="8" rx="1"/><rect x="14" y="2" width="8" height="8" rx="1"/><rect x="2" y="14" width="8" height="8" rx="1"/><rect x="14" y="14" width="4" height="4"/><line x1="22" y1="14" x2="22" y2="18"/><line x1="18" y1="22" x2="22" y2="22"/></svg>
         </button>
@@ -98,6 +101,18 @@ export function getDashboardHtml(port, apiToken, noEncrypt, nonce) {
       </div>
     </div>
 
+
+    <!-- Analytics modal -->
+    <div id="analytics-modal" class="modal-overlay hidden">
+      <div class="modal-content" style="max-width:600px;max-height:80vh;display:flex;flex-direction:column;">
+        <h3 class="modal-title">Usage Analytics</h3>
+        <div id="analytics-content" style="overflow-y:auto;flex:1;"></div>
+        <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end;">
+          <button id="analytics-export-btn" class="btn-modal-cancel">Export CSV</button>
+          <button id="analytics-close-btn" class="btn-modal-cancel">Close</button>
+        </div>
+      </div>
+    </div>
     <!-- Toast container -->
     <div id="toast-container" role="status" aria-live="polite" aria-atomic="true"></div>
 
