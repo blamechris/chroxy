@@ -212,8 +212,8 @@ export async function startCliServer(config) {
     qrcode.generate(connectionUrl, { small: true })
     console.log(`\nOr connect manually:`)
     console.log(`   URL:   ${wsUrl}`)
-    console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
-    console.log(`   Dashboard: ${httpUrl}/dashboard?token=${API_TOKEN.slice(0, 8)}...`)
+    console.log(`   Token: ${API_TOKEN}`)
+    console.log(`   Dashboard: ${httpUrl}/dashboard?token=${API_TOKEN}`)
 
     writeConnectionInfo({
       wsUrl,
@@ -265,7 +265,7 @@ export async function startCliServer(config) {
         qrcode.generate(newConnectionUrl, { small: true })
         console.log(`\nOr connect manually:`)
         console.log(`   URL:   ${newWsUrl}`)
-        console.log(`   Token: ${currentApiToken.slice(0, 8)}...`)
+        console.log(`   Token: ${currentApiToken}`)
         console.log('')
         wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
 
@@ -298,8 +298,8 @@ export async function startCliServer(config) {
     qrcode.generate(connectionUrl, { small: true })
     console.log(`\nOr connect manually:`)
     console.log(`   URL:   ${wsUrl}`)
-    console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
-    console.log(`   Dashboard: ${httpUrl}/dashboard?token=${API_TOKEN.slice(0, 8)}...`)
+    console.log(`   Token: ${API_TOKEN}`)
+    console.log(`   Dashboard: ${httpUrl}/dashboard?token=${API_TOKEN}`)
 
     // 7b. Write connection info file for programmatic access
     writeConnectionInfo({
@@ -322,8 +322,8 @@ export async function startCliServer(config) {
 
     console.log(`[✓] Server ready! (CLI headless mode, no tunnel)\n`)
     console.log(`   Connect: ws://${host}:${PORT}`)
-    console.log(`   Token: ${API_TOKEN.slice(0, 8)}...`)
-    console.log(`   Dashboard: http://localhost:${PORT}/dashboard?token=${API_TOKEN.slice(0, 8)}...`)
+    console.log(`   Token: ${API_TOKEN}`)
+    console.log(`   Dashboard: http://localhost:${PORT}/dashboard?token=${API_TOKEN}`)
 
     writeConnectionInfo({
       wsUrl: `ws://${host}:${PORT}`,

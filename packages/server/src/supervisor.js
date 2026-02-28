@@ -171,7 +171,7 @@ export class Supervisor extends EventEmitter {
         console.log('\nNew tunnel URL:\n')
         this._displayQr(connectionUrl)
         console.log(`\n   URL:   ${newWsUrl}`)
-        console.log(`   Token: ${this._apiToken.slice(0, 8)}...`)
+        console.log(`   Token: ${this._apiToken}`)
         console.log('')
 
         // Update connection info file with new tunnel URL
@@ -204,9 +204,9 @@ export class Supervisor extends EventEmitter {
     this._displayQr(connectionUrl)
     console.log(`\nOr connect manually:`)
     console.log(`   URL:   ${wsUrl}`)
-    console.log(`   Token: ${this._apiToken.slice(0, 8)}...`)
+    console.log(`   Token: ${this._apiToken}`)
     const dashboardBase = httpUrl || `http://localhost:${this._port}`
-    console.log(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard?token=${this._apiToken.slice(0, 8)}...`)
+    console.log(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard?token=${this._apiToken}`)
     console.log('')
 
     // 3b. Write connection info file for programmatic access
