@@ -51,21 +51,26 @@ impl Default for DesktopSettings {
 pub fn write_restricted(path: &std::path::Path, data: &str) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(path)
-        .map_err(|e| format!("Failed to open config: {}", e))?;
+        .map_err(|e| format!("Failed to open file {}: {}", path.display(), e))?;
+    // mode() only applies at creation time; tighten permissions on existing files too
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("Failed to set permissions on {}: {}", path.display(), e))?;
     file.write_all(data.as_bytes())
-        .map_err(|e| format!("Failed to write config: {}", e))?;
+        .map_err(|e| format!("Failed to write file {}: {}", path.display(), e))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
 pub fn write_restricted(path: &std::path::Path, data: &str) -> Result<(), String> {
-    std::fs::write(path, data).map_err(|e| format!("Failed to write config: {}", e))?;
+    std::fs::write(path, data)
+        .map_err(|e| format!("Failed to write file {}: {}", path.display(), e))?;
     Ok(())
 }
 
