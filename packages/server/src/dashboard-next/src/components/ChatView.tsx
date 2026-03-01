@@ -82,7 +82,15 @@ export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps
         {dedupedMessages.map(msg => {
           const custom = renderMessage?.(msg)
           if (custom !== undefined && custom !== null) {
-            return <div key={msg.id} data-testid={`msg-${msg.id}`}>{custom}</div>
+            return (
+              <div
+                key={msg.id}
+                data-testid={`msg-${msg.id}`}
+                style={{ display: 'contents' }}
+              >
+                {custom}
+              </div>
+            )
           }
           return (
             <div
