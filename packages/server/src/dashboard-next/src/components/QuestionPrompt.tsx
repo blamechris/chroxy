@@ -18,7 +18,7 @@ export function QuestionPrompt({ question, options, answered, onSelect }: Questi
       <div className="question-text">{question}</div>
       {options.length > 0 && (
         <div className="question-options">
-          {options.map((opt, i) => (
+          {options.map((opt) => (
             <button
               key={opt.value}
               className={`question-option${answered === opt.value ? ' chosen' : ''}`}
