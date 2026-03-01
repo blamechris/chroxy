@@ -8146,6 +8146,7 @@ describe('provider capability gates', () => {
     sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: '/tmp', type: 'sdk' })
     manager.getSession = (id) => sessionsMap.get(id)
     manager.listSessions = () => []
+    manager.firstSessionId = 'sess-1'
     manager._sessions = sessionsMap
 
     server = new WsServer({
@@ -8177,6 +8178,7 @@ describe('provider capability gates', () => {
     sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: '/tmp', type: 'cli' })
     manager.getSession = (id) => sessionsMap.get(id)
     manager.listSessions = () => []
+    manager.firstSessionId = 'sess-1'
     manager._sessions = sessionsMap
 
     server = new WsServer({
