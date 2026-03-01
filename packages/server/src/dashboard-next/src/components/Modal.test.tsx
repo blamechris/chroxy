@@ -29,6 +29,29 @@ describe('Modal', () => {
     expect(screen.queryByText('Hidden')).not.toBeInTheDocument()
   })
 
+  it('has role=dialog and aria-modal on content (#1186)', () => {
+    render(
+      <Modal open onClose={vi.fn()} title="Accessible Modal">
+        <p>Content</p>
+      </Modal>
+    )
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+  })
+
+  it('has aria-labelledby pointing at modal title (#1186)', () => {
+    render(
+      <Modal open onClose={vi.fn()} title="Labeled Modal">
+        <p>Content</p>
+      </Modal>
+    )
+    const dialog = screen.getByRole('dialog')
+    const labelId = dialog.getAttribute('aria-labelledby')
+    expect(labelId).toBeTruthy()
+    const title = document.getElementById(labelId!)
+    expect(title).toHaveTextContent('Labeled Modal')
+  })
+
   it('calls onClose when backdrop clicked', () => {
     const onClose = vi.fn()
     render(
@@ -70,6 +93,14 @@ describe('CreateSessionModal', () => {
     )
     expect(screen.getByPlaceholderText('Session name')).toBeInTheDocument()
     expect(screen.getByPlaceholderText(/working directory/i)).toBeInTheDocument()
+  })
+
+  it('has explicit aria-label on each input (#1185)', () => {
+    render(
+      <CreateSessionModal open onClose={vi.fn()} onCreate={vi.fn()} />
+    )
+    expect(screen.getByLabelText('Session name')).toBeInTheDocument()
+    expect(screen.getByLabelText('Working directory (optional)')).toBeInTheDocument()
   })
 
   it('calls onCreate with name and cwd on submit', () => {

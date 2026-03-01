@@ -21,7 +21,7 @@ export interface TerminalViewProps {
   onReady?: (handle: TerminalHandle) => void
 }
 
-const BATCH_INTERVAL = 50 // ms — coalesce rapid writes
+export const BATCH_INTERVAL = 50 // ms — coalesce rapid writes
 const RESIZE_DEBOUNCE = 150 // ms — debounce resize/fit calls
 
 /** Safely call fit() — can throw when container is hidden or has zero size */

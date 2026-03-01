@@ -847,6 +847,14 @@
 
 .btn-modal-create:hover { background: #3a8eef; }
 
+.form-error {
+  color: var(--accent-red);
+  font-size: var(--text-sm);
+  display: block;
+  margin-top: -6px;
+  margin-bottom: 4px;
+}
+
 /* ---- Terminal Container ---- */
 .terminal-container {
   flex: 1;
