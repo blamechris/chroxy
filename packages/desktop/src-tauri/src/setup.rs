@@ -1,5 +1,5 @@
 use crate::config;
-use crate::settings::write_restricted;
+use crate::platform;
 use serde_json::json;
 use std::fs;
 use uuid::Uuid;
@@ -32,7 +32,7 @@ pub fn ensure_config() -> bool {
 
     match serde_json::to_string_pretty(&config) {
         Ok(json_str) => {
-            if let Err(e) = write_restricted(&path, &json_str) {
+            if let Err(e) = platform::write_restricted(&path, &json_str) {
                 eprintln!("[setup] Failed to write config: {}", e);
                 return false;
             }

@@ -1,0 +1,73 @@
+use std::fs;
+use std::path::Path;
+
+/// Write data to a file with restricted permissions (0o600 on Unix).
+/// Uses OpenOptions with mode to create the file atomically with the correct
+/// permissions, avoiding a TOCTOU window where the file would briefly be
+/// world-readable.
+#[cfg(unix)]
+pub fn write_restricted(path: &Path, data: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+    file.write_all(data.as_bytes())
+        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+/// Write data to a file (non-Unix fallback, no permission control).
+#[cfg(not(unix))]
+pub fn write_restricted(path: &Path, data: &str) -> Result<(), String> {
+    fs::write(path, data).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_file_with_0o600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join("chroxy-test-platform");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("test-restricted.json");
+        let _ = fs::remove_file(&path);
+
+        write_restricted(&path, r#"{"test": true}"#).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "Expected 0o600, got {:o}", mode);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrites_existing_file_preserving_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join("chroxy-test-platform");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("test-overwrite.json");
+
+        write_restricted(&path, r#"{"v": 1}"#).unwrap();
+        write_restricted(&path, r#"{"v": 2}"#).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, r#"{"v": 2}"#);
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+}
