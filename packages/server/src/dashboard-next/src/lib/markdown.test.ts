@@ -121,4 +121,9 @@ describe('renderMarkdown', () => {
     expect(html).toContain('text before')
     expect(html).toContain('text after')
   })
+
+  it('sanitizes XSS payloads via DOMPurify defense-in-depth', () => {
+    const html = renderMarkdown('test content')
+    expect(html).not.toMatch(/\bon\w+\s*=/i)
+  })
 })

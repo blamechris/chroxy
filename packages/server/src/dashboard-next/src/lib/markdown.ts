@@ -5,6 +5,7 @@
  * inline code, headers, bold, italic, links (with URL sanitization),
  * blockquotes, lists, and paragraphs.
  */
+import DOMPurify from 'dompurify'
 import { highlightCode } from './syntax'
 
 function escapeHtml(text: string): string {
@@ -82,5 +83,7 @@ export function renderMarkdown(text: string): string {
     html = html.replace('\x00CB' + i + '\x00', codeBlocks[i]!)
   }
 
-  return html
+  return DOMPurify.sanitize(html, {
+    ADD_ATTR: ['target', 'rel'],
+  })
 }
