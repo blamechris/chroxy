@@ -105,18 +105,6 @@ describe('QuestionPrompt', () => {
     expect(screen.getByPlaceholderText('Type your response…')).toBeInTheDocument()
   })
 
-  it('shows free-text input when no options (#1245)', () => {
-    render(
-      <QuestionPrompt
-        question="What is your name?"
-        options={[]}
-        onSelect={vi.fn()}
-      />
-    )
-    expect(screen.getByPlaceholderText('Type your response…')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument()
-  })
-
   it('submits free-text response on Send click (#1245)', () => {
     const onSelect = vi.fn()
     render(

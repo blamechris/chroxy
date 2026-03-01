@@ -193,7 +193,7 @@ describe('InputBar', () => {
       Object.defineProperty(textarea, 'scrollHeight', { value: 100, configurable: true })
       fireEvent.change(textarea, { target: { value: 'hello' } })
 
-      // content-box: style.height = scrollHeight - paddingY = 100 - 16 = 84
+      // content-box: style.height = (scrollHeight + borderY) - paddingY - borderY = scrollHeight - paddingY = 100 - 16 = 84
       const height = parseInt(textarea.style.height, 10)
       expect(height).toBe(84)
     } finally {
