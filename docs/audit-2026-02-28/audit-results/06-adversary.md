@@ -38,7 +38,7 @@ Accurate diagrams. Notes API token passed via environment variable (visible in `
 
 ### Finding 1: API Token Exposed in Dashboard HTML (CRITICAL)
 
-**File:** `dashboard.js:138`, `window.rs:25-27`
+**File:** `dashboard.js:151`, `window.rs:25-27`
 
 The API token is embedded directly in the HTML response as `window.__CHROXY_CONFIG__` and appears in the URL query string (`?token=TOKEN`). This means:
 - Token in browser history, web server logs, Referer headers
