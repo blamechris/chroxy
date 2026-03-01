@@ -15,7 +15,8 @@
     "lint": "eslint src/",
     "dashboard:dev": "vite --config src/dashboard-next/vite.config.ts src/dashboard-next",
     "dashboard:build": "vite build --config src/dashboard-next/vite.config.ts src/dashboard-next",
-    "dashboard:typecheck": "tsc --noEmit -p src/dashboard-next/tsconfig.json"
+    "dashboard:typecheck": "tsc --noEmit -p src/dashboard-next/tsconfig.json",
+    "dashboard:test": "vitest run --config src/dashboard-next/vite.config.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",
@@ -26,13 +27,12 @@
     "dotenv": "^16.3.0",
     "qrcode": "^1.5.3",
     "qrcode-terminal": "^0.12.0",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1",
     "uuid": "^9.0.0",
     "ws": "^8.16.0",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "zustand": "^5.0.11"
   },
   "engines": {
     "node": ">=22"
@@ -46,9 +46,12 @@
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^5.1.4",
     "eslint": "^9.39.3",
     "typescript": "^5.9.3",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18"
   }
 }
