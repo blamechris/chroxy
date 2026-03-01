@@ -117,6 +117,9 @@ describe('TerminalView', () => {
       />
     )
 
+    // Guard: onReady must have provided write before we can test batching
+    expect(writeFn).toBeDefined()
+
     // Clear spy to isolate batched writes from mount-time activity
     writeSpy.mockClear()
 
