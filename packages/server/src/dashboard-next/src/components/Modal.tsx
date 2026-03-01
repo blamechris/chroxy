@@ -18,7 +18,7 @@ export function Modal({ open, onClose, title, children, maxWidth }: ModalProps) 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Escape') {
       // Only close if this is the topmost modal (#1179)
-      const overlays = document.querySelectorAll('.modal-overlay')
+      const overlays = document.querySelectorAll('[data-modal-overlay]')
       if (overlays.length > 0 && overlays[overlays.length - 1] === overlayRef.current) {
         onClose()
       }
@@ -38,6 +38,7 @@ export function Modal({ open, onClose, title, children, maxWidth }: ModalProps) 
     <div
       ref={overlayRef}
       className="modal-overlay"
+      data-modal-overlay
       data-testid="modal-overlay"
       onClick={onClose}
     >

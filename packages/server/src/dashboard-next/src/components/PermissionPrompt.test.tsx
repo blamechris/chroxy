@@ -282,7 +282,7 @@ describe('PermissionPrompt', () => {
     const onRespond = vi.fn()
     render(
       <div>
-        <div className="modal-overlay" data-testid="modal-overlay" />
+        <div data-modal-overlay data-testid="modal-overlay" />
         <PermissionPrompt
           requestId="req-1"
           tool="Write"
@@ -300,7 +300,7 @@ describe('PermissionPrompt', () => {
     const onRespond = vi.fn()
     render(
       <div>
-        <div className="modal-overlay" data-testid="modal-overlay" />
+        <div data-modal-overlay data-testid="modal-overlay" />
         <PermissionPrompt
           requestId="req-1"
           tool="Write"
