@@ -63,13 +63,16 @@ export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps
     setUserScrolledUp(false)
   }, [])
 
-  // Auto-scroll on new messages when not scrolled up
+  // Auto-scroll: on new messages (count change) or during streaming (content growth).
+  // When streaming, include messages reference so content growth triggers scroll.
+  // When idle, only message count changes matter (avoids needless DOM writes).
+  const scrollTrigger = isStreaming ? messages : dedupedMessages.length
   useEffect(() => {
     if (!userScrolledUp) {
       const el = containerRef.current
       if (el) el.scrollTop = el.scrollHeight
     }
-  }, [dedupedMessages.length, userScrolledUp])
+  }, [scrollTrigger, userScrolledUp])
 
   return (
     <div className="chat-view" data-testid="chat-view">

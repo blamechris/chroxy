@@ -92,9 +92,9 @@ describe('ChatView', () => {
     expect(screen.getByText('Hello Claude')).toBeInTheDocument()
   })
 
-  it('auto-scrolls only on message count change, not on rerender (#1180)', () => {
+  it('skips auto-scroll on idle rerender with same message count (#1180)', () => {
     const messages = makeMessages(3)
-    const { rerender } = render(<ChatView messages={messages} isStreaming />)
+    const { rerender } = render(<ChatView messages={messages} isStreaming={false} />)
     const container = screen.getByTestId('chat-messages')
 
     // Setup: make scrollTop writable and simulate being at bottom
@@ -105,16 +105,31 @@ describe('ChatView', () => {
     // Reset scrollTop to detect auto-scroll
     container.scrollTop = 500
 
-    // Rerender with same message count but new array reference (streaming update)
+    // Rerender with same message count when not streaming — no scroll
     const sameCountMessages = makeMessages(3)
-    rerender(<ChatView messages={sameCountMessages} isStreaming />)
-
-    // scrollTop should NOT have been reset to scrollHeight (no new messages)
+    rerender(<ChatView messages={sameCountMessages} isStreaming={false} />)
     expect(container.scrollTop).toBe(500)
 
     // Now add a new message — auto-scroll SHOULD fire
     const moreMessages = makeMessages(4)
-    rerender(<ChatView messages={moreMessages} isStreaming />)
+    rerender(<ChatView messages={moreMessages} isStreaming={false} />)
+    expect(container.scrollTop).toBe(1000)
+  })
+
+  it('auto-scrolls during streaming even with same message count (#1180)', () => {
+    const messages = makeMessages(3)
+    const { rerender } = render(<ChatView messages={messages} isStreaming />)
+    const container = screen.getByTestId('chat-messages')
+
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+
+    container.scrollTop = 500
+
+    // Rerender with new content (same count) during streaming — SHOULD scroll
+    const updatedMessages = makeMessages(3)
+    rerender(<ChatView messages={updatedMessages} isStreaming />)
     expect(container.scrollTop).toBe(1000)
   })
 
