@@ -9,6 +9,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, act, cleanup } from '@testing-library/react'
 import { TerminalView } from './TerminalView'
 
+// Module-level spies for mock internals
+const writeSpy = vi.fn()
+const disposeSpy = vi.fn()
+const fitSpy = vi.fn()
+
 // Mock xterm.js since jsdom can't render canvas
 vi.mock('@xterm/xterm', () => {
   class MockTerminal {
@@ -22,10 +27,10 @@ vi.mock('@xterm/xterm', () => {
       this.options = opts || {}
     }
     open(el: HTMLElement) { this._element = el }
-    write(data: string) { this._written.push(data) }
+    write(data: string) { writeSpy(data); this._written.push(data) }
     clear() { this._written = [] }
     reset() { this._written = []; this._element = null }
-    dispose() { this._disposed = true }
+    dispose() { disposeSpy(); this._disposed = true }
     loadAddon(addon: unknown) { this._addons.push(addon) }
     onData(_cb: (data: string) => void) { return { dispose: () => {} } }
   }
@@ -35,7 +40,7 @@ vi.mock('@xterm/xterm', () => {
 vi.mock('@xterm/addon-fit', () => {
   class MockFitAddon {
     _fitted = false
-    fit() { this._fitted = true }
+    fit() { fitSpy(); this._fitted = true }
     dispose() {}
   }
   return { FitAddon: MockFitAddon }
@@ -107,35 +112,50 @@ describe('TerminalView', () => {
     expect(onReady).toHaveBeenCalledTimes(1)
   })
 
-  it('batches rapid writes', async () => {
-    let writeFn: ((data: string) => void) | undefined
-    render(
-      <TerminalView
-        onReady={({ write }) => { writeFn = write }}
-      />
-    )
+  it('batches rapid writes into a single terminal.write call', () => {
+    vi.useFakeTimers()
 
-    // Write multiple times rapidly
-    act(() => {
-      writeFn!('line 1\n')
-      writeFn!('line 2\n')
-      writeFn!('line 3\n')
-    })
+    try {
+      let writeFn: ((data: string) => void) | undefined
+      render(
+        <TerminalView
+          onReady={({ write }) => { writeFn = write }}
+        />
+      )
 
-    // The writes should be queued for batching
-    // (actual xterm.write happens after batch timer)
-    expect(writeFn).toBeDefined()
+      // Clear write spy to ignore initial data writes
+      writeSpy.mockClear()
+
+      // Write multiple times rapidly
+      act(() => {
+        writeFn!('line 1\n')
+        writeFn!('line 2\n')
+        writeFn!('line 3\n')
+      })
+
+      // Before batch timer: no terminal.write calls yet
+      expect(writeSpy).not.toHaveBeenCalled()
+
+      // After batch timer (50ms): all writes coalesced into one call
+      act(() => { vi.advanceTimersByTime(50) })
+      expect(writeSpy).toHaveBeenCalledTimes(1)
+      expect(writeSpy).toHaveBeenCalledWith('line 1\nline 2\nline 3\n')
+    } finally {
+      vi.runOnlyPendingTimers()
+      vi.useRealTimers()
+    }
   })
 
   it('cleans up terminal on unmount', () => {
+    disposeSpy.mockClear()
     const { unmount } = render(<TerminalView />)
     unmount()
-    // Terminal.dispose() should have been called (tested via mock)
+    expect(disposeSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('handles resize via FitAddon', () => {
+  it('calls FitAddon.fit() on mount', () => {
+    fitSpy.mockClear()
     render(<TerminalView />)
-    // FitAddon should be loaded (tested via mock)
-    expect(screen.getByTestId('terminal-container')).toBeInTheDocument()
+    expect(fitSpy).toHaveBeenCalled()
   })
 })
