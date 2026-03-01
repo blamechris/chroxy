@@ -968,6 +968,8 @@ describe('#1141 — async start() rejection guard', () => {
     registerProvider('test-async-failing', AsyncFailingProvider)
 
     // createSession should NOT throw synchronously for async rejection
+    let destroyedEvent = null
+    mgr.on('session_destroyed', (data) => { destroyedEvent = data })
     mgr.createSession({ cwd: '/tmp', provider: 'test-async-failing' })
 
     // Wait for microtask to process the rejection
@@ -975,6 +977,8 @@ describe('#1141 — async start() rejection guard', () => {
 
     assert.equal(destroyCalled, true, 'session.destroy() should be called on async start() rejection')
     assert.equal(mgr._sessions.size, 0, 'sessions map should be empty after async start() failure')
+    assert.ok(destroyedEvent, 'session_destroyed should be emitted after async cleanup')
+    assert.ok(destroyedEvent.sessionId, 'session_destroyed event should include sessionId')
   })
 })
 

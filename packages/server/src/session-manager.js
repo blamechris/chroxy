@@ -180,6 +180,7 @@ export class SessionManager extends EventEmitter {
           session.destroy()
           this._sessions.delete(sessionId)
           this._lastActivity.delete(sessionId)
+          this.emit('session_destroyed', { sessionId })
         })
       }
     } catch (err) {
