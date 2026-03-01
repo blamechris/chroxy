@@ -175,7 +175,7 @@ Before building new features, fix the issues every auditor flagged:
 | Fix `_broadcastToSession` session filtering | 4-8 hours | Messages going to wrong sessions |
 | Add `tauri-plugin-single-instance` | 1-2 hours | Prevents dual-launch data races |
 
-**Total: ~1-2 days.** Clears the decks for feature work.
+**Total: ~3 days.** Clears the decks for feature work.
 
 ### Phase 1: React Migration (Weeks 2-3) — The UI Foundation
 
