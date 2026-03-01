@@ -17,7 +17,7 @@ export function StatusBar({ model, cost, context, isBusy, agentCount }: StatusBa
         <span className="busy-indicator" data-testid="busy-indicator" />
       )}
       {model && <span className="status-model">{model}</span>}
-      {cost != null && cost > 0 && (
+      {cost != null && (
         <span className="status-cost">${cost.toFixed(4)}</span>
       )}
       {context && <span className="status-context">{context}</span>}
