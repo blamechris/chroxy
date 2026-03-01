@@ -169,12 +169,12 @@ describe('WsServer with authRequired: false', () => {
       'auth_ok should include latestVersion (null or string)')
     assert.ok(authOk.cwd === null || typeof authOk.cwd === 'string', 'auth_ok should include cwd (string or null)')
 
-    // Should also receive server_mode and status
-    const serverMode = messages.find(m => m.type === 'server_mode')
+    // Should also receive server_mode and status (wait — they arrive after auth_ok)
+    const serverMode = await waitForMessage(messages, 'server_mode')
     assert.ok(serverMode, 'Should receive server_mode')
     assert.equal(serverMode.mode, 'cli')
 
-    const status = messages.find(m => m.type === 'status')
+    const status = await waitForMessage(messages, 'status')
     assert.ok(status, 'Should receive status')
     assert.equal(status.connected, true)
 
