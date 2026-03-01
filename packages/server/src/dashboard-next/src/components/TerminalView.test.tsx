@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, act, cleanup } from '@testing-library/react'
-import { TerminalView } from './TerminalView'
+import { TerminalView, BATCH_INTERVAL } from './TerminalView'
 
 // Module-level spies for mock internals
 const writeSpy = vi.fn()
@@ -37,7 +37,6 @@ vi.mock('@xterm/xterm', () => {
   return { Terminal: MockTerminal }
 })
 
-const fitSpy = vi.fn()
 vi.mock('@xterm/addon-fit', () => {
   class MockFitAddon {
     _fitted = false
@@ -50,6 +49,7 @@ vi.mock('@xterm/addon-fit', () => {
 describe('TerminalView', () => {
   afterEach(() => {
     cleanup()
+    vi.useRealTimers()
   })
 
   beforeEach(() => {
@@ -101,50 +101,39 @@ describe('TerminalView', () => {
     expect(clearFn).toBeInstanceOf(Function)
   })
 
-  it('writes initial data when provided', () => {
-    const onReady = vi.fn()
-    render(
-      <TerminalView
-        initialData="$ hello\n"
-        onReady={onReady}
-      />
-    )
-    // The terminal should have been written to
-    expect(onReady).toHaveBeenCalledTimes(1)
+  it('writes initial data when provided (#1210)', () => {
+    const data = '$ hello\n'
+    render(<TerminalView initialData={data} />)
+    expect(writeSpy).toHaveBeenCalledWith(data)
   })
 
   it('batches rapid writes into a single terminal.write call', () => {
     vi.useFakeTimers()
 
-    try {
-      let writeFn: ((data: string) => void) | undefined
-      render(
-        <TerminalView
-          onReady={({ write }) => { writeFn = write }}
-        />
-      )
+    let writeFn: ((data: string) => void) | undefined
+    render(
+      <TerminalView
+        onReady={({ write }) => { writeFn = write }}
+      />
+    )
 
-      // Clear spy to isolate batched writes from mount-time activity
-      writeSpy.mockClear()
+    // Clear spy to isolate batched writes from mount-time activity
+    writeSpy.mockClear()
 
-      // Write multiple times rapidly
-      act(() => {
-        writeFn!('line 1\n')
-        writeFn!('line 2\n')
-        writeFn!('line 3\n')
-      })
+    // Write multiple times rapidly
+    act(() => {
+      writeFn!('line 1\n')
+      writeFn!('line 2\n')
+      writeFn!('line 3\n')
+    })
 
-      // Before batch timer: no terminal.write calls yet
-      expect(writeSpy).not.toHaveBeenCalled()
+    // Before batch timer: no terminal.write calls yet
+    expect(writeSpy).not.toHaveBeenCalled()
 
-      // After batch timer (50ms): all writes coalesced into one call
-      act(() => { vi.advanceTimersByTime(50) })
-      expect(writeSpy).toHaveBeenCalledTimes(1)
-      expect(writeSpy).toHaveBeenCalledWith('line 1\nline 2\nline 3\n')
-    } finally {
-      vi.runOnlyPendingTimers()
-      vi.useRealTimers()
-    }
+    // After batch timer: all writes coalesced into one call
+    act(() => { vi.advanceTimersByTime(BATCH_INTERVAL) })
+    expect(writeSpy).toHaveBeenCalledTimes(1)
+    expect(writeSpy).toHaveBeenCalledWith('line 1\nline 2\nline 3\n')
   })
 
   it('cleans up terminal on unmount', () => {
@@ -164,28 +153,41 @@ describe('TerminalView', () => {
     vi.useFakeTimers()
     fitSpy.mockClear()
 
-    try {
-      render(<TerminalView />)
+    render(<TerminalView />)
 
-      // fit() called once during mount (safeFit after open)
-      const mountCalls = fitSpy.mock.calls.length
+    // fit() called once during mount (safeFit after open)
+    const mountCalls = fitSpy.mock.calls.length
 
-      // Fire 5 rapid resize events
-      act(() => {
-        for (let i = 0; i < 5; i++) {
-          window.dispatchEvent(new Event('resize'))
-        }
-      })
+    // Fire 5 rapid resize events
+    act(() => {
+      for (let i = 0; i < 5; i++) {
+        window.dispatchEvent(new Event('resize'))
+      }
+    })
 
-      // Before debounce timer fires — no additional fit() calls
-      expect(fitSpy).toHaveBeenCalledTimes(mountCalls)
+    // Before debounce timer fires — no additional fit() calls
+    expect(fitSpy).toHaveBeenCalledTimes(mountCalls)
 
-      // After debounce timer fires — exactly one additional fit() call
-      act(() => { vi.advanceTimersByTime(200) })
-      expect(fitSpy).toHaveBeenCalledTimes(mountCalls + 1)
-    } finally {
-      vi.runOnlyPendingTimers()
-      vi.useRealTimers()
-    }
+    // After debounce timer fires — exactly one additional fit() call
+    act(() => { vi.advanceTimersByTime(200) })
+    expect(fitSpy).toHaveBeenCalledTimes(mountCalls + 1)
+  })
+
+  it('cancels pending debounced resize on unmount (#1208)', () => {
+    vi.useFakeTimers()
+    fitSpy.mockClear()
+
+    const { unmount } = render(<TerminalView />)
+    const mountCalls = fitSpy.mock.calls.length
+
+    // Trigger resize to start debounce timer
+    act(() => { window.dispatchEvent(new Event('resize')) })
+
+    // Unmount before debounce fires
+    unmount()
+
+    // Advance past debounce — fit() should NOT have been called again
+    act(() => { vi.advanceTimersByTime(200) })
+    expect(fitSpy).toHaveBeenCalledTimes(mountCalls)
   })
 })
