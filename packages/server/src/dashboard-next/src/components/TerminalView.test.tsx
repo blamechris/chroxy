@@ -123,7 +123,7 @@ describe('TerminalView', () => {
         />
       )
 
-      // Clear write spy to ignore initial data writes
+      // Clear spy to isolate batched writes from mount-time activity
       writeSpy.mockClear()
 
       // Write multiple times rapidly
