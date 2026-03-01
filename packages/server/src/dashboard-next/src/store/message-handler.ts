@@ -15,10 +15,8 @@ import {
   createKeyPair,
   deriveSharedKey,
   DIRECTION_CLIENT,
-  DIRECTION_SERVER,
   type EncryptionState,
   type KeyPair,
-  type EncryptedEnvelope,
 } from './crypto';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
 import type {
@@ -91,7 +89,7 @@ export function wsSend(socket: WebSocket, payload: Record<string, unknown>): voi
 }
 
 // Re-export encrypt for wsSend (import is used inside the function)
-import { encrypt, decrypt } from './crypto';
+import { encrypt } from './crypto';
 
 // ---------------------------------------------------------------------------
 // Connection context (set by connect(), read by handleMessage)
@@ -1032,7 +1030,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         );
         if (idx === -1) return {};
         const updated = [...ss.messages];
-        updated[idx] = { ...updated[idx], ...patch };
+        updated[idx] = { ...updated[idx]!, ...patch };
         return { messages: updated };
       };
       if (targetId && get().sessionStates[targetId]) {
@@ -1043,7 +1041,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         );
         if (idx !== -1) {
           const updated = [...get().messages];
-          updated[idx] = { ...updated[idx], ...patch };
+          updated[idx] = { ...updated[idx]!, ...patch };
           set({ messages: updated });
         }
       }
@@ -1254,7 +1252,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       {
         const permTargetId = (msg.sessionId as string) || get().activeSessionId;
         const currentStreamId = permTargetId && get().sessionStates[permTargetId]
-          ? get().sessionStates[permTargetId].streamingMessageId
+          ? get().sessionStates[permTargetId]!.streamingMessageId
           : get().streamingMessageId;
         if (currentStreamId && currentStreamId !== 'pending') {
           if (deltaFlushTimer) {
@@ -1286,7 +1284,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const permTargetId = (msg.sessionId as string) || get().activeSessionId;
 
       const targetMessages = permTargetId && get().sessionStates[permTargetId]
-        ? get().sessionStates[permTargetId].messages
+        ? get().sessionStates[permTargetId]!.messages
         : get().messages;
       const existingIdx = targetMessages.findIndex(
         (m) => m.requestId === permRequestId && m.type === 'prompt'
@@ -1846,15 +1844,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (warnSessionId && get().sessionStates[warnSessionId]) {
         const prevActiveId = get().activeSessionId;
         // Add warning to the target session's messages
-        set((state: ConnectionState) => ({
-          sessionStates: {
-            ...state.sessionStates,
-            [warnSessionId]: {
-              ...state.sessionStates[warnSessionId],
-              messages: [...state.sessionStates[warnSessionId].messages, warningMsg],
+        set((state: ConnectionState) => {
+          const sess = state.sessionStates[warnSessionId]!;
+          return {
+            sessionStates: {
+              ...state.sessionStates,
+              [warnSessionId]: {
+                ...sess,
+                messages: [...sess.messages, warningMsg],
+              },
             },
-          },
-        }));
+          };
+        });
         // Also show console warning if the session isn't currently active
         if (prevActiveId !== warnSessionId) {
           console.warn(`[chroxy] Session Warning: ${message}`);

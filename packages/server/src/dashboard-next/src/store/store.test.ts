@@ -8,10 +8,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { stripAnsi, filterThinking, nextMessageId, withJitter, createEmptySessionState } from './utils';
 import type { ChatMessage, SessionState, ConnectionPhase } from './types';
 import {
-  persistSessionMessages,
   persistViewMode,
   persistActiveSession,
-  persistTerminalBuffer,
   loadPersistedState,
   loadSessionMessages,
   clearPersistedState,
@@ -53,8 +51,8 @@ describe('utils', () => {
     expect(id1).not.toBe(id2);
     expect(id1).toMatch(/^test-\d+-\d+$/);
     // Counter is monotonically increasing
-    const counter1 = parseInt(id1.split('-')[1]);
-    const counter2 = parseInt(id2.split('-')[1]);
+    const counter1 = parseInt(id1.split('-')[1]!);
+    const counter2 = parseInt(id2.split('-')[1]!);
     expect(counter2).toBeGreaterThan(counter1);
   });
 
@@ -336,7 +334,7 @@ describe('useConnectionStore', () => {
     useConnectionStore.getState().addMessage(msg);
     const { messages } = useConnectionStore.getState();
     expect(messages).toHaveLength(1);
-    expect(messages[0].content).toBe('Hello world');
+    expect(messages[0]!.content).toBe('Hello world');
   });
 
   it('setViewMode updates view mode', async () => {
@@ -388,7 +386,7 @@ describe('message handler', () => {
 
     wsSend(mockSocket, { type: 'test', data: 'hello' });
     expect(sent).toHaveLength(1);
-    const parsed = JSON.parse(sent[0]);
+    const parsed = JSON.parse(sent[0]!);
     expect(parsed.type).toBe('test');
     expect(parsed.data).toBe('hello');
   });

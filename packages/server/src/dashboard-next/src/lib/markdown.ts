@@ -73,7 +73,7 @@ export function renderMarkdown(text: string): string {
 
   // Restore code blocks
   for (let i = 0; i < codeBlocks.length; i++) {
-    html = html.replace('\x00CB' + i + '\x00', codeBlocks[i])
+    html = html.replace('\x00CB' + i + '\x00', codeBlocks[i]!)
   }
 
   return html

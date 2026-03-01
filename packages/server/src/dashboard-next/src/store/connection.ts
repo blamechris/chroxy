@@ -11,7 +11,6 @@
  * Desktop web port: React Native / Expo dependencies replaced with browser APIs.
  */
 import { create } from 'zustand';
-import { type EncryptedEnvelope } from './crypto';
 
 // Re-export all types for backward compatibility
 export type {
@@ -59,7 +58,6 @@ import type {
   ChatMessage,
   ConnectionContext,
   ConnectionState,
-  MessageAttachment,
   SessionInfo,
 } from './types';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
@@ -71,7 +69,6 @@ import {
   setEncryptionState,
   setPendingKeyPair,
   getEncryptionState,
-  getPendingKeyPair,
   connectionAttemptId,
   bumpConnectionAttemptId,
   disconnectedAttemptId,
@@ -87,18 +84,14 @@ import {
   clearDeltaBuffers,
   clearMessageQueue,
   enqueueMessage,
-  updateSession,
   updateActiveSession,
-  saveConnection,
   clearConnection,
   loadConnection,
-  drainMessageQueue,
   CLIENT_PROTOCOL_VERSION,
 } from './message-handler';
-import { decrypt, DIRECTION_SERVER, type EncryptionState } from './crypto';
+import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 import {
   loadPersistedState,
-  loadSessionMessages,
   loadSessionList,
   loadAllSessionMessages,
   persistSessionMessages,
@@ -260,7 +253,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   viewCachedSession: () => {
     const { activeSessionId, sessionStates } = get();
-    if (activeSessionId && sessionStates[activeSessionId]?.messages.length > 0) {
+    if (activeSessionId && (sessionStates[activeSessionId]?.messages.length ?? 0) > 0) {
       set({ viewingCachedSession: true });
     }
   },
@@ -430,7 +423,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               restartingSince: currentState.restartingSince || Date.now(),
             });
             if (_retryCount < MAX_RETRIES) {
-              const delay = withJitter(RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)]);
+              const delay = withJitter(RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)]!);
               setTimeout(() => {
                 if (myAttemptId !== connectionAttemptId) return;
                 get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
@@ -456,7 +449,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           : 'Network error';
         set({ connectionError: reason });
         if (_retryCount < MAX_RETRIES) {
-          const delay = withJitter(RETRY_DELAYS[_retryCount]);
+          const delay = withJitter(RETRY_DELAYS[_retryCount]!);
           console.log(`[ws] Retrying in ${delay}ms...`);
           setTimeout(() => {
             if (myAttemptId !== connectionAttemptId) return;

@@ -288,11 +288,12 @@ export function tokenize(code: string, lang: string): Token[] {
   while (pos < code.length) {
     let matched = false
     for (let ri = 0; ri < rules.length; ri++) {
-      rules[ri].p.lastIndex = pos
-      const m = rules[ri].p.exec(code)
+      const rule = rules[ri]!
+      rule.p.lastIndex = pos
+      const m = rule.p.exec(code)
       if (m) {
         if (pos > plainStart) pushToken(tokens, code.slice(plainStart, pos), 'plain')
-        pushToken(tokens, m[0], rules[ri].t)
+        pushToken(tokens, m[0], rule.t)
         pos += m[0].length
         plainStart = pos
         matched = true
