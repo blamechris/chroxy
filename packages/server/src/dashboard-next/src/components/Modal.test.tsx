@@ -179,4 +179,18 @@ describe('Toast', () => {
     render(<Toast items={items} onDismiss={vi.fn()} />)
     expect(screen.getByRole('alert')).toBeInTheDocument()
   })
+
+  it('clears auto-dismiss timer when manually closed (#1187)', () => {
+    const onDismiss = vi.fn()
+    const items: ToastItem[] = [{ id: '1', message: 'Manual close' }]
+    render(<Toast items={items} onDismiss={onDismiss} />)
+
+    // Manually close the toast
+    fireEvent.click(screen.getByTestId('toast-close-1'))
+    expect(onDismiss).toHaveBeenCalledTimes(1)
+
+    // Advance past auto-dismiss timeout — should NOT trigger a second call
+    act(() => { vi.advanceTimersByTime(6000) })
+    expect(onDismiss).toHaveBeenCalledTimes(1)
+  })
 })

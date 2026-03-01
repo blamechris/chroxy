@@ -56,7 +56,13 @@ export function Toast({ items, onDismiss }: ToastProps) {
             className="toast-close"
             data-testid={`toast-close-${item.id}`}
             aria-label="Close notification"
-            onClick={() => onDismiss(item.id)}
+            onClick={() => {
+              if (timersRef.current.has(item.id)) {
+                clearTimeout(timersRef.current.get(item.id)!)
+                timersRef.current.delete(item.id)
+              }
+              onDismiss(item.id)
+            }}
             type="button"
           >
             &times;
