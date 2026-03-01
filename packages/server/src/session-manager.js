@@ -168,7 +168,16 @@ export class SessionManager extends EventEmitter {
     this._sessions.set(sessionId, entry)
     this._lastActivity.set(sessionId, Date.now())
     this._wireSessionEvents(sessionId, session)
-    session.start()
+
+    try {
+      session.start()
+    } catch (err) {
+      // Clean up phantom session on start() failure (Guardian FM-03)
+      this._sessions.delete(sessionId)
+      this._lastActivity.delete(sessionId)
+      session.removeAllListeners()
+      throw err
+    }
 
     console.log(`[session-manager] Created session ${sessionId} "${sessionName}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_created', { sessionId, name: sessionName, cwd: resolvedCwd })

@@ -876,3 +876,66 @@ describe('#987 — dead code removal in session-manager', () => {
       `destroySession should call _schedulePersist once, found ${persistCalls} calls`)
   })
 })
+
+describe('createSession failure cleanup (FM-03)', () => {
+  it('cleans up _sessions and _lastActivity when session.start() throws', async () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    // Register a test provider whose start() throws
+    const { registerProvider } = await import('../src/providers.js')
+    class FailingProvider extends EventEmitter {
+      constructor(opts) {
+        super()
+        this.cwd = opts.cwd
+        this.model = opts.model || null
+        this.permissionMode = opts.permissionMode || 'approve'
+        this.isRunning = false
+        this.resumeSessionId = null
+      }
+      static get capabilities() { return {} }
+      start() { throw new Error('binary not found') }
+      destroy() {}
+      sendMessage() {}
+      setModel() {}
+      setPermissionMode() {}
+    }
+    registerProvider('test-failing', FailingProvider)
+
+    assert.throws(
+      () => mgr.createSession({ cwd: '/tmp', provider: 'test-failing' }),
+      /binary not found/
+    )
+
+    // After the failure, no phantom session should remain
+    assert.equal(mgr._sessions.size, 0, 'sessions map should be empty after start() failure')
+    assert.equal(mgr._lastActivity.size, 0, 'lastActivity map should be empty after start() failure')
+  })
+
+  it('does not emit session_created when start() throws', async () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    let emitted = false
+    mgr.on('session_created', () => { emitted = true })
+
+    const { registerProvider } = await import('../src/providers.js')
+    class FailingProvider2 extends EventEmitter {
+      constructor(opts) {
+        super()
+        this.cwd = opts.cwd
+        this.model = null
+        this.permissionMode = 'approve'
+        this.isRunning = false
+        this.resumeSessionId = null
+      }
+      static get capabilities() { return {} }
+      start() { throw new Error('spawn failed') }
+      destroy() {}
+      sendMessage() {}
+      setModel() {}
+      setPermissionMode() {}
+    }
+    registerProvider('test-failing2', FailingProvider2)
+
+    assert.throws(() => mgr.createSession({ cwd: '/tmp', provider: 'test-failing2' }))
+    assert.equal(emitted, false, 'session_created should not be emitted when start() fails')
+  })
+})
