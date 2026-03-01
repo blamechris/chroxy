@@ -27,7 +27,7 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    include: ['src/dashboard-next/src/**/*.test.{ts,tsx}'],
-    setupFiles: ['src/dashboard-next/src/test-setup.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
+    setupFiles: ['src/test-setup.ts'],
   },
 })

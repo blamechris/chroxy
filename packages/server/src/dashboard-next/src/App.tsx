@@ -4,7 +4,8 @@
  * Auto-connects to the server on mount using the injected config + auth cookie.
  * Layout: header → session bar → view switcher → main content → input bar.
  */
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useConnectionStore } from './store/connection'
 import type { ChatMessage } from './store/connection'
 import type { ChatViewMessage } from './components/ChatView'
@@ -75,8 +76,8 @@ export function App() {
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
   const terminalRawBuffer = useConnectionStore(s => s.terminalRawBuffer)
 
-  // Session-level state
-  const sessionState = useConnectionStore(s => s.getActiveSessionState())
+  // Session-level state — useShallow prevents re-renders when getActiveSessionState()
+  // returns a new fallback object with the same property values
   const {
     messages: storeMessages,
     streamingMessageId,
@@ -87,7 +88,7 @@ export function App() {
     isIdle,
     activeAgents,
     isPlanPending,
-  } = sessionState
+  } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
   // Store actions (stable refs)
   const connect = useConnectionStore(s => s.connect)
@@ -106,7 +107,6 @@ export function App() {
 
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
-  const inputBarRef = useRef<HTMLTextAreaElement>(null)
 
   // Auto-connect on mount
   useEffect(() => {
@@ -136,6 +136,24 @@ export function App() {
     })),
     [sessions, activeSessionId],
   )
+
+  // Derive plan content from the last assistant message (plan text is streamed
+  // before plan_ready fires — the WS protocol doesn't include plan content separately)
+  const planHtml = useMemo(() => {
+    if (!isPlanPending) return ''
+    for (let i = storeMessages.length - 1; i >= 0; i--) {
+      const m = storeMessages[i]!
+      if (m.type === 'response' || m.type === 'thinking') {
+        const escaped = m.content
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/\n/g, '<br/>')
+        return `<p>${escaped}</p>`
+      }
+    }
+    return '<p>Claude has prepared a plan for your review.</p>'
+  }, [isPlanPending, storeMessages])
 
   // Toast items from server errors
   const toastItems: ToastItem[] = useMemo(
@@ -167,7 +185,8 @@ export function App() {
 
   const handlePlanFeedback = useCallback(() => {
     // Focus the input bar so the user can type feedback
-    inputBarRef.current?.focus()
+    const textarea = document.querySelector<HTMLTextAreaElement>('.input-bar textarea')
+    textarea?.focus()
   }, [])
 
   const handleRetry = useCallback(() => {
@@ -326,7 +345,7 @@ export function App() {
       {/* Plan approval */}
       {isPlanPending && (
         <PlanApproval
-          planHtml="<p>Claude has prepared a plan for your review.</p>"
+          planHtml={planHtml}
           onApprove={handlePlanApprove}
           onFeedback={handlePlanFeedback}
         />
