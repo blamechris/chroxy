@@ -468,7 +468,7 @@ export class WsServer {
       }
 
       // Redirect legacy /dashboard-next URLs to /dashboard
-      if (req.method === 'GET' && req.url?.startsWith('/dashboard-next')) {
+      if (req.method === 'GET' && /^\/dashboard-next(\/|$|\?)/.test(req.url || '')) {
         const redirectUrl = req.url.replace('/dashboard-next', '/dashboard')
         res.writeHead(301, { 'Location': redirectUrl, 'Cache-Control': 'no-store' })
         res.end()
@@ -476,7 +476,7 @@ export class WsServer {
       }
 
       // Dashboard endpoint (React app built by Vite)
-      if (req.method === 'GET' && req.url?.startsWith('/dashboard')) {
+      if (req.method === 'GET' && /^\/dashboard(\/|$|\?)/.test(req.url || '')) {
         const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
 
         if (this.authRequired) {
