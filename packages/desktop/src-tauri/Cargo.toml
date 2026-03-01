@@ -20,6 +20,9 @@ ureq = "2"
 libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 strip = true
 lto = true
