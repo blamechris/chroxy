@@ -1,0 +1,125 @@
+/**
+ * Chroxy Desktop Dashboard — CSS Custom Properties
+ *
+ * Dark-only theme. Values sourced from mobile colors.ts + legacy dashboard.css.
+ * TypeScript tokens in tokens.ts mirror these values.
+ */
+
+:root {
+  /* ---- Backgrounds ---- */
+  --bg-primary: #0f0f1a;
+  --bg-secondary: #1a1a2e;
+  --bg-tertiary: #16162a;
+  --bg-card: #2a2a4e;
+  --bg-input: #0f0f1a;
+  --bg-terminal: #000000;
+  --bg-header: #151528;
+  --bg-session-bar: #12121f;
+  --bg-code-block: #0a0a18;
+  --bg-tool-bubble: #161625;
+  --bg-permission: #1e1a30;
+  --bg-question: #1a2530;
+  --bg-plan-banner: #2a1a40;
+  --bg-modal: #1a1a2e;
+
+  /* ---- Text ---- */
+  --text-primary: #ffffff;
+  --text-secondary: #cccccc;
+  --text-muted: #888888;
+  --text-dim: #666666;
+  --text-disabled: #555555;
+  --text-error: #e8a0a0;
+  --text-system: #b0b0b0;
+  --text-link: #4a9eff;
+  --text-emphasis: #b0b8d0;
+  --text-heading: #f0f0f0;
+  --text-blockquote: #999999;
+
+  /* ---- Accents ---- */
+  --accent-blue: #4a9eff;
+  --accent-green: #22c55e;
+  --accent-purple: #a78bfa;
+  --accent-orange: #f59e0b;
+  --accent-red: #ff4a4a;
+
+  /* Accent opacity variants */
+  --accent-blue-light: #4a9eff22;
+  --accent-blue-subtle: #4a9eff33;
+  --accent-blue-border: #4a9eff44;
+  --accent-blue-border-strong: #4a9eff66;
+
+  --accent-green-light: #22c55e22;
+  --accent-green-border: #22c55e33;
+  --accent-green-border-strong: #22c55e66;
+
+  --accent-purple-light: #a78bfa22;
+  --accent-purple-subtle: #a78bfa33;
+  --accent-purple-border-strong: #a78bfa66;
+  --accent-purple-code: #c4a5ff;
+
+  --accent-orange-light: #f59e0b11;
+  --accent-orange-subtle: #f59e0b22;
+  --accent-orange-medium: #f59e0b33;
+  --accent-orange-border: #f59e0b44;
+  --accent-orange-border-strong: #f59e0b66;
+
+  --accent-red-light: #ff4a4a11;
+  --accent-red-subtle: #ff4a4a22;
+  --accent-red-border: #ff4a4a44;
+
+  /* ---- Borders ---- */
+  --border-primary: #2a2a4e;
+  --border-secondary: #3a3a5e;
+  --border-subtle: #4a4a6e;
+  --border-focus: #4a9eff;
+  --border-permission: #4a3a7a;
+  --border-question: #2a5a7a;
+
+  /* ---- Status indicators ---- */
+  --status-connected: #22c55e;
+  --status-disconnected: #ef4444;
+  --status-connecting: #eab308;
+  --status-restarting: #f59e0b;
+
+  /* ---- Syntax highlighting ---- */
+  --syntax-keyword: #c4a5ff;
+  --syntax-string: #4eca6a;
+  --syntax-comment: #7a7a7a;
+  --syntax-number: #ff9a52;
+  --syntax-function: #4a9eff;
+  --syntax-operator: #e0e0e0;
+  --syntax-punctuation: #888888;
+  --syntax-plain: #a0d0ff;
+  --syntax-type: #4a9eff;
+  --syntax-property: #4eca6a;
+
+  /* ---- Diff ---- */
+  --diff-add-bg: #1a2e1a;
+  --diff-remove-bg: #2e1a1a;
+  --diff-add-text: #4eca6a;
+  --diff-remove-text: #ff5b5b;
+
+  /* ---- Scrollbar ---- */
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: #333355;
+  --scrollbar-thumb-hover: #444466;
+
+  /* ---- Fonts ---- */
+  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, Consolas, monospace;
+  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* ---- Typography scale ---- */
+  --text-xs: 10px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+
+  /* ---- Spacing (4px base grid) ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+}
