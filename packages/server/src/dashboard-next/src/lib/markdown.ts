@@ -74,7 +74,7 @@ export function renderMarkdown(text: string): string {
     if (!trimmed) return ''
     if (blockRe.test(trimmed)) return trimmed
     return `<p>${trimmed}</p>`
-  }).filter(Boolean).join('\n')
+  }).filter(Boolean).join('')
   html = html.replace(/\n/g, '<br>')
 
   // Restore code blocks
