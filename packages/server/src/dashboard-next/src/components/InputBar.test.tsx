@@ -93,6 +93,21 @@ describe('InputBar', () => {
     render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} placeholder="Ask Claude..." />)
     expect(screen.getByPlaceholderText('Ask Claude...')).toBeInTheDocument()
   })
+
+  it('has aria-label on textarea (#1171)', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+    expect(screen.getByLabelText('Message input')).toBeInTheDocument()
+  })
+
+  it('has aria-label on send button (#1171)', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+    expect(screen.getByTestId('send-button')).toHaveAttribute('aria-label', 'Send message')
+  })
+
+  it('has aria-label on interrupt button (#1171)', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isStreaming />)
+    expect(screen.getByTestId('interrupt-button')).toHaveAttribute('aria-label', 'Stop generation')
+  })
 })
 
 describe('ReconnectBanner', () => {
@@ -116,6 +131,13 @@ describe('ReconnectBanner', () => {
     render(<ReconnectBanner visible attempt={1} maxAttempts={8} onRetry={onRetry} />)
     fireEvent.click(screen.getByTestId('retry-button'))
     expect(onRetry).toHaveBeenCalled()
+  })
+
+  it('has role=alert and aria-live=polite (#1171)', () => {
+    render(<ReconnectBanner visible attempt={1} maxAttempts={8} onRetry={vi.fn()} />)
+    const banner = screen.getByTestId('reconnect-banner')
+    expect(banner).toHaveAttribute('role', 'alert')
+    expect(banner).toHaveAttribute('aria-live', 'polite')
   })
 
   it('shows custom message', () => {

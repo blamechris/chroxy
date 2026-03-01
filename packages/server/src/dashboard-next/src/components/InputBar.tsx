@@ -56,6 +56,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
         onKeyDown={handleKeyDown}
         disabled={disabled}
         placeholder={placeholder}
+        aria-label="Message input"
         rows={1}
       />
       {isStreaming ? (
@@ -64,6 +65,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
           className="btn-interrupt"
           onClick={onInterrupt}
           type="button"
+          aria-label="Stop generation"
         >
           Stop
         </button>
@@ -74,6 +76,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
           onClick={send}
           disabled={disabled}
           type="button"
+          aria-label="Send message"
         >
           Send
         </button>
