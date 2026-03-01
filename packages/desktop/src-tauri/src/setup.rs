@@ -40,7 +40,7 @@ pub fn ensure_config() -> bool {
                     false
                 }
                 Err(e) => {
-                    eprintln!("[setup] Failed to write config: {}", e);
+                    eprintln!("[setup] Failed to write config to {}: {}", path.display(), e);
                     false
                 }
             }

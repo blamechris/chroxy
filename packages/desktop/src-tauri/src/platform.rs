@@ -42,11 +42,14 @@ pub fn write_restricted(path: &Path, data: &str) -> Result<(), String> {
 pub fn write_restricted_new(path: &Path, data: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(path)?;
+    // Ensure final permissions are exactly 0o600, independent of process umask.
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
     file.write_all(data.as_bytes())?;
     Ok(())
 }
@@ -137,7 +140,6 @@ mod tests {
         let _ = fs::remove_dir(&dir);
     }
 
-    #[cfg(unix)]
     #[test]
     fn write_restricted_new_fails_if_file_exists() {
         let dir = std::env::temp_dir().join(format!(
