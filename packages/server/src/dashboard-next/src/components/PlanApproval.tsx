@@ -2,7 +2,7 @@
  * PlanApproval — plan review card with approve/feedback buttons.
  *
  * Ports plan_ready handler from dashboard-app.js (lines 1655-1662, 1811-1820).
- * Renders plan content, approve sends "Looks good, proceed."
+ * Renders plan content and wires Approve/Feedback buttons to the provided callbacks.
  */
 
 export interface PlanApprovalProps {
