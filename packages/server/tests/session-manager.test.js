@@ -1006,7 +1006,7 @@ describe('#1202 — guard session.destroy() with try-catch', () => {
     assert.equal(mgr._lastActivity.size, 0, 'lastActivity map should be empty')
   })
 
-  it('cleans up when async start() rejects and destroySession throws', async () => {
+  it('cleans up when async start() rejects and destroy() throws', async () => {
     const mgr = new SessionManager({ maxSessions: 5 })
 
     const { registerProvider } = await import('../src/providers.js')
