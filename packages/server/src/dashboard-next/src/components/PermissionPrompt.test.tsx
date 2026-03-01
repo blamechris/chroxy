@@ -278,6 +278,42 @@ describe('PermissionPrompt', () => {
     expect(onRespond).not.toHaveBeenCalled()
   })
 
+  it('ignores Escape when a modal overlay is open (#1230)', () => {
+    const onRespond = vi.fn()
+    render(
+      <div>
+        <div className="modal-overlay" data-testid="modal-overlay" />
+        <PermissionPrompt
+          requestId="req-1"
+          tool="Write"
+          description="test"
+          remainingMs={60000}
+          onRespond={onRespond}
+        />
+      </div>
+    )
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onRespond).not.toHaveBeenCalled()
+  })
+
+  it('still allows Cmd+Y when a modal overlay is open (#1230)', () => {
+    const onRespond = vi.fn()
+    render(
+      <div>
+        <div className="modal-overlay" data-testid="modal-overlay" />
+        <PermissionPrompt
+          requestId="req-1"
+          tool="Write"
+          description="test"
+          remainingMs={60000}
+          onRespond={onRespond}
+        />
+      </div>
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
+  })
+
   it('cleans up keyboard listener on unmount (#1190)', () => {
     const onRespond = vi.fn()
     const { unmount } = render(
