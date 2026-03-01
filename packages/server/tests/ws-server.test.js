@@ -1,9 +1,10 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, before, beforeEach, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { once, EventEmitter } from 'node:events'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync, existsSync } from 'node:fs'
 import { execSync } from 'node:child_process'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
@@ -7035,6 +7036,38 @@ describe('dashboard endpoint', () => {
 // ---------------------------------------------------------------------------
 describe('dashboard-next endpoint', () => {
   let server
+  const __test_dirname = dirname(fileURLToPath(import.meta.url))
+  const distDir = join(__test_dirname, '..', 'src', 'dashboard-next', 'dist')
+  let createdFixture = false
+
+  before(() => {
+    // Create minimal fixture dist/ if it doesn't exist (e.g. CI without dashboard:build)
+    if (!existsSync(join(distDir, 'index.html'))) {
+      createdFixture = true
+      mkdirSync(join(distDir, 'assets'), { recursive: true })
+      writeFileSync(join(distDir, 'assets', 'index-testHash.js'), '// test bundle')
+      writeFileSync(join(distDir, 'index.html'), [
+        '<!DOCTYPE html>',
+        '<html lang="en">',
+        '<head>',
+        '  <meta charset="utf-8">',
+        '  <title>Chroxy Dashboard</title>',
+        '  <script type="module" crossorigin src="/dashboard-next/assets/index-testHash.js"></script>',
+        '</head>',
+        '<body>',
+        '  <div id="root"></div>',
+        '</body>',
+        '</html>',
+      ].join('\n'))
+    }
+  })
+
+  after(() => {
+    // Only clean up if we created the fixture (don't delete a real build)
+    if (createdFixture) {
+      rmSync(distDir, { recursive: true, force: true })
+    }
+  })
 
   afterEach(() => {
     if (server) {
