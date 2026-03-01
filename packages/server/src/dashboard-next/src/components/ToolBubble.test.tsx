@@ -67,9 +67,23 @@ describe('ToolBubble', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
   })
 
-  it('has aria-controls pointing to result panel', () => {
+  it('ignores repeated Space key events', () => {
     render(<ToolBubble {...baseProps} />)
     const toggle = screen.getByRole('button')
+    fireEvent.keyDown(toggle, { key: ' ' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    // Held key (repeat) should not toggle back
+    fireEvent.keyDown(toggle, { key: ' ', repeat: true })
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('sets aria-controls only when result panel is visible', () => {
+    render(<ToolBubble {...baseProps} />)
+    const toggle = screen.getByRole('button')
+    // Collapsed: no aria-controls (panel not in DOM)
+    expect(toggle).not.toHaveAttribute('aria-controls')
+    // Expanded: aria-controls references the panel
+    fireEvent.click(toggle)
     expect(toggle).toHaveAttribute('aria-controls', 'tool-result-tool-1')
   })
 

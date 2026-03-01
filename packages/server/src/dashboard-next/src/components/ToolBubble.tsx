@@ -29,7 +29,10 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
   const toggle = () => setExpanded(prev => !prev)
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' || e.key === ' ') {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      toggle()
+    } else if (e.key === ' ' && !e.repeat) {
       e.preventDefault()
       toggle()
     }
@@ -43,7 +46,7 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
       role="button"
       tabIndex={0}
       aria-expanded={expanded}
-      aria-controls={resultId}
+      aria-controls={expanded && result ? resultId : undefined}
       onClick={toggle}
       onKeyDown={handleKeyDown}
     >
