@@ -202,10 +202,15 @@ export function App() {
     setTerminalWriteCallback(handle.write)
   }, [setTerminalWriteCallback])
 
+  // Build id->message map for O(1) lookups in renderMessage
+  const storeMsgMap = useMemo(
+    () => new Map(storeMessages.map(m => [m.id, m])),
+    [storeMessages],
+  )
+
   // Custom message renderer for permission prompts and tool bubbles
   const renderMessage = useCallback((msg: ChatViewMessage) => {
-    // Find the corresponding store message for full data
-    const storeMsg = storeMessages.find(m => m.id === msg.id)
+    const storeMsg = storeMsgMap.get(msg.id)
     if (!storeMsg) return null
 
     // Permission prompt
@@ -236,7 +241,7 @@ export function App() {
 
     // Default rendering
     return null
-  }, [storeMessages, sendPermissionResponse])
+  }, [storeMsgMap, sendPermissionResponse])
 
   const isConnected = connectionPhase === 'connected'
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
