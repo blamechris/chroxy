@@ -490,7 +490,10 @@ export class WsServer {
             ? req.headers['authorization'].slice(7) : null
           // Also check for token in cookie (set on previous ?token= visit)
           const cookieToken = (req.headers['cookie'] || '').match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
-          const cookieVal = cookieToken ? decodeURIComponent(cookieToken[1]) : null
+          let cookieVal = null
+          if (cookieToken) {
+            try { cookieVal = decodeURIComponent(cookieToken[1]) } catch { cookieVal = null }
+          }
           const token = queryToken || bearerToken || cookieVal
           if (!token || !this._isTokenValid(token)) {
             res.writeHead(403, { 'Content-Type': 'text/html', ...securityHeaders })
@@ -502,9 +505,10 @@ export class WsServer {
           if (queryToken) {
             const encoded = encodeURIComponent(queryToken)
             res.writeHead(302, {
-              'Location': '/dashboard',
-              'Set-Cookie': `chroxy_auth=${encoded}; Path=/; SameSite=Strict; Max-Age=86400`,
+              'Location': dashUrl.pathname,
+              'Set-Cookie': `chroxy_auth=${encoded}; Path=/dashboard; SameSite=Strict; Max-Age=86400`,
               'Cache-Control': 'no-store',
+              ...securityHeaders,
             })
             res.end()
             return

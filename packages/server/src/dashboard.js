@@ -2,9 +2,9 @@
  * Generate the web dashboard HTML with embedded configuration.
  * Assets (CSS, JS, xterm) are served as separate static files via ws-server.
  *
- * Token is NOT embedded in the HTML — it is passed via httpOnly-safe cookie
- * and read from document.cookie by dashboard-app.js. This prevents token
- * leakage in View Source / page source.
+ * Token is NOT embedded in the HTML — it is passed via a SameSite=Strict cookie
+ * set by the server on /dashboard?token=X and read from document.cookie by
+ * dashboard-app.js. This prevents token leakage in View Source / page source.
  *
  * @param {number} port - WsServer port
  * @param {string|null} _apiToken - Unused (kept for call-site compat, will be removed)

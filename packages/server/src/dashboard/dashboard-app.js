@@ -9,7 +9,8 @@
   // instead of being embedded in HTML source (prevents View Source leakage)
   var token = (function() {
     var match = document.cookie.match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
-    return match ? decodeURIComponent(match[1]) : ''
+    if (!match) return ''
+    try { return decodeURIComponent(match[1]) } catch (e) { return '' }
   })();
 
   // ---- State ----
@@ -1732,7 +1733,9 @@
     if (!newToken) return;
     token = newToken;
     // Persist new token to cookie for future page loads
-    document.cookie = 'chroxy_auth=' + encodeURIComponent(newToken) + '; Path=/; SameSite=Strict; Max-Age=86400';
+    var reauthCookie = 'chroxy_auth=' + encodeURIComponent(newToken) + '; Path=/dashboard; SameSite=Strict; Max-Age=86400'
+    if (window.location && window.location.protocol === 'https:') reauthCookie += '; Secure'
+    document.cookie = reauthCookie
     reauthRequired = false;
     reauthContainer.classList.add("hidden");
     reauthInput.value = "";
