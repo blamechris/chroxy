@@ -48,7 +48,7 @@ export function Toast({ items, onDismiss }: ToastProps) {
   }, [])
 
   return (
-    <div className="toast-container" data-testid="toast-container">
+    <div className="toast-container" data-testid="toast-container" aria-live="assertive">
       {items.map(item => (
         <div key={item.id} className="toast" role="alert">
           <span className="toast-msg">{item.message}</span>
