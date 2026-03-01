@@ -942,7 +942,7 @@ describe('createSession failure cleanup (FM-03)', () => {
     assert.equal(emitted, false, 'session_created should not be emitted when start() fails')
   })
 
-  it('calls session.destroy() before removing listeners when start() throws', async () => {
+  it('calls session.destroy() when start() throws', async () => {
     const mgr = new SessionManager({ maxSessions: 5 })
 
     const { registerProvider } = await import('../src/providers.js')
