@@ -174,10 +174,23 @@ describe('Toast', () => {
     expect(container.querySelectorAll('.toast').length).toBe(0)
   })
 
-  it('has accessible role', () => {
-    const items: ToastItem[] = [{ id: '1', message: 'Alert' }]
+  it('has alert role on each toast item', () => {
+    const items: ToastItem[] = [
+      { id: '1', message: 'First' },
+      { id: '2', message: 'Second' },
+    ]
     render(<Toast items={items} onDismiss={vi.fn()} />)
-    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(screen.getAllByRole('alert')).toHaveLength(2)
+  })
+
+  it('container has no role and uses aria-live="assertive" (#1177)', () => {
+    const items: ToastItem[] = [{ id: '1', message: 'Alert' }]
+    const { container } = render(<Toast items={items} onDismiss={vi.fn()} />)
+    const toastContainer = container.querySelector('[data-testid="toast-container"]')!
+    // Container should have no role (items carry their own role="alert")
+    expect(toastContainer).not.toHaveAttribute('role')
+    // Container is a stable live region for reliable screen reader support
+    expect(toastContainer).toHaveAttribute('aria-live', 'assertive')
   })
 
   it('clears auto-dismiss timer when manually closed (#1187)', () => {
