@@ -35,11 +35,10 @@ pub fn write_restricted(path: &Path, data: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn creates_file_with_0o600_permissions() {
         use std::os::unix::fs::PermissionsExt;
@@ -60,7 +59,6 @@ mod tests {
         let _ = fs::remove_dir(&dir);
     }
 
-    #[cfg(unix)]
     #[test]
     fn overwrites_existing_file_preserving_permissions() {
         use std::os::unix::fs::PermissionsExt;
@@ -84,7 +82,6 @@ mod tests {
         let _ = fs::remove_dir(&dir);
     }
 
-    #[cfg(unix)]
     #[test]
     fn tightens_permissions_on_existing_broad_file() {
         use std::os::unix::fs::PermissionsExt;
