@@ -69,7 +69,7 @@ export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps
       const el = containerRef.current
       if (el) el.scrollTop = el.scrollHeight
     }
-  }, [dedupedMessages, userScrolledUp])
+  }, [dedupedMessages.length, userScrolledUp])
 
   return (
     <div className="chat-view" data-testid="chat-view">
