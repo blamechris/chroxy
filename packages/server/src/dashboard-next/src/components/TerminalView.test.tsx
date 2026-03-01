@@ -37,7 +37,6 @@ vi.mock('@xterm/xterm', () => {
   return { Terminal: MockTerminal }
 })
 
-const fitSpy = vi.fn()
 vi.mock('@xterm/addon-fit', () => {
   class MockFitAddon {
     _fitted = false
