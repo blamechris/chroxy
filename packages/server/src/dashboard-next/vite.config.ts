@@ -1,8 +1,10 @@
 /// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import { resolve } from 'path'
+import { resolve, dirname } from 'path'
+import { fileURLToPath } from 'url'
 
+const __dirname = dirname(fileURLToPath(import.meta.url))
 const isTauri = !!process.env.TAURI_ENV_PLATFORM
 
 export default defineConfig({

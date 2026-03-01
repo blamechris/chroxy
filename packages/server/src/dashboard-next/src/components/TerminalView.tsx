@@ -8,6 +8,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
 
 export interface TerminalHandle {
   write: (data: string) => void
@@ -22,14 +23,25 @@ export interface TerminalViewProps {
 
 const BATCH_INTERVAL = 50 // ms — coalesce rapid writes
 
+/** Safely call fit() — can throw when container is hidden or has zero size */
+function safeFit(fit: FitAddon) {
+  try { fit.fit() } catch { /* container not visible */ }
+}
+
 export function TerminalView({ className, initialData, onReady }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const batchRef = useRef<string[]>([])
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const disposedRef = useRef(false)
 
   const flush = useCallback(() => {
+    if (disposedRef.current) {
+      batchRef.current = []
+      timerRef.current = null
+      return
+    }
     if (batchRef.current.length > 0 && termRef.current) {
       const data = batchRef.current.join('')
       batchRef.current = []
@@ -39,6 +51,7 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
   }, [])
 
   const write = useCallback((data: string) => {
+    if (disposedRef.current) return
     batchRef.current.push(data)
     if (!timerRef.current) {
       timerRef.current = setTimeout(flush, BATCH_INTERVAL)
@@ -57,6 +70,8 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
   useEffect(() => {
     if (!containerRef.current) return
 
+    disposedRef.current = false
+
     const term = new Terminal({
       disableStdin: true,
       convertEol: true,
@@ -74,7 +89,7 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(containerRef.current)
-    fit.fit()
+    safeFit(fit)
 
     termRef.current = term
     fitRef.current = fit
@@ -87,28 +102,34 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
     // Notify parent
     onReady?.({ write, clear })
 
-    // Resize handler
-    const onResize = () => fit.fit()
+    // Resize handler — fit() guarded against hidden/zero-size containers
+    const onResize = () => safeFit(fit)
     window.addEventListener('resize', onResize)
 
     // ResizeObserver for container-level resizing
     let resizeObserver: ResizeObserver | undefined
     if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(() => fit.fit())
+      resizeObserver = new ResizeObserver(() => safeFit(fit))
       resizeObserver.observe(containerRef.current)
     }
 
     return () => {
+      disposedRef.current = true
       window.removeEventListener('resize', onResize)
       resizeObserver?.disconnect()
       if (timerRef.current) {
         clearTimeout(timerRef.current)
         timerRef.current = null
       }
+      batchRef.current = []
       term.dispose()
       termRef.current = null
       fitRef.current = null
     }
+    // Mount-once: onReady/initialData/write/clear are stable refs captured at
+    // mount time. The terminal lifecycle is tied to the DOM container, not to
+    // prop changes. Re-running this effect would destroy and recreate the
+    // terminal instance, losing all scrollback.
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
