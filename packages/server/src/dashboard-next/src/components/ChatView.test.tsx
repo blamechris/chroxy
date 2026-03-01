@@ -1,7 +1,7 @@
 /**
  * ChatView + ThinkingDots tests (#1156)
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { ChatView, type ChatViewMessage } from './ChatView'
 import { ThinkingDots } from './ThinkingDots'
@@ -101,6 +101,35 @@ describe('ChatView', () => {
     // Should only render first occurrence
     const items = screen.getAllByText(/First|Duplicate/)
     expect(items.length).toBe(1)
+  })
+
+  it('uses renderMessage when provided and returns a node', () => {
+    const messages: ChatViewMessage[] = [
+      { id: 'custom-1', type: 'response', content: 'Default', timestamp: Date.now() },
+    ]
+    render(
+      <ChatView
+        messages={messages}
+        isStreaming={false}
+        renderMessage={() => <span>Custom render</span>}
+      />
+    )
+    expect(screen.getByText('Custom render')).toBeInTheDocument()
+    expect(screen.queryByText('Default')).not.toBeInTheDocument()
+  })
+
+  it('falls back to default when renderMessage returns null', () => {
+    const messages: ChatViewMessage[] = [
+      { id: 'fallback-1', type: 'response', content: 'Fallback content', timestamp: Date.now() },
+    ]
+    render(
+      <ChatView
+        messages={messages}
+        isStreaming={false}
+        renderMessage={() => null}
+      />
+    )
+    expect(screen.getByText('Fallback content')).toBeInTheDocument()
   })
 })
 

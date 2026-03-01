@@ -6,7 +6,7 @@
  * - Shows scroll-to-bottom button when scrolled up
  * - Deduplicates messages by id for reconnect replay
  */
-import { useRef, useState, useCallback, useEffect, useMemo } from 'react'
+import { useRef, useState, useCallback, useEffect, useMemo, type ReactNode } from 'react'
 import { ThinkingDots } from './ThinkingDots'
 
 export interface ChatViewMessage {
@@ -20,6 +20,8 @@ export interface ChatViewMessage {
 export interface ChatViewProps {
   messages: ChatViewMessage[]
   isStreaming: boolean
+  /** Optional custom renderer. Return a node to override default rendering, or null to fall back. */
+  renderMessage?: (msg: ChatViewMessage) => ReactNode | null
 }
 
 const TYPE_CLASS: Record<string, string> = {
@@ -33,7 +35,7 @@ const TYPE_CLASS: Record<string, string> = {
 
 const SCROLL_THRESHOLD = 60
 
-export function ChatView({ messages, isStreaming }: ChatViewProps) {
+export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
 
@@ -77,15 +79,21 @@ export function ChatView({ messages, isStreaming }: ChatViewProps) {
         data-testid="chat-messages"
         onScroll={handleScroll}
       >
-        {dedupedMessages.map(msg => (
-          <div
-            key={msg.id}
-            className={`msg ${TYPE_CLASS[msg.type] || 'assistant'}${msg.isStreaming ? ' streaming' : ''}`}
-            data-testid={`msg-${msg.id}`}
-          >
-            {msg.content}
-          </div>
-        ))}
+        {dedupedMessages.map(msg => {
+          const custom = renderMessage?.(msg)
+          if (custom !== undefined && custom !== null) {
+            return <div key={msg.id} data-testid={`msg-${msg.id}`}>{custom}</div>
+          }
+          return (
+            <div
+              key={msg.id}
+              className={`msg ${TYPE_CLASS[msg.type] || 'assistant'}${msg.isStreaming ? ' streaming' : ''}`}
+              data-testid={`msg-${msg.id}`}
+            >
+              {msg.content}
+            </div>
+          )
+        })}
         {isStreaming && <ThinkingDots />}
       </div>
 
