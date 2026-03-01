@@ -209,7 +209,8 @@ describe('safeTokenCompare', () => {
   })
 
   it('handles unicode tokens', () => {
-    const token = 'token-with-unicode'
+    const token = 't\u00f6k\u00ebn-\u4f60\u597d'
     assert.equal(safeTokenCompare(token, token), true)
+    assert.equal(safeTokenCompare(token, 'token-\u4f60\u597d'), false)
   })
 })
