@@ -344,6 +344,13 @@ export class SessionManager extends EventEmitter {
     this._sessions.clear()
     this._lastActivity.clear()
     this._sessionWarned.clear()
+    this._messageHistory.clear()
+    this._historyTruncated.clear()
+    this._sessionCosts.clear()
+    this._budgetWarned.clear()
+    this._budgetExceeded.clear()
+    this._budgetPaused.clear()
+    this._pendingStreams.clear()
   }
 
   /**
