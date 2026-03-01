@@ -973,6 +973,62 @@ describe('createSession failure cleanup (FM-03)', () => {
   })
 })
 
+describe('#1204 — _cleanupSessionMaps helper cleans all maps', () => {
+  it('sync start() failure cleans all session-scoped maps', async () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    const { registerProvider } = await import('../src/providers.js')
+    let sessionIdCapture = null
+    class MapPolluter extends EventEmitter {
+      constructor(opts) {
+        super()
+        this.cwd = opts.cwd
+        this.model = null
+        this.permissionMode = 'approve'
+        this.isRunning = false
+        this.resumeSessionId = null
+      }
+      static get capabilities() { return {} }
+      start() {
+        // Pollute maps before throwing
+        // _wireSessionEvents already ran, so we can find our sessionId
+        for (const [sid] of mgr._sessions) {
+          sessionIdCapture = sid
+          mgr._messageHistory.set(sid, [{ type: 'test' }])
+          mgr._historyTruncated.set(sid, true)
+          mgr._sessionCosts.set(sid, 0.5)
+          mgr._budgetWarned.add(sid)
+          mgr._budgetExceeded.add(sid)
+          mgr._budgetPaused.add(sid)
+          mgr._pendingStreams.set(`${sid}:msg-1`, 'partial delta')
+        }
+        throw new Error('polluted start')
+      }
+      destroy() {}
+      sendMessage() {}
+      setModel() {}
+      setPermissionMode() {}
+    }
+    registerProvider('test-map-polluter', MapPolluter)
+
+    assert.throws(
+      () => mgr.createSession({ cwd: '/tmp', provider: 'test-map-polluter' }),
+      /polluted start/
+    )
+
+    assert.ok(sessionIdCapture, 'should have captured sessionId')
+    assert.equal(mgr._sessions.size, 0, '_sessions should be empty')
+    assert.equal(mgr._lastActivity.size, 0, '_lastActivity should be empty')
+    assert.equal(mgr._messageHistory.has(sessionIdCapture), false, '_messageHistory should be cleaned')
+    assert.equal(mgr._historyTruncated.has(sessionIdCapture), false, '_historyTruncated should be cleaned')
+    assert.equal(mgr._sessionCosts.has(sessionIdCapture), false, '_sessionCosts should be cleaned')
+    assert.equal(mgr._budgetWarned.has(sessionIdCapture), false, '_budgetWarned should be cleaned')
+    assert.equal(mgr._budgetExceeded.has(sessionIdCapture), false, '_budgetExceeded should be cleaned')
+    assert.equal(mgr._budgetPaused.has(sessionIdCapture), false, '_budgetPaused should be cleaned')
+    assert.equal(mgr._pendingStreams.has(`${sessionIdCapture}:msg-1`), false, '_pendingStreams should be cleaned')
+  })
+})
+
 describe('#1202 — guard session.destroy() with try-catch', () => {
   it('propagates original start() error when destroy() also throws', async () => {
     const mgr = new SessionManager({ maxSessions: 5 })

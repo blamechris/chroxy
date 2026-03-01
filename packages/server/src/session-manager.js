@@ -114,6 +114,33 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Remove a session from all session-scoped maps and sets (#1204).
+   * Called by destroySession(), sync catch, and async .catch() paths.
+   * @param {string} sessionId
+   */
+  _cleanupSessionMaps(sessionId) {
+    this._sessions.delete(sessionId)
+    this._lastActivity.delete(sessionId)
+    this._sessionWarned.delete(sessionId)
+    this._messageHistory.delete(sessionId)
+    this._historyTruncated.delete(sessionId)
+    this._sessionCosts.delete(sessionId)
+    this._budgetWarned.delete(sessionId)
+    this._budgetExceeded.delete(sessionId)
+    this._budgetPaused.delete(sessionId)
+
+    // Clean up pending stream state (composite keys: `${sessionId}:messageId`).
+    // destroySession() emits synthetic stream_end before calling this helper,
+    // so remaining entries here are only from the sync catch path.
+    const prefix = sessionId + ':'
+    for (const key of this._pendingStreams.keys()) {
+      if (key.startsWith(prefix)) {
+        this._pendingStreams.delete(key)
+      }
+    }
+  }
+
+  /**
    * Create a new session.
    * @returns {string} sessionId
    */
@@ -189,8 +216,7 @@ export class SessionManager extends EventEmitter {
       } catch (destroyErr) {
         console.error(`[session-manager] Failed to destroy session ${sessionId} during start() failure cleanup:`, destroyErr)
       }
-      this._sessions.delete(sessionId)
-      this._lastActivity.delete(sessionId)
+      this._cleanupSessionMaps(sessionId)
       throw err
     }
 
@@ -290,16 +316,8 @@ export class SessionManager extends EventEmitter {
     } catch (destroyErr) {
       console.error(`[session-manager] Error destroying session ${sessionId} "${entry.name}":`, destroyErr)
     }
-    this._sessions.delete(sessionId)
-    this._lastActivity.delete(sessionId)
-    this._sessionWarned.delete(sessionId)
+    this._cleanupSessionMaps(sessionId)
     console.log(`[session-manager] Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
-    this._messageHistory.delete(sessionId)
-    this._historyTruncated.delete(sessionId)
-    this._sessionCosts.delete(sessionId)
-    this._budgetWarned.delete(sessionId)
-    this._budgetExceeded.delete(sessionId)
-    this._budgetPaused.delete(sessionId)
     this.emit('session_destroyed', { sessionId })
     this._schedulePersist()
     return true
