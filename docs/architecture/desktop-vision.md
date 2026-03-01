@@ -140,22 +140,25 @@ The foundation is solid. Most of the server infrastructure needed for this visio
 
 ### Communication Architecture
 
-The desktop app communicates with the server the same way the mobile app does — over WebSocket. This is intentional:
+The desktop app uses a **hybrid serving model** — the React app ships in Tauri's `frontendDist` for IPC access, and connects to the Node.js server via WebSocket for all application data. This is intentional:
 
-1. **Same protocol, same server, same code path.** No special desktop-only APIs to maintain.
+1. **Same protocol, same server, same code path.** No special desktop-only APIs to maintain. All session/message/protocol communication flows over WebSocket, shared with mobile.
 2. **Cross-device sync comes free.** Desktop and mobile see the same sessions through the same WebSocket.
-3. **The dashboard is served by the Node server.** The Tauri WebView loads `http://localhost:{port}/dashboard`. The React app replaces the vanilla JS dashboard at this URL.
-4. **Tauri IPC is for desktop-native features only.** Clipboard, native notifications, file dialogs, window management — things that require OS access. Not for application data.
+3. **Hybrid serving model.** The React app ships in Tauri's `frontendDist` (enabling `window.__TAURI__` IPC for native features) AND is served by the Node.js server at `/dashboard` for browser access. Same codebase, two deploy targets. The app detects its environment: `window.__TAURI__` exists = use Tauri IPC for native features; absent = web fallback (fully functional, no native features).
+4. **Tauri IPC is for desktop-native features only.** File dialogs, clipboard, notifications, global shortcuts, auto-updater, server process control — things that require OS access. Not for application data.
 
 ```
-React UI ──WebSocket──→ Node.js Server ──WebSocket──→ Mobile App
-    │                        │
-    │ Tauri IPC              │ Tunnel
-    ▼                        ▼
-  Native OS             Cloudflare CDN
-  (clipboard,           (remote access)
-   notifications,
-   file dialogs)
+React UI (Tauri frontendDist) ──WebSocket──→ Node.js Server ──WebSocket──→ Mobile App
+    │                                             │
+    │ Tauri IPC (window.__TAURI__)                │ Tunnel
+    ▼                                             ▼
+  Native OS                                  Cloudflare CDN
+  (file dialogs, clipboard,                  (remote access)
+   notifications, global shortcuts,
+   auto-updater, server control)
+
+React UI (browser at /dashboard) ──WebSocket──→ Node.js Server
+  (no Tauri IPC — web fallback)
 ```
 
 ---
