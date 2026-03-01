@@ -4,10 +4,11 @@ import react from '@vitejs/plugin-react'
 import { resolve } from 'path'
 
 export default defineConfig({
+  root: __dirname,
   plugins: [react()],
   base: '/dashboard-next/',
   resolve: { alias: { '@': resolve(__dirname, 'src') } },
-  build: { outDir: 'dist', emptyOutDir: true },
+  build: { outDir: resolve(__dirname, 'dist'), emptyOutDir: true },
   test: {
     root: resolve(__dirname),
     environment: 'jsdom',
