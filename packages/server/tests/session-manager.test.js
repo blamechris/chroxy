@@ -935,7 +935,10 @@ describe('createSession failure cleanup (FM-03)', () => {
     }
     registerProvider('test-failing2', FailingProvider2)
 
-    assert.throws(() => mgr.createSession({ cwd: '/tmp', provider: 'test-failing2' }))
+    assert.throws(
+      () => mgr.createSession({ cwd: '/tmp', provider: 'test-failing2' }),
+      /spawn failed/
+    )
     assert.equal(emitted, false, 'session_created should not be emitted when start() fails')
   })
 })
