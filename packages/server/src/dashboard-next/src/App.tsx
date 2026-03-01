@@ -230,8 +230,8 @@ export function App() {
       )
     }
 
-    // Question prompt with options
-    if (storeMsg.type === 'prompt' && storeMsg.options && storeMsg.options.length > 0 && !storeMsg.requestId) {
+    // Question prompt (with options or free-text)
+    if (storeMsg.type === 'prompt' && storeMsg.options && !storeMsg.requestId) {
       return (
         <QuestionPrompt
           question={storeMsg.content}
