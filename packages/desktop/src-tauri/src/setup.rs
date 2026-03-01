@@ -1,4 +1,5 @@
 use crate::config;
+use crate::settings::write_restricted;
 use serde_json::json;
 use std::fs;
 use uuid::Uuid;
@@ -31,22 +32,9 @@ pub fn ensure_config() -> bool {
 
     match serde_json::to_string_pretty(&config) {
         Ok(json_str) => {
-            if let Err(e) = fs::write(&path, json_str) {
+            if let Err(e) = write_restricted(&path, &json_str) {
                 eprintln!("[setup] Failed to write config: {}", e);
                 return false;
-            }
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
-                    eprintln!(
-                        "[setup] Failed to set secure permissions on {}: {}",
-                        path.display(),
-                        e
-                    );
-                    return false;
-                }
             }
 
             println!("[setup] Created default config at {}", path.display());

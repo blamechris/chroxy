@@ -47,6 +47,33 @@ impl Default for DesktopSettings {
     }
 }
 
+#[cfg(unix)]
+pub fn write_restricted(path: &std::path::Path, data: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("Failed to open file {}: {}", path.display(), e))?;
+    // mode() only applies at creation time; tighten permissions on existing files too
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("Failed to set permissions on {}: {}", path.display(), e))?;
+    file.write_all(data.as_bytes())
+        .map_err(|e| format!("Failed to write file {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn write_restricted(path: &std::path::Path, data: &str) -> Result<(), String> {
+    std::fs::write(path, data)
+        .map_err(|e| format!("Failed to write file {}: {}", path.display(), e))?;
+    Ok(())
+}
+
 impl DesktopSettings {
     /// Path to the settings file.
     pub fn path() -> Option<PathBuf> {
@@ -81,15 +108,53 @@ impl DesktopSettings {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-        fs::write(&path, json).map_err(|e| format!("Failed to write settings: {}", e))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("Failed to set settings file permissions: {}", e))?;
-        }
+        write_restricted(&path, &json)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn write_restricted_creates_file_with_0o600_permissions() {
+        let dir = std::env::temp_dir().join("chroxy-test-settings");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("test-write-restricted.json");
+
+        // Clean up from previous runs
+        let _ = fs::remove_file(&path);
+
+        write_restricted(&path, r#"{"test": true}"#).unwrap();
+
+        let meta = fs::metadata(&path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "File should be created with 0o600 permissions, got {:o}", mode);
+
+        // Clean up
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_restricted_overwrites_existing_file() {
+        let dir = std::env::temp_dir().join("chroxy-test-settings");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("test-overwrite.json");
+
+        write_restricted(&path, r#"{"v": 1}"#).unwrap();
+        write_restricted(&path, r#"{"v": 2}"#).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, r#"{"v": 2}"#);
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
     }
 }
