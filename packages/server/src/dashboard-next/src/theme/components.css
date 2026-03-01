@@ -923,7 +923,7 @@
   .header-center select { font-size: var(--text-sm); padding: 3px 6px; }
   .session-bar { padding: 4px 10px; }
   .chat-messages { padding: 10px; gap: 8px; }
-  .msg, .tool-bubble, .permission-prompt { max-width: 92%; font-size: var(--text-base); }
+  .msg, .tool-bubble, .permission-prompt, .question-prompt { max-width: 92%; font-size: var(--text-base); }
   .input-bar { padding: 8px 10px; gap: 6px; }
   .input-bar textarea { padding: 8px 10px; font-size: var(--text-base); }
   .btn-send, .btn-interrupt { padding: 8px 12px; font-size: var(--text-base); }
