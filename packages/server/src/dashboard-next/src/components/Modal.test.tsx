@@ -100,7 +100,7 @@ describe('Modal', () => {
     expect(onCloseOuter).not.toHaveBeenCalled()
   })
 
-  it('Escape handler uses data-modal-overlay attribute, not CSS class (#1242)', () => {
+  it('overlay element has data-modal-overlay attribute (#1242)', () => {
     const onClose = vi.fn()
     render(
       <Modal open onClose={onClose} title="Data Attr">
