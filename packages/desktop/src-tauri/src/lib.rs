@@ -1,5 +1,6 @@
 mod config;
 mod node;
+mod platform;
 mod server;
 mod settings;
 mod setup;
