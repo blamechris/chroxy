@@ -72,6 +72,14 @@ jobs:
         run: npm ci
         working-directory: .
 
+      - name: Check generated tokens are up-to-date
+        run: |
+          node scripts/generate-theme-tokens.mjs
+          git diff --exit-code src/dashboard-next/src/theme/tokens.ts || {
+            echo "::error::tokens.ts is stale. Run 'npm run dashboard:generate-tokens' and commit the result."
+            exit 1
+          }
+
       - name: Run dashboard tests
         run: npm run dashboard:test
 
