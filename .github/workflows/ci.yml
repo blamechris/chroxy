@@ -53,6 +53,50 @@ jobs:
       - name: Lint
         run: npm run lint
 
+  dashboard-tests:
+    name: Dashboard Tests
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: packages/server
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Run dashboard tests
+        run: npm run dashboard:test
+
+  dashboard-typecheck:
+    name: Dashboard Type Check
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: packages/server
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Type check dashboard
+        run: npm run dashboard:typecheck
+
   app-tests:
     name: App Tests
     runs-on: ubuntu-24.04
