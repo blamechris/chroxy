@@ -303,7 +303,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   loadSavedConnection: async () => {
-    const saved = await loadConnection();
+    const saved = loadConnection();
     if (saved) {
       set({ savedConnection: saved });
     }
@@ -437,10 +437,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               }, delay);
             } else {
               set({ connectionPhase: 'disconnected', connectionError: 'Server restart timed out' });
-              if (!silent) {
-                console.warn(`[chroxy] Connection Failed: The server is still restarting. Try again later.`);
-                get().connect(url, token);
-              }
+              console.warn(`[chroxy] Connection Failed: The server is still restarting. Try again later.`);
             }
             return;
           }
@@ -467,11 +464,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           }, delay);
         } else {
           set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });
-          if (!silent) {
-            console.warn(`[chroxy] Connection Failed: Could not reach the Chroxy server. Make sure it's running.`);
-            void get().clearSavedConnection();
-            get().connect(url, token);
-          }
+          console.warn(`[chroxy] Connection Failed: Could not reach the Chroxy server. Make sure it's running.`);
+          void get().clearSavedConnection();
         }
       });
 
@@ -1185,6 +1179,9 @@ useConnectionStore.subscribe((state) => {
     _prevTerminalBufferLen = state.terminalBuffer.length;
     if (state.terminalBuffer) {
       persistTerminalBuffer(state.terminalBuffer);
+    } else {
+      // Clear persisted terminal buffer when buffer is emptied
+      try { localStorage.removeItem('chroxy_persist_terminal_buffer'); } catch { /* ignore */ }
     }
   }
 });

@@ -3,7 +3,8 @@
  *
  * Adapted from the mobile app's AsyncStorage-based persistence.
  * Persists session state (messages, view mode, active session) across
- * page reloads. Sensitive data (tokens) stored in localStorage.
+ * page reloads. Does not persist auth tokens; token persistence is
+ * handled separately (see message-handler.ts).
  *
  * Data is debounced to avoid excessive writes on rapid message streams.
  */

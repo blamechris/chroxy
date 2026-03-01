@@ -641,13 +641,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       break;
 
-    case 'server_mode':
-      set({ serverMode: msg.mode as 'cli' | 'terminal' });
-      // Force chat view in CLI mode (no terminal available)
-      if (msg.mode === 'cli' && get().viewMode === 'terminal') {
-        set({ viewMode: 'chat' });
+    case 'server_mode': {
+      const mode = msg.mode;
+      if (mode === 'cli' || mode === 'terminal') {
+        set({ serverMode: mode });
+        // Force chat view in CLI mode (no terminal available)
+        if (mode === 'cli' && get().viewMode === 'terminal') {
+          set({ viewMode: 'chat' });
+        }
+      } else {
+        console.warn('[chroxy] Ignoring invalid server_mode value:', mode);
       }
       break;
+    }
 
     // --- Multi-session messages ---
 
