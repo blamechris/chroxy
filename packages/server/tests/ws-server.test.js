@@ -1692,7 +1692,7 @@ describe('background session sync (_broadcastToSession)', () => {
     ws.close()
   })
 
-  it('delivers messages for inactive sessions to all clients', async () => {
+  it('does NOT deliver messages for sessions client is not viewing', async () => {
     const mockManager = createTwoSessionManager()
 
     server = new WsServer({
@@ -1714,16 +1714,15 @@ describe('background session sync (_broadcastToSession)', () => {
       event: 'message',
       data: { type: 'response', content: 'Background message', timestamp: Date.now() },
     })
-    await new Promise(r => setTimeout(r, 100))
+    await new Promise(r => setTimeout(r, 200))
 
     const bgMsg = messages.find(m => m.type === 'message' && m.content === 'Background message')
-    assert.ok(bgMsg, 'Client should receive message for inactive session')
-    assert.equal(bgMsg.sessionId, 'sess-2', 'Should be tagged with the originating sessionId')
+    assert.ok(!bgMsg, 'Client should NOT receive message for session it is not viewing')
 
     ws.close()
   })
 
-  it('stream_start/stream_end for inactive sessions include sessionId', async () => {
+  it('does NOT deliver stream_start/stream_end for non-viewed sessions', async () => {
     const mockManager = createTwoSessionManager()
 
     server = new WsServer({
@@ -1753,12 +1752,10 @@ describe('background session sync (_broadcastToSession)', () => {
     await new Promise(r => setTimeout(r, 200))
 
     const streamStart = messages.find(m => m.type === 'stream_start' && m.messageId === 'msg-bg-1')
-    assert.ok(streamStart, 'Should receive stream_start for background session')
-    assert.equal(streamStart.sessionId, 'sess-2')
+    assert.ok(!streamStart, 'Should NOT receive stream_start for non-viewed session')
 
     const streamEnd = messages.find(m => m.type === 'stream_end' && m.messageId === 'msg-bg-1')
-    assert.ok(streamEnd, 'Should receive stream_end for background session')
-    assert.equal(streamEnd.sessionId, 'sess-2')
+    assert.ok(!streamEnd, 'Should NOT receive stream_end for non-viewed session')
 
     ws.close()
   })
@@ -8169,6 +8166,7 @@ describe('provider capability gates', () => {
     sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: '/tmp', type: 'sdk' })
     manager.getSession = (id) => sessionsMap.get(id)
     manager.listSessions = () => []
+    manager.firstSessionId = 'sess-1'
     manager._sessions = sessionsMap
 
     server = new WsServer({
@@ -8200,6 +8198,7 @@ describe('provider capability gates', () => {
     sessionsMap.set('sess-1', { session: mockSession, name: 'Test', cwd: '/tmp', type: 'cli' })
     manager.getSession = (id) => sessionsMap.get(id)
     manager.listSessions = () => []
+    manager.firstSessionId = 'sess-1'
     manager._sessions = sessionsMap
 
     server = new WsServer({
