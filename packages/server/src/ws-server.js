@@ -3,9 +3,9 @@ import { randomBytes } from 'crypto'
 import { execFileSync } from 'child_process'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
-import { readFileSync } from 'fs'
+import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
+import { dirname, join, resolve } from 'path'
 import { toShortModelId, getModels } from './models.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from './crypto.js'
 import { ClientMessageSchema, AuthSchema, KeyExchangeSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
@@ -470,7 +470,94 @@ export class WsServer {
         return
       }
 
-      // Dashboard endpoint
+      // Dashboard-next endpoint (React app built by Vite) — must come before /dashboard
+      if (req.method === 'GET' && req.url?.startsWith('/dashboard-next')) {
+        const dashNextUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
+
+        // Auth — same logic as legacy /dashboard
+        if (this.authRequired) {
+          const bearerToken = (req.headers['authorization'] || '').startsWith('Bearer ')
+            ? req.headers['authorization'].slice(7) : null
+          const cookieToken = (req.headers['cookie'] || '').match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
+          let cookieVal = null
+          if (cookieToken) {
+            try { cookieVal = decodeURIComponent(cookieToken[1]) } catch { cookieVal = null }
+          }
+          const queryToken = dashNextUrl.searchParams.get('token')
+          const token = queryToken || bearerToken || cookieVal
+          if (!token || !this._isTokenValid(token)) {
+            res.writeHead(403, { 'Content-Type': 'text/html' })
+            res.end('<h1>403 Forbidden</h1><p>Invalid or missing token.</p>')
+            return
+          }
+          if (queryToken) {
+            const encoded = encodeURIComponent(queryToken)
+            res.writeHead(302, {
+              'Location': dashNextUrl.pathname,
+              'Set-Cookie': `chroxy_auth=${encoded}; Path=/dashboard-next; SameSite=Strict; Max-Age=86400`,
+              'Cache-Control': 'no-store',
+            })
+            res.end()
+            return
+          }
+        }
+
+        const distDir = join(__dirname, 'dashboard-next', 'dist')
+        // Strip prefix to get relative path within dist
+        const relPath = dashNextUrl.pathname.replace(/^\/dashboard-next\/?/, '') || 'index.html'
+
+        // Serve static assets (hashed filenames from Vite build)
+        if (relPath.startsWith('assets/')) {
+          const filePath = resolve(distDir, relPath)
+          // Path traversal guard — resolved path must stay within distDir
+          if (!filePath.startsWith(distDir)) {
+            res.writeHead(403)
+            res.end('Forbidden')
+            return
+          }
+          if (existsSync(filePath)) {
+            const ext = relPath.split('.').pop()
+            const mimeTypes = { js: 'application/javascript', css: 'text/css', svg: 'image/svg+xml', png: 'image/png', woff2: 'font/woff2' }
+            try {
+              const content = readFileSync(filePath)
+              res.writeHead(200, {
+                'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+                'Cache-Control': 'public, max-age=31536000, immutable',
+                'X-Content-Type-Options': 'nosniff',
+              })
+              res.end(content)
+            } catch {
+              res.writeHead(500)
+              res.end('Internal server error')
+            }
+            return
+          }
+          // Asset path matched but file not found — return 404 (don't fall through to SPA)
+          res.writeHead(404)
+          res.end('Asset not found')
+          return
+        }
+
+        // SPA fallback — serve index.html with config injection
+        const indexPath = join(distDir, 'index.html')
+        if (existsSync(indexPath)) {
+          let html = readFileSync(indexPath, 'utf-8')
+          // Inject server config before closing </head>
+          const configScript = `<script>window.__CHROXY_CONFIG__={port:${this.port},noEncrypt:${!this._encryptionEnabled}}</script>`
+          html = html.replace('</head>', `${configScript}\n</head>`)
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+          })
+          res.end(html)
+        } else {
+          res.writeHead(404)
+          res.end('Dashboard not built. Run: npm run dashboard:build')
+        }
+        return
+      }
+
+      // Dashboard endpoint (legacy)
       if (req.method === 'GET' && req.url?.startsWith('/dashboard')) {
         const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
         const queryToken = dashUrl.searchParams.get('token')
