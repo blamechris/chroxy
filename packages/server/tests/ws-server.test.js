@@ -6815,226 +6815,13 @@ describe('WsServer GET /connect redacts apiToken in no-auth mode (#742)', () => 
   })
 })
 
+// Legacy dashboard tests removed — React dashboard now serves at /dashboard (#1194)
+// The React dashboard endpoint tests are in the describe block below.
+
+// ---------------------------------------------------------------------------
+// dashboard endpoint (React app via Vite build) (#1093, #1194)
+// ---------------------------------------------------------------------------
 describe('dashboard endpoint', () => {
-  let server
-
-  afterEach(() => {
-    if (server) {
-      server.close()
-      server = null
-    }
-  })
-
-  it('GET /dashboard returns 200 with HTML when auth disabled', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash',
-      cliSession: createMockSession(),
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
-    assert.equal(res.status, 200)
-    assert.ok(res.headers.get('content-type').includes('text/html'))
-    const body = await res.text()
-    assert.ok(body.includes('Chroxy Dashboard'))
-  })
-
-  it('GET /dashboard?token=VALID redirects with cookie when auth enabled', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash-auth',
-      cliSession: createMockSession(),
-      authRequired: true,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard?token=tok-dash-auth`, { redirect: 'manual' })
-    assert.equal(res.status, 302)
-    assert.equal(res.headers.get('location'), '/dashboard')
-    const cookie = res.headers.get('set-cookie')
-    assert.ok(cookie, 'should set chroxy_auth cookie')
-    assert.ok(cookie.includes('chroxy_auth='), 'cookie should contain chroxy_auth')
-    assert.ok(cookie.includes('SameSite=Strict'), 'cookie should be SameSite=Strict')
-  })
-
-  it('GET /dashboard with Bearer token returns 200 when auth enabled', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash-bearer',
-      cliSession: createMockSession(),
-      authRequired: true,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard`, {
-      headers: { 'Authorization': 'Bearer tok-dash-bearer' },
-    })
-    assert.equal(res.status, 200)
-    const body = await res.text()
-    assert.ok(body.includes('Chroxy Dashboard'))
-  })
-
-  it('GET /dashboard with valid cookie returns 200 when auth enabled', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash-cookie',
-      cliSession: createMockSession(),
-      authRequired: true,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard`, {
-      headers: { 'Cookie': 'chroxy_auth=tok-dash-cookie' },
-    })
-    assert.equal(res.status, 200)
-    const body = await res.text()
-    assert.ok(body.includes('Chroxy Dashboard'))
-    assert.ok(!body.includes('tok-dash-cookie'), 'token must not appear in HTML')
-  })
-
-  it('GET /dashboard without token returns 403 when auth enabled', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash-notoken',
-      cliSession: createMockSession(),
-      authRequired: true,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
-    assert.equal(res.status, 403)
-    assert.ok(res.headers.get('content-type').includes('text/html'))
-    const body = await res.text()
-    assert.ok(body.includes('403'))
-  })
-
-  it('GET /dashboard?token=WRONG returns 403 when auth enabled', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash-wrong',
-      cliSession: createMockSession(),
-      authRequired: true,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard?token=bad-token`)
-    assert.equal(res.status, 403)
-    const body = await res.text()
-    assert.ok(body.includes('403'))
-  })
-
-  it('dashboard HTML contains config without token', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash-config',
-      cliSession: createMockSession(),
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
-    const body = await res.text()
-    assert.ok(body.includes('__CHROXY_CONFIG__'))
-    assert.ok(!body.includes('tok-dash-config'), 'token must NOT appear in HTML source')
-    assert.ok(body.match(/port:\s*\d+/), 'should embed a port number')
-  })
-
-  it('response has no-store cache control', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash-cache',
-      cliSession: createMockSession(),
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
-    assert.equal(res.headers.get('cache-control'), 'no-store')
-  })
-
-  it('GET /dashboard/anything also matches (subpath)', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash-sub',
-      cliSession: createMockSession(),
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard/settings`)
-    assert.equal(res.status, 200)
-    const body = await res.text()
-    assert.ok(body.includes('Chroxy Dashboard'))
-  })
-
-  it('response has Content-Security-Policy header', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash-csp',
-      cliSession: createMockSession(),
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
-    const csp = res.headers.get('content-security-policy')
-    assert.ok(csp, 'CSP header should be present')
-    assert.ok(csp.includes("default-src 'self'"), 'CSP should restrict default-src')
-    // Nonce-based CSP — no unsafe-inline
-    assert.ok(!csp.includes("'unsafe-inline'"), 'CSP should NOT use unsafe-inline')
-    const nonceMatch = csp.match(/'nonce-([A-Za-z0-9+/=]+)'/)
-    assert.ok(nonceMatch, 'CSP should include a nonce')
-    assert.ok(csp.includes(`script-src 'self' 'nonce-${nonceMatch[1]}'`), 'CSP script-src should use nonce')
-    assert.ok(csp.includes(`style-src 'self' 'nonce-${nonceMatch[1]}'`), 'CSP style-src should use nonce')
-    assert.ok(csp.includes('connect-src'), 'CSP should restrict connect-src')
-    assert.ok(csp.includes('ws://localhost:'), 'CSP connect-src should allow localhost WebSocket')
-    assert.ok(csp.includes('wss://localhost:'), 'CSP connect-src should allow localhost secure WebSocket')
-    assert.ok(!csp.includes(' ws: ') && !csp.includes(' ws:;'), 'CSP connect-src should NOT allow blanket ws: scheme')
-    assert.ok(csp.includes("frame-ancestors 'none'"), "CSP should forbid framing via frame-ancestors 'none'")
-    assert.ok(csp.includes("base-uri 'none'"), "CSP should restrict base-uri to 'none'")
-    assert.ok(csp.includes("form-action 'self'"), "CSP should restrict form-action to 'self'")
-
-    // Verify nonce is present in HTML body (on script/style tags)
-    const body = await res.clone().text()
-    assert.ok(body.includes(`nonce="${nonceMatch[1]}"`), 'HTML should include nonce attributes on inline tags')
-  })
-
-  it('response has X-Frame-Options: DENY header', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash-frame',
-      cliSession: createMockSession(),
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
-    assert.equal(res.headers.get('x-frame-options'), 'DENY')
-  })
-
-  it('403 response includes security headers', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dash-403-headers',
-      cliSession: createMockSession(),
-      authRequired: true,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
-    assert.equal(res.status, 403)
-    assert.ok(res.headers.get('content-security-policy'), '403 should include CSP header')
-    assert.equal(res.headers.get('x-frame-options'), 'DENY')
-    assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// dashboard-next endpoint (React app via Vite build) (#1093)
-// ---------------------------------------------------------------------------
-describe('dashboard-next endpoint', () => {
   let server
   const __test_dirname = dirname(fileURLToPath(import.meta.url))
   const distDir = join(__test_dirname, '..', 'src', 'dashboard-next', 'dist')
@@ -7052,7 +6839,7 @@ describe('dashboard-next endpoint', () => {
         '<head>',
         '  <meta charset="utf-8">',
         '  <title>Chroxy Dashboard</title>',
-        '  <script type="module" crossorigin src="/dashboard-next/assets/index-testHash.js"></script>',
+        '  <script type="module" crossorigin src="/dashboard/assets/index-testHash.js"></script>',
         '</head>',
         '<body>',
         '  <div id="root"></div>',
@@ -7076,7 +6863,7 @@ describe('dashboard-next endpoint', () => {
     }
   })
 
-  it('GET /dashboard-next returns 200 with HTML when auth disabled', async () => {
+  it('GET /dashboard returns 200 with HTML when auth disabled', async () => {
     server = new WsServer({
       port: 0,
       apiToken: 'tok-dn',
@@ -7085,14 +6872,14 @@ describe('dashboard-next endpoint', () => {
     })
     const port = await startServerAndGetPort(server)
 
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
     assert.equal(res.status, 200)
     assert.ok(res.headers.get('content-type').includes('text/html'))
     const body = await res.text()
     assert.ok(body.includes('<div id="root">'), 'should contain React mount point')
   })
 
-  it('serves hashed JS assets from /dashboard-next/assets/', async () => {
+  it('serves hashed JS assets from /dashboard/assets/', async () => {
     server = new WsServer({
       port: 0,
       apiToken: 'tok-dn-assets',
@@ -7102,12 +6889,12 @@ describe('dashboard-next endpoint', () => {
     const port = await startServerAndGetPort(server)
 
     // First get index.html to extract the actual asset filename
-    const indexRes = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    const indexRes = await fetch(`http://127.0.0.1:${port}/dashboard`)
     const html = await indexRes.text()
-    const jsMatch = html.match(/src="\/dashboard-next\/assets\/(index-[^"]+\.js)"/)
+    const jsMatch = html.match(/src="\/dashboard\/assets\/(index-[^"]+\.js)"/)
     assert.ok(jsMatch, 'index.html should reference a hashed JS bundle')
 
-    const assetRes = await fetch(`http://127.0.0.1:${port}/dashboard-next/assets/${jsMatch[1]}`)
+    const assetRes = await fetch(`http://127.0.0.1:${port}/dashboard/assets/${jsMatch[1]}`)
     assert.equal(assetRes.status, 200)
     assert.ok(assetRes.headers.get('content-type').includes('javascript'))
     assert.ok(assetRes.headers.get('cache-control').includes('max-age'), 'assets should be cached')
@@ -7122,7 +6909,7 @@ describe('dashboard-next endpoint', () => {
     })
     const port = await startServerAndGetPort(server)
 
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next/sessions/abc123`)
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard/sessions/abc123`)
     assert.equal(res.status, 200)
     assert.ok(res.headers.get('content-type').includes('text/html'))
     const body = await res.text()
@@ -7138,7 +6925,7 @@ describe('dashboard-next endpoint', () => {
     })
     const port = await startServerAndGetPort(server)
 
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
     assert.equal(res.status, 403)
   })
 
@@ -7151,7 +6938,7 @@ describe('dashboard-next endpoint', () => {
     })
     const port = await startServerAndGetPort(server)
 
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`, {
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`, {
       headers: { 'Cookie': 'chroxy_auth=tok-dn-cookie' },
     })
     assert.equal(res.status, 200)
@@ -7168,26 +6955,25 @@ describe('dashboard-next endpoint', () => {
     })
     const port = await startServerAndGetPort(server)
 
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
     const body = await res.text()
     assert.ok(body.includes('__CHROXY_CONFIG__'), 'should inject server config')
     assert.ok(body.match(/port:\s*\d+/), 'should contain port number')
     assert.ok(!body.includes('tok-dn-config'), 'token must NOT appear in HTML')
   })
 
-  it('legacy /dashboard still works', async () => {
+  it('/dashboard-next redirects to /dashboard', async () => {
     server = new WsServer({
       port: 0,
-      apiToken: 'tok-dn-legacy',
+      apiToken: 'tok-dn-redirect',
       cliSession: createMockSession(),
       authRequired: false,
     })
     const port = await startServerAndGetPort(server)
 
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
-    assert.equal(res.status, 200)
-    const body = await res.text()
-    assert.ok(body.includes('Chroxy Dashboard'), 'legacy dashboard must still work')
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`, { redirect: 'manual' })
+    assert.equal(res.status, 301)
+    assert.equal(res.headers.get('location'), '/dashboard')
   })
 })
 
