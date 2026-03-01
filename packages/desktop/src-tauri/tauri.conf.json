@@ -3,10 +3,13 @@
   "version": "0.2.0",
   "identifier": "com.chroxy.desktop",
   "build": {
-    "frontendDist": "../dist"
+    "frontendDist": "../../server/src/dashboard-next/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "cd ../../server && npm run dashboard:dev",
+    "beforeBuildCommand": "cd ../../server && npm run dashboard:build"
   },
   "app": {
-    "withGlobalTauri": false,
+    "withGlobalTauri": true,
     "security": {
       "csp": "default-src 'self' http://localhost:*; connect-src ws://localhost:* http://localhost:*; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
     },
