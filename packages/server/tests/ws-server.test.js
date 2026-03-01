@@ -6980,6 +6980,8 @@ describe('dashboard endpoint', () => {
     assert.ok(csp.includes("script-src 'self'"), 'CSP should restrict script-src')
     assert.ok(csp.includes("style-src 'self'"), 'CSP should restrict style-src')
     assert.ok(csp.includes('connect-src'), 'CSP should restrict connect-src')
+    assert.ok(csp.includes('ws:'), 'CSP should allow WebSocket connections')
+    assert.ok(csp.includes('wss:'), 'CSP should allow secure WebSocket connections')
     assert.ok(csp.includes("frame-ancestors 'none'"), 'CSP should forbid framing')
     assert.ok(csp.includes("base-uri 'none'"), "CSP should restrict base-uri")
 
