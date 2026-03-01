@@ -1,6 +1,6 @@
 import React from 'react';
 import { Modal, View, Image, TouchableOpacity, Pressable, Text, StyleSheet, Dimensions } from 'react-native';
-import { ICON_CLOSE } from '../constants/icons';
+import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 
 interface ImageViewerProps {
@@ -22,7 +22,7 @@ export function ImageViewer({ uri, onClose }: ImageViewerProps) {
     >
       <Pressable style={styles.overlay} onPress={onClose}>
         <TouchableOpacity style={styles.closeButton} onPress={onClose} accessibilityRole="button" accessibilityLabel="Close image">
-          <Text style={styles.closeText}>{ICON_CLOSE}</Text>
+          <Icon name="close" size={18} color={COLORS.textPrimary} />
         </TouchableOpacity>
         <Pressable onPress={(e) => e.stopPropagation()}>
           <Image

@@ -348,6 +348,9 @@ export interface ConnectionState {
   connectedClients: ConnectedClient[];
   primaryClientId: string | null;
 
+  // Follow mode: auto-switch sessions when another client switches
+  followMode: boolean;
+
   // Connection quality (measured via ping/pong RTT)
   latencyMs: number | null;
   connectionQuality: 'good' | 'fair' | 'poor' | null;
@@ -508,6 +511,9 @@ export interface ConnectionState {
   // Offline cached session viewing
   viewCachedSession: () => void;
   exitCachedSession: () => void;
+
+  // Follow mode
+  setFollowMode: (enabled: boolean) => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;

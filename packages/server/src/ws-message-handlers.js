@@ -266,6 +266,11 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       ctx.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
       ctx.sendSessionInfo(ws, targetId)
       ctx.replayHistory(ws, targetId)
+      // Notify other clients about this client's focus change
+      ctx.broadcast(
+        { type: 'client_focus_changed', clientId: client.id, sessionId: targetId, timestamp: Date.now() },
+        (c) => c.id !== client.id
+      )
       break
     }
 
@@ -451,6 +456,24 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       }
       break
     }
+
+    case 'request_cost_summary': {
+      const costSessions = ctx.sessionManager.listSessions()
+      const sessionCosts = costSessions.map(s => ({
+        sessionId: s.sessionId,
+        name: s.name,
+        cost: ctx.sessionManager.getSessionCost(s.sessionId),
+        model: s.model || null,
+      }))
+      ctx.send(ws, {
+        type: 'cost_summary',
+        totalCost: ctx.sessionManager.getTotalCost(),
+        budget: ctx.sessionManager.getCostBudget(),
+        sessions: sessionCosts,
+      })
+      break
+    }
+
 
     case 'resume_conversation': {
       // Check resume capability on the active session's provider

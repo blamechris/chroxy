@@ -13,7 +13,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, FileListing, FileContent } from '../store/connection';
 import { COLORS } from '../constants/colors';
-import { ICON_CLOSE, ICON_DOCUMENT, ICON_FOLDER_OPEN } from '../constants/icons';
+import { Icon } from './Icon';
 import { tokenize, SYNTAX_COLORS } from '../utils/syntax';
 import type { Token } from '../utils/syntax';
 
@@ -119,8 +119,8 @@ function FileViewerModal({
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={styles.viewerContainer}>
         <View style={[styles.viewerHeader, { paddingTop: insets.top + 12 }]}>
-          <TouchableOpacity style={styles.viewerCloseButton} onPress={onClose}>
-            <Text style={styles.viewerCloseText}>{ICON_CLOSE}</Text>
+          <TouchableOpacity style={styles.viewerCloseButton} onPress={onClose} accessibilityRole="button" accessibilityLabel="Close file viewer">
+            <Icon name="close" size={18} color={COLORS.textPrimary} />
           </TouchableOpacity>
           <View style={styles.viewerHeaderInfo}>
             <Text style={styles.viewerFileName} numberOfLines={1}>{fileName}</Text>
@@ -297,9 +297,7 @@ export function FileBrowser() {
                   style={styles.entry}
                   onPress={() => item.isDirectory ? navigateTo(fullPath) : openFile(fullPath)}
                 >
-                  <Text style={styles.entryIcon}>
-                    {item.isDirectory ? ICON_FOLDER_OPEN : ICON_DOCUMENT}
-                  </Text>
+                  {item.isDirectory ? <Icon name="folderOpen" size={16} color={COLORS.textMuted} /> : <Icon name="document" size={16} color={COLORS.textMuted} />}
                   <Text style={styles.entryName} numberOfLines={1}>{item.name}</Text>
                   {item.isDirectory ? (
                     <Text style={styles.entryChevron}>{'>'}</Text>

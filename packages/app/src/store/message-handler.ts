@@ -21,6 +21,7 @@ import {
 } from '../utils/crypto';
 import { registerForPushNotifications } from '../notifications';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
+import { hapticSuccess } from '../utils/haptics';
 import type {
   ChatMessage,
   Checkpoint,
@@ -524,6 +525,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       _receivingHistoryReplay = false;
       _isSessionSwitchReplay = false;
       _pendingSwitchSessionId = null;
+      if (!ctx.isReconnect) hapticSuccess();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
       // Extract server context from auth_ok
@@ -1487,6 +1489,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }));
       } else if (!primarySessionId || primarySessionId === 'default') {
         set({ primaryClientId });
+      }
+      break;
+    }
+
+    case 'client_focus_changed': {
+      const focusClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
+      const focusSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      if (!focusClientId || !focusSessionId) break;
+      // Auto-switch if follow mode is on, event is from another client, target session exists locally, and not already on it
+      const { followMode, myClientId, activeSessionId, sessionStates } = get();
+      if (followMode && focusClientId !== myClientId && focusSessionId !== activeSessionId && sessionStates[focusSessionId]) {
+        get().switchSession(focusSessionId);
       }
       break;
     }

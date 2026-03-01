@@ -155,7 +155,10 @@ export function HistoryScreen() {
   useEffect(() => {
     fetchConversationHistory();
     return () => {
-      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+      if (searchTimerRef.current) {
+        clearTimeout(searchTimerRef.current);
+        searchTimerRef.current = null;
+      }
       clearSearchResults();
     };
   }, [fetchConversationHistory, clearSearchResults]);

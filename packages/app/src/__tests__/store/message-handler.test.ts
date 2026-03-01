@@ -458,6 +458,128 @@ describe('unknown message type (default case)', () => {
   });
 });
 
+describe('client_focus_changed follow mode', () => {
+  it('auto-switches session when followMode is true and event is from another client', () => {
+    const store = createMockStore({
+      followMode: true,
+      myClientId: 'client-a',
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Session 1' } as any,
+        { sessionId: 's2', name: 'Session 2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: { ...createEmptySessionState(), messages: [{ id: 'm1', type: 'response' as const, content: 'hello', timestamp: 1 }] },
+      },
+      messages: [],
+      switchSession: jest.fn(),
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'client_focus_changed',
+      clientId: 'client-b',
+      sessionId: 's2',
+      timestamp: Date.now(),
+    });
+
+    expect(store.getState().switchSession).toHaveBeenCalledWith('s2');
+  });
+
+  it('does NOT auto-switch when followMode is false', () => {
+    const store = createMockStore({
+      followMode: false,
+      myClientId: 'client-a',
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Session 1' } as any,
+        { sessionId: 's2', name: 'Session 2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+      switchSession: jest.fn(),
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'client_focus_changed',
+      clientId: 'client-b',
+      sessionId: 's2',
+      timestamp: Date.now(),
+    });
+
+    expect(store.getState().switchSession).not.toHaveBeenCalled();
+  });
+
+  it('does NOT auto-switch when the focus change is from self', () => {
+    const store = createMockStore({
+      followMode: true,
+      myClientId: 'client-a',
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Session 1' } as any,
+        { sessionId: 's2', name: 'Session 2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+      switchSession: jest.fn(),
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'client_focus_changed',
+      clientId: 'client-a',
+      sessionId: 's2',
+      timestamp: Date.now(),
+    });
+
+    expect(store.getState().switchSession).not.toHaveBeenCalled();
+  });
+
+  it('does NOT auto-switch when already on the target session', () => {
+    const store = createMockStore({
+      followMode: true,
+      myClientId: 'client-a',
+      activeSessionId: 's2',
+      sessions: [
+        { sessionId: 's1', name: 'Session 1' } as any,
+        { sessionId: 's2', name: 'Session 2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+      switchSession: jest.fn(),
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'client_focus_changed',
+      clientId: 'client-b',
+      sessionId: 's2',
+      timestamp: Date.now(),
+    });
+
+    expect(store.getState().switchSession).not.toHaveBeenCalled();
+  });
+});
+
 afterAll(() => {
   _testMessageHandler.clearContext();
 });

@@ -18,7 +18,9 @@ import {
 import { ChatMessage, ToolResultImage } from '../store/connection';
 import { FormattedResponse } from './MarkdownRenderer';
 import { ImageViewer } from './ImageViewer';
-import { ICON_CHEVRON_RIGHT, ICON_CHEVRON_DOWN, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOSE, ICON_CHECK, ICON_DOCUMENT } from '../constants/icons';
+import { AnimatedMessage } from './AnimatedMessage';
+import { ICON_CHEVRON_RIGHT } from '../constants/icons';
+import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 import { PermissionDetailOrFallback, PermissionCountdown, PermissionPill, permissionStyles } from './PermissionDetail';
 
@@ -209,7 +211,7 @@ function ActivityEntry({
       onPress={handlePress}
       style={[styles.activityEntry, isSelected && styles.selectedBubble]}
     >
-      <Text style={styles.activityEntryIcon}>{hasResult ? ICON_CHECK : ICON_CHEVRON_RIGHT}</Text>
+      {hasResult ? <Icon name="check" size={12} color={COLORS.accentGreen} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
       {message.serverName ? (
         <Text style={styles.activityEntryTool}>
           <Text style={styles.mcpServerTag}>{message.serverName}</Text>
@@ -290,7 +292,7 @@ function ActivityGroup({
       <View style={styles.activityHeader}>
         {isActive && <View style={styles.activityPulse} />}
         <Text style={styles.activitySummary}>{summary}</Text>
-        <Text style={styles.activityChevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
+        {expanded ? <Icon name="chevronDown" size={14} color={COLORS.textMuted} /> : <Icon name="chevronRight" size={14} color={COLORS.textMuted} />}
       </View>
       {isThinking && <ThinkingIndicator />}
       {expanded && (
@@ -345,7 +347,7 @@ function ToolDetailModal({ visible, toolName, content, toolResult, toolResultTru
               accessibilityRole="button"
               accessibilityLabel="Close tool details"
             >
-              <Text style={styles.toolModalCloseIcon}>{ICON_CLOSE}</Text>
+              <Icon name="close" size={18} color={COLORS.textPrimary} />
             </TouchableOpacity>
           </View>
           <ScrollView style={styles.toolModalScroll}>
@@ -440,7 +442,7 @@ function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpe
       style={[styles.toolBubble, isSelected && styles.selectedBubble]}
     >
       <View style={styles.toolHeader}>
-        <Text style={styles.toolChevron}>{expanded ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT}</Text>
+        {expanded ? <Icon name="chevronDown" size={12} color={COLORS.textMuted} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
         <Text style={styles.senderLabelTool}>
           {message.serverName ? (
             <>
@@ -569,7 +571,7 @@ function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLon
               </TouchableOpacity>
             ) : (
               <View key={att.id} style={styles.attachmentChip}>
-                <Text style={styles.attachmentChipIcon}>{ICON_DOCUMENT}</Text>
+                <Icon name="document" size={14} color={COLORS.textMuted} />
                 <Text style={styles.attachmentChipName} numberOfLines={1}>{att.name}</Text>
               </View>
             )
@@ -695,6 +697,15 @@ export function ChatView({
   const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
+  // Animation: only animate messages arriving after initial mount
+  const mountTimeRef = useRef(Date.now());
+  const [reduceMotion, setReduceMotion] = useState(true);
+  useEffect(() => {
+    const listener = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
+    AccessibilityInfo.isReduceMotionEnabled().then(setReduceMotion);
+    return () => listener.remove();
+  }, []);
+
   // Track message layout positions for search scroll-to-match
   const messageLayoutsRef = useRef<Map<string, number>>(new Map());
 
@@ -782,6 +793,7 @@ export function ChatView({
       ) : (
         displayGroups.map((group) => {
           if (group.type === 'activity') {
+            const firstMsg = group.messages[0];
             return (
               <View
                 key={group.key}
@@ -792,14 +804,21 @@ export function ChatView({
                   }
                 }}
               >
-                <ActivityGroup
-                  messages={group.messages}
-                  isActive={group.isActive}
-                  isSelecting={isSelecting}
-                  selectedIds={selectedIds}
-                  onToggleSelection={onToggleSelection}
-                  searchMatchIds={searchMatchIds}
-                />
+                <AnimatedMessage
+                  type={firstMsg.type}
+                  timestamp={firstMsg.timestamp}
+                  mountTime={mountTimeRef.current}
+                  reduceMotion={reduceMotion}
+                >
+                  <ActivityGroup
+                    messages={group.messages}
+                    isActive={group.isActive}
+                    isSelecting={isSelecting}
+                    selectedIds={selectedIds}
+                    onToggleSelection={onToggleSelection}
+                    searchMatchIds={searchMatchIds}
+                  />
+                </AnimatedMessage>
               </View>
             );
           }
@@ -814,16 +833,23 @@ export function ChatView({
                 messageLayoutsRef.current.set(msg.id, e.nativeEvent.layout.y);
               }}
             >
-              <MessageBubble
-                message={msg}
-                onSelectOption={onSelectOption}
-                isSelected={selectedIds.has(msg.id)}
-                isSelecting={isSelecting}
-                onLongPress={() => onToggleSelection(msg.id)}
-                onPress={() => onToggleSelection(msg.id)}
-                onOpenDetail={handleOpenDetail}
-                onImagePress={setViewerUri}
-              />
+              <AnimatedMessage
+                type={msg.type}
+                timestamp={msg.timestamp}
+                mountTime={mountTimeRef.current}
+                reduceMotion={reduceMotion}
+              >
+                <MessageBubble
+                  message={msg}
+                  onSelectOption={onSelectOption}
+                  isSelected={selectedIds.has(msg.id)}
+                  isSelecting={isSelecting}
+                  onLongPress={() => onToggleSelection(msg.id)}
+                  onPress={() => onToggleSelection(msg.id)}
+                  onOpenDetail={handleOpenDetail}
+                  onImagePress={setViewerUri}
+                />
+              </AnimatedMessage>
             </View>
           );
         })
@@ -847,7 +873,7 @@ export function ChatView({
           accessibilityRole="button"
           accessibilityLabel="Scroll to top of conversation"
         >
-          <Text style={styles.scrollButtonText}>{ICON_ARROW_UP}</Text>
+          <Icon name="arrowUp" size={16} color={COLORS.textPrimary} />
         </TouchableOpacity>
       )}
       {showScrollToBottom && (
@@ -859,7 +885,7 @@ export function ChatView({
           accessibilityRole="button"
           accessibilityLabel="Scroll to bottom of conversation"
         >
-          <Text style={styles.scrollButtonText}>{ICON_ARROW_DOWN}</Text>
+          <Icon name="arrowDown" size={16} color={COLORS.textPrimary} />
         </TouchableOpacity>
       )}
 

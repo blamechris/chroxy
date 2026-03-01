@@ -6,7 +6,7 @@ import {
   StyleSheet,
 } from 'react-native';
 import { useConnectionStore, SessionNotification } from '../store/connection';
-import { ICON_CLOSE } from '../constants/icons';
+import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 
 const MAX_VISIBLE = 3;
@@ -50,7 +50,7 @@ function NotificationRow({ notification }: { notification: SessionNotification }
         accessibilityRole="button"
         accessibilityLabel="Dismiss notification"
       >
-        <Text style={styles.dismissText}>{ICON_CLOSE}</Text>
+        <Icon name="close" size={14} color={COLORS.textMuted} />
       </TouchableOpacity>
     </View>
   );

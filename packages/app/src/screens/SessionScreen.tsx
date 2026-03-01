@@ -28,10 +28,11 @@ import { FileBrowser } from '../components/FileBrowser';
 import { DiffViewer } from '../components/DiffViewer';
 import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
 import { DevPreviewBanner } from '../components/DevPreviewBanner';
+import { SessionOverview } from '../components/SessionOverview';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
-import { ICON_CLOSE, ICON_GEAR, ICON_DIFF, ICON_SEARCH, ICON_EXPORT, ICON_ARROW_UP, ICON_ARROW_DOWN, ICON_CLOCK } from '../constants/icons';
+import { Icon } from '../components/Icon';
 import { COLORS } from '../constants/colors';
 import { useLayout } from '../hooks/useLayout';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
@@ -207,6 +208,7 @@ export function SessionScreen() {
   const isCliMode = serverMode === 'cli';
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showDiffViewer, setShowDiffViewer] = useState(false);
+  const [showSessionOverview, setShowSessionOverview] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
 
   // Search state
@@ -595,7 +597,26 @@ export function SessionScreen() {
     <View style={styles.container}>
       {/* Session picker (CLI mode with multi-session support) */}
       {isCliMode && sessions.length > 0 && (
-        <SessionPicker onCreatePress={() => setShowCreateModal(true)} />
+        <View style={styles.sessionPickerRow}>
+          <View style={{ flex: 1 }}>
+            <SessionPicker onCreatePress={() => setShowCreateModal(true)} />
+          </View>
+          <TouchableOpacity
+            style={styles.overviewButton}
+            onPress={() => setShowSessionOverview(!showSessionOverview)}
+            accessibilityRole="button"
+            accessibilityLabel={showSessionOverview ? 'Hide session overview' : 'Show session overview'}
+          >
+            <Text style={[styles.overviewButtonText, showSessionOverview && styles.overviewButtonTextActive]}>
+              {'☰'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Session overview panel */}
+      {showSessionOverview && (
+        <SessionOverview visible={showSessionOverview} onClose={() => setShowSessionOverview(false)} />
       )}
 
       {/* Selection bar or view mode toggle */}
@@ -612,8 +633,8 @@ export function SessionScreen() {
             <TouchableOpacity style={styles.selectionButton} onPress={handleExport}>
               <Text style={styles.selectionButtonText}>Share</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.selectionCancelButton} onPress={clearSelection}>
-              <Text style={styles.selectionCancelText}>{ICON_CLOSE}</Text>
+            <TouchableOpacity style={styles.selectionCancelButton} onPress={clearSelection} accessibilityRole="button" accessibilityLabel="Cancel selection">
+              <Icon name="close" size={16} color={COLORS.accentRed} />
             </TouchableOpacity>
           </View>
         </View>
@@ -651,27 +672,27 @@ export function SessionScreen() {
               Files
             </Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)}>
-            <Text style={styles.diffButtonText}>{ICON_DIFF}</Text>
+          <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)} accessibilityRole="button" accessibilityLabel="View changes">
+            <Icon name="diff" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
           {(viewMode === 'chat' || (layout.isSplitView && viewMode !== 'files')) && (
             <TouchableOpacity style={styles.diffButton} onPress={handleSearchOpen} accessibilityRole="button" accessibilityLabel="Search messages">
-              <Text style={styles.diffButtonText}>{ICON_SEARCH}</Text>
+              <Icon name="search" size={16} color={COLORS.textMuted} />
             </TouchableOpacity>
           )}
           {(viewMode === 'terminal' || (layout.isSplitView && hasTerminal && viewMode !== 'files')) && (
             <TouchableOpacity style={styles.diffButton} onPress={handleExportTerminal} accessibilityRole="button" accessibilityLabel="Export terminal output">
-              <Text style={styles.diffButtonText}>{ICON_EXPORT}</Text>
+              <Icon name="export" size={16} color={COLORS.textMuted} />
             </TouchableOpacity>
           )}
           <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('History')} accessibilityRole="button" accessibilityLabel="Conversation history">
-            <Text style={styles.settingsButtonText}>{ICON_CLOCK}</Text>
+            <Icon name="clock" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')}>
-            <Text style={styles.settingsButtonText}>{ICON_GEAR}</Text>
+          <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')} accessibilityRole="button" accessibilityLabel="Open settings">
+            <Icon name="settings" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.disconnectButton} onPress={disconnect}>
-            <Text style={styles.disconnectButtonText}>{ICON_CLOSE}</Text>
+          <TouchableOpacity style={styles.disconnectButton} onPress={disconnect} accessibilityRole="button" accessibilityLabel="Disconnect">
+            <Icon name="close" size={16} color={COLORS.accentRed} />
           </TouchableOpacity>
         </View>
       )}
@@ -696,13 +717,13 @@ export function SessionScreen() {
             </Text>
           )}
           <TouchableOpacity onPress={handleSearchPrev} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Previous match">
-            <Text style={styles.searchNavText}>{ICON_ARROW_UP}</Text>
+            <Icon name="arrowUp" size={16} color={COLORS.textSecondary} />
           </TouchableOpacity>
           <TouchableOpacity onPress={handleSearchNext} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Next match">
-            <Text style={styles.searchNavText}>{ICON_ARROW_DOWN}</Text>
+            <Icon name="arrowDown" size={16} color={COLORS.textSecondary} />
           </TouchableOpacity>
           <TouchableOpacity onPress={handleSearchClose} style={styles.searchNavButton} accessibilityRole="button" accessibilityLabel="Close search">
-            <Text style={styles.searchNavText}>{ICON_CLOSE}</Text>
+            <Icon name="close" size={16} color={COLORS.textSecondary} />
           </TouchableOpacity>
         </View>
       )}
@@ -832,7 +853,7 @@ export function SessionScreen() {
               accessibilityRole="button"
               accessibilityLabel="Delete crashed session"
             >
-              <Text style={styles.errorBannerText}>{ICON_CLOSE}</Text>
+              <Icon name="close" size={14} color={COLORS.accentRed} />
             </TouchableOpacity>
           </View>
         </View>
@@ -863,9 +884,7 @@ export function SessionScreen() {
               accessibilityRole="button"
               accessibilityLabel="Dismiss server error"
             >
-              <Text style={err.recoverable ? styles.warningBannerText : styles.errorBannerText}>
-                {ICON_CLOSE}
-              </Text>
+              <Icon name="close" size={14} color={err.recoverable ? COLORS.accentOrange : COLORS.accentRed} />
             </TouchableOpacity>
           </View>
         </View>
@@ -883,7 +902,7 @@ export function SessionScreen() {
       )}
 
       {/* Content area — split view on tablets in landscape */}
-      {layout.isSplitView && hasTerminal && viewMode !== 'files' ? (
+      {!showSessionOverview && layout.isSplitView && hasTerminal && viewMode !== 'files' ? (
         <View style={styles.splitContainer}>
           <View style={styles.splitPane}>
             <ChatView
@@ -911,7 +930,7 @@ export function SessionScreen() {
             <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
           </View>
         </View>
-      ) : viewMode === 'chat' ? (
+      ) : !showSessionOverview && viewMode === 'chat' ? (
         <ChatView
           messages={messages}
           scrollViewRef={scrollViewRef}
@@ -931,11 +950,11 @@ export function SessionScreen() {
           searchMatchIds={searchVisible ? searchMatchIds : undefined}
           currentMatchId={searchVisible ? currentMatchId : undefined}
         />
-      ) : viewMode === 'files' ? (
+      ) : !showSessionOverview && viewMode === 'files' ? (
         <FileBrowser />
-      ) : (
+      ) : !showSessionOverview ? (
         <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
-      )}
+      ) : null}
 
       {/* Input area */}
       <InputBar
@@ -1245,6 +1264,23 @@ const styles = StyleSheet.create({
   },
   sheetCancelText: {
     color: COLORS.accentRed,
+  },
+  sessionPickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  overviewButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  overviewButtonText: {
+    color: COLORS.textMuted,
+    fontSize: 18,
+  },
+  overviewButtonTextActive: {
+    color: COLORS.accentBlue,
   },
   splitContainer: {
     flex: 1,
