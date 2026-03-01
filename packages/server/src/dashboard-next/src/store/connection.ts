@@ -1177,12 +1177,14 @@ useConnectionStore.subscribe((state) => {
 });
 
 // Reconnect on tab/window visibility change (equivalent to app resume from background)
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    const { socket, connectionPhase, wsUrl, apiToken } = useConnectionStore.getState();
-    if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
-      console.log('[ws] Tab became visible, socket stale — reconnecting');
-      useConnectionStore.getState().connect(wsUrl, apiToken);
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      const { socket, connectionPhase, wsUrl, apiToken } = useConnectionStore.getState();
+      if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
+        console.log('[ws] Tab became visible, socket stale — reconnecting');
+        useConnectionStore.getState().connect(wsUrl, apiToken);
+      }
     }
-  }
-});
+  });
+}
