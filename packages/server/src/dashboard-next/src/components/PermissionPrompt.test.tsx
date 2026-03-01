@@ -59,7 +59,7 @@ describe('PermissionPrompt', () => {
     expect(screen.getByTestId('perm-countdown')).toHaveTextContent('0:03')
   })
 
-  it('shows urgent class when ≤30s remaining', () => {
+  it('shows urgent class when <=30s remaining', () => {
     render(
       <PermissionPrompt
         requestId="req-1"
@@ -206,6 +206,21 @@ describe('PermissionPrompt', () => {
     expect(onRespond).toHaveBeenCalledWith('req-1', 'deny')
   })
 
+  it('allows with Cmd+Shift+Y (caps) keyboard shortcut (#1190)', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'Y', metaKey: true })
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
+  })
+
   it('ignores shortcuts when focus is in a textarea (#1190)', () => {
     const onRespond = vi.fn()
     render(
@@ -223,6 +238,26 @@ describe('PermissionPrompt', () => {
     const textarea = screen.getByTestId('input')
     textarea.focus()
     fireEvent.keyDown(textarea, { key: 'y', metaKey: true, bubbles: true })
+    expect(onRespond).not.toHaveBeenCalled()
+  })
+
+  it('ignores shortcuts when focus is in a select (#1190)', () => {
+    const onRespond = vi.fn()
+    render(
+      <div>
+        <select data-testid="model-select"><option>opus</option></select>
+        <PermissionPrompt
+          requestId="req-1"
+          tool="Write"
+          description="test"
+          remainingMs={60000}
+          onRespond={onRespond}
+        />
+      </div>
+    )
+    const sel = screen.getByTestId('model-select')
+    sel.focus()
+    fireEvent.keyDown(sel, { key: 'Escape', bubbles: true })
     expect(onRespond).not.toHaveBeenCalled()
   })
 

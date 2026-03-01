@@ -56,18 +56,17 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     onRespond(requestId, decision)
   }, [requestId, onRespond, answered, remaining])
 
-  // Keyboard shortcuts: Cmd/Ctrl+Y → allow, Escape → deny (#1190)
+  // Keyboard shortcuts: Cmd/Ctrl+Y -> allow, Escape -> deny (#1190)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Skip when focus is in an input or textarea
+      // Skip when focus is in an input, textarea, or select
       const tag = (e.target as HTMLElement)?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
 
-      if (e.key === 'y' && (e.metaKey || e.ctrlKey)) {
+      if (e.key.toLowerCase() === 'y' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault()
         respond('allow')
       } else if (e.key === 'Escape') {
-        e.preventDefault()
         respond('deny')
       }
     }
