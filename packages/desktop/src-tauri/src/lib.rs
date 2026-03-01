@@ -38,11 +38,14 @@ struct TrayMenuItems {
 pub fn run() {
     tauri::Builder::default()
         .plugin(single_instance_init(|app, _args, _cwd| {
-            // Second instance launched: focus the existing window instead
-            if let Some(win) = app.get_webview_window("main") {
+            // Second instance launched: focus the existing window instead.
+            // Prefer dashboard (active when server is running) over main (fallback/loading).
+            if let Some(win) = app.get_webview_window("dashboard") {
+                let _ = win.unminimize();
                 let _ = win.show();
                 let _ = win.set_focus();
-            } else if let Some(win) = app.get_webview_window("dashboard") {
+            } else if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
                 let _ = win.show();
                 let _ = win.set_focus();
             }
