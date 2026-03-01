@@ -39,7 +39,14 @@ pub fn ensure_config() -> bool {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+                if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+                    eprintln!(
+                        "[setup] Failed to set secure permissions on {}: {}",
+                        path.display(),
+                        e
+                    );
+                    return false;
+                }
             }
 
             println!("[setup] Created default config at {}", path.display());

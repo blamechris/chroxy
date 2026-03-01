@@ -86,7 +86,8 @@ impl DesktopSettings {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("Failed to set settings file permissions: {}", e))?;
         }
 
         Ok(())
