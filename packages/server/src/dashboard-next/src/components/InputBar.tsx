@@ -3,7 +3,7 @@
  *
  * Cmd+Enter to send, Escape to interrupt, Shift+Enter for newline.
  */
-import { useState, useRef, useCallback, type KeyboardEvent } from 'react'
+import { useState, useRef, useCallback, type KeyboardEvent, type ChangeEvent } from 'react'
 
 export interface InputBarProps {
   onSend: (text: string) => void
@@ -37,7 +37,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     }
   }, [send, onInterrupt])
 
-  const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+  const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     setValue(e.target.value)
     // Auto-expand
     const el = e.target
