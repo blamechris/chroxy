@@ -7,7 +7,7 @@ const isTauri = !!process.env.TAURI_ENV_PLATFORM
 
 export default defineConfig({
   plugins: [react()],
-  base: isTauri ? '/' : '/dashboard-next/',
+  base: isTauri ? '/' : '/dashboard/',
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),

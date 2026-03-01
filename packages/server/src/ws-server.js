@@ -15,7 +15,6 @@ import { createFileOps } from './ws-file-ops.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage, PERMISSION_MODES } from './ws-message-handlers.js'
-import { getDashboardHtml } from './dashboard.js'
 import QRCode from 'qrcode'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
@@ -441,11 +440,9 @@ export class WsServer {
           return null
         }
         const assetMap = {
-          '/assets/dashboard-app.js': { read: () => readFileSync(join(__dirname, 'dashboard', 'dashboard-app.js')), type: 'application/javascript' },
           '/assets/xterm/xterm.js': { read: () => readModule('@xterm/xterm', 'lib/xterm.js'), type: 'application/javascript' },
           '/assets/xterm/xterm.css': { read: () => readModule('@xterm/xterm', 'css/xterm.css'), type: 'text/css' },
           '/assets/xterm/addon-fit.js': { read: () => readModule('@xterm/addon-fit', 'lib/addon-fit.js'), type: 'application/javascript' },
-          '/assets/dashboard.css': { read: () => readFileSync(join(__dirname, 'dashboard', 'dashboard.css')), type: 'text/css' },
         }
         const assetPath = req.url.split('?')[0]
         const asset = assetMap[assetPath]
@@ -470,11 +467,18 @@ export class WsServer {
         return
       }
 
-      // Dashboard-next endpoint (React app built by Vite) — must come before /dashboard
+      // Redirect legacy /dashboard-next URLs to /dashboard
       if (req.method === 'GET' && req.url?.startsWith('/dashboard-next')) {
-        const dashNextUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
+        const redirectUrl = req.url.replace('/dashboard-next', '/dashboard')
+        res.writeHead(301, { 'Location': redirectUrl, 'Cache-Control': 'no-store' })
+        res.end()
+        return
+      }
 
-        // Auth — same logic as legacy /dashboard
+      // Dashboard endpoint (React app built by Vite)
+      if (req.method === 'GET' && req.url?.startsWith('/dashboard')) {
+        const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
+
         if (this.authRequired) {
           const bearerToken = (req.headers['authorization'] || '').startsWith('Bearer ')
             ? req.headers['authorization'].slice(7) : null
@@ -483,7 +487,7 @@ export class WsServer {
           if (cookieToken) {
             try { cookieVal = decodeURIComponent(cookieToken[1]) } catch { cookieVal = null }
           }
-          const queryToken = dashNextUrl.searchParams.get('token')
+          const queryToken = dashUrl.searchParams.get('token')
           const token = queryToken || bearerToken || cookieVal
           if (!token || !this._isTokenValid(token)) {
             res.writeHead(403, { 'Content-Type': 'text/html' })
@@ -493,8 +497,8 @@ export class WsServer {
           if (queryToken) {
             const encoded = encodeURIComponent(queryToken)
             res.writeHead(302, {
-              'Location': dashNextUrl.pathname,
-              'Set-Cookie': `chroxy_auth=${encoded}; Path=/dashboard-next; SameSite=Strict; Max-Age=86400`,
+              'Location': dashUrl.pathname,
+              'Set-Cookie': `chroxy_auth=${encoded}; Path=/dashboard; SameSite=Strict; Max-Age=86400`,
               'Cache-Control': 'no-store',
             })
             res.end()
@@ -504,7 +508,7 @@ export class WsServer {
 
         const distDir = join(__dirname, 'dashboard-next', 'dist')
         // Strip prefix to get relative path within dist
-        const relPath = dashNextUrl.pathname.replace(/^\/dashboard-next\/?/, '') || 'index.html'
+        const relPath = dashUrl.pathname.replace(/^\/dashboard\/?/, '') || 'index.html'
 
         // Serve static assets (hashed filenames from Vite build)
         if (relPath.startsWith('assets/')) {
@@ -554,60 +558,6 @@ export class WsServer {
           res.writeHead(404)
           res.end('Dashboard not built. Run: npm run dashboard:build')
         }
-        return
-      }
-
-      // Dashboard endpoint (legacy)
-      if (req.method === 'GET' && req.url?.startsWith('/dashboard')) {
-        const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
-        const queryToken = dashUrl.searchParams.get('token')
-
-        // Generate a unique nonce per request for CSP
-        const nonce = randomBytes(16).toString('base64')
-
-        // Security headers shared across all /dashboard responses (200 + 403)
-        const securityHeaders = {
-          'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}'; connect-src 'self' ws://localhost:${this.port} wss://localhost:${this.port}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
-          'X-Frame-Options': 'DENY',
-          'X-Content-Type-Options': 'nosniff',
-        }
-
-        if (this.authRequired) {
-          const bearerToken = (req.headers['authorization'] || '').startsWith('Bearer ')
-            ? req.headers['authorization'].slice(7) : null
-          // Also check for token in cookie (set on previous ?token= visit)
-          const cookieToken = (req.headers['cookie'] || '').match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
-          let cookieVal = null
-          if (cookieToken) {
-            try { cookieVal = decodeURIComponent(cookieToken[1]) } catch { cookieVal = null }
-          }
-          const token = queryToken || bearerToken || cookieVal
-          if (!token || !this._isTokenValid(token)) {
-            res.writeHead(403, { 'Content-Type': 'text/html', ...securityHeaders })
-            res.end('<h1>403 Forbidden</h1><p>Invalid or missing token. Append ?token=YOUR_TOKEN to the URL.</p>')
-            return
-          }
-
-          // If token was in query string, set cookie and redirect to clean URL
-          if (queryToken) {
-            const encoded = encodeURIComponent(queryToken)
-            res.writeHead(302, {
-              'Location': dashUrl.pathname,
-              'Set-Cookie': `chroxy_auth=${encoded}; Path=/dashboard; SameSite=Strict; Max-Age=86400`,
-              'Cache-Control': 'no-store',
-              ...securityHeaders,
-            })
-            res.end()
-            return
-          }
-        }
-
-        res.writeHead(200, {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-store',
-          ...securityHeaders,
-        })
-        res.end(getDashboardHtml(this.port, this.apiToken, !this._encryptionEnabled, nonce))
         return
       }
       res.writeHead(404)
