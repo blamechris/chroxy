@@ -1,8 +1,8 @@
-/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'path'
 
+// Tauri sets TAURI_ENV_PLATFORM during dev/build — use root base for embedded app
 const isTauri = !!process.env.TAURI_ENV_PLATFORM
 
 export default defineConfig({
@@ -17,10 +17,12 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
   },
-  test: {
-    root: resolve(__dirname),
-    environment: 'jsdom',
-    include: ['src/**/*.test.{ts,tsx}'],
-    setupFiles: ['src/test-setup.ts'],
+  server: {
+    proxy: {
+      '/ws': {
+        target: 'ws://localhost:7860',
+        ws: true,
+      },
+    },
   },
 })
