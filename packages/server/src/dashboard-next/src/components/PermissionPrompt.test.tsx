@@ -5,6 +5,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import { PermissionPrompt } from './PermissionPrompt'
 import { PlanApproval } from './PlanApproval'
+import { Modal } from './Modal'
 
 afterEach(cleanup)
 
@@ -328,6 +329,82 @@ describe('PermissionPrompt', () => {
     unmount()
     fireEvent.keyDown(document, { key: 'y', metaKey: true })
     expect(onRespond).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Integration: Modal + PermissionPrompt Escape interaction (#1241)
+// ---------------------------------------------------------------------------
+describe('Modal + PermissionPrompt integration', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('Escape closes Modal without denying PermissionPrompt (#1241)', () => {
+    const onClose = vi.fn()
+    const onRespond = vi.fn()
+    render(
+      <div>
+        <Modal open={true} onClose={onClose} title="Settings">
+          <p>Modal content</p>
+        </Modal>
+        <PermissionPrompt
+          requestId="req-1"
+          tool="Write"
+          description="test"
+          remainingMs={60000}
+          onRespond={onRespond}
+        />
+      </div>
+    )
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalled()
+    expect(onRespond).not.toHaveBeenCalled()
+  })
+
+  it('Escape denies PermissionPrompt when no Modal is open (#1241)', () => {
+    const onRespond = vi.fn()
+    render(
+      <div>
+        <Modal open={false} onClose={vi.fn()} title="Settings">
+          <p>Modal content</p>
+        </Modal>
+        <PermissionPrompt
+          requestId="req-1"
+          tool="Write"
+          description="test"
+          remainingMs={60000}
+          onRespond={onRespond}
+        />
+      </div>
+    )
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'deny')
+  })
+
+  it('Cmd+Y allows PermissionPrompt even with Modal open (#1241)', () => {
+    const onClose = vi.fn()
+    const onRespond = vi.fn()
+    render(
+      <div>
+        <Modal open={true} onClose={onClose} title="Settings">
+          <p>Modal content</p>
+        </Modal>
+        <PermissionPrompt
+          requestId="req-1"
+          tool="Write"
+          description="test"
+          remainingMs={60000}
+          onRespond={onRespond}
+        />
+      </div>
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
   })
 })
 
