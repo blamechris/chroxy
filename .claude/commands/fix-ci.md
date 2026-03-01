@@ -19,7 +19,7 @@ HEAD_SHA=$(gh pr view ${PR_NUM} --json headRefOid -q .headRefOid)
 echo "PR: #${PR_NUM} | Branch: ${BRANCH} | HEAD: ${HEAD_SHA}"
 
 # Get the latest CI run(s) for this branch
-gh run list --branch ${BRANCH} --workflow "CI" --limit 5 --json databaseId,status,conclusion,headSha,event,createdAt
+gh run list --branch "${BRANCH}" --workflow "CI" --limit 5 --json databaseId,status,conclusion,headSha,event,createdAt
 ```
 
 ### 1. Get Job-Level Status
@@ -69,7 +69,7 @@ Cancellation often happens due to concurrency groups (a newer push cancels the o
 
 ```bash
 # Check all runs for this SHA
-gh run list --branch ${BRANCH} --workflow "CI" --limit 5 --json databaseId,status,conclusion,headSha,event \
+gh run list --branch "${BRANCH}" --workflow "CI" --limit 5 --json databaseId,status,conclusion,headSha,event \
   | jq --arg sha "$HEAD_SHA" '[.[] | select(.headSha == $sha)]'
 ```
 
@@ -138,7 +138,7 @@ git push
 
 ```bash
 # 1. Check out the PR branch
-git checkout ${BRANCH}
+git checkout "${BRANCH}"
 
 # 2. Make the fix (specific to the failure pattern matched)
 # 3. Commit with descriptive message
@@ -180,7 +180,7 @@ ELAPSED=0
 
 # Get the new run ID
 sleep 10  # brief delay for run to appear
-NEW_RUN_ID=$(gh run list --branch ${BRANCH} --workflow "CI" --limit 1 --json databaseId -q '.[0].databaseId')
+NEW_RUN_ID=$(gh run list --branch "${BRANCH}" --workflow "CI" --limit 1 --json databaseId -q '.[0].databaseId')
 
 while [ $ELAPSED -lt $MAX_WAIT ]; do
   STATUS=$(gh run view ${NEW_RUN_ID} --json status -q .status)
