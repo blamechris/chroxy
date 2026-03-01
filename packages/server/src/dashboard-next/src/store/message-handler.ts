@@ -437,14 +437,6 @@ function pushSessionNotification(
 }
 
 // ---------------------------------------------------------------------------
-// Push token registration
-// ---------------------------------------------------------------------------
-
-async function registerPushToken(_socket: WebSocket): Promise<void> {
-  // Push notifications not supported on web
-}
-
-// ---------------------------------------------------------------------------
 // Connection persistence helpers
 // ---------------------------------------------------------------------------
 
@@ -606,8 +598,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Save for quick reconnect
       saveConnection(ctx.url, ctx.token);
       set({ savedConnection: { url: ctx.url, token: ctx.token } });
-      // Register push token (async, non-blocking)
-      void registerPushToken(ctx.socket);
       break;
     }
 
