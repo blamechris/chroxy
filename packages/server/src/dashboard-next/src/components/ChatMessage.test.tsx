@@ -77,6 +77,20 @@ describe('ChatMessage', () => {
     expect(el).toHaveClass('thinking')
   })
 
+  it('renders tool_use message with markdown', () => {
+    render(
+      <ChatMessage
+        id="msg-7"
+        type="tool_use"
+        content="Running `npm test`..."
+        timestamp={Date.now()}
+      />
+    )
+    const el = screen.getByTestId('chat-message-msg-7')
+    expect(el).toHaveClass('tool_use')
+    expect(el.innerHTML).toContain('<code>')
+  })
+
   it('applies streaming class when isStreaming is true', () => {
     render(
       <ChatMessage
@@ -112,7 +126,8 @@ describe('ToolBubble', () => {
         input={{ command: 'npm test' }}
       />
     )
-    expect(screen.getByText('npm test')).toBeInTheDocument()
+    const bubble = screen.getByTestId('tool-bubble-tool-2')
+    expect(within(bubble).getByText('npm test')).toBeInTheDocument()
   })
 
   it('shows file_path from input', () => {

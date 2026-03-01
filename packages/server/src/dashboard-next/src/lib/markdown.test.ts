@@ -76,14 +76,18 @@ describe('renderMarkdown', () => {
   it('renders unordered lists', () => {
     const html = renderMarkdown('- item 1\n- item 2')
     expect(html).toContain('<ul>')
-    expect(html).toContain('<li>item 1</li>')
-    expect(html).toContain('<li>item 2</li>')
+    expect(html).toContain('<li')
+    expect(html).toContain('item 1')
+    expect(html).toContain('item 2')
   })
 
   it('renders ordered lists', () => {
     const html = renderMarkdown('1. first\n2. second')
-    expect(html).toContain('<li>first</li>')
-    expect(html).toContain('<li>second</li>')
+    expect(html).toContain('<ol>')
+    expect(html).toContain('<li')
+    expect(html).toContain('first')
+    expect(html).toContain('second')
+    expect(html).toMatch(/<ol>[\s\S]*first[\s\S]*<\/ol>/)
   })
 
   it('converts double newlines to paragraphs', () => {

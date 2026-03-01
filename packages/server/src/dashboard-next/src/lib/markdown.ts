@@ -19,8 +19,9 @@ export function renderMarkdown(text: string): string {
 
   // Extract fenced code blocks BEFORE HTML-escaping
   const codeBlocks: string[] = []
-  let raw = text.replace(/```(\w*)?\n([\s\S]*?)```/g, (_m, lang: string, code: string) => {
+  let raw = text.replace(/```([^\n]*)?\n([\s\S]*?)```/g, (_m, rawLang: string, code: string) => {
     const placeholder = '\x00CB' + codeBlocks.length + '\x00'
+    const lang = rawLang ? rawLang.trim().split(/\s+/)[0] : ''
     const cls = lang ? ` class="language-${lang}"` : ''
     const highlighted = lang ? highlightCode(code, lang) : escapeHtml(code)
     codeBlocks.push(`<pre><code${cls}>${highlighted}</code></pre>`)
@@ -59,11 +60,12 @@ export function renderMarkdown(text: string): string {
   html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
 
   // Unordered lists
-  html = html.replace(/^- (.+)$/gm, '<li>$1</li>')
-  html = html.replace(/(<li>.*<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`)
+  html = html.replace(/^- (.+)$/gm, '<li class="md-ul">$1</li>')
+  html = html.replace(/(<li class="md-ul">.*<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`)
 
   // Ordered lists
-  html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
+  html = html.replace(/^\d+\. (.+)$/gm, '<li class="md-ol">$1</li>')
+  html = html.replace(/(<li class="md-ol">.*<\/li>\n?)+/g, (m) => `<ol>${m}</ol>`)
 
   // Paragraphs
   html = html.replace(/\n\n/g, '</p><p>')
