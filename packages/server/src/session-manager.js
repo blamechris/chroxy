@@ -184,7 +184,7 @@ export class SessionManager extends EventEmitter {
       // Mirror destroySession() teardown order: detach listeners before destroy
       session.removeAllListeners()
       session.on('error', () => {})
-      session.destroy()
+      try { session.destroy() } catch (_) { /* best-effort cleanup (#1202) */ }
       this._sessions.delete(sessionId)
       this._lastActivity.delete(sessionId)
       throw err
@@ -281,7 +281,7 @@ export class SessionManager extends EventEmitter {
         this._pendingStreams.delete(key)
       }
     }
-    entry.session.destroy()
+    try { entry.session.destroy() } catch (_) { /* best-effort cleanup (#1202) */ }
     this._sessions.delete(sessionId)
     this._lastActivity.delete(sessionId)
     this._sessionWarned.delete(sessionId)

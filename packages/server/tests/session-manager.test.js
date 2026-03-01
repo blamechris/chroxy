@@ -973,6 +973,73 @@ describe('createSession failure cleanup (FM-03)', () => {
   })
 })
 
+describe('#1202 — guard session.destroy() with try-catch', () => {
+  it('propagates original start() error when destroy() also throws', async () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    const { registerProvider } = await import('../src/providers.js')
+    class DoubleFailProvider extends EventEmitter {
+      constructor(opts) {
+        super()
+        this.cwd = opts.cwd
+        this.model = null
+        this.permissionMode = 'approve'
+        this.isRunning = false
+        this.resumeSessionId = null
+      }
+      static get capabilities() { return {} }
+      start() { throw new Error('start exploded') }
+      destroy() { throw new Error('destroy exploded') }
+      sendMessage() {}
+      setModel() {}
+      setPermissionMode() {}
+    }
+    registerProvider('test-double-fail', DoubleFailProvider)
+
+    assert.throws(
+      () => mgr.createSession({ cwd: '/tmp', provider: 'test-double-fail' }),
+      /start exploded/
+    )
+
+    // Verify cleanup still happened despite destroy() throwing
+    assert.equal(mgr._sessions.size, 0, 'sessions map should be empty')
+    assert.equal(mgr._lastActivity.size, 0, 'lastActivity map should be empty')
+  })
+
+  it('cleans up when async start() rejects and destroySession throws', async () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    const { registerProvider } = await import('../src/providers.js')
+    class AsyncDoubleFailProvider extends EventEmitter {
+      constructor(opts) {
+        super()
+        this.cwd = opts.cwd
+        this.model = null
+        this.permissionMode = 'approve'
+        this.isRunning = false
+        this.resumeSessionId = null
+      }
+      static get capabilities() { return {} }
+      start() { return Promise.reject(new Error('async start exploded')) }
+      destroy() { throw new Error('async destroy exploded') }
+      sendMessage() {}
+      setModel() {}
+      setPermissionMode() {}
+    }
+    registerProvider('test-async-double-fail', AsyncDoubleFailProvider)
+
+    // Should not throw synchronously
+    mgr.createSession({ cwd: '/tmp', provider: 'test-async-double-fail' })
+
+    // Flush microtask queue
+    await Promise.resolve()
+
+    // Despite destroy() throwing inside destroySession, session should still be cleaned up
+    assert.equal(mgr._sessions.size, 0, 'sessions map should be empty after async double failure')
+    assert.equal(mgr._lastActivity.size, 0, 'lastActivity map should be empty after async double failure')
+  })
+})
+
 describe('#1141 — async start() rejection guard', () => {
   it('cleans up phantom session when start() returns a rejected promise', async () => {
     const mgr = new SessionManager({ maxSessions: 5 })
