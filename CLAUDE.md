@@ -136,17 +136,18 @@ type(scope): Short summary in present tense
 
 **NEVER auto-merge.** Always present a summary and wait for explicit user confirmation.
 
-**Merge Gate — MANDATORY short-circuit when merge is blocked:**
+**Merge Gate — MANDATORY triage when merge is blocked:**
 
-When `gh pr merge` fails with "base branch policy prohibits the merge":
-1. **Do NOT investigate, reason about, or run diagnostic commands.** The cause is almost always unresolved review threads.
-2. **Immediately respond with exactly this** (filling in the PR number):
+When `gh pr merge` fails with "not mergeable" or "base branch policy prohibits the merge", check in this order:
+
+1. **Check for merge conflicts:** `gh pr view {N} --json mergeable,mergeStateStatus`. If `CONFLICTING`, rebase or merge main into the branch to resolve, then retry.
+2. **Check CI:** `gh pr checks {N}`. If any check is `FAILURE` or `PENDING`, fix the failing check or wait for pending checks, then retry.
+3. **Assume unresolved review threads** (if no conflicts and CI is green). Respond with:
    > Merge blocked — unresolved review threads. Please resolve them here:
    > https://github.com/blamechris/chroxy/pull/{N}/files
    >
    > Say "done" when resolved.
-3. **Wait for user confirmation**, then retry `gh pr merge --squash`.
-4. If it fails a second time, THEN check `gh pr checks` for CI failures.
+   Then wait for user confirmation and retry `gh pr merge --squash`.
 
 ## Code Style
 
