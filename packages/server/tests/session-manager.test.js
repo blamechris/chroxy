@@ -942,3 +942,65 @@ describe('createSession failure cleanup (FM-03)', () => {
     assert.equal(emitted, false, 'session_created should not be emitted when start() fails')
   })
 })
+
+describe('#1091 — destroy-while-streaming event leak', () => {
+  it('removes listeners before calling session.destroy()', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    const session = new EventEmitter()
+    session.destroy = () => {
+      session.emit('stream_end', { messageId: 'msg-1' })
+    }
+    session.isRunning = false
+    session.start = () => {}
+    const sessionId = 'test-destroy-order'
+    mgr._sessions.set(sessionId, { session, name: 'Test', cwd: '/tmp', provider: 'test' })
+    mgr._lastActivity.set(sessionId, Date.now())
+    mgr._wireSessionEvents(sessionId, session)
+    const events = []
+    mgr.on('session_event', (evt) => events.push(evt))
+    mgr.destroySession(sessionId)
+    const streamEndEvents = events.filter(e => e.event === 'stream_end')
+    assert.equal(streamEndEvents.length, 0,
+      'stream_end emitted during destroy() should not be proxied')
+  })
+
+  it('does not write to _pendingStreams when events fire during destroy()', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    const session = new EventEmitter()
+    session.destroy = () => {
+      session.emit('stream_start', { messageId: 'orphan-1' })
+    }
+    session.isRunning = false
+    session.start = () => {}
+    const sessionId = 'test-orphan-streams'
+    mgr._sessions.set(sessionId, { session, name: 'Test', cwd: '/tmp', provider: 'test' })
+    mgr._lastActivity.set(sessionId, Date.now())
+    mgr._wireSessionEvents(sessionId, session)
+    mgr.destroySession(sessionId)
+    const orphanKeys = [...mgr._pendingStreams.keys()].filter(k => k.startsWith(sessionId))
+    assert.equal(orphanKeys.length, 0, '_pendingStreams should have no orphaned entries')
+  })
+
+  it('emits synthetic stream_end for pending streams on destroy', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    const session = new EventEmitter()
+    session.destroy = () => {}
+    session.isRunning = false
+    const sessionId = 'test-pending-cleanup'
+    mgr._sessions.set(sessionId, { session, name: 'Test', cwd: '/tmp', provider: 'test' })
+    mgr._lastActivity.set(sessionId, Date.now())
+    mgr._pendingStreams.set(`${sessionId}:msg-a`, 'partial content A')
+    mgr._pendingStreams.set(`${sessionId}:msg-b`, 'partial content B')
+    mgr._pendingStreams.set('other-session:msg-c', 'other content')
+    const events = []
+    mgr.on('session_event', (evt) => events.push(evt))
+    mgr.destroySession(sessionId)
+    const streamEndEvents = events.filter(e => e.event === 'stream_end' && e.sessionId === sessionId)
+    assert.equal(streamEndEvents.length, 2, 'should emit synthetic stream_end for each pending stream')
+    const endedIds = streamEndEvents.map(e => e.data.messageId).sort()
+    assert.deepEqual(endedIds, ['msg-a', 'msg-b'])
+    const remainingKeys = [...mgr._pendingStreams.keys()].filter(k => k.startsWith(sessionId))
+    assert.equal(remainingKeys.length, 0, '_pendingStreams should be empty for destroyed session')
+    assert.equal(mgr._pendingStreams.get('other-session:msg-c'), 'other content')
+  })
+})

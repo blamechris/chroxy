@@ -258,6 +258,16 @@ export class SessionManager extends EventEmitter {
       console.error(`[session-manager] Cannot destroy: session ${sessionId} not found`)
       return false
     }
+    // Detach listeners BEFORE destroy to prevent orphaned events (FM-04)
+    entry.session.removeAllListeners()
+    // Emit synthetic stream_end for any in-flight streams so clients see termination
+    for (const key of this._pendingStreams.keys()) {
+      if (key.startsWith(`${sessionId}:`)) {
+        const messageId = key.slice(sessionId.length + 1)
+        this.emit('session_event', { sessionId, event: 'stream_end', data: { messageId } })
+        this._pendingStreams.delete(key)
+      }
+    }
     entry.session.destroy()
     this._sessions.delete(sessionId)
     this._lastActivity.delete(sessionId)
@@ -265,12 +275,6 @@ export class SessionManager extends EventEmitter {
     console.log(`[session-manager] Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
     this._messageHistory.delete(sessionId)
     this._historyTruncated.delete(sessionId)
-    // Clean up any pending streams for this session
-    for (const key of this._pendingStreams.keys()) {
-      if (key.startsWith(`${sessionId}:`)) {
-        this._pendingStreams.delete(key)
-      }
-    }
     this._sessionCosts.delete(sessionId)
     this._budgetWarned.delete(sessionId)
     this._budgetExceeded.delete(sessionId)
@@ -289,6 +293,7 @@ export class SessionManager extends EventEmitter {
     this._persistTimer = null
     this.serializeState()
     for (const [sessionId, entry] of this._sessions) {
+      entry.session.removeAllListeners()
       entry.session.destroy()
       this.emit('session_destroyed', { sessionId })
     }
