@@ -81,6 +81,14 @@ impl DesktopSettings {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-        fs::write(&path, json).map_err(|e| format!("Failed to write settings: {}", e))
+        fs::write(&path, json).map_err(|e| format!("Failed to write settings: {}", e))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+
+        Ok(())
     }
 }

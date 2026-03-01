@@ -35,6 +35,13 @@ pub fn ensure_config() -> bool {
                 eprintln!("[setup] Failed to write config: {}", e);
                 return false;
             }
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+            }
+
             println!("[setup] Created default config at {}", path.display());
             true
         }
