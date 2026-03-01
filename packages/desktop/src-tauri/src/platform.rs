@@ -38,36 +38,24 @@ pub fn write_restricted(path: &Path, data: &str) -> Result<(), String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
 
     #[test]
     fn creates_file_with_0o600_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "chroxy-test-platform-create-{}",
-            std::process::id()
-        ));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("test-restricted.json");
-        let _ = fs::remove_file(&path);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test-restricted.json");
 
         write_restricted(&path, r#"{"test": true}"#).unwrap();
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "Expected 0o600, got {:o}", mode);
-
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir(&dir);
     }
 
     #[test]
     fn overwrites_existing_file_preserving_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "chroxy-test-platform-overwrite-{}",
-            std::process::id()
-        ));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("test-overwrite.json");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test-overwrite.json");
 
         write_restricted(&path, r#"{"v": 1}"#).unwrap();
         write_restricted(&path, r#"{"v": 2}"#).unwrap();
@@ -77,20 +65,12 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir(&dir);
     }
 
     #[test]
     fn tightens_permissions_on_existing_broad_file() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "chroxy-test-platform-tighten-{}",
-            std::process::id()
-        ));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("test-broad.json");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test-broad.json");
 
         // Create file with overly broad permissions (0o644)
         fs::write(&path, r#"{"old": true}"#).unwrap();
@@ -106,8 +86,5 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content, r#"{"new": true}"#);
-
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir(&dir);
     }
 }
