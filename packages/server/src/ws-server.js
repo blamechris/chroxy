@@ -1030,12 +1030,13 @@ export class WsServer {
   }
 
   /**
-   * Broadcast a session-scoped message to all authenticated clients.
+   * Broadcast a session-scoped message to clients viewing that session.
    * Tags the message with `sessionId` so clients can route it to the correct
-   * session state. The optional `filter` callback restricts delivery to
-   * a subset of connected clients (e.g., status updates scoped to one session).
+   * session state. By default only delivers to clients whose activeSessionId
+   * matches — prevents cross-session info leakage and bandwidth waste.
+   * Pass a custom filter to override (e.g., for session_list broadcasts).
    */
-  _broadcastToSession(sessionId, message, filter = () => true) {
+  _broadcastToSession(sessionId, message, filter = (client) => client.activeSessionId === sessionId) {
     const tagged = { ...message, sessionId }
     for (const [ws, client] of this.clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
