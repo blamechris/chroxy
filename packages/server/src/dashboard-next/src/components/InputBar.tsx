@@ -3,7 +3,7 @@
  *
  * Enter for newline, Cmd/Ctrl+Enter to send, Escape to interrupt.
  */
-import { useState, useRef, useCallback, type KeyboardEvent, type ChangeEvent } from 'react'
+import { useState, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent } from 'react'
 
 export interface InputBarProps {
   onSend: (text: string) => void
@@ -15,6 +15,7 @@ export interface InputBarProps {
 
 export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placeholder }: InputBarProps) {
   const [value, setValue] = useState('')
+  const shortcutsId = useId()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const send = useCallback(() => {
@@ -49,6 +50,9 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
 
   return (
     <div className="input-bar" data-testid="input-bar">
+      <span id={shortcutsId} className="sr-only">
+        Press Cmd/Ctrl+Enter to send, Escape to interrupt
+      </span>
       <textarea
         ref={textareaRef}
         value={value}
@@ -57,6 +61,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
         disabled={disabled}
         placeholder={placeholder}
         aria-label="Message input"
+        aria-describedby={shortcutsId}
         rows={1}
       />
       {isStreaming ? (

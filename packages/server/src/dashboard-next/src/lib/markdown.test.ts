@@ -90,9 +90,17 @@ describe('renderMarkdown', () => {
     expect(html).toMatch(/<ol>[\s\S]*first[\s\S]*<\/ol>/)
   })
 
-  it('converts double newlines to paragraphs', () => {
+  it('wraps paragraphs in proper <p> tags (#1169)', () => {
     const html = renderMarkdown('para 1\n\npara 2')
-    expect(html).toContain('</p><p>')
+    expect(html).toContain('<p>para 1</p>')
+    expect(html).toContain('<p>para 2</p>')
+  })
+
+  it('does not wrap block elements in <p> tags (#1169)', () => {
+    const html = renderMarkdown('# Title\n\nSome text')
+    expect(html).not.toMatch(/<p>\s*<h1>/)
+    expect(html).toContain('<h1>Title</h1>')
+    expect(html).toContain('<p>Some text</p>')
   })
 
   it('converts single newlines to br', () => {
