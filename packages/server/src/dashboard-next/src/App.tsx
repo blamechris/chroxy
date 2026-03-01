@@ -231,7 +231,7 @@ export function App() {
     }
 
     // Question prompt with options
-    if (storeMsg.type === 'prompt' && storeMsg.options && storeMsg.options.length > 0 && !storeMsg.requestId) {
+    if (storeMsg.type === 'prompt' && storeMsg.options && !storeMsg.requestId) {
       return (
         <QuestionPrompt
           question={storeMsg.content}
