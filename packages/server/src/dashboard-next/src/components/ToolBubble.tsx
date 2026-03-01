@@ -24,13 +24,28 @@ function getInputSummary(input: ToolBubbleProps['input']): string {
 export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubbleProps) {
   const [expanded, setExpanded] = useState(false)
   const summary = getInputSummary(input)
+  const resultId = `tool-result-${toolUseId}`
+
+  const toggle = () => setExpanded(prev => !prev)
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      toggle()
+    }
+  }
 
   return (
     <div
       className={`tool-bubble${expanded ? ' expanded' : ''}`}
       data-testid={`tool-bubble-${toolUseId}`}
       data-tool-id={toolUseId}
-      onClick={() => setExpanded(!expanded)}
+      role="button"
+      tabIndex={0}
+      aria-expanded={expanded}
+      aria-controls={resultId}
+      onClick={toggle}
+      onKeyDown={handleKeyDown}
     >
       <span className="tool-name">{toolName}</span>
       {summary && (
@@ -39,7 +54,7 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
         </span>
       )}
       {expanded && result && (
-        <div className="tool-result">
+        <div className="tool-result" id={resultId}>
           <pre>{result}</pre>
         </div>
       )}
