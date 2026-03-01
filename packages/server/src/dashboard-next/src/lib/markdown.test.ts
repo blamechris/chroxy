@@ -122,6 +122,15 @@ describe('renderMarkdown', () => {
     expect(html).toContain('text after')
   })
 
+  it('does not wrap code blocks in <p> tags (#1244)', () => {
+    const html = renderMarkdown('text\n\n```js\nconst x = 1\n```\n\nmore text')
+    // Code block should not be nested inside <p> — verify <pre> is a direct top-level block
+    expect(html).not.toMatch(/<p>[^<]*<pre>/)
+    expect(html).toContain('<pre>')
+    expect(html).toContain('<p>text</p>')
+    expect(html).toContain('<p>more text</p>')
+  })
+
   it('sanitizes XSS payloads via DOMPurify defense-in-depth', () => {
     // Verify no raw <script> or event handler attributes survive in output.
     // Input is escaped by escapeHtml first; DOMPurify catches anything that
