@@ -260,6 +260,8 @@ export class SessionManager extends EventEmitter {
     }
     // Detach listeners BEFORE destroy to prevent orphaned events (FM-04)
     entry.session.removeAllListeners()
+    // Prevent unhandled 'error' throw if session emits error during destroy
+    entry.session.on('error', () => {})
     // Emit synthetic stream_end for any in-flight streams so clients see termination
     for (const key of this._pendingStreams.keys()) {
       if (key.startsWith(`${sessionId}:`)) {
@@ -294,6 +296,7 @@ export class SessionManager extends EventEmitter {
     this.serializeState()
     for (const [sessionId, entry] of this._sessions) {
       entry.session.removeAllListeners()
+      entry.session.on('error', () => {})
       entry.session.destroy()
       this.emit('session_destroyed', { sessionId })
     }
