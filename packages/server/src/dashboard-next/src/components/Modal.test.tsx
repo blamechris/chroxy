@@ -84,6 +84,32 @@ describe('Modal', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onClose).toHaveBeenCalled()
   })
+
+  it('only closes the topmost modal on Escape when nested (#1179)', () => {
+    const onCloseOuter = vi.fn()
+    const onCloseInner = vi.fn()
+    render(
+      <Modal open onClose={onCloseOuter} title="Outer">
+        <Modal open onClose={onCloseInner} title="Inner">
+          <p>Nested content</p>
+        </Modal>
+      </Modal>
+    )
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onCloseInner).toHaveBeenCalledTimes(1)
+    expect(onCloseOuter).not.toHaveBeenCalled()
+  })
+
+  it('single modal Escape behavior unchanged after nested fix (#1179)', () => {
+    const onClose = vi.fn()
+    render(
+      <Modal open onClose={onClose} title="Solo">
+        <p>Content</p>
+      </Modal>
+    )
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('CreateSessionModal', () => {
