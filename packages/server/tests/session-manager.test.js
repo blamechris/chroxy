@@ -1065,6 +1065,7 @@ describe('#1227 — guard destroyAll() session.destroy() with try-catch', () => 
     mgr.destroyAll()
 
     assert.equal(mgr._sessions.size, 0, 'all sessions should be cleared')
+    assert.equal(mgr._lastActivity.size, 0, '_lastActivity should be cleared')
     assert.equal(session2Destroyed, true, 'session2 should still be destroyed')
   })
 })
