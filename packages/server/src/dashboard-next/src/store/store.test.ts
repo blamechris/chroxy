@@ -406,7 +406,7 @@ describe('SSR safety', () => {
       'utf-8'
     );
     // The guard should appear before the addEventListener call
-    const guardPattern = /typeof document\s*!==?\s*['"]undefined['"]/;
+    const guardPattern = /typeof document\s*!==\s*['"]undefined['"]/;
     const listenerPattern = /document\.addEventListener\s*\(\s*['"]visibilitychange['"]/;
 
     const guardMatch = storeSource.match(guardPattern);
@@ -416,8 +416,6 @@ describe('SSR safety', () => {
     expect(listenerMatch).not.toBeNull();
 
     // Guard must appear before the listener in the source
-    if (guardMatch && listenerMatch) {
-      expect(guardMatch.index).toBeLessThan(listenerMatch.index!);
-    }
+    expect(guardMatch!.index!).toBeLessThan(listenerMatch!.index!);
   });
 });
