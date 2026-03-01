@@ -128,6 +128,7 @@ describe('InputBar', () => {
       paddingBottom: '8px',
       borderTopWidth: '1px',
       borderBottomWidth: '1px',
+      boxSizing: 'border-box',
     })
 
     try {
@@ -138,9 +139,63 @@ describe('InputBar', () => {
       Object.defineProperty(textarea, 'scrollHeight', { value: 300, configurable: true })
       fireEvent.change(textarea, { target: { value: 'a\nb\nc\nd\ne\nf\ng' } })
 
-      // Max should be 5 lines * 24px + 8+8 padding + 1+1 border = 138px
+      // Max should be 5 lines * 24px + 8+8 padding + 1+1 border = 138px (border-box)
       const height = parseInt(textarea.style.height, 10)
       expect(height).toBe(138)
+    } finally {
+      window.getComputedStyle = originalGetComputedStyle
+    }
+  })
+
+  it('adjusts height for border-box sizing (#1246)', () => {
+    const originalGetComputedStyle = window.getComputedStyle
+    window.getComputedStyle = vi.fn().mockReturnValue({
+      lineHeight: '24px',
+      paddingTop: '8px',
+      paddingBottom: '8px',
+      borderTopWidth: '1px',
+      borderBottomWidth: '1px',
+      boxSizing: 'border-box',
+    })
+
+    try {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+      // scrollHeight = 100 (includes padding but not border)
+      Object.defineProperty(textarea, 'scrollHeight', { value: 100, configurable: true })
+      fireEvent.change(textarea, { target: { value: 'hello' } })
+
+      // border-box: style.height = scrollHeight + borderY = 100 + 2 = 102
+      const height = parseInt(textarea.style.height, 10)
+      expect(height).toBe(102)
+    } finally {
+      window.getComputedStyle = originalGetComputedStyle
+    }
+  })
+
+  it('adjusts height for content-box sizing (#1246)', () => {
+    const originalGetComputedStyle = window.getComputedStyle
+    window.getComputedStyle = vi.fn().mockReturnValue({
+      lineHeight: '24px',
+      paddingTop: '8px',
+      paddingBottom: '8px',
+      borderTopWidth: '1px',
+      borderBottomWidth: '1px',
+      boxSizing: 'content-box',
+    })
+
+    try {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+      // scrollHeight = 100 (includes padding but not border)
+      Object.defineProperty(textarea, 'scrollHeight', { value: 100, configurable: true })
+      fireEvent.change(textarea, { target: { value: 'hello' } })
+
+      // content-box: style.height = (scrollHeight + borderY) - paddingY - borderY = scrollHeight - paddingY = 100 - 16 = 84
+      const height = parseInt(textarea.style.height, 10)
+      expect(height).toBe(84)
     } finally {
       window.getComputedStyle = originalGetComputedStyle
     }
