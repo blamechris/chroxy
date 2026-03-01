@@ -941,6 +941,36 @@ describe('createSession failure cleanup (FM-03)', () => {
     )
     assert.equal(emitted, false, 'session_created should not be emitted when start() fails')
   })
+
+  it('calls session.destroy() when start() throws', async () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    const { registerProvider } = await import('../src/providers.js')
+    let destroyCalled = false
+    class FailingProvider3 extends EventEmitter {
+      constructor(opts) {
+        super()
+        this.cwd = opts.cwd
+        this.model = null
+        this.permissionMode = 'approve'
+        this.isRunning = false
+        this.resumeSessionId = null
+      }
+      static get capabilities() { return {} }
+      start() { throw new Error('init crashed') }
+      destroy() { destroyCalled = true }
+      sendMessage() {}
+      setModel() {}
+      setPermissionMode() {}
+    }
+    registerProvider('test-failing3', FailingProvider3)
+
+    assert.throws(
+      () => mgr.createSession({ cwd: '/tmp', provider: 'test-failing3' }),
+      /init crashed/
+    )
+    assert.equal(destroyCalled, true, 'session.destroy() should be called on start() failure')
+  })
 })
 
 describe('#1091 — destroy-while-streaming event leak', () => {

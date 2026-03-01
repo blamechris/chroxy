@@ -173,9 +173,12 @@ export class SessionManager extends EventEmitter {
       session.start()
     } catch (err) {
       // Clean up phantom session on start() failure (Guardian FM-03)
+      // Mirror destroySession() teardown order: detach listeners before destroy
+      session.removeAllListeners()
+      session.on('error', () => {})
+      session.destroy()
       this._sessions.delete(sessionId)
       this._lastActivity.delete(sessionId)
-      session.removeAllListeners()
       throw err
     }
 
