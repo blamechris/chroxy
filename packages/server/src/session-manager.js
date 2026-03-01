@@ -350,6 +350,7 @@ export class SessionManager extends EventEmitter {
     this._budgetWarned.clear()
     this._budgetExceeded.clear()
     this._budgetPaused.clear()
+    this._pendingStreams.clear()
   }
 
   /**

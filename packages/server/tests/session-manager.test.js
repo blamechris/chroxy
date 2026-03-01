@@ -1127,7 +1127,7 @@ describe('#1227 — guard destroyAll() session.destroy() with try-catch', () => 
 })
 
 describe('#1243 — destroyAll() clears all session-scoped maps', () => {
-  it('clears messageHistory, historyTruncated, sessionCosts, budget maps after destroyAll', () => {
+  it('clears messageHistory, historyTruncated, sessionCosts, budget maps, pendingStreams after destroyAll', () => {
     const mgr = new SessionManager({ maxSessions: 5 })
 
     const session1 = new EventEmitter()
@@ -1144,6 +1144,7 @@ describe('#1243 — destroyAll() clears all session-scoped maps', () => {
     mgr._budgetWarned.add('s1')
     mgr._budgetExceeded.add('s1')
     mgr._budgetPaused.add('s1')
+    mgr._pendingStreams.set('s1:msg-1', 'partial text')
 
     mgr.destroyAll()
 
@@ -1156,6 +1157,7 @@ describe('#1243 — destroyAll() clears all session-scoped maps', () => {
     assert.equal(mgr._budgetWarned.size, 0, '_budgetWarned should be cleared')
     assert.equal(mgr._budgetExceeded.size, 0, '_budgetExceeded should be cleared')
     assert.equal(mgr._budgetPaused.size, 0, '_budgetPaused should be cleared')
+    assert.equal(mgr._pendingStreams.size, 0, '_pendingStreams should be cleared')
   })
 })
 
