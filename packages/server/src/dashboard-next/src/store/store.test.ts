@@ -391,3 +391,33 @@ describe('message handler', () => {
     expect(parsed.data).toBe('hello');
   });
 });
+
+// ---------------------------------------------------------------------------
+// SSR safety — module-level DOM guards (#1151)
+// ---------------------------------------------------------------------------
+describe('SSR safety', () => {
+  it('visibilitychange listener is guarded by typeof document check', async () => {
+    // The connection store registers a visibilitychange listener at module scope.
+    // Verify the source code wraps it in a typeof document guard.
+    const fs = await import('fs');
+    const path = await import('path');
+    const storeSource = fs.readFileSync(
+      path.resolve(__dirname, 'connection.ts'),
+      'utf-8'
+    );
+    // The guard should appear before the addEventListener call
+    const guardPattern = /typeof document\s*!==?\s*['"]undefined['"]/;
+    const listenerPattern = /document\.addEventListener\s*\(\s*['"]visibilitychange['"]/;
+
+    const guardMatch = storeSource.match(guardPattern);
+    const listenerMatch = storeSource.match(listenerPattern);
+
+    expect(guardMatch).not.toBeNull();
+    expect(listenerMatch).not.toBeNull();
+
+    // Guard must appear before the listener in the source
+    if (guardMatch && listenerMatch) {
+      expect(guardMatch.index).toBeLessThan(listenerMatch.index!);
+    }
+  });
+});
