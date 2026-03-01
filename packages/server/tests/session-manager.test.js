@@ -1040,6 +1040,35 @@ describe('#1202 — guard session.destroy() with try-catch', () => {
   })
 })
 
+describe('#1227 — guard destroyAll() session.destroy() with try-catch', () => {
+  it('cleans up all sessions even when one destroy() throws', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    // Session 1: destroy throws
+    const session1 = new EventEmitter()
+    session1.isRunning = false
+    session1.destroy = () => { throw new Error('destroy exploded') }
+    session1.removeAllListeners = () => {}
+    mgr._sessions.set('s1', { session: session1, type: 'cli', name: 'S1', cwd: '/tmp' })
+    mgr._lastActivity.set('s1', Date.now())
+
+    // Session 2: normal
+    const session2 = new EventEmitter()
+    session2.isRunning = false
+    let session2Destroyed = false
+    session2.destroy = () => { session2Destroyed = true }
+    session2.removeAllListeners = () => {}
+    mgr._sessions.set('s2', { session: session2, type: 'cli', name: 'S2', cwd: '/tmp' })
+    mgr._lastActivity.set('s2', Date.now())
+
+    // Should not throw despite session1.destroy() throwing
+    mgr.destroyAll()
+
+    assert.equal(mgr._sessions.size, 0, 'all sessions should be cleared')
+    assert.equal(session2Destroyed, true, 'session2 should still be destroyed')
+  })
+})
+
 describe('#1141 — async start() rejection guard', () => {
   it('cleans up phantom session when start() returns a rejected promise', async () => {
     const mgr = new SessionManager({ maxSessions: 5 })

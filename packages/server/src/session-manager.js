@@ -316,7 +316,7 @@ export class SessionManager extends EventEmitter {
     for (const [sessionId, entry] of this._sessions) {
       entry.session.removeAllListeners()
       entry.session.on('error', () => {})
-      entry.session.destroy()
+      try { entry.session.destroy() } catch (_) { /* best-effort cleanup (#1227) */ }
       this.emit('session_destroyed', { sessionId })
     }
     this._sessions.clear()
