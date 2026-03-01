@@ -21,6 +21,7 @@ class MockProvider {
   emit(event, data) {
     for (const h of this._handlers[event] || []) h(data)
   }
+  removeAllListeners() { this._handlers = {} }
   sendMessage() {}
 }
 
