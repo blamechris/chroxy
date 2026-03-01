@@ -514,6 +514,55 @@
   margin-top: 6px;
 }
 
+/* ---- Question Prompt (#1193) ---- */
+.question-prompt {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  padding: 12px 14px;
+  align-self: flex-start;
+  max-width: 85%;
+}
+
+.question-text {
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.question-option {
+  padding: 5px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--accent-purple);
+  background: transparent;
+  color: var(--accent-purple);
+  font-size: var(--text-base);
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.question-option:hover:not(:disabled) {
+  background: var(--accent-purple);
+  color: #fff;
+}
+
+.question-option:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.question-option.chosen {
+  background: var(--accent-purple);
+  color: #fff;
+  opacity: 1;
+}
+
 .perm-countdown {
   font-size: var(--text-sm);
   color: var(--text-muted);
@@ -887,7 +936,7 @@
   .header-center select { font-size: var(--text-sm); padding: 3px 6px; }
   .session-bar { padding: 4px 10px; }
   .chat-messages { padding: 10px; gap: 8px; }
-  .msg, .tool-bubble, .permission-prompt { max-width: 92%; font-size: var(--text-base); }
+  .msg, .tool-bubble, .permission-prompt, .question-prompt { max-width: 92%; font-size: var(--text-base); }
   .input-bar { padding: 8px 10px; gap: 6px; }
   .input-bar textarea { padding: 8px 10px; font-size: var(--text-base); }
   .btn-send, .btn-interrupt { padding: 8px 12px; font-size: var(--text-base); }

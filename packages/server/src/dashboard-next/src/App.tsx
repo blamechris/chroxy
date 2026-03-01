@@ -16,6 +16,7 @@ import { InputBar } from './components/InputBar'
 import { SessionBar, type SessionTabData } from './components/SessionBar'
 import { StatusBar } from './components/StatusBar'
 import { PermissionPrompt } from './components/PermissionPrompt'
+import { QuestionPrompt } from './components/QuestionPrompt'
 import { ToolBubble } from './components/ToolBubble'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
@@ -104,6 +105,8 @@ export function App() {
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
   const setTerminalWriteCallback = useConnectionStore(s => s.setTerminalWriteCallback)
+  const sendUserQuestionResponse = useConnectionStore(s => s.sendUserQuestionResponse)
+  const markPromptAnswered = useConnectionStore(s => s.markPromptAnswered)
 
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
@@ -227,6 +230,21 @@ export function App() {
       )
     }
 
+    // Question prompt with options
+    if (storeMsg.type === 'prompt' && storeMsg.options && storeMsg.options.length > 0 && !storeMsg.requestId) {
+      return (
+        <QuestionPrompt
+          question={storeMsg.content}
+          options={storeMsg.options}
+          answered={storeMsg.answered}
+          onSelect={(value) => {
+            sendUserQuestionResponse(value, storeMsg.toolUseId)
+            markPromptAnswered(storeMsg.id, value)
+          }}
+        />
+      )
+    }
+
     // Tool bubble
     if (storeMsg.type === 'tool_use' && storeMsg.toolUseId) {
       return (
@@ -241,7 +259,7 @@ export function App() {
 
     // Default rendering
     return null
-  }, [storeMsgMap, sendPermissionResponse])
+  }, [storeMsgMap, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
 
   const isConnected = connectionPhase === 'connected'
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
