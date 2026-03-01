@@ -53,7 +53,7 @@ async function searchFile(filePath, queryLower, conversationId, projectName, dec
       try {
         const { bytesRead } = await handle.read(buf, 0, MAX_FILE_READ, 0)
         const decoder = new TextDecoder('utf-8', { fatal: false })
-        text = decoder.decode(buf.subarray(0, bytesRead), { stream: true })
+        text = decoder.decode(buf.subarray(0, bytesRead))
       } finally {
         await handle.close()
       }
@@ -216,8 +216,13 @@ export async function searchConversations(query, opts = {}) {
   const results = await runWithConcurrency(tasks, CONCURRENCY)
   const matches = results.filter(Boolean)
 
-  // Sort by match count descending, then by project name
-  matches.sort((a, b) => b.matchCount - a.matchCount)
+  // Sort by match count descending, then by project name, then conversationId
+  matches.sort((a, b) => {
+    if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount
+    const nameCmp = a.projectName.localeCompare(b.projectName)
+    if (nameCmp !== 0) return nameCmp
+    return a.conversationId.localeCompare(b.conversationId)
+  })
 
   return matches.slice(0, maxResults)
 }

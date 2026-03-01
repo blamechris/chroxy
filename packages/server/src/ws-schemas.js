@@ -199,13 +199,14 @@ export const ResumeConversationSchema = z.object({
 
 export const SearchConversationsSchema = z.object({
   type: z.literal('search_conversations'),
-  query: z.string().min(1).max(500),
+  query: z.string().trim().min(1).max(500),
   maxResults: z.number().int().min(1).max(100).optional(),
 })
 
 export const RequestCostSummarySchema = z.object({
   type: z.literal('request_cost_summary'),
 })
+
 
 // Encrypted envelope — validated separately (before decryption)
 export const EncryptedEnvelopeSchema = z.object({

@@ -390,6 +390,7 @@ export interface ConnectionState {
   // Cross-session search
   searchResults: SearchResult[];
   searchLoading: boolean;
+  searchQuery: string;
 
   // Checkpoints for session rewind
   checkpoints: Checkpoint[];

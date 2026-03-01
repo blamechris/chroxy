@@ -474,6 +474,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       break
     }
 
+
     case 'resume_conversation': {
       // Check resume capability on the active session's provider
       const activeEntry = client.activeSessionId && ctx.sessionManager.getSession(client.activeSessionId)

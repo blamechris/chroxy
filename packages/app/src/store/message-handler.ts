@@ -1783,6 +1783,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'search_results': {
       const results = Array.isArray(msg.results) ? msg.results : [];
+      const msgQuery = typeof msg.query === 'string' ? msg.query : null;
+      const currentQuery = (get() as ConnectionState).searchQuery;
+      if (msgQuery !== null && currentQuery && msgQuery !== currentQuery) {
+        break; // Stale response for an older query — ignore
+      }
       set({ searchResults: results, searchLoading: false });
       break;
     }
