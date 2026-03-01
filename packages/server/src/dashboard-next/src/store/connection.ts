@@ -120,7 +120,7 @@ let searchTimeoutId: ReturnType<typeof setTimeout> | undefined;
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
 let _cachedDeviceId: string | null = null;
 
-async function getDeviceId(): Promise<string> {
+function getDeviceId(): string {
   if (_cachedDeviceId) return _cachedDeviceId;
   try {
     const stored = localStorage.getItem(STORAGE_KEY_DEVICE_ID);
@@ -295,7 +295,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     };
   },
 
-  loadSavedConnection: async () => {
+  loadSavedConnection: () => {
     const saved = loadConnection();
     if (saved) {
       set({ savedConnection: saved });
@@ -314,10 +314,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     // Load persisted session state (view mode, active session, terminal buffer, session list)
     try {
-      const [persisted, cachedSessions] = await Promise.all([
-        loadPersistedState(),
-        loadSessionList(),
-      ]);
+      const persisted = loadPersistedState();
+      const cachedSessions = loadSessionList();
       const updates: Partial<ReturnType<typeof get>> = {};
       if (persisted.viewMode) updates.viewMode = persisted.viewMode;
       if (persisted.activeSessionId) updates.activeSessionId = persisted.activeSessionId;
@@ -331,7 +329,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         sessionIds.push(persisted.activeSessionId);
       }
       if (sessionIds.length > 0) {
-        const allMessages = await loadAllSessionMessages(sessionIds);
+        const allMessages = loadAllSessionMessages(sessionIds);
         const sessionStates: Record<string, ReturnType<typeof createEmptySessionState>> = {};
         for (const [id, messages] of Object.entries(allMessages)) {
           if (messages.length > 0) {
@@ -349,8 +347,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  clearSavedConnection: async () => {
-    await clearConnection();
+  clearSavedConnection: () => {
+    clearConnection();
     set({ savedConnection: null });
   },
 
@@ -471,16 +469,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     socket.onopen = () => {
       // Include device info in auth for multi-client awareness
       const info = getDeviceInfo();
-      void getDeviceId().then((deviceId) => {
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({
-            type: 'auth',
-            token,
-            protocolVersion: CLIENT_PROTOCOL_VERSION,
-            deviceInfo: { deviceId, ...info },
-          }));
-        }
-      });
+      const deviceId = getDeviceId();
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'auth',
+          token,
+          protocolVersion: CLIENT_PROTOCOL_VERSION,
+          deviceInfo: { deviceId, ...info },
+        }));
+      }
     };
 
     const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket };

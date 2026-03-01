@@ -426,8 +426,8 @@ export interface ConnectionState {
   // Actions
   connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => void;
   disconnect: () => void;
-  loadSavedConnection: () => Promise<void>;
-  clearSavedConnection: () => Promise<void>;
+  loadSavedConnection: () => void;
+  clearSavedConnection: () => void;
   setViewMode: (mode: 'chat' | 'terminal' | 'files') => void;
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[]) => void;
