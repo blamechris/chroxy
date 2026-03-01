@@ -16,7 +16,8 @@
     "dashboard:dev": "vite --config src/dashboard-next/vite.config.ts src/dashboard-next",
     "dashboard:build": "vite build --config src/dashboard-next/vite.config.ts src/dashboard-next",
     "dashboard:typecheck": "tsc --noEmit -p src/dashboard-next/tsconfig.json",
-    "dashboard:test": "vitest run --config src/dashboard-next/vite.config.ts"
+    "dashboard:test": "vitest run --config src/dashboard-next/vite.config.ts",
+    "dashboard:generate-tokens": "node scripts/generate-theme-tokens.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",

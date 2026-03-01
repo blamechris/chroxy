@@ -1,8 +1,8 @@
 /**
- * Design tokens for the Chroxy desktop dashboard.
+ * DO NOT EDIT — generated from theme.css by scripts/generate-theme-tokens.mjs
  *
- * Source of truth: mobile app colors.ts + legacy dashboard.css
- * CSS custom properties in theme.css mirror these values.
+ * Design tokens for the Chroxy desktop dashboard.
+ * Run: npm run dashboard:generate-tokens
  */
 
 // ---------------------------------------------------------------------------
@@ -10,7 +10,6 @@
 // ---------------------------------------------------------------------------
 
 export const colors = {
-  // Backgrounds
   bg: {
     primary: '#0f0f1a',
     secondary: '#1a1a2e',
@@ -27,8 +26,6 @@ export const colors = {
     planBanner: '#2a1a40',
     modal: '#1a1a2e',
   },
-
-  // Text
   text: {
     primary: '#ffffff',
     secondary: '#cccccc',
@@ -42,42 +39,32 @@ export const colors = {
     heading: '#f0f0f0',
     blockquote: '#999999',
   },
-
-  // Accents — solid
   accent: {
     blue: '#4a9eff',
     green: '#22c55e',
     purple: '#a78bfa',
     orange: '#f59e0b',
     red: '#ff4a4a',
-
-    // Opacity variants (hex alpha)
     blueLight: '#4a9eff22',
     blueSubtle: '#4a9eff33',
     blueBorder: '#4a9eff44',
     blueBorderStrong: '#4a9eff66',
-
     greenLight: '#22c55e22',
     greenBorder: '#22c55e33',
     greenBorderStrong: '#22c55e66',
-
     purpleLight: '#a78bfa22',
     purpleSubtle: '#a78bfa33',
     purpleBorderStrong: '#a78bfa66',
     purpleCode: '#c4a5ff',
-
     orangeLight: '#f59e0b11',
     orangeSubtle: '#f59e0b22',
     orangeMedium: '#f59e0b33',
     orangeBorder: '#f59e0b44',
     orangeBorderStrong: '#f59e0b66',
-
     redLight: '#ff4a4a11',
     redSubtle: '#ff4a4a22',
     redBorder: '#ff4a4a44',
   },
-
-  // Borders
   border: {
     primary: '#2a2a4e',
     secondary: '#3a3a5e',
@@ -86,16 +73,12 @@ export const colors = {
     permission: '#4a3a7a',
     question: '#2a5a7a',
   },
-
-  // Status indicator dots
   status: {
     connected: '#22c55e',
     disconnected: '#ef4444',
     connecting: '#eab308',
     restarting: '#f59e0b',
   },
-
-  // Syntax highlighting
   syntax: {
     keyword: '#c4a5ff',
     string: '#4eca6a',
@@ -108,16 +91,12 @@ export const colors = {
     type: '#4a9eff',
     property: '#4eca6a',
   },
-
-  // Diff
   diff: {
     addBg: '#1a2e1a',
     removeBg: '#2e1a1a',
     addText: '#4eca6a',
     removeText: '#ff5b5b',
   },
-
-  // Scrollbar
   scrollbar: {
     track: 'transparent',
     thumb: '#333355',
