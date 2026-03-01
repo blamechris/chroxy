@@ -35,6 +35,35 @@ pub fn write_restricted(path: &Path, data: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Create a new file atomically with restricted permissions (0o600 on Unix).
+/// Fails with `std::io::ErrorKind::AlreadyExists` if the file already exists,
+/// eliminating TOCTOU races between existence check and file creation.
+#[cfg(unix)]
+pub fn write_restricted_new(path: &Path, data: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(data.as_bytes())?;
+    Ok(())
+}
+
+/// Create a new file atomically (non-Unix fallback).
+#[cfg(not(unix))]
+pub fn write_restricted_new(path: &Path, data: &str) -> std::io::Result<()> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(data.as_bytes())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,6 +108,56 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_restricted_new_creates_file_with_0o600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "chroxy-test-platform-new-create-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("test-new.json");
+        let _ = fs::remove_file(&path);
+
+        write_restricted_new(&path, r#"{"new": true}"#).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "Expected 0o600, got {:o}", mode);
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, r#"{"new": true}"#);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_restricted_new_fails_if_file_exists() {
+        let dir = std::env::temp_dir().join(format!(
+            "chroxy-test-platform-new-exists-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("test-exists.json");
+
+        // Create the file first
+        fs::write(&path, r#"{"old": true}"#).unwrap();
+
+        // write_restricted_new should fail with AlreadyExists
+        let result = write_restricted_new(&path, r#"{"new": true}"#);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+
+        // Original content should be preserved
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, r#"{"old": true}"#);
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&dir);
