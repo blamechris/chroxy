@@ -35,6 +35,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+  const cancelledRef = useRef(false)
   const showClose = sessions.length > 1
 
   useEffect(() => {
@@ -45,32 +46,45 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
   }, [renamingId])
 
   const startRename = useCallback((session: SessionTabData) => {
+    cancelledRef.current = false
     setRenamingId(session.sessionId)
     setRenameValue(session.name)
   }, [])
 
   const commitRename = useCallback((sessionId: string) => {
+    if (cancelledRef.current) return
     const trimmed = renameValue.trim()
-    if (trimmed) {
+    const session = sessions.find(s => s.sessionId === sessionId)
+    if (trimmed && session && trimmed !== session.name.trim()) {
       onRename(sessionId, trimmed)
     }
     setRenamingId(null)
-  }, [renameValue, onRename])
+  }, [renameValue, onRename, sessions])
 
   const cancelRename = useCallback(() => {
+    cancelledRef.current = true
     setRenamingId(null)
   }, [])
 
   return (
     <div className="session-bar" data-testid="session-bar">
-      <div className="session-tabs">
+      <div className="session-tabs" role="tablist">
         {sessions.map(session => (
           <div
             key={session.sessionId}
             className={`session-tab${session.isActive ? ' active' : ''}`}
             data-testid={`session-tab-${session.sessionId}`}
+            role="tab"
+            aria-selected={session.isActive}
+            tabIndex={0}
             onClick={() => {
               if (!session.isActive) onSwitch(session.sessionId)
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                if (!session.isActive) onSwitch(session.sessionId)
+              }
             }}
           >
             {session.isBusy && (
@@ -125,6 +139,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               <button
                 className="tab-close"
                 data-testid="tab-close"
+                aria-label={`Close session ${session.name}`}
                 onClick={e => {
                   e.stopPropagation()
                   onClose(session.sessionId)
@@ -142,6 +157,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
         className="btn-new-session"
         data-testid="new-session-btn"
         onClick={onNewSession}
+        aria-label="Create new session"
         title="New session (Ctrl+N)"
         type="button"
       >

@@ -175,6 +175,24 @@ describe('SessionBar', () => {
     expect(screen.getByText('Backend')).toBeInTheDocument()
   })
 
+  it('does not call onRename when name is unchanged', () => {
+    const onRename = vi.fn()
+    render(
+      <SessionBar
+        sessions={makeSessions()}
+        onSwitch={vi.fn()}
+        onClose={vi.fn()}
+        onRename={onRename}
+        onNewSession={vi.fn()}
+      />
+    )
+    const nameEl = screen.getByText('Default')
+    fireEvent.doubleClick(nameEl)
+    const input = screen.getByDisplayValue('Default')
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onRename).not.toHaveBeenCalled()
+  })
+
   it('shows abbreviated cwd on tab', () => {
     render(
       <SessionBar
@@ -199,6 +217,37 @@ describe('SessionBar', () => {
       />
     )
     expect(screen.getByText('opus')).toBeInTheDocument()
+  })
+
+  it('has ARIA tab roles', () => {
+    render(
+      <SessionBar
+        sessions={makeSessions()}
+        onSwitch={vi.fn()}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onNewSession={vi.fn()}
+      />
+    )
+    expect(screen.getByRole('tablist')).toBeInTheDocument()
+    const tabs = screen.getAllByRole('tab')
+    expect(tabs).toHaveLength(2)
+    expect(tabs[0]).toHaveAttribute('aria-selected', 'true')
+    expect(tabs[1]).toHaveAttribute('aria-selected', 'false')
+  })
+
+  it('has aria-label on close button', () => {
+    render(
+      <SessionBar
+        sessions={makeSessions()}
+        onSwitch={vi.fn()}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onNewSession={vi.fn()}
+      />
+    )
+    const closeButtons = screen.getAllByTestId('tab-close')
+    expect(closeButtons[0]).toHaveAttribute('aria-label', 'Close session Default')
   })
 })
 
@@ -243,7 +292,7 @@ describe('StatusBar', () => {
     expect(screen.queryByTestId('agent-badge')).not.toBeInTheDocument()
   })
 
-  it('renders nothing for empty state', () => {
+  it('renders status bar container when no props provided', () => {
     const { container } = render(<StatusBar />)
     const bar = container.querySelector('[data-testid="status-bar"]')
     expect(bar).toBeInTheDocument()
