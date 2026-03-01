@@ -86,6 +86,23 @@ describe('PermissionPrompt', () => {
     expect(screen.getByTestId('perm-countdown')).toHaveTextContent('Timed out')
   })
 
+  it('hides buttons when expired', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={2000}
+        onRespond={onRespond}
+      />
+    )
+    expect(screen.getByText('Allow')).toBeInTheDocument()
+    act(() => { vi.advanceTimersByTime(3000) })
+    expect(screen.queryByText('Allow')).not.toBeInTheDocument()
+    expect(screen.queryByText('Deny')).not.toBeInTheDocument()
+  })
+
   it('shows expired immediately when remainingMs is 0', () => {
     render(
       <PermissionPrompt
@@ -149,7 +166,7 @@ describe('PlanApproval', () => {
   it('renders plan content', () => {
     render(
       <PlanApproval
-        plan="## My Plan\n\n- Step 1\n- Step 2"
+        planHtml="## My Plan\n\n- Step 1\n- Step 2"
         onApprove={vi.fn()}
         onFeedback={vi.fn()}
       />
@@ -162,7 +179,7 @@ describe('PlanApproval', () => {
     const onApprove = vi.fn()
     render(
       <PlanApproval
-        plan="Plan text"
+        planHtml="Plan text"
         onApprove={onApprove}
         onFeedback={vi.fn()}
       />
@@ -175,7 +192,7 @@ describe('PlanApproval', () => {
     const onFeedback = vi.fn()
     render(
       <PlanApproval
-        plan="Plan text"
+        planHtml="Plan text"
         onApprove={vi.fn()}
         onFeedback={onFeedback}
       />
@@ -187,7 +204,7 @@ describe('PlanApproval', () => {
   it('does not render when no plan', () => {
     const { container } = render(
       <PlanApproval
-        plan=""
+        planHtml=""
         onApprove={vi.fn()}
         onFeedback={vi.fn()}
       />

@@ -28,7 +28,9 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   const expiresAtRef = useRef(Date.now() + remainingMs)
 
   useEffect(() => {
+    if (intervalRef.current) clearInterval(intervalRef.current)
     setRemaining(remainingMs)
+
     if (remainingMs <= 0) {
       return
     }
@@ -48,11 +50,11 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   }, [remainingMs])
 
   const respond = useCallback((decision: 'allow' | 'deny') => {
-    if (remaining <= 0) return
+    if (answered || remaining <= 0) return
     if (intervalRef.current) clearInterval(intervalRef.current)
     setAnswered(decision)
     onRespond(requestId, decision)
-  }, [requestId, onRespond, remaining])
+  }, [requestId, onRespond, answered, remaining])
 
   const isExpired = remaining <= 0
   const isUrgent = remaining > 0 && remaining <= 30000

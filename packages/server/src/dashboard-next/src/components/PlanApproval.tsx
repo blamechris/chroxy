@@ -6,20 +6,21 @@
  */
 
 export interface PlanApprovalProps {
-  plan: string
+  /** Pre-sanitized HTML (rendered via dangerouslySetInnerHTML). Caller must sanitize. */
+  planHtml: string
   onApprove: () => void
   onFeedback: () => void
 }
 
-export function PlanApproval({ plan, onApprove, onFeedback }: PlanApprovalProps) {
-  if (!plan) return null
+export function PlanApproval({ planHtml, onApprove, onFeedback }: PlanApprovalProps) {
+  if (!planHtml) return null
 
   return (
     <div className="plan-approval" data-testid="plan-approval">
       <div
         className="plan-content"
         data-testid="plan-content"
-        dangerouslySetInnerHTML={{ __html: plan }}
+        dangerouslySetInnerHTML={{ __html: planHtml }}
       />
       <div className="plan-buttons">
         <button className="btn-plan-approve" onClick={onApprove} type="button">
