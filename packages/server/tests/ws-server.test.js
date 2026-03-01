@@ -7031,6 +7031,134 @@ describe('dashboard endpoint', () => {
 })
 
 // ---------------------------------------------------------------------------
+// dashboard-next endpoint (React app via Vite build) (#1093)
+// ---------------------------------------------------------------------------
+describe('dashboard-next endpoint', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('GET /dashboard-next returns 200 with HTML when auth disabled', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    assert.equal(res.status, 200)
+    assert.ok(res.headers.get('content-type').includes('text/html'))
+    const body = await res.text()
+    assert.ok(body.includes('<div id="root">'), 'should contain React mount point')
+  })
+
+  it('serves hashed JS assets from /dashboard-next/assets/', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-assets',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // First get index.html to extract the actual asset filename
+    const indexRes = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    const html = await indexRes.text()
+    const jsMatch = html.match(/src="\/dashboard-next\/assets\/(index-[^"]+\.js)"/)
+    assert.ok(jsMatch, 'index.html should reference a hashed JS bundle')
+
+    const assetRes = await fetch(`http://127.0.0.1:${port}/dashboard-next/assets/${jsMatch[1]}`)
+    assert.equal(assetRes.status, 200)
+    assert.ok(assetRes.headers.get('content-type').includes('javascript'))
+    assert.ok(assetRes.headers.get('cache-control').includes('max-age'), 'assets should be cached')
+  })
+
+  it('SPA fallback returns index.html for unknown paths', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-spa',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next/sessions/abc123`)
+    assert.equal(res.status, 200)
+    assert.ok(res.headers.get('content-type').includes('text/html'))
+    const body = await res.text()
+    assert.ok(body.includes('<div id="root">'), 'SPA fallback should serve index.html')
+  })
+
+  it('returns 403 without auth when auth required', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-auth',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    assert.equal(res.status, 403)
+  })
+
+  it('returns 200 with valid cookie when auth required', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-cookie',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`, {
+      headers: { 'Cookie': 'chroxy_auth=tok-dn-cookie' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.text()
+    assert.ok(body.includes('<div id="root">'))
+  })
+
+  it('injects __CHROXY_CONFIG__ into index.html', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-config',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    const body = await res.text()
+    assert.ok(body.includes('__CHROXY_CONFIG__'), 'should inject server config')
+    assert.ok(body.match(/port:\s*\d+/), 'should contain port number')
+    assert.ok(!body.includes('tok-dn-config'), 'token must NOT appear in HTML')
+  })
+
+  it('legacy /dashboard still works', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-legacy',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
+    assert.equal(res.status, 200)
+    const body = await res.text()
+    assert.ok(body.includes('Chroxy Dashboard'), 'legacy dashboard must still work')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Localhost encryption bypass (#732)
 // Uses _WsServer (raw, encryption enabled) to test localhost bypass behavior
 // ---------------------------------------------------------------------------
