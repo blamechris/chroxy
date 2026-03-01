@@ -1,9 +1,10 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, before, beforeEach, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { once, EventEmitter } from 'node:events'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync, existsSync } from 'node:fs'
 import { execSync } from 'node:child_process'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
@@ -7027,6 +7028,166 @@ describe('dashboard endpoint', () => {
     assert.ok(res.headers.get('content-security-policy'), '403 should include CSP header')
     assert.equal(res.headers.get('x-frame-options'), 'DENY')
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// dashboard-next endpoint (React app via Vite build) (#1093)
+// ---------------------------------------------------------------------------
+describe('dashboard-next endpoint', () => {
+  let server
+  const __test_dirname = dirname(fileURLToPath(import.meta.url))
+  const distDir = join(__test_dirname, '..', 'src', 'dashboard-next', 'dist')
+  let createdFixture = false
+
+  before(() => {
+    // Create minimal fixture dist/ if it doesn't exist (e.g. CI without dashboard:build)
+    if (!existsSync(join(distDir, 'index.html'))) {
+      createdFixture = true
+      mkdirSync(join(distDir, 'assets'), { recursive: true })
+      writeFileSync(join(distDir, 'assets', 'index-testHash.js'), '// test bundle')
+      writeFileSync(join(distDir, 'index.html'), [
+        '<!DOCTYPE html>',
+        '<html lang="en">',
+        '<head>',
+        '  <meta charset="utf-8">',
+        '  <title>Chroxy Dashboard</title>',
+        '  <script type="module" crossorigin src="/dashboard-next/assets/index-testHash.js"></script>',
+        '</head>',
+        '<body>',
+        '  <div id="root"></div>',
+        '</body>',
+        '</html>',
+      ].join('\n'))
+    }
+  })
+
+  after(() => {
+    // Only clean up if we created the fixture (don't delete a real build)
+    if (createdFixture) {
+      rmSync(distDir, { recursive: true, force: true })
+    }
+  })
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('GET /dashboard-next returns 200 with HTML when auth disabled', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    assert.equal(res.status, 200)
+    assert.ok(res.headers.get('content-type').includes('text/html'))
+    const body = await res.text()
+    assert.ok(body.includes('<div id="root">'), 'should contain React mount point')
+  })
+
+  it('serves hashed JS assets from /dashboard-next/assets/', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-assets',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // First get index.html to extract the actual asset filename
+    const indexRes = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    const html = await indexRes.text()
+    const jsMatch = html.match(/src="\/dashboard-next\/assets\/(index-[^"]+\.js)"/)
+    assert.ok(jsMatch, 'index.html should reference a hashed JS bundle')
+
+    const assetRes = await fetch(`http://127.0.0.1:${port}/dashboard-next/assets/${jsMatch[1]}`)
+    assert.equal(assetRes.status, 200)
+    assert.ok(assetRes.headers.get('content-type').includes('javascript'))
+    assert.ok(assetRes.headers.get('cache-control').includes('max-age'), 'assets should be cached')
+  })
+
+  it('SPA fallback returns index.html for unknown paths', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-spa',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next/sessions/abc123`)
+    assert.equal(res.status, 200)
+    assert.ok(res.headers.get('content-type').includes('text/html'))
+    const body = await res.text()
+    assert.ok(body.includes('<div id="root">'), 'SPA fallback should serve index.html')
+  })
+
+  it('returns 403 without auth when auth required', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-auth',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    assert.equal(res.status, 403)
+  })
+
+  it('returns 200 with valid cookie when auth required', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-cookie',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`, {
+      headers: { 'Cookie': 'chroxy_auth=tok-dn-cookie' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.text()
+    assert.ok(body.includes('<div id="root">'))
+  })
+
+  it('injects __CHROXY_CONFIG__ into index.html', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-config',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`)
+    const body = await res.text()
+    assert.ok(body.includes('__CHROXY_CONFIG__'), 'should inject server config')
+    assert.ok(body.match(/port:\s*\d+/), 'should contain port number')
+    assert.ok(!body.includes('tok-dn-config'), 'token must NOT appear in HTML')
+  })
+
+  it('legacy /dashboard still works', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dn-legacy',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
+    assert.equal(res.status, 200)
+    const body = await res.text()
+    assert.ok(body.includes('Chroxy Dashboard'), 'legacy dashboard must still work')
   })
 })
 

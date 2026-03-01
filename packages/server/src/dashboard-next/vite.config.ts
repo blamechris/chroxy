@@ -1,4 +1,3 @@
-/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'path'
@@ -21,14 +20,9 @@ export default defineConfig({
   server: {
     proxy: {
       '/ws': {
-        target: `ws://localhost:${process.env.CHROXY_PORT || 8765}`,
+        target: 'ws://localhost:7860',
         ws: true,
       },
     },
-  },
-  test: {
-    root: resolve(__dirname),
-    environment: 'jsdom',
-    include: ['src/**/*.test.ts'],
   },
 })
