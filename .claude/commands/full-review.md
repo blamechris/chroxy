@@ -30,16 +30,15 @@ After agent-review completes, run the `/check-pr` skill on the same PR. By now, 
 
 **Capture the results:** comments processed, fixes committed, issues created/closed.
 
-### Phase 2.5: Verify CI (Optional)
+### Phase 2.5: Verify CI
 
-If check-pr pushed any fix commits in Phase 2, CI needs to pass on the new HEAD before merge. Concurrency groups commonly cancel the in-progress run when fixes are pushed, leaving CI stale.
+Always capture the current CI state for the summary table. If check-pr pushed fix commits in Phase 2, CI may need intervention (concurrency groups commonly cancel the in-progress run when fixes are pushed).
 
 1. Check if any commits were pushed in Phase 2 (check-pr fixes)
-2. If yes, run `/fix-ci` on the same PR
-3. Common outcome: retriggering a cancelled run after concurrency cancellation
-4. If no commits were pushed, skip this phase (CI is still valid from before)
+2. If yes, run `/fix-ci` on the same PR (common outcome: retriggering a cancelled run)
+3. If no commits were pushed, check CI status anyway (`gh run list` for HEAD SHA) and report the current state (PASS / IN_PROGRESS / FAILED)
 
-**Capture the results:** CI status, any action taken (retrigger/fix/escalate).
+**Capture the results:** CI status, any action taken (retrigger/fix/escalate), or current state if no action needed.
 
 ### Phase 3: Combined Summary
 
@@ -54,7 +53,7 @@ Output a **single combined summary table** covering both phases. This is the PRI
 **Column guide:**
 - **Review:** Verdict + finding counts from agent-review
 - **Check-PR:** `N comments → M fixed` (add `, X false pos` / `, Y deferred` if any)
-- **CI:** Status from Phase 2.5. `PASS` / `PASS (after retrigger)` / `PASS (after fix)` / `ESCALATED` / `—` (if Phase 2.5 was skipped because no commits were pushed)
+- **CI:** Always reported. `PASS` / `PASS (after retrigger)` / `PASS (after fix)` / `IN_PROGRESS` / `FAILED` / `ESCALATED`
 - **Changes:** Comma-separated brief descriptions of what changed (2-5 words each, from check-pr fixes)
 - **Issues:** Combined from both phases. `Created: #X` for new follow-ups. `Closed: #Y` for resolved issues. Deduplicate (agent-review may create issues that check-pr then closes).
 
