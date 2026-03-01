@@ -144,25 +144,28 @@ describe('TerminalView', () => {
     vi.useFakeTimers()
     fitSpy.mockClear()
 
-    render(<TerminalView />)
+    try {
+      render(<TerminalView />)
 
-    // fit() called once during mount (safeFit after open)
-    const mountCalls = fitSpy.mock.calls.length
+      // fit() called once during mount (safeFit after open)
+      const mountCalls = fitSpy.mock.calls.length
 
-    // Fire 5 rapid resize events
-    act(() => {
-      for (let i = 0; i < 5; i++) {
-        window.dispatchEvent(new Event('resize'))
-      }
-    })
+      // Fire 5 rapid resize events
+      act(() => {
+        for (let i = 0; i < 5; i++) {
+          window.dispatchEvent(new Event('resize'))
+        }
+      })
 
-    // Before debounce timer fires — no additional fit() calls
-    expect(fitSpy).toHaveBeenCalledTimes(mountCalls)
+      // Before debounce timer fires — no additional fit() calls
+      expect(fitSpy).toHaveBeenCalledTimes(mountCalls)
 
-    // After debounce timer fires — exactly one additional fit() call
-    act(() => { vi.advanceTimersByTime(200) })
-    expect(fitSpy).toHaveBeenCalledTimes(mountCalls + 1)
-
-    vi.useRealTimers()
+      // After debounce timer fires — exactly one additional fit() call
+      act(() => { vi.advanceTimersByTime(200) })
+      expect(fitSpy).toHaveBeenCalledTimes(mountCalls + 1)
+    } finally {
+      vi.runOnlyPendingTimers()
+      vi.useRealTimers()
+    }
   })
 })

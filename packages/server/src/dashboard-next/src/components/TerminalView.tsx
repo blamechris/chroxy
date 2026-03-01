@@ -106,8 +106,12 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
     // Debounced resize handler — prevents excessive reflows during drag-resize
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
     const debouncedFit = () => {
+      if (disposedRef.current) return
       if (resizeTimer) clearTimeout(resizeTimer)
-      resizeTimer = setTimeout(() => safeFit(fit), RESIZE_DEBOUNCE)
+      resizeTimer = setTimeout(() => {
+        if (disposedRef.current) return
+        safeFit(fit)
+      }, RESIZE_DEBOUNCE)
     }
 
     window.addEventListener('resize', debouncedFit)
