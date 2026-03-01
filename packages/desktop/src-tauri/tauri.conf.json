@@ -27,10 +27,7 @@
   },
   "bundle": {
     "macOS": {
-      "signingIdentity": "$APPLE_SIGNING_IDENTITY",
-      "notarization": {
-        "teamId": "$APPLE_TEAM_ID"
-      }
+      "signingIdentity": "$APPLE_SIGNING_IDENTITY"
     }
   },
   "plugins": {

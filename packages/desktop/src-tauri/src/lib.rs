@@ -19,6 +19,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
+use tauri_plugin_single_instance::init as single_instance_init;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 /// Menu item handles so we can enable/disable them from anywhere.
@@ -36,6 +37,16 @@ struct TrayMenuItems {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(single_instance_init(|app, _args, _cwd| {
+            // Second instance launched: focus the existing window instead
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.set_focus();
+            } else if let Some(win) = app.get_webview_window("dashboard") {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
