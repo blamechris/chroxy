@@ -2,7 +2,7 @@
  * PermissionPrompt — tool permission request with countdown timer.
  *
  * Ports addPermissionPrompt() from dashboard-app.js (lines 685-753).
- * Countdown, urgent styling at ≤30s, expired state, allow/deny buttons.
+ * Countdown, urgent styling at <=30s, expired state, allow/deny buttons.
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
 
@@ -28,8 +28,8 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   const expiresAtRef = useRef(Date.now() + remainingMs)
 
   useEffect(() => {
+    setRemaining(remainingMs)
     if (remainingMs <= 0) {
-      setRemaining(0)
       return
     }
     expiresAtRef.current = Date.now() + remainingMs
@@ -48,13 +48,15 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   }, [remainingMs])
 
   const respond = useCallback((decision: 'allow' | 'deny') => {
+    if (remaining <= 0) return
     if (intervalRef.current) clearInterval(intervalRef.current)
     setAnswered(decision)
     onRespond(requestId, decision)
-  }, [requestId, onRespond])
+  }, [requestId, onRespond, remaining])
 
   const isExpired = remaining <= 0
   const isUrgent = remaining > 0 && remaining <= 30000
+  const showButtons = !answered && !isExpired
 
   return (
     <div className={`permission-prompt${answered ? ' answered' : ''}`} data-testid="permission-prompt">
@@ -71,7 +73,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
         </div>
       )}
 
-      {!answered && (
+      {showButtons && (
         <div className="perm-buttons">
           <button className="btn-allow" onClick={() => respond('allow')} type="button">
             Allow
