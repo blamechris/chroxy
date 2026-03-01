@@ -72,6 +72,14 @@ describe('CreateSessionModal', () => {
     expect(screen.getByPlaceholderText(/working directory/i)).toBeInTheDocument()
   })
 
+  it('has explicit aria-label on each input (#1185)', () => {
+    render(
+      <CreateSessionModal open onClose={vi.fn()} onCreate={vi.fn()} />
+    )
+    expect(screen.getByLabelText('Session name')).toBeInTheDocument()
+    expect(screen.getByLabelText('Working directory')).toBeInTheDocument()
+  })
+
   it('calls onCreate with name and cwd on submit', () => {
     const onCreate = vi.fn()
     render(

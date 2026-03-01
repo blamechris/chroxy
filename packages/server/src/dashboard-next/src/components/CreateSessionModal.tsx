@@ -49,6 +49,7 @@ export function CreateSessionModal({ open, onClose, onCreate }: CreateSessionMod
       <input
         type="text"
         placeholder="Session name"
+        aria-label="Session name"
         value={name}
         onChange={e => { setName(e.target.value); setNameError('') }}
         onKeyDown={handleKeyDown}
@@ -64,6 +65,7 @@ export function CreateSessionModal({ open, onClose, onCreate }: CreateSessionMod
       <input
         type="text"
         placeholder="Working directory (optional)"
+        aria-label="Working directory"
         value={cwd}
         onChange={e => setCwd(e.target.value)}
         onKeyDown={handleKeyDown}
