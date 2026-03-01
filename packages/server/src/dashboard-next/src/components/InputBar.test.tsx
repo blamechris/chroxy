@@ -128,21 +128,22 @@ describe('InputBar', () => {
       paddingBottom: '8px',
       borderTopWidth: '1px',
       borderBottomWidth: '1px',
-      boxSizing: 'content-box',
     })
 
-    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
-    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    try {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
 
-    // Mock scrollHeight to exceed the 5-line max
-    Object.defineProperty(textarea, 'scrollHeight', { value: 300, configurable: true })
-    fireEvent.change(textarea, { target: { value: 'a\nb\nc\nd\ne\nf\ng' } })
+      // Mock scrollHeight to exceed the 5-line max
+      Object.defineProperty(textarea, 'scrollHeight', { value: 300, configurable: true })
+      fireEvent.change(textarea, { target: { value: 'a\nb\nc\nd\ne\nf\ng' } })
 
-    // Max should be 5 lines * 24px + 8+8 padding + 1+1 border = 138px
-    const height = parseInt(textarea.style.height, 10)
-    expect(height).toBe(138)
-
-    window.getComputedStyle = originalGetComputedStyle
+      // Max should be 5 lines * 24px + 8+8 padding + 1+1 border = 138px
+      const height = parseInt(textarea.style.height, 10)
+      expect(height).toBe(138)
+    } finally {
+      window.getComputedStyle = originalGetComputedStyle
+    }
   })
 
   it('falls back to defaults when getComputedStyle returns non-numeric values (#1172)', () => {
@@ -153,20 +154,21 @@ describe('InputBar', () => {
       paddingBottom: '',
       borderTopWidth: '',
       borderBottomWidth: '',
-      boxSizing: 'content-box',
     })
 
-    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
-    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    try {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
 
-    Object.defineProperty(textarea, 'scrollHeight', { value: 300, configurable: true })
-    fireEvent.change(textarea, { target: { value: 'a\nb\nc\nd\ne\nf\ng' } })
+      Object.defineProperty(textarea, 'scrollHeight', { value: 300, configurable: true })
+      fireEvent.change(textarea, { target: { value: 'a\nb\nc\nd\ne\nf\ng' } })
 
-    // Fallback: 5 lines * 20px + 0 padding + 0 border = 100px
-    const height = parseInt(textarea.style.height, 10)
-    expect(height).toBe(100)
-
-    window.getComputedStyle = originalGetComputedStyle
+      // Fallback: 5 lines * 20px + 0 padding + 0 border = 100px
+      const height = parseInt(textarea.style.height, 10)
+      expect(height).toBe(100)
+    } finally {
+      window.getComputedStyle = originalGetComputedStyle
+    }
   })
 })
 
