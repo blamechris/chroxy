@@ -1126,6 +1126,39 @@ describe('#1227 — guard destroyAll() session.destroy() with try-catch', () => 
   })
 })
 
+describe('#1243 — destroyAll() clears all session-scoped maps', () => {
+  it('clears messageHistory, historyTruncated, sessionCosts, budget maps after destroyAll', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    const session1 = new EventEmitter()
+    session1.isRunning = false
+    session1.destroy = () => {}
+    session1.removeAllListeners = () => {}
+    mgr._sessions.set('s1', { session: session1, type: 'cli', name: 'S1', cwd: '/tmp' })
+    mgr._lastActivity.set('s1', Date.now())
+
+    // Populate all session-scoped maps that destroyAll should clear
+    mgr._messageHistory.set('s1', [{ type: 'response', content: 'hello' }])
+    mgr._historyTruncated.set('s1', true)
+    mgr._sessionCosts.set('s1', 0.05)
+    mgr._budgetWarned.add('s1')
+    mgr._budgetExceeded.add('s1')
+    mgr._budgetPaused.add('s1')
+
+    mgr.destroyAll()
+
+    assert.equal(mgr._sessions.size, 0, '_sessions should be cleared')
+    assert.equal(mgr._lastActivity.size, 0, '_lastActivity should be cleared')
+    assert.equal(mgr._sessionWarned.size, 0, '_sessionWarned should be cleared')
+    assert.equal(mgr._messageHistory.size, 0, '_messageHistory should be cleared')
+    assert.equal(mgr._historyTruncated.size, 0, '_historyTruncated should be cleared')
+    assert.equal(mgr._sessionCosts.size, 0, '_sessionCosts should be cleared')
+    assert.equal(mgr._budgetWarned.size, 0, '_budgetWarned should be cleared')
+    assert.equal(mgr._budgetExceeded.size, 0, '_budgetExceeded should be cleared')
+    assert.equal(mgr._budgetPaused.size, 0, '_budgetPaused should be cleared')
+  })
+})
+
 describe('#1141 — async start() rejection guard', () => {
   it('cleans up phantom session when start() returns a rejected promise', async () => {
     const mgr = new SessionManager({ maxSessions: 5 })
