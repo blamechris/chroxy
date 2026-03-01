@@ -309,6 +309,41 @@ export class WsServer {
   }
 
   /**
+   * Authenticate a dashboard HTTP request using cookie, bearer, or query token.
+   * Returns true if auth passes (or auth is disabled). On failure or redirect,
+   * writes the response and returns false (caller should stop processing).
+   */
+  _authenticateDashboardRequest(req, res, dashUrl, securityHeaders) {
+    if (!this.authRequired) return true
+    const bearerToken = (req.headers['authorization'] || '').startsWith('Bearer ')
+      ? req.headers['authorization'].slice(7) : null
+    const cookieToken = (req.headers['cookie'] || '').match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
+    let cookieVal = null
+    if (cookieToken) {
+      try { cookieVal = decodeURIComponent(cookieToken[1]) } catch { cookieVal = null }
+    }
+    const queryToken = dashUrl.searchParams.get('token')
+    const token = queryToken || bearerToken || cookieVal
+    if (!token || !this._isTokenValid(token)) {
+      res.writeHead(403, { 'Content-Type': 'text/html', ...securityHeaders })
+      res.end('<h1>403 Forbidden</h1><p>Invalid or missing token.</p>')
+      return false
+    }
+    if (queryToken) {
+      const encoded = encodeURIComponent(queryToken)
+      res.writeHead(302, {
+        'Location': dashUrl.pathname,
+        'Set-Cookie': `chroxy_auth=${encoded}; Path=/dashboard; SameSite=Strict; Max-Age=86400`,
+        'Cache-Control': 'no-store',
+        ...securityHeaders,
+      })
+      res.end()
+      return false
+    }
+    return true
+  }
+
+  /**
    * Validate Bearer token on an HTTP request. Returns true if auth passes
    * (or auth is disabled). On failure, writes a 403 response and returns false.
    */
@@ -487,33 +522,7 @@ export class WsServer {
           'X-Content-Type-Options': 'nosniff',
         }
 
-        if (this.authRequired) {
-          const bearerToken = (req.headers['authorization'] || '').startsWith('Bearer ')
-            ? req.headers['authorization'].slice(7) : null
-          const cookieToken = (req.headers['cookie'] || '').match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
-          let cookieVal = null
-          if (cookieToken) {
-            try { cookieVal = decodeURIComponent(cookieToken[1]) } catch { cookieVal = null }
-          }
-          const queryToken = dashUrl.searchParams.get('token')
-          const token = queryToken || bearerToken || cookieVal
-          if (!token || !this._isTokenValid(token)) {
-            res.writeHead(403, { 'Content-Type': 'text/html', ...securityHeaders })
-            res.end('<h1>403 Forbidden</h1><p>Invalid or missing token.</p>')
-            return
-          }
-          if (queryToken) {
-            const encoded = encodeURIComponent(queryToken)
-            res.writeHead(302, {
-              'Location': dashUrl.pathname,
-              'Set-Cookie': `chroxy_auth=${encoded}; Path=/dashboard; SameSite=Strict; Max-Age=86400`,
-              'Cache-Control': 'no-store',
-              ...securityHeaders,
-            })
-            res.end()
-            return
-          }
-        }
+        if (!this._authenticateDashboardRequest(req, res, dashUrl, securityHeaders)) return
 
         const distDir = join(__dirname, 'dashboard-next', 'dist')
         // Strip prefix to get relative path within dist
