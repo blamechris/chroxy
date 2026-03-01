@@ -54,14 +54,14 @@ describe('getDashboardHtml', () => {
     assert.ok(html.includes('port: 9999'))
   })
 
-  it('embeds token when provided', () => {
+  it('does not embed token in HTML source', () => {
     const html = getDashboardHtml(8765, 'my-secret-token', false)
-    assert.ok(html.includes('"my-secret-token"'))
+    assert.ok(!html.includes('my-secret-token'), 'token must not appear in HTML page source')
   })
 
-  it('sets token to empty string when not provided', () => {
-    const html = getDashboardHtml(8765, null, false)
-    assert.ok(html.includes('token: ""'))
+  it('does not include token property in config', () => {
+    const html = getDashboardHtml(8765, 'my-secret-token', false)
+    assert.ok(!html.includes('token:'), 'window.__CHROXY_CONFIG__ should not have token property')
   })
 
   it('embeds noEncrypt flag', () => {
