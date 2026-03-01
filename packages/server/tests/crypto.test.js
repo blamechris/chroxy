@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createKeyPair, deriveSharedKey, encrypt, decrypt, nonceFromCounter, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
+import { createKeyPair, deriveSharedKey, encrypt, decrypt, nonceFromCounter, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from '../src/crypto.js'
 
 describe('crypto', () => {
   it('round-trip encrypt/decrypt', () => {
@@ -140,5 +140,76 @@ describe('crypto', () => {
     const envelope = encrypt(JSON.stringify(msg), serverShared, 0, DIRECTION_SERVER)
     const decrypted = decrypt(envelope, clientShared, 0, DIRECTION_SERVER)
     assert.deepEqual(decrypted, msg)
+  })
+})
+
+describe('safeTokenCompare', () => {
+  it('returns true for equal tokens', () => {
+    assert.equal(safeTokenCompare('abc123', 'abc123'), true)
+  })
+
+  it('returns true for long equal tokens', () => {
+    const token = 'a'.repeat(256)
+    assert.equal(safeTokenCompare(token, token), true)
+  })
+
+  it('returns false for different tokens of same length', () => {
+    assert.equal(safeTokenCompare('abc123', 'abc456'), false)
+  })
+
+  it('returns false for different length tokens', () => {
+    assert.equal(safeTokenCompare('short', 'muchlongertoken'), false)
+  })
+
+  it('returns false when first token is longer', () => {
+    assert.equal(safeTokenCompare('muchlongertoken', 'short'), false)
+  })
+
+  it('returns false for empty string vs non-empty string', () => {
+    assert.equal(safeTokenCompare('', 'notempty'), false)
+  })
+
+  it('returns false for non-empty string vs empty string', () => {
+    assert.equal(safeTokenCompare('notempty', ''), false)
+  })
+
+  it('returns false for two empty strings', () => {
+    // Two empty strings should return false (maxLen === 0 guard)
+    assert.equal(safeTokenCompare('', ''), false)
+  })
+
+  it('returns false for non-string inputs (number)', () => {
+    assert.equal(safeTokenCompare(123, 'abc'), false)
+  })
+
+  it('returns false for non-string inputs (null)', () => {
+    assert.equal(safeTokenCompare(null, 'abc'), false)
+  })
+
+  it('returns false for non-string inputs (undefined)', () => {
+    assert.equal(safeTokenCompare(undefined, 'abc'), false)
+  })
+
+  it('returns false for non-string inputs (object)', () => {
+    assert.equal(safeTokenCompare({}, 'abc'), false)
+  })
+
+  it('returns false when both inputs are non-strings', () => {
+    assert.equal(safeTokenCompare(123, 456), false)
+  })
+
+  it('returns false for single character difference', () => {
+    assert.equal(safeTokenCompare('abcdefg', 'abcdefh'), false)
+  })
+
+  it('handles tokens with special characters', () => {
+    const token = 'tok-abc_123.xyz/+='
+    assert.equal(safeTokenCompare(token, token), true)
+    assert.equal(safeTokenCompare(token, token + '!'), false)
+  })
+
+  it('handles unicode tokens', () => {
+    const token = 'token-with-unicode'
+    assert.equal(safeTokenCompare(token, token), true)
   })
 })
