@@ -292,6 +292,16 @@ describe('StatusBar', () => {
     expect(screen.queryByTestId('agent-badge')).not.toBeInTheDocument()
   })
 
+  it('shows $0.0000 when cost is zero', () => {
+    render(<StatusBar cost={0} />)
+    expect(screen.getByText('$0.0000')).toBeInTheDocument()
+  })
+
+  it('hides cost element when cost is undefined', () => {
+    const { container } = render(<StatusBar />)
+    expect(container.querySelector('.status-cost')).toBeNull()
+  })
+
   it('renders status bar container when no props provided', () => {
     const { container } = render(<StatusBar />)
     const bar = container.querySelector('[data-testid="status-bar"]')
