@@ -479,6 +479,14 @@ export class WsServer {
       if (req.method === 'GET' && /^\/dashboard(\/|$|\?)/.test(req.url || '')) {
         const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
 
+        // Generate nonce for CSP
+        const nonce = randomBytes(16).toString('base64')
+        const securityHeaders = {
+          'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
+          'X-Frame-Options': 'DENY',
+          'X-Content-Type-Options': 'nosniff',
+        }
+
         if (this.authRequired) {
           const bearerToken = (req.headers['authorization'] || '').startsWith('Bearer ')
             ? req.headers['authorization'].slice(7) : null
@@ -490,7 +498,7 @@ export class WsServer {
           const queryToken = dashUrl.searchParams.get('token')
           const token = queryToken || bearerToken || cookieVal
           if (!token || !this._isTokenValid(token)) {
-            res.writeHead(403, { 'Content-Type': 'text/html' })
+            res.writeHead(403, { 'Content-Type': 'text/html', ...securityHeaders })
             res.end('<h1>403 Forbidden</h1><p>Invalid or missing token.</p>')
             return
           }
@@ -500,6 +508,7 @@ export class WsServer {
               'Location': dashUrl.pathname,
               'Set-Cookie': `chroxy_auth=${encoded}; Path=/dashboard; SameSite=Strict; Max-Age=86400`,
               'Cache-Control': 'no-store',
+              ...securityHeaders,
             })
             res.end()
             return
@@ -546,12 +555,13 @@ export class WsServer {
         const indexPath = join(distDir, 'index.html')
         if (existsSync(indexPath)) {
           let html = readFileSync(indexPath, 'utf-8')
-          // Inject server config before closing </head>
-          const configScript = `<script>window.__CHROXY_CONFIG__={port:${this.port},noEncrypt:${!this._encryptionEnabled}}</script>`
+          // Inject server config with nonce before closing </head>
+          const configScript = `<script nonce="${nonce}">window.__CHROXY_CONFIG__={port:${this.port},noEncrypt:${!this._encryptionEnabled}}</script>`
           html = html.replace('</head>', `${configScript}\n</head>`)
           res.writeHead(200, {
             'Content-Type': 'text/html; charset=utf-8',
             'Cache-Control': 'no-store',
+            ...securityHeaders,
           })
           res.end(html)
         } else {
