@@ -16,13 +16,10 @@ export interface QuestionPromptProps {
 
 export function QuestionPrompt({ question, options, answered, onSelect }: QuestionPromptProps) {
   const [text, setText] = useState('')
-  const [submitted, setSubmitted] = useState(false)
 
   const handleSubmit = () => {
-    if (submitted) return
     const trimmed = text.trim()
     if (!trimmed) return
-    setSubmitted(true)
     onSelect(trimmed)
   }
 

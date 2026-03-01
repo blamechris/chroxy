@@ -40,7 +40,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
 
   const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     setValue(e.target.value)
-    // Auto-expand up to 5 lines, derived from computed styles (#1172)
+    // Auto-expand up to 5 lines, derived from computed styles (#1172, #1246)
     const el = e.target
     el.style.height = 'auto'
     const computed = getComputedStyle(el)
@@ -48,8 +48,16 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     const paddingY = (parseFloat(computed.paddingTop) || 0) + (parseFloat(computed.paddingBottom) || 0)
     const borderY = (parseFloat(computed.borderTopWidth) || 0) + (parseFloat(computed.borderBottomWidth) || 0)
     const maxLines = 5
-    const maxHeight = lineHeight * maxLines + paddingY + borderY
-    el.style.height = Math.min(el.scrollHeight, maxHeight) + 'px'
+    // Normalize to outer height (content + padding + border)
+    const outerMax = lineHeight * maxLines + paddingY + borderY
+    const outerScrollHeight = el.scrollHeight + borderY
+    const outerHeight = Math.min(outerScrollHeight, outerMax)
+    // Adjust for box-sizing: border-box includes padding+border in height,
+    // content-box sets content height only (#1246)
+    const assignedHeight = computed.boxSizing === 'border-box'
+      ? outerHeight
+      : outerHeight - paddingY - borderY
+    el.style.height = assignedHeight + 'px'
   }, [])
 
   return (
