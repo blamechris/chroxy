@@ -1,7 +1,7 @@
 /**
  * InputBar — auto-expanding textarea with send/interrupt.
  *
- * Cmd+Enter to send, Escape to interrupt, Shift+Enter for newline.
+ * Enter for newline, Cmd/Ctrl+Enter to send, Escape to interrupt.
  */
 import { useState, useRef, useCallback, type KeyboardEvent, type ChangeEvent } from 'react'
 
