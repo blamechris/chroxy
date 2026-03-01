@@ -943,6 +943,41 @@ describe('createSession failure cleanup (FM-03)', () => {
   })
 })
 
+describe('#1141 — async start() rejection guard', () => {
+  it('cleans up phantom session when start() returns a rejected promise', async () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    const { registerProvider } = await import('../src/providers.js')
+    let destroyCalled = false
+    class AsyncFailingProvider extends EventEmitter {
+      constructor(opts) {
+        super()
+        this.cwd = opts.cwd
+        this.model = null
+        this.permissionMode = 'approve'
+        this.isRunning = false
+        this.resumeSessionId = null
+      }
+      static get capabilities() { return {} }
+      start() { return Promise.reject(new Error('async init failed')) }
+      destroy() { destroyCalled = true }
+      sendMessage() {}
+      setModel() {}
+      setPermissionMode() {}
+    }
+    registerProvider('test-async-failing', AsyncFailingProvider)
+
+    // createSession should NOT throw synchronously for async rejection
+    mgr.createSession({ cwd: '/tmp', provider: 'test-async-failing' })
+
+    // Wait for microtask to process the rejection
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    assert.equal(destroyCalled, true, 'session.destroy() should be called on async start() rejection')
+    assert.equal(mgr._sessions.size, 0, 'sessions map should be empty after async start() failure')
+  })
+})
+
 describe('#1091 — destroy-while-streaming event leak', () => {
   it('removes listeners before calling session.destroy()', () => {
     const mgr = new SessionManager({ maxSessions: 5 })

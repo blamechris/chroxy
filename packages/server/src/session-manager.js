@@ -170,7 +170,18 @@ export class SessionManager extends EventEmitter {
     this._wireSessionEvents(sessionId, session)
 
     try {
-      session.start()
+      const result = session.start()
+      // Guard: if start() returns a thenable, catch async rejections (#1141)
+      if (result && typeof result.catch === 'function') {
+        result.catch((err) => {
+          console.error(`[session-manager] Async start() rejected for session ${sessionId}: ${err.message}`)
+          session.removeAllListeners()
+          session.on('error', () => {})
+          session.destroy()
+          this._sessions.delete(sessionId)
+          this._lastActivity.delete(sessionId)
+        })
+      }
     } catch (err) {
       // Clean up phantom session on start() failure (Guardian FM-03)
       this._sessions.delete(sessionId)
