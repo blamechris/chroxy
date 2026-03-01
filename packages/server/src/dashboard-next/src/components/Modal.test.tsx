@@ -174,9 +174,22 @@ describe('Toast', () => {
     expect(container.querySelectorAll('.toast').length).toBe(0)
   })
 
-  it('has accessible role', () => {
-    const items: ToastItem[] = [{ id: '1', message: 'Alert' }]
+  it('has alert role on each toast item', () => {
+    const items: ToastItem[] = [
+      { id: '1', message: 'First' },
+      { id: '2', message: 'Second' },
+    ]
     render(<Toast items={items} onDismiss={vi.fn()} />)
-    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(screen.getAllByRole('alert')).toHaveLength(2)
+  })
+
+  it('container does not have conflicting role (#1177)', () => {
+    const items: ToastItem[] = [{ id: '1', message: 'Alert' }]
+    const { container } = render(<Toast items={items} onDismiss={vi.fn()} />)
+    const toastContainer = container.querySelector('[data-testid="toast-container"]')!
+    // Container should not have role="status" (conflicts with item role="alert")
+    expect(toastContainer).not.toHaveAttribute('role', 'status')
+    // Container should not have aria-live (items are self-contained live regions)
+    expect(toastContainer).not.toHaveAttribute('aria-live')
   })
 })
