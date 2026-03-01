@@ -75,7 +75,7 @@ The foundation is solid. Most of the server infrastructure needed for this visio
 | **SessionManager** | Working | Multi-session lifecycle (create/switch/destroy/persist) — already supports 5 concurrent sessions |
 | **ConversationScanner** | Working | Discovers past conversations by repo from `~/.claude/projects/` — powers the "resumable" list |
 | **Provider Registry** | Working | SDK + CLI providers with capability introspection — session creation uses this |
-| **WebSocket Protocol** | Working | 58+ message types, schema-validated — all session interaction flows through this |
+| **WebSocket Protocol** | Working | 100+ message types, schema-validated — all session interaction flows through this |
 | **E2E Encryption** | Working | XSalsa20-Poly1305 over Curve25519 ECDH — differentiator, carry forward |
 | **Tunnel System** | Working | Cloudflare quick/named + adapter registry — enables mobile sync |
 | **Tauri Tray App** | Working | Process management, health polling, settings, autostart — desktop shell exists |
