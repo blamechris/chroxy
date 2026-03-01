@@ -18,17 +18,22 @@ export interface CreateSessionModalProps {
 export function CreateSessionModal({ open, onClose, onCreate }: CreateSessionModalProps) {
   const [name, setName] = useState('')
   const [cwd, setCwd] = useState('')
+  const [nameError, setNameError] = useState('')
 
   useEffect(() => {
     if (open) {
       setName('')
       setCwd('')
+      setNameError('')
     }
   }, [open])
 
   const submit = useCallback(() => {
     const trimmed = name.trim()
-    if (!trimmed) return
+    if (!trimmed) {
+      setNameError('Session name is required')
+      return
+    }
     onCreate({ name: trimmed, cwd: cwd.trim() })
   }, [name, cwd, onCreate])
 
@@ -45,10 +50,17 @@ export function CreateSessionModal({ open, onClose, onCreate }: CreateSessionMod
         type="text"
         placeholder="Session name"
         value={name}
-        onChange={e => setName(e.target.value)}
+        onChange={e => { setName(e.target.value); setNameError('') }}
         onKeyDown={handleKeyDown}
         autoComplete="off"
+        aria-invalid={nameError ? true : undefined}
+        aria-describedby={nameError ? 'session-name-error' : undefined}
       />
+      {nameError && (
+        <span id="session-name-error" className="form-error" role="alert">
+          {nameError}
+        </span>
+      )}
       <input
         type="text"
         placeholder="Working directory (optional)"

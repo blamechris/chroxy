@@ -92,6 +92,45 @@ describe('CreateSessionModal', () => {
     expect(onCreate).not.toHaveBeenCalled()
   })
 
+  it('shows validation error when submitting empty name (#1184)', () => {
+    render(
+      <CreateSessionModal open onClose={vi.fn()} onCreate={vi.fn()} />
+    )
+    fireEvent.click(screen.getByText('Create'))
+    expect(screen.getByText('Session name is required')).toBeInTheDocument()
+  })
+
+  it('sets aria-invalid on name input when validation fails (#1184)', () => {
+    render(
+      <CreateSessionModal open onClose={vi.fn()} onCreate={vi.fn()} />
+    )
+    fireEvent.click(screen.getByText('Create'))
+    const nameInput = screen.getByPlaceholderText('Session name')
+    expect(nameInput).toHaveAttribute('aria-invalid', 'true')
+    expect(nameInput).toHaveAttribute('aria-describedby', 'session-name-error')
+  })
+
+  it('clears validation error when user types (#1184)', () => {
+    render(
+      <CreateSessionModal open onClose={vi.fn()} onCreate={vi.fn()} />
+    )
+    fireEvent.click(screen.getByText('Create'))
+    expect(screen.getByText('Session name is required')).toBeInTheDocument()
+    fireEvent.change(screen.getByPlaceholderText('Session name'), { target: { value: 'a' } })
+    expect(screen.queryByText('Session name is required')).not.toBeInTheDocument()
+  })
+
+  it('clears validation error when modal reopens (#1184)', () => {
+    const { rerender } = render(
+      <CreateSessionModal open onClose={vi.fn()} onCreate={vi.fn()} />
+    )
+    fireEvent.click(screen.getByText('Create'))
+    expect(screen.getByText('Session name is required')).toBeInTheDocument()
+    rerender(<CreateSessionModal open={false} onClose={vi.fn()} onCreate={vi.fn()} />)
+    rerender(<CreateSessionModal open onClose={vi.fn()} onCreate={vi.fn()} />)
+    expect(screen.queryByText('Session name is required')).not.toBeInTheDocument()
+  })
+
   it('submits on Enter key', () => {
     const onCreate = vi.fn()
     render(
