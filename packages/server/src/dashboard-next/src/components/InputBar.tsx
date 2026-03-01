@@ -40,12 +40,16 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
 
   const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     setValue(e.target.value)
-    // Auto-expand
+    // Auto-expand up to 5 lines, derived from computed styles (#1172)
     const el = e.target
     el.style.height = 'auto'
-    const lineHeight = 20
+    const computed = getComputedStyle(el)
+    const lineHeight = parseFloat(computed.lineHeight) || 20
+    const paddingY = (parseFloat(computed.paddingTop) || 0) + (parseFloat(computed.paddingBottom) || 0)
+    const borderY = (parseFloat(computed.borderTopWidth) || 0) + (parseFloat(computed.borderBottomWidth) || 0)
     const maxLines = 5
-    el.style.height = Math.min(el.scrollHeight, lineHeight * maxLines) + 'px'
+    const maxHeight = lineHeight * maxLines + paddingY + borderY
+    el.style.height = Math.min(el.scrollHeight, maxHeight) + 'px'
   }, [])
 
   return (
