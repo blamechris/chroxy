@@ -1000,6 +1000,7 @@ describe('#1204 — _cleanupSessionMaps helper cleans all maps', () => {
           mgr._budgetWarned.add(sid)
           mgr._budgetExceeded.add(sid)
           mgr._budgetPaused.add(sid)
+          mgr._pendingStreams.set(`${sid}:msg-1`, 'partial delta')
         }
         throw new Error('polluted start')
       }
@@ -1024,6 +1025,7 @@ describe('#1204 — _cleanupSessionMaps helper cleans all maps', () => {
     assert.equal(mgr._budgetWarned.has(sessionIdCapture), false, '_budgetWarned should be cleaned')
     assert.equal(mgr._budgetExceeded.has(sessionIdCapture), false, '_budgetExceeded should be cleaned')
     assert.equal(mgr._budgetPaused.has(sessionIdCapture), false, '_budgetPaused should be cleaned')
+    assert.equal(mgr._pendingStreams.has(`${sessionIdCapture}:msg-1`), false, '_pendingStreams should be cleaned')
   })
 })
 

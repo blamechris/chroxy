@@ -128,6 +128,16 @@ export class SessionManager extends EventEmitter {
     this._budgetWarned.delete(sessionId)
     this._budgetExceeded.delete(sessionId)
     this._budgetPaused.delete(sessionId)
+
+    // Clean up pending stream state (composite keys: `${sessionId}:messageId`).
+    // destroySession() emits synthetic stream_end before calling this helper,
+    // so remaining entries here are only from the sync catch path.
+    const prefix = sessionId + ':'
+    for (const key of this._pendingStreams.keys()) {
+      if (key.startsWith(prefix)) {
+        this._pendingStreams.delete(key)
+      }
+    }
   }
 
   /**
