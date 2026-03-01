@@ -112,10 +112,12 @@ describe('InputBar', () => {
   it('has aria-describedby linking to keyboard shortcut hints (#1226)', () => {
     render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
     const textarea = screen.getByRole('textbox')
-    expect(textarea).toHaveAttribute('aria-describedby', 'input-shortcuts')
-    const hint = document.getElementById('input-shortcuts')
+    const describedBy = textarea.getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    const hint = document.getElementById(describedBy!)
     expect(hint).toBeInTheDocument()
-    expect(hint!.textContent).toMatch(/Cmd.*Enter.*send/)
+    expect(hint!.textContent).toMatch(/Cmd\/Ctrl.*Enter.*send/i)
+    expect(hint!.textContent).toMatch(/Escape.*interrupt/i)
   })
 })
 

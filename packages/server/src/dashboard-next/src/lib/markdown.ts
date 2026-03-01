@@ -67,8 +67,14 @@ export function renderMarkdown(text: string): string {
   html = html.replace(/^\d+\. (.+)$/gm, '<li class="md-ol">$1</li>')
   html = html.replace(/(<li class="md-ol">.*<\/li>\n?)+/g, (m) => `<ol>${m}</ol>`)
 
-  // Paragraphs
-  html = html.replace(/\n\n/g, '</p><p>')
+  // Paragraphs — split on double newlines, wrap non-block segments in <p> (#1169)
+  const blockRe = /^<(h[1-6]|pre|ul|ol|blockquote)/
+  html = html.split('\n\n').map(seg => {
+    const trimmed = seg.trim()
+    if (!trimmed) return ''
+    if (blockRe.test(trimmed)) return trimmed
+    return `<p>${trimmed}</p>`
+  }).filter(Boolean).join('\n')
   html = html.replace(/\n/g, '<br>')
 
   // Restore code blocks
