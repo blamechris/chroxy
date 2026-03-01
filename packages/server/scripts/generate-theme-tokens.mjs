@@ -54,6 +54,7 @@ function toCamelCase(str) {
 
 // Classify and group each property
 const groups = { colors: {}, spacing: {}, typography: {}, fonts: {} }
+const unmapped = []
 
 for (const { name, value } of props) {
   // Typography scale: --text-xs, --text-sm, etc. (px values, not color hex)
@@ -83,8 +84,14 @@ for (const { name, value } of props) {
   }
 
   if (!matched) {
-    console.warn(`[warn] Unmapped CSS property: --${name}: ${value}`)
+    unmapped.push(`--${name}: ${value}`)
   }
+}
+
+if (unmapped.length > 0) {
+  console.error(`[error] ${unmapped.length} unmapped CSS properties:`)
+  for (const prop of unmapped) console.error(`  ${prop}`)
+  process.exit(1)
 }
 
 // Generate TypeScript output
