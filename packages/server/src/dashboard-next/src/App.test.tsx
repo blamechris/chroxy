@@ -49,8 +49,14 @@ vi.mock('./store/connection', () => {
     setTerminalWriteCallback: vi.fn(),
   }
   return {
-    useConnectionStore: (selector: (s: typeof defaultState) => unknown) => selector(defaultState),
-    // Re-export ChatMessage type (used in App.tsx imports)
+    useConnectionStore: (
+      selector?: (s: typeof defaultState) => unknown,
+    ) => {
+      if (typeof selector === 'function') {
+        return selector(defaultState)
+      }
+      return defaultState
+    },
   }
 })
 
