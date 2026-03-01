@@ -160,6 +160,104 @@ describe('PermissionPrompt', () => {
     fireEvent.click(screen.getByText('Allow'))
     expect(screen.getByText('Allowed')).toBeInTheDocument()
   })
+
+  it('allows with Cmd+Y keyboard shortcut (#1190)', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
+  })
+
+  it('allows with Ctrl+Y keyboard shortcut (#1190)', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', ctrlKey: true })
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
+  })
+
+  it('denies with Escape keyboard shortcut (#1190)', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'deny')
+  })
+
+  it('ignores shortcuts when focus is in a textarea (#1190)', () => {
+    const onRespond = vi.fn()
+    render(
+      <div>
+        <textarea data-testid="input" />
+        <PermissionPrompt
+          requestId="req-1"
+          tool="Write"
+          description="test"
+          remainingMs={60000}
+          onRespond={onRespond}
+        />
+      </div>
+    )
+    const textarea = screen.getByTestId('input')
+    textarea.focus()
+    fireEvent.keyDown(textarea, { key: 'y', metaKey: true, bubbles: true })
+    expect(onRespond).not.toHaveBeenCalled()
+  })
+
+  it('does not fire shortcut after already answered (#1190)', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.click(screen.getByText('Allow'))
+    onRespond.mockClear()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onRespond).not.toHaveBeenCalled()
+  })
+
+  it('cleans up keyboard listener on unmount (#1190)', () => {
+    const onRespond = vi.fn()
+    const { unmount } = render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    unmount()
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    expect(onRespond).not.toHaveBeenCalled()
+  })
 })
 
 describe('PlanApproval', () => {
