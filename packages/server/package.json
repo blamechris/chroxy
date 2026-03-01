@@ -12,7 +12,9 @@
     "dev": "node --watch src/cli.js start",
     "test": "node --test --test-force-exit './tests/**/*.test.js'",
     "test:integration": "node --test ./tests/*.integration.test.js",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "dashboard:test": "vitest run --config src/dashboard-next/vite.config.ts",
+    "dashboard:typecheck": "tsc --noEmit -p src/dashboard-next/tsconfig.json"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",
@@ -39,6 +41,17 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "eslint": "^9.39.3"
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "eslint": "^9.39.3",
+    "jsdom": "^28.1.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18"
   }
 }
