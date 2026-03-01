@@ -22,6 +22,7 @@ export interface TerminalViewProps {
 }
 
 const BATCH_INTERVAL = 50 // ms — coalesce rapid writes
+const RESIZE_DEBOUNCE = 150 // ms — debounce resize/fit calls
 
 /** Safely call fit() — can throw when container is hidden or has zero size */
 function safeFit(fit: FitAddon) {
@@ -102,21 +103,27 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
     // Notify parent
     onReady?.({ write, clear })
 
-    // Resize handler — fit() guarded against hidden/zero-size containers
-    const onResize = () => safeFit(fit)
-    window.addEventListener('resize', onResize)
+    // Debounced resize handler — prevents excessive reflows during drag-resize
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null
+    const debouncedFit = () => {
+      if (resizeTimer) clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(() => safeFit(fit), RESIZE_DEBOUNCE)
+    }
+
+    window.addEventListener('resize', debouncedFit)
 
     // ResizeObserver for container-level resizing
     let resizeObserver: ResizeObserver | undefined
     if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(() => safeFit(fit))
+      resizeObserver = new ResizeObserver(debouncedFit)
       resizeObserver.observe(containerRef.current)
     }
 
     return () => {
       disposedRef.current = true
-      window.removeEventListener('resize', onResize)
+      window.removeEventListener('resize', debouncedFit)
       resizeObserver?.disconnect()
+      if (resizeTimer) clearTimeout(resizeTimer)
       if (timerRef.current) {
         clearTimeout(timerRef.current)
         timerRef.current = null
