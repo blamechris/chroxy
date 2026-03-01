@@ -1034,7 +1034,7 @@ export class WsServer {
    * Tags the message with `sessionId` so clients can route it to the correct
    * session state. By default only delivers to clients whose activeSessionId
    * matches — prevents cross-session info leakage and bandwidth waste.
-   * Pass a custom filter to override (e.g., for session_list broadcasts).
+   * Pass a custom filter to override the default recipient selection when needed.
    */
   _broadcastToSession(sessionId, message, filter = (client) => client.activeSessionId === sessionId) {
     const tagged = { ...message, sessionId }
