@@ -5,7 +5,7 @@ import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
+import { dirname, join, resolve } from 'path'
 import { toShortModelId, getModels } from './models.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from './crypto.js'
 import { ClientMessageSchema, AuthSchema, KeyExchangeSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
@@ -508,19 +508,34 @@ export class WsServer {
 
         // Serve static assets (hashed filenames from Vite build)
         if (relPath.startsWith('assets/')) {
-          const filePath = join(distDir, relPath)
+          const filePath = resolve(distDir, relPath)
+          // Path traversal guard — resolved path must stay within distDir
+          if (!filePath.startsWith(distDir)) {
+            res.writeHead(403)
+            res.end('Forbidden')
+            return
+          }
           if (existsSync(filePath)) {
             const ext = relPath.split('.').pop()
             const mimeTypes = { js: 'application/javascript', css: 'text/css', svg: 'image/svg+xml', png: 'image/png', woff2: 'font/woff2' }
-            const content = readFileSync(filePath)
-            res.writeHead(200, {
-              'Content-Type': mimeTypes[ext] || 'application/octet-stream',
-              'Cache-Control': 'public, max-age=31536000, immutable',
-              'X-Content-Type-Options': 'nosniff',
-            })
-            res.end(content)
+            try {
+              const content = readFileSync(filePath)
+              res.writeHead(200, {
+                'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+                'Cache-Control': 'public, max-age=31536000, immutable',
+                'X-Content-Type-Options': 'nosniff',
+              })
+              res.end(content)
+            } catch {
+              res.writeHead(500)
+              res.end('Internal server error')
+            }
             return
           }
+          // Asset path matched but file not found — return 404 (don't fall through to SPA)
+          res.writeHead(404)
+          res.end('Asset not found')
+          return
         }
 
         // SPA fallback — serve index.html with config injection
