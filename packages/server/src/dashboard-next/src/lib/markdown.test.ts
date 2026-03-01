@@ -131,6 +131,13 @@ describe('renderMarkdown', () => {
     expect(html).toContain('<p>more text</p>')
   })
 
+  it('wraps paragraphs starting with inline code in <p> tags (#1244)', () => {
+    const html = renderMarkdown('`x` is a variable\n\nother text')
+    // Inline code at start of paragraph must still get <p> wrapping
+    expect(html).toMatch(/<p>.*<code>x<\/code> is a variable.*<\/p>/)
+    expect(html).toContain('<p>other text</p>')
+  })
+
   it('sanitizes XSS payloads via DOMPurify defense-in-depth', () => {
     // Verify no raw <script> or event handler attributes survive in output.
     // Input is escaped by escapeHtml first; DOMPurify catches anything that
