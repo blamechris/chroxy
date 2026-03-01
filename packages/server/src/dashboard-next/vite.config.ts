@@ -21,7 +21,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/ws': {
-        target: 'ws://localhost:7860',
+        target: `ws://localhost:${process.env.CHROXY_PORT || 8765}`,
         ws: true,
       },
     },
