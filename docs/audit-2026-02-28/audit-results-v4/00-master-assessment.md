@@ -82,7 +82,7 @@ Skeptic, Builder, Guardian, and Adversary all flag: multi-tab requires session-l
 
 ### 4. Server-Side Tests Are a Prerequisite
 
-Tester (emphatically), Skeptic, and Guardian: zero automated tests in `packages/server/`. The React migration is a high-risk rewrite. Set up Vitest and write regression tests for Phase 0 fixes *before* Phase 1 begins.
+Tester (emphatically), Skeptic, and Guardian: the existing automated tests in `packages/server/` (44 test files using Node's built-in test runner) do not yet cover the multi-tab server behavior or React migration paths. The React migration is a high-risk rewrite. Extend the current test suite with regression tests for Phase 0 fixes *before* Phase 1 begins.
 
 ### 5. First-Run Wizard, Not Silent Failure
 
