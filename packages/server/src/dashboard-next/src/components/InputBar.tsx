@@ -49,6 +49,9 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
 
   return (
     <div className="input-bar" data-testid="input-bar">
+      <span id="input-shortcuts" className="sr-only">
+        Press Cmd+Enter to send, Escape to interrupt
+      </span>
       <textarea
         ref={textareaRef}
         value={value}
@@ -57,6 +60,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
         disabled={disabled}
         placeholder={placeholder}
         aria-label="Message input"
+        aria-describedby="input-shortcuts"
         rows={1}
       />
       {isStreaming ? (

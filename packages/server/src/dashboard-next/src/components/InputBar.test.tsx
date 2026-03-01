@@ -108,6 +108,15 @@ describe('InputBar', () => {
     render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isStreaming />)
     expect(screen.getByTestId('interrupt-button')).toHaveAttribute('aria-label', 'Stop generation')
   })
+
+  it('has aria-describedby linking to keyboard shortcut hints (#1226)', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+    const textarea = screen.getByRole('textbox')
+    expect(textarea).toHaveAttribute('aria-describedby', 'input-shortcuts')
+    const hint = document.getElementById('input-shortcuts')
+    expect(hint).toBeInTheDocument()
+    expect(hint!.textContent).toMatch(/Cmd.*Enter.*send/)
+  })
 })
 
 describe('ReconnectBanner', () => {
