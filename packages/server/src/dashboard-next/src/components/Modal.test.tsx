@@ -100,6 +100,17 @@ describe('Modal', () => {
     expect(onCloseOuter).not.toHaveBeenCalled()
   })
 
+  it('overlay element has data-modal-overlay attribute (#1242)', () => {
+    const onClose = vi.fn()
+    render(
+      <Modal open onClose={onClose} title="Data Attr">
+        <p>Content</p>
+      </Modal>
+    )
+    const overlay = screen.getByTestId('modal-overlay')
+    expect(overlay).toHaveAttribute('data-modal-overlay')
+  })
+
   it('single modal Escape behavior unchanged after nested fix (#1179)', () => {
     const onClose = vi.fn()
     render(

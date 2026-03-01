@@ -68,7 +68,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
         respond('allow')
       } else if (e.key === 'Escape') {
         // Skip if a modal overlay is open — let Modal handle Escape (#1230)
-        if (document.querySelector('.modal-overlay')) return
+        if (document.querySelector('[data-modal-overlay]')) return
         respond('deny')
       }
     }
