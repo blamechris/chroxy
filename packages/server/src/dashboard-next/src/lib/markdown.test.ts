@@ -123,7 +123,20 @@ describe('renderMarkdown', () => {
   })
 
   it('sanitizes XSS payloads via DOMPurify defense-in-depth', () => {
-    const html = renderMarkdown('test content')
-    expect(html).not.toMatch(/\bon\w+\s*=/i)
+    // Verify no raw <script> or event handler attributes survive in output.
+    // Input is escaped by escapeHtml first; DOMPurify catches anything that
+    // bypasses the regex-based pipeline in the future.
+    const html = renderMarkdown('<img src=x onerror=alert(1)>')
+    expect(html).not.toContain('<img')
+    expect(html).not.toContain('<script')
+    // Event handlers only dangerous as HTML attributes — verify no unescaped tags
+    const div = document.createElement('div')
+    div.innerHTML = html
+    const allEls = div.querySelectorAll('*')
+    for (const el of allEls) {
+      for (const attr of el.attributes) {
+        expect(attr.name).not.toMatch(/^on/i)
+      }
+    }
   })
 })
