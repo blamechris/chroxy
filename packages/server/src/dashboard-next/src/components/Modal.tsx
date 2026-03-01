@@ -1,7 +1,7 @@
 /**
  * Modal — generic modal overlay with backdrop close and Escape key.
  */
-import { useEffect, useCallback, type ReactNode } from 'react'
+import { useId, useEffect, useCallback, type ReactNode } from 'react'
 
 export interface ModalProps {
   open: boolean
@@ -12,6 +12,7 @@ export interface ModalProps {
 }
 
 export function Modal({ open, onClose, title, children, maxWidth }: ModalProps) {
+  const titleId = useId()
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Escape') onClose()
   }, [onClose])
@@ -33,10 +34,13 @@ export function Modal({ open, onClose, title, children, maxWidth }: ModalProps) 
     >
       <div
         className="modal-content"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         style={maxWidth ? { maxWidth } : undefined}
         onClick={e => e.stopPropagation()}
       >
-        <h3 className="modal-title">{title}</h3>
+        <h3 id={titleId} className="modal-title">{title}</h3>
         {children}
       </div>
     </div>
