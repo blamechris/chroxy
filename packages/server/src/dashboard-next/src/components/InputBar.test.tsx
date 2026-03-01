@@ -133,11 +133,10 @@ describe('ReconnectBanner', () => {
     expect(onRetry).toHaveBeenCalled()
   })
 
-  it('has role=alert and aria-live=polite (#1171)', () => {
+  it('has role=status for polite screen reader announcement (#1171)', () => {
     render(<ReconnectBanner visible attempt={1} maxAttempts={8} onRetry={vi.fn()} />)
     const banner = screen.getByTestId('reconnect-banner')
-    expect(banner).toHaveAttribute('role', 'alert')
-    expect(banner).toHaveAttribute('aria-live', 'polite')
+    expect(banner).toHaveAttribute('role', 'status')
   })
 
   it('shows custom message', () => {
