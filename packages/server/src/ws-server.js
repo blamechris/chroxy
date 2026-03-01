@@ -488,10 +488,25 @@ export class WsServer {
         if (this.authRequired) {
           const bearerToken = (req.headers['authorization'] || '').startsWith('Bearer ')
             ? req.headers['authorization'].slice(7) : null
-          const token = queryToken || bearerToken
+          // Also check for token in cookie (set on previous ?token= visit)
+          const cookieToken = (req.headers['cookie'] || '').match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
+          const cookieVal = cookieToken ? decodeURIComponent(cookieToken[1]) : null
+          const token = queryToken || bearerToken || cookieVal
           if (!token || !this._isTokenValid(token)) {
             res.writeHead(403, { 'Content-Type': 'text/html', ...securityHeaders })
             res.end('<h1>403 Forbidden</h1><p>Invalid or missing token. Append ?token=YOUR_TOKEN to the URL.</p>')
+            return
+          }
+
+          // If token was in query string, set cookie and redirect to clean URL
+          if (queryToken) {
+            const encoded = encodeURIComponent(queryToken)
+            res.writeHead(302, {
+              'Location': '/dashboard',
+              'Set-Cookie': `chroxy_auth=${encoded}; Path=/; SameSite=Strict; Max-Age=86400`,
+              'Cache-Control': 'no-store',
+            })
+            res.end()
             return
           }
         }

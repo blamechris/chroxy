@@ -5,7 +5,12 @@
   // ---- Config ----
   var config = window.__CHROXY_CONFIG__;
   var port = config.port;
-  var token = config.token;
+  // Token is read from cookie (set by server on /dashboard?token=X redirect)
+  // instead of being embedded in HTML source (prevents View Source leakage)
+  var token = (function() {
+    var match = document.cookie.match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
+    return match ? decodeURIComponent(match[1]) : ''
+  })();
 
   // ---- State ----
   var ws = null;
@@ -1726,6 +1731,8 @@
     var newToken = reauthInput.value.trim();
     if (!newToken) return;
     token = newToken;
+    // Persist new token to cookie for future page loads
+    document.cookie = 'chroxy_auth=' + encodeURIComponent(newToken) + '; Path=/; SameSite=Strict; Max-Age=86400';
     reauthRequired = false;
     reauthContainer.classList.add("hidden");
     reauthInput.value = "";

@@ -2,13 +2,17 @@
  * Generate the web dashboard HTML with embedded configuration.
  * Assets (CSS, JS, xterm) are served as separate static files via ws-server.
  *
+ * Token is NOT embedded in the HTML — it is passed via httpOnly-safe cookie
+ * and read from document.cookie by dashboard-app.js. This prevents token
+ * leakage in View Source / page source.
+ *
  * @param {number} port - WsServer port
- * @param {string|null} apiToken - API token (embedded for WS auth)
+ * @param {string|null} _apiToken - Unused (kept for call-site compat, will be removed)
  * @param {boolean} noEncrypt - Whether E2E encryption is disabled
  * @param {string} [nonce] - Optional CSP nonce to apply to inline style and script tags
  * @returns {string} Complete HTML document
  */
-export function getDashboardHtml(port, apiToken, noEncrypt, nonce) {
+export function getDashboardHtml(port, _apiToken, noEncrypt, nonce) {
   const n = nonce ? ` nonce="${nonce}"` : ''
   return `<!DOCTYPE html>
 <html lang="en">
@@ -150,7 +154,6 @@ export function getDashboardHtml(port, apiToken, noEncrypt, nonce) {
   <script${n}>
     window.__CHROXY_CONFIG__ = {
       port: ${port},
-      token: ${apiToken ? JSON.stringify(apiToken).replace(/</g, '\\u003c') : '""'},
       noEncrypt: ${!!noEncrypt},
     };
   </script>

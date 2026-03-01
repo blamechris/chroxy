@@ -6843,7 +6843,7 @@ describe('dashboard endpoint', () => {
     assert.ok(body.includes('Chroxy Dashboard'))
   })
 
-  it('GET /dashboard?token=VALID returns 200 when auth enabled', async () => {
+  it('GET /dashboard?token=VALID redirects with cookie when auth enabled', async () => {
     server = new WsServer({
       port: 0,
       apiToken: 'tok-dash-auth',
@@ -6852,11 +6852,13 @@ describe('dashboard endpoint', () => {
     })
     const port = await startServerAndGetPort(server)
 
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard?token=tok-dash-auth`)
-    assert.equal(res.status, 200)
-    assert.ok(res.headers.get('content-type').includes('text/html'))
-    const body = await res.text()
-    assert.ok(body.includes('Chroxy Dashboard'))
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard?token=tok-dash-auth`, { redirect: 'manual' })
+    assert.equal(res.status, 302)
+    assert.equal(res.headers.get('location'), '/dashboard')
+    const cookie = res.headers.get('set-cookie')
+    assert.ok(cookie, 'should set chroxy_auth cookie')
+    assert.ok(cookie.includes('chroxy_auth='), 'cookie should contain chroxy_auth')
+    assert.ok(cookie.includes('SameSite=Strict'), 'cookie should be SameSite=Strict')
   })
 
   it('GET /dashboard with Bearer token returns 200 when auth enabled', async () => {
@@ -6874,6 +6876,24 @@ describe('dashboard endpoint', () => {
     assert.equal(res.status, 200)
     const body = await res.text()
     assert.ok(body.includes('Chroxy Dashboard'))
+  })
+
+  it('GET /dashboard with valid cookie returns 200 when auth enabled', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-dash-cookie',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`, {
+      headers: { 'Cookie': 'chroxy_auth=tok-dash-cookie' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.text()
+    assert.ok(body.includes('Chroxy Dashboard'))
+    assert.ok(!body.includes('tok-dash-cookie'), 'token must not appear in HTML')
   })
 
   it('GET /dashboard without token returns 403 when auth enabled', async () => {
@@ -6907,7 +6927,7 @@ describe('dashboard endpoint', () => {
     assert.ok(body.includes('403'))
   })
 
-  it('dashboard HTML contains embedded config', async () => {
+  it('dashboard HTML contains config without token', async () => {
     server = new WsServer({
       port: 0,
       apiToken: 'tok-dash-config',
@@ -6919,7 +6939,7 @@ describe('dashboard endpoint', () => {
     const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
     const body = await res.text()
     assert.ok(body.includes('__CHROXY_CONFIG__'))
-    assert.ok(body.includes('"tok-dash-config"'), 'should embed the API token')
+    assert.ok(!body.includes('tok-dash-config'), 'token must NOT appear in HTML source')
     assert.ok(body.match(/port:\s*\d+/), 'should embed a port number')
   })
 
