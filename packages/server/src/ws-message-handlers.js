@@ -1,6 +1,6 @@
 import { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { join, resolve, relative } from 'path'
+import { resolve, relative } from 'path'
 import { ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { WebTaskUnavailableError } from './web-task-manager.js'
 import { scanConversations } from './conversation-scanner.js'
