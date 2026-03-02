@@ -37,9 +37,11 @@ pub fn navigate_to_dashboard(app: &AppHandle, port: u16, token: Option<&str>) {
     }
 }
 
-/// Show the main window (e.g. after server stop, displays loading page).
-pub fn show_main(app: &AppHandle) {
+/// Navigate the main window back to the bundled loading page and show it.
+/// Used after server stop, crash, or when server is not yet running.
+pub fn show_loading(app: &AppHandle) {
     if let Some(win) = app.get_webview_window(MAIN_LABEL) {
+        let _ = win.eval("window.location.href = 'tauri://localhost';");
         let _ = win.show();
         let _ = win.set_focus();
     }

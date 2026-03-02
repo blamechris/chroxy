@@ -283,7 +283,7 @@ fn handle_start(app: &tauri::AppHandle) {
             update_menu_state(app, true);
 
             // Show loading page immediately (React will handle connection when navigated)
-            window::show_main(app);
+            window::show_loading(app);
 
             let app_handle = app.clone();
             std::thread::spawn(move || {
@@ -348,7 +348,7 @@ fn handle_start(app: &tauri::AppHandle) {
                             );
 
                             // Show loading page so user sees restart progress
-                            window::show_main(&app_handle);
+                            window::show_loading(&app_handle);
 
                             // Wait backoff delay
                             std::thread::sleep(backoff);
@@ -440,7 +440,7 @@ fn handle_stop(app: &tauri::AppHandle) {
     mgr.stop();
     drop(mgr);
     update_menu_state(app, false);
-    window::show_main(app);
+    window::show_loading(app);
 }
 
 fn handle_restart(app: &tauri::AppHandle) {
@@ -464,7 +464,7 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let mgr = lock_or_recover(&state);
     if !mgr.is_running() {
-        window::show_main(app);
+        window::show_loading(app);
         return;
     }
 
