@@ -5,8 +5,8 @@
   "build": {
     "frontendDist": "../../server/src/dashboard-next/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "cd ../../server && npm run dashboard:dev",
-    "beforeBuildCommand": "cd ../../server && npm run dashboard:build"
+    "beforeDevCommand": "cd ../server && npm run dashboard:dev",
+    "beforeBuildCommand": "cd ../server && npm run dashboard:build && cd ../desktop && bash scripts/bundle-server.sh"
   },
   "app": {
     "withGlobalTauri": true,
@@ -29,6 +29,9 @@
     }
   },
   "bundle": {
+    "resources": {
+      "server-bundle": "server"
+    },
     "macOS": {
       "signingIdentity": "$APPLE_SIGNING_IDENTITY"
     }

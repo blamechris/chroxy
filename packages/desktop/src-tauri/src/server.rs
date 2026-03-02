@@ -306,9 +306,21 @@ impl ServerManager {
     }
 
     /// Resolve the chroxy CLI entry point (cli.js).
-    /// Checks: relative to binary (monorepo), then `which chroxy`, then CHROXY_SERVER_PATH env.
+    /// Checks: bundled .app resources, monorepo relative, CHROXY_SERVER_PATH env, `which chroxy`.
     fn resolve_cli_js() -> Result<PathBuf, String> {
-        // Check monorepo path relative to the Tauri binary.
+        // Strategy 1: Bundled inside .app (macOS).
+        // Binary lives at Contents/MacOS/chroxy-desktop,
+        // resources at Contents/Resources/server/src/cli.js.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(contents_dir) = exe.parent().and_then(|p| p.parent()) {
+                let bundled = contents_dir.join("Resources/server/src/cli.js");
+                if bundled.exists() {
+                    return Ok(bundled);
+                }
+            }
+        }
+
+        // Strategy 2: Monorepo path relative to the Tauri binary.
         // Walk up to 6 parent directories to find the monorepo root.
         // In dev: packages/desktop/src-tauri/target/debug/chroxy-desktop (5 levels up)
         // In release: packages/desktop/src-tauri/target/release/chroxy-desktop (5 levels up)
@@ -328,7 +340,7 @@ impl ServerManager {
             }
         }
 
-        // Check CHROXY_SERVER_PATH env — canonicalize and verify it's a .js file
+        // Strategy 3: CHROXY_SERVER_PATH env — canonicalize and verify it's a .js file
         if let Ok(path) = std::env::var("CHROXY_SERVER_PATH") {
             let p = PathBuf::from(&path);
             if let Ok(canonical) = p.canonicalize() {
@@ -343,7 +355,7 @@ impl ServerManager {
             }
         }
 
-        // Try `which chroxy` and resolve to its cli.js
+        // Strategy 4: `which chroxy` and resolve to its cli.js
         if let Ok(output) = Command::new("which").arg("chroxy").output() {
             let which_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !which_path.is_empty() {
