@@ -186,8 +186,8 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     const newValue = e.target.value
     setValue(newValue)
 
-    // Slash command detection: "/" at start of input with commands available
-    if (slashCommands && slashCommands.length > 0 && newValue.startsWith('/')) {
+    // Slash command detection: "/" at start of input
+    if (slashCommands && newValue.startsWith('/')) {
       if (!pickerOpen) {
         setPickerOpen(true)
         setSelectedIndex(0)

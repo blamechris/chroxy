@@ -460,6 +460,23 @@ describe('InputBar slash command picker (#1281)', () => {
     expect(onSlashTrigger).toHaveBeenCalled()
   })
 
+  it('opens picker when "/" is typed with empty slashCommands (async fetch)', () => {
+    const onSlashTrigger = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        slashCommands={[]}
+        onSlashTrigger={onSlashTrigger}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/' } })
+    // Should open picker (shows "No commands found") and trigger fetch
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+    expect(onSlashTrigger).toHaveBeenCalled()
+  })
+
   it('does not show picker when slashCommands prop is not provided', () => {
     render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
     const textarea = screen.getByRole('textbox')
