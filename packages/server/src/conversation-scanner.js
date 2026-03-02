@@ -204,32 +204,6 @@ async function performScan(projectsDir) {
  *   cwd: string|null,
  * }>>}
  */
-/**
- * Group conversations by their project path (repo).
- * Returns an array of unique repos sorted by most recent activity.
- *
- * @param {Array<{ project: string|null, projectName: string, modifiedAtMs: number }>} conversations
- * @returns {Array<{ path: string, name: string, lastActivityAt: number }>}
- */
-export function groupConversationsByRepo(conversations) {
-  const repoMap = new Map()
-
-  for (const conv of conversations) {
-    if (!conv.project) continue
-
-    const existing = repoMap.get(conv.project)
-    if (!existing || conv.modifiedAtMs > existing.lastActivityAt) {
-      repoMap.set(conv.project, {
-        path: conv.project,
-        name: conv.projectName,
-        lastActivityAt: conv.modifiedAtMs,
-      })
-    }
-  }
-
-  return [...repoMap.values()].sort((a, b) => b.lastActivityAt - a.lastActivityAt)
-}
-
 export async function scanConversations(opts = {}) {
   const projectsDir = opts.projectsDir || PROJECTS_DIR
   const maxResults = Math.max(0, Math.floor(opts.maxResults || 0))
@@ -260,4 +234,30 @@ export async function scanConversations(opts = {}) {
   _cacheTime = Date.now()
 
   return maxResults > 0 ? conversations.slice(0, maxResults) : [...conversations]
+}
+
+/**
+ * Group conversations by their project path (repo).
+ * Returns an array of unique repos sorted by most recent activity.
+ *
+ * @param {Array<{ project: string|null, projectName: string, modifiedAtMs: number }>} conversations
+ * @returns {Array<{ path: string, name: string, lastActivityAt: number }>}
+ */
+export function groupConversationsByRepo(conversations) {
+  const repoMap = new Map()
+
+  for (const conv of conversations) {
+    if (!conv.project) continue
+
+    const existing = repoMap.get(conv.project)
+    if (!existing || conv.modifiedAtMs > existing.lastActivityAt) {
+      repoMap.set(conv.project, {
+        path: conv.project,
+        name: conv.projectName,
+        lastActivityAt: conv.modifiedAtMs,
+      })
+    }
+  }
+
+  return [...repoMap.values()].sort((a, b) => b.lastActivityAt - a.lastActivityAt)
 }

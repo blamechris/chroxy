@@ -1,6 +1,6 @@
 import { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { resolve, relative } from 'path'
+import { resolve, relative, basename } from 'path'
 import { ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { WebTaskUnavailableError } from './web-task-manager.js'
 import { scanConversations, groupConversationsByRepo } from './conversation-scanner.js'
@@ -112,7 +112,7 @@ async function buildRepoList() {
     seen.add(repo.path)
     let exists = false
     try { statSync(repo.path); exists = true } catch { /* noop */ }
-    repos.push({ path: repo.path, name: repo.name || repo.path.split('/').pop(), source: 'manual', exists })
+    repos.push({ path: repo.path, name: repo.name || basename(repo.path), source: 'manual', exists })
   }
 
   for (const repo of autoRepos) {
@@ -839,18 +839,17 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         break
       }
 
-      const resolvedPath = realpathSync(repoPath)
-      const existing = readReposFromConfig()
-      if (!existing.some(r => r.path === resolvedPath)) {
-        existing.push({ path: resolvedPath, name: msg.name || resolvedPath.split('/').pop() })
-        writeReposToConfig(existing)
-      }
-
       try {
+        const resolvedPath = realpathSync(repoPath)
+        const existing = readReposFromConfig()
+        if (!existing.some(r => r.path === resolvedPath)) {
+          existing.push({ path: resolvedPath, name: msg.name || basename(resolvedPath) })
+          writeReposToConfig(existing)
+        }
         const repos = await buildRepoList()
         ctx.send(ws, { type: 'repo_list', repos })
       } catch (err) {
-        ctx.send(ws, { type: 'server_error', message: `Failed to list repos: ${err.message}`, recoverable: true })
+        ctx.send(ws, { type: 'session_error', message: `Failed to add repo: ${err.message}` })
       }
       break
     }
