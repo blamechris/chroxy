@@ -133,7 +133,13 @@ export function resolveFileRefAttachments(attachments, cwd) {
       if (stat.size > MAX_FILE_REF_SIZE) {
         return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: file too large (${(stat.size / 1024).toFixed(0)}KB, max 1MB): ${att.path}]`).toString('base64'), name: att.name || att.path }
       }
-      const content = readFileSync(absPath, 'utf-8')
+      // Detect binary files by checking for null bytes in the first 8KB
+      const raw = readFileSync(absPath)
+      const sample = raw.subarray(0, 8192)
+      if (sample.includes(0)) {
+        return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: binary file not supported: ${att.path}]`).toString('base64'), name: att.name || att.path }
+      }
+      const content = raw.toString('utf-8')
       return { type: 'document', mediaType: 'text/plain', data: Buffer.from(content).toString('base64'), name: att.name || att.path }
     } catch (err) {
       const msg = err?.code === 'ENOENT' ? 'file not found' : err?.code === 'EACCES' ? 'permission denied' : 'read error'

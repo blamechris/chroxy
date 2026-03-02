@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'fs'
+import { mkdirSync, writeFileSync, symlinkSync, rmSync, mkdtempSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops.js'
@@ -230,6 +230,44 @@ describe('listFiles', () => {
     const paths = msg.files.map(f => f.path)
     const sorted = [...paths].sort()
     assert.deepEqual(paths, sorted)
+  })
+
+  it('does not follow symlinks pointing outside CWD', async () => {
+    // Create an outside directory with a secret file
+    const outsideDir = mkdtempSync(join(tmpdir(), 'outside-'))
+    writeFileSync(join(outsideDir, 'secret.txt'), 'top secret')
+
+    // Create a symlink inside CWD pointing to the outside directory
+    symlinkSync(outsideDir, join(tmpDir, 'escape-link'))
+
+    // Also create a normal file to verify the walk works
+    writeFileSync(join(tmpDir, 'normal.txt'), 'visible')
+
+    await fileOps.listFiles({}, tmpDir, null)
+
+    const msg = sent[0]
+    const paths = msg.files.map(f => f.path)
+    assert.ok(paths.includes('normal.txt'), 'normal file should be listed')
+    assert.ok(!paths.some(p => p.includes('secret.txt')), 'symlinked outside file should NOT be listed')
+    assert.ok(!paths.some(p => p.includes('escape-link')), 'symlink dir should NOT be traversed')
+
+    rmSync(outsideDir, { recursive: true, force: true })
+  })
+
+  it('follows symlinks that stay within CWD', async () => {
+    // Create a subdirectory with a file
+    mkdirSync(join(tmpDir, 'real-dir'))
+    writeFileSync(join(tmpDir, 'real-dir', 'file.txt'), 'content')
+
+    // Create a symlink within CWD pointing to the subdirectory
+    symlinkSync(join(tmpDir, 'real-dir'), join(tmpDir, 'link-dir'))
+
+    await fileOps.listFiles({}, tmpDir, null)
+
+    const msg = sent[0]
+    const paths = msg.files.map(f => f.path)
+    assert.ok(paths.includes('real-dir/file.txt'), 'real dir file should be listed')
+    assert.ok(paths.includes('link-dir/file.txt'), 'symlink within CWD should be followed')
   })
 
   it('includes sessionId in response when provided', async () => {
