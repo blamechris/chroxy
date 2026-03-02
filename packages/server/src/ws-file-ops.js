@@ -751,7 +751,13 @@ export function createFileOps(sendFn) {
       if (sessionId) response.sessionId = sessionId
       sendFn(ws, response)
     } catch (err) {
-      const response = { type: 'file_list', files: [], error: err.message }
+      let message = 'Failed to list files'
+      if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        message = 'Directory not found'
+      } else if (err && typeof err === 'object' && err.code === 'EACCES') {
+        message = 'Permission denied'
+      }
+      const response = { type: 'file_list', files: [], error: message }
       if (sessionId) response.sessionId = sessionId
       sendFn(ws, response)
     }
