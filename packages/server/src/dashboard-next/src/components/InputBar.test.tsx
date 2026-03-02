@@ -722,6 +722,24 @@ describe('InputBar attachments (#1287)', () => {
     expect(screen.queryByTestId('attachment-chips')).not.toBeInTheDocument()
   })
 
+  it('deduplicates attachments with same path', () => {
+    const attachments = [
+      { path: 'src/App.tsx', name: 'App.tsx' },
+      { path: 'src/App.tsx', name: 'App.tsx' },
+    ]
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        attachments={attachments}
+        onRemoveAttachment={vi.fn()}
+      />
+    )
+    // Should only render one chip despite two entries with same path
+    const chips = screen.getAllByText('App.tsx')
+    expect(chips).toHaveLength(1)
+  })
+
   it('allows sending with attachments and empty text', () => {
     const onSend = vi.fn()
     const attachments = [{ path: 'src/App.tsx', name: 'App.tsx' }]

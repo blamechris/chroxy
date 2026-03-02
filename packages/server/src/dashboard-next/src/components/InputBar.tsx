@@ -254,7 +254,17 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     el.style.height = assignedHeight + 'px'
   }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger])
 
-  const hasChips = attachments && attachments.length > 0
+  const dedupedAttachments = useMemo(() => {
+    if (!attachments) return undefined
+    const seen = new Set<string>()
+    return attachments.filter(att => {
+      if (seen.has(att.path)) return false
+      seen.add(att.path)
+      return true
+    })
+  }, [attachments])
+
+  const hasChips = dedupedAttachments && dedupedAttachments.length > 0
 
   const handlePaste = useCallback((e: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!onImagePaste) return
@@ -304,7 +314,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
       )}
       {hasChips && (
         <div className="attachment-chips" data-testid="attachment-chips">
-          {attachments.map(att => (
+          {dedupedAttachments.map(att => (
             <AttachmentChip
               key={att.path}
               name={att.name}
