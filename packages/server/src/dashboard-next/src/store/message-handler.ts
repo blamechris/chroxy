@@ -1551,9 +1551,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'file_list': {
-      if (Array.isArray(msg.files)) {
-        set({ filePickerFiles: msg.files as FilePickerItem[] });
-      }
+      const files = Array.isArray(msg.files)
+        ? (msg.files as FilePickerItem[])
+        : [];
+      set({ filePickerFiles: files });
       break;
     }
 

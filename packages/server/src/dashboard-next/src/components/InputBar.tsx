@@ -24,13 +24,20 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
   const shortcutsId = useId()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
+  // Find the last qualifying @ (at start or after whitespace)
+  const triggerAtIdx = useMemo(() => {
+    for (let i = value.length - 1; i >= 0; i--) {
+      if (value[i] === '@' && (i === 0 || /\s/.test(value[i - 1]!))) return i
+    }
+    return -1
+  }, [value])
+
   // Extract filter text after @ trigger
   const fileFilter = useMemo(() => {
     if (!filePickerOpen) return ''
-    const atIdx = value.indexOf('@')
-    if (atIdx < 0) return ''
-    return value.slice(atIdx + 1)
-  }, [filePickerOpen, value])
+    if (triggerAtIdx < 0) return ''
+    return value.slice(triggerAtIdx + 1)
+  }, [filePickerOpen, value, triggerAtIdx])
 
   // Filtered files for keyboard navigation bounds
   const filteredFiles = useMemo(() => {
@@ -42,14 +49,16 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
   }, [filePickerFiles, fileFilter])
 
   const selectFile = useCallback((path: string) => {
-    const atIdx = value.indexOf('@')
-    if (atIdx >= 0) {
-      const before = value.slice(0, atIdx)
-      setValue(before + path + ' ')
+    if (triggerAtIdx >= 0) {
+      const before = value.slice(0, triggerAtIdx)
+      const afterAt = value.slice(triggerAtIdx + 1)
+      const nextWs = afterAt.search(/\s/)
+      const suffix = nextWs === -1 ? '' : afterAt.slice(nextWs)
+      setValue(before + path + (suffix || ' '))
     }
     setFilePickerOpen(false)
     setFileSelectedIndex(0)
-  }, [value])
+  }, [value, triggerAtIdx])
 
   const send = useCallback(() => {
     const trimmed = value.trim()
@@ -68,7 +77,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     if (filePickerOpen) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
-        setFileSelectedIndex(i => Math.min(i + 1, filteredFiles.length - 1))
+        setFileSelectedIndex(i => filteredFiles.length === 0 ? 0 : Math.min(i + 1, filteredFiles.length - 1))
         return
       }
       if (e.key === 'ArrowUp') {
@@ -104,15 +113,19 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     const newValue = e.target.value
     setValue(newValue)
 
-    // Detect @ trigger: must be at start of input or after whitespace
+    // Detect @ trigger: find last @ that's at start or after whitespace
     if (filePickerFiles !== undefined && newValue.includes('@')) {
-      const atIdx = newValue.indexOf('@')
-      if (atIdx === 0 || (atIdx > 0 && /\s/.test(newValue[atIdx - 1]!))) {
-        if (!filePickerOpen) {
-          setFilePickerOpen(true)
-          setFileSelectedIndex(0)
-          onFileTrigger?.()
+      let foundAt = false
+      for (let i = newValue.length - 1; i >= 0; i--) {
+        if (newValue[i] === '@' && (i === 0 || /\s/.test(newValue[i - 1]!))) {
+          foundAt = true
+          break
         }
+      }
+      if (foundAt && !filePickerOpen) {
+        setFilePickerOpen(true)
+        setFileSelectedIndex(0)
+        onFileTrigger?.()
       }
     }
 
