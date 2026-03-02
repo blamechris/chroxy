@@ -60,7 +60,16 @@ Update the progress table with pre-flight results. This is informational — doe
 
 ### Phase 2: Sequential Merge Loop
 
-Process PRs in order. For each PR:
+Process PRs in order using an indexed loop:
+
+```bash
+for ((i=0; i<${#PR_NUMS[@]}; i++)); do
+  PR_NUM=${PR_NUMS[$i]}
+  # Steps 2a–2g for each PR
+done
+```
+
+For each PR:
 
 #### Step 2a: Check CI
 
@@ -80,8 +89,10 @@ All required checks must be `SUCCESS` or `SKIPPED`. If any are failing or pendin
 ```bash
 COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
   --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] |
+    sort_by(.submitted_at) |
     if length == 0 then "NOT_FOUND"
-    elif (.[0].state == "PENDING") then "IN_PROGRESS"
+    elif (.[-1].state == "PENDING") then "IN_PROGRESS"
+    elif (.[-1].state == "DISMISSED") then "DISMISSED"
     else "COMPLETED" end')
 ```
 
@@ -103,13 +114,16 @@ ALL_COMMENTS=$(gh api repos/${REPO}/pulls/${PR_NUM}/comments --paginate)
 # Find Copilot comments without a reply from us
 WORKFLOW_USER=$(gh api user --jq .login)
 
-# Comments that are top-level (not replies) and have no reply from us
-UNREPLIED=$(echo "$ALL_COMMENTS" | jq --arg user "$WORKFLOW_USER" '
-  [.[] | select(.in_reply_to_id == null)] |
-  map(select(.id as $id |
-    [.. | select(.in_reply_to_id? == $id) | select(.user.login == $user)] | length == 0
-  ))
-')
+# Step 1: Get IDs of root comments that already have a reply from the workflow user
+REPLIED_IDS=$(echo "$ALL_COMMENTS" | jq --arg user "$WORKFLOW_USER" \
+  '[.[] | select(.in_reply_to_id != null and .user.login == $user) | .in_reply_to_id] | unique')
+
+# Step 2: Filter to Copilot-authored top-level comments that have no reply from us
+UNREPLIED=$(echo "$ALL_COMMENTS" \
+  | jq --argjson replied "$REPLIED_IDS" \
+    '[.[] | select(.in_reply_to_id == null)
+          | select(.user.login == "copilot-pull-request-reviewer[bot]")
+          | select([.id] | inside($replied) | not)]')
 ```
 
 For each unreplied comment, handle using the 3-outcome model from `/check-pr`:
@@ -136,7 +150,7 @@ fi
 After merging PR N, PR N+1 is stale (`strict: true` branch protection). Update it:
 
 ```bash
-NEXT_PR=${PR_NUMS[$((current_index + 1))]}
+NEXT_PR=${PR_NUMS[$((i + 1))]}
 if [ -n "$NEXT_PR" ]; then
   gh api repos/${REPO}/pulls/${NEXT_PR}/update-branch \
     --method PUT \
@@ -152,8 +166,15 @@ When `update-branch` API fails with conflicts (common when multiple PRs modify t
 
 ```bash
 NEXT_BRANCH=$(gh pr view ${NEXT_PR} --json headRefName -q .headRefName)
+
+# Validate branch name — reject if it contains shell metacharacters
+if ! printf '%s' "$NEXT_BRANCH" | grep -qE '^[a-zA-Z0-9/_.-]+$'; then
+  echo "ERROR: Branch name '${NEXT_BRANCH}' contains unsafe characters. Skipping."
+  continue  # Skip this PR
+fi
+
 git checkout main && git pull origin main
-git checkout ${NEXT_BRANCH}
+git checkout -- "$NEXT_BRANCH"
 git rebase main
 ```
 
@@ -162,8 +183,8 @@ If rebase has conflicts:
 1. For each conflicted file, read the file and resolve by keeping **all HEAD features** (already merged) plus the **incoming branch's additions**
 2. Verify no conflict markers remain: `grep -r '<<<<<<' <files>`
 3. `git add <files> && git rebase --continue`
-4. Run tests: `cd packages/server/src/dashboard-next && npx vitest run` (ignore pre-existing store.test.ts localStorage failures)
-5. `git push --force-with-lease origin ${NEXT_BRANCH}`
+4. Run tests: `cd packages/server && npm run dashboard:test`
+5. `git push --force-with-lease origin "$NEXT_BRANCH"`
 6. Wait for CI (Step 2f)
 
 If rebase conflicts are too complex to resolve (3+ files with deep interleaving), mark PR as `Blocked` and continue to next PR.
@@ -191,6 +212,13 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
   sleep $INTERVAL
   ELAPSED=$((ELAPSED + INTERVAL))
 done
+
+# Post-loop: check final state
+if [ "$ELAPSED" -ge "$MAX_WAIT" ] && [ "$PENDING" != "0" ]; then
+  echo "CI still pending after ${MAX_WAIT}s — marking PR #${NEXT_PR} as Pending"
+  # Do NOT attempt merge. This PR will be retried when it becomes the active PR
+  # in the next loop iteration (Step 2a will poll again).
+fi
 ```
 
 If CI fails after update-branch, run `/fix-ci ${NEXT_PR}`.
