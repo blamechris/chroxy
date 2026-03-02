@@ -47,6 +47,10 @@ vi.mock('./store/connection', () => {
     setPermissionMode: vi.fn(),
     dismissServerError: vi.fn(),
     setTerminalWriteCallback: vi.fn(),
+    filePickerFiles: null,
+    slashCommands: [],
+    fetchFileList: vi.fn(),
+    fetchSlashCommands: vi.fn(),
   }
   return {
     useConnectionStore: (
