@@ -1,7 +1,7 @@
 /**
  * Image utility tests — validation, base64 conversion, compression (#1288)
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   ALLOWED_IMAGE_TYPES,
   MAX_IMAGE_SIZE,
@@ -84,6 +84,147 @@ describe('compressImage', () => {
     const result = await compressImage(smallData, 'image/png')
     expect(result.data).toBe(smallData)
     expect(result.mediaType).toBe('image/png')
+  })
+
+  // Generate a base64 string larger than 1MB threshold to trigger canvas path
+  const largeBase64 = 'A'.repeat(1.5 * 1024 * 1024)
+
+  function createMockCanvas(drawImageSpy: ReturnType<typeof vi.fn>) {
+    return {
+      width: 0,
+      height: 0,
+      getContext: () => ({
+        drawImage: drawImageSpy,
+      }),
+      toDataURL: () => 'data:image/jpeg;base64,compressed_result',
+    }
+  }
+
+  function setupImageMock(imgWidth: number, imgHeight: number) {
+    const drawImageSpy = vi.fn()
+    const mockCanvas = createMockCanvas(drawImageSpy)
+    const origCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+      if (tag === 'canvas') return mockCanvas as unknown as HTMLCanvasElement
+      return origCreateElement(tag)
+    })
+
+    const OrigImage = globalThis.Image
+    class MockImage {
+      width = imgWidth
+      height = imgHeight
+      onload: (() => void) | null = null
+      onerror: (() => void) | null = null
+      set src(_: string) {
+        // Trigger onload asynchronously
+        setTimeout(() => this.onload?.(), 0)
+      }
+    }
+    globalThis.Image = MockImage as unknown as typeof Image
+
+    return { drawImageSpy, mockCanvas, restore: () => { globalThis.Image = OrigImage } }
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('scales down wide images to fit within 1920px', async () => {
+    const { drawImageSpy, mockCanvas, restore } = setupImageMock(3840, 1080)
+    try {
+      await compressImage(largeBase64, 'image/jpeg')
+      // scale = 1920 / 3840 = 0.5
+      expect(mockCanvas.width).toBe(1920)
+      expect(mockCanvas.height).toBe(540)
+      expect(drawImageSpy).toHaveBeenCalledWith(expect.anything(), 0, 0, 1920, 540)
+    } finally {
+      restore()
+    }
+  })
+
+  it('scales down tall images to fit within 1920px', async () => {
+    const { drawImageSpy, mockCanvas, restore } = setupImageMock(800, 4000)
+    try {
+      await compressImage(largeBase64, 'image/jpeg')
+      // scale = 1920 / 4000 = 0.48
+      expect(mockCanvas.width).toBe(384)
+      expect(mockCanvas.height).toBe(1920)
+      expect(drawImageSpy).toHaveBeenCalledWith(expect.anything(), 0, 0, 384, 1920)
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not scale images within 1920px', async () => {
+    const { drawImageSpy, mockCanvas, restore } = setupImageMock(1000, 800)
+    try {
+      await compressImage(largeBase64, 'image/jpeg')
+      expect(mockCanvas.width).toBe(1000)
+      expect(mockCanvas.height).toBe(800)
+      expect(drawImageSpy).toHaveBeenCalledWith(expect.anything(), 0, 0, 1000, 800)
+    } finally {
+      restore()
+    }
+  })
+
+  it('returns compressed result from canvas toDataURL', async () => {
+    const { restore } = setupImageMock(1000, 800)
+    try {
+      const result = await compressImage(largeBase64, 'image/jpeg')
+      expect(result).toEqual({ data: 'compressed_result', mediaType: 'image/jpeg' })
+    } finally {
+      restore()
+    }
+  })
+
+  it('returns original base64 on image load error', async () => {
+    const origCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+      if (tag === 'canvas') return { width: 0, height: 0, getContext: () => ({ drawImage: vi.fn() }), toDataURL: () => '' } as unknown as HTMLCanvasElement
+      return origCreateElement(tag)
+    })
+
+    const OrigImage = globalThis.Image
+    class FailImage {
+      onload: (() => void) | null = null
+      onerror: (() => void) | null = null
+      set src(_: string) {
+        setTimeout(() => this.onerror?.(), 0)
+      }
+    }
+    globalThis.Image = FailImage as unknown as typeof Image
+    try {
+      const result = await compressImage(largeBase64, 'image/jpeg')
+      expect(result).toEqual({ data: largeBase64, mediaType: 'image/jpeg' })
+    } finally {
+      globalThis.Image = OrigImage
+    }
+  })
+
+  it('returns original base64 when getContext returns null', async () => {
+    const origCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+      if (tag === 'canvas') return { width: 0, height: 0, getContext: () => null, toDataURL: () => '' } as unknown as HTMLCanvasElement
+      return origCreateElement(tag)
+    })
+
+    const OrigImage = globalThis.Image
+    class MockImage {
+      width = 1000
+      height = 800
+      onload: (() => void) | null = null
+      onerror: (() => void) | null = null
+      set src(_: string) {
+        setTimeout(() => this.onload?.(), 0)
+      }
+    }
+    globalThis.Image = MockImage as unknown as typeof Image
+    try {
+      const result = await compressImage(largeBase64, 'image/jpeg')
+      expect(result).toEqual({ data: largeBase64, mediaType: 'image/jpeg' })
+    } finally {
+      globalThis.Image = OrigImage
+    }
   })
 })
 
