@@ -2,13 +2,15 @@
  * InputBar — auto-expanding textarea with send/interrupt and slash command picker.
  *
  * Enter for newline, Cmd/Ctrl+Enter to send, Escape to interrupt.
- * Supports file picker (@ trigger), attachment chips, and slash command picker (/ trigger).
+ * Supports file picker (@ trigger), attachment chips, slash command picker (/ trigger),
+ * and image paste/drag-drop (#1288).
  */
-import { useState, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent } from 'react'
+import { useState, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent } from 'react'
 import { FilePicker, type FilePickerItem } from './FilePicker'
 import { AttachmentChip } from './AttachmentChip'
 import { SlashCommandPicker } from './SlashCommandPicker'
 import type { SlashCommand } from '../store/types'
+import { filterImageFiles } from '../utils/image-utils'
 
 export interface FileAttachment {
   path: string
@@ -27,9 +29,11 @@ export interface InputBarProps {
   onRemoveAttachment?: (path: string) => void
   slashCommands?: SlashCommand[]
   onSlashTrigger?: () => void
+  onImagePaste?: (files: File[]) => void
+  onImageDrop?: (files: File[]) => void
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop }: InputBarProps) {
   const [value, setValue] = useState('')
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
@@ -243,8 +247,41 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
 
   const hasChips = attachments && attachments.length > 0
 
+  const handlePaste = useCallback((e: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!onImagePaste) return
+    const files = e.clipboardData?.files
+    if (!files || files.length === 0) return
+    const imageFiles = filterImageFiles(files)
+    if (imageFiles.length > 0) {
+      e.preventDefault()
+      onImagePaste(imageFiles)
+    }
+  }, [onImagePaste])
+
+  const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
+    if (onImageDrop) {
+      e.preventDefault()
+    }
+  }, [onImageDrop])
+
+  const handleDrop = useCallback((e: DragEvent<HTMLDivElement>) => {
+    if (!onImageDrop) return
+    e.preventDefault()
+    const files = e.dataTransfer?.files
+    if (!files || files.length === 0) return
+    const imageFiles = filterImageFiles(files)
+    if (imageFiles.length > 0) {
+      onImageDrop(imageFiles)
+    }
+  }, [onImageDrop])
+
   return (
-    <div className="input-bar" data-testid="input-bar">
+    <div
+      className="input-bar"
+      data-testid="input-bar"
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
       {filePickerOpen && filePickerFiles !== undefined && (
         <FilePicker
           files={filePickerFiles}
@@ -283,6 +320,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
         value={value}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
         disabled={disabled}
         placeholder={placeholder}
         aria-label="Message input"

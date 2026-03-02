@@ -485,6 +485,76 @@ describe('InputBar slash command picker (#1281)', () => {
   })
 })
 
+describe('InputBar paste/drop (#1288)', () => {
+  function createMockFile(name: string, size: number, type: string): File {
+    return new File([new ArrayBuffer(size)], name, { type })
+  }
+
+  it('calls onImagePaste when pasting an image', () => {
+    const onImagePaste = vi.fn()
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onImagePaste={onImagePaste} />)
+    const textarea = screen.getByRole('textbox')
+
+    const file = createMockFile('screenshot.png', 1000, 'image/png')
+    const clipboardData = {
+      files: [file],
+      items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }],
+    }
+    fireEvent.paste(textarea, { clipboardData })
+    expect(onImagePaste).toHaveBeenCalledWith([file])
+  })
+
+  it('does not call onImagePaste for text paste', () => {
+    const onImagePaste = vi.fn()
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onImagePaste={onImagePaste} />)
+    const textarea = screen.getByRole('textbox')
+
+    const clipboardData = {
+      files: [],
+      items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+    }
+    fireEvent.paste(textarea, { clipboardData })
+    expect(onImagePaste).not.toHaveBeenCalled()
+  })
+
+  it('calls onImageDrop when dropping image files', () => {
+    const onImageDrop = vi.fn()
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onImageDrop={onImageDrop} />)
+    const dropZone = screen.getByTestId('input-bar')
+
+    const file = createMockFile('photo.jpg', 1000, 'image/jpeg')
+    fireEvent.drop(dropZone, {
+      dataTransfer: { files: [file] },
+    })
+    expect(onImageDrop).toHaveBeenCalledWith([file])
+  })
+
+  it('does not call onImageDrop for non-image files', () => {
+    const onImageDrop = vi.fn()
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onImageDrop={onImageDrop} />)
+    const dropZone = screen.getByTestId('input-bar')
+
+    const file = createMockFile('doc.pdf', 1000, 'application/pdf')
+    fireEvent.drop(dropZone, {
+      dataTransfer: { files: [file] },
+    })
+    expect(onImageDrop).not.toHaveBeenCalled()
+  })
+
+  it('filters to only image files on drop', () => {
+    const onImageDrop = vi.fn()
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onImageDrop={onImageDrop} />)
+    const dropZone = screen.getByTestId('input-bar')
+
+    const imgFile = createMockFile('photo.jpg', 1000, 'image/jpeg')
+    const pdfFile = createMockFile('doc.pdf', 1000, 'application/pdf')
+    fireEvent.drop(dropZone, {
+      dataTransfer: { files: [imgFile, pdfFile] },
+    })
+    expect(onImageDrop).toHaveBeenCalledWith([imgFile])
+  })
+})
+
 describe('ReconnectBanner', () => {
   it('renders when visible', () => {
     render(<ReconnectBanner visible attempt={1} maxAttempts={8} onRetry={vi.fn()} />)
