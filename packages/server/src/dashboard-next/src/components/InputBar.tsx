@@ -77,6 +77,16 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
   // Derive slash filter from current value (text after "/")
   const slashFilter = pickerOpen && value.startsWith('/') ? value.slice(1) : ''
 
+  // Single source of truth for filtered commands — used by both picker and keyboard handler
+  const filteredCommands = useMemo(() => {
+    if (!slashCommands || slashCommands.length === 0) return []
+    if (!slashFilter) return slashCommands
+    const lower = slashFilter.toLowerCase()
+    return slashCommands.filter(
+      c => c.name.toLowerCase().includes(lower) || c.description.toLowerCase().includes(lower)
+    )
+  }, [slashCommands, slashFilter])
+
   const send = useCallback(() => {
     const trimmed = value.trim()
     const hasAttachments = attachments && attachments.length > 0
@@ -118,23 +128,15 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
       }
       if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
         e.preventDefault()
-        if (slashCommands && slashCommands.length > 0) {
-          const filtered = slashFilter
-            ? slashCommands.filter(c =>
-                c.name.toLowerCase().includes(slashFilter.toLowerCase()) ||
-                c.description.toLowerCase().includes(slashFilter.toLowerCase())
-              )
-            : slashCommands
-          if (filtered.length > 0) {
-            const idx = Math.min(selectedIndex, filtered.length - 1)
-            selectCommand(filtered[idx]!.name)
-          }
+        if (filteredCommands.length > 0) {
+          const idx = Math.min(selectedIndex, filteredCommands.length - 1)
+          selectCommand(filteredCommands[idx]!.name)
         }
         return
       }
       if (e.key === 'ArrowDown') {
         e.preventDefault()
-        setSelectedIndex(i => i + 1)
+        setSelectedIndex(i => Math.min(i + 1, filteredCommands.length - 1))
         return
       }
       if (e.key === 'ArrowUp') {
@@ -178,7 +180,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
       e.preventDefault()
       onInterrupt()
     }
-  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, slashCommands, slashFilter, selectedIndex])
+  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex])
 
   const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value

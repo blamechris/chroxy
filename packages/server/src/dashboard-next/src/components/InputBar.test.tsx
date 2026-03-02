@@ -425,6 +425,26 @@ describe('InputBar slash command picker (#1281)', () => {
     expect(updatedItems[1]).toHaveAttribute('aria-selected', 'true')
   })
 
+  it('does not navigate past last item with ArrowDown', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        slashCommands={mockCommands}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/' } })
+    // Arrow down past the end (only 2 items)
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    const items = screen.getAllByRole('option')
+    // Should stay on last item (index 1)
+    expect(items[1]).toHaveAttribute('aria-selected', 'true')
+    expect(items[0]).toHaveAttribute('aria-selected', 'false')
+  })
+
   it('calls onSlashTrigger when "/" is typed', () => {
     const onSlashTrigger = vi.fn()
     render(
