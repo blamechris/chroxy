@@ -163,13 +163,23 @@ When the user approves (e.g., "yes", "apply all", "1 and 3", "skip 2"):
 
 **Clean up error journal:** After persisting, remove any error journal entries that were the source of a persisted insight. Entries that were NOT persisted (not actionable yet, or didn't pass the quality bar) stay in the journal — they may accumulate more evidence in future sessions.
 
+The journal file is always at: `~/.claude/projects/<project-hash>/memory/error-journal.md`
+(the same directory as MEMORY.md for the current project).
+
 ```bash
-# Read current journal, remove lines that match persisted insights, write back
-# Only remove entries whose pattern was captured in the persisted insight
-# Leave unrelated entries and entries that didn't graduate
+JOURNAL="$HOME/.claude/projects/$(basename $(pwd))/memory/error-journal.md"
+# Fallback: find by glob if basename doesn't match
+[ -f "$JOURNAL" ] || JOURNAL=$(ls ~/.claude/projects/*/memory/error-journal.md 2>/dev/null | head -1)
+
+# For each persisted insight that originated from a journal entry:
+# Use the Edit tool to remove the matching line(s) from $JOURNAL
+# Match by the distinctive pattern substring, not the full line (dates/tallies may differ)
+
+# After edits, check if the file is empty (only header + blank lines remain)
+# If so, delete it: rm "$JOURNAL"
 ```
 
-If the journal becomes empty after cleanup, delete the file.
+If the journal becomes empty after cleanup (only the header line remains or file is blank), delete the file.
 
 Final output -- one line:
 ```
