@@ -766,6 +766,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   sendInput: (input, wireAttachments, options) => {
     const { socket, activeSessionId } = get();
+
+    // Show user message immediately (optimistic update + thinking indicator)
+    get().addUserMessage(input, wireAttachments);
+
     const payload: Record<string, unknown> = { type: 'input', data: input };
     if (activeSessionId) payload.sessionId = activeSessionId;
     if (wireAttachments?.length) {
