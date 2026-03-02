@@ -44,7 +44,8 @@ export function FilePicker({
   useEffect(() => {
     if (listRef.current && selectedIndex >= 0) {
       const items = listRef.current.querySelectorAll('[role="option"]')
-      items[selectedIndex]?.scrollIntoView({ block: 'nearest' })
+      const el = items[selectedIndex] as HTMLElement | undefined
+      el?.scrollIntoView?.({ block: 'nearest' })
     }
   }, [selectedIndex])
 
