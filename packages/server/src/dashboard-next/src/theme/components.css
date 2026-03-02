@@ -727,6 +727,12 @@
   background: var(--bg-header);
   border-top: 1px solid var(--border-primary);
   flex-shrink: 0;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.input-bar.dragging {
+  border-color: var(--accent-blue);
+  background: color-mix(in srgb, var(--accent-blue) 8%, var(--bg-header));
 }
 
 /* ---- File Picker ---- */
@@ -869,11 +875,21 @@
   align-items: center;
   justify-content: center;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.15s;
 }
 
-.image-thumbnail:hover .thumbnail-remove {
+.image-thumbnail:hover .thumbnail-remove,
+.thumbnail-remove:focus-visible {
   opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .thumbnail-remove {
+    opacity: 0.7;
+    pointer-events: auto;
+  }
 }
 
 .image-count {

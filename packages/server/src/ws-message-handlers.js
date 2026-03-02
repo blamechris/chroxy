@@ -16,10 +16,10 @@ export const PERMISSION_MODES = [
 export const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
 
 // -- Attachment validation constants --
-const MAX_ATTACHMENT_COUNT = 5
-const MAX_IMAGE_SIZE = 2 * 1024 * 1024       // 2MB decoded
-const MAX_DOCUMENT_SIZE = 5 * 1024 * 1024    // 5MB decoded
-const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+export const MAX_ATTACHMENT_COUNT = 5
+export const MAX_IMAGE_SIZE = 2 * 1024 * 1024       // 2MB decoded
+export const MAX_DOCUMENT_SIZE = 5 * 1024 * 1024    // 5MB decoded
+export const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
 const ALLOWED_DOC_TYPES = new Set(['application/pdf', 'text/plain', 'text/markdown', 'text/csv', 'application/json'])
 
 /**
@@ -133,7 +133,13 @@ export function resolveFileRefAttachments(attachments, cwd) {
       if (stat.size > MAX_FILE_REF_SIZE) {
         return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: file too large (${(stat.size / 1024).toFixed(0)}KB, max 1MB): ${att.path}]`).toString('base64'), name: att.name || att.path }
       }
-      const content = readFileSync(absPath, 'utf-8')
+      // Detect binary files by checking for null bytes in the first 8KB
+      const raw = readFileSync(absPath)
+      const sample = raw.subarray(0, 8192)
+      if (sample.includes(0)) {
+        return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: binary file not supported: ${att.path}]`).toString('base64'), name: att.name || att.path }
+      }
+      const content = raw.toString('utf-8')
       return { type: 'document', mediaType: 'text/plain', data: Buffer.from(content).toString('base64'), name: att.name || att.path }
     } catch (err) {
       const msg = err?.code === 'ENOENT' ? 'file not found' : err?.code === 'EACCES' ? 'permission denied' : 'read error'

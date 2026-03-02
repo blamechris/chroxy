@@ -144,6 +144,26 @@ describe('resolveFileRefAttachments', () => {
     assert.deepStrictEqual(result, [])
   })
 
+  it('returns error document for binary files', () => {
+    const binPath = join(testDir, 'image.png')
+    // Write binary content with null bytes
+    const buf = Buffer.alloc(256)
+    buf[0] = 0x89 // PNG magic
+    buf[1] = 0x50
+    buf[2] = 0x4e
+    buf[3] = 0x47
+    buf[10] = 0x00 // null byte
+    buf[20] = 0x00
+    writeFileSync(binPath, buf)
+    const result = resolveFileRefAttachments(
+      [{ type: 'file_ref', path: 'image.png', name: 'image.png' }],
+      testDir
+    )
+    assert.strictEqual(result[0].type, 'document')
+    const decoded = Buffer.from(result[0].data, 'base64').toString('utf-8')
+    assert.match(decoded, /binary/)
+  })
+
   it('uses att.path as fallback name when att.name is missing', () => {
     const result = resolveFileRefAttachments(
       [{ type: 'file_ref', path: 'readme.md' }],
