@@ -38,6 +38,18 @@ export function CommandPalette({ commands, isOpen, onClose }: CommandPaletteProp
     return map
   }, [filtered])
 
+  // Build stable id→flatIndex map for aria-selected
+  const indexMap = useMemo(() => {
+    const map = new Map<string, number>()
+    let idx = 0
+    for (const [, cmds] of grouped) {
+      for (const cmd of cmds) {
+        map.set(cmd.id, idx++)
+      }
+    }
+    return map
+  }, [grouped])
+
   useEffect(() => {
     if (isOpen) {
       setQuery('')
@@ -61,11 +73,11 @@ export function CommandPalette({ commands, isOpen, onClose }: CommandPaletteProp
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault()
-        setSelectedIndex(i => (i + 1) % filtered.length)
+        if (filtered.length > 0) setSelectedIndex(i => (i + 1) % filtered.length)
         break
       case 'ArrowUp':
         e.preventDefault()
-        setSelectedIndex(i => (i - 1 + filtered.length) % filtered.length)
+        if (filtered.length > 0) setSelectedIndex(i => (i - 1 + filtered.length) % filtered.length)
         break
       case 'Enter':
         e.preventDefault()
@@ -79,8 +91,6 @@ export function CommandPalette({ commands, isOpen, onClose }: CommandPaletteProp
         break
     }
   }
-
-  let flatIndex = 0
 
   return (
     <div className="command-palette" data-testid="command-palette">
@@ -111,7 +121,7 @@ export function CommandPalette({ commands, isOpen, onClose }: CommandPaletteProp
             <div key={category} className="command-palette-group">
               <div className="command-palette-category">{category}</div>
               {cmds.map(cmd => {
-                const idx = flatIndex++
+                const idx = indexMap.get(cmd.id) ?? 0
                 return (
                   <div
                     key={cmd.id}
