@@ -269,8 +269,9 @@ impl ServerManager {
         Ok(())
     }
 
-    /// Internal stop: clean up process without setting user_stopped flag.
-    fn stop_process(&mut self) {
+    /// Internal: kill the child process and clear the handle.
+    /// Does NOT change status — callers decide what status to set.
+    fn kill_child(&mut self) {
         // Stop health polling by advancing generation (old threads will see mismatch and exit)
         self.health_generation.fetch_add(1, Ordering::SeqCst);
 
@@ -310,6 +311,11 @@ impl ServerManager {
         }
 
         self.child = None;
+    }
+
+    /// Internal stop: kill process and set status to Stopped.
+    fn stop_process(&mut self) {
+        self.kill_child();
         *lock_or_recover(&self.status) = ServerStatus::Stopped;
     }
 
@@ -322,7 +328,7 @@ impl ServerManager {
 
     /// Restart: stop then start (resets auto-restart state via start()).
     pub fn restart(&mut self) -> Result<(), String> {
-        self.stop_process();
+        self.kill_child();
         self.start()
     }
 
@@ -340,7 +346,7 @@ impl ServerManager {
 
         self.auto_restart_pending.store(false, Ordering::Relaxed);
         *lock_or_recover(&self.status) = ServerStatus::Restarting;
-        self.stop_process();
+        self.kill_child();
         match self.start_server_process() {
             Ok(()) => Ok(()),
             Err(e) => {
