@@ -378,6 +378,7 @@ fn handle_start(app: &tauri::AppHandle) {
                                 Ok(()) => {
                                     drop(mgr);
                                     // Wait for server to reach Running again
+                                    let mut recovered = false;
                                     for _ in 0..60 {
                                         std::thread::sleep(
                                             std::time::Duration::from_secs(1),
@@ -393,10 +394,24 @@ fn handle_start(app: &tauri::AppHandle) {
                                                     "Server Recovered",
                                                     "Auto-restart successful",
                                                 );
+                                                recovered = true;
                                                 break;
                                             }
                                             ServerStatus::Error(_) => break,
                                             _ => {}
+                                        }
+                                    }
+                                    // If recovery failed but we haven't hit max
+                                    // attempts, re-signal pending so the outer loop
+                                    // retries instead of exiting at Error(_).
+                                    if !recovered {
+                                        let state =
+                                            app_handle.state::<Mutex<ServerManager>>();
+                                        let mgr = lock_or_recover(&state);
+                                        if mgr.restart_count()
+                                            < ServerManager::MAX_RESTART_ATTEMPTS
+                                        {
+                                            mgr.signal_auto_restart();
                                         }
                                     }
                                     // Continue loop — will check for more crashes

@@ -103,6 +103,13 @@ impl ServerManager {
         self.restart_count.load(Ordering::Relaxed)
     }
 
+    /// Re-signal that auto-restart should be attempted.
+    /// Called when a restart attempt started the process but it failed to
+    /// reach Running. Sets the pending flag so the monitoring loop retries.
+    pub fn signal_auto_restart(&self) {
+        self.auto_restart_pending.store(true, Ordering::Relaxed);
+    }
+
     /// Backoff delay for auto-restart: 3s, 6s, 12s.
     pub fn restart_backoff(&self) -> Duration {
         let count = self.restart_count.load(Ordering::Relaxed);
