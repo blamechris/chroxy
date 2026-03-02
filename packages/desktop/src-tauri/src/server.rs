@@ -408,7 +408,7 @@ impl ServerManager {
         }
 
         Err(
-            "Could not find chroxy server. Set CHROXY_SERVER_PATH or run from the monorepo."
+            "Could not find chroxy server. Checked: bundled .app resources, monorepo layout, CHROXY_SERVER_PATH env, and PATH (which chroxy)."
                 .to_string(),
         )
     }
