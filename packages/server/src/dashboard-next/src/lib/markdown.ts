@@ -21,7 +21,7 @@ export function renderMarkdown(text: string): string {
   // Extract fenced code blocks BEFORE HTML-escaping
   const codeBlocks: string[] = []
   let raw = text.replace(/```([^\n]*)?\n([\s\S]*?)```/g, (_m, rawLang: string, code: string) => {
-    const placeholder = '\x00CB' + codeBlocks.length + '\x00'
+    const placeholder = '\x00FB' + codeBlocks.length + '\x00'
     const lang = rawLang ? rawLang.trim().split(/\s+/)[0] : ''
     const cls = lang ? ` class="language-${lang}"` : ''
     const highlighted = lang ? highlightCode(code, lang) : escapeHtml(code)
@@ -69,7 +69,7 @@ export function renderMarkdown(text: string): string {
   html = html.replace(/(<li class="md-ol">.*<\/li>\n?)+/g, (m) => `<ol>${m}</ol>`)
 
   // Paragraphs — split on double newlines, wrap non-block segments in <p> (#1169)
-  const blockRe = /^(<(h[1-6]|pre|ul|ol|blockquote)|\x00CB\d+\x00$)/
+  const blockRe = /^(<(h[1-6]|pre|ul|ol|blockquote)|\x00FB\d+\x00$)/
   html = html.split('\n\n').map(seg => {
     const trimmed = seg.trim()
     if (!trimmed) return ''
@@ -78,10 +78,8 @@ export function renderMarkdown(text: string): string {
   }).filter(Boolean).join('')
   html = html.replace(/\n/g, '<br>')
 
-  // Restore code blocks
-  for (let i = 0; i < codeBlocks.length; i++) {
-    html = html.replace('\x00CB' + i + '\x00', codeBlocks[i]!)
-  }
+  // Restore code blocks (fenced use \x00FB, inline use \x00CB) in a single pass
+  html = html.replace(/\x00(?:FB|CB)(\d+)\x00/g, (_m, idx: string) => codeBlocks[Number(idx)]!)
 
   return DOMPurify.sanitize(html, {
     ADD_ATTR: ['target', 'rel'],

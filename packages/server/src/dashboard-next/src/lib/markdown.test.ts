@@ -138,6 +138,16 @@ describe('renderMarkdown', () => {
     expect(html).toContain('<p>other text</p>')
   })
 
+  it('wraps standalone inline code paragraph in <p> tags (#1272)', () => {
+    // When inline code is the sole content of a paragraph segment,
+    // it should still get <p> wrapping (not treated as a block element)
+    const html = renderMarkdown('before\n\n`foo`\n\nafter')
+    // The <code> must be directly inside a <p>, not bare between separate <p> tags
+    expect(html).toContain('<p><code>foo</code></p>')
+    expect(html).toContain('<p>before</p>')
+    expect(html).toContain('<p>after</p>')
+  })
+
   it('sanitizes XSS payloads via DOMPurify defense-in-depth', () => {
     // Verify no raw <script> or event handler attributes survive in output.
     // Input is escaped by escapeHtml first; DOMPurify catches anything that
