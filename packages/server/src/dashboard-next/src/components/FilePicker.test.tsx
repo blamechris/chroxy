@@ -1,9 +1,14 @@
 /**
  * FilePicker component tests (#1286)
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { FilePicker, type FilePickerItem } from './FilePicker'
+
+// jsdom doesn't implement scrollIntoView
+beforeAll(() => {
+  Element.prototype.scrollIntoView = vi.fn()
+})
 
 afterEach(cleanup)
 
@@ -141,6 +146,32 @@ describe('FilePicker', () => {
     )
     fireEvent.mouseDown(screen.getByTestId('outside'))
     expect(onClose).toHaveBeenCalled()
+  })
+
+  it('scrolls selected item into view on selectedIndex change', () => {
+    const { rerender } = render(
+      <FilePicker
+        files={mockFiles}
+        filter=""
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        selectedIndex={0}
+      />
+    )
+
+    ;(Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+
+    rerender(
+      <FilePicker
+        files={mockFiles}
+        filter=""
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        selectedIndex={2}
+      />
+    )
+
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
   })
 
   it('shows file size in human-readable format', () => {

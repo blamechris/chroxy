@@ -39,6 +39,15 @@ export function FilePicker({
     return () => document.removeEventListener('mousedown', handler)
   }, [onClose])
 
+  const listRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (listRef.current && selectedIndex >= 0) {
+      const items = listRef.current.querySelectorAll('[role="option"]')
+      items[selectedIndex]?.scrollIntoView({ block: 'nearest' })
+    }
+  }, [selectedIndex])
+
   const filtered = useMemo(() => {
     if (!files) return null
     if (!filter) return files
@@ -64,7 +73,7 @@ export function FilePicker({
 
   return (
     <div ref={ref} className="file-picker" data-testid="file-picker">
-      <div role="listbox" aria-label="File picker">
+      <div ref={listRef} role="listbox" aria-label="File picker">
         {filtered.map((file, i) => (
           <div
             key={file.path}
