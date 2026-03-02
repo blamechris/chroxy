@@ -2,7 +2,7 @@ use crate::config;
 use crate::platform;
 use serde_json::json;
 use std::fs;
-use std::io::ErrorKind;
+use std::io;
 use uuid::Uuid;
 
 /// First-run setup: if no ~/.chroxy/config.json exists, generate one with defaults.
@@ -35,12 +35,12 @@ pub fn ensure_config() -> bool {
                     println!("[setup] Created default config at {}", path.display());
                     true
                 }
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                     // Config already exists — not an error, just skip creation
                     false
                 }
                 Err(e) => {
-                    eprintln!("[setup] Failed to write config at {}: {}", path.display(), e);
+                    eprintln!("[setup] {}", e);
                     false
                 }
             }
