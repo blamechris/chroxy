@@ -282,8 +282,8 @@ fn handle_start(app: &tauri::AppHandle) {
         Ok(()) => {
             update_menu_state(app, true);
 
-            // Show loading page immediately (React will handle connection when navigated)
-            window::show_loading(app);
+            // Show window immediately (loading page listens for server_ready event)
+            window::show_window(app);
 
             let app_handle = app.clone();
             std::thread::spawn(move || {
@@ -296,13 +296,13 @@ fn handle_start(app: &tauri::AppHandle) {
                     match status {
                         ServerStatus::Running => {
                             update_menu_state(&app_handle, true);
-                            // Navigate main window to dashboard
+                            // Emit server_ready — loading page navigates to dashboard
                             let state = app_handle.state::<Mutex<ServerManager>>();
                             let mgr = lock_or_recover(&state);
                             let p = mgr.port();
                             let t = mgr.token();
                             drop(mgr);
-                            window::navigate_to_dashboard(&app_handle, p, t.as_deref());
+                            window::emit_server_ready(&app_handle, p, t.as_deref());
                             reached_running = true;
                             break;
                         }
@@ -347,8 +347,13 @@ fn handle_start(app: &tauri::AppHandle) {
                                 ),
                             );
 
-                            // Show loading page so user sees restart progress
-                            window::show_loading(&app_handle);
+                            // Emit restarting event — React dashboard shows restart progress
+                            window::emit_server_restarting(
+                                &app_handle,
+                                count + 1,
+                                ServerManager::MAX_RESTART_ATTEMPTS as u32,
+                                backoff.as_secs(),
+                            );
 
                             // Wait backoff delay
                             std::thread::sleep(backoff);
@@ -371,13 +376,13 @@ fn handle_start(app: &tauri::AppHandle) {
                                         match status {
                                             ServerStatus::Running => {
                                                 update_menu_state(&app_handle, true);
-                                                // Navigate back to dashboard
+                                                // Emit server_ready — dashboard reconnects
                                                 let state = app_handle.state::<Mutex<ServerManager>>();
                                                 let mgr = lock_or_recover(&state);
                                                 let p = mgr.port();
                                                 let t = mgr.token();
                                                 drop(mgr);
-                                                window::navigate_to_dashboard(&app_handle, p, t.as_deref());
+                                                window::emit_server_ready(&app_handle, p, t.as_deref());
                                                 send_notification(
                                                     &app_handle,
                                                     "Server Recovered",
@@ -440,7 +445,7 @@ fn handle_stop(app: &tauri::AppHandle) {
     mgr.stop();
     drop(mgr);
     update_menu_state(app, false);
-    window::show_loading(app);
+    window::emit_server_stopped(app);
 }
 
 fn handle_restart(app: &tauri::AppHandle) {
@@ -464,7 +469,7 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let mgr = lock_or_recover(&state);
     if !mgr.is_running() {
-        window::show_loading(app);
+        window::show_window(app);
         return;
     }
 
@@ -472,7 +477,7 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     let token = mgr.token();
     drop(mgr);
 
-    window::navigate_to_dashboard(app, port, token.as_deref());
+    window::emit_server_ready(app, port, token.as_deref());
 }
 
 fn handle_toggle_login(app: &tauri::AppHandle) {

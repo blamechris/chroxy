@@ -32,17 +32,49 @@
       margin: 0 auto 1rem;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .status {
-      font-size: 0.9rem;
-      color: #888;
-    }
+    .status { font-size: 0.9rem; color: #888; }
+    .error { color: #f87171; }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="logo">Chroxy</div>
-    <div class="spinner"></div>
-    <div class="status">Starting server...</div>
+    <div id="spinner" class="spinner"></div>
+    <div id="status" class="status">Starting server...</div>
   </div>
+  <script>
+  (function() {
+    var status = document.getElementById('status');
+    var spinner = document.getElementById('spinner');
+
+    // Listen for Tauri events (withGlobalTauri: true provides window.__TAURI__)
+    if (window.__TAURI__ && window.__TAURI__.event) {
+      window.__TAURI__.event.listen('server_ready', function(event) {
+        status.textContent = 'Connected!';
+        status.className = 'status';
+        window.location.href = event.payload.url;
+      });
+
+      window.__TAURI__.event.listen('server_error', function(event) {
+        spinner.style.display = 'none';
+        status.textContent = event.payload.message || 'Server error';
+        status.className = 'status error';
+      });
+
+      window.__TAURI__.event.listen('server_restarting', function(event) {
+        var p = event.payload;
+        status.textContent = 'Restarting... (attempt ' + p.attempt + '/' + p.max_attempts + ')';
+        status.className = 'status';
+        spinner.style.display = '';
+      });
+
+      window.__TAURI__.event.listen('server_stopped', function() {
+        spinner.style.display = 'none';
+        status.textContent = 'Server stopped';
+        status.className = 'status';
+      });
+    }
+  })();
+  </script>
 </body>
 </html>
