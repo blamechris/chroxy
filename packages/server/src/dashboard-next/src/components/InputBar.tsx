@@ -100,12 +100,22 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     )
   }, [slashCommands, slashFilter])
 
+  const dedupedAttachments = useMemo(() => {
+    if (!attachments) return undefined
+    const seen = new Set<string>()
+    return attachments.filter(att => {
+      if (seen.has(att.path)) return false
+      seen.add(att.path)
+      return true
+    })
+  }, [attachments])
+
   const send = useCallback(() => {
     const trimmed = value.trim()
-    const hasAttachments = attachments && attachments.length > 0
-    if (!trimmed && !hasAttachments) return
-    if (hasAttachments) {
-      onSend(trimmed, attachments)
+    const hasAtts = dedupedAttachments && dedupedAttachments.length > 0
+    if (!trimmed && !hasAtts) return
+    if (hasAtts) {
+      onSend(trimmed, dedupedAttachments)
     } else {
       onSend(trimmed)
     }
@@ -117,7 +127,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [value, onSend, attachments])
+  }, [value, onSend, dedupedAttachments])
 
   const selectCommand = useCallback((name: string) => {
     setValue(`/${name} `)
@@ -254,10 +264,10 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     el.style.height = assignedHeight + 'px'
   }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger])
 
-  const hasChips = attachments && attachments.length > 0
+  const hasChips = dedupedAttachments && dedupedAttachments.length > 0
 
   const handlePaste = useCallback((e: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!onImagePaste) return
+    if (disabled || !onImagePaste) return
     const files = e.clipboardData?.files
     if (!files || files.length === 0) return
     const imageFiles = filterImageFiles(files)
@@ -265,24 +275,25 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
       e.preventDefault()
       onImagePaste(imageFiles)
     }
-  }, [onImagePaste])
+  }, [disabled, onImagePaste])
 
   const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
-    if (onImageDrop) {
-      e.preventDefault()
+    e.preventDefault()
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = disabled || !onImageDrop ? 'none' : 'copy'
     }
-  }, [onImageDrop])
+  }, [disabled, onImageDrop])
 
   const handleDrop = useCallback((e: DragEvent<HTMLDivElement>) => {
-    if (!onImageDrop) return
     e.preventDefault()
+    if (disabled || !onImageDrop) return
     const files = e.dataTransfer?.files
     if (!files || files.length === 0) return
     const imageFiles = filterImageFiles(files)
     if (imageFiles.length > 0) {
       onImageDrop(imageFiles)
     }
-  }, [onImageDrop])
+  }, [disabled, onImageDrop])
 
   const hasImages = imageAttachments && imageAttachments.length > 0
 
@@ -304,7 +315,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
       )}
       {hasChips && (
         <div className="attachment-chips" data-testid="attachment-chips">
-          {attachments.map(att => (
+          {dedupedAttachments.map(att => (
             <AttachmentChip
               key={att.path}
               name={att.name}
