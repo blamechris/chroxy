@@ -147,7 +147,7 @@ describe('QuestionPrompt', () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
-  it('disables free-text input when answered (#1245)', () => {
+  it('hides free-text input when answered (#1245)', () => {
     render(
       <QuestionPrompt
         question="What is your name?"
