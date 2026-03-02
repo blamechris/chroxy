@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,6 +17,7 @@ pub enum ServerStatus {
     Stopped,
     Starting,
     Running,
+    Restarting,
     Error(String),
 }
 
@@ -26,6 +27,7 @@ impl ServerStatus {
             ServerStatus::Stopped => "Stopped",
             ServerStatus::Starting => "Starting...",
             ServerStatus::Running => "Running",
+            ServerStatus::Restarting => "Restarting...",
             ServerStatus::Error(_) => "Error",
         }
     }
@@ -40,9 +42,18 @@ pub struct ServerManager {
     config: ChroxyConfig,
     tunnel_mode: String,
     health_generation: Arc<AtomicU64>,
+    /// Set by stop() to prevent auto-restart after user-initiated stop.
+    user_stopped: Arc<AtomicBool>,
+    /// Set by health poll when crash detected; cleared by try_auto_restart().
+    auto_restart_pending: Arc<AtomicBool>,
+    /// Consecutive auto-restart attempts; reset when server reaches Running.
+    restart_count: Arc<AtomicU32>,
 }
 
 impl ServerManager {
+    /// Maximum auto-restart attempts before giving up.
+    pub const MAX_RESTART_ATTEMPTS: u32 = 3;
+
     pub fn new() -> Self {
         Self {
             status: Arc::new(Mutex::new(ServerStatus::Stopped)),
@@ -52,6 +63,9 @@ impl ServerManager {
             config: ChroxyConfig::default(),
             tunnel_mode: "quick".to_string(),
             health_generation: Arc::new(AtomicU64::new(0)),
+            user_stopped: Arc::new(AtomicBool::new(false)),
+            auto_restart_pending: Arc::new(AtomicBool::new(false)),
+            restart_count: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -77,6 +91,33 @@ impl ServerManager {
 
     pub fn set_tunnel_mode(&mut self, mode: &str) {
         self.tunnel_mode = mode.to_string();
+    }
+
+    /// Whether auto-restart has been requested by the health poll.
+    pub fn is_auto_restart_pending(&self) -> bool {
+        self.auto_restart_pending.load(Ordering::Relaxed)
+    }
+
+    /// Current consecutive restart attempt count.
+    pub fn restart_count(&self) -> u32 {
+        self.restart_count.load(Ordering::Relaxed)
+    }
+
+    /// Re-signal that auto-restart should be attempted.
+    /// Called when a restart attempt started the process but it failed to
+    /// reach Running. Sets the pending flag so the monitoring loop retries.
+    pub fn signal_auto_restart(&self) {
+        self.auto_restart_pending.store(true, Ordering::Relaxed);
+    }
+
+    /// Backoff delay for auto-restart: 3s, 6s, 12s.
+    pub fn restart_backoff(&self) -> Duration {
+        let count = self.restart_count.load(Ordering::Relaxed);
+        Duration::from_secs(match count {
+            0 => 3,
+            1 => 6,
+            _ => 12,
+        })
     }
 
     /// Kill any process listening on the given port (cleanup from previous crash).
@@ -115,6 +156,16 @@ impl ServerManager {
             return Err("Server is already running".to_string());
         }
 
+        // Reset auto-restart state on user-initiated start
+        self.user_stopped.store(false, Ordering::Relaxed);
+        self.auto_restart_pending.store(false, Ordering::Relaxed);
+        self.restart_count.store(0, Ordering::Relaxed);
+
+        self.start_server_process()
+    }
+
+    /// Internal: spawn the server process and start health polling.
+    fn start_server_process(&mut self) -> Result<(), String> {
         // Reload config each start
         self.config = config::load_config();
 
@@ -225,8 +276,9 @@ impl ServerManager {
         Ok(())
     }
 
-    /// Stop the server process gracefully (SIGTERM → 5s → SIGKILL).
-    pub fn stop(&mut self) {
+    /// Internal: kill the child process and clear the handle.
+    /// Does NOT change status — callers decide what status to set.
+    fn kill_child(&mut self) {
         // Stop health polling by advancing generation (old threads will see mismatch and exit)
         self.health_generation.fetch_add(1, Ordering::SeqCst);
 
@@ -266,21 +318,62 @@ impl ServerManager {
         }
 
         self.child = None;
+    }
+
+    /// Internal stop: kill process and set status to Stopped.
+    fn stop_process(&mut self) {
+        self.kill_child();
         *lock_or_recover(&self.status) = ServerStatus::Stopped;
     }
 
-    /// Restart: stop then start.
+    /// Stop the server process gracefully. Prevents auto-restart.
+    pub fn stop(&mut self) {
+        self.user_stopped.store(true, Ordering::Relaxed);
+        self.auto_restart_pending.store(false, Ordering::Relaxed);
+        self.stop_process();
+    }
+
+    /// Restart: stop then start (resets auto-restart state via start()).
     pub fn restart(&mut self) -> Result<(), String> {
-        self.stop();
+        self.kill_child();
         self.start()
     }
 
-    /// Poll the health endpoint every 2s until Running or timeout (60s).
+    /// Attempt auto-restart after crash detection.
+    /// Increments restart count. Returns Err if max attempts exceeded or start fails.
+    pub fn try_auto_restart(&mut self) -> Result<(), String> {
+        let count = self.restart_count.load(Ordering::Relaxed);
+        if count >= Self::MAX_RESTART_ATTEMPTS {
+            *lock_or_recover(&self.status) = ServerStatus::Error(
+                format!("Auto-restart failed after {} attempts", Self::MAX_RESTART_ATTEMPTS),
+            );
+            return Err("Max restart attempts exceeded".to_string());
+        }
+        self.restart_count.fetch_add(1, Ordering::Relaxed);
+
+        self.auto_restart_pending.store(false, Ordering::Relaxed);
+        *lock_or_recover(&self.status) = ServerStatus::Restarting;
+        self.kill_child();
+        match self.start_server_process() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                *lock_or_recover(&self.status) = ServerStatus::Error(e.clone());
+                self.auto_restart_pending.store(true, Ordering::Relaxed);
+                Err(e)
+            }
+        }
+    }
+
+    /// Poll the health endpoint every 2s until Running or timeout (60s),
+    /// then monitor continuously. Signals auto-restart on crash detection.
     /// Uses a generation counter to ensure old threads exit when a new poll starts.
     fn start_health_poll(&self) {
         let status = self.status.clone();
         let port = self.config.port;
         let generation = self.health_generation.clone();
+        let user_stopped = self.user_stopped.clone();
+        let auto_restart_pending = self.auto_restart_pending.clone();
+        let restart_count = self.restart_count.clone();
 
         // Advance generation so any existing poll thread sees a mismatch and exits
         let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -308,6 +401,8 @@ impl ServerManager {
                     Ok(resp) => {
                         if resp.status() == 200 {
                             *lock_or_recover(&status) = ServerStatus::Running;
+                            // Reset restart count on successful startup
+                            restart_count.store(0, Ordering::Relaxed);
                             break;
                         }
                     }
@@ -341,6 +436,10 @@ impl ServerManager {
                         let mut s = lock_or_recover(&status);
                         if *s == ServerStatus::Running {
                             *s = ServerStatus::Error("Server stopped responding".to_string());
+                            // Signal auto-restart unless user explicitly stopped
+                            if !user_stopped.load(Ordering::Relaxed) {
+                                auto_restart_pending.store(true, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -478,5 +577,63 @@ mod tests {
         // Clean up: advance generation to stop the second thread
         mgr.health_generation.fetch_add(1, Ordering::SeqCst);
         thread::sleep(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn restarting_status_has_correct_label() {
+        assert_eq!(ServerStatus::Restarting.label(), "Restarting...");
+    }
+
+    #[test]
+    fn restart_backoff_increases_with_count() {
+        let mgr = ServerManager::new();
+
+        // Initial: 3s
+        assert_eq!(mgr.restart_backoff(), Duration::from_secs(3));
+
+        // After 1st attempt: 6s
+        mgr.restart_count.store(1, Ordering::Relaxed);
+        assert_eq!(mgr.restart_backoff(), Duration::from_secs(6));
+
+        // After 2nd attempt: 12s
+        mgr.restart_count.store(2, Ordering::Relaxed);
+        assert_eq!(mgr.restart_backoff(), Duration::from_secs(12));
+
+        // Capped at 12s
+        mgr.restart_count.store(10, Ordering::Relaxed);
+        assert_eq!(mgr.restart_backoff(), Duration::from_secs(12));
+    }
+
+    #[test]
+    fn try_auto_restart_rejects_at_max_attempts() {
+        let mut mgr = ServerManager::new();
+        mgr.restart_count.store(ServerManager::MAX_RESTART_ATTEMPTS, Ordering::Relaxed);
+
+        let result = mgr.try_auto_restart();
+        assert!(result.is_err());
+        assert_eq!(
+            mgr.status(),
+            ServerStatus::Error(format!(
+                "Auto-restart failed after {} attempts",
+                ServerManager::MAX_RESTART_ATTEMPTS
+            ))
+        );
+    }
+
+    #[test]
+    fn stop_sets_user_stopped_and_clears_auto_restart() {
+        let mut mgr = ServerManager::new();
+        mgr.auto_restart_pending.store(true, Ordering::Relaxed);
+
+        mgr.stop();
+
+        assert!(mgr.user_stopped.load(Ordering::Relaxed));
+        assert!(!mgr.auto_restart_pending.load(Ordering::Relaxed));
+        assert_eq!(mgr.status(), ServerStatus::Stopped);
+    }
+
+    #[test]
+    fn max_restart_attempts_is_three() {
+        assert_eq!(ServerManager::MAX_RESTART_ATTEMPTS, 3);
     }
 }
