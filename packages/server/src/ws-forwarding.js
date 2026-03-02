@@ -78,7 +78,7 @@ function setupSessionForwarding(normalizer, ctx) {
     }
   })
 
-  // Sidebar activity feed: lightweight status for ALL subscribed clients
+  // Sidebar activity feed: lightweight status broadcast to ALL authenticated clients
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     if (event === 'stream_start') {
       broadcast({ type: 'session_activity', sessionId, isBusy: true, lastCost: null })
