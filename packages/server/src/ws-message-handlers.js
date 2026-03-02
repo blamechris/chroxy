@@ -375,6 +375,13 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       break
     }
 
+    case 'list_files': {
+      const listFilesSessionId = msg.sessionId || client.activeSessionId
+      const listFilesEntry = ctx.sessionManager.getSession(listFilesSessionId)
+      ctx.fileOps.listFiles(ws, listFilesEntry?.cwd || null, msg.query || null, listFilesSessionId)
+      break
+    }
+
     case 'read_file': {
       const readSessionId = msg.sessionId || client.activeSessionId
       const readEntry = ctx.sessionManager.getSession(readSessionId)
@@ -778,6 +785,10 @@ export function handleCliMessage(ws, client, msg, ctx) {
 
     case 'browse_files':
       ctx.fileOps.browseFiles(ws, msg.path, ctx.cliSession?.cwd || null)
+      break
+
+    case 'list_files':
+      ctx.fileOps.listFiles(ws, ctx.cliSession?.cwd || null, msg.query || null)
       break
 
     case 'read_file':

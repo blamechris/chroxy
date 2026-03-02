@@ -105,6 +105,11 @@ export const ReadFileSchema = z.object({
   path: z.string(),
 }).passthrough()
 
+export const ListFilesSchema = z.object({
+  type: z.literal('list_files'),
+  query: z.string().optional(),
+}).passthrough()
+
 export const ListSlashCommandsSchema = z.object({
   type: z.literal('list_slash_commands'),
 }).passthrough()
@@ -475,6 +480,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ListDirectorySchema,
   BrowseFilesSchema,
   ReadFileSchema,
+  ListFilesSchema,
   ListSlashCommandsSchema,
   ListAgentsSchema,
   RequestFullHistorySchema,

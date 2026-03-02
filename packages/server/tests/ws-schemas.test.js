@@ -18,6 +18,7 @@ import {
   ListDirectorySchema,
   BrowseFilesSchema,
   ReadFileSchema,
+  ListFilesSchema,
   ListSlashCommandsSchema,
   ListAgentsSchema,
   RequestFullHistorySchema,
@@ -395,6 +396,18 @@ describe('ReadFileSchema', () => {
   })
 })
 
+
+describe('ListFilesSchema', () => {
+  it('accepts without query', () => {
+    const result = ListFilesSchema.safeParse({ type: 'list_files' })
+    assert.ok(result.success)
+  })
+
+  it('accepts with query', () => {
+    const result = ListFilesSchema.safeParse({ type: 'list_files', query: 'index' })
+    assert.ok(result.success)
+  })
+})
 
 // -- Slash commands and agents --
 describe('ListSlashCommandsSchema', () => {
