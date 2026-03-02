@@ -78,11 +78,8 @@ export function renderMarkdown(text: string): string {
   }).filter(Boolean).join('')
   html = html.replace(/\n/g, '<br>')
 
-  // Restore code blocks (fenced use \x00FB, inline use \x00CB)
-  for (let i = 0; i < codeBlocks.length; i++) {
-    html = html.replace('\x00FB' + i + '\x00', codeBlocks[i]!)
-    html = html.replace('\x00CB' + i + '\x00', codeBlocks[i]!)
-  }
+  // Restore code blocks (fenced use \x00FB, inline use \x00CB) in a single pass
+  html = html.replace(/\x00(?:FB|CB)(\d+)\x00/g, (_m, idx: string) => codeBlocks[Number(idx)]!)
 
   return DOMPurify.sanitize(html, {
     ADD_ATTR: ['target', 'rel'],
