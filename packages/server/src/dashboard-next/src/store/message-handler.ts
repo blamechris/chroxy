@@ -38,6 +38,7 @@ import type {
   SessionNotification,
   SessionState,
   SlashCommand,
+  FilePickerItem,
   ConversationSummary,
   ToolResultImage,
   WebTask,
@@ -1545,6 +1546,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (msg.sessionId && slashSid && msg.sessionId !== slashSid) break;
       if (Array.isArray(msg.commands)) {
         set({ slashCommands: msg.commands as SlashCommand[] });
+      }
+      break;
+    }
+
+    case 'file_list': {
+      if (Array.isArray(msg.files)) {
+        set({ filePickerFiles: msg.files as FilePickerItem[] });
       }
       break;
     }

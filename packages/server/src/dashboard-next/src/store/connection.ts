@@ -192,6 +192,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   restartingSince: null,
   pendingPermissionConfirm: null,
   slashCommands: [],
+  filePickerFiles: null,
   customAgents: [],
   checkpoints: [],
   _directoryListingCallback: null,
@@ -957,6 +958,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'list_slash_commands' });
+    }
+  },
+
+  fetchFileList: (query?: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const msg: Record<string, string> = { type: 'list_files' };
+      if (query) msg.query = query;
+      wsSend(socket, msg);
     }
   },
 
