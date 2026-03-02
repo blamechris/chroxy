@@ -104,6 +104,13 @@ import {
 
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
+// Stable empty arrays for getActiveSessionState() fallback.
+// Inline [] creates new refs each call → useShallow detects false changes → infinite re-render.
+const EMPTY_AGENTS: never[] = [];
+const EMPTY_PROMPTS: never[] = [];
+const EMPTY_MCP_SERVERS: never[] = [];
+const EMPTY_DEV_PREVIEWS: never[] = [];
+
 /** Delay before auto-reconnecting after an unexpected socket close (ms) */
 const AUTO_RECONNECT_DELAY = 1500;
 /** Delay before reconnecting after a WebSocket error (ms) */
@@ -271,7 +278,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (activeSessionId && sessionStates[activeSessionId]) {
       return sessionStates[activeSessionId];
     }
-    // Fallback: construct from flat state
+    // Fallback: construct from flat state.
+    // IMPORTANT: use the module-level EMPTY_* constants (not inline [])
+    // so useShallow sees stable references and avoids infinite re-renders.
     return {
       messages: get().messages,
       streamingMessageId: get().streamingMessageId,
@@ -284,14 +293,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionCost: null,
       isIdle: true,
       health: 'healthy' as const,
-      activeAgents: [],
+      activeAgents: EMPTY_AGENTS,
       isPlanPending: false,
-      planAllowedPrompts: [],
+      planAllowedPrompts: EMPTY_PROMPTS,
       primaryClientId: null,
       conversationId: null,
       sessionContext: null,
-      mcpServers: [],
-      devPreviews: [],
+      mcpServers: EMPTY_MCP_SERVERS,
+      devPreviews: EMPTY_DEV_PREVIEWS,
     };
   },
 
