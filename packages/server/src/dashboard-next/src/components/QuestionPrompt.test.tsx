@@ -92,7 +92,7 @@ describe('QuestionPrompt', () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
-  it('renders without options as plain text', () => {
+  it('renders without options with free-text input', () => {
     render(
       <QuestionPrompt
         question="What do you think?"
@@ -101,6 +101,62 @@ describe('QuestionPrompt', () => {
       />
     )
     expect(screen.getByText('What do you think?')).toBeInTheDocument()
-    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    expect(screen.queryAllByRole('button')).toHaveLength(1) // Send button
+    expect(screen.getByPlaceholderText('Type your response…')).toBeInTheDocument()
+  })
+
+  it('submits free-text response on Send click (#1245)', () => {
+    const onSelect = vi.fn()
+    render(
+      <QuestionPrompt
+        question="What is your name?"
+        options={[]}
+        onSelect={onSelect}
+      />
+    )
+    fireEvent.change(screen.getByPlaceholderText('Type your response…'), { target: { value: 'Alice' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(onSelect).toHaveBeenCalledWith('Alice')
+  })
+
+  it('submits free-text response on Enter key (#1245)', () => {
+    const onSelect = vi.fn()
+    render(
+      <QuestionPrompt
+        question="What is your name?"
+        options={[]}
+        onSelect={onSelect}
+      />
+    )
+    const input = screen.getByPlaceholderText('Type your response…')
+    fireEvent.change(input, { target: { value: 'Bob' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onSelect).toHaveBeenCalledWith('Bob')
+  })
+
+  it('does not submit empty free-text response (#1245)', () => {
+    const onSelect = vi.fn()
+    render(
+      <QuestionPrompt
+        question="What is your name?"
+        options={[]}
+        onSelect={onSelect}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('hides free-text input when answered (#1245)', () => {
+    render(
+      <QuestionPrompt
+        question="What is your name?"
+        options={[]}
+        answered="Alice"
+        onSelect={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Alice')).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('Type your response…')).not.toBeInTheDocument()
   })
 })
