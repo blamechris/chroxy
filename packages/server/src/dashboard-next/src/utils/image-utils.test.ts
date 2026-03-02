@@ -72,10 +72,18 @@ describe('fileToBase64', () => {
 })
 
 describe('compressImage', () => {
-  it('returns original base64 for small images (under 1MB)', async () => {
+  it('returns original base64 and mediaType for small images (under 1MB)', async () => {
     const smallData = 'aGVsbG8='  // "hello" in base64
     const result = await compressImage(smallData, 'image/jpeg')
-    expect(result).toBe(smallData)
+    expect(result.data).toBe(smallData)
+    expect(result.mediaType).toBe('image/jpeg')
+  })
+
+  it('preserves mediaType for PNG inputs (under threshold)', async () => {
+    const smallData = 'aGVsbG8='
+    const result = await compressImage(smallData, 'image/png')
+    expect(result.data).toBe(smallData)
+    expect(result.mediaType).toBe('image/png')
   })
 })
 
