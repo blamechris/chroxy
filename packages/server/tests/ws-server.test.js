@@ -1761,6 +1761,44 @@ describe('background session sync (_broadcastToSession)', () => {
     ws.close()
   })
 
+  it('scopes model_changed and permission_mode_changed to active session (#1138)', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Emit model_changed and permission_mode_changed for sess-2 (client is on sess-1)
+    mockManager.emit('session_event', {
+      sessionId: 'sess-2',
+      event: 'model_changed',
+      data: { model: 'claude-sonnet-4-5-20250514' },
+    })
+    mockManager.emit('session_event', {
+      sessionId: 'sess-2',
+      event: 'permission_mode_changed',
+      data: { mode: 'auto' },
+    })
+    await new Promise(r => setTimeout(r, 200))
+
+    const modelMsg = messages.find(m => m.type === 'model_changed' && m.sessionId === 'sess-2')
+    assert.ok(!modelMsg, 'Should NOT receive model_changed for non-viewed session')
+
+    const permMsg = messages.find(m => m.type === 'permission_mode_changed' && m.sessionId === 'sess-2')
+    assert.ok(!permMsg, 'Should NOT receive permission_mode_changed for non-viewed session')
+
+    ws.close()
+  })
+
 })
 
 describe('public broadcast method', () => {
