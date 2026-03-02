@@ -1,6 +1,6 @@
 import { readdir, readFile, stat, realpath } from 'fs/promises'
 import { homedir } from 'os'
-import { join, resolve, normalize, extname } from 'path'
+import { join, resolve, normalize, extname, relative } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { parseDiff } from './diff-parser.js'
@@ -592,6 +592,177 @@ export function createFileOps(sendFn) {
     sendFn(ws, response)
   }
 
+  /**
+   * Parse a .gitignore file into an array of { pattern, negated } rules.
+   * Supports basic gitignore patterns: globs, directory markers, negation.
+   */
+  function parseGitignore(content) {
+    const rules = []
+    for (const raw of content.split('\n')) {
+      let line = raw.trim()
+      if (!line || line.startsWith('#')) continue
+      const negated = line.startsWith('!')
+      if (negated) line = line.slice(1)
+      rules.push({ pattern: line, negated })
+    }
+    return rules
+  }
+
+  /**
+   * Test whether a relative file path matches a gitignore rule pattern.
+   * Handles: exact name, directory suffix (/), leading slash, glob (*).
+   */
+  function matchesGitignorePattern(relPath, pattern, isDir) {
+    const segments = relPath.split('/')
+    let pat = pattern
+
+    // Directory-only pattern (trailing /) — only matches directories
+    const dirOnly = pat.endsWith('/')
+    if (dirOnly) {
+      if (!isDir) return false
+      pat = pat.slice(0, -1)
+    }
+
+    // Rooted pattern (leading /) — must match from root
+    const rooted = pat.startsWith('/')
+    if (rooted) pat = pat.slice(1)
+
+    // Convert glob pattern to regex
+    const regexStr = pat
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*\*/g, '⚡GLOBSTAR⚡')
+      .replace(/\*/g, '[^/]*')
+      .replace(/⚡GLOBSTAR⚡/g, '.*')
+      .replace(/\?/g, '[^/]')
+
+    const regex = new RegExp(`^${regexStr}$`)
+
+    if (rooted) {
+      return regex.test(relPath)
+    }
+
+    // Patterns with slashes match against path suffixes
+    if (pat.includes('/')) {
+      for (let i = 0; i < segments.length; i++) {
+        const subpath = segments.slice(i).join('/')
+        if (regex.test(subpath)) return true
+      }
+      return false
+    }
+
+    // Unrooted patterns without slashes match any segment or the full path
+    if (regex.test(relPath)) return true
+    for (const seg of segments) {
+      if (regex.test(seg)) return true
+    }
+    return false
+  }
+
+  /**
+   * Check if a relative path is ignored by gitignore rules.
+   */
+  function isIgnored(relPath, rules, isDir) {
+    let ignored = false
+    for (const rule of rules) {
+      if (matchesGitignorePattern(relPath, rule.pattern, isDir)) {
+        ignored = !rule.negated
+      }
+    }
+    return ignored
+  }
+
+  /**
+   * List files recursively from session CWD with gitignore filtering.
+   * Max depth defaults to 3. Optional query for substring filtering.
+   */
+  async function listFiles(ws, sessionCwd, query, sessionId) {
+    if (!sessionCwd) {
+      const response = { type: 'file_list', files: [], error: 'File listing is not available in this mode' }
+      if (sessionId) response.sessionId = sessionId
+      sendFn(ws, response)
+      return
+    }
+
+    const MAX_DEPTH = 3
+    const MAX_FILES = 1000
+
+    try {
+      const cwdReal = await resolveSessionCwd(sessionCwd)
+
+      // Load .gitignore if it exists
+      let gitignoreRules = []
+      try {
+        const content = await readFile(join(cwdReal, '.gitignore'), 'utf-8')
+        gitignoreRules = parseGitignore(content)
+      } catch {
+        // No .gitignore or unreadable — proceed without
+      }
+
+      const files = []
+
+      async function walk(dir, depth) {
+        if (depth > MAX_DEPTH || files.length >= MAX_FILES) return
+
+        let dirents
+        try {
+          dirents = await readdir(dir, { withFileTypes: true })
+        } catch {
+          return
+        }
+
+        for (const d of dirents) {
+          if (files.length >= MAX_FILES) break
+          if (d.name.startsWith('.')) continue
+          if (d.name === 'node_modules') continue
+
+          const absPath = join(dir, d.name)
+          const relPath = relative(cwdReal, absPath)
+
+          // Check gitignore
+          if (isIgnored(relPath, gitignoreRules, d.isDirectory())) continue
+
+          if (d.isDirectory()) {
+            await walk(absPath, depth + 1)
+          } else {
+            let size = null
+            try {
+              const s = await stat(absPath)
+              size = s.size
+            } catch { /* skip size on error */ }
+
+            files.push({ path: relPath, type: 'file', size })
+          }
+        }
+      }
+
+      await walk(cwdReal, 0)
+
+      // Sort alphabetically by path
+      files.sort((a, b) => a.path.localeCompare(b.path))
+
+      // Apply query filter if provided
+      let result = files
+      if (query && typeof query === 'string' && query.trim()) {
+        const lower = query.toLowerCase()
+        result = files.filter(f => f.path.toLowerCase().includes(lower))
+      }
+
+      const response = { type: 'file_list', files: result, error: null }
+      if (sessionId) response.sessionId = sessionId
+      sendFn(ws, response)
+    } catch (err) {
+      let message = 'Failed to list files'
+      if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        message = 'Directory not found'
+      } else if (err && typeof err === 'object' && err.code === 'EACCES') {
+        message = 'Permission denied'
+      }
+      const response = { type: 'file_list', files: [], error: message }
+      if (sessionId) response.sessionId = sessionId
+      sendFn(ws, response)
+    }
+  }
+
   return {
     listDirectory,
     browseFiles,
@@ -599,5 +770,6 @@ export function createFileOps(sendFn) {
     getDiff,
     listSlashCommands,
     listAgents,
+    listFiles,
   }
 }
