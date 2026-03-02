@@ -577,6 +577,29 @@ describe('InputBar paste/drop (#1288)', () => {
     })
     expect(onImagePaste).not.toHaveBeenCalled()
   })
+
+  it('adds dragging class on dragEnter and removes on dragLeave', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onImageDrop={vi.fn()} />)
+    const dropZone = screen.getByTestId('input-bar')
+
+    fireEvent.dragEnter(dropZone)
+    expect(dropZone.classList.contains('dragging')).toBe(true)
+
+    fireEvent.dragLeave(dropZone)
+    expect(dropZone.classList.contains('dragging')).toBe(false)
+  })
+
+  it('removes dragging class on drop', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onImageDrop={vi.fn()} />)
+    const dropZone = screen.getByTestId('input-bar')
+
+    fireEvent.dragEnter(dropZone)
+    expect(dropZone.classList.contains('dragging')).toBe(true)
+
+    const file = createMockFile('photo.jpg', 1000, 'image/jpeg')
+    fireEvent.drop(dropZone, { dataTransfer: { files: [file] } })
+    expect(dropZone.classList.contains('dragging')).toBe(false)
+  })
 })
 
 describe('InputBar image thumbnails (#1289)', () => {

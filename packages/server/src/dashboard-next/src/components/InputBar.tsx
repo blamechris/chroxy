@@ -277,6 +277,8 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     }
   }, [disabled, onImagePaste])
 
+  const [dragging, setDragging] = useState(false)
+
   const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     if (e.dataTransfer) {
@@ -284,8 +286,20 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     }
   }, [disabled, onImageDrop])
 
+  const handleDragEnter = useCallback((e: DragEvent<HTMLDivElement>) => {
+    if (!onImageDrop) return
+    e.preventDefault()
+    setDragging(true)
+  }, [onImageDrop])
+
+  const handleDragLeave = useCallback((_e: DragEvent<HTMLDivElement>) => {
+    if (!onImageDrop) return
+    setDragging(false)
+  }, [onImageDrop])
+
   const handleDrop = useCallback((e: DragEvent<HTMLDivElement>) => {
     e.preventDefault()
+    setDragging(false)
     if (disabled || !onImageDrop) return
     const files = e.dataTransfer?.files
     if (!files || files.length === 0) return
@@ -299,9 +313,11 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
 
   return (
     <div
-      className="input-bar"
+      className={`input-bar${dragging ? ' dragging' : ''}`}
       data-testid="input-bar"
       onDragOver={handleDragOver}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
       {filePickerOpen && filePickerFiles !== undefined && (
