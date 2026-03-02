@@ -722,6 +722,48 @@ describe('InputBar attachments (#1287)', () => {
     expect(screen.queryByTestId('attachment-chips')).not.toBeInTheDocument()
   })
 
+  it('deduplicates attachments with same path', () => {
+    const attachments = [
+      { path: 'src/App.tsx', name: 'App.tsx' },
+      { path: 'src/App.tsx', name: 'App.tsx' },
+    ]
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        attachments={attachments}
+        onRemoveAttachment={vi.fn()}
+      />
+    )
+    // Should only render one chip despite two entries with same path
+    const chips = screen.getAllByText('App.tsx')
+    expect(chips).toHaveLength(1)
+  })
+
+  it('sends deduplicated attachments to onSend', () => {
+    const onSend = vi.fn()
+    const attachments = [
+      { path: 'src/App.tsx', name: 'App.tsx' },
+      { path: 'src/App.tsx', name: 'App.tsx' },
+      { path: 'src/index.ts', name: 'index.ts' },
+    ]
+    render(
+      <InputBar
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+        attachments={attachments}
+        onRemoveAttachment={vi.fn()}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'explain' } })
+    fireEvent.click(screen.getByTestId('send-button'))
+    expect(onSend).toHaveBeenCalledWith('explain', [
+      { path: 'src/App.tsx', name: 'App.tsx' },
+      { path: 'src/index.ts', name: 'index.ts' },
+    ])
+  })
+
   it('allows sending with attachments and empty text', () => {
     const onSend = vi.fn()
     const attachments = [{ path: 'src/App.tsx', name: 'App.tsx' }]
