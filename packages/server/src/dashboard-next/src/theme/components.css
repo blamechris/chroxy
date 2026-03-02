@@ -872,8 +872,15 @@
   transition: opacity 0.15s;
 }
 
-.image-thumbnail:hover .thumbnail-remove {
+.image-thumbnail:hover .thumbnail-remove,
+.thumbnail-remove:focus-visible {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .thumbnail-remove {
+    opacity: 0.7;
+  }
 }
 
 .image-count {
