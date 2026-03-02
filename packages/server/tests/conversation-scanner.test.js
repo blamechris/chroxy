@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { scanConversations, clearScanCache } from '../src/conversation-scanner.js'
+import { scanConversations, clearScanCache, groupConversationsByRepo } from '../src/conversation-scanner.js'
 
 describe('scanConversations', () => {
   let tempDir
@@ -417,5 +417,65 @@ describe('scanConversations', () => {
 
     const result = await scanConversations({ projectsDir: tempDir })
     assert.equal(result.length, 20)
+  })
+})
+
+describe('groupConversationsByRepo', () => {
+  it('returns empty array for empty input', () => {
+    assert.deepEqual(groupConversationsByRepo([]), [])
+  })
+
+  it('returns empty array when all conversations have null project', () => {
+    const conversations = [
+      { project: null, projectName: 'unknown', modifiedAtMs: 1000 },
+    ]
+    assert.deepEqual(groupConversationsByRepo(conversations), [])
+  })
+
+  it('groups conversations by project path', () => {
+    const conversations = [
+      { project: '/home/user/repo-a', projectName: 'repo-a', modifiedAtMs: 3000 },
+      { project: '/home/user/repo-a', projectName: 'repo-a', modifiedAtMs: 1000 },
+      { project: '/home/user/repo-b', projectName: 'repo-b', modifiedAtMs: 2000 },
+    ]
+    const result = groupConversationsByRepo(conversations)
+    assert.equal(result.length, 2)
+    assert.equal(result[0].path, '/home/user/repo-a')
+    assert.equal(result[0].lastActivityAt, 3000)
+    assert.equal(result[1].path, '/home/user/repo-b')
+    assert.equal(result[1].lastActivityAt, 2000)
+  })
+
+  it('sorts by most recent activity first', () => {
+    const conversations = [
+      { project: '/old', projectName: 'old', modifiedAtMs: 1000 },
+      { project: '/new', projectName: 'new', modifiedAtMs: 5000 },
+      { project: '/mid', projectName: 'mid', modifiedAtMs: 3000 },
+    ]
+    const result = groupConversationsByRepo(conversations)
+    assert.equal(result[0].path, '/new')
+    assert.equal(result[1].path, '/mid')
+    assert.equal(result[2].path, '/old')
+  })
+
+  it('uses most recent modifiedAtMs for each repo', () => {
+    const conversations = [
+      { project: '/repo', projectName: 'repo', modifiedAtMs: 100 },
+      { project: '/repo', projectName: 'repo', modifiedAtMs: 500 },
+      { project: '/repo', projectName: 'repo', modifiedAtMs: 300 },
+    ]
+    const result = groupConversationsByRepo(conversations)
+    assert.equal(result.length, 1)
+    assert.equal(result[0].lastActivityAt, 500)
+  })
+
+  it('skips null projects but includes valid ones', () => {
+    const conversations = [
+      { project: null, projectName: 'unknown', modifiedAtMs: 9000 },
+      { project: '/valid', projectName: 'valid', modifiedAtMs: 1000 },
+    ]
+    const result = groupConversationsByRepo(conversations)
+    assert.equal(result.length, 1)
+    assert.equal(result[0].path, '/valid')
   })
 })

@@ -636,6 +636,7 @@ export class WsServer {
         authenticated: false,
         mode: 'chat', // default to chat view
         activeSessionId: null,
+        subscribedSessionIds: new Set(),
         isAlive: true,
         deviceInfo: null,
         ip,
@@ -1140,7 +1141,7 @@ export class WsServer {
    * matches — prevents cross-session info leakage and bandwidth waste.
    * Pass a custom filter to override the default recipient selection when needed.
    */
-  _broadcastToSession(sessionId, message, filter = (client) => client.activeSessionId === sessionId) {
+  _broadcastToSession(sessionId, message, filter = (client) => client.activeSessionId === sessionId || client.subscribedSessionIds.has(sessionId)) {
     const tagged = { ...message, sessionId }
     for (const [ws, client] of this.clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {

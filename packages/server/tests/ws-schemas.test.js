@@ -64,6 +64,13 @@ import {
   ServerCostUpdateSchema,
   ServerBudgetWarningSchema,
   ServerBudgetExceededSchema,
+  // Session subscription schemas
+  SubscribeSessionsSchema,
+  UnsubscribeSessionsSchema,
+  // Repo management schemas
+  ListReposSchema,
+  AddRepoSchema,
+  RemoveRepoSchema,
   // Web task schemas
   LaunchWebTaskSchema,
   ListWebTasksSchema,
@@ -628,6 +635,7 @@ describe('ClientMessageSchema', () => {
       'get_diff',
       'list_checkpoints',
       'create_checkpoint',
+      'list_repos',
     ]
     for (const type of simpleTypes) {
       const result = ClientMessageSchema.safeParse({ type })
@@ -1097,6 +1105,170 @@ describe('ServerShutdownSchema', () => {
 describe('ServerPongSchema', () => {
   it('accepts valid pong', () => {
     assert.ok(ServerPongSchema.safeParse({ type: 'pong' }).success)
+  })
+})
+
+
+// ============================================================
+// Session subscription schemas
+// ============================================================
+
+describe('SubscribeSessionsSchema', () => {
+  it('accepts valid subscribe_sessions', () => {
+    const result = SubscribeSessionsSchema.safeParse({
+      type: 'subscribe_sessions',
+      sessionIds: ['sess-1', 'sess-2'],
+    })
+    assert.ok(result.success)
+    assert.deepEqual(result.data.sessionIds, ['sess-1', 'sess-2'])
+  })
+
+  it('accepts single session', () => {
+    const result = SubscribeSessionsSchema.safeParse({
+      type: 'subscribe_sessions',
+      sessionIds: ['sess-1'],
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects empty sessionIds array', () => {
+    const result = SubscribeSessionsSchema.safeParse({
+      type: 'subscribe_sessions',
+      sessionIds: [],
+    })
+    assert.ok(!result.success)
+  })
+
+  it('rejects more than 20 sessionIds', () => {
+    const ids = Array.from({ length: 21 }, (_, i) => `sess-${i}`)
+    const result = SubscribeSessionsSchema.safeParse({
+      type: 'subscribe_sessions',
+      sessionIds: ids,
+    })
+    assert.ok(!result.success)
+  })
+
+  it('rejects missing sessionIds', () => {
+    const result = SubscribeSessionsSchema.safeParse({
+      type: 'subscribe_sessions',
+    })
+    assert.ok(!result.success)
+  })
+
+  it('dispatches through ClientMessageSchema', () => {
+    const result = ClientMessageSchema.safeParse({
+      type: 'subscribe_sessions',
+      sessionIds: ['sess-1'],
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.type, 'subscribe_sessions')
+  })
+})
+
+describe('UnsubscribeSessionsSchema', () => {
+  it('accepts valid unsubscribe_sessions', () => {
+    const result = UnsubscribeSessionsSchema.safeParse({
+      type: 'unsubscribe_sessions',
+      sessionIds: ['sess-1'],
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects empty sessionIds array', () => {
+    const result = UnsubscribeSessionsSchema.safeParse({
+      type: 'unsubscribe_sessions',
+      sessionIds: [],
+    })
+    assert.ok(!result.success)
+  })
+
+  it('rejects more than 20 sessionIds', () => {
+    const ids = Array.from({ length: 21 }, (_, i) => `sess-${i}`)
+    const result = UnsubscribeSessionsSchema.safeParse({
+      type: 'unsubscribe_sessions',
+      sessionIds: ids,
+    })
+    assert.ok(!result.success)
+  })
+
+  it('dispatches through ClientMessageSchema', () => {
+    const result = ClientMessageSchema.safeParse({
+      type: 'unsubscribe_sessions',
+      sessionIds: ['sess-1', 'sess-2'],
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.type, 'unsubscribe_sessions')
+  })
+})
+
+
+// ============================================================
+// Repo management schemas
+// ============================================================
+
+describe('ListReposSchema', () => {
+  it('accepts valid list_repos', () => {
+    const result = ListReposSchema.safeParse({ type: 'list_repos' })
+    assert.ok(result.success)
+  })
+
+  it('dispatches through ClientMessageSchema', () => {
+    const result = ClientMessageSchema.safeParse({ type: 'list_repos' })
+    assert.ok(result.success)
+    assert.equal(result.data.type, 'list_repos')
+  })
+})
+
+describe('AddRepoSchema', () => {
+  it('accepts valid add_repo with path only', () => {
+    const result = AddRepoSchema.safeParse({ type: 'add_repo', path: '/home/user/project' })
+    assert.ok(result.success)
+    assert.equal(result.data.path, '/home/user/project')
+  })
+
+  it('accepts add_repo with name', () => {
+    const result = AddRepoSchema.safeParse({ type: 'add_repo', path: '/tmp/repo', name: 'my-repo' })
+    assert.ok(result.success)
+    assert.equal(result.data.name, 'my-repo')
+  })
+
+  it('rejects missing path', () => {
+    const result = AddRepoSchema.safeParse({ type: 'add_repo' })
+    assert.ok(!result.success)
+  })
+
+  it('rejects empty path', () => {
+    const result = AddRepoSchema.safeParse({ type: 'add_repo', path: '' })
+    assert.ok(!result.success)
+  })
+
+  it('dispatches through ClientMessageSchema', () => {
+    const result = ClientMessageSchema.safeParse({ type: 'add_repo', path: '/tmp' })
+    assert.ok(result.success)
+    assert.equal(result.data.type, 'add_repo')
+  })
+})
+
+describe('RemoveRepoSchema', () => {
+  it('accepts valid remove_repo', () => {
+    const result = RemoveRepoSchema.safeParse({ type: 'remove_repo', path: '/home/user/project' })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing path', () => {
+    const result = RemoveRepoSchema.safeParse({ type: 'remove_repo' })
+    assert.ok(!result.success)
+  })
+
+  it('rejects empty path', () => {
+    const result = RemoveRepoSchema.safeParse({ type: 'remove_repo', path: '' })
+    assert.ok(!result.success)
+  })
+
+  it('dispatches through ClientMessageSchema', () => {
+    const result = ClientMessageSchema.safeParse({ type: 'remove_repo', path: '/tmp' })
+    assert.ok(result.success)
+    assert.equal(result.data.type, 'remove_repo')
   })
 })
 
