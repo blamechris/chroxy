@@ -44,7 +44,7 @@ export function validateAttachments(attachments) {
       if (att.path.startsWith('/')) {
         return `attachment[${i}]: file_ref path must not be absolute`
       }
-      if (att.path.includes('..')) {
+      if (att.path.split('/').includes('..')) {
         return `attachment[${i}]: file_ref path must not contain traversal (..)`
       }
       continue
@@ -116,6 +116,17 @@ export function resolveFileRefAttachments(attachments, cwd) {
     const rel = relative(cwd, absPath)
     if (rel.startsWith('..') || resolve(cwd, rel) !== absPath) {
       return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: cannot read file outside project: ${att.path}]`).toString('base64'), name: att.name || att.path }
+    }
+    // Security: verify after symlink resolution to prevent symlink escape
+    try {
+      const realAbs = realpathSync(absPath)
+      const realCwd = realpathSync(cwd)
+      const realRel = relative(realCwd, realAbs)
+      if (realRel.startsWith('..')) {
+        return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: cannot read file outside project: ${att.path}]`).toString('base64'), name: att.name || att.path }
+      }
+    } catch {
+      // realpathSync fails if file doesn't exist — let readFileSync handle ENOENT below
     }
     try {
       const stat = statSync(absPath)
