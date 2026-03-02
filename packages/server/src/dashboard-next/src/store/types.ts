@@ -444,7 +444,7 @@ export interface ConnectionState {
   clearTerminalBuffer: () => void;
   setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
-  sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
+  sendInput: (input: string, wireAttachments?: { type: string; name: string; [key: string]: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
   sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;

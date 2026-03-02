@@ -12,7 +12,9 @@ import type { ChatViewMessage } from './components/ChatView'
 
 import { ChatView } from './components/ChatView'
 import { TerminalView, type TerminalHandle } from './components/TerminalView'
-import { InputBar } from './components/InputBar'
+import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
+import { toWireAttachments } from './utils/attachment-utils'
+import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { SessionBar, type SessionTabData } from './components/SessionBar'
 import { StatusBar } from './components/StatusBar'
 import { PermissionPrompt } from './components/PermissionPrompt'
@@ -118,6 +120,8 @@ export function App() {
 
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
+  const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
+  const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
 
   // Auto-connect on mount
   useEffect(() => {
@@ -173,9 +177,16 @@ export function App() {
   )
 
   // Handlers
-  const handleSend = useCallback((text: string) => {
-    sendInput(text)
-  }, [sendInput])
+  const handleSend = useCallback((text: string, files?: FileAttachment[]) => {
+    const allFiles = files || fileAttachments
+    const wire = toWireAttachments(
+      allFiles.length > 0 ? allFiles : undefined,
+      imageAttachments.length > 0 ? imageAttachments : undefined,
+    )
+    sendInput(text, wire.length > 0 ? wire : undefined)
+    setFileAttachments([])
+    setImageAttachments([])
+  }, [sendInput, fileAttachments, imageAttachments])
 
   const handleInterrupt = useCallback(() => {
     sendInterrupt()
@@ -198,6 +209,36 @@ export function App() {
     // Focus the input bar so the user can type feedback
     const textarea = document.querySelector<HTMLTextAreaElement>('.input-bar textarea')
     textarea?.focus()
+  }, [])
+
+  const handleFileSelect = useCallback((path: string) => {
+    setFileAttachments(prev => {
+      if (prev.some(f => f.path === path)) return prev
+      const name = path.split('/').pop() || path
+      return [...prev, { path, name }]
+    })
+  }, [])
+
+  const handleRemoveAttachment = useCallback((path: string) => {
+    setFileAttachments(prev => prev.filter(f => f.path !== path))
+  }, [])
+
+  const handleImagePaste = useCallback(async (files: File[]) => {
+    const images = filterImageFiles(files)
+    if (images.length === 0) return
+    const { accepted } = await processImageFiles(images)
+    setImageAttachments(prev => [...prev, ...accepted])
+  }, [])
+
+  const handleImageDrop = useCallback(async (files: File[]) => {
+    const images = filterImageFiles(files)
+    if (images.length === 0) return
+    const { accepted } = await processImageFiles(images)
+    setImageAttachments(prev => [...prev, ...accepted])
+  }, [])
+
+  const handleRemoveImage = useCallback((index: number) => {
+    setImageAttachments(prev => prev.filter((_, i) => i !== index))
   }, [])
 
   const handleRetry = useCallback(() => {
@@ -391,8 +432,15 @@ export function App() {
         placeholder={isConnected ? 'Type a message... (Cmd+Enter to send)' : 'Connecting...'}
         filePickerFiles={filePickerFiles}
         onFileTrigger={fetchFileList}
+        attachments={fileAttachments}
+        onRemoveAttachment={handleRemoveAttachment}
         slashCommands={slashCommands}
         onSlashTrigger={fetchSlashCommands}
+        onImagePaste={handleImagePaste}
+        onImageDrop={handleImageDrop}
+        imageAttachments={imageAttachments}
+        onRemoveImage={handleRemoveImage}
+        onFileAttach={handleFileSelect}
       />
 
       {/* Modals */}

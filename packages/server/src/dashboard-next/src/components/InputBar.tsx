@@ -40,9 +40,10 @@ export interface InputBarProps {
   onImageDrop?: (files: File[]) => void
   imageAttachments?: ImageAttachment[]
   onRemoveImage?: (index: number) => void
+  onFileAttach?: (path: string) => void
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach }: InputBarProps) {
   const [value, setValue] = useState('')
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
@@ -83,9 +84,10 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
       const suffix = nextWs === -1 ? '' : afterAt.slice(nextWs)
       setValue(before + path + (suffix || ' '))
     }
+    onFileAttach?.(path)
     setFilePickerOpen(false)
     setFileSelectedIndex(0)
-  }, [value, triggerAtIdx])
+  }, [value, triggerAtIdx, onFileAttach])
 
   // Derive slash filter from current value (text after "/")
   const slashFilter = pickerOpen && value.startsWith('/') ? value.slice(1) : ''
