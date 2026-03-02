@@ -54,18 +54,27 @@ export function fileToBase64(file: File): Promise<string> {
   })
 }
 
+export interface CompressResult {
+  data: string
+  mediaType: string
+}
+
 /**
  * Compress an image if it exceeds the threshold.
- * Returns the original base64 if under threshold or if compression is not possible.
+ * Preserves PNG format (and transparency) — only converts JPEG/WEBP to JPEG.
+ * Returns { data, mediaType } with the actual encoded format.
  */
-export async function compressImage(base64: string, mediaType: string): Promise<string> {
+export async function compressImage(base64: string, mediaType: string): Promise<CompressResult> {
   const sizeBytes = Math.ceil(base64.length * 3 / 4)
-  if (sizeBytes <= COMPRESS_THRESHOLD) return base64
+  if (sizeBytes <= COMPRESS_THRESHOLD) return { data: base64, mediaType }
 
-  // Canvas compression — only works for jpeg and png in browsers
-  if (typeof document === 'undefined') return base64
+  // Canvas compression — only works in browsers
+  if (typeof document === 'undefined') return { data: base64, mediaType }
 
-  return new Promise<string>((resolve) => {
+  // Preserve PNG format to keep transparency; compress others as JPEG
+  const outputType = mediaType === 'image/png' ? 'image/png' : 'image/jpeg'
+
+  return new Promise<CompressResult>((resolve) => {
     const img = new Image()
     img.onload = () => {
       const canvas = document.createElement('canvas')
@@ -80,14 +89,15 @@ export async function compressImage(base64: string, mediaType: string): Promise<
       canvas.width = width
       canvas.height = height
       const ctx = canvas.getContext('2d')
-      if (!ctx) { resolve(base64); return }
+      if (!ctx) { resolve({ data: base64, mediaType }); return }
       ctx.drawImage(img, 0, 0, width, height)
-      // Encode as jpeg at 0.8 quality for compression
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.8)
+      const dataUrl = outputType === 'image/jpeg'
+        ? canvas.toDataURL('image/jpeg', 0.8)
+        : canvas.toDataURL('image/png')
       const compressed = dataUrl.split(',')[1] || base64
-      resolve(compressed)
+      resolve({ data: compressed, mediaType: outputType })
     }
-    img.onerror = () => resolve(base64) // Fallback to original
+    img.onerror = () => resolve({ data: base64, mediaType }) // Fallback to original
     img.src = `data:${mediaType};base64,${base64}`
   })
 }
@@ -116,12 +126,12 @@ export async function processImageFiles(
     }
 
     try {
-      let base64 = await fileToBase64(file)
-      base64 = await compressImage(base64, file.type)
+      const base64 = await fileToBase64(file)
+      const compressed = await compressImage(base64, file.type)
       accepted.push({
         type: 'image',
-        mediaType: file.type,
-        data: base64,
+        mediaType: compressed.mediaType,
+        data: compressed.data,
         name: file.name,
       })
     } catch {
