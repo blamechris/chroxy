@@ -13,7 +13,10 @@ Capture genuinely novel learnings from the current session and persist them to t
 Check the error journal for accumulated cross-session patterns:
 
 ```bash
-cat ~/.claude/projects/*/memory/error-journal.md 2>/dev/null
+# Derive project-specific memory path from CWD (replaces / with -)
+PROJECT_HASH=$(pwd | sed 's|/|-|g')
+JOURNAL="$HOME/.claude/projects/$PROJECT_HASH/memory/error-journal.md"
+cat "$JOURNAL" 2>/dev/null
 ```
 
 The error journal captures tool call failures and recurring mistakes logged during normal work. Entries accumulate across sessions — they are NOT cleaned up automatically.
@@ -167,9 +170,9 @@ The journal file is always at: `~/.claude/projects/<project-hash>/memory/error-j
 (the same directory as MEMORY.md for the current project).
 
 ```bash
-JOURNAL="$HOME/.claude/projects/$(basename $(pwd))/memory/error-journal.md"
-# Fallback: find by glob if basename doesn't match
-[ -f "$JOURNAL" ] || JOURNAL=$(ls ~/.claude/projects/*/memory/error-journal.md 2>/dev/null | head -1)
+# Derive project-specific memory path from CWD (replaces / with -)
+PROJECT_HASH=$(pwd | sed 's|/|-|g')
+JOURNAL="$HOME/.claude/projects/$PROJECT_HASH/memory/error-journal.md"
 
 # For each persisted insight that originated from a journal entry:
 # Use the Edit tool to remove the matching line(s) from $JOURNAL
