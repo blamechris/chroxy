@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager};
 
 const DASHBOARD_LABEL: &str = "dashboard";
 const FALLBACK_LABEL: &str = "main";
@@ -20,48 +20,16 @@ fn url_encode(s: &str) -> String {
     encoded
 }
 
-/// Open (or focus) the dashboard window pointing at the local server.
+/// Open the dashboard in the system default browser.
 pub fn open_dashboard(app: &AppHandle, port: u16, token: Option<&str>) {
     let url = match token {
-        Some(t) => format!("http://localhost:{}/dashboard?token={}", port, url_encode(t)),
-        None => format!("http://localhost:{}/dashboard", port),
+        Some(t) => format!("http://127.0.0.1:{}/dashboard?token={}", port, url_encode(t)),
+        None => format!("http://127.0.0.1:{}/dashboard", port),
     };
 
-    // If dashboard window already exists, navigate and show it
-    if let Some(win) = app.get_webview_window(DASHBOARD_LABEL) {
-        let _ = win.navigate(url.parse().unwrap());
-        let _ = win.show();
-        let _ = win.set_focus();
-        return;
-    }
-
-    // Hide fallback window if visible
-    if let Some(fallback) = app.get_webview_window(FALLBACK_LABEL) {
-        let _ = fallback.hide();
-    }
-
-    // Create new dashboard window
-    let builder = WebviewWindowBuilder::new(
-        app,
-        DASHBOARD_LABEL,
-        WebviewUrl::External(url.parse().unwrap()),
-    )
-    .title("Chroxy Dashboard")
-    .inner_size(900.0, 700.0)
-    .center();
-
-    if let Ok(win) = builder.build() {
-        // Close hides instead of destroying
-        let app_handle = app.clone();
-        win.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                if let Some(w) = app_handle.get_webview_window(DASHBOARD_LABEL) {
-                    let _ = w.hide();
-                }
-            }
-        });
-    }
+    use tauri_plugin_shell::ShellExt;
+    use tauri_plugin_shell::open::Program;
+    let _ = app.shell().open(&url, None::<Program>);
 }
 
 /// Show the fallback/loading page with optional port, token, and tunnel mode for health+QR polling.
@@ -92,23 +60,15 @@ pub fn show_fallback(app: &AppHandle, port: Option<u16>, token: Option<&str>, tu
     }
 }
 
-/// Toggle window visibility (for tray left-click).
-pub fn toggle_window(app: &AppHandle, server_running: bool) {
-    let label = if server_running {
-        DASHBOARD_LABEL
-    } else {
-        FALLBACK_LABEL
-    };
-
-    if let Some(win) = app.get_webview_window(label) {
+/// Toggle fallback window visibility (for tray left-click).
+pub fn toggle_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(FALLBACK_LABEL) {
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
         } else {
             let _ = win.show();
             let _ = win.set_focus();
         }
-    } else if server_running {
-        // Dashboard window doesn't exist yet — will be created via handle_dashboard
     } else {
         show_fallback(app, None, None, None);
     }

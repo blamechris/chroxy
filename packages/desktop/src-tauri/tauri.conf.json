@@ -3,15 +3,15 @@
   "version": "0.2.0",
   "identifier": "com.chroxy.desktop",
   "build": {
-    "frontendDist": "../../server/src/dashboard-next/dist",
+    "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "cd ../server && npm run dashboard:dev",
-    "beforeBuildCommand": "cd ../server && npm run dashboard:build && cd ../desktop && bash scripts/bundle-server.sh"
+    "beforeBuildCommand": "cd ../server && TAURI_ENV_PLATFORM= npm run dashboard:build && cd ../desktop && bash scripts/bundle-server.sh"
   },
   "app": {
     "withGlobalTauri": true,
     "security": {
-      "csp": "default-src 'self' http://localhost:*; connect-src ws://localhost:* http://localhost:*; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self' http://localhost:* http://127.0.0.1:*; connect-src ws://localhost:* ws://127.0.0.1:* http://localhost:* http://127.0.0.1:*; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
     },
     "windows": [
       {
@@ -22,13 +22,13 @@
         "visible": false,
         "center": true
       }
-    ],
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true
-    }
+    ]
   },
   "bundle": {
+    "icon": [
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
     "resources": {
       "server-bundle": "server"
     },

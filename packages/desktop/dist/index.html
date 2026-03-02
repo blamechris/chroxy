@@ -10,6 +10,10 @@
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       background: #0f0f1a;
       color: #e0e0e0;
+      height: 100vh;
+      overflow: hidden;
+    }
+    .page-wrapper {
       display: flex;
       align-items: center;
       justify-content: center;
@@ -152,6 +156,7 @@
   </style>
 </head>
 <body>
+  <div class="page-wrapper">
   <div class="container">
     <div class="logo">Chroxy</div>
 
@@ -183,7 +188,7 @@
     <!-- Error states -->
     <div id="error-box" class="error-box">
       <h3>Server failed to start</h3>
-      <p>The server didn't respond within 30 seconds.</p>
+      <p>The server didn't respond within 60 seconds.</p>
       <p>Try starting manually: <code>npx chroxy start</code></p>
       <p>Check the tray menu for error details.</p>
       <p style="margin-top:8px;color:#666;font-size:0.8rem;">Requires Node 22 &mdash; <code>node@22</code></p>
@@ -196,7 +201,17 @@
       <p>Or switch to <strong>Local Only</strong> mode in the tray menu.</p>
     </div>
   </div>
+  </div>
+  <div style="position:fixed;bottom:12px;left:0;right:0;text-align:center;font-size:0.7rem;color:#4a9eff;pointer-events:none;font-family:monospace;opacity:0.6;z-index:9999;">v0.2.0-dev.15</div>
 
+  <script>
+  // Stub available IMMEDIATELY — Tauri's win.eval() can call this
+  // before the IIFE below finishes parsing/executing.
+  window.__pendingStartArgs = null;
+  window.__startPolling = function(p, t, tm) {
+    window.__pendingStartArgs = [p, t, tm];
+  };
+  </script>
   <script>
   (function() {
     var port = '8765';
@@ -265,9 +280,14 @@
     }
 
     function openDashboard() {
-      var dashUrl = '/dashboard';
-      if (token) dashUrl += '?token=' + encodeURIComponent(token);
-      window.location.href = 'http://localhost:' + port + dashUrl;
+      if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function') {
+        window.__TAURI__.core.invoke('cmd_open_dashboard');
+      } else {
+        // Fallback for dev/non-Tauri context
+        var dashUrl = '/dashboard';
+        if (token) dashUrl += '?token=' + encodeURIComponent(token);
+        window.location.href = 'http://127.0.0.1:' + port + dashUrl;
+      }
     }
 
     dashBtn.addEventListener('click', openDashboard);
@@ -279,6 +299,8 @@
       tunnelMode = tm || 'none';
       startTime = Date.now();
       healthPassed = false;
+      // Force-restart: cancel any in-flight poll so we start fresh with correct token
+      polling = false;
       // Reset UI
       startupSection.style.display = '';
       spinner.style.display = '';
@@ -290,12 +312,12 @@
       qrSection.style.display = '';
       qrContainer.innerHTML = '';
       setStage(1);
-      if (!polling) pollHealth();
+      pollHealth();
     };
 
     function pollHealth() {
       polling = true;
-      fetch('http://localhost:' + port + '/')
+      fetch('http://127.0.0.1:' + port + '/')
         .then(function(r) { return r.json(); })
         .then(function(data) {
           if (data.status === 'ok') {
@@ -325,7 +347,7 @@
           var elapsed = Date.now() - startTime;
           if (elapsed > 2000) setStage(2);
           if (elapsed > 10000) setStage(3);
-          if (elapsed > 30000) {
+          if (elapsed > 60000) {
             showError();
             return;
           }
@@ -338,7 +360,7 @@
       var timeoutMs = tunnelMode !== 'none' ? 45000 : 10000;
 
       function poll() {
-        fetch('http://localhost:' + port + '/qr', {
+        fetch('http://127.0.0.1:' + port + '/qr', {
             headers: token ? { 'Authorization': 'Bearer ' + token } : {}
           })
           .then(function(r) {
@@ -387,7 +409,16 @@
     }
 
     setStage(1);
-    pollHealth();
+
+    // If Tauri called the stub before IIFE finished, replay with real implementation
+    if (window.__pendingStartArgs) {
+      var args = window.__pendingStartArgs;
+      window.__pendingStartArgs = null;
+      window.__startPolling(args[0], args[1], args[2]);
+    } else if (!window.__TAURI__) {
+      // Non-Tauri (dev/browser): auto-poll with defaults
+      pollHealth();
+    }
   })();
   </script>
 </body>

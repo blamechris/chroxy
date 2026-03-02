@@ -2,8 +2,18 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Search common locations for Node 22, verify the version, and return the path.
-/// Mirrors the search order in packages/server/src/service.js:resolveNode22Path().
+const MIN_NODE_MAJOR: u32 = 22;
+
+/// Parse major version from a Node version string like "v22.22.0".
+fn parse_major(version: &str) -> Option<u32> {
+    version
+        .strip_prefix('v')
+        .and_then(|s| s.split('.').next())
+        .and_then(|s| s.parse().ok())
+}
+
+/// Search common locations for Node >= 22, verify the version, and return the path.
+/// Prefers Node 22 at well-known paths, then falls back to any Node >= 22 on PATH.
 pub fn resolve_node22() -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -12,37 +22,44 @@ pub fn resolve_node22() -> Result<PathBuf, String> {
     // Homebrew (Intel)
     candidates.push(PathBuf::from("/usr/local/opt/node@22/bin/node"));
 
-    // nvm — glob for latest v22.*
+    // nvm — glob for v22.* and above, prefer v22 first
     if let Some(home) = dirs::home_dir() {
         let nvm_dir = home.join(".nvm/versions/node");
         if nvm_dir.is_dir() {
             if let Ok(entries) = fs::read_dir(&nvm_dir) {
-                let mut v22_dirs: Vec<PathBuf> = entries
+                let mut eligible: Vec<PathBuf> = entries
                     .filter_map(|e| e.ok())
                     .map(|e| e.path())
                     .filter(|p| {
                         p.file_name()
                             .and_then(|n| n.to_str())
-                            .map(|n| n.starts_with("v22."))
+                            .and_then(|n| parse_major(n))
+                            .map(|major| major >= MIN_NODE_MAJOR)
                             .unwrap_or(false)
                     })
                     .collect();
-                v22_dirs.sort();
-                v22_dirs.reverse();
-                for d in v22_dirs {
+                // Sort so v22.x comes before v23+
+                eligible.sort();
+                for d in eligible {
                     candidates.push(d.join("bin/node"));
                 }
             }
         }
     }
 
+    // Homebrew "current" node (may be 22+)
+    candidates.push(PathBuf::from("/opt/homebrew/bin/node"));
+    candidates.push(PathBuf::from("/usr/local/bin/node"));
+
     // Check each candidate
     for candidate in &candidates {
         if candidate.exists() {
             if let Ok(output) = Command::new(candidate).arg("--version").output() {
                 let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if version.starts_with("v22") {
-                    return Ok(candidate.clone());
+                if let Some(major) = parse_major(&version) {
+                    if major >= MIN_NODE_MAJOR {
+                        return Ok(candidate.clone());
+                    }
                 }
             }
         }
@@ -57,8 +74,10 @@ pub fn resolve_node22() -> Result<PathBuf, String> {
                 if let Ok(ver_output) = Command::new(&node_path).arg("--version").output() {
                     let version =
                         String::from_utf8_lossy(&ver_output.stdout).trim().to_string();
-                    if version.starts_with("v22") {
-                        return Ok(node_path);
+                    if let Some(major) = parse_major(&version) {
+                        if major >= MIN_NODE_MAJOR {
+                            return Ok(node_path);
+                        }
                     }
                 }
             }
@@ -66,7 +85,7 @@ pub fn resolve_node22() -> Result<PathBuf, String> {
     }
 
     Err(
-        "Could not find Node.js 22. Install it via:\n  \
+        "Could not find Node.js >= 22. Install it via:\n  \
          brew install node@22\n  \
          or use nvm: nvm install 22"
             .to_string(),

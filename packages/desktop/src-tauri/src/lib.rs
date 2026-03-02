@@ -17,7 +17,7 @@ pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::TrayIconBuilder,
     Manager,
 };
 #[cfg(desktop)]
@@ -37,12 +37,18 @@ struct TrayMenuItems {
     tunnel_none: CheckMenuItem<tauri::Wry>,
 }
 
+/// Tauri command: open the dashboard window (called from loading page JS).
+#[tauri::command]
+fn cmd_open_dashboard(app: tauri::AppHandle) {
+    handle_dashboard(&app);
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
     #[cfg(desktop)]
     {
-        builder = builder.plugin(single_instance_init(|app, _args, _cwd| {
+        builder = builder.plugin(single_instance_init(|app: &tauri::AppHandle, _args, _cwd| {
             // Second instance launched: focus the existing window instead.
             // Prefer dashboard (active when server is running) over main (fallback/loading).
             if let Some(win) = app.get_webview_window("dashboard") {
@@ -64,6 +70,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_notification::init())
+        .invoke_handler(tauri::generate_handler![cmd_open_dashboard])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
         .setup(|app| {
@@ -103,6 +110,15 @@ pub fn run() {
                     s.last_window_height = Some(size.height as f64);
                     let _ = s.save();
                 }
+            }
+            // Closing any window stops the server and quits the app
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let app = window.app_handle();
+                if let Some(mgr) = app.try_state::<Mutex<ServerManager>>() {
+                    let mut mgr = lock_or_recover(&mgr);
+                    mgr.stop();
+                }
+                app.exit(0);
             }
         })
         .run(tauri::generate_context!())
@@ -188,8 +204,17 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         tunnel_none: tunnel_none.clone(),
     }));
 
-    let _tray = TrayIconBuilder::new()
+    // Load tray icon from embedded PNG (not from config — avoids dual tray icon conflict)
+    let icon_bytes = include_bytes!("../icons/tray-icon.png");
+    let img = image::load_from_memory(icon_bytes).expect("decode tray icon").to_rgba8();
+    let (w, h) = img.dimensions();
+    let icon = tauri::image::Image::new_owned(img.into_raw(), w, h);
+
+    let tray = TrayIconBuilder::new()
+        .icon(icon)
+        .icon_as_template(false)
         .menu(&menu)
+        .show_menu_on_left_click(true)
         .tooltip("Chroxy")
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
@@ -213,39 +238,12 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                let app = tray.app_handle();
-                let running = app
-                    .try_state::<Mutex<ServerManager>>()
-                    .map(|s| lock_or_recover(&s).is_running())
-                    .unwrap_or(false);
-
-                if running {
-                    let port;
-                    let token;
-                    {
-                        let mgr = app.state::<Mutex<ServerManager>>();
-                        let mgr = lock_or_recover(&mgr);
-                        port = mgr.port();
-                        token = mgr.token();
-                    }
-                    if app.get_webview_window("dashboard").is_some() {
-                        window::toggle_window(app, true);
-                    } else {
-                        window::open_dashboard(app, port, token.as_deref());
-                    }
-                } else {
-                    window::toggle_window(app, false);
-                }
-            }
-        })
         .build(app)?;
+
+    // Keep tray icon alive for the entire app lifetime.
+    // TrayIcon is registered with the app but the local reference must not be dropped
+    // on older Tauri versions where Drop removes the tray.
+    std::mem::forget(tray);
 
     Ok(())
 }
