@@ -29,7 +29,7 @@ fn default_true() -> bool {
 }
 
 fn default_tunnel_mode() -> String {
-    "quick".to_string()
+    "none".to_string()
 }
 
 impl Default for DesktopSettings {
@@ -37,7 +37,7 @@ impl Default for DesktopSettings {
         Self {
             auto_start_server: true,
             show_notifications: true,
-            tunnel_mode: "quick".to_string(),
+            tunnel_mode: "none".to_string(),
             node_path: None,
             last_window_x: None,
             last_window_y: None,

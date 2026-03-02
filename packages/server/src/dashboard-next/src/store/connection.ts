@@ -104,6 +104,13 @@ import {
 
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
+// Stable empty arrays for getActiveSessionState() fallback.
+// Inline [] creates new refs each call → useShallow detects false changes → infinite re-render.
+const EMPTY_AGENTS: never[] = [];
+const EMPTY_PROMPTS: never[] = [];
+const EMPTY_MCP_SERVERS: never[] = [];
+const EMPTY_DEV_PREVIEWS: never[] = [];
+
 /** Delay before auto-reconnecting after an unexpected socket close (ms) */
 const AUTO_RECONNECT_DELAY = 1500;
 /** Delay before reconnecting after a WebSocket error (ms) */
@@ -271,7 +278,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (activeSessionId && sessionStates[activeSessionId]) {
       return sessionStates[activeSessionId];
     }
-    // Fallback: construct from flat state
+    // Fallback: construct from flat state.
+    // IMPORTANT: use the module-level EMPTY_* constants (not inline [])
+    // so useShallow sees stable references and avoids infinite re-renders.
     return {
       messages: get().messages,
       streamingMessageId: get().streamingMessageId,
@@ -284,14 +293,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionCost: null,
       isIdle: true,
       health: 'healthy' as const,
-      activeAgents: [],
+      activeAgents: EMPTY_AGENTS,
       isPlanPending: false,
-      planAllowedPrompts: [],
+      planAllowedPrompts: EMPTY_PROMPTS,
       primaryClientId: null,
       conversationId: null,
       sessionContext: null,
-      mcpServers: [],
-      devPreviews: [],
+      mcpServers: EMPTY_MCP_SERVERS,
+      devPreviews: EMPTY_DEV_PREVIEWS,
     };
   },
 
@@ -396,8 +405,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
     }
 
-    // HTTP health check before WebSocket — verify tunnel is up
-    const httpUrl = url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+    // HTTP health check before WebSocket — verify server is up.
+    // Use root path (/) not the WS path (/ws) — GET /ws returns 404.
+    const httpBase = url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+    const httpUrl = new URL('/', httpBase).href;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000);
     fetch(httpUrl, { method: 'GET', signal: controller.signal })
@@ -755,6 +766,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   sendInput: (input, wireAttachments, options) => {
     const { socket, activeSessionId } = get();
+
+    // Show user message immediately (optimistic update + thinking indicator).
+    // Wire attachments use a different shape than MessageAttachment — pass text only for now.
+    get().addUserMessage(input);
+
     const payload: Record<string, unknown> = { type: 'input', data: input };
     if (activeSessionId) payload.sessionId = activeSessionId;
     if (wireAttachments?.length) {

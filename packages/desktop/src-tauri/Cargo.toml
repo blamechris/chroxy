@@ -18,8 +18,7 @@ dirs = "5"
 ureq = "2"
 libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
-
-[target.'cfg(desktop)'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-plugin-single-instance = "2"
 
 [dev-dependencies]

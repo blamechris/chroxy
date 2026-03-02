@@ -78,6 +78,25 @@ impl ServerManager {
         self.tunnel_mode = mode.to_string();
     }
 
+    /// Kill any process listening on the given port (cleanup from previous crash).
+    fn kill_port_holder(port: u16) {
+        if let Ok(output) = Command::new("lsof")
+            .args(["-ti", &format!("tcp:{}", port)])
+            .output()
+        {
+            let pids = String::from_utf8_lossy(&output.stdout);
+            for pid_str in pids.split_whitespace() {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    unsafe { libc::kill(pid, libc::SIGTERM); }
+                }
+            }
+            if !pids.trim().is_empty() {
+                // Give processes a moment to exit
+                thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+
     /// Check whether `cloudflared` is available on PATH.
     pub fn check_cloudflared() -> bool {
         Command::new("which")
@@ -98,6 +117,9 @@ impl ServerManager {
         // Reload config each start
         self.config = config::load_config();
 
+        // Kill any orphaned server on the port (e.g. from a previous crash)
+        Self::kill_port_holder(self.config.port);
+
         // Resolve Node 22 path
         let node_path = match &self.node_path {
             Some(p) => p.clone(),
@@ -116,14 +138,32 @@ impl ServerManager {
         // Build command
         let mut cmd = Command::new(&node_path);
         cmd.arg(&cli_js).arg("start");
-        cmd.env(
-            "PATH",
-            format!(
-                "{}:{}",
-                node_path.parent().unwrap().display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        );
+
+        // Build a comprehensive PATH.  macOS GUI apps inherit a minimal
+        // PATH (/usr/bin:/bin:/usr/sbin:/sbin) which misses Homebrew,
+        // nvm, and tools like cloudflared. Prepend common locations.
+        let node_bin = node_path.parent().unwrap().display().to_string();
+        let base_path = std::env::var("PATH").unwrap_or_default();
+        let mut extra_dirs: Vec<String> = vec![node_bin];
+        // Homebrew
+        for dir in &["/opt/homebrew/bin", "/usr/local/bin"] {
+            if !base_path.contains(dir) {
+                extra_dirs.push(dir.to_string());
+            }
+        }
+        // User-local bins
+        if let Some(home) = dirs::home_dir() {
+            let local_bin = home.join(".local/bin");
+            if local_bin.is_dir() {
+                extra_dirs.push(local_bin.display().to_string());
+            }
+        }
+        let full_path = format!("{}:{}", extra_dirs.join(":"), base_path);
+        cmd.env("PATH", &full_path);
+        // Ensure HOME is set — macOS GUI apps may not inherit it
+        if let Some(home) = dirs::home_dir() {
+            cmd.env("HOME", home);
+        }
         // Pass config as env vars (same pattern as supervisor.js)
         if let Some(ref token) = self.config.api_token {
             cmd.env("API_TOKEN", token);
@@ -234,7 +274,7 @@ impl ServerManager {
         self.start()
     }
 
-    /// Poll the health endpoint every 2s until Running or timeout (30s).
+    /// Poll the health endpoint every 2s until Running or timeout (60s).
     fn start_health_poll(&self) {
         let status = self.status.clone();
         let port = self.config.port;
@@ -244,19 +284,19 @@ impl ServerManager {
 
         thread::spawn(move || {
             let start = Instant::now();
-            // Use GET / — the canonical health check endpoint used by Cloudflare
-            // routing, app pre-connect verification, and supervisor.js
-            let url = format!("http://localhost:{}/", port);
+            // Use 127.0.0.1 (not localhost) to avoid IPv6 resolution issues
+            // in macOS GUI app context where DNS may resolve differently.
+            let url = format!("http://127.0.0.1:{}/", port);
 
             loop {
                 if !*lock_or_recover(&health_running) {
                     return;
                 }
 
-                if start.elapsed() > Duration::from_secs(30) {
+                if start.elapsed() > Duration::from_secs(60) {
                     let mut s = lock_or_recover(&status);
                     if *s == ServerStatus::Starting {
-                        *s = ServerStatus::Error("Health check timeout after 30s".to_string());
+                        *s = ServerStatus::Error("Health check timeout after 60s".to_string());
                     }
                     return;
                 }
@@ -306,9 +346,21 @@ impl ServerManager {
     }
 
     /// Resolve the chroxy CLI entry point (cli.js).
-    /// Checks: relative to binary (monorepo), then `which chroxy`, then CHROXY_SERVER_PATH env.
+    /// Checks: bundled .app resources, monorepo relative, CHROXY_SERVER_PATH env, `which chroxy`.
     fn resolve_cli_js() -> Result<PathBuf, String> {
-        // Check monorepo path relative to the Tauri binary.
+        // Strategy 1: Bundled inside .app (macOS).
+        // Binary lives at Contents/MacOS/chroxy-desktop,
+        // resources at Contents/Resources/server/src/cli.js.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(contents_dir) = exe.parent().and_then(|p| p.parent()) {
+                let bundled = contents_dir.join("Resources/server/src/cli.js");
+                if bundled.exists() {
+                    return Ok(bundled);
+                }
+            }
+        }
+
+        // Strategy 2: Monorepo path relative to the Tauri binary.
         // Walk up to 6 parent directories to find the monorepo root.
         // In dev: packages/desktop/src-tauri/target/debug/chroxy-desktop (5 levels up)
         // In release: packages/desktop/src-tauri/target/release/chroxy-desktop (5 levels up)
@@ -328,7 +380,7 @@ impl ServerManager {
             }
         }
 
-        // Check CHROXY_SERVER_PATH env — canonicalize and verify it's a .js file
+        // Strategy 3: CHROXY_SERVER_PATH env — canonicalize and verify it's a .js file
         if let Ok(path) = std::env::var("CHROXY_SERVER_PATH") {
             let p = PathBuf::from(&path);
             if let Ok(canonical) = p.canonicalize() {
@@ -343,7 +395,7 @@ impl ServerManager {
             }
         }
 
-        // Try `which chroxy` and resolve to its cli.js
+        // Strategy 4: `which chroxy` and resolve to its cli.js
         if let Ok(output) = Command::new("which").arg("chroxy").output() {
             let which_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !which_path.is_empty() {
@@ -356,7 +408,7 @@ impl ServerManager {
         }
 
         Err(
-            "Could not find chroxy server. Set CHROXY_SERVER_PATH or run from the monorepo."
+            "Could not find chroxy server. Checked: bundled .app resources, monorepo layout, CHROXY_SERVER_PATH env, and PATH (which chroxy)."
                 .to_string(),
         )
     }

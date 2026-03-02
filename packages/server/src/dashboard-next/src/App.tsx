@@ -35,9 +35,12 @@ declare global {
   }
 }
 
-/** Read chroxy_auth cookie value */
-function getCookie(name: string): string | null {
-  const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`))
+/** Read auth token from URL query param (preferred) or cookie (fallback) */
+function getAuthToken(): string | null {
+  const params = new URLSearchParams(window.location.search)
+  const queryToken = params.get('token')
+  if (queryToken) return queryToken
+  const match = document.cookie.match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
   if (!match || !match[1]) return null
   try {
     return decodeURIComponent(match[1])
@@ -113,7 +116,7 @@ export function App() {
 
   // Auto-connect on mount
   useEffect(() => {
-    const token = getCookie('chroxy_auth')
+    const token = getAuthToken()
     if (!token) return
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
@@ -193,7 +196,7 @@ export function App() {
   }, [])
 
   const handleRetry = useCallback(() => {
-    const token = getCookie('chroxy_auth')
+    const token = getAuthToken()
     if (!token) return
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const wsUrl = `${proto}://${window.location.host}/ws`

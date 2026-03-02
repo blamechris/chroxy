@@ -6988,11 +6988,10 @@ describe('dashboard endpoint', () => {
     assert.equal(res.headers.get('x-frame-options'), 'DENY')
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
 
-    // Verify nonce on injected config script
-    const nonceMatch = csp.match(/'nonce-([A-Za-z0-9+/=]+)'/)
-    assert.ok(nonceMatch, 'CSP should include a nonce for inline script')
+    // CSP uses 'unsafe-inline' for script-src (required for WKWebView + Vite builds)
+    assert.ok(csp.includes("'unsafe-inline'"), 'CSP should include unsafe-inline for script-src')
     const body = await res.text()
-    assert.ok(body.includes(`nonce="${nonceMatch[1]}"`), 'injected script should have nonce attribute')
+    assert.ok(body.includes('__CHROXY_CONFIG__'), 'injected config script should be present')
   })
 
   it('403 response has security headers when auth required', async () => {

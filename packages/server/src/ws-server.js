@@ -331,14 +331,10 @@ export class WsServer {
     }
     if (queryToken) {
       const encoded = encodeURIComponent(queryToken)
-      res.writeHead(302, {
-        'Location': dashUrl.pathname,
-        'Set-Cookie': `chroxy_auth=${encoded}; Path=/dashboard; SameSite=Strict; Max-Age=86400`,
-        'Cache-Control': 'no-store',
-        ...securityHeaders,
-      })
-      res.end()
-      return false
+      // Set cookie for future requests, but DON'T redirect — serve content
+      // directly. Tauri's WKWebView doesn't reliably send cookies on 302
+      // redirects to 127.0.0.1 with SameSite=Strict.
+      res.setHeader('Set-Cookie', `chroxy_auth=${encoded}; Path=/dashboard; SameSite=Strict; Max-Age=86400`)
     }
     return true
   }
@@ -362,6 +358,19 @@ export class WsServer {
   start(host) {
     // Create HTTP server that handles health checks, permission hooks, and WebSocket upgrades
     this.httpServer = createServer(async (req, res) => {
+      // CORS preflight — allow cross-origin requests from the Tauri WebView
+      // (loads from http://tauri.localhost, needs to reach http://127.0.0.1:PORT)
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+          'Access-Control-Max-Age': '86400',
+        })
+        res.end()
+        return
+      }
+
       // Health check endpoint — Cloudflare and the app verify connectivity via GET / and GET /health
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
         // Browser visitors (Accept: text/html) get redirected to the dashboard
@@ -375,7 +384,11 @@ export class WsServer {
           res.end()
           return
         }
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Vary': 'Accept' })
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Vary': 'Accept',
+          'Access-Control-Allow-Origin': '*',
+        })
         res.end(JSON.stringify({ status: 'ok', mode: this.serverMode, version: SERVER_VERSION }))
         return
       }
@@ -439,7 +452,7 @@ export class WsServer {
         if (!this._validateBearerAuth(req, res)) return
         const connInfo = readConnectionInfo()
         if (!connInfo || !connInfo.connectionUrl) {
-          res.writeHead(503, { 'Content-Type': 'application/json' })
+          res.writeHead(503, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
           res.end(JSON.stringify({ error: 'Connection info not available yet' }))
           return
         }
@@ -452,6 +465,7 @@ export class WsServer {
           res.writeHead(200, {
             'Content-Type': 'image/svg+xml',
             'Cache-Control': 'no-store',
+            'Access-Control-Allow-Origin': '*',
           })
           res.end(svg)
         } catch (_err) {
@@ -514,21 +528,19 @@ export class WsServer {
       if (req.method === 'GET' && /^\/dashboard(\/|$|\?)/.test(req.url || '')) {
         const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
 
-        // Generate nonce for CSP
-        const nonce = randomBytes(16).toString('base64')
         const securityHeaders = {
-          'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
+          'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
           'X-Frame-Options': 'DENY',
           'X-Content-Type-Options': 'nosniff',
         }
-
-        if (!this._authenticateDashboardRequest(req, res, dashUrl, securityHeaders)) return
 
         const distDir = join(__dirname, 'dashboard-next', 'dist')
         // Strip prefix to get relative path within dist
         const relPath = dashUrl.pathname.replace(/^\/dashboard\/?/, '') || 'index.html'
 
-        // Serve static assets (hashed filenames from Vite build)
+        // Serve static assets WITHOUT auth — hashed filenames from Vite build
+        // are not sensitive (app code, not user data), and the browser won't
+        // send the auth cookie/token on sub-resource requests reliably.
         if (relPath.startsWith('assets/')) {
           const filePath = resolve(distDir, relPath)
           // Path traversal guard — resolved path must stay within distDir
@@ -560,12 +572,15 @@ export class WsServer {
           return
         }
 
+        // Auth required for HTML pages (not assets above)
+        if (!this._authenticateDashboardRequest(req, res, dashUrl, securityHeaders)) return
+
         // SPA fallback — serve index.html with config injection
         const indexPath = join(distDir, 'index.html')
         if (existsSync(indexPath)) {
           let html = readFileSync(indexPath, 'utf-8')
-          // Inject server config with nonce before closing </head>
-          const configScript = `<script nonce="${nonce}">window.__CHROXY_CONFIG__={port:${this.port},noEncrypt:${!this._encryptionEnabled}}</script>`
+          // Inject server config before closing </head>
+          const configScript = `<script>window.__CHROXY_CONFIG__={port:${this.port},noEncrypt:${!this._encryptionEnabled}}</script>`
           html = html.replace('</head>', `${configScript}\n</head>`)
           res.writeHead(200, {
             'Content-Type': 'text/html; charset=utf-8',
