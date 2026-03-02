@@ -4,12 +4,9 @@
  * Triggered by `@` in InputBar. Displays files from `list_files` WS response.
  */
 import { useMemo, useRef, useEffect } from 'react'
+import type { FilePickerItem } from '../store/types'
 
-export interface FilePickerItem {
-  path: string
-  type: 'file'
-  size: number | null
-}
+export type { FilePickerItem }
 
 export interface FilePickerProps {
   files: FilePickerItem[] | null
@@ -39,6 +36,16 @@ export function FilePicker({
     return () => document.removeEventListener('mousedown', handler)
   }, [onClose])
 
+  const listRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (listRef.current && selectedIndex >= 0) {
+      const items = listRef.current.querySelectorAll('[role="option"]')
+      const el = items[selectedIndex] as HTMLElement | undefined
+      el?.scrollIntoView?.({ block: 'nearest' })
+    }
+  }, [selectedIndex])
+
   const filtered = useMemo(() => {
     if (!files) return null
     if (!filter) return files
@@ -54,6 +61,10 @@ export function FilePicker({
     )
   }
 
+  const DISPLAY_CAP = 200
+  const overflow = filtered.length > DISPLAY_CAP ? filtered.length - DISPLAY_CAP : 0
+  const display = overflow > 0 ? filtered.slice(0, DISPLAY_CAP) : filtered
+
   if (filtered.length === 0) {
     return (
       <div ref={ref} className="file-picker" data-testid="file-picker">
@@ -64,8 +75,8 @@ export function FilePicker({
 
   return (
     <div ref={ref} className="file-picker" data-testid="file-picker">
-      <div role="listbox" aria-label="File picker">
-        {filtered.map((file, i) => (
+      <div ref={listRef} role="listbox" aria-label="File picker">
+        {display.map((file, i) => (
           <div
             key={file.path}
             role="option"
@@ -80,6 +91,9 @@ export function FilePicker({
           </div>
         ))}
       </div>
+      {overflow > 0 && (
+        <div className="file-picker-overflow">{overflow} more files...</div>
+      )}
     </div>
   )
 }

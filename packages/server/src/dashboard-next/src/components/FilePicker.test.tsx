@@ -1,9 +1,14 @@
 /**
  * FilePicker component tests (#1286)
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { FilePicker, type FilePickerItem } from './FilePicker'
+
+// jsdom doesn't implement scrollIntoView
+beforeAll(() => {
+  Element.prototype.scrollIntoView = vi.fn()
+})
 
 afterEach(cleanup)
 
@@ -141,6 +146,65 @@ describe('FilePicker', () => {
     )
     fireEvent.mouseDown(screen.getByTestId('outside'))
     expect(onClose).toHaveBeenCalled()
+  })
+
+  it('scrolls selected item into view on selectedIndex change', () => {
+    const { rerender } = render(
+      <FilePicker
+        files={mockFiles}
+        filter=""
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        selectedIndex={0}
+      />
+    )
+
+    ;(Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+
+    rerender(
+      <FilePicker
+        files={mockFiles}
+        filter=""
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        selectedIndex={2}
+      />
+    )
+
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+  })
+
+  it('caps display at 200 items with overflow indicator', () => {
+    const manyFiles: FilePickerItem[] = Array.from({ length: 300 }, (_, i) => ({
+      path: `src/file${i.toString().padStart(3, '0')}.ts`,
+      type: 'file' as const,
+      size: 100,
+    }))
+    render(
+      <FilePicker
+        files={manyFiles}
+        filter=""
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        selectedIndex={0}
+      />
+    )
+    const items = screen.getAllByRole('option')
+    expect(items.length).toBe(200)
+    expect(screen.getByText(/100 more files/)).toBeInTheDocument()
+  })
+
+  it('does not show overflow indicator when under cap', () => {
+    render(
+      <FilePicker
+        files={mockFiles}
+        filter=""
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        selectedIndex={0}
+      />
+    )
+    expect(screen.queryByText(/more files/)).not.toBeInTheDocument()
   })
 
   it('shows file size in human-readable format', () => {
