@@ -95,6 +95,8 @@ export function App() {
     isPlanPending,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
+  const slashCommands = useConnectionStore(s => s.slashCommands)
+
   // Store actions (stable refs)
   const connect = useConnectionStore(s => s.connect)
   const sendInput = useConnectionStore(s => s.sendInput)
@@ -112,6 +114,7 @@ export function App() {
   const sendUserQuestionResponse = useConnectionStore(s => s.sendUserQuestionResponse)
   const markPromptAnswered = useConnectionStore(s => s.markPromptAnswered)
   const fetchFileList = useConnectionStore(s => s.fetchFileList)
+  const fetchSlashCommands = useConnectionStore(s => s.fetchSlashCommands)
 
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
@@ -388,6 +391,8 @@ export function App() {
         placeholder={isConnected ? 'Type a message... (Cmd+Enter to send)' : 'Connecting...'}
         filePickerFiles={filePickerFiles}
         onFileTrigger={fetchFileList}
+        slashCommands={slashCommands}
+        onSlashTrigger={fetchSlashCommands}
       />
 
       {/* Modals */}
