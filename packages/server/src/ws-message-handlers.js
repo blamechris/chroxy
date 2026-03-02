@@ -1,5 +1,6 @@
-import { statSync, realpathSync } from 'fs'
+import { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
+import { resolve, relative } from 'path'
 import { ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { WebTaskUnavailableError } from './web-task-manager.js'
 import { scanConversations } from './conversation-scanner.js'
@@ -31,9 +32,24 @@ export function validateAttachments(attachments) {
   for (let i = 0; i < attachments.length; i++) {
     const att = attachments[i]
     if (!att || typeof att !== 'object') return `attachment[${i}]: not an object`
-    if (typeof att.type !== 'string' || (att.type !== 'image' && att.type !== 'document')) {
-      return `attachment[${i}]: type must be 'image' or 'document'`
+    if (typeof att.type !== 'string' || (att.type !== 'image' && att.type !== 'document' && att.type !== 'file_ref')) {
+      return `attachment[${i}]: type must be 'image', 'document', or 'file_ref'`
     }
+
+    // file_ref: project-relative path — server reads content before sending to Claude
+    if (att.type === 'file_ref') {
+      if (typeof att.path !== 'string' || !att.path.trim()) {
+        return `attachment[${i}]: file_ref requires a non-empty path`
+      }
+      if (att.path.startsWith('/')) {
+        return `attachment[${i}]: file_ref path must not be absolute`
+      }
+      if (att.path.split('/').includes('..')) {
+        return `attachment[${i}]: file_ref path must not contain traversal (..)`
+      }
+      continue
+    }
+
     if (typeof att.mediaType !== 'string') return `attachment[${i}]: missing mediaType`
     if (typeof att.data !== 'string') return `attachment[${i}]: missing data`
     if (typeof att.name !== 'string') return `attachment[${i}]: missing name`
@@ -80,6 +96,52 @@ function validateCwdWithinHome(cwd) {
   return null
 }
 
+const MAX_FILE_REF_SIZE = 1 * 1024 * 1024 // 1MB max per file_ref
+
+/**
+ * Resolve file_ref attachments by reading file content from the session's cwd.
+ * Converts file_ref entries to standard document attachments with base64 data.
+ * Non-file_ref attachments are passed through unchanged.
+ *
+ * @param {Array} attachments - Validated attachment array
+ * @param {string} cwd - Session working directory
+ * @returns {Array} Resolved attachments (file_ref → document with inline text)
+ */
+export function resolveFileRefAttachments(attachments, cwd) {
+  if (!attachments?.length || !cwd) return attachments
+  return attachments.map(att => {
+    if (att.type !== 'file_ref') return att
+    const absPath = resolve(cwd, att.path)
+    // Security: ensure resolved path is within cwd
+    const rel = relative(cwd, absPath)
+    if (rel.startsWith('..') || resolve(cwd, rel) !== absPath) {
+      return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: cannot read file outside project: ${att.path}]`).toString('base64'), name: att.name || att.path }
+    }
+    // Security: verify after symlink resolution to prevent symlink escape
+    try {
+      const realAbs = realpathSync(absPath)
+      const realCwd = realpathSync(cwd)
+      const realRel = relative(realCwd, realAbs)
+      if (realRel.startsWith('..')) {
+        return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: cannot read file outside project: ${att.path}]`).toString('base64'), name: att.name || att.path }
+      }
+    } catch {
+      // realpathSync fails if file doesn't exist — let readFileSync handle ENOENT below
+    }
+    try {
+      const stat = statSync(absPath)
+      if (stat.size > MAX_FILE_REF_SIZE) {
+        return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: file too large (${(stat.size / 1024).toFixed(0)}KB, max 1MB): ${att.path}]`).toString('base64'), name: att.name || att.path }
+      }
+      const content = readFileSync(absPath, 'utf-8')
+      return { type: 'document', mediaType: 'text/plain', data: Buffer.from(content).toString('base64'), name: att.name || att.path }
+    } catch (err) {
+      const msg = err?.code === 'ENOENT' ? 'file not found' : err?.code === 'EACCES' ? 'permission denied' : 'read error'
+      return { type: 'document', mediaType: 'text/plain', data: Buffer.from(`[Error: ${msg}: ${att.path}]`).toString('base64'), name: att.name || att.path }
+    }
+  })
+}
+
 /**
  * Handle messages in multi-session mode.
  *
@@ -115,6 +177,11 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
           attachments = undefined
           break
         }
+      }
+
+      // Resolve file_ref attachments to actual file content
+      if (attachments?.length) {
+        attachments = resolveFileRefAttachments(attachments, entry.cwd)
       }
 
       if ((!text || !text.trim()) && !attachments?.length) break
@@ -708,6 +775,10 @@ export function handleCliMessage(ws, client, msg, ctx) {
           attachments = undefined
           break
         }
+      }
+      // Resolve file_ref attachments to actual file content
+      if (attachments?.length) {
+        attachments = resolveFileRefAttachments(attachments, ctx.cliSession?.cwd || null)
       }
       if ((!text || !text.trim()) && !attachments?.length) break
       const trimmed = text?.trim() || ''

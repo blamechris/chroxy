@@ -1,12 +1,20 @@
 import { z } from 'zod'
 
 // -- Attachment schema (reusable) --
-const AttachmentSchema = z.object({
+const BinaryAttachmentSchema = z.object({
   type: z.enum(['image', 'document']),
   mediaType: z.string(),
   data: z.string(),
   name: z.string(),
 })
+
+const FileRefAttachmentSchema = z.object({
+  type: z.literal('file_ref'),
+  path: z.string(),
+  name: z.string().optional(),
+})
+
+const AttachmentSchema = z.union([BinaryAttachmentSchema, FileRefAttachmentSchema])
 
 // -- Device info (optional in auth) --
 const DeviceInfoSchema = z.object({
