@@ -63,4 +63,9 @@ describe('LoadingScreen', () => {
     render(<LoadingScreen stage={3} statusText="Ready!" qrSvg="<svg/>" />)
     expect(screen.queryByRole('list')).not.toBeInTheDocument()
   })
+
+  it('hides dashboard button when onOpenDashboard is omitted', () => {
+    render(<LoadingScreen stage={3} statusText="Ready!" qrSvg="<svg/>" />)
+    expect(screen.queryByRole('button', { name: /open dashboard/i })).not.toBeInTheDocument()
+  })
 })
