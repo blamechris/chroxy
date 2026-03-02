@@ -153,6 +153,13 @@
       margin-bottom: 1rem;
     }
     .hidden { display: none; }
+    .version-label {
+      font-size: 0.65rem;
+      color: #4a9eff;
+      font-family: monospace;
+      opacity: 0.5;
+      margin-top: 2rem;
+    }
   </style>
 </head>
 <body>
@@ -200,9 +207,10 @@
       <p>Ensure <code>cloudflared</code> is installed: <code>brew install cloudflared</code></p>
       <p>Or switch to <strong>Local Only</strong> mode in the tray menu.</p>
     </div>
+
+    <div class="version-label">v0.2.0-dev.16</div>
   </div>
   </div>
-  <div style="position:fixed;bottom:12px;left:0;right:0;text-align:center;font-size:0.7rem;color:#4a9eff;pointer-events:none;font-family:monospace;opacity:0.6;z-index:9999;">v0.2.0-dev.15</div>
 
   <script>
   // Stub available IMMEDIATELY — Tauri's win.eval() can call this

@@ -1,4 +1,5 @@
 use tauri::{AppHandle, Manager};
+use tauri::webview::WebviewWindowBuilder;
 
 const DASHBOARD_LABEL: &str = "dashboard";
 const FALLBACK_LABEL: &str = "main";
@@ -20,16 +21,32 @@ fn url_encode(s: &str) -> String {
     encoded
 }
 
-/// Open the dashboard in the system default browser.
+/// Open the dashboard in a Tauri webview window (or focus if already open).
 pub fn open_dashboard(app: &AppHandle, port: u16, token: Option<&str>) {
     let url = match token {
         Some(t) => format!("http://127.0.0.1:{}/dashboard?token={}", port, url_encode(t)),
         None => format!("http://127.0.0.1:{}/dashboard", port),
     };
 
-    use tauri_plugin_shell::ShellExt;
-    use tauri_plugin_shell::open::Program;
-    let _ = app.shell().open(&url, None::<Program>);
+    // If dashboard window already exists, navigate and focus it
+    if let Some(win) = app.get_webview_window(DASHBOARD_LABEL) {
+        let _ = win.eval(&format!("window.location.href = '{}';", url));
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+
+    // Create a new dashboard window pointing at the server URL
+    let webview_url = tauri::WebviewUrl::External(url.parse().expect("valid dashboard URL"));
+    match WebviewWindowBuilder::new(app, DASHBOARD_LABEL, webview_url)
+        .title("Chroxy Dashboard")
+        .inner_size(1100.0, 750.0)
+        .center()
+        .build()
+    {
+        Ok(_) => {}
+        Err(e) => eprintln!("[window] Failed to create dashboard window: {}", e),
+    }
 }
 
 /// Show the fallback/loading page with optional port, token, and tunnel mode for health+QR polling.
