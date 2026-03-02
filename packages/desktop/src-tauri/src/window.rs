@@ -1,4 +1,5 @@
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
+use serde::Serialize;
 
 const MAIN_LABEL: &str = "main";
 
@@ -27,21 +28,74 @@ pub fn dashboard_url(port: u16, token: Option<&str>) -> String {
     }
 }
 
-/// Navigate the main window to the dashboard URL.
-pub fn navigate_to_dashboard(app: &AppHandle, port: u16, token: Option<&str>) {
-    let url = dashboard_url(port, token);
-    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
-        let _ = win.eval(&format!("window.location.href = '{}';", url));
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+// -- Tauri event payloads --
+
+#[derive(Clone, Serialize)]
+pub struct ServerReadyPayload {
+    pub port: u16,
+    pub token: String,
+    pub url: String,
 }
 
-/// Navigate the main window back to the bundled loading page and show it.
-/// Used after server stop, crash, or when server is not yet running.
-pub fn show_loading(app: &AppHandle) {
+#[derive(Clone, Serialize)]
+pub struct ServerErrorPayload {
+    pub message: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct ServerRestartingPayload {
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub backoff_secs: u64,
+}
+
+// -- Event emission (replaces eval-based injection) --
+
+/// Emit `server_ready` event with dashboard URL payload.
+/// The loading page JS listens and navigates to the URL.
+pub fn emit_server_ready(app: &AppHandle, port: u16, token: Option<&str>) {
+    let url = dashboard_url(port, token);
+    let payload = ServerReadyPayload {
+        port,
+        token: token.unwrap_or("").to_string(),
+        url,
+    };
+    let _ = app.emit("server_ready", payload);
+    show_window(app);
+}
+
+/// Emit `server_stopped` event.
+/// React dashboard listens and shows disconnected state.
+pub fn emit_server_stopped(app: &AppHandle) {
+    let _ = app.emit("server_stopped", ());
+    show_window(app);
+}
+
+/// Emit `server_error` event with error message.
+pub fn emit_server_error(app: &AppHandle, message: &str) {
+    let payload = ServerErrorPayload {
+        message: message.to_string(),
+    };
+    let _ = app.emit("server_error", payload);
+    show_window(app);
+}
+
+/// Emit `server_restarting` event with restart progress.
+pub fn emit_server_restarting(app: &AppHandle, attempt: u32, max_attempts: u32, backoff_secs: u64) {
+    let payload = ServerRestartingPayload {
+        attempt,
+        max_attempts,
+        backoff_secs,
+    };
+    let _ = app.emit("server_restarting", payload);
+    show_window(app);
+}
+
+// -- Window management (no eval) --
+
+/// Show and focus the main window.
+pub fn show_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window(MAIN_LABEL) {
-        let _ = win.eval("window.location.href = 'tauri://localhost';");
         let _ = win.show();
         let _ = win.set_focus();
     }
@@ -92,5 +146,40 @@ mod tests {
     fn dashboard_url_encodes_token_special_chars() {
         let url = dashboard_url(9000, Some("key with spaces&more"));
         assert!(url.contains("key%20with%20spaces%26more"));
+    }
+
+    #[test]
+    fn server_ready_payload_serializes() {
+        let payload = ServerReadyPayload {
+            port: 8765,
+            token: "abc".to_string(),
+            url: "http://127.0.0.1:8765/dashboard?token=abc".to_string(),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["port"], 8765);
+        assert_eq!(json["token"], "abc");
+        assert!(json["url"].as_str().unwrap().contains("/dashboard"));
+    }
+
+    #[test]
+    fn server_error_payload_serializes() {
+        let payload = ServerErrorPayload {
+            message: "something went wrong".to_string(),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["message"], "something went wrong");
+    }
+
+    #[test]
+    fn server_restarting_payload_serializes() {
+        let payload = ServerRestartingPayload {
+            attempt: 2,
+            max_attempts: 3,
+            backoff_secs: 6,
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["attempt"], 2);
+        assert_eq!(json["max_attempts"], 3);
+        assert_eq!(json["backoff_secs"], 6);
     }
 }
