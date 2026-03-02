@@ -428,7 +428,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generation_advances_on_stop() {
+    fn initial_generation_is_zero() {
         let mgr = ServerManager::new();
         let initial = mgr.health_generation.load(Ordering::SeqCst);
         assert_eq!(initial, 0);
