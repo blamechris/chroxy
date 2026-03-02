@@ -534,13 +534,13 @@ export class WsServer {
           'X-Content-Type-Options': 'nosniff',
         }
 
-        if (!this._authenticateDashboardRequest(req, res, dashUrl, securityHeaders)) return
-
         const distDir = join(__dirname, 'dashboard-next', 'dist')
         // Strip prefix to get relative path within dist
         const relPath = dashUrl.pathname.replace(/^\/dashboard\/?/, '') || 'index.html'
 
-        // Serve static assets (hashed filenames from Vite build)
+        // Serve static assets WITHOUT auth — hashed filenames from Vite build
+        // are not sensitive (app code, not user data), and the browser won't
+        // send the auth cookie/token on sub-resource requests reliably.
         if (relPath.startsWith('assets/')) {
           const filePath = resolve(distDir, relPath)
           // Path traversal guard — resolved path must stay within distDir
@@ -571,6 +571,9 @@ export class WsServer {
           res.end('Asset not found')
           return
         }
+
+        // Auth required for HTML pages (not assets above)
+        if (!this._authenticateDashboardRequest(req, res, dashUrl, securityHeaders)) return
 
         // SPA fallback — serve index.html with config injection
         const indexPath = join(distDir, 'index.html')
