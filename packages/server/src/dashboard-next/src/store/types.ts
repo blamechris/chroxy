@@ -264,6 +264,12 @@ export interface SlashCommand {
   source: 'project' | 'user';
 }
 
+export interface FilePickerItem {
+  path: string;
+  type: 'file';
+  size: number | null;
+}
+
 export interface CustomAgent {
   name: string;
   description: string;
@@ -380,6 +386,9 @@ export interface ConnectionState {
   // Slash commands from server
   slashCommands: SlashCommand[];
 
+  // File picker items from list_files
+  filePickerFiles: FilePickerItem[] | null;
+
   // Custom agents from server
   customAgents: CustomAgent[];
 
@@ -470,6 +479,9 @@ export interface ConnectionState {
 
   // Slash commands
   fetchSlashCommands: () => void;
+
+  // File picker
+  fetchFileList: (query?: string) => void;
 
   // Custom agents
   fetchCustomAgents: () => void;

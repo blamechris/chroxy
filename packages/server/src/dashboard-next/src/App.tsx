@@ -79,6 +79,7 @@ export function App() {
   const serverErrors = useConnectionStore(s => s.serverErrors)
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
   const terminalRawBuffer = useConnectionStore(s => s.terminalRawBuffer)
+  const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
 
   // Session-level state — useShallow prevents re-renders when getActiveSessionState()
   // returns a new fallback object with the same property values
@@ -110,6 +111,7 @@ export function App() {
   const setTerminalWriteCallback = useConnectionStore(s => s.setTerminalWriteCallback)
   const sendUserQuestionResponse = useConnectionStore(s => s.sendUserQuestionResponse)
   const markPromptAnswered = useConnectionStore(s => s.markPromptAnswered)
+  const fetchFileList = useConnectionStore(s => s.fetchFileList)
 
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
@@ -384,6 +386,8 @@ export function App() {
         disabled={!isConnected}
         isStreaming={streamingMessageId !== null}
         placeholder={isConnected ? 'Type a message... (Cmd+Enter to send)' : 'Connecting...'}
+        filePickerFiles={filePickerFiles}
+        onFileTrigger={fetchFileList}
       />
 
       {/* Modals */}

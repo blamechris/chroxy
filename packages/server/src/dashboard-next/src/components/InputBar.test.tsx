@@ -227,6 +227,92 @@ describe('InputBar', () => {
   })
 })
 
+describe('InputBar file picker (#1286)', () => {
+  const mockFiles = [
+    { path: 'src/index.ts', type: 'file' as const, size: 1024 },
+    { path: 'README.md', type: 'file' as const, size: 256 },
+    { path: 'package.json', type: 'file' as const, size: 128 },
+  ]
+
+  it('shows file picker when @ is typed at start', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} filePickerFiles={mockFiles} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '@' } })
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+  })
+
+  it('does not show file picker when @ is mid-text', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} filePickerFiles={mockFiles} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'email@test' } })
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+  })
+
+  it('filters files as user types after @', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} filePickerFiles={mockFiles} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '@README' } })
+    expect(screen.getByText('README.md')).toBeInTheDocument()
+    expect(screen.queryByText('src/index.ts')).not.toBeInTheDocument()
+  })
+
+  it('inserts selected file path into input on Enter', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} filePickerFiles={mockFiles} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '@' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(textarea.value).toContain('src/index.ts')
+  })
+
+  it('closes picker on Escape without calling onInterrupt', () => {
+    const onInterrupt = vi.fn()
+    render(<InputBar onSend={vi.fn()} onInterrupt={onInterrupt} filePickerFiles={mockFiles} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '@' } })
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    expect(onInterrupt).not.toHaveBeenCalled()
+  })
+
+  it('navigates with arrow keys', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} filePickerFiles={mockFiles} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '@' } })
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    const items = screen.getAllByRole('option')
+    expect(items[1]).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('calls onFileTrigger when @ is typed', () => {
+    const onFileTrigger = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        filePickerFiles={mockFiles}
+        onFileTrigger={onFileTrigger}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '@' } })
+    expect(onFileTrigger).toHaveBeenCalled()
+  })
+
+  it('opens picker with null files for async loading', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} filePickerFiles={null} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '@' } })
+    expect(screen.getByText('Loading files...')).toBeInTheDocument()
+  })
+
+  it('does not show picker when filePickerFiles prop is not provided', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '@' } })
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+  })
+})
+
 describe('ReconnectBanner', () => {
   it('renders when visible', () => {
     render(<ReconnectBanner visible attempt={1} maxAttempts={8} onRetry={vi.fn()} />)

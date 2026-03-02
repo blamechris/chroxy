@@ -656,6 +656,7 @@
 
 /* ---- Input Bar ---- */
 .input-bar {
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 8px;
@@ -663,6 +664,59 @@
   background: var(--bg-header);
   border-top: 1px solid var(--border-primary);
   flex-shrink: 0;
+}
+
+/* ---- File Picker ---- */
+.file-picker {
+  position: absolute;
+  bottom: 100%;
+  left: 16px;
+  right: 16px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.3);
+  z-index: 10;
+  margin-bottom: 4px;
+}
+
+.file-picker-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.file-picker-item:hover,
+.file-picker-item.selected {
+  background: var(--bg-hover);
+}
+
+.file-picker-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.file-picker-size {
+  margin-left: 12px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.file-picker-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
 }
 
 .input-bar textarea {
