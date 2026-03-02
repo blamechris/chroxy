@@ -139,7 +139,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
       ? outerHeight
       : outerHeight - paddingY - borderY
     el.style.height = assignedHeight + 'px'
-  }, [])
+  }, [filePickerFiles, filePickerOpen, onFileTrigger])
 
   return (
     <div className="input-bar" data-testid="input-bar">

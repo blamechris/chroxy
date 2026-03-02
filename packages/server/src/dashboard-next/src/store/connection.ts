@@ -631,6 +631,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       restartingSince: null,
       pendingPermissionConfirm: null,
       slashCommands: [],
+      filePickerFiles: null,
       customAgents: [],
       checkpoints: [],
       _directoryListingCallback: null,
