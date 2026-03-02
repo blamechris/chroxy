@@ -586,7 +586,7 @@
 }
 
 .question-freetext-input::placeholder {
-  color: var(--text-dim);
+  color: var(--text-disabled);
 }
 
 .question-freetext-send {
