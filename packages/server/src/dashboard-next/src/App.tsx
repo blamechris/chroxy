@@ -10,6 +10,8 @@ import { useConnectionStore } from './store/connection'
 import type { ChatMessage } from './store/connection'
 import type { ChatViewMessage } from './components/ChatView'
 
+import { CommandPalette } from './components/CommandPalette'
+import { useCommands, recordMruCommand } from './store/commands'
 import { ChatView } from './components/ChatView'
 import { TerminalView, type TerminalHandle } from './components/TerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
@@ -117,6 +119,32 @@ export function App() {
   const markPromptAnswered = useConnectionStore(s => s.markPromptAnswered)
   const fetchFileList = useConnectionStore(s => s.fetchFileList)
   const fetchSlashCommands = useConnectionStore(s => s.fetchSlashCommands)
+
+  // Command palette
+  const commands = useCommands()
+  const [paletteOpen, setPaletteOpen] = useState(false)
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault()
+        setPaletteOpen(prev => !prev)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
+  const trackedCommands = useMemo(
+    () => commands.map(cmd => ({
+      ...cmd,
+      action: () => {
+        recordMruCommand(cmd.id)
+        cmd.action()
+      },
+    })),
+    [commands],
+  )
 
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
@@ -452,6 +480,13 @@ export function App() {
 
       {/* Toasts */}
       <Toast items={toastItems} onDismiss={dismissServerError} />
+
+      {/* Command palette */}
+      <CommandPalette
+        commands={trackedCommands}
+        isOpen={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+      />
     </div>
   )
 }
