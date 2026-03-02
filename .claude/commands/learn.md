@@ -8,11 +8,27 @@ Capture genuinely novel learnings from the current session and persist them to t
 
 ## Instructions
 
-### 0. Gate Check -- Is There Anything Worth Learning?
+### 0. Read Error Journal
+
+Check the error journal for accumulated cross-session patterns:
+
+```bash
+cat ~/.claude/projects/*/memory/error-journal.md 2>/dev/null
+```
+
+The error journal captures tool call failures and recurring mistakes logged during normal work. Entries accumulate across sessions — they are NOT cleaned up automatically.
+
+- If the journal has entries, include them as candidate sources alongside conversation recall in Step 1
+- Journal entries with 2+ occurrences (same pattern seen in different sessions) are stronger candidates than single observations
+- An entry with a tally (e.g., `(x3)`) means it's been seen multiple times — prioritize extracting a behavioral insight from it
+
+**Do NOT skip the gate check (Step 0.5) just because the journal has entries.** The journal is an input, not an override.
+
+### 0.5. Gate Check -- Is There Anything Worth Learning?
 
 Before doing any extraction work, answer one question honestly:
 
-**Did this session produce knowledge that would cause Claude to _behave differently_ in a future task?**
+**Did this session OR the error journal produce knowledge that would cause Claude to _behave differently_ in a future task?**
 
 Apply the **Behavioral Test**. A learning is only worth persisting if it describes a concrete change in approach:
 
@@ -145,9 +161,19 @@ When the user approves (e.g., "yes", "apply all", "1 and 3", "skip 2"):
 
 **Do NOT commit.** The user decides when and how to commit.
 
+**Clean up error journal:** After persisting, remove any error journal entries that were the source of a persisted insight. Entries that were NOT persisted (not actionable yet, or didn't pass the quality bar) stay in the journal — they may accumulate more evidence in future sessions.
+
+```bash
+# Read current journal, remove lines that match persisted insights, write back
+# Only remove entries whose pattern was captured in the persisted insight
+# Leave unrelated entries and entries that didn't graduate
+```
+
+If the journal becomes empty after cleanup, delete the file.
+
 Final output -- one line:
 ```
-Persisted N of M insights. Files changed: [list].
+Persisted N of M insights. Files changed: [list]. Journal: K entries cleaned.
 ```
 
 ## Safety Rules
