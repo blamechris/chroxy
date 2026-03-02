@@ -658,6 +658,7 @@
 .input-bar {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 8px;
   padding: 12px 16px;
@@ -717,6 +718,49 @@
   text-align: center;
   color: var(--text-muted);
   font-size: var(--text-sm);
+}
+
+/* Attachment chips row */
+.attachment-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 100%;
+  padding-bottom: 4px;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--scrollbar-thumb);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  max-width: 200px;
+}
+
+.chip-filename {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.chip-remove {
+  background: none;
+  border: none;
+  color: var(--text-disabled);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.chip-remove:hover {
+  color: var(--text-primary);
 }
 
 .input-bar textarea {

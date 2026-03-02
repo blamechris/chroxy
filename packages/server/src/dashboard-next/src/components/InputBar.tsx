@@ -2,22 +2,30 @@
  * InputBar — auto-expanding textarea with send/interrupt.
  *
  * Enter for newline, Cmd/Ctrl+Enter to send, Escape to interrupt.
- * Supports file picker (@ trigger) for file attachment.
+ * Supports file picker (@ trigger) and attachment chips.
  */
 import { useState, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent } from 'react'
 import { FilePicker, type FilePickerItem } from './FilePicker'
+import { AttachmentChip } from './AttachmentChip'
+
+export interface FileAttachment {
+  path: string
+  name: string
+}
 
 export interface InputBarProps {
-  onSend: (text: string) => void
+  onSend: (text: string, attachments?: FileAttachment[]) => void
   onInterrupt: () => void
   disabled?: boolean
   isStreaming?: boolean
   placeholder?: string
   filePickerFiles?: FilePickerItem[] | null
   onFileTrigger?: () => void
+  attachments?: FileAttachment[]
+  onRemoveAttachment?: (path: string) => void
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placeholder, filePickerFiles, onFileTrigger }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment }: InputBarProps) {
   const [value, setValue] = useState('')
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
@@ -62,15 +70,20 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
 
   const send = useCallback(() => {
     const trimmed = value.trim()
-    if (!trimmed) return
-    onSend(trimmed)
+    const hasAttachments = attachments && attachments.length > 0
+    if (!trimmed && !hasAttachments) return
+    if (hasAttachments) {
+      onSend(trimmed, attachments)
+    } else {
+      onSend(trimmed)
+    }
     setValue('')
     setFilePickerOpen(false)
     setFileSelectedIndex(0)
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [value, onSend])
+  }, [value, onSend, attachments])
 
   const handleKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
     // File picker keyboard handling
@@ -154,6 +167,8 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     el.style.height = assignedHeight + 'px'
   }, [filePickerFiles, filePickerOpen, onFileTrigger])
 
+  const hasChips = attachments && attachments.length > 0
+
   return (
     <div className="input-bar" data-testid="input-bar">
       {filePickerOpen && filePickerFiles !== undefined && (
@@ -164,6 +179,18 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
           onClose={() => { setFilePickerOpen(false); setFileSelectedIndex(0) }}
           selectedIndex={fileSelectedIndex}
         />
+      )}
+      {hasChips && (
+        <div className="attachment-chips" data-testid="attachment-chips">
+          {attachments.map(att => (
+            <AttachmentChip
+              key={att.path}
+              name={att.name}
+              path={att.path}
+              onRemove={() => onRemoveAttachment?.(att.path)}
+            />
+          ))}
+        </div>
       )}
       <span id={shortcutsId} className="sr-only">
         Press Cmd/Ctrl+Enter to send, Escape to interrupt

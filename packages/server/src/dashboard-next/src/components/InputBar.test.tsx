@@ -355,3 +355,100 @@ describe('ReconnectBanner', () => {
     expect(screen.getByText(/Server restarting/)).toBeInTheDocument()
   })
 })
+
+describe('InputBar attachments (#1287)', () => {
+  it('renders attachment chips when attachments are provided', () => {
+    const attachments = [{ path: 'src/App.tsx', name: 'App.tsx' }]
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        attachments={attachments}
+        onRemoveAttachment={vi.fn()}
+      />
+    )
+    expect(screen.getByText('App.tsx')).toBeInTheDocument()
+  })
+
+  it('calls onRemoveAttachment when chip remove button clicked', () => {
+    const onRemove = vi.fn()
+    const attachments = [{ path: 'src/App.tsx', name: 'App.tsx' }]
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        attachments={attachments}
+        onRemoveAttachment={onRemove}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: /remove/i }))
+    expect(onRemove).toHaveBeenCalledWith('src/App.tsx')
+  })
+
+  it('renders multiple attachment chips', () => {
+    const attachments = [
+      { path: 'src/App.tsx', name: 'App.tsx' },
+      { path: 'src/index.ts', name: 'index.ts' },
+    ]
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        attachments={attachments}
+        onRemoveAttachment={vi.fn()}
+      />
+    )
+    expect(screen.getByText('App.tsx')).toBeInTheDocument()
+    expect(screen.getByText('index.ts')).toBeInTheDocument()
+  })
+
+  it('includes attachments in onSend callback', () => {
+    const onSend = vi.fn()
+    const attachments = [{ path: 'src/App.tsx', name: 'App.tsx' }]
+    render(
+      <InputBar
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+        attachments={attachments}
+        onRemoveAttachment={vi.fn()}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'explain this' } })
+    fireEvent.click(screen.getByTestId('send-button'))
+    expect(onSend).toHaveBeenCalledWith('explain this', [{ path: 'src/App.tsx', name: 'App.tsx' }])
+  })
+
+  it('does not render attachment area when no attachments', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+    expect(screen.queryByTestId('attachment-chips')).not.toBeInTheDocument()
+  })
+
+  it('does not render attachment area when attachments is empty', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        attachments={[]}
+        onRemoveAttachment={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('attachment-chips')).not.toBeInTheDocument()
+  })
+
+  it('allows sending with attachments and empty text', () => {
+    const onSend = vi.fn()
+    const attachments = [{ path: 'src/App.tsx', name: 'App.tsx' }]
+    render(
+      <InputBar
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+        attachments={attachments}
+        onRemoveAttachment={vi.fn()}
+      />
+    )
+    // Click send with empty text but attachments present
+    fireEvent.click(screen.getByTestId('send-button'))
+    expect(onSend).toHaveBeenCalledWith('', [{ path: 'src/App.tsx', name: 'App.tsx' }])
+  })
+})
