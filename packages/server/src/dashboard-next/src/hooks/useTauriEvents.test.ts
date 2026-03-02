@@ -78,6 +78,62 @@ describe('useTauriEvents', () => {
     expect(useConnectionStore.getState().connectionError).toBe('Node not found')
   })
 
+  it('navigates to dashboard URL on server_ready when not on dashboard', () => {
+    // Mock window.location as not being on dashboard
+    const originalHref = window.location.href
+    Object.defineProperty(window, 'location', {
+      value: { href: 'tauri://localhost', protocol: 'http:', host: 'localhost' },
+      writable: true,
+      configurable: true,
+    })
+
+    renderHook(() => useTauriEvents())
+    emit('server_ready', { port: 9222, token: 'abc', url: 'http://localhost:9222/dashboard?token=abc' })
+
+    expect(window.location.href).toBe('http://localhost:9222/dashboard?token=abc')
+
+    // Restore
+    Object.defineProperty(window, 'location', {
+      value: new URL(originalHref),
+      writable: true,
+      configurable: true,
+    })
+  })
+
+  it('reconnects via store on server_ready when already on dashboard', () => {
+    // Mock being on the dashboard page
+    Object.defineProperty(window, 'location', {
+      value: { href: 'http://localhost:9222/dashboard?token=abc', protocol: 'http:', host: 'localhost:9222' },
+      writable: true,
+      configurable: true,
+    })
+
+    const connectSpy = vi.fn()
+    useConnectionStore.setState({ connect: connectSpy } as unknown as Record<string, unknown>)
+
+    renderHook(() => useTauriEvents())
+    emit('server_ready', { port: 9333, token: 'newtoken', url: 'http://localhost:9333/dashboard?token=newtoken' })
+
+    expect(connectSpy).toHaveBeenCalledWith('ws://localhost:9333/ws', 'newtoken')
+
+    // Restore location
+    Object.defineProperty(window, 'location', {
+      value: new URL('http://localhost'),
+      writable: true,
+      configurable: true,
+    })
+  })
+
+  it('disconnects on server_stopped event', () => {
+    const disconnectSpy = vi.fn()
+    useConnectionStore.setState({ disconnect: disconnectSpy } as unknown as Record<string, unknown>)
+
+    renderHook(() => useTauriEvents())
+    emit('server_stopped')
+
+    expect(disconnectSpy).toHaveBeenCalled()
+  })
+
   it('unlistens on unmount', async () => {
     const { unmount } = renderHook(() => useTauriEvents())
     unmount()
