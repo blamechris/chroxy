@@ -612,13 +612,16 @@ export function createFileOps(sendFn) {
    * Test whether a relative file path matches a gitignore rule pattern.
    * Handles: exact name, directory suffix (/), leading slash, glob (*).
    */
-  function matchesGitignorePattern(relPath, pattern) {
+  function matchesGitignorePattern(relPath, pattern, isDir) {
     const segments = relPath.split('/')
     let pat = pattern
 
-    // Directory-only pattern (trailing /)
+    // Directory-only pattern (trailing /) — only matches directories
     const dirOnly = pat.endsWith('/')
-    if (dirOnly) pat = pat.slice(0, -1)
+    if (dirOnly) {
+      if (!isDir) return false
+      pat = pat.slice(0, -1)
+    }
 
     // Rooted pattern (leading /) — must match from root
     const rooted = pat.startsWith('/')
@@ -638,7 +641,16 @@ export function createFileOps(sendFn) {
       return regex.test(relPath)
     }
 
-    // Unrooted patterns match any segment or the full path
+    // Patterns with slashes match against path suffixes
+    if (pat.includes('/')) {
+      for (let i = 0; i < segments.length; i++) {
+        const subpath = segments.slice(i).join('/')
+        if (regex.test(subpath)) return true
+      }
+      return false
+    }
+
+    // Unrooted patterns without slashes match any segment or the full path
     if (regex.test(relPath)) return true
     for (const seg of segments) {
       if (regex.test(seg)) return true
@@ -649,10 +661,10 @@ export function createFileOps(sendFn) {
   /**
    * Check if a relative path is ignored by gitignore rules.
    */
-  function isIgnored(relPath, rules) {
+  function isIgnored(relPath, rules, isDir) {
     let ignored = false
     for (const rule of rules) {
-      if (matchesGitignorePattern(relPath, rule.pattern)) {
+      if (matchesGitignorePattern(relPath, rule.pattern, isDir)) {
         ignored = !rule.negated
       }
     }
@@ -707,7 +719,7 @@ export function createFileOps(sendFn) {
           const relPath = relative(cwdReal, absPath)
 
           // Check gitignore
-          if (isIgnored(relPath, gitignoreRules)) continue
+          if (isIgnored(relPath, gitignoreRules, d.isDirectory())) continue
 
           if (d.isDirectory()) {
             await walk(absPath, depth + 1)
