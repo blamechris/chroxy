@@ -26,6 +26,7 @@ import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { CreateSessionModal } from './components/CreateSessionModal'
 import { Toast, type ToastItem } from './components/Toast'
+import { useTauriEvents } from './hooks/useTauriEvents'
 
 /** Server-injected config from window.__CHROXY_CONFIG__ */
 interface ChroxyConfig {
@@ -84,6 +85,9 @@ export function App() {
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
   const terminalRawBuffer = useConnectionStore(s => s.terminalRawBuffer)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
+
+  // Listen for Tauri desktop events (no-op in browser context)
+  useTauriEvents()
 
   // Session-level state — useShallow prevents re-renders when getActiveSessionState()
   // returns a new fallback object with the same property values
