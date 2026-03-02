@@ -4,12 +4,9 @@
  * Triggered by `@` in InputBar. Displays files from `list_files` WS response.
  */
 import { useMemo, useRef, useEffect } from 'react'
+import type { FilePickerItem } from '../store/types'
 
-export interface FilePickerItem {
-  path: string
-  type: 'file'
-  size: number | null
-}
+export type { FilePickerItem }
 
 export interface FilePickerProps {
   files: FilePickerItem[] | null
