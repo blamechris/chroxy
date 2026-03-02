@@ -1,8 +1,6 @@
 use tauri::{AppHandle, Manager};
-use tauri::webview::WebviewWindowBuilder;
 
-const DASHBOARD_LABEL: &str = "dashboard";
-const FALLBACK_LABEL: &str = "main";
+const MAIN_LABEL: &str = "main";
 
 /// Percent-encode a string for safe use in URL query values.
 /// Encodes everything except unreserved characters (RFC 3986: A-Z a-z 0-9 - _ . ~).
@@ -21,72 +19,76 @@ fn url_encode(s: &str) -> String {
     encoded
 }
 
-/// Open the dashboard in a Tauri webview window (or focus if already open).
-pub fn open_dashboard(app: &AppHandle, port: u16, token: Option<&str>) {
-    let url = match token {
+/// Build the dashboard URL for the given port and optional token.
+pub fn dashboard_url(port: u16, token: Option<&str>) -> String {
+    match token {
         Some(t) => format!("http://127.0.0.1:{}/dashboard?token={}", port, url_encode(t)),
         None => format!("http://127.0.0.1:{}/dashboard", port),
-    };
+    }
+}
 
-    // If dashboard window already exists, navigate and focus it
-    if let Some(win) = app.get_webview_window(DASHBOARD_LABEL) {
+/// Navigate the main window to the dashboard URL.
+pub fn navigate_to_dashboard(app: &AppHandle, port: u16, token: Option<&str>) {
+    let url = dashboard_url(port, token);
+    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
         let _ = win.eval(&format!("window.location.href = '{}';", url));
         let _ = win.show();
         let _ = win.set_focus();
-        return;
-    }
-
-    // Create a new dashboard window pointing at the server URL
-    let webview_url = tauri::WebviewUrl::External(url.parse().expect("valid dashboard URL"));
-    match WebviewWindowBuilder::new(app, DASHBOARD_LABEL, webview_url)
-        .title("Chroxy Dashboard")
-        .inner_size(1100.0, 750.0)
-        .center()
-        .build()
-    {
-        Ok(_) => {}
-        Err(e) => eprintln!("[window] Failed to create dashboard window: {}", e),
     }
 }
 
-/// Show the fallback/loading page with optional port, token, and tunnel mode for health+QR polling.
-pub fn show_fallback(app: &AppHandle, port: Option<u16>, token: Option<&str>, tunnel_mode: Option<&str>) {
-    // Hide dashboard if open
-    if let Some(dash) = app.get_webview_window(DASHBOARD_LABEL) {
-        let _ = dash.hide();
-    }
-
-    if let Some(win) = app.get_webview_window(FALLBACK_LABEL) {
-        // Inject port/token/tunnelMode and trigger health polling via JS eval
-        if let Some(p) = port {
-            let t = token.unwrap_or("");
-            let tm = tunnel_mode.unwrap_or("none");
-            // Escape token for safe JS string interpolation (defense-in-depth)
-            let escaped = t
-                .replace('\\', "\\\\")
-                .replace('\'', "\\'")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r");
-            let _ = win.eval(&format!(
-                "if (typeof window.__startPolling === 'function') {{ window.__startPolling({}, '{}', '{}'); }}",
-                p, escaped, tm
-            ));
-        }
+/// Show the main window (e.g. after server stop, displays loading page).
+pub fn show_main(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
         let _ = win.show();
         let _ = win.set_focus();
     }
 }
 
-/// Toggle fallback window visibility (for tray left-click).
+/// Toggle main window visibility (for tray left-click).
 pub fn toggle_window(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window(FALLBACK_LABEL) {
+    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
         } else {
             let _ = win.show();
             let _ = win.set_focus();
         }
-    } else {
-        show_fallback(app, None, None, None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_encode_leaves_unreserved_chars() {
+        assert_eq!(url_encode("hello"), "hello");
+        assert_eq!(url_encode("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn url_encode_encodes_special_chars() {
+        assert_eq!(url_encode("a b"), "a%20b");
+        assert_eq!(url_encode("a+b"), "a%2Bb");
+        assert_eq!(url_encode("a&b=c"), "a%26b%3Dc");
+    }
+
+    #[test]
+    fn dashboard_url_without_token() {
+        let url = dashboard_url(8765, None);
+        assert_eq!(url, "http://127.0.0.1:8765/dashboard");
+    }
+
+    #[test]
+    fn dashboard_url_with_token() {
+        let url = dashboard_url(8765, Some("abc-123"));
+        assert_eq!(url, "http://127.0.0.1:8765/dashboard?token=abc-123");
+    }
+
+    #[test]
+    fn dashboard_url_encodes_token_special_chars() {
+        let url = dashboard_url(9000, Some("key with spaces&more"));
+        assert!(url.contains("key%20with%20spaces%26more"));
     }
 }
