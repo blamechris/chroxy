@@ -3,17 +3,24 @@
  *
  * Enter for newline, Cmd/Ctrl+Enter to send, Escape to interrupt.
  * Supports file picker (@ trigger), attachment chips, slash command picker (/ trigger),
- * and image paste/drag-drop (#1288).
+ * image paste/drag-drop (#1288), and image preview thumbnails (#1289).
  */
 import { useState, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent } from 'react'
 import { FilePicker, type FilePickerItem } from './FilePicker'
 import { AttachmentChip } from './AttachmentChip'
 import { SlashCommandPicker } from './SlashCommandPicker'
+import { ImageThumbnail } from './ImageThumbnail'
 import type { SlashCommand } from '../store/types'
 import { filterImageFiles } from '../utils/image-utils'
 
 export interface FileAttachment {
   path: string
+  name: string
+}
+
+export interface ImageAttachment {
+  data: string // base64
+  mediaType: string
   name: string
 }
 
@@ -31,9 +38,11 @@ export interface InputBarProps {
   onSlashTrigger?: () => void
   onImagePaste?: (files: File[]) => void
   onImageDrop?: (files: File[]) => void
+  imageAttachments?: ImageAttachment[]
+  onRemoveImage?: (index: number) => void
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage }: InputBarProps) {
   const [value, setValue] = useState('')
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
@@ -275,6 +284,8 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     }
   }, [onImageDrop])
 
+  const hasImages = imageAttachments && imageAttachments.length > 0
+
   return (
     <div
       className="input-bar"
@@ -301,6 +312,22 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
               onRemove={() => onRemoveAttachment?.(att.path)}
             />
           ))}
+        </div>
+      )}
+      {hasImages && (
+        <div className="image-thumbnails" data-testid="image-thumbnails">
+          {imageAttachments.map((img, i) => (
+            <ImageThumbnail
+              key={`${img.name}-${i}`}
+              data={img.data}
+              mediaType={img.mediaType}
+              name={img.name}
+              onRemove={() => onRemoveImage?.(i)}
+            />
+          ))}
+          {imageAttachments.length > 1 && (
+            <span className="image-count">{imageAttachments.length} images</span>
+          )}
         </div>
       )}
       <span id={shortcutsId} className="sr-only">
