@@ -61,6 +61,10 @@ export function FilePicker({
     )
   }
 
+  const DISPLAY_CAP = 200
+  const overflow = filtered.length > DISPLAY_CAP ? filtered.length - DISPLAY_CAP : 0
+  const display = overflow > 0 ? filtered.slice(0, DISPLAY_CAP) : filtered
+
   if (filtered.length === 0) {
     return (
       <div ref={ref} className="file-picker" data-testid="file-picker">
@@ -72,7 +76,7 @@ export function FilePicker({
   return (
     <div ref={ref} className="file-picker" data-testid="file-picker">
       <div ref={listRef} role="listbox" aria-label="File picker">
-        {filtered.map((file, i) => (
+        {display.map((file, i) => (
           <div
             key={file.path}
             role="option"
@@ -87,6 +91,9 @@ export function FilePicker({
           </div>
         ))}
       </div>
+      {overflow > 0 && (
+        <div className="file-picker-overflow">{overflow} more files...</div>
+      )}
     </div>
   )
 }

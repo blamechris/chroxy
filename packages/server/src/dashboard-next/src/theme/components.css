@@ -788,6 +788,14 @@
   font-size: var(--text-sm);
 }
 
+.file-picker-overflow {
+  padding: 8px 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  border-top: 1px solid var(--border-muted);
+}
+
 /* Attachment chips row */
 .attachment-chips {
   display: flex;
