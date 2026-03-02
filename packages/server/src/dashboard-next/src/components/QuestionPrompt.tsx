@@ -5,7 +5,7 @@
  * with option buttons; disables and highlights after selection.
  * When no options are provided, shows a free-text input (#1245).
  */
-import { useRef, useState } from 'react'
+import { useState, useRef } from 'react'
 
 export interface QuestionPromptProps {
   question: string
@@ -16,7 +16,6 @@ export interface QuestionPromptProps {
 
 export function QuestionPrompt({ question, options, answered, onSelect }: QuestionPromptProps) {
   const [text, setText] = useState('')
-  const [submitted, setSubmitted] = useState(false)
   const submittedRef = useRef(false)
 
   const handleSubmit = () => {
@@ -24,7 +23,6 @@ export function QuestionPrompt({ question, options, answered, onSelect }: Questi
     const trimmed = text.trim()
     if (!trimmed) return
     submittedRef.current = true
-    setSubmitted(true)
     onSelect(trimmed)
   }
 
