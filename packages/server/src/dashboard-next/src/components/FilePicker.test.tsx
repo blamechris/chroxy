@@ -174,6 +174,39 @@ describe('FilePicker', () => {
     expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
   })
 
+  it('caps display at 200 items with overflow indicator', () => {
+    const manyFiles: FilePickerItem[] = Array.from({ length: 300 }, (_, i) => ({
+      path: `src/file${i.toString().padStart(3, '0')}.ts`,
+      type: 'file' as const,
+      size: 100,
+    }))
+    render(
+      <FilePicker
+        files={manyFiles}
+        filter=""
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        selectedIndex={0}
+      />
+    )
+    const items = screen.getAllByRole('option')
+    expect(items.length).toBe(200)
+    expect(screen.getByText(/100 more files/)).toBeInTheDocument()
+  })
+
+  it('does not show overflow indicator when under cap', () => {
+    render(
+      <FilePicker
+        files={mockFiles}
+        filter=""
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        selectedIndex={0}
+      />
+    )
+    expect(screen.queryByText(/more files/)).not.toBeInTheDocument()
+  })
+
   it('shows file size in human-readable format', () => {
     render(
       <FilePicker
