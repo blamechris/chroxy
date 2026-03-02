@@ -718,10 +718,32 @@ export function createFileOps(sendFn) {
           const absPath = join(dir, d.name)
           const relPath = relative(cwdReal, absPath)
 
-          // Check gitignore
-          if (isIgnored(relPath, gitignoreRules, d.isDirectory())) continue
+          // Validate symlinks stay within CWD boundary
+          if (d.isSymbolicLink()) {
+            try {
+              const realTarget = await realpath(absPath)
+              if (!realTarget.startsWith(cwdReal + '/') && realTarget !== cwdReal) continue
+            } catch {
+              continue // Skip broken symlinks
+            }
+          }
 
-          if (d.isDirectory()) {
+          // Check gitignore
+          const isDir = d.isDirectory() || d.isSymbolicLink()
+          if (isIgnored(relPath, gitignoreRules, isDir)) continue
+
+          if (d.isDirectory() || d.isSymbolicLink()) {
+            // For symlinks, verify the target is a directory before walking
+            if (d.isSymbolicLink()) {
+              try {
+                const s = await stat(absPath)
+                if (!s.isDirectory()) {
+                  // Symlink to a file — treat as file
+                  files.push({ path: relPath, type: 'file', size: s.size })
+                  continue
+                }
+              } catch { continue }
+            }
             await walk(absPath, depth + 1)
           } else {
             let size = null
