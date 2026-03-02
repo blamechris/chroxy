@@ -855,8 +855,10 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
     }
 
     case 'remove_repo': {
+      let targetPath = msg.path
+      try { targetPath = realpathSync(msg.path) } catch { /* fall back to raw path */ }
       const existing = readReposFromConfig()
-      const filtered = existing.filter(r => r.path !== msg.path)
+      const filtered = existing.filter(r => r.path !== targetPath)
       writeReposToConfig(filtered)
 
       try {
