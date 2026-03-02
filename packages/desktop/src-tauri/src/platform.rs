@@ -49,22 +49,31 @@ pub fn write_restricted_new(path: &Path, data: &str) -> std::io::Result<()> {
         .mode(0o600)
         .open(path)?;
     // Ensure final permissions are exactly 0o600, independent of process umask.
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.write_all(data.as_bytes())?;
+    if let Err(e) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
+        // Best-effort cleanup so subsequent calls don't hit AlreadyExists on a broken file.
+        let _ = fs::remove_file(path);
+        return Err(e);
+    }
+    if let Err(e) = file.write_all(data.as_bytes()) {
+        let _ = fs::remove_file(path);
+        return Err(e);
+    }
     Ok(())
 }
 
 /// Create a new file atomically (non-Unix fallback).
 #[cfg(not(unix))]
 pub fn write_restricted_new(path: &Path, data: &str) -> std::io::Result<()> {
-    fs::OpenOptions::new()
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
-        .and_then(|mut f| {
-            use std::io::Write;
-            f.write_all(data.as_bytes())
-        })
+        .open(path)?;
+    if let Err(e) = file.write_all(data.as_bytes()) {
+        let _ = fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
