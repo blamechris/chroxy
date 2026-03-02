@@ -727,6 +727,12 @@
   background: var(--bg-header);
   border-top: 1px solid var(--border-primary);
   flex-shrink: 0;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.input-bar.dragging {
+  border-color: var(--accent-blue);
+  background: color-mix(in srgb, var(--accent-blue) 8%, var(--bg-header));
 }
 
 /* ---- File Picker ---- */
