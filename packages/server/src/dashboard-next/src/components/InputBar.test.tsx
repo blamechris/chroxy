@@ -555,6 +555,50 @@ describe('InputBar paste/drop (#1288)', () => {
   })
 })
 
+describe('InputBar image thumbnails (#1289)', () => {
+  it('renders image thumbnails when imageAttachments provided', () => {
+    const images = [
+      { data: 'aGVsbG8=', mediaType: 'image/png', name: 'screenshot.png' },
+    ]
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} imageAttachments={images} onRemoveImage={vi.fn()} />)
+    expect(screen.getByTestId('image-thumbnails')).toBeInTheDocument()
+    expect(screen.getByAltText('screenshot.png')).toBeInTheDocument()
+  })
+
+  it('does not render thumbnails when no images', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+    expect(screen.queryByTestId('image-thumbnails')).not.toBeInTheDocument()
+  })
+
+  it('renders count indicator for multiple images', () => {
+    const images = [
+      { data: 'aQ==', mediaType: 'image/png', name: 'img1.png' },
+      { data: 'ag==', mediaType: 'image/jpeg', name: 'img2.jpg' },
+      { data: 'aw==', mediaType: 'image/gif', name: 'img3.gif' },
+    ]
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} imageAttachments={images} onRemoveImage={vi.fn()} />)
+    expect(screen.getByText(/3 images/i)).toBeInTheDocument()
+  })
+
+  it('calls onRemoveImage when thumbnail remove clicked', () => {
+    const onRemoveImage = vi.fn()
+    const images = [
+      { data: 'aGVsbG8=', mediaType: 'image/png', name: 'screenshot.png' },
+    ]
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} imageAttachments={images} onRemoveImage={onRemoveImage} />)
+    fireEvent.click(screen.getByRole('button', { name: /remove/i }))
+    expect(onRemoveImage).toHaveBeenCalledWith(0)
+  })
+
+  it('does not show count for single image', () => {
+    const images = [
+      { data: 'aGVsbG8=', mediaType: 'image/png', name: 'screenshot.png' },
+    ]
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} imageAttachments={images} onRemoveImage={vi.fn()} />)
+    expect(screen.queryByText(/image/i)).not.toBeInTheDocument()
+  })
+})
+
 describe('ReconnectBanner', () => {
   it('renders when visible', () => {
     render(<ReconnectBanner visible attempt={1} maxAttempts={8} onRetry={vi.fn()} />)
