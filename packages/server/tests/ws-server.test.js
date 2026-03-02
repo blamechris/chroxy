@@ -1761,6 +1761,42 @@ describe('background session sync (_broadcastToSession)', () => {
     ws.close()
   })
 
+  it('scopes model_changed and permission_mode_changed to active session (#1138)', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    // Emit a "ready" session_event for sess-2 (client is on sess-1). The
+    // EventNormalizer translates ready into model_changed + permission_mode_changed
+    // messages, which are broadcast via broadcastToSession with the default
+    // activeSessionId filter — so the client on sess-1 should not receive them.
+    mockManager.emit('session_event', {
+      sessionId: 'sess-2',
+      event: 'ready',
+      data: {},
+    })
+    await new Promise(r => setTimeout(r, 200))
+
+    const modelMsg = messages.find(m => m.type === 'model_changed' && m.sessionId === 'sess-2')
+    assert.ok(!modelMsg, 'Should NOT receive model_changed for non-viewed session')
+
+    const permMsg = messages.find(m => m.type === 'permission_mode_changed' && m.sessionId === 'sess-2')
+    assert.ok(!permMsg, 'Should NOT receive permission_mode_changed for non-viewed session')
+
+    ws.close()
+  })
+
 })
 
 describe('public broadcast method', () => {
@@ -6054,6 +6090,49 @@ describe('_replayHistory()', () => {
     const replayStart = messages.find(m => m.type === 'history_replay_start')
     assert.ok(replayStart, 'Should send history_replay_start')
     assert.equal(replayStart.truncated, false, 'truncated should be false')
+
+    ws.close()
+  })
+  it('yields event loop between chunks for large histories (#1112)', async () => {
+    // Create a history with 50 entries (more than one chunk of 20)
+    const history = []
+    history.push({ type: 'message', messageType: 'response', content: 'start', messageId: 'msg-0' })
+    for (let i = 1; i <= 49; i++) {
+      history.push({ type: 'tool_start', messageId: 'msg-0', toolUseId: `tu-${i}`, tool: 'Read', input: `/file-${i}` })
+    }
+
+    const mockManager = createHistoryMockManager({
+      history,
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    // Allow extra time for async batched delivery
+    await new Promise(r => setTimeout(r, 500))
+
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const replayEnd = messages.find(m => m.type === 'history_replay_end')
+    assert.ok(replayStart, 'Should send history_replay_start')
+    assert.ok(replayEnd, 'Should send history_replay_end after all chunks')
+
+    const startIdx = messages.indexOf(replayStart)
+    const endIdx = messages.indexOf(replayEnd)
+    const replayed = messages.slice(startIdx + 1, endIdx)
+
+    // Filter to only history entries (exclude any interleaved post-auth messages)
+    const historyEntries = replayed.filter(m =>
+      m.type === 'message' || m.type === 'tool_start' || m.type === 'tool_result' || m.type === 'result'
+    )
+    assert.equal(historyEntries.length, 50, 'All 50 history entries should be delivered')
+    assert.equal(historyEntries[0].content, 'start', 'First entry should be the response')
+    assert.equal(historyEntries[49].toolUseId, 'tu-49', 'Last entry should be preserved in order')
 
     ws.close()
   })

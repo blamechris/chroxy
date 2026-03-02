@@ -927,10 +927,24 @@ export class WsServer {
 
     const truncated = this.sessionManager.isHistoryTruncated(sessionId)
     this._send(ws, { type: 'history_replay_start', sessionId, truncated })
-    for (const entry of history) {
-      this._send(ws, entry)
+
+    // Batch replay: send chunks of 20 with setImmediate() between to yield
+    // the event loop. Prevents blocking other sessions during large replays
+    // (e.g. 500 messages with E2E encryption = 500 nacl.secretbox() calls).
+    const CHUNK_SIZE = 20
+    const sendChunk = (offset) => {
+      if (ws.readyState !== 1) return
+      const end = Math.min(offset + CHUNK_SIZE, history.length)
+      for (let i = offset; i < end; i++) {
+        this._send(ws, history[i])
+      }
+      if (end < history.length) {
+        setImmediate(() => sendChunk(end))
+      } else {
+        this._send(ws, { type: 'history_replay_end', sessionId })
+      }
     }
-    this._send(ws, { type: 'history_replay_end', sessionId })
+    sendChunk(0)
   }
 
   /** Send session-specific info (model, permission, ready status) to a client */
