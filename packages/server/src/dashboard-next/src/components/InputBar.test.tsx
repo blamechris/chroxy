@@ -313,6 +313,178 @@ describe('InputBar file picker (#1286)', () => {
   })
 })
 
+describe('InputBar slash command picker (#1281)', () => {
+  const mockCommands = [
+    { name: 'commit', description: 'Create a git commit', source: 'project' as const },
+    { name: 'review-pr', description: 'Review a pull request', source: 'project' as const },
+  ]
+
+  it('shows picker when "/" is typed at start of empty input', () => {
+    const onSlashTrigger = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        slashCommands={mockCommands}
+        onSlashTrigger={onSlashTrigger}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/' } })
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+  })
+
+  it('does not show picker when "/" is in the middle of text', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        slashCommands={mockCommands}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'hello / world' } })
+    expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+  })
+
+  it('filters commands as user types after "/"', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        slashCommands={mockCommands}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/com' } })
+    expect(screen.getByText('/commit')).toBeInTheDocument()
+    expect(screen.queryByText('/review-pr')).not.toBeInTheDocument()
+  })
+
+  it('inserts selected command into input', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        slashCommands={mockCommands}
+      />
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '/' } })
+    fireEvent.click(screen.getByText('/commit'))
+    expect(textarea.value).toBe('/commit ')
+  })
+
+  it('closes picker and inserts on Enter when picker is open', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        slashCommands={mockCommands}
+      />
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '/' } })
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(textarea.value).toBe('/commit ')
+    expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+  })
+
+  it('closes picker on Escape without inserting', () => {
+    const onInterrupt = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={onInterrupt}
+        slashCommands={mockCommands}
+      />
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '/' } })
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    expect(onInterrupt).not.toHaveBeenCalled()
+  })
+
+  it('navigates with arrow keys', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        slashCommands={mockCommands}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/' } })
+    const items = screen.getAllByRole('option')
+    expect(items[0]).toHaveAttribute('aria-selected', 'true')
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    const updatedItems = screen.getAllByRole('option')
+    expect(updatedItems[1]).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('does not navigate past last item with ArrowDown', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        slashCommands={mockCommands}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/' } })
+    // Arrow down past the end (only 2 items)
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    const items = screen.getAllByRole('option')
+    // Should stay on last item (index 1)
+    expect(items[1]).toHaveAttribute('aria-selected', 'true')
+    expect(items[0]).toHaveAttribute('aria-selected', 'false')
+  })
+
+  it('calls onSlashTrigger when "/" is typed', () => {
+    const onSlashTrigger = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        slashCommands={mockCommands}
+        onSlashTrigger={onSlashTrigger}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/' } })
+    expect(onSlashTrigger).toHaveBeenCalled()
+  })
+
+  it('opens picker when "/" is typed with empty slashCommands (async fetch)', () => {
+    const onSlashTrigger = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        slashCommands={[]}
+        onSlashTrigger={onSlashTrigger}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/' } })
+    // Should open picker (shows "No commands found") and trigger fetch
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+    expect(onSlashTrigger).toHaveBeenCalled()
+  })
+
+  it('does not show picker when slashCommands prop is not provided', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/' } })
+    expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+  })
+})
+
 describe('ReconnectBanner', () => {
   it('renders when visible', () => {
     render(<ReconnectBanner visible attempt={1} maxAttempts={8} onRetry={vi.fn()} />)
