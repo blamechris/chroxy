@@ -5,6 +5,8 @@
  * Replaces the static dist/index.html fallback page.
  */
 
+import DOMPurify from 'dompurify'
+
 export interface LoadingScreenProps {
   /** Current startup stage: 1=starting, 2=health check, 3=almost ready */
   stage: number
@@ -41,7 +43,7 @@ export function LoadingScreen({
         {!showQr && (
           <>
             <div className="loading-spinner" data-testid="loading-spinner" />
-            <div className="loading-status">{statusText}</div>
+            <div className="loading-status" aria-live="polite">{statusText}</div>
             <ul className="loading-stages">
               {stages.map((label, i) => {
                 const stageNum = i + 1
@@ -66,7 +68,7 @@ export function LoadingScreen({
             <div
               className="loading-qr-container"
               data-testid="qr-container"
-              dangerouslySetInnerHTML={{ __html: qrSvg! }}
+              dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(qrSvg!, { USE_PROFILES: { svg: true } }) }}
             />
             <div className="loading-qr-label">
               {qrLabel || 'Scan with Chroxy app to pair your phone'}
