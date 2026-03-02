@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ pub struct ServerManager {
     node_path: Option<PathBuf>,
     config: ChroxyConfig,
     tunnel_mode: String,
-    health_running: Arc<Mutex<bool>>,
+    health_generation: Arc<AtomicU64>,
 }
 
 impl ServerManager {
@@ -50,7 +51,7 @@ impl ServerManager {
             node_path: None,
             config: ChroxyConfig::default(),
             tunnel_mode: "quick".to_string(),
-            health_running: Arc::new(Mutex::new(false)),
+            health_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -226,8 +227,8 @@ impl ServerManager {
 
     /// Stop the server process gracefully (SIGTERM → 5s → SIGKILL).
     pub fn stop(&mut self) {
-        // Stop health polling
-        *lock_or_recover(&self.health_running) = false;
+        // Stop health polling by advancing generation (old threads will see mismatch and exit)
+        self.health_generation.fetch_add(1, Ordering::SeqCst);
 
         if let Some(ref mut child) = self.child {
             // Only send SIGTERM if the child is still running
@@ -275,12 +276,14 @@ impl ServerManager {
     }
 
     /// Poll the health endpoint every 2s until Running or timeout (60s).
+    /// Uses a generation counter to ensure old threads exit when a new poll starts.
     fn start_health_poll(&self) {
         let status = self.status.clone();
         let port = self.config.port;
-        let health_running = self.health_running.clone();
+        let generation = self.health_generation.clone();
 
-        *lock_or_recover(&health_running) = true;
+        // Advance generation so any existing poll thread sees a mismatch and exits
+        let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -289,7 +292,7 @@ impl ServerManager {
             let url = format!("http://127.0.0.1:{}/", port);
 
             loop {
-                if !*lock_or_recover(&health_running) {
+                if generation.load(Ordering::SeqCst) != my_gen {
                     return;
                 }
 
@@ -318,13 +321,13 @@ impl ServerManager {
 
             // Continue monitoring while running
             loop {
-                if !*lock_or_recover(&health_running) {
+                if generation.load(Ordering::SeqCst) != my_gen {
                     return;
                 }
 
                 thread::sleep(Duration::from_secs(5));
 
-                if !*lock_or_recover(&health_running) {
+                if generation.load(Ordering::SeqCst) != my_gen {
                     return;
                 }
 
@@ -417,5 +420,63 @@ impl ServerManager {
 impl Drop for ServerManager {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generation_advances_on_stop() {
+        let mgr = ServerManager::new();
+        let initial = mgr.health_generation.load(Ordering::SeqCst);
+        assert_eq!(initial, 0);
+    }
+
+    #[test]
+    fn stop_increments_generation() {
+        let mut mgr = ServerManager::new();
+        let gen_before = mgr.health_generation.load(Ordering::SeqCst);
+        mgr.stop();
+        let gen_after = mgr.health_generation.load(Ordering::SeqCst);
+        assert_eq!(gen_after, gen_before + 1);
+    }
+
+    #[test]
+    fn multiple_stops_increment_generation_each_time() {
+        let mut mgr = ServerManager::new();
+        mgr.stop();
+        mgr.stop();
+        mgr.stop();
+        let gen = mgr.health_generation.load(Ordering::SeqCst);
+        assert_eq!(gen, 3);
+    }
+
+    #[test]
+    fn health_poll_advances_generation_on_spawn() {
+        let mgr = ServerManager::new();
+        let gen_before = mgr.health_generation.load(Ordering::SeqCst);
+        // start_health_poll increments generation before spawning thread
+        mgr.start_health_poll();
+        let gen_after = mgr.health_generation.load(Ordering::SeqCst);
+        assert_eq!(gen_after, gen_before + 1);
+        // Advance generation to stop the spawned thread
+        mgr.health_generation.fetch_add(1, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn second_health_poll_invalidates_first() {
+        let mgr = ServerManager::new();
+        // First poll gets generation 1
+        mgr.start_health_poll();
+        assert_eq!(mgr.health_generation.load(Ordering::SeqCst), 1);
+        // Second poll gets generation 2 — first thread will see mismatch
+        mgr.start_health_poll();
+        assert_eq!(mgr.health_generation.load(Ordering::SeqCst), 2);
+        // Clean up: advance generation to stop the second thread
+        mgr.health_generation.fetch_add(1, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(100));
     }
 }
