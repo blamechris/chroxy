@@ -553,6 +553,30 @@ describe('InputBar paste/drop (#1288)', () => {
     })
     expect(onImageDrop).toHaveBeenCalledWith([imgFile])
   })
+
+  it('does not call onImageDrop when disabled', () => {
+    const onImageDrop = vi.fn()
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onImageDrop={onImageDrop} disabled />)
+    const dropZone = screen.getByTestId('input-bar')
+
+    const file = createMockFile('photo.jpg', 1000, 'image/jpeg')
+    fireEvent.drop(dropZone, {
+      dataTransfer: { files: [file] },
+    })
+    expect(onImageDrop).not.toHaveBeenCalled()
+  })
+
+  it('does not call onImagePaste when disabled', () => {
+    const onImagePaste = vi.fn()
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} onImagePaste={onImagePaste} disabled />)
+    const textarea = screen.getByRole('textbox')
+
+    const file = createMockFile('screenshot.png', 1000, 'image/png')
+    fireEvent.paste(textarea, {
+      clipboardData: { files: [file] },
+    })
+    expect(onImagePaste).not.toHaveBeenCalled()
+  })
 })
 
 describe('InputBar image thumbnails (#1289)', () => {
