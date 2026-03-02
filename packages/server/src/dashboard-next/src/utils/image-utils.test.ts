@@ -171,7 +171,7 @@ describe('compressImage', () => {
     const { restore } = setupImageMock(1000, 800)
     try {
       const result = await compressImage(largeBase64, 'image/jpeg')
-      expect(result).toBe('compressed_result')
+      expect(result).toEqual({ data: 'compressed_result', mediaType: 'image/jpeg' })
     } finally {
       restore()
     }
@@ -195,7 +195,7 @@ describe('compressImage', () => {
     globalThis.Image = FailImage as unknown as typeof Image
     try {
       const result = await compressImage(largeBase64, 'image/jpeg')
-      expect(result).toBe(largeBase64)
+      expect(result).toEqual({ data: largeBase64, mediaType: 'image/jpeg' })
     } finally {
       globalThis.Image = OrigImage
     }
@@ -221,7 +221,7 @@ describe('compressImage', () => {
     globalThis.Image = MockImage as unknown as typeof Image
     try {
       const result = await compressImage(largeBase64, 'image/jpeg')
-      expect(result).toBe(largeBase64)
+      expect(result).toEqual({ data: largeBase64, mediaType: 'image/jpeg' })
     } finally {
       globalThis.Image = OrigImage
     }
