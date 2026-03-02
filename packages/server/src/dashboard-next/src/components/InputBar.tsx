@@ -278,13 +278,15 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
   }, [disabled, onImagePaste])
 
   const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
-    if (disabled || !onImageDrop) return
     e.preventDefault()
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = disabled || !onImageDrop ? 'none' : 'copy'
+    }
   }, [disabled, onImageDrop])
 
   const handleDrop = useCallback((e: DragEvent<HTMLDivElement>) => {
-    if (disabled || !onImageDrop) return
     e.preventDefault()
+    if (disabled || !onImageDrop) return
     const files = e.dataTransfer?.files
     if (!files || files.length === 0) return
     const imageFiles = filterImageFiles(files)
