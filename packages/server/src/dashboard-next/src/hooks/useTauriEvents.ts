@@ -55,11 +55,11 @@ export function useTauriEvents() {
     // Server ready — navigate to dashboard URL (or reconnect if already there)
     unlisteners.push(
       tauriEvent.listen<ServerReadyPayload>('server_ready', (event) => {
-        const { url, token } = event.payload
+        const { url, token, port } = event.payload
         // If we're already on the dashboard, reconnect via the store
         if (window.location.href.includes('/dashboard')) {
-          const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-          const wsUrl = `${proto}://${window.location.host}/ws`
+          // Derive WS URL from the event payload so reconnect works even if the port changed
+          const wsUrl = `ws://localhost:${port}/ws`
           useConnectionStore.getState().connect(wsUrl, token)
         } else {
           // Still on loading page — navigate to dashboard
@@ -91,7 +91,7 @@ export function useTauriEvents() {
     )
 
     return () => {
-      unlisteners.forEach(p => p.then(fn => fn()))
+      unlisteners.forEach(p => p.then(fn => fn()).catch(() => {}))
     }
   }, [])
 }

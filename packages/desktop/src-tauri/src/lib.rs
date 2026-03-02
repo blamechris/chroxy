@@ -469,7 +469,9 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let mgr = lock_or_recover(&state);
     if !mgr.is_running() {
-        window::show_window(app);
+        // Emit server_stopped so the loading page shows "Server stopped"
+        // instead of the default "Starting server..." text
+        window::emit_server_stopped(app);
         return;
     }
 
