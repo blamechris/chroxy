@@ -1777,16 +1777,14 @@ describe('background session sync (_broadcastToSession)', () => {
     send(ws, { type: 'auth', token: 'test-token' })
     await waitForMessage(messages, 'auth_ok', 2000)
 
-    // Emit model_changed and permission_mode_changed for sess-2 (client is on sess-1)
+    // Emit a "ready" session_event for sess-2 (client is on sess-1). The
+    // EventNormalizer translates ready into model_changed + permission_mode_changed
+    // messages, which are broadcast via broadcastToSession with the default
+    // activeSessionId filter — so the client on sess-1 should not receive them.
     mockManager.emit('session_event', {
       sessionId: 'sess-2',
-      event: 'model_changed',
-      data: { model: 'claude-sonnet-4-5-20250514' },
-    })
-    mockManager.emit('session_event', {
-      sessionId: 'sess-2',
-      event: 'permission_mode_changed',
-      data: { mode: 'auto' },
+      event: 'ready',
+      data: {},
     })
     await new Promise(r => setTimeout(r, 200))
 
