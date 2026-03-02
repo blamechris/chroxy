@@ -1,4 +1,4 @@
-import { readdir, readFile, stat, realpath, access } from 'fs/promises'
+import { readdir, readFile, stat, realpath } from 'fs/promises'
 import { homedir } from 'os'
 import { join, resolve, normalize, extname, relative } from 'path'
 import { execFile as execFileCb } from 'child_process'
