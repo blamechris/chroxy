@@ -405,8 +405,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
     }
 
-    // HTTP health check before WebSocket — verify tunnel is up
-    const httpUrl = url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+    // HTTP health check before WebSocket — verify server is up.
+    // Use root path (/) not the WS path (/ws) — GET /ws returns 404.
+    const httpBase = url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+    const httpUrl = new URL('/', httpBase).href;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000);
     fetch(httpUrl, { method: 'GET', signal: controller.signal })
