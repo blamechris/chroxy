@@ -20,8 +20,9 @@ echo "[bundle-server] Staging server to $STAGING"
 rm -rf "$STAGING"
 mkdir -p "$STAGING/src/dashboard-next" "$STAGING/hooks"
 
-# package.json — read by cli.js, ws-server.js, server-cli.js for version
+# package.json + lockfile — reproducible installs via npm ci
 cp "$SERVER_DIR/package.json" "$STAGING/package.json"
+cp "$SERVER_DIR/package-lock.json" "$STAGING/package-lock.json"
 
 # Server source (flat .js files)
 cp "$SERVER_DIR/src/"*.js "$STAGING/src/"
@@ -40,10 +41,10 @@ fi
 cp "$SERVER_DIR/hooks/permission-hook.sh" "$STAGING/hooks/permission-hook.sh"
 chmod +x "$STAGING/hooks/permission-hook.sh"
 
-# Install production dependencies only
+# Install production dependencies (deterministic via lockfile)
 echo "[bundle-server] Installing production dependencies..."
 cd "$STAGING"
-npm install --omit=dev --no-audit --no-fund 2>&1
+npm ci --omit=dev --no-audit --no-fund 2>&1
 
 echo "[bundle-server] Bundle complete."
 du -sh "$STAGING" 2>/dev/null || true
