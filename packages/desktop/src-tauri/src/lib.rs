@@ -37,11 +37,6 @@ struct TrayMenuItems {
     tunnel_none: CheckMenuItem<tauri::Wry>,
 }
 
-/// Tauri command: open the dashboard window (called from loading page JS).
-#[tauri::command]
-fn cmd_open_dashboard(app: tauri::AppHandle) {
-    handle_dashboard(&app);
-}
 
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -49,13 +44,8 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(single_instance_init(|app: &tauri::AppHandle, _args, _cwd| {
-            // Second instance launched: focus the existing window instead.
-            // Prefer dashboard (active when server is running) over main (fallback/loading).
-            if let Some(win) = app.get_webview_window("dashboard") {
-                let _ = win.unminimize();
-                let _ = win.show();
-                let _ = win.set_focus();
-            } else if let Some(win) = app.get_webview_window("main") {
+            // Second instance launched: focus the existing main window.
+            if let Some(win) = app.get_webview_window("main") {
                 let _ = win.unminimize();
                 let _ = win.show();
                 let _ = win.set_focus();
@@ -70,7 +60,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![cmd_open_dashboard])
+        .invoke_handler(tauri::generate_handler![])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
         .setup(|app| {
@@ -276,7 +266,7 @@ fn handle_start(app: &tauri::AppHandle) {
     }
 
     let state = app.state::<Mutex<ServerManager>>();
-    let (result, port, token) = {
+    let result = {
         let mut mgr = lock_or_recover(&state);
         // Only use tunnel mode if cloudflared is available, otherwise fall back to none
         let effective_mode = if tunnel_mode != "none" && !ServerManager::check_cloudflared() {
@@ -285,22 +275,15 @@ fn handle_start(app: &tauri::AppHandle) {
             &tunnel_mode
         };
         mgr.set_tunnel_mode(effective_mode);
-        let r = mgr.start();
-        let p = mgr.port();
-        let t = mgr.token();
-        (r, p, t)
+        mgr.start()
     };
 
     match result {
         Ok(()) => {
             update_menu_state(app, true);
 
-            // Show loading page immediately with port/token/tunnelMode so it can poll for health+QR
-            let effective_mode = {
-                let mgr = lock_or_recover(&state);
-                mgr.tunnel_mode().to_string()
-            };
-            window::show_fallback(app, Some(port), token.as_deref(), Some(&effective_mode));
+            // Show loading page immediately (React will handle connection when navigated)
+            window::show_loading(app);
 
             let app_handle = app.clone();
             std::thread::spawn(move || {
@@ -313,6 +296,13 @@ fn handle_start(app: &tauri::AppHandle) {
                     match status {
                         ServerStatus::Running => {
                             update_menu_state(&app_handle, true);
+                            // Navigate main window to dashboard
+                            let state = app_handle.state::<Mutex<ServerManager>>();
+                            let mgr = lock_or_recover(&state);
+                            let p = mgr.port();
+                            let t = mgr.token();
+                            drop(mgr);
+                            window::navigate_to_dashboard(&app_handle, p, t.as_deref());
                             reached_running = true;
                             break;
                         }
@@ -339,9 +329,6 @@ fn handle_start(app: &tauri::AppHandle) {
                     let pending = mgr.is_auto_restart_pending();
                     let backoff = mgr.restart_backoff();
                     let count = mgr.restart_count();
-                    let port = mgr.port();
-                    let token = mgr.token();
-                    let tunnel = mgr.tunnel_mode().to_string();
                     drop(mgr);
 
                     match status {
@@ -361,12 +348,7 @@ fn handle_start(app: &tauri::AppHandle) {
                             );
 
                             // Show loading page so user sees restart progress
-                            window::show_fallback(
-                                &app_handle,
-                                Some(port),
-                                token.as_deref(),
-                                Some(&tunnel),
-                            );
+                            window::show_loading(&app_handle);
 
                             // Wait backoff delay
                             std::thread::sleep(backoff);
@@ -389,6 +371,13 @@ fn handle_start(app: &tauri::AppHandle) {
                                         match status {
                                             ServerStatus::Running => {
                                                 update_menu_state(&app_handle, true);
+                                                // Navigate back to dashboard
+                                                let state = app_handle.state::<Mutex<ServerManager>>();
+                                                let mgr = lock_or_recover(&state);
+                                                let p = mgr.port();
+                                                let t = mgr.token();
+                                                drop(mgr);
+                                                window::navigate_to_dashboard(&app_handle, p, t.as_deref());
                                                 send_notification(
                                                     &app_handle,
                                                     "Server Recovered",
@@ -451,7 +440,7 @@ fn handle_stop(app: &tauri::AppHandle) {
     mgr.stop();
     drop(mgr);
     update_menu_state(app, false);
-    window::show_fallback(app, None, None, None);
+    window::show_loading(app);
 }
 
 fn handle_restart(app: &tauri::AppHandle) {
@@ -475,7 +464,7 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let mgr = lock_or_recover(&state);
     if !mgr.is_running() {
-        window::show_fallback(app, None, None, None);
+        window::show_loading(app);
         return;
     }
 
@@ -483,7 +472,7 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     let token = mgr.token();
     drop(mgr);
 
-    window::open_dashboard(app, port, token.as_deref());
+    window::navigate_to_dashboard(app, port, token.as_deref());
 }
 
 fn handle_toggle_login(app: &tauri::AppHandle) {

@@ -17,9 +17,11 @@
       {
         "label": "main",
         "title": "Chroxy",
-        "width": 900,
-        "height": 700,
-        "visible": false,
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 500,
+        "visible": true,
         "center": true
       }
     ]
