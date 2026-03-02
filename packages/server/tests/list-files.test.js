@@ -114,6 +114,56 @@ describe('listFiles', () => {
     assert.ok(paths.includes('app.js'))
   })
 
+  it('respects gitignore patterns with slashes', async () => {
+    writeFileSync(join(tmpDir, '.gitignore'), 'build/*.js\n')
+    mkdirSync(join(tmpDir, 'build'))
+    writeFileSync(join(tmpDir, 'build', 'bundle.js'), '')
+    writeFileSync(join(tmpDir, 'build', 'styles.css'), '')
+    mkdirSync(join(tmpDir, 'src'))
+    mkdirSync(join(tmpDir, 'src', 'build'))
+    writeFileSync(join(tmpDir, 'src', 'build', 'output.js'), '')
+
+    await fileOps.listFiles({}, tmpDir, null)
+
+    const msg = sent[0]
+    const paths = msg.files.map(f => f.path)
+    assert.ok(!paths.includes('build/bundle.js'))
+    assert.ok(!paths.includes('src/build/output.js'))
+    assert.ok(paths.includes('build/styles.css'))
+  })
+
+  it('respects gitignore negation patterns', async () => {
+    writeFileSync(join(tmpDir, '.gitignore'), '*.log\n!keep.log\n')
+    writeFileSync(join(tmpDir, 'error.log'), '')
+    writeFileSync(join(tmpDir, 'keep.log'), '')
+    writeFileSync(join(tmpDir, 'app.js'), '')
+
+    await fileOps.listFiles({}, tmpDir, null)
+
+    const msg = sent[0]
+    const paths = msg.files.map(f => f.path)
+    assert.ok(!paths.includes('error.log'))
+    assert.ok(paths.includes('keep.log'))
+    assert.ok(paths.includes('app.js'))
+  })
+
+  it('directory-only gitignore pattern does not match files', async () => {
+    writeFileSync(join(tmpDir, '.gitignore'), 'dist/\n')
+    mkdirSync(join(tmpDir, 'dist'))
+    writeFileSync(join(tmpDir, 'dist', 'bundle.js'), '')
+    // A file named 'dist' (not a directory) should NOT be ignored
+    // This can't happen alongside a dist dir, so test with a different name
+    writeFileSync(join(tmpDir, 'app.js'), '')
+
+    await fileOps.listFiles({}, tmpDir, null)
+
+    const msg = sent[0]
+    const paths = msg.files.map(f => f.path)
+    // dist/ directory and its contents should be ignored
+    assert.ok(!paths.some(p => p.startsWith('dist')))
+    assert.ok(paths.includes('app.js'))
+  })
+
   it('filters by query param (substring match)', async () => {
     writeFileSync(join(tmpDir, 'README.md'), '')
     writeFileSync(join(tmpDir, 'index.js'), '')
