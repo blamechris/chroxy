@@ -6057,6 +6057,49 @@ describe('_replayHistory()', () => {
 
     ws.close()
   })
+  it('yields event loop between chunks for large histories (#1112)', async () => {
+    // Create a history with 50 entries (more than one chunk of 20)
+    const history = []
+    history.push({ type: 'message', messageType: 'response', content: 'start', messageId: 'msg-0' })
+    for (let i = 1; i <= 49; i++) {
+      history.push({ type: 'tool_start', messageId: 'msg-0', toolUseId: `tu-${i}`, tool: 'Read', input: `/file-${i}` })
+    }
+
+    const mockManager = createHistoryMockManager({
+      history,
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    // Allow extra time for async batched delivery
+    await new Promise(r => setTimeout(r, 500))
+
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const replayEnd = messages.find(m => m.type === 'history_replay_end')
+    assert.ok(replayStart, 'Should send history_replay_start')
+    assert.ok(replayEnd, 'Should send history_replay_end after all chunks')
+
+    const startIdx = messages.indexOf(replayStart)
+    const endIdx = messages.indexOf(replayEnd)
+    const replayed = messages.slice(startIdx + 1, endIdx)
+
+    // Filter to only history entries (exclude any interleaved post-auth messages)
+    const historyEntries = replayed.filter(m =>
+      m.type === 'message' || m.type === 'tool_start' || m.type === 'tool_result' || m.type === 'result'
+    )
+    assert.equal(historyEntries.length, 50, 'All 50 history entries should be delivered')
+    assert.equal(historyEntries[0].content, 'start', 'First entry should be the response')
+    assert.equal(historyEntries[49].toolUseId, 'tu-49', 'Last entry should be preserved in order')
+
+    ws.close()
+  })
 })
 
 describe('transient events not replayed in history', () => {
