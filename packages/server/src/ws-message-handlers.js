@@ -16,10 +16,10 @@ export const PERMISSION_MODES = [
 export const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
 
 // -- Attachment validation constants --
-const MAX_ATTACHMENT_COUNT = 5
-const MAX_IMAGE_SIZE = 2 * 1024 * 1024       // 2MB decoded
-const MAX_DOCUMENT_SIZE = 5 * 1024 * 1024    // 5MB decoded
-const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+export const MAX_ATTACHMENT_COUNT = 5
+export const MAX_IMAGE_SIZE = 2 * 1024 * 1024       // 2MB decoded
+export const MAX_DOCUMENT_SIZE = 5 * 1024 * 1024    // 5MB decoded
+export const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
 const ALLOWED_DOC_TYPES = new Set(['application/pdf', 'text/plain', 'text/markdown', 'text/csv', 'application/json'])
 
 /**
