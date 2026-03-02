@@ -230,7 +230,7 @@ export function App() {
       )
     }
 
-    // Question prompt with options
+    // Question prompt (options or free-text fallback)
     if (storeMsg.type === 'prompt' && storeMsg.options && !storeMsg.requestId) {
       return (
         <QuestionPrompt
