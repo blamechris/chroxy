@@ -8,6 +8,11 @@
  * 4. Defaults
  */
 
+import { readFileSync, existsSync, mkdirSync } from 'fs'
+import { join, dirname } from 'path'
+import { homedir } from 'os'
+import { writeFileRestricted } from './platform.js'
+
 /**
  * Known configuration keys and their expected types.
  */
@@ -34,6 +39,7 @@ const CONFIG_SCHEMA = {
   sessionTimeout: 'string',
   costBudget: 'number',
   externalUrl: 'string',
+  repos: 'array',
 }
 
 /**
@@ -238,4 +244,41 @@ function parseEnvValue(key, value) {
   }
 
   return value
+}
+
+const DEFAULT_CONFIG_PATH = join(homedir(), '.chroxy', 'config.json')
+
+/**
+ * Read the repos array from a config file.
+ * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
+ * @returns {Array<{ path: string, name?: string }>} Repos array, or [] if missing/invalid.
+ */
+export function readReposFromConfig(configPath = DEFAULT_CONFIG_PATH) {
+  try {
+    if (!existsSync(configPath)) return []
+    const raw = JSON.parse(readFileSync(configPath, 'utf-8'))
+    return Array.isArray(raw.repos) ? raw.repos : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Write the repos array to a config file, preserving other fields.
+ * @param {Array<{ path: string, name?: string }>} repos - Repos array to write.
+ * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
+ */
+export function writeReposToConfig(repos, configPath = DEFAULT_CONFIG_PATH) {
+  let existing = {}
+  try {
+    if (existsSync(configPath)) {
+      existing = JSON.parse(readFileSync(configPath, 'utf-8'))
+    }
+  } catch {
+    // Start fresh if parse fails
+  }
+  existing.repos = repos
+  const dir = dirname(configPath)
+  mkdirSync(dir, { recursive: true })
+  writeFileRestricted(configPath, JSON.stringify(existing, null, 2))
 }

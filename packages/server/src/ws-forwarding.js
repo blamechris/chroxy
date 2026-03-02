@@ -78,6 +78,15 @@ function setupSessionForwarding(normalizer, ctx) {
     }
   })
 
+  // Sidebar activity feed: lightweight status broadcast to ALL authenticated clients
+  sessionManager.on('session_event', ({ sessionId, event, data }) => {
+    if (event === 'stream_start') {
+      broadcast({ type: 'session_activity', sessionId, isBusy: true, lastCost: null })
+    } else if (event === 'result') {
+      broadcast({ type: 'session_activity', sessionId, isBusy: false, lastCost: data?.cost ?? null })
+    }
+  })
+
   // Dev server preview: scan tool_result events for localhost server patterns
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     if (event === 'tool_result' && data?.result) {

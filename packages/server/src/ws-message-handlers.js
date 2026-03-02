@@ -1,10 +1,11 @@
 import { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { resolve, relative } from 'path'
+import { resolve, relative, basename } from 'path'
 import { ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
 import { WebTaskUnavailableError } from './web-task-manager.js'
-import { scanConversations } from './conversation-scanner.js'
+import { scanConversations, groupConversationsByRepo } from './conversation-scanner.js'
 import { searchConversations } from './conversation-search.js'
+import { readReposFromConfig, writeReposToConfig } from './config.js'
 
 // -- Permission modes --
 export const PERMISSION_MODES = [
@@ -94,6 +95,35 @@ function validateCwdWithinHome(cwd) {
     return 'Directory must be within your home directory'
   }
   return null
+}
+
+/**
+ * Build merged repo list from auto-discovered and manual repos.
+ * Manual repos come first, auto-discovered repos are deduplicated.
+ */
+async function buildRepoList() {
+  const conversations = await scanConversations()
+  const autoRepos = groupConversationsByRepo(conversations)
+  const manualRepos = readReposFromConfig()
+  const seen = new Set()
+  const repos = []
+
+  for (const repo of manualRepos) {
+    seen.add(repo.path)
+    let exists = false
+    try { statSync(repo.path); exists = true } catch { /* noop */ }
+    repos.push({ path: repo.path, name: repo.name || basename(repo.path), source: 'manual', exists })
+  }
+
+  for (const repo of autoRepos) {
+    if (seen.has(repo.path)) continue
+    seen.add(repo.path)
+    let exists = false
+    try { statSync(repo.path); exists = true } catch { /* noop */ }
+    repos.push({ path: repo.path, name: repo.name, source: 'auto', exists })
+  }
+
+  return repos
 }
 
 const MAX_FILE_REF_SIZE = 1 * 1024 * 1024 // 1MB max per file_ref
@@ -335,6 +365,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         break
       }
       client.activeSessionId = targetId
+      client.subscribedSessionIds.add(targetId)
       console.log(`[ws] Client ${client.id} switched to session ${targetId}`)
       ctx.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
       ctx.sendSessionInfo(ws, targetId)
@@ -390,6 +421,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
 
       const firstId = ctx.sessionManager.firstSessionId
       for (const [clientWs, c] of ctx.clients) {
+        c.subscribedSessionIds?.delete(targetId)
         if (c.authenticated && c.activeSessionId === targetId) {
           c.activeSessionId = firstId
           const entry = ctx.sessionManager.getSession(firstId)
@@ -417,6 +449,32 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       } else {
         ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
       }
+      break
+    }
+
+    case 'subscribe_sessions': {
+      for (const sid of msg.sessionIds) {
+        if (ctx.sessionManager.getSession(sid)) {
+          client.subscribedSessionIds.add(sid)
+        }
+      }
+      ctx.send(ws, {
+        type: 'subscriptions_updated',
+        subscribedSessionIds: [...client.subscribedSessionIds],
+      })
+      break
+    }
+
+    case 'unsubscribe_sessions': {
+      for (const sid of msg.sessionIds) {
+        if (sid !== client.activeSessionId) {
+          client.subscribedSessionIds.delete(sid)
+        }
+      }
+      ctx.send(ws, {
+        type: 'subscriptions_updated',
+        subscribedSessionIds: [...client.subscribedSessionIds],
+      })
       break
     }
 
@@ -760,6 +818,55 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       }).catch(err => {
         ctx.send(ws, { type: 'web_task_error', taskId: msg.taskId, message: err.message })
       })
+      break
+    }
+
+    case 'list_repos': {
+      try {
+        const repos = await buildRepoList()
+        ctx.send(ws, { type: 'repo_list', repos })
+      } catch (err) {
+        ctx.send(ws, { type: 'server_error', message: `Failed to list repos: ${err.message}`, recoverable: true })
+      }
+      break
+    }
+
+    case 'add_repo': {
+      const repoPath = msg.path
+      const cwdError = validateCwdWithinHome(repoPath)
+      if (cwdError) {
+        ctx.send(ws, { type: 'session_error', message: cwdError })
+        break
+      }
+
+      try {
+        const resolvedPath = realpathSync(repoPath)
+        const existing = readReposFromConfig()
+        if (!existing.some(r => r.path === resolvedPath)) {
+          existing.push({ path: resolvedPath, name: msg.name || basename(resolvedPath) })
+          writeReposToConfig(existing)
+        }
+        const repos = await buildRepoList()
+        ctx.send(ws, { type: 'repo_list', repos })
+      } catch (err) {
+        ctx.send(ws, { type: 'session_error', message: `Failed to add repo: ${err.message}` })
+      }
+      break
+    }
+
+    case 'remove_repo': {
+      let targetPath = msg.path
+      try { targetPath = realpathSync(msg.path) } catch { /* fall back to raw path */ }
+      const existing = readReposFromConfig()
+      const filtered = existing.filter(r => r.path !== targetPath)
+      writeReposToConfig(filtered)
+
+      try {
+        const repos = await buildRepoList()
+        ctx.send(ws, { type: 'repo_list', repos })
+      } catch (err) {
+        ctx.send(ws, { type: 'server_error', message: `Failed to list repos: ${err.message}`, recoverable: true })
+      }
       break
     }
 

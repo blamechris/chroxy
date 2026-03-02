@@ -220,6 +220,35 @@ export const RequestCostSummarySchema = z.object({
   type: z.literal('request_cost_summary'),
 })
 
+// -- Session subscription schemas --
+
+export const SubscribeSessionsSchema = z.object({
+  type: z.literal('subscribe_sessions'),
+  sessionIds: z.array(z.string()).min(1).max(20),
+})
+
+export const UnsubscribeSessionsSchema = z.object({
+  type: z.literal('unsubscribe_sessions'),
+  sessionIds: z.array(z.string()).min(1).max(20),
+})
+
+// -- Repo management schemas --
+
+export const ListReposSchema = z.object({
+  type: z.literal('list_repos'),
+})
+
+export const AddRepoSchema = z.object({
+  type: z.literal('add_repo'),
+  path: z.string().min(1),
+  name: z.string().optional(),
+})
+
+export const RemoveRepoSchema = z.object({
+  type: z.literal('remove_repo'),
+  path: z.string().min(1),
+})
+
 
 // Encrypted envelope — validated separately (before decryption)
 export const EncryptedEnvelopeSchema = z.object({
@@ -507,4 +536,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ResumeConversationSchema,
   SearchConversationsSchema,
   RequestCostSummarySchema,
+  SubscribeSessionsSchema,
+  UnsubscribeSessionsSchema,
+  ListReposSchema,
+  AddRepoSchema,
+  RemoveRepoSchema,
 ])

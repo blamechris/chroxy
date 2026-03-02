@@ -1,6 +1,9 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { validateConfig, mergeConfig } from '../src/config.js'
+import { writeFileSync, mkdtempSync, rmSync, readFileSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
+import { validateConfig, mergeConfig, readReposFromConfig, writeReposToConfig } from '../src/config.js'
 
 describe('validateConfig', () => {
   it('accepts valid config with all known keys', () => {
@@ -305,5 +308,104 @@ describe('mergeConfig', () => {
     const merged = mergeConfig({ fileConfig })
     assert.equal(merged.provider, 'custom')
     assert.equal(merged.legacyCli, true)
+  })
+})
+
+describe('readReposFromConfig', () => {
+  let tempDir
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-config-test-'))
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('returns empty array when file does not exist', () => {
+    const result = readReposFromConfig(join(tempDir, 'nonexistent.json'))
+    assert.deepEqual(result, [])
+  })
+
+  it('returns empty array when config has no repos key', () => {
+    const configPath = join(tempDir, 'config.json')
+    writeFileSync(configPath, JSON.stringify({ port: 8765 }))
+    const result = readReposFromConfig(configPath)
+    assert.deepEqual(result, [])
+  })
+
+  it('returns repos array from config', () => {
+    const repos = [{ path: '/home/user/project', name: 'my-project' }]
+    const configPath = join(tempDir, 'config.json')
+    writeFileSync(configPath, JSON.stringify({ repos }))
+    const result = readReposFromConfig(configPath)
+    assert.deepEqual(result, repos)
+  })
+
+  it('returns empty array for invalid JSON', () => {
+    const configPath = join(tempDir, 'config.json')
+    writeFileSync(configPath, 'NOT JSON')
+    const result = readReposFromConfig(configPath)
+    assert.deepEqual(result, [])
+  })
+
+  it('returns empty array when repos is not an array', () => {
+    const configPath = join(tempDir, 'config.json')
+    writeFileSync(configPath, JSON.stringify({ repos: 'not-array' }))
+    const result = readReposFromConfig(configPath)
+    assert.deepEqual(result, [])
+  })
+})
+
+describe('writeReposToConfig', () => {
+  let tempDir
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-config-test-'))
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('creates config file with repos', () => {
+    const configPath = join(tempDir, 'config.json')
+    const repos = [{ path: '/tmp/repo', name: 'repo' }]
+    writeReposToConfig(repos, configPath)
+    const result = JSON.parse(readFileSync(configPath, 'utf-8'))
+    assert.deepEqual(result.repos, repos)
+  })
+
+  it('preserves existing config fields', () => {
+    const configPath = join(tempDir, 'config.json')
+    writeFileSync(configPath, JSON.stringify({ port: 9000, apiToken: 'abc' }))
+    writeReposToConfig([{ path: '/tmp/repo' }], configPath)
+    const result = JSON.parse(readFileSync(configPath, 'utf-8'))
+    assert.equal(result.port, 9000)
+    assert.equal(result.apiToken, 'abc')
+    assert.deepEqual(result.repos, [{ path: '/tmp/repo' }])
+  })
+
+  it('overwrites existing repos', () => {
+    const configPath = join(tempDir, 'config.json')
+    writeFileSync(configPath, JSON.stringify({ repos: [{ path: '/old' }] }))
+    writeReposToConfig([{ path: '/new' }], configPath)
+    const result = JSON.parse(readFileSync(configPath, 'utf-8'))
+    assert.deepEqual(result.repos, [{ path: '/new' }])
+  })
+
+  it('creates parent directories if needed', () => {
+    const configPath = join(tempDir, 'nested', 'dir', 'config.json')
+    writeReposToConfig([{ path: '/tmp' }], configPath)
+    const result = JSON.parse(readFileSync(configPath, 'utf-8'))
+    assert.deepEqual(result.repos, [{ path: '/tmp' }])
+  })
+
+  it('handles malformed existing config gracefully', () => {
+    const configPath = join(tempDir, 'config.json')
+    writeFileSync(configPath, 'NOT JSON')
+    writeReposToConfig([{ path: '/tmp' }], configPath)
+    const result = JSON.parse(readFileSync(configPath, 'utf-8'))
+    assert.deepEqual(result.repos, [{ path: '/tmp' }])
   })
 })
