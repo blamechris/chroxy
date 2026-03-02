@@ -2,19 +2,17 @@ use crate::config;
 use crate::platform;
 use serde_json::json;
 use std::fs;
+use std::io::ErrorKind;
 use uuid::Uuid;
 
 /// First-run setup: if no ~/.chroxy/config.json exists, generate one with defaults.
+/// Uses create_new(true) for atomic creation — no TOCTOU race between exists() and open().
 /// Returns true if a new config was created.
 pub fn ensure_config() -> bool {
     let path = match config::config_path() {
         Some(p) => p,
         None => return false,
     };
-
-    if path.exists() {
-        return false;
-    }
 
     // Ensure ~/.chroxy/ directory exists
     if let Some(parent) = path.parent() {
@@ -32,13 +30,20 @@ pub fn ensure_config() -> bool {
 
     match serde_json::to_string_pretty(&config) {
         Ok(json_str) => {
-            if let Err(e) = platform::write_restricted(&path, &json_str) {
-                eprintln!("[setup] Failed to write config: {}", e);
-                return false;
+            match platform::write_restricted_new(&path, &json_str) {
+                Ok(()) => {
+                    println!("[setup] Created default config at {}", path.display());
+                    true
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    // Config already exists — not an error, just skip creation
+                    false
+                }
+                Err(e) => {
+                    eprintln!("[setup] Failed to write config at {}: {}", path.display(), e);
+                    false
+                }
             }
-
-            println!("[setup] Created default config at {}", path.display());
-            true
         }
         Err(e) => {
             eprintln!("[setup] Failed to serialize config: {}", e);
