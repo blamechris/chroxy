@@ -304,6 +304,8 @@ fn handle_start(app: &tauri::AppHandle) {
 
             let app_handle = app.clone();
             std::thread::spawn(move || {
+                // Phase 1: Wait for initial startup (up to 60s)
+                let mut reached_running = false;
                 for _ in 0..60 {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     let state = app_handle.state::<Mutex<ServerManager>>();
@@ -311,7 +313,8 @@ fn handle_start(app: &tauri::AppHandle) {
                     match status {
                         ServerStatus::Running => {
                             update_menu_state(&app_handle, true);
-                            return;
+                            reached_running = true;
+                            break;
                         }
                         ServerStatus::Error(ref msg) => {
                             update_menu_state(&app_handle, false);
@@ -319,6 +322,102 @@ fn handle_start(app: &tauri::AppHandle) {
                             return;
                         }
                         _ => {}
+                    }
+                }
+
+                if !reached_running {
+                    return; // Startup timeout
+                }
+
+                // Phase 2: Monitor for crashes and auto-restart
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+
+                    let state = app_handle.state::<Mutex<ServerManager>>();
+                    let mgr = lock_or_recover(&state);
+                    let status = mgr.status();
+                    let pending = mgr.is_auto_restart_pending();
+                    let backoff = mgr.restart_backoff();
+                    let count = mgr.restart_count();
+                    let port = mgr.port();
+                    let token = mgr.token();
+                    let tunnel = mgr.tunnel_mode().to_string();
+                    drop(mgr);
+
+                    match status {
+                        ServerStatus::Stopped => return, // User stopped
+                        ServerStatus::Error(_) if pending => {
+                            // Crash detected — attempt auto-restart
+                            update_menu_state(&app_handle, false);
+                            send_notification(
+                                &app_handle,
+                                "Server Crashed",
+                                &format!(
+                                    "Auto-restarting in {}s (attempt {}/{})",
+                                    backoff.as_secs(),
+                                    count + 1,
+                                    ServerManager::MAX_RESTART_ATTEMPTS
+                                ),
+                            );
+
+                            // Show loading page so user sees restart progress
+                            window::show_fallback(
+                                &app_handle,
+                                Some(port),
+                                token.as_deref(),
+                                Some(&tunnel),
+                            );
+
+                            // Wait backoff delay
+                            std::thread::sleep(backoff);
+
+                            // Attempt restart
+                            let state = app_handle.state::<Mutex<ServerManager>>();
+                            let mut mgr = lock_or_recover(&state);
+                            match mgr.try_auto_restart() {
+                                Ok(()) => {
+                                    drop(mgr);
+                                    // Wait for server to reach Running again
+                                    for _ in 0..60 {
+                                        std::thread::sleep(
+                                            std::time::Duration::from_secs(1),
+                                        );
+                                        let state =
+                                            app_handle.state::<Mutex<ServerManager>>();
+                                        let status = lock_or_recover(&state).status();
+                                        match status {
+                                            ServerStatus::Running => {
+                                                update_menu_state(&app_handle, true);
+                                                send_notification(
+                                                    &app_handle,
+                                                    "Server Recovered",
+                                                    "Auto-restart successful",
+                                                );
+                                                break;
+                                            }
+                                            ServerStatus::Error(_) => break,
+                                            _ => {}
+                                        }
+                                    }
+                                    // Continue loop — will check for more crashes
+                                }
+                                Err(_) => {
+                                    drop(mgr);
+                                    update_menu_state(&app_handle, false);
+                                    send_notification(
+                                        &app_handle,
+                                        "Server Unrecoverable",
+                                        "Auto-restart failed. Use tray menu to restart manually.",
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        ServerStatus::Error(_) => {
+                            // Error without auto-restart pending (max attempts or unknown)
+                            return;
+                        }
+                        _ => {} // Running, Starting, Restarting — keep monitoring
                     }
                 }
             });
