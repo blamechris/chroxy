@@ -740,6 +740,30 @@ describe('InputBar attachments (#1287)', () => {
     expect(chips).toHaveLength(1)
   })
 
+  it('sends deduplicated attachments to onSend', () => {
+    const onSend = vi.fn()
+    const attachments = [
+      { path: 'src/App.tsx', name: 'App.tsx' },
+      { path: 'src/App.tsx', name: 'App.tsx' },
+      { path: 'src/index.ts', name: 'index.ts' },
+    ]
+    render(
+      <InputBar
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+        attachments={attachments}
+        onRemoveAttachment={vi.fn()}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'explain' } })
+    fireEvent.click(screen.getByTestId('send-button'))
+    expect(onSend).toHaveBeenCalledWith('explain', [
+      { path: 'src/App.tsx', name: 'App.tsx' },
+      { path: 'src/index.ts', name: 'index.ts' },
+    ])
+  })
+
   it('allows sending with attachments and empty text', () => {
     const onSend = vi.fn()
     const attachments = [{ path: 'src/App.tsx', name: 'App.tsx' }]

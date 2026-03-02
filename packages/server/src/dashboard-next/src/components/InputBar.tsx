@@ -100,12 +100,22 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     )
   }, [slashCommands, slashFilter])
 
+  const dedupedAttachments = useMemo(() => {
+    if (!attachments) return undefined
+    const seen = new Set<string>()
+    return attachments.filter(att => {
+      if (seen.has(att.path)) return false
+      seen.add(att.path)
+      return true
+    })
+  }, [attachments])
+
   const send = useCallback(() => {
     const trimmed = value.trim()
-    const hasAttachments = attachments && attachments.length > 0
-    if (!trimmed && !hasAttachments) return
-    if (hasAttachments) {
-      onSend(trimmed, attachments)
+    const hasAtts = dedupedAttachments && dedupedAttachments.length > 0
+    if (!trimmed && !hasAtts) return
+    if (hasAtts) {
+      onSend(trimmed, dedupedAttachments)
     } else {
       onSend(trimmed)
     }
@@ -117,7 +127,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [value, onSend, attachments])
+  }, [value, onSend, dedupedAttachments])
 
   const selectCommand = useCallback((name: string) => {
     setValue(`/${name} `)
@@ -253,16 +263,6 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
       : outerHeight - paddingY - borderY
     el.style.height = assignedHeight + 'px'
   }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger])
-
-  const dedupedAttachments = useMemo(() => {
-    if (!attachments) return undefined
-    const seen = new Set<string>()
-    return attachments.filter(att => {
-      if (seen.has(att.path)) return false
-      seen.add(att.path)
-      return true
-    })
-  }, [attachments])
 
   const hasChips = dedupedAttachments && dedupedAttachments.length > 0
 
