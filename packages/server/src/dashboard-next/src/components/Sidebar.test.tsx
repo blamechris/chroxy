@@ -234,6 +234,12 @@ describe('Sidebar', () => {
     expect(otherItem).toHaveAttribute('aria-selected', 'false')
   })
 
+  it('sets aria-selected=false on resumable session treeitems', () => {
+    renderSidebar()
+    const resumableItem = screen.getByTestId('resumable-item-c1')
+    expect(resumableItem).toHaveAttribute('aria-selected', 'false')
+  })
+
   it('has role="group" on session children container', () => {
     renderSidebar()
     const groups = screen.getByRole('tree').querySelectorAll('[role="group"]')

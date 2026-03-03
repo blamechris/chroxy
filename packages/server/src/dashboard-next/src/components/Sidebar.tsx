@@ -201,6 +201,7 @@ export function Sidebar({
                         <div
                           key={conv.conversationId}
                           role="treeitem"
+                          aria-selected={false}
                           className="sidebar-resumable-item"
                           data-testid={`resumable-item-${conv.conversationId}`}
                           onClick={() => onResumeSession(conv.conversationId)}
