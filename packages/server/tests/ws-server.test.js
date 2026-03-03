@@ -6136,6 +6136,67 @@ describe('_replayHistory()', () => {
 
     ws.close()
   })
+
+  it('stops replay when ws.readyState is not OPEN (#1347)', async () => {
+    // Unit-test the readyState guard by calling _replayHistory directly with a
+    // mock ws whose readyState we flip to CLOSED between the first synchronous
+    // chunk and the next setImmediate callback.
+    const history = []
+    history.push({ type: 'message', messageType: 'response', content: 'start', messageId: 'msg-0' })
+    for (let i = 1; i <= 49; i++) {
+      history.push({ type: 'tool_start', messageId: 'msg-0', toolUseId: `tu-${i}`, tool: 'Read', input: `/file-${i}` })
+    }
+
+    const mockManager = createHistoryMockManager({
+      history,
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+
+    // Mock ws with controlled readyState
+    const sentData = []
+    const mockWs = {
+      readyState: 1, // WebSocket.OPEN
+      send(data) { sentData.push(JSON.parse(data)) },
+    }
+
+    // Register mock ws in clients map so _send can assign seq numbers
+    server.clients.set(mockWs, {
+      id: 'mock-client',
+      _seq: 0,
+      activeSessionId: 'sess-1',
+      encryptionPending: false,
+      encryptionState: null,
+      postAuthQueue: null,
+    })
+
+    // Call _replayHistory — first chunk (history_replay_start + 20 entries) sent synchronously
+    server._replayHistory(mockWs, 'sess-1')
+
+    // Flip readyState BEFORE the next setImmediate fires
+    mockWs.readyState = 3 // WebSocket.CLOSED
+
+    // Allow scheduled setImmediate callbacks to attempt (and bail on guard)
+    await new Promise(r => setTimeout(r, 100))
+
+    const replayEnd = sentData.find(m => m.type === 'history_replay_end')
+    assert.equal(replayEnd, undefined, 'Should NOT send history_replay_end when ws is closed')
+
+    const historyEntries = sentData.filter(m => m.type === 'message' || m.type === 'tool_start')
+    // First chunk = 20 entries (sent synchronously before readyState change)
+    assert.equal(historyEntries.length, 20, 'Should deliver only the first chunk (20 of 50)')
+
+    // Total sent: history_replay_start + 20 entries = 21
+    assert.equal(sentData.length, 21, 'Total messages: 1 replay_start + 20 history entries')
+
+    server.clients.delete(mockWs)
+  })
 })
 
 describe('transient events not replayed in history', () => {
