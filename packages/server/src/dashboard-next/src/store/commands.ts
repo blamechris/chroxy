@@ -31,7 +31,6 @@ export function useCommands(): Command[] {
   const setViewMode = useConnectionStore(s => s.setViewMode)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
   const createSession = useConnectionStore(s => s.createSession)
-  const viewMode = useConnectionStore(s => s.viewMode)
 
   return useMemo(() => {
     const commands: Command[] = [
@@ -71,5 +70,5 @@ export function useCommands(): Command[] {
       },
     ]
     return commands
-  }, [setViewMode, sendInterrupt, createSession, viewMode])
+  }, [setViewMode, sendInterrupt, createSession])
 }
