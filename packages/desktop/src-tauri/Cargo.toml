@@ -1,6 +1,6 @@
 [package]
 name = "chroxy-desktop"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Chroxy desktop tray app"
 
@@ -20,6 +20,8 @@ libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [dev-dependencies]
 tempfile = "3"

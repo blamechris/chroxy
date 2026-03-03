@@ -1159,6 +1159,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }));
   },
 
+  addServerError: (message: string) => {
+    const err = {
+      id: `info-${Date.now()}`,
+      category: 'general' as const,
+      message,
+      recoverable: true,
+      timestamp: Date.now(),
+    };
+    set((state) => ({
+      serverErrors: [...state.serverErrors, err].slice(-10),
+    }));
+  },
+
   dismissServerError: (id: string) => {
     set((state) => ({
       serverErrors: state.serverErrors.filter((e) => e.id !== id),

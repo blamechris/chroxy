@@ -90,6 +90,22 @@ export function useTauriEvents() {
       })
     )
 
+    // Update available — show toast notification
+    unlisteners.push(
+      tauriEvent.listen<string>('update_available', (event) => {
+        const store = useConnectionStore.getState()
+        store.addServerError(`Chroxy ${event.payload} is available. Use tray menu to update.`)
+      })
+    )
+
+    // Update installed — show restart prompt
+    unlisteners.push(
+      tauriEvent.listen<string>('update_installed', (event) => {
+        const store = useConnectionStore.getState()
+        store.addServerError(`Chroxy ${event.payload} installed. Restart to apply.`)
+      })
+    )
+
     return () => {
       unlisteners.forEach(p => p.then(fn => fn()).catch(() => {}))
     }

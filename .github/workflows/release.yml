@@ -157,6 +157,8 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         working-directory: packages/desktop
         run: cargo tauri build --target universal-apple-darwin
 
@@ -167,6 +169,9 @@ jobs:
           path: |
             packages/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             packages/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+            packages/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.tar.gz
+            packages/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.tar.gz.sig
+            packages/desktop/src-tauri/target/universal-apple-darwin/release/bundle/**/latest.json
 
   github-release:
     name: GitHub Release
@@ -175,6 +180,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -200,5 +206,8 @@ jobs:
           body: ${{ steps.changelog.outputs.body }}
           files: |
             artifacts/**/*.dmg
+            artifacts/**/*.tar.gz
+            artifacts/**/*.sig
+            artifacts/**/latest.json
           draft: false
           prerelease: false

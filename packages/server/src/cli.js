@@ -1039,4 +1039,43 @@ serviceCmd
     console.log('')
   })
 
+/**
+ * chroxy update — Check for newer releases
+ */
+program
+  .command('update')
+  .description('Check for available updates')
+  .action(async () => {
+    try {
+      const res = await fetch('https://api.github.com/repos/blamechris/chroxy/releases/latest', {
+        headers: { 'User-Agent': 'chroxy-cli' },
+      })
+      if (!res.ok) {
+        console.error('Failed to check for updates:', res.statusText)
+        process.exit(1)
+      }
+      const release = await res.json()
+      const latest = release.tag_name.replace(/^v/, '')
+      const current = version
+
+      if (latest === current) {
+        console.log(`\nChroxy v${current} is up to date.\n`)
+      } else {
+        console.log(`\nUpdate available: v${current} → v${latest}`)
+        console.log(`\nRelease: ${release.html_url}`)
+        console.log('\nTo update (git clone):')
+        console.log('  git pull && npm ci\n')
+
+        // Show DMG download link if available
+        const dmg = release.assets?.find(a => a.name.endsWith('.dmg'))
+        if (dmg) {
+          console.log(`Desktop app: ${dmg.browser_download_url}\n`)
+        }
+      }
+    } catch (err) {
+      console.error('Failed to check for updates:', err.message)
+      process.exit(1)
+    }
+  })
+
 program.parse()

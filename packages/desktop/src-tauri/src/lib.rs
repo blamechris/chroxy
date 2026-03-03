@@ -18,6 +18,7 @@ pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder},
     tray::TrayIconBuilder,
+    Emitter,
     Manager,
 };
 #[cfg(desktop)]
@@ -30,6 +31,7 @@ struct TrayMenuItems {
     stop: MenuItem<tauri::Wry>,
     restart: MenuItem<tauri::Wry>,
     dashboard: MenuItem<tauri::Wry>,
+    check_updates: MenuItem<tauri::Wry>,
     auto_start_login: CheckMenuItem<tauri::Wry>,
     auto_start_server: CheckMenuItem<tauri::Wry>,
     tunnel_quick: CheckMenuItem<tauri::Wry>,
@@ -60,6 +62,8 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
@@ -78,6 +82,17 @@ pub fn run() {
                     handle_start(app.handle());
                 }
             }
+
+            // Silent update check on launch
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri_plugin_updater::UpdaterExt;
+                if let Ok(updater) = app_handle.updater() {
+                    if let Ok(Some(update)) = updater.check().await {
+                        let _ = app_handle.emit("update_available", &update.version);
+                    }
+                }
+            });
 
             Ok(())
         })
@@ -168,6 +183,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .item(&tunnel_none)
         .build()?;
 
+    let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates").build(app)?;
+
     let quit = MenuItemBuilder::with_id("quit", "Quit Chroxy").build(app)?;
 
     let menu = MenuBuilder::new(app)
@@ -179,6 +196,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .item(&auto_start_server)
         .item(&tunnel_submenu)
         .separator()
+        .item(&check_updates)
+        .separator()
         .items(&[&quit])
         .build()?;
 
@@ -187,6 +206,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         stop: stop.clone(),
         restart: restart.clone(),
         dashboard: dashboard.clone(),
+        check_updates: check_updates.clone(),
         auto_start_login: auto_start_login.clone(),
         auto_start_server: auto_start_server.clone(),
         tunnel_quick: tunnel_quick.clone(),
@@ -218,6 +238,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 "tunnel_quick" => handle_set_tunnel_mode(app, "quick"),
                 "tunnel_named" => handle_set_tunnel_mode(app, "named"),
                 "tunnel_none" => handle_set_tunnel_mode(app, "none"),
+                "check_updates" => handle_check_updates(app),
                 "quit" => {
                     if let Some(mgr) = app.try_state::<Mutex<ServerManager>>() {
                         let mut mgr = lock_or_recover(&mgr);
@@ -589,6 +610,59 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
             _ => mode,
         }),
     );
+}
+
+fn handle_check_updates(app: &tauri::AppHandle) {
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        use tauri_plugin_updater::UpdaterExt;
+        let updater = match app_handle.updater() {
+            Ok(u) => u,
+            Err(e) => {
+                send_notification(&app_handle, "Update Check Failed", &format!("{}", e));
+                return;
+            }
+        };
+        match updater.check().await {
+            Ok(Some(update)) => {
+                let version = update.version.clone();
+                send_notification(
+                    &app_handle,
+                    "Update Available",
+                    &format!("Chroxy {} is available. Downloading...", version),
+                );
+                let _ = app_handle.emit("update_available", &version);
+
+                match update.download_and_install(|_, _| {}, || {}).await {
+                    Ok(()) => {
+                        send_notification(
+                            &app_handle,
+                            "Update Installed",
+                            &format!("Chroxy {} installed. Restart to apply.", version),
+                        );
+                        let _ = app_handle.emit("update_installed", &version);
+                    }
+                    Err(e) => {
+                        send_notification(
+                            &app_handle,
+                            "Update Failed",
+                            &format!("Download failed: {}", e),
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                send_notification(&app_handle, "No Updates", "You're running the latest version.");
+            }
+            Err(e) => {
+                send_notification(
+                    &app_handle,
+                    "Update Check Failed",
+                    &format!("Could not check for updates: {}", e),
+                );
+            }
+        }
+    });
 }
 
 fn send_notification(app: &tauri::AppHandle, title: &str, body: &str) {
