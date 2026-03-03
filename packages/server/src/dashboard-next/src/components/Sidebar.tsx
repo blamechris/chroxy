@@ -5,6 +5,8 @@
  * Collapsible with Cmd+B toggle.
  */
 import { useState, useCallback } from 'react'
+import { ConversationSearch } from './ConversationSearch'
+import type { SearchResult } from '../store/types'
 
 export interface ActiveSessionNode {
   sessionId: string
@@ -49,6 +51,11 @@ export interface SidebarProps {
   onNewSession: (cwd: string) => void
   onToggle: () => void
   onContextMenu: (target: ContextMenuTarget, event: React.MouseEvent) => void
+  searchResults?: SearchResult[]
+  searchLoading?: boolean
+  searchQuery?: string
+  searchConversations?: (query: string) => void
+  clearSearchResults?: () => void
 }
 
 function abbreviateTunnel(url: string): string {
@@ -74,6 +81,11 @@ export function Sidebar({
   onNewSession,
   onToggle,
   onContextMenu,
+  searchResults = [],
+  searchLoading = false,
+  searchQuery = '',
+  searchConversations,
+  clearSearchResults,
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
 
@@ -136,6 +148,18 @@ export function Sidebar({
               className="sidebar-filter-input"
             />
           </div>
+
+          {/* Conversation search */}
+          {searchConversations && clearSearchResults && (
+            <ConversationSearch
+              searchResults={searchResults}
+              searchLoading={searchLoading}
+              searchQuery={searchQuery}
+              searchConversations={searchConversations}
+              clearSearchResults={clearSearchResults}
+              onResumeSession={(convId) => onResumeSession(convId)}
+            />
+          )}
 
           {/* Repo tree */}
           <div className="sidebar-tree">
