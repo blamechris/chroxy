@@ -55,7 +55,6 @@ jobs:
 
       - name: Check server lockfile freshness
         run: |
-          cd packages/server
           npm install --package-lock-only
           git diff --exit-code package-lock.json || {
             echo "::error::packages/server/package-lock.json is stale. Run 'cd packages/server && npm install --package-lock-only' and commit the result."
