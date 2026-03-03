@@ -294,6 +294,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionCost: null,
       isIdle: true,
       health: 'healthy' as const,
+      terminalRawBuffer: get().terminalRawBuffer,
       activeAgents: EMPTY_AGENTS,
       isPlanPending: false,
       planAllowedPrompts: EMPTY_PROMPTS,
@@ -738,10 +739,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   appendTerminalData: (data) => {
-    set((state) => ({
-      terminalBuffer: (state.terminalBuffer + stripAnsi(data)).slice(-50000),
-      terminalRawBuffer: (state.terminalRawBuffer + data).slice(-100000),
-    }));
+    const activeId = get().activeSessionId;
+    set((state) => {
+      const updates: Record<string, unknown> = {
+        terminalBuffer: (state.terminalBuffer + stripAnsi(data)).slice(-50000),
+        terminalRawBuffer: (state.terminalRawBuffer + data).slice(-100000),
+      };
+      // Also update per-session terminal buffer
+      if (activeId && state.sessionStates[activeId]) {
+        const ss = state.sessionStates[activeId];
+        updates.sessionStates = {
+          ...state.sessionStates,
+          [activeId]: {
+            ...ss,
+            terminalRawBuffer: (ss.terminalRawBuffer + data).slice(-100000),
+          },
+        };
+      }
+      return updates;
+    });
     // Forward raw data to xterm.js via batched write callback
     const cb = get()._terminalWriteCallback;
     if (cb) {

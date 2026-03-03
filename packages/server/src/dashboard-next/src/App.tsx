@@ -14,7 +14,7 @@ import { Sidebar, type RepoNode } from './components/Sidebar'
 import { CommandPalette } from './components/CommandPalette'
 import { useCommands, recordMruCommand } from './store/commands'
 import { ChatView } from './components/ChatView'
-import { TerminalView, type TerminalHandle } from './components/TerminalView'
+import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { toWireAttachments } from './utils/attachment-utils'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
@@ -84,7 +84,6 @@ export function App() {
   const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
   const serverErrors = useConnectionStore(s => s.serverErrors)
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
-  const terminalRawBuffer = useConnectionStore(s => s.terminalRawBuffer)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
 
   // Listen for Tauri desktop events (no-op in browser context)
@@ -119,7 +118,6 @@ export function App() {
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
-  const setTerminalWriteCallback = useConnectionStore(s => s.setTerminalWriteCallback)
   const sendUserQuestionResponse = useConnectionStore(s => s.sendUserQuestionResponse)
   const markPromptAnswered = useConnectionStore(s => s.markPromptAnswered)
   const fetchFileList = useConnectionStore(s => s.fetchFileList)
@@ -134,6 +132,33 @@ export function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault()
         setPaletteOpen(prev => !prev)
+        return
+      }
+      // Cmd+1-9: switch to tab by index
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key >= '1' && e.key <= '9') {
+        e.preventDefault()
+        const idx = parseInt(e.key, 10) - 1
+        const target = sessions[idx]
+        if (target) switchSession(target.sessionId)
+        return
+      }
+      // Cmd+Shift+[ / ]: prev/next tab
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === '[' || e.key === ']')) {
+        e.preventDefault()
+        const currentIdx = sessions.findIndex(s => s.sessionId === activeSessionId)
+        if (currentIdx < 0) return
+        const nextIdx = e.key === '['
+          ? (currentIdx - 1 + sessions.length) % sessions.length
+          : (currentIdx + 1) % sessions.length
+        switchSession(sessions[nextIdx]!.sessionId)
+        return
+      }
+      // Cmd+W: close active tab (if more than 1 session)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'w' && !e.shiftKey) {
+        e.preventDefault()
+        if (activeSessionId && sessions.length > 1) {
+          destroySession(activeSessionId)
+        }
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
         e.preventDefault()
@@ -142,7 +167,7 @@ export function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [])
+  }, [sessions, activeSessionId, switchSession, destroySession])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
@@ -312,11 +337,6 @@ export function App() {
     const wsUrl = `${proto}://${window.location.host}/ws`
     connect(wsUrl, token)
   }, [connect])
-
-  // Terminal integration
-  const handleTerminalReady = useCallback((handle: TerminalHandle) => {
-    setTerminalWriteCallback(handle.write)
-  }, [setTerminalWriteCallback])
 
   // Build id->message map for O(1) lookups in renderMessage
   const storeMsgMap = useMemo(
@@ -499,12 +519,12 @@ export function App() {
             />
           )}
           {viewMode === 'terminal' && (
-            <TerminalView
+            <MultiTerminalView
+              sessions={sessions}
+              activeSessionId={activeSessionId}
               className="terminal-container"
-              initialData={terminalRawBuffer}
-              onReady={handleTerminalReady}
-            />
-          )}
+          />
+        )}
         </div>
 
         {/* Plan approval */}

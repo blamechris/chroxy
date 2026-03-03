@@ -223,6 +223,7 @@ export interface SessionState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
   claudeReady: boolean;
+  terminalRawBuffer: string;
   activeModel: string | null;
   permissionMode: string | null;
   contextUsage: ContextUsage | null;

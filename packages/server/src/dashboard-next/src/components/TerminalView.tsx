@@ -13,6 +13,7 @@ import '@xterm/xterm/css/xterm.css'
 export interface TerminalHandle {
   write: (data: string) => void
   clear: () => void
+  fit: () => void
 }
 
 export interface TerminalViewProps {
@@ -68,6 +69,10 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
     termRef.current?.clear()
   }, [])
 
+  const fit = useCallback(() => {
+    if (fitRef.current) safeFit(fitRef.current)
+  }, [])
+
   useEffect(() => {
     if (!containerRef.current) return
 
@@ -87,13 +92,13 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
       },
     })
 
-    const fit = new FitAddon()
-    term.loadAddon(fit)
+    const fitAddon = new FitAddon()
+    term.loadAddon(fitAddon)
     term.open(containerRef.current)
-    safeFit(fit)
+    safeFit(fitAddon)
 
     termRef.current = term
-    fitRef.current = fit
+    fitRef.current = fitAddon
 
     // Write initial data if provided
     if (initialData) {
@@ -101,7 +106,7 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
     }
 
     // Notify parent
-    onReady?.({ write, clear })
+    onReady?.({ write, clear, fit })
 
     // Debounced resize handler — prevents excessive reflows during drag-resize
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
@@ -110,7 +115,7 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
       if (resizeTimer) clearTimeout(resizeTimer)
       resizeTimer = setTimeout(() => {
         if (disposedRef.current) return
-        safeFit(fit)
+        safeFit(fitAddon)
       }, RESIZE_DEBOUNCE)
     }
 
