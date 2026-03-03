@@ -216,6 +216,7 @@ Store files:
 | `session_list` | All available sessions |
 | `session_switched` | Switched to active session |
 | `session_timeout` | Session destroyed due to idle timeout |
+| `session_updated` | Session metadata changed (e.g., rename) |
 | `session_warning` | Session about to timeout (with remainingMs) |
 | `slash_commands` | Available slash command definitions |
 | `status` | Connection status (connected: true/false) |
@@ -252,6 +253,7 @@ Store files:
 - `set_permission_mode` accepts optional `confirmed: true` (required for `auto` mode); without it, server responds with `confirm_permission_mode` challenge containing a `warning` string
 - `cost_update` sent after each query with `{ sessionCost, totalCost, budget }` where budget is null if no cost budget configured
 - `budget_warning` sent when session cost exceeds 80% of budget; `budget_exceeded` when budget is hit (session paused); `resume_budget` from client to unpause; `budget_resumed` broadcast by server after successful resume
+- `session_updated` payload: `{ type: 'session_updated', sessionId, name }` — broadcast globally when a session is renamed (user-initiated or auto-label)
 - `session_warning` sent before session timeout with `{ sessionId, name, reason, message, remainingMs }`; `session_timeout` when session is destroyed
 - `token_rotated` broadcast when API token is rotated by TokenManager; includes `{ expiresAt }` only — the new token is NOT sent over the wire for security; clients must re-authenticate
 - `checkpoint_created` payload: `{ sessionId, checkpoint: { id, name, description, messageCount, createdAt, hasGitSnapshot } }`; `checkpoint_list` returns array of checkpoints; `restore_checkpoint` creates a new session from checkpoint state
