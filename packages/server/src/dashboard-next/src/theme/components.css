@@ -2144,5 +2144,27 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .skeleton-line { animation: none; }
+  .skeleton-line,
+  .sidebar-busy-dot,
+  .tab-busy-dot,
+  .busy-indicator,
+  .thinking-dot,
+  .loading-spinner {
+    animation: none;
+  }
+
+  /* Keep indicators visible with static styling */
+  .sidebar-busy-dot,
+  .tab-busy-dot,
+  .busy-indicator {
+    opacity: 1;
+  }
+
+  .thinking-dot {
+    opacity: 0.6;
+  }
+
+  .loading-spinner {
+    border-top-color: var(--accent-blue);
+  }
 }
