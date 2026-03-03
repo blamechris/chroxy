@@ -138,11 +138,11 @@ export function Sidebar({
           </div>
 
           {/* Repo tree */}
-          <div className="sidebar-tree">
+          <div className="sidebar-tree" role="tree" aria-label="Repository sessions">
             {filteredRepos.map(repo => {
               const isCollapsed = collapsed[repo.path] ?? false
               return (
-                <div key={repo.path} className="sidebar-repo">
+                <div key={repo.path} className="sidebar-repo" role="treeitem" aria-expanded={!isCollapsed}>
                   <div
                     className={`sidebar-repo-header${!repo.exists ? ' missing' : ''}`}
                     data-testid={`repo-header-${repo.path}`}
@@ -172,11 +172,13 @@ export function Sidebar({
                   </div>
 
                   {!isCollapsed && (
-                    <div className="sidebar-repo-children">
+                    <div className="sidebar-repo-children" role="group">
                       {/* Active sessions */}
                       {repo.activeSessions.map(session => (
                         <div
                           key={session.sessionId}
+                          role="treeitem"
+                          aria-selected={activeSessionId === session.sessionId}
                           className={`sidebar-session-item${activeSessionId === session.sessionId ? ' active' : ''}`}
                           data-testid={`session-item-${session.sessionId}`}
                           onClick={() => onSessionClick(session.sessionId)}
@@ -198,6 +200,7 @@ export function Sidebar({
                       {repo.resumableSessions.map(conv => (
                         <div
                           key={conv.conversationId}
+                          role="treeitem"
                           className="sidebar-resumable-item"
                           data-testid={`resumable-item-${conv.conversationId}`}
                           onClick={() => onResumeSession(conv.conversationId)}
