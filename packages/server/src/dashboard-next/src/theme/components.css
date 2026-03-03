@@ -1602,6 +1602,9 @@
   .modal-content { min-width: 0; max-width: 90vw; margin: 0 16px; padding: 16px; }
   .toast-container { right: 10px; left: 10px; max-width: none; }
   .plan-approval { margin: 6px 10px; }
+  .loading-container, .error-screen-container { padding: 1rem; }
+  .loading-qr-container { width: 180px; height: 180px; }
+  .loading-qr-container svg { width: 160px; height: 160px; }
 }
 
 /* ---- Loading Screen ---- */
