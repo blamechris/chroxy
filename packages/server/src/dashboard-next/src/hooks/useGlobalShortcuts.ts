@@ -3,8 +3,12 @@
  *
  * Parses shortcut strings like "cmd+shift+p" and fires handlers
  * when matching keydown events occur outside text inputs.
+ *
+ * The `shortcuts` parameter does NOT need to be a stable reference —
+ * the hook uses a ref internally so the listener is registered once
+ * on mount and torn down on unmount, regardless of reference changes.
  */
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 
 export type ShortcutMap = Record<string, () => void>
 
@@ -40,14 +44,17 @@ function isTextInput(el: EventTarget | null): boolean {
 }
 
 export function useGlobalShortcuts(shortcuts: ShortcutMap): void {
-  useEffect(() => {
-    const parsed = Object.entries(shortcuts).map(([str, handler]) => ({
-      ...parseShortcut(str),
-      handler,
-    }))
+  const shortcutsRef = useRef(shortcuts)
+  shortcutsRef.current = shortcuts
 
+  useEffect(() => {
     const listener = (e: KeyboardEvent) => {
       if (isTextInput(e.target)) return
+
+      const parsed = Object.entries(shortcutsRef.current).map(([str, handler]) => ({
+        ...parseShortcut(str),
+        handler,
+      }))
 
       const key = e.key.toLowerCase()
       const meta = e.metaKey || e.ctrlKey
@@ -70,5 +77,5 @@ export function useGlobalShortcuts(shortcuts: ShortcutMap): void {
 
     document.addEventListener('keydown', listener)
     return () => document.removeEventListener('keydown', listener)
-  }, [shortcuts])
+  }, [])
 }
