@@ -68,6 +68,7 @@ export function createEmptySessionState(): SessionState {
     messages: [],
     streamingMessageId: null,
     claudeReady: false,
+    terminalRawBuffer: '',
     activeModel: null,
     permissionMode: null,
     contextUsage: null,
