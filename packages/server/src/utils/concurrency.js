@@ -5,6 +5,9 @@
  * @returns {Promise<Array>} Results in order
  */
 export async function runWithConcurrency(tasks, limit) {
+  if (!Number.isFinite(limit) || limit < 1) {
+    throw new RangeError('runWithConcurrency: limit must be >= 1')
+  }
   const results = new Array(tasks.length)
   let nextIndex = 0
 
