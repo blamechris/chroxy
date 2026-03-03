@@ -284,6 +284,7 @@ export class SessionManager extends EventEmitter {
       return false
     }
     entry.name = name
+    entry._autoLabeled = true // prevent auto-label from overwriting manual rename
     console.log(`[session-manager] Renamed session ${sessionId} to "${name}"`)
     this.emit('session_updated', { sessionId, name })
     return true
@@ -586,13 +587,53 @@ export class SessionManager extends EventEmitter {
   /**
    * Record a user input message in the session's history ring buffer.
    * Public API for ws-server to record user messages so they survive reconnect replay.
+   *
+   * On the first non-empty input, auto-labels sessions with default names
+   * ("Session N" or "New Session") to a truncation of the input text.
    */
   recordUserInput(sessionId, text) {
+    this._autoLabelSession(sessionId, text)
     this._recordHistory(sessionId, 'message', {
       type: 'user_input',
       content: text,
       timestamp: Date.now(),
     })
+  }
+
+  /**
+   * Auto-label a session from the first user input if it still has a default name.
+   * Truncates to ~40 chars at word boundary, appends "..." if truncated.
+   */
+  _autoLabelSession(sessionId, text) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry) return
+    if (entry._autoLabeled) return
+
+    // Only rename sessions with default names
+    const isDefault = /^(Session \d+|New Session)$/i.test(entry.name)
+    if (!isDefault) return
+
+    const trimmed = text.trim()
+    if (!trimmed) return
+
+    // Skip attachment-only markers (e.g. "[2 file(s) attached]") — not meaningful labels
+    if (/^\[\d+ file\(s\) attached\]$/.test(trimmed)) return
+
+    entry._autoLabeled = true
+
+    const MAX_LEN = 40
+    let label
+    if (trimmed.length <= MAX_LEN) {
+      label = trimmed
+    } else {
+      // Truncate at last space within MAX_LEN
+      const cut = trimmed.lastIndexOf(' ', MAX_LEN)
+      label = (cut > 10 ? trimmed.slice(0, cut) : trimmed.slice(0, MAX_LEN)) + '...'
+    }
+
+    entry.name = label
+    console.log(`[session-manager] Auto-labeled session ${sessionId} to "${label}"`)
+    this.emit('session_updated', { sessionId, name: label })
   }
 
   /**
