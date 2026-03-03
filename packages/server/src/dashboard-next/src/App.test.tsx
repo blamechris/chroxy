@@ -51,6 +51,9 @@ vi.mock('./store/connection', () => {
     slashCommands: [],
     fetchFileList: vi.fn(),
     fetchSlashCommands: vi.fn(),
+    conversationHistory: [],
+    fetchConversationHistory: vi.fn(),
+    resumeConversation: vi.fn(),
   }
   return {
     useConnectionStore: (
