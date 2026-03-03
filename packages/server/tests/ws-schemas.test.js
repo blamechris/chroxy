@@ -64,6 +64,8 @@ import {
   ServerCostUpdateSchema,
   ServerBudgetWarningSchema,
   ServerBudgetExceededSchema,
+  // Conversation schemas
+  SearchConversationsSchema,
   // Session subscription schemas
   SubscribeSessionsSchema,
   UnsubscribeSessionsSchema,
@@ -1105,6 +1107,118 @@ describe('ServerShutdownSchema', () => {
 describe('ServerPongSchema', () => {
   it('accepts valid pong', () => {
     assert.ok(ServerPongSchema.safeParse({ type: 'pong' }).success)
+  })
+})
+
+
+// ============================================================
+// SearchConversationsSchema
+// ============================================================
+
+describe('SearchConversationsSchema (#1076)', () => {
+  it('accepts valid search_conversations with query only', () => {
+    const result = SearchConversationsSchema.safeParse({
+      type: 'search_conversations',
+      query: 'hello world',
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.type, 'search_conversations')
+    assert.equal(result.data.query, 'hello world')
+    assert.equal(result.data.maxResults, undefined)
+  })
+
+  it('accepts search_conversations with maxResults', () => {
+    const result = SearchConversationsSchema.safeParse({
+      type: 'search_conversations',
+      query: 'test',
+      maxResults: 25,
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.maxResults, 25)
+  })
+
+  it('trims whitespace from query', () => {
+    const result = SearchConversationsSchema.safeParse({
+      type: 'search_conversations',
+      query: '  trimmed  ',
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.query, 'trimmed')
+  })
+
+  it('rejects empty query', () => {
+    const result = SearchConversationsSchema.safeParse({
+      type: 'search_conversations',
+      query: '',
+    })
+    assert.ok(!result.success)
+  })
+
+  it('rejects whitespace-only query (trims to empty)', () => {
+    const result = SearchConversationsSchema.safeParse({
+      type: 'search_conversations',
+      query: '   ',
+    })
+    assert.ok(!result.success)
+  })
+
+  it('rejects query exceeding 500 characters', () => {
+    const result = SearchConversationsSchema.safeParse({
+      type: 'search_conversations',
+      query: 'x'.repeat(501),
+    })
+    assert.ok(!result.success)
+  })
+
+  it('accepts query at exactly 500 characters', () => {
+    const result = SearchConversationsSchema.safeParse({
+      type: 'search_conversations',
+      query: 'x'.repeat(500),
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects maxResults less than 1', () => {
+    const result = SearchConversationsSchema.safeParse({
+      type: 'search_conversations',
+      query: 'test',
+      maxResults: 0,
+    })
+    assert.ok(!result.success)
+  })
+
+  it('rejects maxResults greater than 100', () => {
+    const result = SearchConversationsSchema.safeParse({
+      type: 'search_conversations',
+      query: 'test',
+      maxResults: 101,
+    })
+    assert.ok(!result.success)
+  })
+
+  it('rejects non-integer maxResults', () => {
+    const result = SearchConversationsSchema.safeParse({
+      type: 'search_conversations',
+      query: 'test',
+      maxResults: 2.5,
+    })
+    assert.ok(!result.success)
+  })
+
+  it('rejects missing query', () => {
+    const result = SearchConversationsSchema.safeParse({
+      type: 'search_conversations',
+    })
+    assert.ok(!result.success)
+  })
+
+  it('dispatches through ClientMessageSchema', () => {
+    const result = ClientMessageSchema.safeParse({
+      type: 'search_conversations',
+      query: 'test query',
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.type, 'search_conversations')
   })
 })
 
