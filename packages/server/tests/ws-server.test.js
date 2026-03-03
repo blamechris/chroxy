@@ -6289,7 +6289,9 @@ describe('postAuthQueue flush batching (#1348)', () => {
     // Close after first chunk
     mockWs.readyState = 3
 
-    await new Promise(r => setTimeout(r, 100))
+    // Allow remaining setImmediate ticks to fire (would send chunks 2+3 if not guarded)
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
 
     assert.equal(sentData.length, 20, 'Should stop after first chunk when ws is closed')
 
