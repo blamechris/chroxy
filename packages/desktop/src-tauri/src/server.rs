@@ -103,6 +103,11 @@ impl ServerManager {
         self.restart_count.load(Ordering::Relaxed)
     }
 
+    /// Reset consecutive restart count (called by monitoring thread after recovery).
+    pub fn reset_restart_count(&self) {
+        self.restart_count.store(0, Ordering::Relaxed);
+    }
+
     /// Re-signal that auto-restart should be attempted.
     /// Called when a restart attempt started the process but it failed to
     /// reach Running. Sets the pending flag so the monitoring loop retries.
@@ -373,7 +378,6 @@ impl ServerManager {
         let generation = self.health_generation.clone();
         let user_stopped = self.user_stopped.clone();
         let auto_restart_pending = self.auto_restart_pending.clone();
-        let restart_count = self.restart_count.clone();
 
         // Advance generation so any existing poll thread sees a mismatch and exits
         let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -401,8 +405,6 @@ impl ServerManager {
                     Ok(resp) => {
                         if resp.status() == 200 {
                             *lock_or_recover(&status) = ServerStatus::Running;
-                            // Reset restart count on successful startup
-                            restart_count.store(0, Ordering::Relaxed);
                             break;
                         }
                     }
@@ -635,5 +637,15 @@ mod tests {
     #[test]
     fn max_restart_attempts_is_three() {
         assert_eq!(ServerManager::MAX_RESTART_ATTEMPTS, 3);
+    }
+
+    #[test]
+    fn reset_restart_count_clears_to_zero() {
+        let mgr = ServerManager::new();
+        mgr.restart_count.store(2, Ordering::Relaxed);
+        assert_eq!(mgr.restart_count(), 2);
+
+        mgr.reset_restart_count();
+        assert_eq!(mgr.restart_count(), 0);
     }
 }
