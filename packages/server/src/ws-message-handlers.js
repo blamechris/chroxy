@@ -453,8 +453,12 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
     }
 
     case 'subscribe_sessions': {
+      const newlySubscribed = []
       for (const sid of msg.sessionIds) {
         if (ctx.sessionManager.getSession(sid)) {
+          if (!client.subscribedSessionIds.has(sid)) {
+            newlySubscribed.push(sid)
+          }
           client.subscribedSessionIds.add(sid)
         }
       }
@@ -462,6 +466,12 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         type: 'subscriptions_updated',
         subscribedSessionIds: [...client.subscribedSessionIds],
       })
+      // Replay history for newly subscribed sessions so the client can
+      // immediately render their state without waiting for new events
+      for (const sid of newlySubscribed) {
+        ctx.sendSessionInfo(ws, sid)
+        ctx.replayHistory(ws, sid)
+      }
       break
     }
 

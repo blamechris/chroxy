@@ -330,6 +330,112 @@ describe('subscribe_sessions', () => {
     ws.close()
   })
 
+  it('subscribe_sessions replays history for newly subscribed sessions', async () => {
+    const sm = createMockSessionManager()
+    const s1 = sm.createSession({ name: 'session-1' })
+    const s2 = sm.createSession({ name: 'session-2' })
+
+    // Seed history for s2 only
+    const origGetHistory = sm.getHistory.bind(sm)
+    const seeded = new Map()
+    seeded.set(s2, [
+      { type: 'message', messageType: 'response', text: 'Hello from session 2' },
+      { type: 'result', cost: 0.01 },
+    ])
+    sm.getHistory = (id) => seeded.get(id) || origGetHistory(id)
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: sm,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    // Switch to s1 first (active session)
+    send(ws, { type: 'switch_session', sessionId: s1 })
+    await waitForMessage(messages, 'session_switched')
+
+    // Subscribe to s2 — should trigger history replay
+    send(ws, { type: 'subscribe_sessions', sessionIds: [s2] })
+
+    // Wait for history_replay_end for s2 (proves replay happened)
+    await withTimeout(
+      (async () => {
+        while (!messages.find(m => m.type === 'history_replay_end' && m.sessionId === s2)) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Timeout waiting for history_replay_end'
+    )
+
+    // Check that history_replay_start was sent for s2
+    const replayStart = messages.find(m => m.type === 'history_replay_start' && m.sessionId === s2)
+    assert.ok(replayStart, 'history_replay_start should be sent for s2')
+
+    // Verify subscriptions_updated was also received
+    const subUpdate = messages.find(m => m.type === 'subscriptions_updated')
+    assert.ok(subUpdate, 'subscriptions_updated should be sent')
+
+    ws.close()
+  })
+
+  it('subscribe_sessions does not replay history for already-subscribed sessions', async () => {
+    const sm = createMockSessionManager()
+    const s1 = sm.createSession({ name: 'session-1' })
+
+    // Seed history for s1
+    const origGetHistory = sm.getHistory.bind(sm)
+    const seeded = new Map()
+    seeded.set(s1, [
+      { type: 'message', messageType: 'response', text: 'Hello' },
+    ])
+    sm.getHistory = (id) => seeded.get(id) || origGetHistory(id)
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: sm,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    // Switch to s1 (auto-subscribes + replays history)
+    send(ws, { type: 'switch_session', sessionId: s1 })
+    await waitForMessage(messages, 'session_switched')
+
+    // Wait for BOTH replays to finish (auth replay + switch_session replay)
+    // Auth calls _replayHistory once, switch_session calls it again
+    await withTimeout(
+      (async () => {
+        while (messages.filter(m => m.type === 'history_replay_end').length < 2) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Timeout waiting for both history_replay_end messages'
+    )
+
+    // Capture replay count after both auth + switch replays
+    const initialReplayCount = messages.filter(m => m.type === 'history_replay_start').length
+
+    // Subscribe to s1 again (already subscribed via switch)
+    send(ws, { type: 'subscribe_sessions', sessionIds: [s1] })
+    await waitForMessage(messages, 'subscriptions_updated')
+
+    // Give time for any extra replay to arrive
+    await new Promise(r => setTimeout(r, 200))
+
+    // Should NOT have gotten another replay
+    const finalReplayCount = messages.filter(m => m.type === 'history_replay_start').length
+    assert.equal(finalReplayCount, initialReplayCount, 'should not replay for already-subscribed session')
+
+    ws.close()
+  })
+
   it('old clients without subscriptions still receive active session broadcasts', async () => {
     const sm = createMockSessionManager()
     const s1 = sm.createSession({ name: 'session-1' })
