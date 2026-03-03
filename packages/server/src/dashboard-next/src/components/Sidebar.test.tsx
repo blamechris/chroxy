@@ -245,4 +245,35 @@ describe('Sidebar', () => {
     const groups = screen.getByRole('tree').querySelectorAll('[role="group"]')
     expect(groups.length).toBeGreaterThanOrEqual(1)
   })
+
+  it('auto-expands collapsed repos when filter matches children (#1376)', () => {
+    const { rerender } = renderSidebar()
+    // Collapse the api repo
+    fireEvent.click(screen.getByTestId('repo-header-/home/user/projects/api'))
+    expect(screen.queryByText('Backend')).not.toBeInTheDocument()
+
+    // Set a filter matching a child session — should auto-expand
+    const props: SidebarProps = {
+      repos: makeRepos(),
+      activeSessionId: 's1',
+      isOpen: true,
+      width: 240,
+      filter: 'Backend',
+      serverStatus: 'connected',
+      tunnelUrl: null,
+      clientCount: 1,
+      onFilterChange: noop,
+      onSessionClick: noop,
+      onResumeSession: noop,
+      onNewSession: noop,
+      onToggle: noop,
+      onContextMenu: noop,
+    }
+    rerender(<Sidebar {...props} />)
+    expect(screen.getByText('Backend')).toBeInTheDocument()
+
+    // Clear filter — collapsed state should be restored
+    rerender(<Sidebar {...props} filter="" />)
+    expect(screen.queryByText('Backend')).not.toBeInTheDocument()
+  })
 })
