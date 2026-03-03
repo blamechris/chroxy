@@ -50,6 +50,7 @@
   flex-direction: column;
   overflow: hidden;
   max-width: 960px;
+  margin: 0 auto;
 }
 
 /* ---- Header ---- */

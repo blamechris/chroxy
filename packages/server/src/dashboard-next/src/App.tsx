@@ -160,7 +160,7 @@ export function App() {
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [sidebarWidth, setSidebarWidth] = useState(240)
+  const [sidebarWidth] = useState(240)
   const [sidebarFilter, setSidebarFilter] = useState('')
 
   // Auto-connect on mount
@@ -196,14 +196,14 @@ export function App() {
   const sidebarRepos: RepoNode[] = useMemo(() => {
     const repoMap = new Map<string, RepoNode>()
 
-    // Group active sessions by cwd
+    // Group active sessions by cwd (skip sessions without a cwd)
     for (const s of sessions) {
-      const cwd = s.cwd || 'Unknown'
-      let repo = repoMap.get(cwd)
+      if (!s.cwd) continue
+      let repo = repoMap.get(s.cwd)
       if (!repo) {
-        const name = cwd.split('/').pop() || cwd
-        repo = { path: cwd, name, source: 'auto', exists: true, activeSessions: [], resumableSessions: [] }
-        repoMap.set(cwd, repo)
+        const name = s.cwd.split('/').pop() || s.cwd
+        repo = { path: s.cwd, name, source: 'auto', exists: true, activeSessions: [], resumableSessions: [] }
+        repoMap.set(s.cwd, repo)
       }
       repo.activeSessions.push({ sessionId: s.sessionId, name: s.name, isBusy: s.isBusy })
     }
@@ -452,7 +452,6 @@ export function App() {
             createSession('New Session', cwd)
           }}
           onToggle={() => setSidebarOpen(prev => !prev)}
-          onWidthChange={setSidebarWidth}
           onContextMenu={() => {
             /* Context menus will be added in a follow-up */
           }}

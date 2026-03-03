@@ -52,7 +52,6 @@ function renderSidebar(props: Partial<SidebarProps> = {}) {
     onResumeSession: noop,
     onNewSession: noop,
     onToggle: noop,
-    onWidthChange: noop,
     onContextMenu: noop,
   }
   return render(<Sidebar {...defaultProps} {...props} />)
@@ -105,8 +104,7 @@ describe('Sidebar', () => {
   it('calls onNewSession when new session button clicked', () => {
     const onNewSession = vi.fn()
     renderSidebar({ onNewSession })
-    const buttons = screen.getAllByTestId('sidebar-new-session')
-    fireEvent.click(buttons[0]!)
+    fireEvent.click(screen.getByTestId('sidebar-new-session-/home/user/projects/api'))
     expect(onNewSession).toHaveBeenCalledWith('/home/user/projects/api')
   })
 
@@ -128,6 +126,15 @@ describe('Sidebar', () => {
     renderSidebar({ filter: 'web' })
     expect(screen.queryByText('api')).not.toBeInTheDocument()
     expect(screen.getByText('web')).toBeInTheDocument()
+  })
+
+  it('filters sessions within a matching repo', () => {
+    renderSidebar({ filter: 'Backend' })
+    // api repo should show (has matching session)
+    expect(screen.getByText('api')).toBeInTheDocument()
+    // Backend matches, Tests does not
+    expect(screen.getByText('Backend')).toBeInTheDocument()
+    expect(screen.queryByText('Tests')).not.toBeInTheDocument()
   })
 
   it('shows server status in footer', () => {

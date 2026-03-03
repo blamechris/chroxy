@@ -2,7 +2,7 @@
  * Sidebar — primary navigation for the desktop IDE.
  *
  * Shows repos with active/resumable sessions, filter, status footer.
- * Collapsible with Cmd+B toggle, resizable drag handle.
+ * Collapsible with Cmd+B toggle.
  */
 import { useState, useCallback } from 'react'
 
@@ -48,7 +48,6 @@ export interface SidebarProps {
   onResumeSession: (conversationId: string) => void
   onNewSession: (cwd: string) => void
   onToggle: () => void
-  onWidthChange: (width: number) => void
   onContextMenu: (target: ContextMenuTarget, event: React.MouseEvent) => void
 }
 
@@ -83,13 +82,25 @@ export function Sidebar({
   }, [])
 
   const filteredRepos = filter
-    ? repos.filter(r => {
-        const lf = filter.toLowerCase()
-        if (r.name.toLowerCase().includes(lf)) return true
-        if (r.activeSessions.some(s => s.name.toLowerCase().includes(lf))) return true
-        if (r.resumableSessions.some(s => s.preview?.toLowerCase().includes(lf))) return true
-        return false
-      })
+    ? repos
+        .map(r => {
+          const lf = filter.toLowerCase()
+          const matchesRepoName = r.name.toLowerCase().includes(lf)
+          const filteredActive = r.activeSessions.filter(s =>
+            s.name.toLowerCase().includes(lf),
+          )
+          const filteredResumable = r.resumableSessions.filter(s =>
+            (s.preview ?? '').toLowerCase().includes(lf),
+          )
+          const hasMatchingChild = filteredActive.length > 0 || filteredResumable.length > 0
+          if (!matchesRepoName && !hasMatchingChild) return null
+          return {
+            ...r,
+            activeSessions: matchesRepoName ? r.activeSessions : filteredActive,
+            resumableSessions: matchesRepoName ? r.resumableSessions : filteredResumable,
+          }
+        })
+        .filter((r): r is RepoNode => r !== null)
     : repos
 
   const statusLabel = serverStatus === 'connected' ? 'Running'
@@ -146,20 +157,18 @@ export function Sidebar({
                     {repo.source === 'manual' && (
                       <span className="sidebar-repo-badge">pinned</span>
                     )}
-                    {repo.activeSessions.length > 0 && (
-                      <button
-                        className="sidebar-repo-new-session"
-                        data-testid="sidebar-new-session"
-                        onClick={e => {
-                          e.stopPropagation()
-                          onNewSession(repo.path)
-                        }}
-                        aria-label={`New session in ${repo.name}`}
-                        type="button"
-                      >
-                        +
-                      </button>
-                    )}
+                    <button
+                      className="sidebar-repo-new-session"
+                      data-testid={`sidebar-new-session-${repo.path}`}
+                      onClick={e => {
+                        e.stopPropagation()
+                        onNewSession(repo.path)
+                      }}
+                      aria-label={`New session in ${repo.name}`}
+                      type="button"
+                    >
+                      +
+                    </button>
                   </div>
 
                   {!isCollapsed && (
@@ -204,17 +213,6 @@ export function Sidebar({
                         </div>
                       ))}
 
-                      {/* New session button for repos with no active sessions */}
-                      {repo.activeSessions.length === 0 && (
-                        <button
-                          className="sidebar-repo-new-session inline"
-                          data-testid="sidebar-new-session"
-                          onClick={() => onNewSession(repo.path)}
-                          type="button"
-                        >
-                          + New session
-                        </button>
-                      )}
                     </div>
                   )}
                 </div>
