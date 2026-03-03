@@ -53,6 +53,15 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Check server lockfile freshness
+        run: |
+          cd packages/server
+          npm install --package-lock-only
+          git diff --exit-code package-lock.json || {
+            echo "::error::packages/server/package-lock.json is stale. Run 'cd packages/server && npm install --package-lock-only' and commit the result."
+            exit 1
+          }
+
   dashboard-tests:
     name: Dashboard Tests
     runs-on: ubuntu-24.04
