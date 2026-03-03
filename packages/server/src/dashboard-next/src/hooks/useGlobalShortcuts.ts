@@ -4,7 +4,9 @@
  * Parses shortcut strings like "cmd+shift+p" and fires handlers
  * when matching keydown events occur outside text inputs.
  *
- * Uses a ref internally so the listener is registered once on mount.
+ * Uses a ref internally so the listener is registered once per mount
+ * and not re-registered on re-renders (note: StrictMode in dev will
+ * mount/unmount/remount, but the listener is stable across re-renders).
  * Callers do NOT need to stabilize the shortcuts object with useMemo.
  */
 import { useEffect, useRef } from 'react'
