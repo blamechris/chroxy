@@ -164,7 +164,7 @@ export function Sidebar({
           {/* Repo tree */}
           <div className="sidebar-tree" role="tree" aria-label="Repository sessions">
             {filteredRepos.map(repo => {
-              const isCollapsed = collapsed[repo.path] ?? false
+              const isCollapsed = filter ? false : (collapsed[repo.path] ?? false)
               return (
                 <div key={repo.path} className="sidebar-repo" role="treeitem" aria-expanded={!isCollapsed}>
                   <div
