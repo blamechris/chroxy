@@ -176,6 +176,35 @@ describe('useGlobalShortcuts', () => {
     expect(handler).not.toHaveBeenCalled()
   })
 
+  it('does not re-register listener when shortcuts reference changes but entries are the same', () => {
+    const addSpy = vi.spyOn(document, 'addEventListener')
+    const removeSpy = vi.spyOn(document, 'removeEventListener')
+
+    const handler = vi.fn()
+    // First render — inline object (new reference each time)
+    const { rerender } = renderHook(
+      ({ shortcuts }: { shortcuts: ShortcutMap }) => useGlobalShortcuts(shortcuts),
+      { initialProps: { shortcuts: { 'cmd+n': handler } } },
+    )
+
+    const addCountAfterMount = addSpy.mock.calls.filter(c => c[0] === 'keydown').length
+    const removeCountAfterMount = removeSpy.mock.calls.filter(c => c[0] === 'keydown').length
+
+    // Re-render with a NEW object reference (same handler)
+    rerender({ shortcuts: { 'cmd+n': handler } })
+
+    const addCountAfterRerender = addSpy.mock.calls.filter(c => c[0] === 'keydown').length
+    const removeCountAfterRerender = removeSpy.mock.calls.filter(c => c[0] === 'keydown').length
+
+    // With useRef approach: no additional add/remove cycles
+    expect(addCountAfterRerender).toBe(addCountAfterMount)
+    expect(removeCountAfterRerender).toBe(removeCountAfterMount)
+
+    // Handler should still work
+    fireKeyDown('n', { metaKey: true })
+    expect(handler).toHaveBeenCalledOnce()
+  })
+
   it('fires shortcut when focus is in non-textual inputs (#1361)', () => {
     const handler = vi.fn()
     const shortcuts: ShortcutMap = { 'cmd+n': handler }
