@@ -25,6 +25,7 @@ import { QuestionPrompt } from './components/QuestionPrompt'
 import { ToolBubble } from './components/ToolBubble'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
+import { WelcomeScreen } from './components/WelcomeScreen'
 import { CreateSessionModal } from './components/CreateSessionModal'
 import { Toast, type ToastItem } from './components/Toast'
 import { useTauriEvents } from './hooks/useTauriEvents'
@@ -118,6 +119,9 @@ export function App() {
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
+  const conversationHistory = useConnectionStore(s => s.conversationHistory)
+  const fetchConversationHistory = useConnectionStore(s => s.fetchConversationHistory)
+  const resumeConversation = useConnectionStore(s => s.resumeConversation)
   const sendUserQuestionResponse = useConnectionStore(s => s.sendUserQuestionResponse)
   const markPromptAnswered = useConnectionStore(s => s.markPromptAnswered)
   const fetchFileList = useConnectionStore(s => s.fetchFileList)
@@ -396,6 +400,25 @@ export function App() {
 
   const isConnected = connectionPhase === 'connected'
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
+  const showWelcome = isConnected && sessions.length === 0
+
+  // Fetch conversation history when welcome screen is shown
+  useEffect(() => {
+    if (showWelcome) fetchConversationHistory()
+  }, [showWelcome, fetchConversationHistory])
+
+  // Convert ConversationSummary[] to RecentSession[] for WelcomeScreen
+  const recentSessions = useMemo(
+    () => conversationHistory
+      .filter(c => c.preview && c.cwd)
+      .map(c => ({
+        conversationId: c.conversationId,
+        preview: c.preview!,
+        cwd: c.cwd!,
+        updatedAt: c.modifiedAtMs,
+      })),
+    [conversationHistory],
+  )
 
   return (
     <div id="app" className={sidebarRepos.length > 0 ? 'with-sidebar' : ''}>
@@ -491,70 +514,85 @@ export function App() {
           />
         )}
 
-        {/* View switcher */}
-        <div className="view-switch">
-          <button
-            className={`view-tab${viewMode === 'chat' ? ' active' : ''}`}
-            onClick={() => setViewMode('chat')}
-            type="button"
-          >
-            Chat
-          </button>
-          <button
-            className={`view-tab${viewMode === 'terminal' ? ' active' : ''}`}
-            onClick={() => setViewMode('terminal')}
-            type="button"
-          >
-            Terminal
-          </button>
-        </div>
+        {/* Welcome screen — shown when connected but no sessions */}
+        {showWelcome && (
+          <WelcomeScreen
+            onNewSession={handleNewSession}
+            recentSessions={recentSessions}
+            onResumeSession={resumeConversation}
+            className="main-content"
+          />
+        )}
 
-        {/* Main content */}
-        <div className="main-content">
-          {viewMode === 'chat' && (
-            <ChatView
-              messages={chatMessages}
+        {/* Normal session UI */}
+        {!showWelcome && (
+          <>
+            {/* View switcher */}
+            <div className="view-switch">
+              <button
+                className={`view-tab${viewMode === 'chat' ? ' active' : ''}`}
+                onClick={() => setViewMode('chat')}
+                type="button"
+              >
+                Chat
+              </button>
+              <button
+                className={`view-tab${viewMode === 'terminal' ? ' active' : ''}`}
+                onClick={() => setViewMode('terminal')}
+                type="button"
+              >
+                Terminal
+              </button>
+            </div>
+
+            {/* Main content */}
+            <div className="main-content">
+              {viewMode === 'chat' && (
+                <ChatView
+                  messages={chatMessages}
+                  isStreaming={streamingMessageId !== null}
+                  renderMessage={renderMessage}
+                />
+              )}
+              {viewMode === 'terminal' && (
+                <MultiTerminalView
+                  sessions={sessions}
+                  activeSessionId={activeSessionId}
+                  className="terminal-container"
+                />
+              )}
+            </div>
+
+            {/* Plan approval */}
+            {isPlanPending && (
+              <PlanApproval
+                planHtml={planHtml}
+                onApprove={handlePlanApprove}
+                onFeedback={handlePlanFeedback}
+              />
+            )}
+
+            {/* Input bar */}
+            <InputBar
+              onSend={handleSend}
+              onInterrupt={handleInterrupt}
+              disabled={!isConnected}
               isStreaming={streamingMessageId !== null}
-              renderMessage={renderMessage}
+              placeholder={isConnected ? 'Type a message... (Cmd+Enter to send)' : 'Connecting...'}
+              filePickerFiles={filePickerFiles}
+              onFileTrigger={fetchFileList}
+              attachments={fileAttachments}
+              onRemoveAttachment={handleRemoveAttachment}
+              slashCommands={slashCommands}
+              onSlashTrigger={fetchSlashCommands}
+              onImagePaste={handleImagePaste}
+              onImageDrop={handleImageDrop}
+              imageAttachments={imageAttachments}
+              onRemoveImage={handleRemoveImage}
+              onFileAttach={handleFileSelect}
             />
-          )}
-          {viewMode === 'terminal' && (
-            <MultiTerminalView
-              sessions={sessions}
-              activeSessionId={activeSessionId}
-              className="terminal-container"
-          />
+          </>
         )}
-        </div>
-
-        {/* Plan approval */}
-        {isPlanPending && (
-          <PlanApproval
-            planHtml={planHtml}
-            onApprove={handlePlanApprove}
-            onFeedback={handlePlanFeedback}
-          />
-        )}
-
-        {/* Input bar */}
-        <InputBar
-          onSend={handleSend}
-          onInterrupt={handleInterrupt}
-          disabled={!isConnected}
-          isStreaming={streamingMessageId !== null}
-          placeholder={isConnected ? 'Type a message... (Cmd+Enter to send)' : 'Connecting...'}
-          filePickerFiles={filePickerFiles}
-          onFileTrigger={fetchFileList}
-          attachments={fileAttachments}
-          onRemoveAttachment={handleRemoveAttachment}
-          slashCommands={slashCommands}
-          onSlashTrigger={fetchSlashCommands}
-          onImagePaste={handleImagePaste}
-          onImageDrop={handleImageDrop}
-          imageAttachments={imageAttachments}
-          onRemoveImage={handleRemoveImage}
-          onFileAttach={handleFileSelect}
-        />
       </div>
 
       {/* Modals */}
