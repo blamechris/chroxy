@@ -25,10 +25,18 @@ function parseShortcut(str: string): ParsedShortcut {
   }
 }
 
+const TEXT_INPUT_TYPES = new Set([
+  'text', 'search', 'url', 'email', 'password', 'tel', 'number',
+])
+
 function isTextInput(el: EventTarget | null): boolean {
   if (!el || !(el instanceof HTMLElement)) return false
   const tag = el.tagName
-  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable
+  if (tag === 'TEXTAREA' || el.isContentEditable) return true
+  if (tag === 'INPUT') {
+    return TEXT_INPUT_TYPES.has((el as HTMLInputElement).type)
+  }
+  return false
 }
 
 export function useGlobalShortcuts(shortcuts: ShortcutMap): void {
