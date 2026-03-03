@@ -10,6 +10,7 @@ import { useConnectionStore } from './store/connection'
 import type { ChatMessage } from './store/connection'
 import type { ChatViewMessage } from './components/ChatView'
 
+import { Sidebar, type RepoNode } from './components/Sidebar'
 import { CommandPalette } from './components/CommandPalette'
 import { useCommands, recordMruCommand } from './store/commands'
 import { ChatView } from './components/ChatView'
@@ -134,6 +135,10 @@ export function App() {
         e.preventDefault()
         setPaletteOpen(prev => !prev)
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
+        e.preventDefault()
+        setSidebarOpen(prev => !prev)
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
@@ -154,6 +159,9 @@ export function App() {
   const [showCreateSession, setShowCreateSession] = useState(false)
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sidebarWidth] = useState(240)
+  const [sidebarFilter, setSidebarFilter] = useState('')
 
   // Auto-connect on mount
   useEffect(() => {
@@ -183,6 +191,30 @@ export function App() {
     })),
     [sessions, activeSessionId],
   )
+
+  // Derive sidebar repo tree from sessions
+  const sidebarRepos: RepoNode[] = useMemo(() => {
+    const repoMap = new Map<string, RepoNode>()
+
+    // Group active sessions by cwd (skip sessions without a cwd)
+    for (const s of sessions) {
+      if (!s.cwd) continue
+      let repo = repoMap.get(s.cwd)
+      if (!repo) {
+        const name = s.cwd.split('/').pop() || s.cwd
+        repo = { path: s.cwd, name, source: 'auto', exists: true, activeSessions: [], resumableSessions: [] }
+        repoMap.set(s.cwd, repo)
+      }
+      repo.activeSessions.push({ sessionId: s.sessionId, name: s.name, isBusy: s.isBusy })
+    }
+
+    // If no repos from sessions, create a default
+    if (repoMap.size === 0) {
+      return []
+    }
+
+    return [...repoMap.values()]
+  }, [sessions])
 
   // Derive plan content from the last assistant message (plan text is streamed
   // before plan_ready fires — the WS protocol doesn't include plan content separately)
@@ -346,7 +378,7 @@ export function App() {
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
 
   return (
-    <div id="app">
+    <div id="app" className={sidebarRepos.length > 0 ? 'with-sidebar' : ''}>
       {/* Reconnect banner */}
       <ReconnectBanner
         visible={isReconnecting}
@@ -399,81 +431,111 @@ export function App() {
         </div>
       </header>
 
-      {/* Session bar */}
-      {sessionTabs.length > 0 && (
-        <SessionBar
-          sessions={sessionTabs}
-          onSwitch={switchSession}
-          onClose={destroySession}
-          onRename={renameSession}
-          onNewSession={handleNewSession}
+      {/* Sidebar */}
+      {sidebarRepos.length > 0 && (
+        <Sidebar
+          repos={sidebarRepos}
+          activeSessionId={activeSessionId}
+          isOpen={sidebarOpen}
+          width={sidebarWidth}
+          filter={sidebarFilter}
+          serverStatus={isConnected ? 'connected' : isReconnecting ? 'reconnecting' : 'disconnected'}
+          tunnelUrl={null}
+          clientCount={1}
+          onFilterChange={setSidebarFilter}
+          onSessionClick={switchSession}
+          onResumeSession={(convId) => {
+            /* Will be wired in #1107 */
+            console.log('Resume session:', convId)
+          }}
+          onNewSession={(cwd) => {
+            createSession('New Session', cwd)
+          }}
+          onToggle={() => setSidebarOpen(prev => !prev)}
+          onContextMenu={() => {
+            /* Context menus will be added in a follow-up */
+          }}
         />
       )}
 
-      {/* View switcher */}
-      <div className="view-switch">
-        <button
-          className={`view-tab${viewMode === 'chat' ? ' active' : ''}`}
-          onClick={() => setViewMode('chat')}
-          type="button"
-        >
-          Chat
-        </button>
-        <button
-          className={`view-tab${viewMode === 'terminal' ? ' active' : ''}`}
-          onClick={() => setViewMode('terminal')}
-          type="button"
-        >
-          Terminal
-        </button>
-      </div>
-
-      {/* Main content */}
-      <div className="main-content">
-        {viewMode === 'chat' && (
-          <ChatView
-            messages={chatMessages}
-            isStreaming={streamingMessageId !== null}
-            renderMessage={renderMessage}
+      {/* Main content wrapper (when sidebar present) */}
+      <div className={sidebarRepos.length > 0 ? 'main-wrapper' : undefined}>
+        {/* Session bar */}
+        {sessionTabs.length > 0 && (
+          <SessionBar
+            sessions={sessionTabs}
+            onSwitch={switchSession}
+            onClose={destroySession}
+            onRename={renameSession}
+            onNewSession={handleNewSession}
           />
         )}
-        {viewMode === 'terminal' && (
-          <TerminalView
-            className="terminal-container"
-            initialData={terminalRawBuffer}
-            onReady={handleTerminalReady}
+
+        {/* View switcher */}
+        <div className="view-switch">
+          <button
+            className={`view-tab${viewMode === 'chat' ? ' active' : ''}`}
+            onClick={() => setViewMode('chat')}
+            type="button"
+          >
+            Chat
+          </button>
+          <button
+            className={`view-tab${viewMode === 'terminal' ? ' active' : ''}`}
+            onClick={() => setViewMode('terminal')}
+            type="button"
+          >
+            Terminal
+          </button>
+        </div>
+
+        {/* Main content */}
+        <div className="main-content">
+          {viewMode === 'chat' && (
+            <ChatView
+              messages={chatMessages}
+              isStreaming={streamingMessageId !== null}
+              renderMessage={renderMessage}
+            />
+          )}
+          {viewMode === 'terminal' && (
+            <TerminalView
+              className="terminal-container"
+              initialData={terminalRawBuffer}
+              onReady={handleTerminalReady}
+            />
+          )}
+        </div>
+
+        {/* Plan approval */}
+        {isPlanPending && (
+          <PlanApproval
+            planHtml={planHtml}
+            onApprove={handlePlanApprove}
+            onFeedback={handlePlanFeedback}
           />
         )}
-      </div>
 
-      {/* Plan approval */}
-      {isPlanPending && (
-        <PlanApproval
-          planHtml={planHtml}
-          onApprove={handlePlanApprove}
-          onFeedback={handlePlanFeedback}
+        {/* Input bar */}
+        <InputBar
+          onSend={handleSend}
+          onInterrupt={handleInterrupt}
+          disabled={!isConnected}
+          isStreaming={streamingMessageId !== null}
+          placeholder={isConnected ? 'Type a message... (Cmd+Enter to send)' : 'Connecting...'}
+          filePickerFiles={filePickerFiles}
+          onFileTrigger={fetchFileList}
+          attachments={fileAttachments}
+          onRemoveAttachment={handleRemoveAttachment}
+          slashCommands={slashCommands}
+          onSlashTrigger={fetchSlashCommands}
+          onImagePaste={handleImagePaste}
+          onImageDrop={handleImageDrop}
+          imageAttachments={imageAttachments}
+          onRemoveImage={handleRemoveImage}
+          onFileAttach={handleFileSelect}
         />
-      )}
-
-      {/* Input bar */}
-      <InputBar
-        onSend={handleSend}
-        onInterrupt={handleInterrupt}
-        disabled={!isConnected}
-        isStreaming={streamingMessageId !== null}
-        placeholder={isConnected ? 'Type a message... (Cmd+Enter to send)' : 'Connecting...'}
-        filePickerFiles={filePickerFiles}
-        onFileTrigger={fetchFileList}
-        attachments={fileAttachments}
-        onRemoveAttachment={handleRemoveAttachment}
-        slashCommands={slashCommands}
-        onSlashTrigger={fetchSlashCommands}
-        onImagePaste={handleImagePaste}
-        onImageDrop={handleImageDrop}
-        imageAttachments={imageAttachments}
-        onRemoveImage={handleRemoveImage}
-        onFileAttach={handleFileSelect}
-      />
+      </div>
 
       {/* Modals */}
       <CreateSessionModal
