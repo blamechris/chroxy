@@ -2,6 +2,7 @@ import { readdir, stat, readFile, open } from 'fs/promises'
 import { join, basename } from 'path'
 import { homedir } from 'os'
 import { decodeProjectPath } from './jsonl-reader.js'
+import { runWithConcurrency } from './utils/concurrency.js'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const MIN_FILE_SIZE = 100
@@ -128,25 +129,6 @@ async function searchFile(filePath, queryLower, conversationId, projectName, dec
     snippet: firstSnippet,
     matchCount,
   }
-}
-
-/**
- * Run async tasks with a concurrency limit.
- */
-async function runWithConcurrency(tasks, limit) {
-  const results = new Array(tasks.length)
-  let nextIndex = 0
-
-  async function worker() {
-    while (nextIndex < tasks.length) {
-      const idx = nextIndex++
-      results[idx] = await tasks[idx]()
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker())
-  await Promise.all(workers)
-  return results
 }
 
 /**
