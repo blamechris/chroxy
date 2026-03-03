@@ -8,7 +8,7 @@
  * the hook uses a ref internally so the listener is registered once
  * on mount and torn down on unmount, regardless of reference changes.
  */
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 
 export type ShortcutMap = Record<string, () => void>
 
@@ -44,24 +44,25 @@ function isTextInput(el: EventTarget | null): boolean {
 }
 
 export function useGlobalShortcuts(shortcuts: ShortcutMap): void {
-  const shortcutsRef = useRef(shortcuts)
-  shortcutsRef.current = shortcuts
+  const parsedRef = useRef<(ParsedShortcut & { handler: () => void })[]>([])
+
+  useLayoutEffect(() => {
+    parsedRef.current = Object.entries(shortcuts).map(([str, handler]) => ({
+      ...parseShortcut(str),
+      handler,
+    }))
+  })
 
   useEffect(() => {
     const listener = (e: KeyboardEvent) => {
       if (isTextInput(e.target)) return
-
-      const parsed = Object.entries(shortcutsRef.current).map(([str, handler]) => ({
-        ...parseShortcut(str),
-        handler,
-      }))
 
       const key = e.key.toLowerCase()
       const meta = e.metaKey || e.ctrlKey
       const shift = e.shiftKey
       const alt = e.altKey
 
-      for (const shortcut of parsed) {
+      for (const shortcut of parsedRef.current) {
         if (
           key === shortcut.key &&
           meta === shortcut.meta &&
