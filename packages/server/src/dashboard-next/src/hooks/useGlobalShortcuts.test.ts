@@ -129,4 +129,74 @@ describe('useGlobalShortcuts', () => {
     fireKeyDown('P', { metaKey: true, shiftKey: true })
     expect(handler).toHaveBeenCalledOnce()
   })
+
+  it('fires shortcut when focus is in a checkbox input (#1361)', () => {
+    const handler = vi.fn()
+    const shortcuts: ShortcutMap = { 'cmd+n': handler }
+    renderHook(() => useGlobalShortcuts(shortcuts))
+
+    const checkbox = document.createElement('input')
+    checkbox.type = 'checkbox'
+    document.body.appendChild(checkbox)
+    checkbox.focus()
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'n',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    checkbox.dispatchEvent(event)
+
+    expect(handler).toHaveBeenCalledOnce()
+    document.body.removeChild(checkbox)
+  })
+
+  it('suppresses shortcut when focus is in a text-type input (#1361)', () => {
+    const handler = vi.fn()
+    const shortcuts: ShortcutMap = { 'cmd+n': handler }
+    renderHook(() => useGlobalShortcuts(shortcuts))
+
+    for (const type of ['text', 'search', 'url', 'email', 'password', 'tel', 'number']) {
+      const input = document.createElement('input')
+      input.type = type
+      document.body.appendChild(input)
+      input.focus()
+
+      const event = new KeyboardEvent('keydown', {
+        key: 'n',
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+      input.dispatchEvent(event)
+      document.body.removeChild(input)
+    }
+
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('fires shortcut when focus is in non-textual inputs (#1361)', () => {
+    const handler = vi.fn()
+    const shortcuts: ShortcutMap = { 'cmd+n': handler }
+    renderHook(() => useGlobalShortcuts(shortcuts))
+
+    for (const type of ['checkbox', 'radio', 'range', 'color', 'file']) {
+      const input = document.createElement('input')
+      input.type = type
+      document.body.appendChild(input)
+      input.focus()
+
+      const event = new KeyboardEvent('keydown', {
+        key: 'n',
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+      input.dispatchEvent(event)
+      document.body.removeChild(input)
+    }
+
+    expect(handler).toHaveBeenCalledTimes(5)
+  })
 })
