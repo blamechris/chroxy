@@ -1839,11 +1839,11 @@ describe('broadcastToSession via message-handler path (#1344)', () => {
       get: () => sessionsMap.keys().next().value
     })
 
-    return { manager, sessionsMap }
+    return manager
   }
 
   it('set_model broadcasts model_changed only to clients on the target session', async () => {
-    const { manager } = createTwoSessionManager()
+    const manager = createTwoSessionManager()
 
     server = new WsServer({
       port: 0,
@@ -1885,7 +1885,7 @@ describe('broadcastToSession via message-handler path (#1344)', () => {
   })
 
   it('set_permission_mode broadcasts permission_mode_changed only to clients on the target session', async () => {
-    const { manager } = createTwoSessionManager()
+    const manager = createTwoSessionManager()
 
     server = new WsServer({
       port: 0,
