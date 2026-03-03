@@ -28,7 +28,7 @@ import { ReconnectBanner } from './components/ReconnectBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { CreateSessionModal } from './components/CreateSessionModal'
 import { Toast, type ToastItem } from './components/Toast'
-import { useTauriEvents } from './hooks/useTauriEvents'
+import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
 
 /** Server-injected config from window.__CHROXY_CONFIG__ */
 interface ChroxyConfig {
@@ -157,8 +157,8 @@ export function App() {
         switchSession(sessions[nextIdx]!.sessionId)
         return
       }
-      // Cmd+W: close active tab (if more than 1 session)
-      if ((e.metaKey || e.ctrlKey) && e.key === 'w' && !e.shiftKey) {
+      // Cmd+W: close active tab (if more than 1 session) — Tauri only (#1378)
+      if (isTauri() && (e.metaKey || e.ctrlKey) && e.key === 'w' && !e.shiftKey) {
         if (activeSessionId && sessions.length > 1) {
           e.preventDefault()
           destroySession(activeSessionId)

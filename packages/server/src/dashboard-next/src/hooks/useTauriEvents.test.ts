@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook } from '@testing-library/react'
-import { useTauriEvents } from './useTauriEvents'
+import { useTauriEvents, isTauri } from './useTauriEvents'
 import { useConnectionStore } from '../store/connection'
 
 // Mock Tauri event system
@@ -141,5 +141,18 @@ describe('useTauriEvents', () => {
     // Give promises time to resolve
     await new Promise(r => setTimeout(r, 10))
     expect(unlisten).toHaveBeenCalled()
+  })
+})
+
+describe('isTauri (#1378)', () => {
+  it('returns true when __TAURI__ is present', () => {
+    setupTauriMock()
+    expect(isTauri()).toBe(true)
+    clearTauriMock()
+  })
+
+  it('returns false when __TAURI__ is absent', () => {
+    clearTauriMock()
+    expect(isTauri()).toBe(false)
   })
 })

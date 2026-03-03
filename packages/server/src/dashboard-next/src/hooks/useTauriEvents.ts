@@ -35,7 +35,7 @@ interface ServerErrorPayload {
 
 type UnlistenFn = () => void
 
-function isTauri(): boolean {
+export function isTauri(): boolean {
   return typeof window !== 'undefined' && !!(window as unknown as Record<string, unknown>).__TAURI__
 }
 
