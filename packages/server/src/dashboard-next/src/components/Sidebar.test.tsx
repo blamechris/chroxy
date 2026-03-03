@@ -204,4 +204,45 @@ describe('Sidebar', () => {
       expect.anything(),
     )
   })
+
+  // ARIA tree roles (#1375)
+  it('has role="tree" on the tree container', () => {
+    renderSidebar()
+    expect(screen.getByRole('tree')).toBeInTheDocument()
+  })
+
+  it('has role="treeitem" on repo headers', () => {
+    renderSidebar()
+    const treeitems = screen.getAllByRole('treeitem')
+    expect(treeitems.length).toBeGreaterThanOrEqual(2) // at least 2 repos
+  })
+
+  it('sets aria-expanded on repo treeitems', () => {
+    renderSidebar()
+    const apiRepo = screen.getByTestId('repo-header-/home/user/projects/api').closest('[role="treeitem"]')
+    expect(apiRepo).toHaveAttribute('aria-expanded', 'true')
+    // Collapse it
+    fireEvent.click(screen.getByTestId('repo-header-/home/user/projects/api'))
+    expect(apiRepo).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('sets aria-selected on active session treeitem', () => {
+    renderSidebar({ activeSessionId: 's1' })
+    const sessionItem = screen.getByTestId('session-item-s1')
+    expect(sessionItem).toHaveAttribute('aria-selected', 'true')
+    const otherItem = screen.getByTestId('session-item-s2')
+    expect(otherItem).toHaveAttribute('aria-selected', 'false')
+  })
+
+  it('sets aria-selected=false on resumable session treeitems', () => {
+    renderSidebar()
+    const resumableItem = screen.getByTestId('resumable-item-c1')
+    expect(resumableItem).toHaveAttribute('aria-selected', 'false')
+  })
+
+  it('has role="group" on session children container', () => {
+    renderSidebar()
+    const groups = screen.getByRole('tree').querySelectorAll('[role="group"]')
+    expect(groups.length).toBeGreaterThanOrEqual(1)
+  })
 })
