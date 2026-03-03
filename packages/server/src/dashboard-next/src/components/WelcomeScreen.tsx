@@ -22,7 +22,7 @@ export interface WelcomeScreenProps {
 
 const MAX_RECENT = 5
 
-/** Shorten a path to last 2-3 segments */
+/** Shorten a path to last 2 segments */
 function abbreviatePath(path: string): string {
   const parts = path.split('/')
   if (parts.length <= 3) return path
@@ -43,9 +43,7 @@ function relativeTime(ts: number): string {
 }
 
 const shortcuts = [
-  { keys: 'Cmd+N', label: 'New session' },
   { keys: 'Cmd+K', label: 'Command palette' },
-  { keys: 'Cmd+1-9', label: 'Switch tab' },
 ]
 
 export function WelcomeScreen({

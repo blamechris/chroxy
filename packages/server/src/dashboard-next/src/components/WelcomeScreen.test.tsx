@@ -45,8 +45,6 @@ describe('WelcomeScreen', () => {
 
   it('shows keyboard shortcut hints', () => {
     renderWelcome()
-    // Should show common shortcuts
-    expect(screen.getByText(/Cmd\+N/)).toBeInTheDocument()
     expect(screen.getByText(/Cmd\+K/)).toBeInTheDocument()
   })
 
@@ -78,12 +76,14 @@ describe('WelcomeScreen', () => {
   })
 
   it('shows relative timestamps for recent sessions', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-03-02T12:00:00Z'))
     const recent = [
-      { conversationId: 'c1', preview: 'Recent task', cwd: '/home', updatedAt: Date.now() - 60000 },
+      { conversationId: 'c1', preview: 'Recent task', cwd: '/home', updatedAt: new Date('2026-03-02T11:59:00Z').getTime() },
     ]
     renderWelcome({ recentSessions: recent })
-    // Should show a relative time like "1 min ago"
     expect(screen.getByText(/1 min/i)).toBeInTheDocument()
+    vi.useRealTimers()
   })
 
   it('truncates long cwd paths', () => {
