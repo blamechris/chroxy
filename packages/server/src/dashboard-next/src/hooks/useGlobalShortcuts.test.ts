@@ -199,4 +199,55 @@ describe('useGlobalShortcuts', () => {
 
     expect(handler).toHaveBeenCalledTimes(5)
   })
+
+  it('does not re-register listener when shortcuts reference changes', () => {
+    const addSpy = vi.spyOn(document, 'addEventListener')
+    const removeSpy = vi.spyOn(document, 'removeEventListener')
+
+    const handler = vi.fn()
+    const { rerender } = renderHook(
+      ({ shortcuts }) => useGlobalShortcuts(shortcuts),
+      { initialProps: { shortcuts: { 'cmd+n': handler } as ShortcutMap } },
+    )
+
+    const addCountAfterMount = addSpy.mock.calls.filter(
+      ([type]) => type === 'keydown',
+    ).length
+    const removeCountAfterMount = removeSpy.mock.calls.filter(
+      ([type]) => type === 'keydown',
+    ).length
+
+    // Re-render with a new object reference (same logical shortcuts)
+    rerender({ shortcuts: { 'cmd+n': handler } as ShortcutMap })
+
+    const addCountAfterRerender = addSpy.mock.calls.filter(
+      ([type]) => type === 'keydown',
+    ).length
+    const removeCountAfterRerender = removeSpy.mock.calls.filter(
+      ([type]) => type === 'keydown',
+    ).length
+
+    // Listener should NOT have been torn down and re-added
+    expect(addCountAfterRerender).toBe(addCountAfterMount)
+    expect(removeCountAfterRerender).toBe(removeCountAfterMount)
+  })
+
+  it('uses latest handler after shortcuts update', () => {
+    const handler1 = vi.fn()
+    const handler2 = vi.fn()
+
+    const { rerender } = renderHook(
+      ({ shortcuts }) => useGlobalShortcuts(shortcuts),
+      { initialProps: { shortcuts: { 'cmd+n': handler1 } as ShortcutMap } },
+    )
+
+    // Update to new handler
+    rerender({ shortcuts: { 'cmd+n': handler2 } as ShortcutMap })
+
+    fireKeyDown('n', { metaKey: true })
+
+    // Should call the latest handler, not the original
+    expect(handler1).not.toHaveBeenCalled()
+    expect(handler2).toHaveBeenCalledOnce()
+  })
 })
