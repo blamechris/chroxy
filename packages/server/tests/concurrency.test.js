@@ -60,4 +60,32 @@ describe('runWithConcurrency (#1075)', () => {
       { message: 'boom' }
     )
   })
+
+  it('throws RangeError when limit is 0', async () => {
+    await assert.rejects(
+      () => runWithConcurrency([() => Promise.resolve('x')], 0),
+      (err) => err instanceof RangeError && /limit must be >= 1/.test(err.message)
+    )
+  })
+
+  it('throws RangeError when limit is negative', async () => {
+    await assert.rejects(
+      () => runWithConcurrency([() => Promise.resolve('x')], -1),
+      (err) => err instanceof RangeError && /limit must be >= 1/.test(err.message)
+    )
+  })
+
+  it('throws RangeError when limit is NaN', async () => {
+    await assert.rejects(
+      () => runWithConcurrency([() => Promise.resolve('x')], NaN),
+      (err) => err instanceof RangeError && /limit must be >= 1/.test(err.message)
+    )
+  })
+
+  it('throws RangeError when limit is Infinity', async () => {
+    await assert.rejects(
+      () => runWithConcurrency([() => Promise.resolve('x')], Infinity),
+      (err) => err instanceof RangeError && /limit must be >= 1/.test(err.message)
+    )
+  })
 })
