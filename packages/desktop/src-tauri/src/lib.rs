@@ -238,13 +238,36 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn update_menu_state(app: &tauri::AppHandle, running: bool) {
+/// Tray menu states that determine which items are enabled.
+enum MenuState {
+    Running,
+    Stopped,
+    Restarting,
+}
+
+fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
     if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
         let items = lock_or_recover(&items);
-        let _ = items.start.set_enabled(!running);
-        let _ = items.stop.set_enabled(running);
-        let _ = items.restart.set_enabled(running);
-        let _ = items.dashboard.set_enabled(running);
+        match state {
+            MenuState::Running => {
+                let _ = items.start.set_enabled(false);
+                let _ = items.stop.set_enabled(true);
+                let _ = items.restart.set_enabled(true);
+                let _ = items.dashboard.set_enabled(true);
+            }
+            MenuState::Stopped => {
+                let _ = items.start.set_enabled(true);
+                let _ = items.stop.set_enabled(false);
+                let _ = items.restart.set_enabled(false);
+                let _ = items.dashboard.set_enabled(false);
+            }
+            MenuState::Restarting => {
+                let _ = items.start.set_enabled(false);
+                let _ = items.stop.set_enabled(false);
+                let _ = items.restart.set_enabled(false);
+                let _ = items.dashboard.set_enabled(false);
+            }
+        }
     }
 }
 
@@ -280,7 +303,7 @@ fn handle_start(app: &tauri::AppHandle) {
 
     match result {
         Ok(()) => {
-            update_menu_state(app, true);
+            update_menu_state(app, MenuState::Running);
 
             // Show window immediately (loading page listens for server_ready event)
             window::show_window(app);
@@ -295,7 +318,7 @@ fn handle_start(app: &tauri::AppHandle) {
                     let status = lock_or_recover(&state).status();
                     match status {
                         ServerStatus::Running => {
-                            update_menu_state(&app_handle, true);
+                            update_menu_state(&app_handle, MenuState::Running);
                             // Emit server_ready — loading page navigates to dashboard
                             let state = app_handle.state::<Mutex<ServerManager>>();
                             let mgr = lock_or_recover(&state);
@@ -307,7 +330,7 @@ fn handle_start(app: &tauri::AppHandle) {
                             break;
                         }
                         ServerStatus::Error(ref msg) => {
-                            update_menu_state(&app_handle, false);
+                            update_menu_state(&app_handle, MenuState::Stopped);
                             send_notification(&app_handle, "Server Error", msg);
                             return;
                         }
@@ -335,7 +358,7 @@ fn handle_start(app: &tauri::AppHandle) {
                         ServerStatus::Stopped => return, // User stopped
                         ServerStatus::Error(_) if pending => {
                             // Crash detected — attempt auto-restart
-                            update_menu_state(&app_handle, false);
+                            update_menu_state(&app_handle, MenuState::Restarting);
                             send_notification(
                                 &app_handle,
                                 "Server Crashed",
@@ -375,7 +398,7 @@ fn handle_start(app: &tauri::AppHandle) {
                                         let status = lock_or_recover(&state).status();
                                         match status {
                                             ServerStatus::Running => {
-                                                update_menu_state(&app_handle, true);
+                                                update_menu_state(&app_handle, MenuState::Running);
                                                 // Emit server_ready — dashboard reconnects
                                                 let state = app_handle.state::<Mutex<ServerManager>>();
                                                 let mgr = lock_or_recover(&state);
@@ -415,7 +438,7 @@ fn handle_start(app: &tauri::AppHandle) {
                                 }
                                 Err(_) => {
                                     drop(mgr);
-                                    update_menu_state(&app_handle, false);
+                                    update_menu_state(&app_handle, MenuState::Stopped);
                                     send_notification(
                                         &app_handle,
                                         "Server Unrecoverable",
@@ -436,7 +459,7 @@ fn handle_start(app: &tauri::AppHandle) {
         }
         Err(e) => {
             eprintln!("[tray] Failed to start server: {}", e);
-            update_menu_state(app, false);
+            update_menu_state(app, MenuState::Stopped);
             send_notification(app, "Server Error", &e);
         }
     }
@@ -447,7 +470,7 @@ fn handle_stop(app: &tauri::AppHandle) {
     let mut mgr = lock_or_recover(&state);
     mgr.stop();
     drop(mgr);
-    update_menu_state(app, false);
+    update_menu_state(app, MenuState::Stopped);
     window::emit_server_stopped(app);
 }
 
@@ -459,10 +482,10 @@ fn handle_restart(app: &tauri::AppHandle) {
     };
 
     match result {
-        Ok(()) => update_menu_state(app, true),
+        Ok(()) => update_menu_state(app, MenuState::Running),
         Err(e) => {
             eprintln!("[tray] Failed to restart server: {}", e);
-            update_menu_state(app, false);
+            update_menu_state(app, MenuState::Stopped);
             send_notification(app, "Restart Failed", &e);
         }
     }
