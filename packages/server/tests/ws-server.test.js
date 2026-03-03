@@ -1819,7 +1819,7 @@ describe('background session sync (_broadcastToSession)', () => {
     send(c2.ws, { type: 'auth', token: 'test-token' })
     await waitForMessage(c2.messages, 'auth_ok', 2000)
     send(c2.ws, { type: 'switch_session', sessionId: 'sess-2' })
-    await waitForMessage(c2.messages, 'session_context', 2000)
+    await waitForMessage(c2.messages, 'session_switched', 2000)
 
     // Clear messages before test
     c1.messages.length = 0
@@ -1864,20 +1864,21 @@ describe('background session sync (_broadcastToSession)', () => {
     send(c2.ws, { type: 'auth', token: 'test-token' })
     await waitForMessage(c2.messages, 'auth_ok', 2000)
     send(c2.ws, { type: 'switch_session', sessionId: 'sess-2' })
-    await waitForMessage(c2.messages, 'session_context', 2000)
+    await waitForMessage(c2.messages, 'session_switched', 2000)
 
     // Clear messages
     c1.messages.length = 0
     c2.messages.length = 0
 
     // Client 2 sends set_permission_mode targeting sess-2
-    send(c2.ws, { type: 'set_permission_mode', mode: 'plan' })
+    // Use 'approve' — 'plan' requires planMode capability on the session constructor
+    send(c2.ws, { type: 'set_permission_mode', mode: 'approve' })
     await new Promise(r => setTimeout(r, 300))
 
     // Client 2 should receive permission_mode_changed
     const c2Perm = c2.messages.find(m => m.type === 'permission_mode_changed')
     assert.ok(c2Perm, 'Client on sess-2 should receive permission_mode_changed')
-    assert.equal(c2Perm.mode, 'plan')
+    assert.equal(c2Perm.mode, 'approve')
 
     // Client 1 should NOT receive permission_mode_changed
     const c1Perm = c1.messages.find(m => m.type === 'permission_mode_changed')
