@@ -284,6 +284,7 @@ export class SessionManager extends EventEmitter {
       return false
     }
     entry.name = name
+    entry._autoLabeled = true // prevent auto-label from overwriting manual rename
     console.log(`[session-manager] Renamed session ${sessionId} to "${name}"`)
     this.emit('session_updated', { sessionId, name })
     return true

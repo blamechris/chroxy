@@ -81,7 +81,7 @@ describe('SessionManager auto-labeling', () => {
     assert.equal(events.length, 0, 'Should not emit session_updated')
   })
 
-  it('does not auto-rename "New Session" names', () => {
+  it('auto-renames "New Session" default names', () => {
     const session = makeMockSession()
     mgr._sessions.set('s1', { session, name: 'New Session', cwd: '/tmp' })
 
@@ -124,5 +124,18 @@ describe('SessionManager auto-labeling', () => {
     assert.ok(name.endsWith('...'), 'Should end with ellipsis')
     // Should break at word boundary before "module"
     assert.ok(!name.includes('modul'), 'Should not include partial word')
+  })
+
+  it('does not auto-rename after manual rename (even if name matches default pattern)', () => {
+    const session = makeMockSession()
+    mgr._sessions.set('s1', { session, name: 'Session 1', cwd: '/tmp' })
+
+    // Manually rename to a default-looking name
+    mgr.renameSession('s1', 'Session 5')
+
+    // Next user input should NOT overwrite the manual rename
+    mgr.recordUserInput('s1', 'This should not become the label')
+
+    assert.equal(mgr.getSession('s1').name, 'Session 5')
   })
 })
