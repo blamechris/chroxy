@@ -131,7 +131,6 @@ async function searchFile(filePath, queryLower, conversationId, projectName, dec
   }
 }
 
-
 /**
  * Search all conversation JSONL files for a query string.
  * Returns an array of results with conversation metadata and match snippets.

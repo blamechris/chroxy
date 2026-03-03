@@ -94,7 +94,6 @@ async function extractMetadata(filePath) {
   }
 }
 
-
 async function performScan(projectsDir) {
   let projectDirs
   try {
