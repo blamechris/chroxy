@@ -347,6 +347,47 @@ describe('session_list GC handler', () => {
   });
 });
 
+describe('session_updated handler (#1381)', () => {
+  it('updates session name in store', () => {
+    const store = createMockStore({
+      sessions: [
+        { sessionId: 's1', name: 'Old Name' } as any,
+        { sessionId: 's2', name: 'Other' } as any,
+      ],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'session_updated',
+      sessionId: 's1',
+      name: 'New Name',
+    });
+
+    const state = store.getState();
+    expect(state.sessions[0].name).toBe('New Name');
+    expect(state.sessions[1].name).toBe('Other');
+  });
+
+  it('ignores unknown session ids', () => {
+    const store = createMockStore({
+      sessions: [{ sessionId: 's1', name: 'Original' } as any],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'session_updated',
+      sessionId: 'unknown',
+      name: 'Nope',
+    });
+
+    expect(store.getState().sessions[0].name).toBe('Original');
+  });
+});
+
 describe('conversations_list handler', () => {
   it('populates conversationHistory and clears loading flag', () => {
     const store = createMockStore({
