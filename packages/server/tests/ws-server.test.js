@@ -1829,12 +1829,16 @@ describe('background session sync (_broadcastToSession)', () => {
     send(c2.ws, { type: 'set_model', model: 'sonnet' })
 
     // Await positive assertion via waitForMessage (avoids flaky fixed-delay)
-    const c2Model = await waitForMessage(c2.messages, 'model_changed', 2000)
+    // Filter by sessionId to distinguish broadcast (tagged by _broadcastToSession)
+    // from _sendSessionInfo messages (untagged) that may arrive after clear
+    await waitForMessage(c2.messages, 'model_changed', 2000)
+    const c2Model = c2.messages.find(m => m.type === 'model_changed' && m.sessionId === 'sess-2')
+    assert.ok(c2Model, 'Client on sess-2 should receive broadcast model_changed')
     assert.equal(c2Model.model, 'sonnet')
 
     // Short delay for negative assertion — ensure c1 had time to receive if leaking
     await new Promise(r => setTimeout(r, 100))
-    const c1Model = c1.messages.find(m => m.type === 'model_changed')
+    const c1Model = c1.messages.find(m => m.type === 'model_changed' && m.sessionId === 'sess-2')
     assert.ok(!c1Model, 'Client on sess-1 should NOT receive model_changed for sess-2')
 
     c1.ws.close()
@@ -1874,12 +1878,16 @@ describe('background session sync (_broadcastToSession)', () => {
     send(c2.ws, { type: 'set_permission_mode', mode: 'approve' })
 
     // Await positive assertion via waitForMessage (avoids flaky fixed-delay)
-    const c2Perm = await waitForMessage(c2.messages, 'permission_mode_changed', 2000)
+    // Filter by sessionId to distinguish broadcast (tagged by _broadcastToSession)
+    // from _sendSessionInfo messages (untagged) that may arrive after clear
+    await waitForMessage(c2.messages, 'permission_mode_changed', 2000)
+    const c2Perm = c2.messages.find(m => m.type === 'permission_mode_changed' && m.sessionId === 'sess-2')
+    assert.ok(c2Perm, 'Client on sess-2 should receive broadcast permission_mode_changed')
     assert.equal(c2Perm.mode, 'approve')
 
     // Short delay for negative assertion — ensure c1 had time to receive if leaking
     await new Promise(r => setTimeout(r, 100))
-    const c1Perm = c1.messages.find(m => m.type === 'permission_mode_changed')
+    const c1Perm = c1.messages.find(m => m.type === 'permission_mode_changed' && m.sessionId === 'sess-2')
     assert.ok(!c1Perm, 'Client on sess-1 should NOT receive permission_mode_changed for sess-2')
 
     c1.ws.close()
