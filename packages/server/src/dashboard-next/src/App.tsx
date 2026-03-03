@@ -36,6 +36,8 @@ interface ChroxyConfig {
   noEncrypt: boolean
 }
 
+declare const __APP_VERSION__: string
+
 declare global {
   interface Window {
     __CHROXY_CONFIG__?: ChroxyConfig
@@ -440,6 +442,7 @@ export function App() {
       <header id="header">
         <div className="header-left">
           <span className="logo">Chroxy</span>
+          <span className="version-badge">v{__APP_VERSION__}</span>
           <span className={`status-dot ${connectionPhase}`} />
         </div>
         <div className="header-center">
