@@ -1797,6 +1797,96 @@ describe('background session sync (_broadcastToSession)', () => {
     ws.close()
   })
 
+  it('set_model broadcasts model_changed only to the target session clients (#1344)', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Client 1 on sess-1
+    const c1 = await createClient(port, false)
+    send(c1.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(c1.messages, 'auth_ok', 2000)
+
+    // Client 2 switches to sess-2
+    const c2 = await createClient(port, false)
+    send(c2.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(c2.messages, 'auth_ok', 2000)
+    send(c2.ws, { type: 'switch_session', sessionId: 'sess-2' })
+    await waitForMessage(c2.messages, 'session_context', 2000)
+
+    // Clear messages before test
+    c1.messages.length = 0
+    c2.messages.length = 0
+
+    // Client 2 sends set_model targeting sess-2 (via handler path)
+    send(c2.ws, { type: 'set_model', model: 'sonnet' })
+    await new Promise(r => setTimeout(r, 300))
+
+    // Client 2 should receive model_changed
+    const c2Model = c2.messages.find(m => m.type === 'model_changed')
+    assert.ok(c2Model, 'Client on sess-2 should receive model_changed')
+    assert.equal(c2Model.model, 'sonnet')
+
+    // Client 1 should NOT receive model_changed
+    const c1Model = c1.messages.find(m => m.type === 'model_changed')
+    assert.ok(!c1Model, 'Client on sess-1 should NOT receive model_changed for sess-2')
+
+    c1.ws.close()
+    c2.ws.close()
+  })
+
+  it('set_permission_mode broadcasts only to the target session clients (#1344)', async () => {
+    const mockManager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Client 1 on sess-1
+    const c1 = await createClient(port, false)
+    send(c1.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(c1.messages, 'auth_ok', 2000)
+
+    // Client 2 switches to sess-2
+    const c2 = await createClient(port, false)
+    send(c2.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(c2.messages, 'auth_ok', 2000)
+    send(c2.ws, { type: 'switch_session', sessionId: 'sess-2' })
+    await waitForMessage(c2.messages, 'session_context', 2000)
+
+    // Clear messages
+    c1.messages.length = 0
+    c2.messages.length = 0
+
+    // Client 2 sends set_permission_mode targeting sess-2
+    send(c2.ws, { type: 'set_permission_mode', mode: 'plan' })
+    await new Promise(r => setTimeout(r, 300))
+
+    // Client 2 should receive permission_mode_changed
+    const c2Perm = c2.messages.find(m => m.type === 'permission_mode_changed')
+    assert.ok(c2Perm, 'Client on sess-2 should receive permission_mode_changed')
+    assert.equal(c2Perm.mode, 'plan')
+
+    // Client 1 should NOT receive permission_mode_changed
+    const c1Perm = c1.messages.find(m => m.type === 'permission_mode_changed')
+    assert.ok(!c1Perm, 'Client on sess-1 should NOT receive permission_mode_changed for sess-2')
+
+    c1.ws.close()
+    c2.ws.close()
+  })
+
 })
 
 describe('public broadcast method', () => {
