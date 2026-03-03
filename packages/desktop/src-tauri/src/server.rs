@@ -364,6 +364,26 @@ impl ServerManager {
         }
     }
 
+    /// Sleep in short increments, checking the generation counter between each.
+    /// Returns `true` if the full duration elapsed, `false` if generation changed.
+    fn sleep_interruptible(
+        dur: Duration,
+        generation: &AtomicU64,
+        my_gen: u64,
+    ) -> bool {
+        let step = Duration::from_millis(100);
+        let mut remaining = dur;
+        while remaining > Duration::ZERO {
+            let chunk = remaining.min(step);
+            thread::sleep(chunk);
+            if generation.load(Ordering::SeqCst) != my_gen {
+                return false;
+            }
+            remaining = remaining.saturating_sub(chunk);
+        }
+        true
+    }
+
     /// Poll the health endpoint every 2s until Running or timeout (60s),
     /// then monitor continuously. Signals auto-restart on crash detection.
     /// Uses a generation counter to ensure old threads exit when a new poll starts.
@@ -411,7 +431,9 @@ impl ServerManager {
                     }
                 }
 
-                thread::sleep(Duration::from_secs(2));
+                if !Self::sleep_interruptible(Duration::from_secs(2), &generation, my_gen) {
+                    return;
+                }
             }
 
             // Continue monitoring while running
@@ -420,9 +442,7 @@ impl ServerManager {
                     return;
                 }
 
-                thread::sleep(Duration::from_secs(5));
-
-                if generation.load(Ordering::SeqCst) != my_gen {
+                if !Self::sleep_interruptible(Duration::from_secs(5), &generation, my_gen) {
                     return;
                 }
 
@@ -577,6 +597,29 @@ mod tests {
         // Clean up: advance generation to stop the second thread
         mgr.health_generation.fetch_add(1, Ordering::SeqCst);
         thread::sleep(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn health_poll_exits_within_500ms_of_generation_change() {
+        let mgr = ServerManager::new();
+        // Start a health poll (spawns a thread that sleeps 2s between checks)
+        mgr.start_health_poll();
+        let poll_gen = mgr.health_generation.load(Ordering::SeqCst);
+
+        // Wait a bit for the thread to enter its sleep
+        thread::sleep(Duration::from_millis(50));
+
+        let before = Instant::now();
+        // Invalidate the generation — thread should wake up and exit quickly
+        mgr.health_generation.fetch_add(1, Ordering::SeqCst);
+        assert_ne!(mgr.health_generation.load(Ordering::SeqCst), poll_gen);
+
+        // Wait for the thread to exit (poll every 50ms, up to 600ms)
+        // If interruptible, it exits in <200ms. If not, it takes up to 4s.
+        thread::sleep(Duration::from_millis(500));
+        let elapsed = before.elapsed();
+        // Verify it exited well under the old 2s sleep
+        assert!(elapsed < Duration::from_secs(1), "Thread took {:?} to exit — should be <500ms", elapsed);
     }
 
     #[test]
