@@ -616,6 +616,9 @@ export class SessionManager extends EventEmitter {
     const trimmed = text.trim()
     if (!trimmed) return
 
+    // Skip attachment-only markers (e.g. "[2 file(s) attached]") — not meaningful labels
+    if (/^\[\d+ file\(s\) attached\]$/.test(trimmed)) return
+
     entry._autoLabeled = true
 
     const MAX_LEN = 40

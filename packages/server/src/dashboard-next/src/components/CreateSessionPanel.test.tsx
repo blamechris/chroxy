@@ -83,23 +83,36 @@ describe('CreateSessionPanel', () => {
     expect(screen.queryByLabelText(/permission/i)).not.toBeInTheDocument()
   })
 
-  it('submits on Enter key in CWD field', () => {
+  it('omits model and permissionMode from onCreate when lists are empty', () => {
+    const onCreate = vi.fn()
+    render(<CreateSessionPanel {...defaultProps} models={[]} permissionModes={[]} onCreate={onCreate} />)
+    fireEvent.click(screen.getByRole('button', { name: /create/i }))
+
+    expect(onCreate).toHaveBeenCalledWith({ cwd: '/Users/me/projects/my-app' })
+    const data = onCreate.mock.calls[0]![0]
+    expect(data).not.toHaveProperty('model')
+    expect(data).not.toHaveProperty('permissionMode')
+  })
+
+  it('submits on Enter key from any field', () => {
     const onCreate = vi.fn()
     render(<CreateSessionPanel {...defaultProps} onCreate={onCreate} />)
 
-    const cwdInput = screen.getByLabelText(/working directory/i)
-    fireEvent.keyDown(cwdInput, { key: 'Enter' })
+    // Enter on CWD input
+    fireEvent.keyDown(screen.getByLabelText(/working directory/i), { key: 'Enter' })
+    expect(onCreate).toHaveBeenCalledTimes(1)
 
-    expect(onCreate).toHaveBeenCalled()
+    // Enter on model select
+    fireEvent.keyDown(screen.getByLabelText(/model/i), { key: 'Enter' })
+    expect(onCreate).toHaveBeenCalledTimes(2)
   })
 
-  it('cancels on Escape key', () => {
+  it('cancels on Escape key from any field', () => {
     const onCancel = vi.fn()
     render(<CreateSessionPanel {...defaultProps} onCancel={onCancel} />)
 
-    const cwdInput = screen.getByLabelText(/working directory/i)
-    fireEvent.keyDown(cwdInput, { key: 'Escape' })
-
+    // Escape on permission select
+    fireEvent.keyDown(screen.getByLabelText(/permission/i), { key: 'Escape' })
     expect(onCancel).toHaveBeenCalled()
   })
 

@@ -7,11 +7,17 @@
  */
 import { useState, useCallback, type KeyboardEvent } from 'react'
 
+export interface CreateSessionData {
+  cwd: string
+  model?: string
+  permissionMode?: string
+}
+
 export interface CreateSessionPanelProps {
   cwd: string
   models: { id: string; label: string }[]
   permissionModes: { id: string; label: string }[]
-  onCreate: (data: { cwd: string; model: string; permissionMode: string }) => void
+  onCreate: (data: CreateSessionData) => void
   onCancel: () => void
   className?: string
 }
@@ -29,11 +35,10 @@ export function CreateSessionPanel({
   const [permMode, setPermMode] = useState(permissionModes[0]?.id ?? '')
 
   const submit = useCallback(() => {
-    onCreate({
-      cwd: cwdValue.trim() || cwd,
-      model,
-      permissionMode: permMode,
-    })
+    const data: CreateSessionData = { cwd: cwdValue.trim() || cwd }
+    if (model) data.model = model
+    if (permMode) data.permissionMode = permMode
+    onCreate(data)
   }, [cwdValue, cwd, model, permMode, onCreate])
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -50,6 +55,7 @@ export function CreateSessionPanel({
     <div
       className={`create-session-panel${className ? ` ${className}` : ''}`}
       data-testid="create-session-panel"
+      onKeyDown={handleKeyDown}
     >
       <label className="create-session-field">
         <span className="create-session-label">Working directory</span>
@@ -58,7 +64,6 @@ export function CreateSessionPanel({
           aria-label="Working directory"
           value={cwdValue}
           onChange={e => setCwdValue(e.target.value)}
-          onKeyDown={handleKeyDown}
           autoComplete="off"
           autoFocus
         />

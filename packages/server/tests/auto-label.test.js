@@ -126,6 +126,19 @@ describe('SessionManager auto-labeling', () => {
     assert.ok(!name.includes('modul'), 'Should not include partial word')
   })
 
+  it('skips attachment-only markers as labels', () => {
+    const session = makeMockSession()
+    mgr._sessions.set('s1', { session, name: 'Session 1', cwd: '/tmp' })
+
+    // First message is attachment-only
+    mgr.recordUserInput('s1', '[2 file(s) attached]')
+    assert.equal(mgr.getSession('s1').name, 'Session 1')
+
+    // Second message with actual text should still auto-label
+    mgr.recordUserInput('s1', 'Review these files please')
+    assert.equal(mgr.getSession('s1').name, 'Review these files please')
+  })
+
   it('does not auto-rename after manual rename (even if name matches default pattern)', () => {
     const session = makeMockSession()
     mgr._sessions.set('s1', { session, name: 'Session 1', cwd: '/tmp' })
