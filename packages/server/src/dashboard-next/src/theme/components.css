@@ -846,6 +846,7 @@
 
 .question-freetext-input:focus {
   border-color: var(--accent-purple);
+  box-shadow: 0 0 0 2px var(--accent-purple);
 }
 
 .question-freetext-input::placeholder {
@@ -866,6 +867,16 @@
 
 .question-freetext-send:hover {
   opacity: 0.85;
+}
+
+.question-freetext-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.question-freetext-send:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
 }
 
 .question-answered {
