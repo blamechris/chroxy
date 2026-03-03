@@ -62,7 +62,7 @@ export function QuestionPrompt({ question, options, answered, onSelect }: Questi
             aria-label="Your response"
             className="question-freetext-input"
           />
-          <button type="button" onClick={handleSubmit} className="question-freetext-send">
+          <button type="button" onClick={handleSubmit} disabled={!text.trim()} className="question-freetext-send">
             Send
           </button>
         </div>

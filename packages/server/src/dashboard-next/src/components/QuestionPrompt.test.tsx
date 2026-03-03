@@ -159,4 +159,29 @@ describe('QuestionPrompt', () => {
     expect(screen.getByText('Alice')).toBeInTheDocument()
     expect(screen.queryByPlaceholderText('Type your response…')).not.toBeInTheDocument()
   })
+
+  it('disables Send button when text is empty (#1336)', () => {
+    render(
+      <QuestionPrompt
+        question="Your input?"
+        options={[]}
+        onSelect={vi.fn()}
+      />
+    )
+    const sendBtn = screen.getByRole('button', { name: 'Send' })
+    expect(sendBtn).toBeDisabled()
+  })
+
+  it('enables Send button when text is non-empty (#1336)', () => {
+    render(
+      <QuestionPrompt
+        question="Your input?"
+        options={[]}
+        onSelect={vi.fn()}
+      />
+    )
+    fireEvent.change(screen.getByPlaceholderText('Type your response…'), { target: { value: 'hello' } })
+    const sendBtn = screen.getByRole('button', { name: 'Send' })
+    expect(sendBtn).not.toBeDisabled()
+  })
 })
