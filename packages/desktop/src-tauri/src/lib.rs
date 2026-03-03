@@ -388,6 +388,9 @@ fn handle_start(app: &tauri::AppHandle) {
                                                     "Server Recovered",
                                                     "Auto-restart successful",
                                                 );
+                                                // Reset restart count after recovery notification
+                                                let state = app_handle.state::<Mutex<ServerManager>>();
+                                                lock_or_recover(&state).reset_restart_count();
                                                 recovered = true;
                                                 break;
                                             }
