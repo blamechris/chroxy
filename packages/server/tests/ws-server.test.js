@@ -1827,14 +1827,13 @@ describe('background session sync (_broadcastToSession)', () => {
 
     // Client 2 sends set_model targeting sess-2 (via handler path)
     send(c2.ws, { type: 'set_model', model: 'sonnet' })
-    await new Promise(r => setTimeout(r, 300))
 
-    // Client 2 should receive model_changed
-    const c2Model = c2.messages.find(m => m.type === 'model_changed')
-    assert.ok(c2Model, 'Client on sess-2 should receive model_changed')
+    // Await positive assertion via waitForMessage (avoids flaky fixed-delay)
+    const c2Model = await waitForMessage(c2.messages, 'model_changed', 2000)
     assert.equal(c2Model.model, 'sonnet')
 
-    // Client 1 should NOT receive model_changed
+    // Short delay for negative assertion — ensure c1 had time to receive if leaking
+    await new Promise(r => setTimeout(r, 100))
     const c1Model = c1.messages.find(m => m.type === 'model_changed')
     assert.ok(!c1Model, 'Client on sess-1 should NOT receive model_changed for sess-2')
 
@@ -1873,14 +1872,13 @@ describe('background session sync (_broadcastToSession)', () => {
     // Client 2 sends set_permission_mode targeting sess-2
     // Use 'approve' — 'plan' requires planMode capability on the session constructor
     send(c2.ws, { type: 'set_permission_mode', mode: 'approve' })
-    await new Promise(r => setTimeout(r, 300))
 
-    // Client 2 should receive permission_mode_changed
-    const c2Perm = c2.messages.find(m => m.type === 'permission_mode_changed')
-    assert.ok(c2Perm, 'Client on sess-2 should receive permission_mode_changed')
+    // Await positive assertion via waitForMessage (avoids flaky fixed-delay)
+    const c2Perm = await waitForMessage(c2.messages, 'permission_mode_changed', 2000)
     assert.equal(c2Perm.mode, 'approve')
 
-    // Client 1 should NOT receive permission_mode_changed
+    // Short delay for negative assertion — ensure c1 had time to receive if leaking
+    await new Promise(r => setTimeout(r, 100))
     const c1Perm = c1.messages.find(m => m.type === 'permission_mode_changed')
     assert.ok(!c1Perm, 'Client on sess-1 should NOT receive permission_mode_changed for sess-2')
 
