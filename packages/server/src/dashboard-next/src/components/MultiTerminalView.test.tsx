@@ -84,6 +84,7 @@ function renderMultiTerminal(props: Partial<MultiTerminalViewProps> = {}) {
 describe('MultiTerminalView', () => {
   beforeEach(() => {
     mockGetState.mockReturnValue({
+      activeSessionId: 's1',
       sessionStates: {
         s1: { terminalRawBuffer: 'session-1-data' },
         s2: { terminalRawBuffer: 'session-2-data' },

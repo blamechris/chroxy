@@ -738,6 +738,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }, 5000);
   },
 
+  // NOTE: `raw` WS messages don't carry sessionId — terminal data is always routed
+  // to the active session's buffer. Background session output goes to the global
+  // buffer only. This is a known protocol limitation; proper per-session routing
+  // requires sessionId on raw messages (tracked in subscribe_sessions #1104).
   appendTerminalData: (data) => {
     const activeId = get().activeSessionId;
     set((state) => {
@@ -766,7 +770,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   clearTerminalBuffer: () => {
-    set({ terminalBuffer: '', terminalRawBuffer: '' });
+    const activeId = get().activeSessionId;
+    set((state) => {
+      const base: Record<string, unknown> = { terminalBuffer: '', terminalRawBuffer: '' };
+      if (activeId && state.sessionStates[activeId]) {
+        base.sessionStates = {
+          ...state.sessionStates,
+          [activeId]: { ...state.sessionStates[activeId], terminalRawBuffer: '' },
+        };
+      }
+      return base;
+    });
     clearTerminalWriteBatching();
   },
 

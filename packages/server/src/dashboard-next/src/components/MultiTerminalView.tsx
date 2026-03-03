@@ -41,11 +41,13 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
 
   const handleReady = useCallback((sessionId: string, handle: TerminalHandle) => {
     handlesRef.current.set(sessionId, handle)
-    // If this is the active session, wire it up immediately
-    if (sessionId === activeSessionId) {
+    // Use getState() for a fresh read — avoids stale closure from TerminalView's mount-once effect
+    const currentActive = useConnectionStore.getState().activeSessionId
+    if (sessionId === currentActive) {
       setTerminalWriteCallback(handle.write)
+      handle.fit()
     }
-  }, [activeSessionId, setTerminalWriteCallback])
+  }, [setTerminalWriteCallback])
 
   // Clean up handles for removed sessions
   useEffect(() => {
