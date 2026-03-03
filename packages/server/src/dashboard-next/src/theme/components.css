@@ -23,15 +23,12 @@
   display: flex;
   flex-direction: column;
   height: 100vh;
-  max-width: 960px;
-  margin: 0 auto;
 }
 
 #app.with-sidebar {
   display: grid;
   grid-template-columns: auto 1fr;
   grid-template-rows: auto auto 1fr;
-  max-width: none;
 }
 
 #app.with-sidebar > .reconnect-banner {
@@ -55,8 +52,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  max-width: 960px;
-  margin: 0 auto;
+  min-width: 0;
 }
 
 /* ---- Header ---- */
