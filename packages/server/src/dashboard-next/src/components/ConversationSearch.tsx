@@ -72,7 +72,15 @@ export function ConversationSearch({
             <li
               key={result.conversationId}
               className="conversation-search-result"
+              role="button"
+              tabIndex={0}
               onClick={() => onResumeSession(result.conversationId, result.cwd ?? '')}
+              onKeyDown={e => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  onResumeSession(result.conversationId, result.cwd ?? '')
+                }
+              }}
             >
               <div className="conversation-search-result-title">
                 {result.preview || 'Untitled conversation'}

@@ -47,7 +47,7 @@ export interface SidebarProps {
   clientCount: number
   onFilterChange: (value: string) => void
   onSessionClick: (sessionId: string) => void
-  onResumeSession: (conversationId: string) => void
+  onResumeSession: (conversationId: string, cwd?: string) => void
   onNewSession: (cwd: string) => void
   onToggle: () => void
   onContextMenu: (target: ContextMenuTarget, event: React.MouseEvent) => void
@@ -157,7 +157,7 @@ export function Sidebar({
               searchQuery={searchQuery}
               searchConversations={searchConversations}
               clearSearchResults={clearSearchResults}
-              onResumeSession={(convId) => onResumeSession(convId)}
+              onResumeSession={(convId, cwd) => onResumeSession(convId, cwd)}
             />
           )}
 
