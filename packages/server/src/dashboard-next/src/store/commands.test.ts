@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { renderHook } from '@testing-library/react'
-import { useCommands, getMruCommands, recordMruCommand } from './commands'
+import { useCommands, getMruCommands, recordMruCommand, sortCommandsByMru } from './commands'
 
 // Mock the connection store
 const mockStore = {
@@ -120,5 +120,47 @@ describe('MRU tracking', () => {
     expect(raw).toBeTruthy()
     const parsed = JSON.parse(raw!)
     expect(parsed).toContain('test-cmd')
+  })
+})
+
+describe('sortCommandsByMru (#1360)', () => {
+  const noop = () => {}
+  const commands = [
+    { id: 'alpha', name: 'Alpha', category: 'A', action: noop },
+    { id: 'beta', name: 'Beta', category: 'A', action: noop },
+    { id: 'gamma', name: 'Gamma', category: 'B', action: noop },
+    { id: 'delta', name: 'Delta', category: 'B', action: noop },
+  ]
+
+  beforeEach(() => {
+    localStorage.clear()
+  })
+
+  it('returns original order when no MRU data', () => {
+    const sorted = sortCommandsByMru(commands)
+    expect(sorted.map(c => c.id)).toEqual(['alpha', 'beta', 'gamma', 'delta'])
+  })
+
+  it('moves MRU commands to front', () => {
+    recordMruCommand('gamma')
+    recordMruCommand('delta')
+    const sorted = sortCommandsByMru(commands)
+    expect(sorted[0]!.id).toBe('delta')
+    expect(sorted[1]!.id).toBe('gamma')
+  })
+
+  it('preserves order of non-MRU commands', () => {
+    recordMruCommand('gamma')
+    const sorted = sortCommandsByMru(commands)
+    expect(sorted[0]!.id).toBe('gamma')
+    const rest = sorted.slice(1).map(c => c.id)
+    expect(rest).toEqual(['alpha', 'beta', 'delta'])
+  })
+
+  it('does not mutate input array', () => {
+    recordMruCommand('beta')
+    const original = [...commands]
+    sortCommandsByMru(commands)
+    expect(commands.map(c => c.id)).toEqual(original.map(c => c.id))
   })
 })

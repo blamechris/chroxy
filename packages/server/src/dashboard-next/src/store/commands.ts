@@ -27,6 +27,21 @@ export function recordMruCommand(id: string): void {
   localStorage.setItem(MRU_KEY, JSON.stringify(mru.slice(0, MRU_MAX)))
 }
 
+/** Sort commands by MRU — recently used commands appear first (#1360). */
+export function sortCommandsByMru(commands: Command[]): Command[] {
+  const mru = getMruCommands()
+  if (mru.length === 0) return [...commands]
+  const mruSet = new Map(mru.map((id, i) => [id, i]))
+  return [...commands].sort((a, b) => {
+    const ai = mruSet.get(a.id)
+    const bi = mruSet.get(b.id)
+    if (ai != null && bi != null) return ai - bi
+    if (ai != null) return -1
+    if (bi != null) return 1
+    return 0
+  })
+}
+
 export function useCommands(): Command[] {
   const setViewMode = useConnectionStore(s => s.setViewMode)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)

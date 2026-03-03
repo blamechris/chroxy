@@ -12,7 +12,7 @@ import type { ChatViewMessage } from './components/ChatView'
 
 import { Sidebar, type RepoNode } from './components/Sidebar'
 import { CommandPalette } from './components/CommandPalette'
-import { useCommands, recordMruCommand } from './store/commands'
+import { useCommands, recordMruCommand, sortCommandsByMru } from './store/commands'
 import { ChatView } from './components/ChatView'
 import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
@@ -173,15 +173,17 @@ export function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [sessions, activeSessionId, switchSession, destroySession])
 
+  const [mruVersion, setMruVersion] = useState(0)
   const trackedCommands = useMemo(
-    () => commands.map(cmd => ({
+    () => sortCommandsByMru(commands).map(cmd => ({
       ...cmd,
       action: () => {
         recordMruCommand(cmd.id)
+        setMruVersion(v => v + 1)
         cmd.action()
       },
     })),
-    [commands],
+    [commands, mruVersion],
   )
 
   // Local state
