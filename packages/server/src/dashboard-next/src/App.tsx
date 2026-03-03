@@ -126,6 +126,11 @@ export function App() {
   const markPromptAnswered = useConnectionStore(s => s.markPromptAnswered)
   const fetchFileList = useConnectionStore(s => s.fetchFileList)
   const fetchSlashCommands = useConnectionStore(s => s.fetchSlashCommands)
+  const searchResults = useConnectionStore(s => s.searchResults)
+  const searchLoading = useConnectionStore(s => s.searchLoading)
+  const searchQuery = useConnectionStore(s => s.searchQuery)
+  const searchConversations = useConnectionStore(s => s.searchConversations)
+  const clearSearchResults = useConnectionStore(s => s.clearSearchResults)
 
   // Command palette
   const commands = useCommands()
@@ -498,6 +503,11 @@ export function App() {
           onContextMenu={() => {
             /* Context menus will be added in a follow-up */
           }}
+          searchResults={searchResults}
+          searchLoading={searchLoading}
+          searchQuery={searchQuery}
+          searchConversations={searchConversations}
+          clearSearchResults={clearSearchResults}
         />
       )}
 
