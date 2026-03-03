@@ -15,7 +15,9 @@ export function getMruCommands(): string[] {
   try {
     const raw = localStorage.getItem(MRU_KEY)
     if (!raw) return []
-    return JSON.parse(raw)
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((x): x is string => typeof x === 'string')
   } catch {
     return []
   }
@@ -31,10 +33,10 @@ export function recordMruCommand(id: string): void {
 export function sortCommandsByMru(commands: Command[]): Command[] {
   const mru = getMruCommands()
   if (mru.length === 0) return [...commands]
-  const mruSet = new Map(mru.map((id, i) => [id, i]))
+  const mruIndex = new Map(mru.map((id, i) => [id, i]))
   return [...commands].sort((a, b) => {
-    const ai = mruSet.get(a.id)
-    const bi = mruSet.get(b.id)
+    const ai = mruIndex.get(a.id)
+    const bi = mruIndex.get(b.id)
     if (ai != null && bi != null) return ai - bi
     if (ai != null) return -1
     if (bi != null) return 1
