@@ -5,6 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-02
+
+### Added
+
+**Dashboard — Full React Rewrite**
+- Complete React + TypeScript + Vite rewrite replacing the legacy string-template dashboard
+- Sidebar with repo tree navigation, ARIA tree roles, and auto-expand filtering
+- Command palette with keyboard navigation (Cmd+K), command registry, and MRU sorting
+- Cross-session conversation search with parallel scanning and caching
+- File browser with fuzzy search, recursive walk, and gitignore awareness
+- Image attachments: drag-drop, clipboard paste, preview thumbnails, PNG transparency
+- Slash command picker with autocomplete
+- Welcome screen with quick-start actions
+- Session auto-labeling and creation panel
+- Multi-tab terminal management
+- Question prompts with option buttons and free-text fallback
+- Usage analytics with cost and token visualization
+- DOMPurify sanitization for markdown rendering
+- CSS-to-TypeScript theme token codegen
+- Comprehensive accessibility: ARIA labels, keyboard focus indicators, screen reader support
+- Responsive breakpoints for loading and error screens
+- Reduced-motion support for animations
+
+**Desktop**
+- Standalone `.app` bundle with server embedded via `bundle-server.sh`
+- Server crash auto-restart with exponential backoff
+- Single-instance enforcement
+- Consolidated to single Tauri window (replaced dual-window architecture)
+- Tauri event system replacing `eval()` injection
+- React loading and error screen components
+- Restarting state in tray menu UI
+- Protocol-version-aware logging for unknown message types
+- QR code mobile pairing from desktop app
+
+**Server**
+- Session subscriptions and repo management
+- History replay batching with readyState guard
+- `list_files` WebSocket endpoint with recursive walk and gitignore
+- PostAuth queue batch flush for event loop yielding
+- Broadcast session focus across clients
+- Protocol version negotiation in WebSocket handshake
+- Token rotation with QR code regeneration and dashboard re-auth
+- Conversation history scanner with parallel scanning and caching
+- File attachment resolution with binary file rejection and symlink validation
+- Shared `runWithConcurrency` utility
+
+**Mobile App**
+- Conversation history screen with resume
+- Kanban-style session overview panel
+- Vector icons replacing Unicode emoji
+- Message entrance animations
+- Haptic feedback for key user actions
+- Shared active session with opt-in follow mode
+
+**Infrastructure**
+- CI staleness check for server `package-lock.json`
+- Batch-merge skill for PR management
+- Error journal convention for persistent debugging patterns
+
+### Changed
+
+- Dashboard architecture: legacy `dashboard.js` string monolith replaced with React component tree
+- Desktop: dual-window approach consolidated to single window with Tauri events
+- Health poll waits made interruptible in desktop app
+
+### Fixed
+
+- ReconnectBanner grid-column in sidebar layout
+- `isTextInput` check narrowed to exclude non-textual inputs
+- Code block placeholder prefix collision between fenced and inline blocks
+- Lockfile included in `bundle-server.sh` for reproducible builds
+- Health poll thread generation counter race condition
+- Desktop `ensure_config` uses `create_new(true)` to avoid overwrites
+- Keyboard focus indicators on QuestionPrompt
+- InputBar disabled state checked in drag/drop/paste handlers
+- Attachment path deduplication preventing React key collisions
+- FilePicker keyboard navigation scrollIntoView
+- ImageThumbnail remove button accessible on touch and keyboard
+- Standalone server EADDRINUSE infinite retry loop
+- Provider capability gates for plan mode and resume
+
 ## [0.2.0] - 2026-02-24
 
 ### Added

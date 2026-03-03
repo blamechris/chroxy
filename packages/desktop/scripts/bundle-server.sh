@@ -33,6 +33,11 @@ cp "$SERVER_DIR/src/"*.js "$STAGING/src/"
 # tunnel/ subdirectory
 cp -r "$SERVER_DIR/src/tunnel" "$STAGING/src/tunnel"
 
+# utils/ subdirectory
+if [ -d "$SERVER_DIR/src/utils" ]; then
+  cp -r "$SERVER_DIR/src/utils" "$STAGING/src/utils"
+fi
+
 # Built dashboard (served over HTTP by ws-server.js)
 if [ -d "$SERVER_DIR/src/dashboard-next/dist" ]; then
   cp -r "$SERVER_DIR/src/dashboard-next/dist" "$STAGING/src/dashboard-next/dist"

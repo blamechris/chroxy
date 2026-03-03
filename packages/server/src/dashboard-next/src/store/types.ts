@@ -508,6 +508,7 @@ export interface ConnectionState {
   clearPlanState: () => void;
 
   // Server error actions
+  addServerError: (message: string) => void;
   dismissServerError: (id: string) => void;
 
   // Session notification actions
