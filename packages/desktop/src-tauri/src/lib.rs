@@ -631,7 +631,8 @@ fn handle_check_updates(app: &tauri::AppHandle) {
                     "Update Available",
                     &format!("Chroxy {} is available. Downloading...", version),
                 );
-                let _ = app_handle.emit("update_available", &version);
+                // Don't emit update_available here — user already initiated via tray menu.
+                // The silent startup check emits it for passive dashboard notification.
 
                 match update.download_and_install(|_, _| {}, || {}).await {
                     Ok(()) => {

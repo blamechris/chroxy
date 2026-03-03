@@ -94,7 +94,7 @@ export function useTauriEvents() {
     unlisteners.push(
       tauriEvent.listen<string>('update_available', (event) => {
         const store = useConnectionStore.getState()
-        store.addServerError(`Chroxy ${event.payload} is available. Use tray menu to update.`)
+        store.addServerError(`Chroxy ${event.payload} is available.`)
       })
     )
 

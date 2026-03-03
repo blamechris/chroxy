@@ -1160,12 +1160,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   addServerError: (message: string) => {
+    const now = Date.now();
     const err = {
-      id: `info-${Date.now()}`,
+      id: nextMessageId('info'),
       category: 'general' as const,
       message,
       recoverable: true,
-      timestamp: Date.now(),
+      timestamp: now,
     };
     set((state) => ({
       serverErrors: [...state.serverErrors, err].slice(-10),
