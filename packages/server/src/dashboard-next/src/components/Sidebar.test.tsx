@@ -246,23 +246,7 @@ describe('Sidebar', () => {
     expect(groups.length).toBeGreaterThanOrEqual(1)
   })
 
-  it('auto-expands collapsed repo when filter matches child session (#1376)', () => {
-    renderSidebar()
-    // Collapse the api repo
-    fireEvent.click(screen.getByTestId('repo-header-/home/user/projects/api'))
-    expect(screen.queryByText('Backend')).not.toBeInTheDocument()
-
-    // Re-render with filter matching a child session
-    cleanup()
-    // We need a component that has filter set — re-render with filter
-    renderSidebar({ filter: 'Backend' })
-    // Note: the collapsed state is internal React state, reset on re-render
-    // The real scenario is: user collapses, THEN types a filter
-    // We need to test the component with collapsed + filter together
-    expect(screen.getByText('Backend')).toBeInTheDocument()
-  })
-
-  it('shows children of collapsed repo when filter is active (#1376)', () => {
+  it('auto-expands collapsed repo when filter is active and restores on clear (#1376)', () => {
     const { rerender } = render(
       <Sidebar
         repos={makeRepos()}
@@ -286,7 +270,7 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByTestId('repo-header-/home/user/projects/api'))
     expect(screen.queryByText('Backend')).not.toBeInTheDocument()
 
-    // Now apply filter that matches a child — should auto-expand
+    // Apply filter that matches a child — should auto-expand
     rerender(
       <Sidebar
         repos={makeRepos()}
@@ -308,5 +292,28 @@ describe('Sidebar', () => {
 
     // Children should be visible despite collapsed state
     expect(screen.getByText('Backend')).toBeInTheDocument()
+
+    // Clear filter — collapsed state should be restored
+    rerender(
+      <Sidebar
+        repos={makeRepos()}
+        activeSessionId="s1"
+        isOpen={true}
+        width={240}
+        filter=""
+        serverStatus="connected"
+        tunnelUrl={null}
+        clientCount={1}
+        onFilterChange={noop}
+        onSessionClick={noop}
+        onResumeSession={noop}
+        onNewSession={noop}
+        onToggle={noop}
+        onContextMenu={noop}
+      />,
+    )
+
+    // Repo should be collapsed again — children hidden
+    expect(screen.queryByText('Backend')).not.toBeInTheDocument()
   })
 })
