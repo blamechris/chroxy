@@ -8750,3 +8750,114 @@ describe('client_focus_changed broadcast', () => {
     client1.ws.close()
   })
 })
+
+describe('_sendSessionInfo sessionId tagging (#1417)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  function createTwoSessionManager() {
+    const manager = new EventEmitter()
+    const sessionsMap = new Map()
+
+    const session1 = createMockSession()
+    session1.cwd = '/tmp/project-1'
+    session1.isReady = true
+    session1.model = 'sonnet'
+    session1.permissionMode = 'approve'
+    sessionsMap.set('sess-1', { session: session1, name: 'Session 1', cwd: '/tmp/project-1', type: 'cli', isBusy: false })
+
+    const session2 = createMockSession()
+    session2.cwd = '/tmp/project-2'
+    session2.isReady = true
+    session2.model = 'opus'
+    session2.permissionMode = 'plan'
+    sessionsMap.set('sess-2', { session: session2, name: 'Session 2', cwd: '/tmp/project-2', type: 'cli', isBusy: false })
+
+    manager.getSession = (id) => sessionsMap.get(id)
+    manager.listSessions = () => {
+      const list = []
+      for (const [id, entry] of sessionsMap) {
+        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
+      }
+      return list
+    }
+    manager.getHistory = () => []
+    manager.recordUserInput = () => {}
+    manager.touchActivity = () => {}
+    manager.getFullHistoryAsync = async () => []
+    manager.isBudgetPaused = () => false
+    manager.getSessionContext = async () => null
+    Object.defineProperty(manager, 'firstSessionId', {
+      get: () => sessionsMap.keys().next().value
+    })
+
+    return manager
+  }
+
+  it('tags model_changed and permission_mode_changed with sessionId on switch_session', async () => {
+    const manager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    messages.length = 0
+
+    // Switch to sess-2 — _sendSessionInfo should send tagged messages
+    send(ws, { type: 'switch_session', sessionId: 'sess-2' })
+    await waitForMessage(messages, 'session_switched', 2000)
+    await new Promise(r => setTimeout(r, 100))
+
+    const modelMsg = messages.find(m => m.type === 'model_changed')
+    assert.ok(modelMsg, 'Should receive model_changed after switch')
+    assert.equal(modelMsg.sessionId, 'sess-2', 'model_changed should include sessionId')
+
+    const permMsg = messages.find(m => m.type === 'permission_mode_changed')
+    assert.ok(permMsg, 'Should receive permission_mode_changed after switch')
+    assert.equal(permMsg.sessionId, 'sess-2', 'permission_mode_changed should include sessionId')
+
+    const readyMsg = messages.find(m => m.type === 'claude_ready')
+    assert.ok(readyMsg, 'Should receive claude_ready after switch')
+    assert.equal(readyMsg.sessionId, 'sess-2', 'claude_ready should include sessionId')
+
+    ws.close()
+  })
+
+  it('tags messages with sessionId during initial auth', async () => {
+    const manager = createTwoSessionManager()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+    await new Promise(r => setTimeout(r, 100))
+
+    const modelMsg = messages.find(m => m.type === 'model_changed')
+    assert.ok(modelMsg, 'Should receive model_changed after auth')
+    assert.equal(modelMsg.sessionId, 'sess-1', 'model_changed should include sessionId for default session')
+
+    ws.close()
+  })
+})

@@ -973,15 +973,17 @@ export class WsServer {
     const session = entry.session
 
     if (session.isReady) {
-      this._send(ws, { type: 'claude_ready' })
+      this._send(ws, { type: 'claude_ready', sessionId })
     }
     this._send(ws, {
       type: 'model_changed',
       model: session.model ? toShortModelId(session.model) : null,
+      sessionId,
     })
     this._send(ws, {
       type: 'permission_mode_changed',
       mode: session.permissionMode || 'approve',
+      sessionId,
     })
   }
 
