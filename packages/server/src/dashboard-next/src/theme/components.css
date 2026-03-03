@@ -30,21 +30,27 @@
 #app.with-sidebar {
   display: grid;
   grid-template-columns: auto 1fr;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr;
   max-width: none;
 }
 
+#app.with-sidebar > .reconnect-banner {
+  grid-row: 1;
+  grid-column: 1 / -1;
+}
+
 #app.with-sidebar > header {
+  grid-row: 2;
   grid-column: 1 / -1;
 }
 
 #app.with-sidebar > .sidebar {
-  grid-row: 2;
+  grid-row: 3;
   grid-column: 1;
 }
 
 #app.with-sidebar > .main-wrapper {
-  grid-row: 2;
+  grid-row: 3;
   grid-column: 2;
   display: flex;
   flex-direction: column;
