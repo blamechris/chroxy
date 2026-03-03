@@ -948,6 +948,24 @@ export class WsServer {
     sendChunk(0)
   }
 
+  /** Flush queued post-auth messages in batches to yield the event loop (#1348).
+   *  Same chunking pattern as _replayHistory — prevents blocking when queue is
+   *  large (500+ messages with nacl.secretbox() encryption per send). */
+  _flushPostAuthQueue(ws, queue) {
+    const CHUNK_SIZE = 20
+    const drainChunk = (offset) => {
+      if (ws.readyState !== 1) return
+      const end = Math.min(offset + CHUNK_SIZE, queue.length)
+      for (let i = offset; i < end; i++) {
+        this._send(ws, queue[i])
+      }
+      if (end < queue.length) {
+        setImmediate(() => drainChunk(end))
+      }
+    }
+    drainChunk(0)
+  }
+
   /** Send session-specific info (model, permission, ready status) to a client */
   _sendSessionInfo(ws, sessionId) {
     const entry = this.sessionManager?.getSession(sessionId)
@@ -1062,12 +1080,10 @@ export class WsServer {
           console.error('[ws] Failed to send key_exchange_ok:', err.message)
         }
         console.log(`[ws] E2E encryption established with ${client.id}`)
-        // Flush queued messages (now encrypted)
+        // Flush queued messages (now encrypted) — batched to yield event loop
         const queue = client.postAuthQueue
         client.postAuthQueue = null
-        for (const queued of queue) {
-          this._send(ws, queued)
-        }
+        this._flushPostAuthQueue(ws, queue)
         return
       }
       // Non-key_exchange message while pending — disconnect (never downgrade to plaintext)
