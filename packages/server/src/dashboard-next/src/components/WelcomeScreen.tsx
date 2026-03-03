@@ -32,6 +32,7 @@ function abbreviatePath(path: string): string {
 /** Format a timestamp as relative time */
 function relativeTime(ts: number): string {
   const diffMs = Date.now() - ts
+  if (diffMs < 0) return 'just now'
   const diffMin = Math.floor(diffMs / 60000)
   if (diffMin < 1) return 'just now'
   if (diffMin < 60) return `${diffMin} min ago`
