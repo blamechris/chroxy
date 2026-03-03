@@ -6252,6 +6252,117 @@ describe('transient events not replayed in history', () => {
   })
 })
 
+describe('postAuthQueue flush batching (#1348)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('flushes postAuthQueue in chunks via setImmediate', async () => {
+    // Verifies that _flushPostAuthQueue yields the event loop between
+    // chunks of 20, same as _replayHistory batching.
+    const mockManager = createHistoryMockManager({
+      history: [],
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+
+    const sentData = []
+    const mockWs = {
+      readyState: 1,
+      send(data) { sentData.push(JSON.parse(data)) },
+    }
+
+    server.clients.set(mockWs, {
+      id: 'mock-client',
+      _seq: 0,
+      activeSessionId: 'sess-1',
+      encryptionPending: false,
+      encryptionState: null,
+      postAuthQueue: null,
+    })
+
+    // Build a queue of 50 messages
+    const queue = []
+    for (let i = 0; i < 50; i++) {
+      queue.push({ type: 'message', messageType: 'response', content: `msg-${i}`, messageId: `m-${i}` })
+    }
+
+    // Flush the queue — should yield between chunks
+    server._flushPostAuthQueue(mockWs, queue)
+
+    // After synchronous return, only first chunk (20) should be sent
+    assert.equal(sentData.length, 20, 'First chunk of 20 should be sent synchronously')
+
+    // Allow one setImmediate tick
+    await new Promise(r => setImmediate(r))
+    assert.equal(sentData.length, 40, 'Second chunk of 20 should arrive after setImmediate')
+
+    // Allow another setImmediate tick
+    await new Promise(r => setImmediate(r))
+    assert.equal(sentData.length, 50, 'Final chunk of 10 should complete the flush')
+
+    server.clients.delete(mockWs)
+  })
+
+  it('stops flush when ws.readyState is not OPEN', async () => {
+    const mockManager = createHistoryMockManager({
+      history: [],
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+
+    const sentData = []
+    const mockWs = {
+      readyState: 1,
+      send(data) { sentData.push(JSON.parse(data)) },
+    }
+
+    server.clients.set(mockWs, {
+      id: 'mock-client',
+      _seq: 0,
+      activeSessionId: 'sess-1',
+      encryptionPending: false,
+      encryptionState: null,
+      postAuthQueue: null,
+    })
+
+    const queue = []
+    for (let i = 0; i < 50; i++) {
+      queue.push({ type: 'message', messageType: 'response', content: `msg-${i}`, messageId: `m-${i}` })
+    }
+
+    server._flushPostAuthQueue(mockWs, queue)
+
+    // Close after first chunk
+    mockWs.readyState = 3
+
+    // Allow remaining setImmediate ticks to fire (would send chunks 2+3 if not guarded)
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+
+    assert.equal(sentData.length, 20, 'Should stop after first chunk when ws is closed')
+
+    server.clients.delete(mockWs)
+  })
+})
+
 describe('encryption integration (end-to-end)', () => {
   let server
 
