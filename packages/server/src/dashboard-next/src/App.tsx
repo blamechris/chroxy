@@ -155,8 +155,8 @@ export function App() {
       }
       // Cmd+W: close active tab (if more than 1 session)
       if ((e.metaKey || e.ctrlKey) && e.key === 'w' && !e.shiftKey) {
-        e.preventDefault()
         if (activeSessionId && sessions.length > 1) {
+          e.preventDefault()
           destroySession(activeSessionId)
         }
       }
