@@ -87,6 +87,11 @@ function setupSessionForwarding(normalizer, ctx) {
     }
   })
 
+  // Session metadata updates (e.g. auto-labeling) — broadcast to ALL clients
+  sessionManager.on('session_updated', ({ sessionId, name }) => {
+    broadcast({ type: 'session_updated', sessionId, name })
+  })
+
   // Dev server preview: scan tool_result events for localhost server patterns
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     if (event === 'tool_result' && data?.result) {

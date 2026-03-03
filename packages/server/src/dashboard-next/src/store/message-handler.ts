@@ -706,6 +706,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       break;
 
+    case 'session_updated': {
+      const updatedId = msg.sessionId as string;
+      const updatedName = msg.name as string;
+      if (updatedId && updatedName) {
+        const sessions = get().sessions.map((s) =>
+          s.sessionId === updatedId ? { ...s, name: updatedName } : s,
+        );
+        set({ sessions });
+      }
+      break;
+    }
+
     case 'session_context': {
       const ctxSessionId = (msg.sessionId as string) || get().activeSessionId;
       if (ctxSessionId && get().sessionStates[ctxSessionId]) {
