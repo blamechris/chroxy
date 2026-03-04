@@ -105,6 +105,15 @@
   color: var(--accent-blue);
 }
 
+.version-badge {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
 .status-dot {
   width: 8px;
   height: 8px;
