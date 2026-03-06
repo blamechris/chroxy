@@ -9247,3 +9247,51 @@ describe('CORS origin restrictions (#1533)', () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 })
+
+describe('broadcast backpressure', () => {
+  it('skips clients whose bufferedAmount exceeds the threshold', async () => {
+    const mockSession = createMockSession()
+    const server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      backpressureThreshold: 100,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+
+    // Verify normal broadcast works
+    server.broadcast({ type: 'discovered_sessions', tmux: [] })
+    await waitFor(() => messages.find(m => m.type === 'discovered_sessions'), { label: 'normal broadcast' })
+    assert.ok(messages.find(m => m.type === 'discovered_sessions'), 'Should receive broadcast when under threshold')
+
+    // Stub bufferedAmount to simulate backpressure
+    const clientWs = [...server.clients.keys()][0]
+    Object.defineProperty(clientWs, 'bufferedAmount', { get: () => 200, configurable: true })
+
+    // Spy on _send to verify backpressure skips the client
+    const sendCalls = []
+    const originalSend = server._send.bind(server)
+    server._send = (ws, msg) => { sendCalls.push({ ws, msg }); return originalSend(ws, msg) }
+
+    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'bp-test' }] })
+
+    const clientSends = sendCalls.filter(call => call.ws === clientWs)
+    assert.equal(clientSends.length, 0, 'Should NOT send broadcast to client when over backpressure threshold')
+    server._send = originalSend
+
+    // Restore bufferedAmount and verify broadcast resumes
+    Object.defineProperty(clientWs, 'bufferedAmount', { get: () => 0, configurable: true })
+    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'resumed' }] })
+    const resumedMsg = await waitFor(
+      () => messages.find(m => m.type === 'discovered_sessions' && m.tmux?.[0]?.sessionName === 'resumed'),
+      { label: 'resumed broadcast' }
+    )
+    assert.ok(resumedMsg, 'Should receive broadcast after backpressure clears')
+
+    ws.close()
+    server.close()
+  })
+})
