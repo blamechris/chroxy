@@ -418,6 +418,7 @@ function pushSessionNotification(
   sessionId: string,
   eventType: SessionNotification['eventType'],
   message: string,
+  requestId?: string,
 ): void {
   const state = getStore().getState();
   if (sessionId === state.activeSessionId) return;
@@ -430,6 +431,7 @@ function pushSessionNotification(
     eventType,
     message,
     timestamp: Date.now(),
+    ...(requestId ? { requestId } : {}),
   };
   getStore().setState((s) => {
     const filtered = s.sessionNotifications.filter(
@@ -529,8 +531,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
       // Extract server context from auth_ok
-      const authServerMode: 'cli' | 'terminal' | null =
-        msg.serverMode === 'cli' || msg.serverMode === 'terminal' ? msg.serverMode : null;
+      const authServerMode: 'cli' | null =
+        msg.serverMode === 'cli' ? 'cli' : null;
       const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
       const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
       const authLatestVersion = typeof msg.latestVersion === 'string' ? msg.latestVersion : null;
@@ -653,7 +655,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
 
     case 'server_mode':
-      set({ serverMode: msg.mode as 'cli' | 'terminal' });
+      set({ serverMode: msg.mode === 'cli' ? 'cli' : null });
       // Force chat view in CLI mode (no terminal available)
       if (msg.mode === 'cli' && get().viewMode === 'terminal') {
         set({ viewMode: 'chat' });
@@ -1068,6 +1070,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'result': {
+      hapticSuccess();
       // Flush any buffered deltas before clearing streaming state
       if (deltaFlushTimer) {
         clearTimeout(deltaFlushTimer);
@@ -1344,7 +1347,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       if (permTargetId) {
         const toolDesc = msg.tool ? `${msg.tool}` : 'Permission needed';
-        pushSessionNotification(permTargetId, 'permission', toolDesc);
+        pushSessionNotification(permTargetId, 'permission', toolDesc, permRequestId);
       }
       break;
     }

@@ -256,6 +256,7 @@ export interface SessionNotification {
   eventType: 'permission' | 'question' | 'completed' | 'error';
   message: string;
   timestamp: number;
+  requestId?: string;
 }
 
 export interface SlashCommand {
@@ -307,8 +308,8 @@ export interface ConnectionState {
   // User explicitly disconnected — prevents auto-reconnect on ConnectScreen mount
   userDisconnected: boolean;
 
-  // Server mode: 'cli' (headless) or 'terminal' (PTY/tmux)
-  serverMode: 'cli' | 'terminal' | null;
+  // Server mode (always 'cli' since v0.2.0)
+  serverMode: 'cli' | null;
 
   // Server context (from auth_ok)
   sessionCwd: string | null;
@@ -322,7 +323,7 @@ export interface ConnectionState {
   activeSessionId: string | null;
   sessionStates: Record<string, SessionState>;
 
-  // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
+  // Legacy flat state (used when server doesn't send session_list)
   claudeReady: boolean;
   streamingMessageId: string | null;
   activeModel: string | null;
