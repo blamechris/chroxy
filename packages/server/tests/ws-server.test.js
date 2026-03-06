@@ -8816,15 +8816,15 @@ describe('Pre-auth connection limit', () => {
     const port = await startServerAndGetPort(server)
 
     // Create and authenticate MAX_PENDING connections
+    const authed = []
     for (let i = 0; i < MAX_PENDING; i++) {
-      const { ws } = await createClient(port, false)
+      const { ws, messages } = await createClient(port, false)
       ws.send(JSON.stringify({ type: 'auth', token: 'test-token' }))
-      const msgs = []
-      ws.on('message', (data) => msgs.push(JSON.parse(data.toString())))
       await withTimeout(
-        (async () => { while (!msgs.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
+        (async () => { while (!messages.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
         2000, 'Auth timeout'
       )
+      authed.push(ws)
     }
 
     // Should still accept new connections since authenticated ones don't count
@@ -8838,6 +8838,8 @@ describe('Pre-auth connection limit', () => {
       'Should accept new connection when all existing are authenticated'
     )
 
+    // Clean up all sockets
+    for (const ws of authed) ws.close()
     ws3.close()
   })
 })
