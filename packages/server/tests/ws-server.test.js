@@ -8600,22 +8600,17 @@ describe('client_focus_changed broadcast', () => {
   })
 
   it('broadcasts client_focus_changed when a client creates a session', async () => {
-    const { manager: mockManager } = createMockSessionManager([
+    const { manager: mockManager, sessionsMap } = createMockSessionManager([
       { id: 'sess-a', name: 'Session A', cwd: '/tmp/a' },
     ])
 
-    // Add createSession to mock — returns a new session ID and adds it to the internal map
+    // Add createSession to mock — inserts into sessionsMap so getSession/listSessions/firstSessionId all reflect it
     let nextId = 1
     mockManager.createSession = ({ name, cwd }) => {
       const id = `new-sess-${nextId++}`
       const mockSession = createMockSession()
       mockSession.cwd = cwd || '/tmp'
-      // Add to internal state so getSession works
-      const entry = { session: mockSession, name: name || 'New Session', cwd: cwd || '/tmp', type: 'cli', isBusy: false }
-      // Access the internal map via getSession — we need to make getSession return this
-      const origGetSession = mockManager.getSession
-      const newGetSession = (sid) => sid === id ? entry : origGetSession(sid)
-      mockManager.getSession = newGetSession
+      sessionsMap.set(id, { session: mockSession, name: name || 'New Session', cwd: cwd || '/tmp', type: 'cli', isBusy: false })
       return id
     }
 
