@@ -7159,15 +7159,25 @@ describe('dashboard endpoint', () => {
   let server
   const __test_dirname = dirname(fileURLToPath(import.meta.url))
   const distDir = join(__test_dirname, '..', 'src', 'dashboard-next', 'dist')
-  let createdFixture = false
+  const createdPaths = []
 
   before(() => {
     // Create minimal fixture dist/ if it doesn't exist (e.g. CI without dashboard:build)
     if (!existsSync(join(distDir, 'index.html'))) {
-      createdFixture = true
-      mkdirSync(join(distDir, 'assets'), { recursive: true })
-      writeFileSync(join(distDir, 'assets', 'index-testHash.js'), '// test bundle')
-      writeFileSync(join(distDir, 'index.html'), [
+      const assetsDir = join(distDir, 'assets')
+      if (!existsSync(distDir)) {
+        mkdirSync(distDir, { recursive: true })
+        createdPaths.push(distDir)
+      }
+      if (!existsSync(assetsDir)) {
+        mkdirSync(assetsDir, { recursive: true })
+        createdPaths.push(assetsDir)
+      }
+      const jsFile = join(assetsDir, 'index-testHash.js')
+      writeFileSync(jsFile, '// test bundle')
+      createdPaths.push(jsFile)
+      const htmlFile = join(distDir, 'index.html')
+      writeFileSync(htmlFile, [
         '<!DOCTYPE html>',
         '<html lang="en">',
         '<head>',
@@ -7180,13 +7190,14 @@ describe('dashboard endpoint', () => {
         '</body>',
         '</html>',
       ].join('\n'))
+      createdPaths.push(htmlFile)
     }
   })
 
   after(() => {
-    // Only clean up if we created the fixture (don't delete a real build)
-    if (createdFixture) {
-      rmSync(distDir, { recursive: true, force: true })
+    // Only clean up exactly what was created (don't delete pre-existing files)
+    for (const p of createdPaths.reverse()) {
+      rmSync(p, { recursive: true, force: true })
     }
   })
 
@@ -9095,19 +9106,29 @@ describe('cookie security flags (#1532)', () => {
   let server
   const __cookie_test_dirname = dirname(fileURLToPath(import.meta.url))
   const cookieDistDir = join(__cookie_test_dirname, '..', 'src', 'dashboard-next', 'dist')
-  let createdCookieFixture = false
+  const createdCookiePaths = []
 
   before(() => {
     if (!existsSync(join(cookieDistDir, 'index.html'))) {
-      createdCookieFixture = true
-      mkdirSync(join(cookieDistDir, 'assets'), { recursive: true })
-      writeFileSync(join(cookieDistDir, 'index.html'), '<html><body><div id="root"></div></body></html>')
+      if (!existsSync(cookieDistDir)) {
+        mkdirSync(cookieDistDir, { recursive: true })
+        createdCookiePaths.push(cookieDistDir)
+      }
+      const assetsDir = join(cookieDistDir, 'assets')
+      if (!existsSync(assetsDir)) {
+        mkdirSync(assetsDir, { recursive: true })
+        createdCookiePaths.push(assetsDir)
+      }
+      const htmlFile = join(cookieDistDir, 'index.html')
+      writeFileSync(htmlFile, '<html><body><div id="root"></div></body></html>')
+      createdCookiePaths.push(htmlFile)
     }
   })
 
   after(() => {
-    if (createdCookieFixture) {
-      rmSync(cookieDistDir, { recursive: true, force: true })
+    // Only clean up exactly what was created (don't delete pre-existing files)
+    for (const p of createdCookiePaths.reverse()) {
+      rmSync(p, { recursive: true, force: true })
     }
   })
 
