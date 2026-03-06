@@ -10,12 +10,12 @@ afterEach(cleanup)
 describe('QrModal', () => {
   it('does not render when closed', () => {
     render(<QrModal open={false} onClose={vi.fn()} qrSvg={null} loading={false} />)
-    expect(screen.queryByTestId('qr-modal')).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('renders modal when open', () => {
     render(<QrModal open={true} onClose={vi.fn()} qrSvg={null} loading={false} />)
-    expect(screen.getByTestId('qr-modal')).toBeInTheDocument()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 
   it('shows loading spinner when loading', () => {
@@ -45,7 +45,7 @@ describe('QrModal', () => {
   it('calls onClose when backdrop clicked', () => {
     const onClose = vi.fn()
     render(<QrModal open={true} onClose={onClose} qrSvg={null} loading={false} />)
-    fireEvent.click(screen.getByTestId('qr-modal-backdrop'))
+    fireEvent.click(screen.getByTestId('modal-overlay'))
     expect(onClose).toHaveBeenCalledOnce()
   })
 
@@ -53,5 +53,23 @@ describe('QrModal', () => {
     const svg = '<svg><rect/></svg>'
     render(<QrModal open={true} onClose={vi.fn()} qrSvg={svg} loading={false} />)
     expect(screen.getByText(/Scan with Chroxy app/)).toBeInTheDocument()
+  })
+
+  it('closes on Escape key (#1549)', () => {
+    const onClose = vi.fn()
+    render(<QrModal open={true} onClose={onClose} qrSvg={null} loading={false} />)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('has aria-modal="true" on dialog (#1549)', () => {
+    render(<QrModal open={true} onClose={vi.fn()} qrSvg={null} loading={false} />)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+  })
+
+  it('has data-modal-overlay attribute on backdrop (#1549)', () => {
+    render(<QrModal open={true} onClose={vi.fn()} qrSvg={null} loading={false} />)
+    expect(screen.getByTestId('modal-overlay')).toHaveAttribute('data-modal-overlay')
   })
 })
