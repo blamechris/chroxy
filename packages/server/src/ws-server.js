@@ -3,19 +3,18 @@ import { randomBytes } from 'crypto'
 import { execFileSync } from 'child_process'
 import { WebSocketServer } from 'ws'
 import { v4 as uuidv4 } from 'uuid'
-import { readFileSync, existsSync } from 'fs'
+import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
-import { dirname, join, resolve } from 'path'
+import { dirname, join } from 'path'
 import { toShortModelId, getModels } from './models.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from './crypto.js'
 import { ClientMessageSchema, AuthSchema, KeyExchangeSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
 import { EventNormalizer } from './event-normalizer.js'
-import { readConnectionInfo } from './connection-info.js'
 import { createFileOps } from './ws-file-ops.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage, PERMISSION_MODES } from './ws-message-handlers.js'
-import QRCode from 'qrcode'
+import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
@@ -107,28 +106,6 @@ function getGitInfo() {
   } catch {
     return { commit: 'unknown', branch: 'unknown' }
   }
-}
-
-/**
- * Allowed CORS origins for sensitive endpoints (/qr, /connect).
- * Health endpoint (/) keeps wildcard.
- */
-const ALLOWED_ORIGINS = [
-  'tauri://localhost',
-  'https://tauri.localhost',
-]
-
-/**
- * Check if an Origin header matches the allowed list.
- * Localhost origins with any port are allowed for dev.
- */
-function _matchAllowedOrigin(origin) {
-  if (!origin) return null
-  if (ALLOWED_ORIGINS.includes(origin)) return origin
-  // Allow http://localhost:<port> and http://127.0.0.1:<port>
-  if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return origin
-  if (/^http:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) return origin
-  return null
 }
 
 /**
@@ -424,265 +401,8 @@ export class WsServer {
   }
 
   start(host) {
-    // Create HTTP server that handles health checks, permission hooks, and WebSocket upgrades
-    this.httpServer = createServer(async (req, res) => {
-      // CORS preflight — allow cross-origin requests from the Tauri WebView
-      // (loads from http://tauri.localhost, needs to reach http://127.0.0.1:PORT)
-      if (req.method === 'OPTIONS') {
-        const isRestricted = req.url?.startsWith('/qr') || req.url?.startsWith('/connect')
-        const corsOrigin = isRestricted
-          ? _matchAllowedOrigin(req.headers['origin'])
-          : '*'
-        const headers = {
-          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Authorization, Content-Type',
-          'Access-Control-Max-Age': '86400',
-        }
-        if (corsOrigin) {
-          headers['Access-Control-Allow-Origin'] = corsOrigin
-          if (isRestricted) headers['Vary'] = 'Origin'
-        }
-        res.writeHead(204, headers)
-        res.end()
-        return
-      }
-
-      // Health check endpoint — Cloudflare and the app verify connectivity via GET / and GET /health
-      if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
-        // Browser visitors (Accept: text/html) get redirected to the dashboard
-        const accept = req.headers['accept'] || ''
-        if (req.url === '/' && accept.includes('text/html') && this.apiToken) {
-          res.writeHead(302, {
-            'Location': '/dashboard',
-            'Cache-Control': 'no-store',
-            'Vary': 'Accept',
-          })
-          res.end()
-          return
-        }
-        res.writeHead(200, {
-          'Content-Type': 'application/json',
-          'Vary': 'Accept',
-          'Access-Control-Allow-Origin': '*',
-        })
-        res.end(JSON.stringify({ status: 'ok', mode: this.serverMode, version: SERVER_VERSION }))
-        return
-      }
-
-      // Version endpoint — returns server version, git info, and uptime
-      if (req.method === 'GET' && req.url === '/version') {
-        if (!this._validateBearerAuth(req, res)) {
-          console.warn('[ws] Rejected unauthenticated GET /version')
-          return
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({
-          version: SERVER_VERSION,
-          latestVersion: this._latestVersion,
-          gitCommit: this._gitInfo.commit,
-          gitBranch: this._gitInfo.branch,
-          uptime: Math.round((Date.now() - this._startedAt) / 1000),
-        }))
-        return
-      }
-
-      // Permission hook endpoint — receives requests from permission-hook.sh,
-      // holds the HTTP response open until the mobile app responds via WebSocket
-      if (req.method === 'POST' && req.url === '/permission') {
-        this._permissions.handlePermissionRequest(req, res)
-        return
-      }
-
-      // Permission response endpoint — receives Approve/Deny from iOS notification actions
-      // (HTTP fallback when WebSocket is disconnected)
-      if (req.method === 'POST' && req.url === '/permission-response') {
-        this._permissions.handlePermissionResponseHttp(req, res)
-        return
-      }
-
-      // Connection info endpoint — returns connection.json for programmatic access
-      if (req.method === 'GET' && req.url === '/connect') {
-        if (!this._validateBearerAuth(req, res)) return
-        const connInfo = readConnectionInfo()
-        if (!connInfo) {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'No connection info available' }))
-          return
-        }
-        // Redact secrets when auth is disabled to prevent exposure on the network (#742, #753)
-        if (!this.authRequired) {
-          if (connInfo.apiToken) {
-            connInfo.apiToken = '[REDACTED]'
-          }
-          // connectionUrl contains the token embedded in the query string (chroxy://host?token=...)
-          delete connInfo.connectionUrl
-        }
-        const connectCors = _matchAllowedOrigin(req.headers['origin'])
-        const connectHeaders = { 'Content-Type': 'application/json' }
-        if (connectCors) {
-          connectHeaders['Access-Control-Allow-Origin'] = connectCors
-          connectHeaders['Vary'] = 'Origin'
-        }
-        res.writeHead(200, connectHeaders)
-        res.end(JSON.stringify(connInfo))
-        return
-      }
-
-      // QR code endpoint — generates SVG QR from connection URL
-      // Auth required: QR contains the connection token
-      if (req.method === 'GET' && req.url?.startsWith('/qr')) {
-        if (!this._validateBearerAuth(req, res)) return
-        const qrCors = _matchAllowedOrigin(req.headers['origin'])
-        const connInfo = readConnectionInfo()
-        if (!connInfo || !connInfo.connectionUrl) {
-          const errHeaders = { 'Content-Type': 'application/json' }
-          if (qrCors) errHeaders['Access-Control-Allow-Origin'] = qrCors
-          res.writeHead(503, errHeaders)
-          res.end(JSON.stringify({ error: 'Connection info not available yet' }))
-          return
-        }
-        try {
-          const svg = await QRCode.toString(connInfo.connectionUrl, {
-            type: 'svg',
-            color: { dark: '#e0e0e0', light: '#00000000' },
-            margin: 1,
-          })
-          const qrHeaders = {
-            'Content-Type': 'image/svg+xml',
-            'Cache-Control': 'no-store',
-          }
-          if (qrCors) qrHeaders['Access-Control-Allow-Origin'] = qrCors
-          res.writeHead(200, qrHeaders)
-          res.end(svg)
-        } catch (_err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Failed to generate QR code' }))
-        }
-        return
-      }
-
-      // Static assets for dashboard (xterm.js, etc.)
-      if (req.method === 'GET' && req.url?.startsWith('/assets/')) {
-        // Resolve from local or hoisted (monorepo root) node_modules
-        const readModule = (pkg, file) => {
-          const paths = [
-            join(__dirname, '../node_modules', pkg, file),
-            join(__dirname, '../../../node_modules', pkg, file),
-          ]
-          for (const p of paths) {
-            try { return readFileSync(p) } catch {}
-          }
-          return null
-        }
-        const assetMap = {
-          '/assets/xterm/xterm.js': { read: () => readModule('@xterm/xterm', 'lib/xterm.js'), type: 'application/javascript' },
-          '/assets/xterm/xterm.css': { read: () => readModule('@xterm/xterm', 'css/xterm.css'), type: 'text/css' },
-          '/assets/xterm/addon-fit.js': { read: () => readModule('@xterm/addon-fit', 'lib/addon-fit.js'), type: 'application/javascript' },
-        }
-        const assetPath = req.url.split('?')[0]
-        const asset = assetMap[assetPath]
-        if (asset) {
-          try {
-            const content = asset.read()
-            if (!content) throw new Error('Module not found')
-            res.writeHead(200, {
-              'Content-Type': asset.type,
-              'Cache-Control': 'public, max-age=86400',
-              'X-Content-Type-Options': 'nosniff',
-            })
-            res.end(content)
-          } catch (_e) {
-            res.writeHead(404)
-            res.end('Asset not found')
-          }
-        } else {
-          res.writeHead(404)
-          res.end('Not found')
-        }
-        return
-      }
-
-      // Redirect legacy /dashboard-next URLs to /dashboard
-      if (req.method === 'GET' && /^\/dashboard-next(\/|$|\?)/.test(req.url || '')) {
-        const redirectUrl = req.url.replace('/dashboard-next', '/dashboard')
-        res.writeHead(301, { 'Location': redirectUrl, 'Cache-Control': 'no-store' })
-        res.end()
-        return
-      }
-
-      // Dashboard endpoint (React app built by Vite)
-      if (req.method === 'GET' && /^\/dashboard(\/|$|\?)/.test(req.url || '')) {
-        const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
-
-        const securityHeaders = {
-          'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-          'X-Frame-Options': 'DENY',
-          'X-Content-Type-Options': 'nosniff',
-        }
-
-        const distDir = join(__dirname, 'dashboard-next', 'dist')
-        // Strip prefix to get relative path within dist
-        const relPath = dashUrl.pathname.replace(/^\/dashboard\/?/, '') || 'index.html'
-
-        // Serve static assets WITHOUT auth — hashed filenames from Vite build
-        // are not sensitive (app code, not user data), and the browser won't
-        // send the auth cookie/token on sub-resource requests reliably.
-        if (relPath.startsWith('assets/')) {
-          const filePath = resolve(distDir, relPath)
-          // Path traversal guard — resolved path must stay within distDir
-          if (!filePath.startsWith(distDir)) {
-            res.writeHead(403)
-            res.end('Forbidden')
-            return
-          }
-          if (existsSync(filePath)) {
-            const ext = relPath.split('.').pop()
-            const mimeTypes = { js: 'application/javascript', css: 'text/css', svg: 'image/svg+xml', png: 'image/png', woff2: 'font/woff2' }
-            try {
-              const content = readFileSync(filePath)
-              res.writeHead(200, {
-                'Content-Type': mimeTypes[ext] || 'application/octet-stream',
-                'Cache-Control': 'public, max-age=31536000, immutable',
-                'X-Content-Type-Options': 'nosniff',
-              })
-              res.end(content)
-            } catch {
-              res.writeHead(500)
-              res.end('Internal server error')
-            }
-            return
-          }
-          // Asset path matched but file not found — return 404 (don't fall through to SPA)
-          res.writeHead(404)
-          res.end('Asset not found')
-          return
-        }
-
-        // Auth required for HTML pages (not assets above)
-        if (!this._authenticateDashboardRequest(req, res, dashUrl, securityHeaders)) return
-
-        // SPA fallback — serve index.html with config injection
-        const indexPath = join(distDir, 'index.html')
-        if (existsSync(indexPath)) {
-          let html = readFileSync(indexPath, 'utf-8')
-          // Inject server config before closing </head>
-          const configScript = `<script>window.__CHROXY_CONFIG__={port:${this.port},noEncrypt:${!this._encryptionEnabled}}</script>`
-          html = html.replace('</head>', `${configScript}\n</head>`)
-          res.writeHead(200, {
-            'Content-Type': 'text/html; charset=utf-8',
-            'Cache-Control': 'no-store',
-            ...securityHeaders,
-          })
-          res.end(html)
-        } else {
-          res.writeHead(404)
-          res.end('Dashboard not built. Run: npm run dashboard:build')
-        }
-        return
-      }
-      res.writeHead(404)
-      res.end()
-    })
+    // Create HTTP server — route handling extracted to http-routes.js
+    this.httpServer = createServer(createHttpHandler(this))
 
     // WebSocket server in noServer mode — we handle the upgrade manually
     this.wss = new WebSocketServer({
