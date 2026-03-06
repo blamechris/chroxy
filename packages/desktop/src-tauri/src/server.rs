@@ -126,6 +126,7 @@ impl ServerManager {
     }
 
     /// Kill any process listening on the given port (cleanup from previous crash).
+    #[cfg(unix)]
     fn kill_port_holder(port: u16) {
         if let Ok(output) = Command::new("lsof")
             .args(["-ti", &format!("tcp:{}", port)])
@@ -144,9 +145,39 @@ impl ServerManager {
         }
     }
 
+    /// Kill any process listening on the given port (cleanup from previous crash).
+    #[cfg(windows)]
+    fn kill_port_holder(port: u16) {
+        // On Windows, use netstat + taskkill to find and kill port holders
+        if let Ok(output) = Command::new("cmd")
+            .args(["/C", &format!("netstat -ano | findstr :{}", port)])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                if let Some(pid_str) = line.split_whitespace().last() {
+                    if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                        if pid > 0 {
+                            let _ = Command::new("taskkill")
+                                .args(["/PID", &pid.to_string(), "/F"])
+                                .output();
+                        }
+                    }
+                }
+            }
+            if !text.trim().is_empty() {
+                thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+
     /// Check whether `cloudflared` is available on PATH.
     pub fn check_cloudflared() -> bool {
-        Command::new("which")
+        #[cfg(unix)]
+        let cmd = "which";
+        #[cfg(windows)]
+        let cmd = "where";
+        Command::new(cmd)
             .arg("cloudflared")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -294,11 +325,20 @@ impl ServerManager {
                     // Child already exited or cannot be inspected; skip signalling
                 }
                 Ok(None) => {
-                    // SAFETY: We just confirmed the child is still running via try_wait().
-                    // The PID (child.id()) belongs to our direct child process, which
-                    // has not yet exited, so PID reuse cannot occur here.
-                    unsafe {
-                        libc::kill(child.id() as i32, libc::SIGTERM);
+                    // Send graceful termination signal
+                    #[cfg(unix)]
+                    {
+                        // SAFETY: We just confirmed the child is still running via try_wait().
+                        // The PID (child.id()) belongs to our direct child process, which
+                        // has not yet exited, so PID reuse cannot occur here.
+                        unsafe {
+                            libc::kill(child.id() as i32, libc::SIGTERM);
+                        }
+                    }
+                    #[cfg(windows)]
+                    {
+                        // Windows: no SIGTERM, kill directly
+                        let _ = child.kill();
                     }
 
                     // Wait up to 5 seconds for graceful shutdown
