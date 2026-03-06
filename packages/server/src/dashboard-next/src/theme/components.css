@@ -623,6 +623,31 @@
   gap: 12px;
 }
 
+/* ---- Message rows with sender icons ---- */
+.msg-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  align-self: flex-start;
+  max-width: 88%;
+}
+
+.msg-row-user {
+  align-self: flex-end;
+}
+
+.msg-row-system {
+  align-self: center;
+}
+
+.msg-row .sender-icon {
+  margin-top: 6px;
+}
+
+.msg-row .msg {
+  max-width: unset;
+}
+
 .msg {
   max-width: 85%;
   padding: 10px 14px;
@@ -1688,7 +1713,7 @@
   .header-center select { font-size: var(--text-sm); padding: 3px 6px; }
   .session-bar { padding: 4px 10px; }
   .chat-messages { padding: 10px; gap: 8px; }
-  .msg, .tool-bubble, .permission-prompt, .question-prompt { max-width: 92%; font-size: var(--text-base); }
+  .msg, .msg-row, .tool-bubble, .permission-prompt, .question-prompt { max-width: 92%; font-size: var(--text-base); }
   .input-bar { padding: 8px 10px; gap: 6px; }
   .input-bar textarea { padding: 8px 10px; font-size: var(--text-base); }
   .btn-send, .btn-interrupt { padding: 8px 12px; font-size: var(--text-base); }
