@@ -88,7 +88,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             }}
           >
             {session.isBusy && (
-              <span className="tab-busy-dot" data-testid="busy-dot" />
+              <span className="tab-busy-dot" data-testid="busy-dot" title="Session busy — processing..." />
             )}
 
             {renamingId === session.sessionId ? (

@@ -212,9 +212,9 @@ export function Sidebar({
                           }}
                         >
                           {session.isBusy ? (
-                            <span className="sidebar-busy-dot" />
+                            <span className="sidebar-busy-dot" title="Session busy — processing..." />
                           ) : (
-                            <span className="sidebar-idle-dot" />
+                            <span className="sidebar-idle-dot" title="Session idle — ready for input" />
                           )}
                           <span className="sidebar-session-name">{session.name}</span>
                         </div>
@@ -234,7 +234,7 @@ export function Sidebar({
                             onContextMenu({ type: 'resumable', conversationId: conv.conversationId }, e)
                           }}
                         >
-                          <span className="sidebar-resumable-dot" />
+                          <span className="sidebar-resumable-dot" title="Resumable conversation" />
                           <span className="sidebar-session-name">
                             {conv.preview || 'Untitled conversation'}
                           </span>
@@ -250,7 +250,11 @@ export function Sidebar({
 
           {/* Footer */}
           <div className="sidebar-footer" data-testid="sidebar-footer">
-            <span className={`sidebar-status-dot ${serverStatus}`} />
+            <span className={`sidebar-status-dot ${serverStatus}`} title={
+              serverStatus === 'connected' ? 'Server connected'
+                : serverStatus === 'reconnecting' ? 'Reconnecting to server...'
+                : 'Server disconnected'
+            } />
             <span className="sidebar-status-label">{statusLabel}</span>
             {tunnelUrl && (
               <span className="sidebar-tunnel" title={tunnelUrl}>
