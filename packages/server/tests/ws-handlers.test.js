@@ -97,6 +97,8 @@ describe('WS handler: create_session', () => {
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port)
 
+    // Wait for all initial auth-flow messages to arrive before clearing
+    await new Promise(r => setTimeout(r, 50))
     messages.length = 0
     send(ws, { type: 'create_session', name: 'My Session' })
 
