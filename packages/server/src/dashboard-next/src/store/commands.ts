@@ -12,7 +12,7 @@ import type { Command } from '../components/CommandPalette'
 export { useMruStore } from './mru'
 
 export function getMruCommands(): string[] {
-  return useMruStore.getState().mruList
+  return [...useMruStore.getState().mruList]
 }
 
 export function recordMruCommand(id: string): void {
