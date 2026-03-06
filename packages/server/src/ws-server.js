@@ -645,7 +645,7 @@ export class WsServer {
         encryptionState: null,    // { sharedKey, sendNonce, recvNonce } when active
         encryptionPending: false, // true while waiting for key_exchange
         postAuthQueue: null,      // queued messages during key exchange
-        _flushing: false,         // true while draining post-auth queue
+        _flushing: false,         // gates _send during setImmediate gaps in post-auth flush
         _flushOverflow: null,     // messages that arrived during flush
       })
 
@@ -959,7 +959,10 @@ export class WsServer {
     const CHUNK_SIZE = 20
     const drainChunk = (offset) => {
       if (ws.readyState !== 1) {
-        if (client) client._flushing = false
+        if (client) {
+          client._flushing = false
+          client._flushOverflow = null
+        }
         return
       }
       const end = Math.min(offset + CHUNK_SIZE, queue.length)
