@@ -16,6 +16,14 @@ export const PERMISSION_MODES = [
 ]
 export const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
 
+/** Broadcast client_focus_changed to other clients when a client's active session changes */
+function broadcastFocusChanged(client, sessionId, ctx) {
+  ctx.broadcast(
+    { type: 'client_focus_changed', clientId: client.id, sessionId, timestamp: Date.now() },
+    (c) => c.id !== client.id
+  )
+}
+
 // -- Attachment validation constants --
 export const MAX_ATTACHMENT_COUNT = 5
 export const MAX_IMAGE_SIZE = 2 * 1024 * 1024       // 2MB decoded
@@ -370,11 +378,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       ctx.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
       ctx.sendSessionInfo(ws, targetId)
       ctx.replayHistory(ws, targetId)
-      // Notify other clients about this client's focus change
-      ctx.broadcast(
-        { type: 'client_focus_changed', clientId: client.id, sessionId: targetId, timestamp: Date.now() },
-        (c) => c.id !== client.id
-      )
+      broadcastFocusChanged(client, targetId, ctx)
       break
     }
 
@@ -398,6 +402,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
         ctx.sendSessionInfo(ws, sessionId)
         ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+        broadcastFocusChanged(client, sessionId, ctx)
       } catch (err) {
         ctx.send(ws, { type: 'session_error', message: err.message })
       }
@@ -429,6 +434,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
             ctx.send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
             ctx.sendSessionInfo(clientWs, firstId)
           }
+          broadcastFocusChanged(c, firstId, ctx)
         }
       }
 
@@ -660,6 +666,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         ctx.sendSessionInfo(ws, sessionId)
         ctx.replayHistory(ws, sessionId)
         ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+        broadcastFocusChanged(client, sessionId, ctx)
       } catch (err) {
         ctx.send(ws, { type: 'session_error', message: err.message })
       }
