@@ -542,6 +542,13 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       break
     }
 
+    case 'write_file': {
+      const writeSessionId = msg.sessionId || client.activeSessionId
+      const writeEntry = ctx.sessionManager.getSession(writeSessionId)
+      ctx.fileOps.writeFile(ws, msg.path, msg.content, writeEntry?.cwd || null)
+      break
+    }
+
     case 'get_diff': {
       const diffSessionId = msg.sessionId || client.activeSessionId
       const diffEntry = ctx.sessionManager.getSession(diffSessionId)
@@ -1006,6 +1013,10 @@ export function handleCliMessage(ws, client, msg, ctx) {
 
     case 'read_file':
       ctx.fileOps.readFile(ws, msg.path, ctx.cliSession?.cwd || null)
+      break
+
+    case 'write_file':
+      ctx.fileOps.writeFile(ws, msg.path, msg.content, ctx.cliSession?.cwd || null)
       break
 
     case 'get_diff':
