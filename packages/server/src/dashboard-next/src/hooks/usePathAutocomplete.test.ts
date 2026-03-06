@@ -61,6 +61,23 @@ describe('splitPath', () => {
   it('handles trailing slash (directory listing request)', () => {
     expect(splitPath('/home/user/')).toEqual({ parent: '/home/user', partial: '' })
   })
+
+  // Windows path support (#1553)
+  it('splits Windows path with backslashes', () => {
+    expect(splitPath('C:\\Users\\dev\\pro')).toEqual({ parent: 'C:\\Users\\dev', partial: 'pro' })
+  })
+
+  it('handles Windows root-level path', () => {
+    expect(splitPath('C:\\Users')).toEqual({ parent: 'C:\\', partial: 'Users' })
+  })
+
+  it('handles trailing backslash', () => {
+    expect(splitPath('C:\\Users\\dev\\')).toEqual({ parent: 'C:\\Users\\dev', partial: '' })
+  })
+
+  it('handles mixed separators', () => {
+    expect(splitPath('C:\\Users/dev\\pro')).toEqual({ parent: 'C:\\Users/dev', partial: 'pro' })
+  })
 })
 
 describe('usePathAutocomplete', () => {
