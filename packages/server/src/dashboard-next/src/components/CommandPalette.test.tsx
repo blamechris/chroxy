@@ -147,4 +147,32 @@ describe('CommandPalette', () => {
     const chatIdx = names.indexOf('Switch to Chat')
     expect(terminalIdx).toBeLessThan(chatIdx!)
   })
+
+  it('integration: execute command → reopen → MRU reorders', () => {
+    // Simulate full flow: open palette with no MRU, execute command, reopen with updated MRU
+    const mruList: string[] = []
+    const onClose = vi.fn()
+
+    // First render: no MRU, default order (Change Model before Toggle Theme)
+    const { unmount } = render(
+      <CommandPalette commands={mockCommands} isOpen={true} onClose={onClose} mruList={mruList} />,
+    )
+    let options = screen.getAllByRole('option')
+    let names = options.map(opt => opt.textContent?.replace(/Cmd\+\w+/, '').trim())
+    expect(names.indexOf('Change Model')).toBeLessThan(names.indexOf('Toggle Theme')!)
+
+    // Execute "Toggle Theme" — this records it as MRU
+    fireEvent.click(screen.getByText('Toggle Theme'))
+    mruList.unshift('toggle-theme')
+    unmount()
+
+    // Reopen palette with updated MRU
+    render(
+      <CommandPalette commands={mockCommands} isOpen={true} onClose={vi.fn()} mruList={[...mruList]} />,
+    )
+    options = screen.getAllByRole('option')
+    names = options.map(opt => opt.textContent?.replace(/Cmd\+\w+/, '').trim())
+    // Toggle Theme should now appear before Change Model in Settings
+    expect(names.indexOf('Toggle Theme')).toBeLessThan(names.indexOf('Change Model')!)
+  })
 })
