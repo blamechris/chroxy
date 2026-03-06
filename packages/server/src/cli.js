@@ -8,6 +8,7 @@ import readline from 'readline'
 import { validateConfig, mergeConfig } from './config.js'
 import { isWindows, defaultShell, writeFileRestricted } from './platform.js'
 import { parseTunnelArg, getTunnel, listTunnels } from './tunnel/registry.js'
+import { isNewer } from './semver.js'
 import { createRequire } from 'module'
 
 const require = createRequire(import.meta.url)
@@ -1058,7 +1059,7 @@ program
       const latest = release.tag_name.replace(/^v/, '')
       const current = version
 
-      if (latest === current) {
+      if (!isNewer(latest, current)) {
         console.log(`\nChroxy v${current} is up to date.\n`)
       } else {
         console.log(`\nUpdate available: v${current} → v${latest}`)
