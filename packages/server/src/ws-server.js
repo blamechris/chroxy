@@ -856,6 +856,7 @@ export class WsServer {
       latestVersion: this._latestVersion,
       serverCommit: this._gitInfo.commit,
       cwd: sessionInfo.cwd,
+      defaultCwd: this.sessionManager?._defaultCwd || null,
       connectedClients: this._getConnectedClientList(),
       encryption: requireEncryption ? 'required' : 'disabled',
       protocolVersion: SERVER_PROTOCOL_VERSION,

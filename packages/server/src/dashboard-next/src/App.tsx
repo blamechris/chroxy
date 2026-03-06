@@ -80,6 +80,9 @@ function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
 export function App() {
   // Store selectors — subscribe to specific slices to avoid re-renders
   const connectionPhase = useConnectionStore(s => s.connectionPhase)
+  const serverVersion = useConnectionStore(s => s.serverVersion)
+  const sessionCwd = useConnectionStore(s => s.sessionCwd)
+  const defaultCwd = useConnectionStore(s => s.defaultCwd)
   const sessions = useConnectionStore(s => s.sessions)
   const activeSessionId = useConnectionStore(s => s.activeSessionId)
   const viewMode = useConnectionStore(s => s.viewMode)
@@ -455,7 +458,7 @@ export function App() {
       <header id="header">
         <div className="header-left">
           <span className="logo">Chroxy</span>
-          <span className="version-badge">v{__APP_VERSION__}</span>
+          <span className="version-badge">v{serverVersion ?? __APP_VERSION__}</span>
           <span className={`status-dot ${connectionPhase}`} />
         </div>
         <div className="header-center">
@@ -628,6 +631,8 @@ export function App() {
         onClose={() => setShowCreateSession(false)}
         onCreate={handleCreateSession}
         initialCwd={pendingCwd}
+        knownCwds={[...sidebarRepos.map(r => r.path), ...(defaultCwd ? [defaultCwd] : []), ...(sessionCwd ? [sessionCwd] : [])]}
+        existingNames={sessions.map(s => s.name)}
       />
 
       {/* Toasts */}

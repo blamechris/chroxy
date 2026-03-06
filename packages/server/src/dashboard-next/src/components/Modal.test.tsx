@@ -137,7 +137,7 @@ describe('CreateSessionModal', () => {
       <CreateSessionModal open onClose={vi.fn()} onCreate={vi.fn()} />
     )
     expect(screen.getByLabelText('Session name')).toBeInTheDocument()
-    expect(screen.getByLabelText('Working directory (optional)')).toBeInTheDocument()
+    expect(screen.getByLabelText('Working directory')).toBeInTheDocument()
   })
 
   it('calls onCreate with name and cwd on submit', () => {

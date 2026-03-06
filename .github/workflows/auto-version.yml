@@ -1,0 +1,67 @@
+name: Auto Version
+
+# Bump patch version after every PR merge to main.
+# Runs AFTER CI passes, so version bumps only happen on green builds.
+
+on:
+  push:
+    branches: [main]
+
+# Skip if the push was a version bump commit (prevents infinite loop)
+# GitHub Actions does not trigger workflows from commits made by GITHUB_TOKEN
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    name: Bump Patch Version
+    runs-on: ubuntu-24.04
+    # Skip version-bump commits and non-merge pushes
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Read current version
+        id: current
+        run: echo "version=$(node -e "console.log(require('./packages/server/package.json').version)")" >> $GITHUB_OUTPUT
+
+      - name: Bump patch version in all files
+        run: |
+          CURRENT="${{ steps.current.outputs.version }}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW="$MAJOR.$MINOR.$((PATCH + 1))"
+          echo "NEW_VERSION=$NEW" >> $GITHUB_ENV
+
+          # Update server package.json
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('packages/server/package.json', 'utf-8'));
+            pkg.version = '$NEW';
+            fs.writeFileSync('packages/server/package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+          # Update tauri.conf.json
+          node -e "
+            const fs = require('fs');
+            const conf = JSON.parse(fs.readFileSync('packages/desktop/src-tauri/tauri.conf.json', 'utf-8'));
+            conf.version = '$NEW';
+            fs.writeFileSync('packages/desktop/src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
+          "
+
+          # Update Cargo.toml
+          sed -i "s/^version = \"$CURRENT\"/version = \"$NEW\"/" packages/desktop/src-tauri/Cargo.toml
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/server/package.json packages/desktop/src-tauri/tauri.conf.json packages/desktop/src-tauri/Cargo.toml
+          git commit -m "chore: bump version to v${NEW_VERSION}"
+          git push

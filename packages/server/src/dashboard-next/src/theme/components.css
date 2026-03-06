@@ -1600,6 +1600,92 @@
   margin-bottom: 4px;
 }
 
+/* ---- CWD Combobox ---- */
+.cwd-combobox {
+  position: relative;
+}
+
+.cwd-combobox input {
+  padding-right: 32px;
+}
+
+.cwd-dropdown-toggle {
+  position: absolute;
+  right: 1px;
+  top: 1px;
+  bottom: 1px;
+  width: 30px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0 6px 6px 0;
+}
+
+.cwd-dropdown-toggle:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.cwd-dropdown-arrow {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--text-muted);
+}
+
+.cwd-suggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 2px 0 0;
+  padding: 4px 0;
+  list-style: none;
+  background: #1a1a2e;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  z-index: 100;
+  max-height: 180px;
+  overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+.cwd-suggestion {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 10px;
+  cursor: pointer;
+  gap: 1px;
+}
+
+.cwd-suggestion:hover,
+.cwd-suggestion.selected {
+  background: rgba(74, 144, 226, 0.15);
+}
+
+.cwd-suggestion-name {
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.cwd-suggestion-path {
+  font-size: var(--text-xs);
+  color: var(--text-disabled);
+  font-family: var(--font-mono);
+}
+
+.cwd-hint {
+  font-size: var(--text-xs);
+  color: var(--text-disabled);
+  display: block;
+  margin-top: -6px;
+}
+
 /* ---- Terminal Container ---- */
 .terminal-container {
   flex: 1;
