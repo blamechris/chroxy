@@ -13,7 +13,7 @@ describe('CreateSessionModal memoization (#1476)', () => {
   })
 
   it('depends on knownCwds', () => {
-    expect(source).toMatch(/suggestions\s*=\s*useMemo\([\s\S]*?knownCwds/)
+    expect(source).toMatch(/suggestions\s*=\s*useMemo\([^[]*\[[\s\S]*?knownCwds/)
   })
 })
 

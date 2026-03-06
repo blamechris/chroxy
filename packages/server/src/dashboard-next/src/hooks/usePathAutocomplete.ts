@@ -12,15 +12,10 @@ import type { DirectoryListing } from '../store/types'
 export function splitPath(input: string): { parent: string; partial: string } {
   if (!input) return { parent: '', partial: '' }
 
-  // Handle ~ expansion
-  const normalized = input.startsWith('~/')
-    ? input  // Server handles ~ expansion
-    : input
-
-  const lastSlash = normalized.lastIndexOf('/')
-  if (lastSlash === -1) return { parent: '', partial: normalized }
-  if (lastSlash === 0) return { parent: '/', partial: normalized.slice(1) }
-  return { parent: normalized.slice(0, lastSlash), partial: normalized.slice(lastSlash + 1) }
+  const lastSlash = input.lastIndexOf('/')
+  if (lastSlash === -1) return { parent: '', partial: input }
+  if (lastSlash === 0) return { parent: '/', partial: input.slice(1) }
+  return { parent: input.slice(0, lastSlash), partial: input.slice(lastSlash + 1) }
 }
 
 const DEBOUNCE_MS = 200
@@ -32,14 +27,23 @@ export function usePathAutocomplete(input: string) {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastParentRef = useRef('')
 
+  const inputRef = useRef(input)
+  inputRef.current = input
+
   const handleListing = useCallback((listing: DirectoryListing) => {
     if (listing.error || !listing.entries) {
       setSuggestions([])
       return
     }
 
-    const { partial } = splitPath(input)
-    const parentPath = listing.path || listing.parentPath || ''
+    // Guard against out-of-order responses — only accept listings matching the last request
+    const responsePath = listing.path || listing.parentPath || ''
+    if (responsePath && lastParentRef.current && responsePath !== lastParentRef.current) {
+      return
+    }
+
+    const { partial } = splitPath(inputRef.current)
+    const parentPath = responsePath
     const dirs = listing.entries
       .filter(e => e.isDirectory)
       .filter(e => !partial || e.name.toLowerCase().startsWith(partial.toLowerCase()))
@@ -49,11 +53,12 @@ export function usePathAutocomplete(input: string) {
       })
 
     setSuggestions(dirs)
-  }, [input])
+  }, [])
 
   useEffect(() => {
     if (!input || input.length < 2) {
       setSuggestions([])
+      setDirectoryListingCallback(null)
       return
     }
 
@@ -62,6 +67,7 @@ export function usePathAutocomplete(input: string) {
     // Need at least a parent directory to query
     if (!parent) {
       setSuggestions([])
+      setDirectoryListingCallback(null)
       return
     }
 

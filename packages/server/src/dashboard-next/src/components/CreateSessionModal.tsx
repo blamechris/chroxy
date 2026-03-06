@@ -115,11 +115,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   }, [nameManuallyEdited, existingNames])
 
   const handleCwdKeyDown = useCallback((e: KeyboardEvent) => {
-    // Tab completion
-    if (e.key === 'Tab' && suggestions.length > 0) {
+    // Tab completion — only when dropdown is visible to avoid trapping keyboard focus
+    if (e.key === 'Tab' && showSuggestions && suggestions.length > 0) {
       e.preventDefault()
       const idx = selectedSuggestion >= 0 ? selectedSuggestion : 0
-      selectSuggestion(suggestions[idx]! + '/')
+      const suggestion = suggestions[idx]!
+      const completed = suggestion.endsWith('/') ? suggestion : suggestion + '/'
+      selectSuggestion(completed)
       return
     }
     if (showSuggestions && suggestions.length > 0) {
