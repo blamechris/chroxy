@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer, MIN_PROTOCOL_VERSION, SERVER_PROTOCOL_VERSION } from '../src/ws-server.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
-import { createMockSession, createMockSessionManager, GIT } from './test-helpers.js'
+import { createMockSession, createMockSessionManager, waitFor, GIT } from './test-helpers.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
 class WsServer extends _WsServer {
@@ -93,15 +93,7 @@ async function createClient(port, expectAuth = true) {
 
   // If expecting auth, wait for auth_ok with timeout
   if (expectAuth) {
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'auth_ok')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Auth timeout'
-    )
+    await waitForMessage(messages, 'auth_ok')
   }
 
   return { ws, messages }
@@ -115,23 +107,21 @@ function send(ws, msg) {
 /**
  * Helper to wait for a message of a specific type with timeout.
  */
-async function waitForMessage(messages, type, timeout = 1000) {
-  // Check if message already exists
-  const existing = messages.find(m => m.type === type)
-  if (existing) return existing
-
-  // Poll for message with timeout
-  await withTimeout(
-    (async () => {
-      while (!messages.find(m => m.type === type)) {
-        await new Promise(r => setTimeout(r, 10))
-      }
-    })(),
-    timeout,
-    `Timeout waiting for message type: ${type}`
+async function waitForMessage(messages, type, timeout = 2000) {
+  return waitFor(
+    () => messages.find(m => m.type === type),
+    { timeoutMs: timeout, label: `message type: ${type}` }
   )
+}
 
-  return messages.find(m => m.type === type)
+/**
+ * Helper to wait for a message matching an arbitrary predicate.
+ */
+async function waitForMessageMatch(messages, predicate, timeout = 2000, label = 'message match') {
+  return waitFor(
+    () => messages.find(predicate),
+    { timeoutMs: timeout, label }
+  )
 }
 
 // createMockSession imported from ./test-helpers.js (spy-enabled)
@@ -232,7 +222,7 @@ describe('WsServer with authRequired: false', () => {
     send(ws, { type: 'input', data: 'hello world' })
 
     // Wait for the message to be processed
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => mockSession.sendMessage.callCount >= 1, { label: 'sendMessage called' })
 
     // Verify the mock session received the input (spy records calls)
     assert.equal(mockSession.sendMessage.callCount, 1, 'sendMessage should be called once')
@@ -857,7 +847,7 @@ describe('WsServer.broadcastError', () => {
       authRequired: false,
     })
     server.start('127.0.0.1')
-    await new Promise(r => setTimeout(r, 100))
+    await once(server.httpServer, 'listening')
 
     // Connect and auto-authenticate
     const { ws, messages } = await createClient(port, true)
@@ -912,7 +902,7 @@ describe('WsServer.broadcastError', () => {
       authRequired: true,
     })
     server.start('127.0.0.1')
-    await new Promise(r => setTimeout(r, 100))
+    await once(server.httpServer, 'listening')
 
     // Connect WITHOUT authenticating
     const { ws, messages } = await createClient(port, false)
@@ -986,14 +976,9 @@ describe('WsServer.broadcastStatus', () => {
     server.broadcastStatus('Second recovery attempt')
 
     // Wait until both server_status messages have been received
-    await withTimeout(
-      (async () => {
-        while (messages.filter(m => m.type === 'server_status').length < 2) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      1000,
-      'Timed out waiting for 2 server_status messages'
+    await waitFor(
+      () => messages.filter(m => m.type === 'server_status').length >= 2,
+      { timeoutMs: 2000, label: '2 server_status messages' }
     )
 
     const statusMsgs = messages.filter(m => m.type === 'server_status')
@@ -1465,7 +1450,7 @@ describe('user_question_response forwarding (multi-session)', () => {
     await waitForMessage(messages, 'auth_ok', 2000)
 
     send(ws, { type: 'user_question_response', answer: 'Option A' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => receivedAnswer !== null, { label: 'receivedAnswer set' })
 
     assert.equal(receivedAnswer, 'Option A', 'Answer should be forwarded to session')
 
@@ -1500,7 +1485,7 @@ describe('user_question_response forwarding (single-session)', () => {
     await waitForMessage(messages, 'auth_ok', 2000)
 
     send(ws, { type: 'user_question_response', answer: 'Option A' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => mockSession.respondToQuestion.callCount >= 1, { label: 'respondToQuestion called' })
 
     // Spy records calls — no manual tracking needed
     assert.equal(mockSession.respondToQuestion.callCount, 1, 'respondToQuestion should be called once')
@@ -1598,9 +1583,10 @@ describe('background session sync (_broadcastToSession)', () => {
       event: 'message',
       data: { type: 'response', content: 'Hello from session 1', timestamp: Date.now() },
     })
-    await new Promise(r => setTimeout(r, 100))
 
-    const msgEvent = messages.find(m => m.type === 'message' && m.content === 'Hello from session 1')
+    const msgEvent = await waitForMessageMatch(messages,
+      m => m.type === 'message' && m.content === 'Hello from session 1',
+      2000, 'message from session 1')
     assert.ok(msgEvent, 'Should receive the message event')
     assert.equal(msgEvent.sessionId, 'sess-1', 'Message should include sessionId')
 
@@ -1782,11 +1768,12 @@ describe('broadcastToSession via message-handler path (#1344)', () => {
 
     // Client B sends set_model targeting sess-2
     send(clientB.ws, { type: 'set_model', model: 'sonnet', sessionId: 'sess-2' })
-    await new Promise(r => setTimeout(r, 200))
 
     // Client B (on sess-2) should receive model_changed tagged with sess-2
     // (filter by sessionId to distinguish from _sendSessionInfo's untagged model_changed)
-    const bModelMsg = clientB.messages.find(m => m.type === 'model_changed' && m.sessionId === 'sess-2')
+    const bModelMsg = await waitForMessageMatch(clientB.messages,
+      m => m.type === 'model_changed' && m.sessionId === 'sess-2',
+      2000, 'model_changed for sess-2')
     assert.ok(bModelMsg, 'Client on sess-2 should receive model_changed with sessionId tag')
     assert.equal(bModelMsg.model, 'sonnet', 'model_changed should contain the new model')
 
@@ -1824,11 +1811,12 @@ describe('broadcastToSession via message-handler path (#1344)', () => {
 
     // Client B sends set_permission_mode targeting sess-2
     send(clientB.ws, { type: 'set_permission_mode', mode: 'approve', sessionId: 'sess-2' })
-    await new Promise(r => setTimeout(r, 200))
 
     // Client B (on sess-2) should receive permission_mode_changed tagged with sess-2
     // (filter by sessionId to distinguish from _sendSessionInfo's untagged permission_mode_changed)
-    const bPermMsg = clientB.messages.find(m => m.type === 'permission_mode_changed' && m.sessionId === 'sess-2')
+    const bPermMsg = await waitForMessageMatch(clientB.messages,
+      m => m.type === 'permission_mode_changed' && m.sessionId === 'sess-2',
+      2000, 'permission_mode_changed for sess-2')
     assert.ok(bPermMsg, 'Client on sess-2 should receive permission_mode_changed with sessionId tag')
     assert.equal(bPermMsg.mode, 'approve', 'permission_mode_changed should contain the new mode')
 
@@ -1867,9 +1855,8 @@ describe('public broadcast method', () => {
 
     // Use public broadcast to send discovered_sessions
     server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'test-session', cwd: '/tmp', pid: 123 }] })
-    await new Promise(r => setTimeout(r, 100))
 
-    const discoveryMsg = messages.find(m => m.type === 'discovered_sessions')
+    const discoveryMsg = await waitForMessage(messages, 'discovered_sessions')
     assert.ok(discoveryMsg, 'Client should receive broadcast message')
     assert.equal(discoveryMsg.tmux.length, 1)
     assert.equal(discoveryMsg.tmux[0].sessionName, 'test-session')
@@ -1968,9 +1955,8 @@ describe('agent idle/busy notifications', () => {
       event: 'stream_start',
       data: { messageId: 'msg-1' },
     })
-    await new Promise(r => setTimeout(r, 100))
 
-    const agentBusy = messages.find(m => m.type === 'agent_busy')
+    const agentBusy = await waitForMessage(messages, 'agent_busy')
     assert.ok(agentBusy, 'Should receive agent_busy after stream_start')
     assert.equal(agentBusy.sessionId, 'sess-1', 'agent_busy should include sessionId')
 
@@ -2000,9 +1986,8 @@ describe('agent idle/busy notifications', () => {
       event: 'result',
       data: { cost: 0.01, duration: 500, usage: {} },
     })
-    await new Promise(r => setTimeout(r, 100))
 
-    const agentIdle = messages.find(m => m.type === 'agent_idle')
+    const agentIdle = await waitForMessage(messages, 'agent_idle')
     assert.ok(agentIdle, 'Should receive agent_idle after result')
     assert.equal(agentIdle.sessionId, 'sess-1', 'agent_idle should include sessionId')
 
@@ -2032,9 +2017,8 @@ describe('agent idle/busy notifications', () => {
       event: 'stream_start',
       data: { messageId: 'msg-1' },
     })
-    await new Promise(r => setTimeout(r, 100))
 
-    const sessionList = messages.find(m => m.type === 'session_list')
+    const sessionList = await waitForMessage(messages, 'session_list')
     assert.ok(sessionList, 'Should receive session_list broadcast on stream_start')
     assert.ok(Array.isArray(sessionList.sessions), 'session_list should contain sessions array')
 
@@ -2165,7 +2149,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
 
     // Send permission_response — should still be forwarded
     send(ws, { type: 'permission_response', requestId: 'perm-1', decision: 'allow' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => permissionResolved, { label: 'permission_response forwarded' })
 
     assert.equal(permissionResolved, true, 'permission_response should be forwarded even during drain')
 
@@ -2194,7 +2178,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
 
     // Send user_question_response — should still be forwarded
     send(ws, { type: 'user_question_response', answer: 'yes' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => questionResolved, { label: 'question_response forwarded' })
 
     assert.equal(questionResolved, true, 'user_question_response should be forwarded even during drain')
 
@@ -2255,7 +2239,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
 
     // Input should now work again
     send(ws, { type: 'input', data: 'hello after drain' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => receivedInput !== null, { label: 'input received after drain disabled' })
 
     assert.equal(receivedInput, 'hello after drain', 'Input should be accepted after drain is disabled')
   })
@@ -2427,7 +2411,6 @@ describe('multi-client awareness', () => {
 
     // Disconnect client 2
     client2.ws.close()
-    await new Promise(r => setTimeout(r, 100))
 
     // Client 1 should receive client_left
     const leftMsg = await waitForMessage(client1.messages, 'client_left', 2000)
@@ -2534,16 +2517,14 @@ describe('primary client tracking', () => {
 
     // Send input
     send(client1.ws, { type: 'input', data: 'hello' })
-    await new Promise(r => setTimeout(r, 100))
 
     // Should receive primary_changed
-    const primaryMsg = await waitForMessage(client1.messages, 'primary_changed', 1000)
+    const primaryMsg = await waitForMessage(client1.messages, 'primary_changed', 2000)
     assert.ok(primaryMsg, 'Should receive primary_changed')
     assert.equal(primaryMsg.clientId, client1Id, 'Primary should be the sending client')
     assert.equal(primaryMsg.sessionId, 'sess-1', 'primary_changed should include sessionId')
 
     client1.ws.close()
-    await new Promise(r => setTimeout(r, 50))
   })
 
   it('does not re-broadcast primary_changed if client is already primary', async () => {
@@ -2564,7 +2545,7 @@ describe('primary client tracking', () => {
 
     // First input establishes primary
     send(ws, { type: 'input', data: 'msg1' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitForMessage(messages, 'primary_changed')
 
     const primaryMsgs1 = messages.filter(m => m.type === 'primary_changed')
     assert.equal(primaryMsgs1.length, 1, 'First input should trigger primary_changed')
@@ -2578,7 +2559,6 @@ describe('primary client tracking', () => {
     assert.equal(primaryMsgs2.length, 0, 'Second input from same client should NOT trigger primary_changed')
 
     ws.close()
-    await new Promise(r => setTimeout(r, 50))
   })
 
   it('clears primary when primary client disconnects', async () => {
@@ -2603,14 +2583,13 @@ describe('primary client tracking', () => {
 
     // Client 1 sends input to become primary
     send(client1.ws, { type: 'input', data: 'I am primary' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitForMessage(client2.messages, 'primary_changed', 2000)
 
     // Clear messages to isolate disconnect broadcast
     client2.messages.length = 0
 
     // Client 1 disconnects
     client1.ws.close()
-    await new Promise(r => setTimeout(r, 100))
 
     // Client 2 should receive primary_changed with null clientId
     const primaryMsg = await waitForMessage(client2.messages, 'primary_changed', 2000)
@@ -2619,7 +2598,6 @@ describe('primary client tracking', () => {
     assert.equal(primaryMsg.sessionId, 'sess-1', 'Should include sessionId')
 
     client2.ws.close()
-    await new Promise(r => setTimeout(r, 50))
   })
 })
 
@@ -2648,7 +2626,6 @@ describe('auth rate limiting', () => {
     send(ws1, { type: 'auth', token: 'wrong-token' })
     await waitForMessage(msgs1, 'auth_fail', 2000)
     assert.equal(msgs1[0].reason, 'invalid_token')
-    await new Promise(r => setTimeout(r, 50))
 
     // Immediately try again — should be rate limited (within 1s backoff)
     const { ws: ws2, messages: msgs2 } = await createClient(port, false)
@@ -2674,7 +2651,6 @@ describe('auth rate limiting', () => {
     const { ws: ws1, messages: msgs1 } = await createClient(port, false)
     send(ws1, { type: 'auth', token: 'wrong' })
     await waitForMessage(msgs1, 'auth_fail', 2000)
-    await new Promise(r => setTimeout(r, 50))
 
     // Wait for the backoff to expire (1s for first failure)
     await new Promise(r => setTimeout(r, 1100))
@@ -2694,7 +2670,6 @@ describe('auth rate limiting', () => {
     ws1.close()
     ws2.close()
     ws3.close()
-    await new Promise(r => setTimeout(r, 50))
   })
 
   it('exponential backoff increases block duration', async () => {
@@ -2712,7 +2687,6 @@ describe('auth rate limiting', () => {
     const { ws: ws1, messages: msgs1 } = await createClient(port, false)
     send(ws1, { type: 'auth', token: 'wrong' })
     await waitForMessage(msgs1, 'auth_fail', 2000)
-    await new Promise(r => setTimeout(r, 50))
 
     const entry1 = server._authFailures.values().next().value
     assert.equal(entry1.count, 1)
@@ -2726,7 +2700,6 @@ describe('auth rate limiting', () => {
     const { ws: ws2, messages: msgs2 } = await createClient(port, false)
     send(ws2, { type: 'auth', token: 'wrong' })
     await waitForMessage(msgs2, 'auth_fail', 2000)
-    await new Promise(r => setTimeout(r, 50))
 
     const entry2 = server._authFailures.values().next().value
     assert.equal(entry2.count, 2)
@@ -3710,7 +3683,7 @@ describe('permission/question routing to originating session', () => {
 
     // Respond to the permission — should route to Session A despite active being B
     send(ws, { type: 'permission_response', requestId: 'perm-routing-1', decision: 'allow' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => sessionAGotPermission, { label: 'sessionA permission routed' })
 
     assert.equal(sessionAGotPermission, true, 'Session A should receive the permission response')
     assert.equal(sessionBGotPermission, false, 'Session B should NOT receive the permission response')
@@ -3745,7 +3718,7 @@ describe('permission/question routing to originating session', () => {
 
     // Respond to the question — should route to Session A
     send(ws, { type: 'user_question_response', toolUseId: 'q-routing-1', answer: 'yes' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => sessionAGotQuestion, { label: 'sessionA question routed' })
 
     assert.equal(sessionAGotQuestion, true, 'Session A should receive the question response')
     assert.equal(sessionBGotQuestion, false, 'Session B should NOT receive the question response')
@@ -3773,7 +3746,7 @@ describe('permission/question routing to originating session', () => {
 
     // Respond
     send(ws, { type: 'permission_response', requestId: 'perm-cleanup-1', decision: 'allow' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => server._permissionSessionMap.size === 0, { label: 'permission map cleaned up' })
 
     // Map entry should be deleted
     assert.equal(server._permissionSessionMap.size, 0, 'Permission routing map should be cleaned up')
@@ -3801,7 +3774,7 @@ describe('permission/question routing to originating session', () => {
 
     // Respond
     send(ws, { type: 'user_question_response', toolUseId: 'q-cleanup-1', answer: 'yes' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => server._questionSessionMap.size === 0, { label: 'question map cleaned up' })
 
     // Map entry should be deleted
     assert.equal(server._questionSessionMap.size, 0, 'Question routing map should be cleaned up')
@@ -3832,7 +3805,7 @@ describe('permission/question routing to originating session', () => {
     // Send permission response with unknown requestId — no entry in routing map
     // Should fall back to activeSessionId (sess-b)
     send(ws, { type: 'permission_response', requestId: 'unknown-id', decision: 'allow' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => sessionBGotPermission, { label: 'sessionB fallback permission' })
 
     assert.equal(sessionBGotPermission, true, 'Should fall back to activeSessionId when requestId not in routing map')
 
@@ -3862,7 +3835,7 @@ describe('permission/question routing to originating session', () => {
     // Send question response with unknown toolUseId — no entry in routing map
     // Should fall back to activeSessionId (sess-b)
     send(ws, { type: 'user_question_response', toolUseId: 'unknown-tool-use-id', answer: 'yes' })
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => sessionBGotQuestion, { label: 'sessionB fallback question' })
 
     assert.equal(sessionBGotQuestion, true, 'Should fall back to activeSessionId when toolUseId not in routing map')
 
@@ -4509,15 +4482,7 @@ describe('encryption key exchange enforcement', () => {
     )
 
     // Wait for auth_ok (which includes encryption: 'required')
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'auth_ok')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Auth timeout'
-    )
+    await waitForMessage(messages, 'auth_ok')
 
     const authOk = messages.find(m => m.type === 'auth_ok')
     assert.equal(authOk.encryption, 'required', 'Should indicate encryption is required')
@@ -4567,15 +4532,7 @@ describe('encryption key exchange enforcement', () => {
     )
 
     // Wait for auth_ok
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'auth_ok')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Auth timeout'
-    )
+    await waitForMessage(messages, 'auth_ok')
 
     // Send a regular message instead of key_exchange
     ws.send(JSON.stringify({ type: 'input', text: 'hello' }))
@@ -4623,15 +4580,7 @@ describe('encryption key exchange enforcement', () => {
     )
 
     // Wait for auth_ok
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'auth_ok')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Auth timeout'
-    )
+    await waitForMessage(messages, 'auth_ok')
 
     // Send key_exchange without publicKey
     ws.send(JSON.stringify({ type: 'key_exchange' }))
@@ -5063,7 +5012,7 @@ describe('outbound message sequence numbers', () => {
     const { ws, messages } = await createClient(port, true)
 
     // Wait for initial messages to settle (auth_ok, server_mode, status, etc.)
-    await new Promise(r => setTimeout(r, 200))
+    await waitForMessage(messages, 'status')
 
     // All messages should have a seq field
     assert.ok(messages.length > 0, 'Should have received messages')
@@ -5093,7 +5042,7 @@ describe('outbound message sequence numbers', () => {
     const { ws, messages } = await createClient(port, true)
 
     // Wait for initial messages
-    await new Promise(r => setTimeout(r, 200))
+    await waitForMessage(messages, 'status')
 
     const initialCount = messages.length
 
@@ -5121,17 +5070,17 @@ describe('outbound message sequence numbers', () => {
 
     // First connection
     const { ws: ws1, messages: messages1 } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 200))
+    await waitForMessage(messages1, 'status')
 
     const firstAuthOk = messages1.find(m => m.type === 'auth_ok')
     assert.equal(firstAuthOk.seq, 1, 'First connection auth_ok should have seq 1')
 
     ws1.close()
-    await new Promise(r => setTimeout(r, 100))
+    await waitFor(() => ws1.readyState === WebSocket.CLOSED, { label: 'ws1 closed' })
 
     // Second connection — seq should restart at 1
     const { ws: ws2, messages: messages2 } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 200))
+    await waitForMessage(messages2, 'status')
 
     const secondAuthOk = messages2.find(m => m.type === 'auth_ok')
     assert.equal(secondAuthOk.seq, 1, 'Second connection auth_ok should have seq 1 (reset)')
@@ -5151,20 +5100,21 @@ describe('outbound message sequence numbers', () => {
 
     // Connect two clients
     const { ws: ws1, messages: messages1 } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 200))
+    await waitForMessage(messages1, 'status')
 
     const { ws: ws2, messages: messages2 } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 200))
+    await waitForMessage(messages2, 'status')
+    // Wait for client_joined on client1 from client2's connection
+    await waitForMessage(messages1, 'client_joined')
 
     const client1CountBefore = messages1.length
     const client2CountBefore = messages2.length
 
     // Broadcast a message — each client gets their own seq
     server.broadcast({ type: 'discovered_sessions', tmux: [] })
-    await new Promise(r => setTimeout(r, 200))
 
-    const disc1 = messages1.find(m => m.type === 'discovered_sessions')
-    const disc2 = messages2.find(m => m.type === 'discovered_sessions')
+    const disc1 = await waitForMessage(messages1, 'discovered_sessions')
+    const disc2 = await waitForMessage(messages2, 'discovered_sessions')
     assert.ok(disc1, 'Client 1 should receive broadcast')
     assert.ok(disc2, 'Client 2 should receive broadcast')
 
@@ -5208,11 +5158,10 @@ describe('outbound message sequence numbers', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 300))
 
     // Find history replay messages
+    const replayEnd = await waitForMessage(messages, 'history_replay_end')
     const replayStart = messages.find(m => m.type === 'history_replay_start')
-    const replayEnd = messages.find(m => m.type === 'history_replay_end')
     assert.ok(replayStart, 'Should have history_replay_start')
     assert.ok(replayEnd, 'Should have history_replay_end')
     assert.equal(typeof replayStart.seq, 'number', 'history_replay_start should have seq')
@@ -5864,7 +5813,8 @@ describe('_replayHistory()', () => {
     })
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 300))
+    // Wait for initial messages to settle (no history replay expected)
+    await waitForMessage(messages, 'status')
 
     // With empty history, there should be NO history_replay_start or history_replay_end
     const replayStart = messages.find(m => m.type === 'history_replay_start')
@@ -5897,10 +5847,8 @@ describe('_replayHistory()', () => {
     })
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 300))
-
+    const replayEnd = await waitForMessage(messages, 'history_replay_end')
     const replayStart = messages.find(m => m.type === 'history_replay_start')
-    const replayEnd = messages.find(m => m.type === 'history_replay_end')
     assert.ok(replayStart, 'Should send history_replay_start')
     assert.ok(replayEnd, 'Should send history_replay_end')
 
@@ -5950,10 +5898,8 @@ describe('_replayHistory()', () => {
     })
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 300))
-
+    const replayEnd = await waitForMessage(messages, 'history_replay_end')
     const replayStart = messages.find(m => m.type === 'history_replay_start')
-    const replayEnd = messages.find(m => m.type === 'history_replay_end')
     const startIdx = messages.indexOf(replayStart)
     const endIdx = messages.indexOf(replayEnd)
     const replayed = messages.slice(startIdx + 1, endIdx)
@@ -5984,10 +5930,8 @@ describe('_replayHistory()', () => {
     })
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 300))
-
+    const replayEnd = await waitForMessage(messages, 'history_replay_end')
     const replayStart = messages.find(m => m.type === 'history_replay_start')
-    const replayEnd = messages.find(m => m.type === 'history_replay_end')
 
     assert.ok(replayStart, 'Should send history_replay_start')
     assert.equal(replayStart.sessionId, 'sess-1', 'history_replay_start should include sessionId')
@@ -6018,10 +5962,8 @@ describe('_replayHistory()', () => {
     })
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 300))
-
+    const replayEnd = await waitForMessage(messages, 'history_replay_end')
     const replayStart = messages.find(m => m.type === 'history_replay_start')
-    const replayEnd = messages.find(m => m.type === 'history_replay_end')
     const startIdx = messages.indexOf(replayStart)
     const endIdx = messages.indexOf(replayEnd)
     const replayed = messages.slice(startIdx + 1, endIdx)
@@ -6071,9 +6013,7 @@ describe('_replayHistory()', () => {
     })
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 300))
-
-    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const replayStart = await waitForMessage(messages, 'history_replay_start')
     assert.ok(replayStart, 'Should send history_replay_start')
     assert.equal(replayStart.truncated, true, 'Should set truncated flag when history was truncated')
 
@@ -6099,9 +6039,7 @@ describe('_replayHistory()', () => {
     })
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 300))
-
-    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const replayStart = await waitForMessage(messages, 'history_replay_start')
     assert.ok(replayStart, 'Should send history_replay_start')
     assert.equal(replayStart.truncated, false, 'truncated should be false')
 
@@ -6128,11 +6066,8 @@ describe('_replayHistory()', () => {
     })
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
-    // Allow extra time for async batched delivery
-    await new Promise(r => setTimeout(r, 500))
-
+    const replayEnd = await waitForMessage(messages, 'history_replay_end')
     const replayStart = messages.find(m => m.type === 'history_replay_start')
-    const replayEnd = messages.find(m => m.type === 'history_replay_end')
     assert.ok(replayStart, 'Should send history_replay_start')
     assert.ok(replayEnd, 'Should send history_replay_end after all chunks')
 
@@ -6247,14 +6182,13 @@ describe('transient events not replayed in history', () => {
     })
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
-    await new Promise(r => setTimeout(r, 300))
+    const replayEnd = await waitForMessage(messages, 'history_replay_end')
 
     // The history has entries but none are type=message with messageType=response,
     // so the replay starts from index 0 but still wraps in markers.
     // Verify that transient-style events in history ARE sent (they are in the buffer),
     // but in real usage session-manager never records them so they never appear.
     const replayStart = messages.find(m => m.type === 'history_replay_start')
-    const replayEnd = messages.find(m => m.type === 'history_replay_end')
     assert.ok(replayStart, 'Should send history_replay_start')
     assert.ok(replayEnd, 'Should send history_replay_end')
 
@@ -6482,15 +6416,7 @@ describe('encryption integration (end-to-end)', () => {
     )
 
     // Wait for auth_ok (sent unencrypted, includes encryption: 'required')
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'auth_ok')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Auth timeout'
-    )
+    await waitForMessage(messages, 'auth_ok')
 
     const authOk = messages.find(m => m.type === 'auth_ok')
     assert.equal(authOk.encryption, 'required')
@@ -6500,15 +6426,7 @@ describe('encryption integration (end-to-end)', () => {
     ws.send(JSON.stringify({ type: 'key_exchange', publicKey: clientKp.publicKey }))
 
     // Wait for key_exchange_ok (sent unencrypted)
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'key_exchange_ok')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Key exchange timeout'
-    )
+    await waitForMessage(messages, 'key_exchange_ok')
 
     const kxOk = messages.find(m => m.type === 'key_exchange_ok')
     assert.ok(kxOk.publicKey, 'Server should send its public key')
@@ -6541,14 +6459,9 @@ describe('encryption integration (end-to-end)', () => {
    * Encrypted messages arrive as { type: 'encrypted', d: '...', n: N }.
    */
   async function waitForEncryptedMessage(messages, clientEncryption, timeout = 2000) {
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'encrypted')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      timeout,
-      'Timeout waiting for encrypted message'
+    await waitFor(
+      () => messages.find(m => m.type === 'encrypted'),
+      { timeoutMs: timeout, label: 'encrypted message' }
     )
 
     const encrypted = messages.find(m => m.type === 'encrypted')
@@ -6593,7 +6506,7 @@ describe('encryption integration (end-to-end)', () => {
 
     // After key exchange, server should flush queued messages (server_mode, status, etc.)
     // These should all arrive as encrypted envelopes
-    await new Promise(r => setTimeout(r, 500))
+    await waitFor(() => messages.filter(m => m.type === 'encrypted').length > 0, { label: 'encrypted messages arrived' })
 
     // All post-key-exchange messages should be encrypted
     const encryptedMsgs = messages.filter(m => m.type === 'encrypted')
@@ -6630,14 +6543,11 @@ describe('encryption integration (end-to-end)', () => {
     const { ws, messages, clientEncryption } = await connectWithEncryption(port)
 
     // Drain initial encrypted messages (server_mode, status, etc.)
-    await new Promise(r => setTimeout(r, 500))
+    await waitFor(() => messages.filter(m => m.type === 'encrypted').length > 0, { label: 'initial encrypted messages' })
     drainEncryptedMessages(messages, clientEncryption)
 
     // Send an encrypted ping from client
     sendEncrypted(ws, { type: 'ping' }, clientEncryption)
-
-    // Wait for encrypted pong response
-    await new Promise(r => setTimeout(r, 500))
 
     // The pong should arrive as an encrypted envelope
     const pong = await waitForEncryptedMessage(messages, clientEncryption, 2000)
@@ -6663,7 +6573,7 @@ describe('encryption integration (end-to-end)', () => {
     const { ws, messages, clientEncryption } = await connectWithEncryption(port)
 
     // After key exchange, queued messages should be flushed
-    await new Promise(r => setTimeout(r, 500))
+    await waitFor(() => messages.filter(m => m.type === 'encrypted').length > 0, { label: 'queued encrypted messages' })
 
     const decrypted = drainEncryptedMessages(messages, clientEncryption)
 
@@ -6697,7 +6607,7 @@ describe('encryption integration (end-to-end)', () => {
     const { ws, messages, clientEncryption } = await connectWithEncryption(port)
 
     // Drain initial messages
-    await new Promise(r => setTimeout(r, 500))
+    await waitFor(() => messages.filter(m => m.type === 'encrypted').length > 0, { label: 'initial encrypted messages' })
     drainEncryptedMessages(messages, clientEncryption)
 
     // Send a malformed encrypted envelope with garbage ciphertext
@@ -6740,7 +6650,7 @@ describe('encryption integration (end-to-end)', () => {
     const { ws, messages, clientEncryption } = await connectWithEncryption(port)
 
     // Drain initial messages
-    await new Promise(r => setTimeout(r, 500))
+    await waitFor(() => messages.filter(m => m.type === 'encrypted').length > 0, { label: 'initial encrypted messages' })
     drainEncryptedMessages(messages, clientEncryption)
 
     // Send multiple encrypted pings
@@ -6748,7 +6658,8 @@ describe('encryption integration (end-to-end)', () => {
     sendEncrypted(ws, { type: 'ping' }, clientEncryption)
     sendEncrypted(ws, { type: 'ping' }, clientEncryption)
 
-    await new Promise(r => setTimeout(r, 500))
+    // Wait for 3 encrypted responses
+    await waitFor(() => messages.filter(m => m.type === 'encrypted').length >= 3, { label: '3 encrypted pong responses' })
 
     // Decrypt all pong responses — nonce sequence must be continuous
     const pong1 = await waitForEncryptedMessage(messages, clientEncryption, 2000)
@@ -6790,8 +6701,11 @@ describe('encryption integration (end-to-end)', () => {
 
     const { ws, messages, clientEncryption } = await connectWithEncryption(port)
 
-    // Wait for all encrypted messages to arrive
-    await new Promise(r => setTimeout(r, 500))
+    // Wait for all encrypted messages to arrive (history replay + post-auth)
+    // history_replay_end is the last message in the history replay sequence
+    // We need enough encrypted messages to cover: server_mode, status, claude_ready, model_changed,
+    // history_replay_start, history entry, history entry, history_replay_end, etc.
+    await waitFor(() => messages.filter(m => m.type === 'encrypted').length >= 5, { label: 'encrypted history messages' })
 
     const decrypted = drainEncryptedMessages(messages, clientEncryption)
 
@@ -6848,15 +6762,7 @@ describe('encryption integration (end-to-end)', () => {
     )
 
     // Wait for auth_ok
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'auth_ok')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Auth timeout'
-    )
+    await waitForMessage(messages, 'auth_ok')
 
     const authOk = messages.find(m => m.type === 'auth_ok')
     assert.equal(authOk.encryption, 'required', 'Server should require encryption')
@@ -6903,7 +6809,7 @@ describe('models_updated broadcasting', () => {
     const { ws, messages } = await createClient(port)
 
     // Wait for initial messages (auth_ok, server_mode, etc.)
-    await new Promise(r => setTimeout(r, 200))
+    await waitForMessage(messages, 'status')
     const initialCount = messages.length
 
     // Emit models_updated from the CLI session
@@ -6913,8 +6819,11 @@ describe('models_updated broadcasting', () => {
     ]
     mockSession.emit('models_updated', { models: newModels })
 
-    // Wait for broadcast
-    await new Promise(r => setTimeout(r, 200))
+    // Wait for broadcast (a NEW available_models after initialCount)
+    await waitFor(
+      () => messages.slice(initialCount).some(m => m.type === 'available_models'),
+      { label: 'available_models broadcast after emit' }
+    )
 
     const modelMsgs = messages.slice(initialCount).filter(m => m.type === 'available_models')
     assert.equal(modelMsgs.length, 1, 'Should receive exactly one available_models broadcast')
@@ -6935,14 +6844,22 @@ describe('models_updated broadcasting', () => {
     const client1 = await createClient(port)
     const client2 = await createClient(port)
 
-    await new Promise(r => setTimeout(r, 200))
+    await waitForMessage(client1.messages, 'status')
+    await waitForMessage(client2.messages, 'status')
     const c1Start = client1.messages.length
     const c2Start = client2.messages.length
 
     const newModels = [{ id: 'test-model', label: 'Test', fullId: 'claude-test-model' }]
     mockSession.emit('models_updated', { models: newModels })
 
-    await new Promise(r => setTimeout(r, 200))
+    await waitFor(
+      () => client1.messages.slice(c1Start).some(m => m.type === 'available_models'),
+      { label: 'c1 available_models after emit' }
+    )
+    await waitFor(
+      () => client2.messages.slice(c2Start).some(m => m.type === 'available_models'),
+      { label: 'c2 available_models after emit' }
+    )
 
     const c1Models = client1.messages.slice(c1Start).filter(m => m.type === 'available_models')
     const c2Models = client2.messages.slice(c2Start).filter(m => m.type === 'available_models')
@@ -6964,12 +6881,13 @@ describe('models_updated broadcasting', () => {
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port)
 
-    await new Promise(r => setTimeout(r, 200))
+    await waitForMessage(messages, 'status')
     const initialCount = messages.length
 
     // Emit with no models property
     mockSession.emit('models_updated', {})
-    await new Promise(r => setTimeout(r, 200))
+    // Negative test: wait a short time to confirm no message arrives
+    await new Promise(r => setTimeout(r, 100))
 
     const modelMsgs = messages.slice(initialCount).filter(m => m.type === 'available_models')
     assert.equal(modelMsgs.length, 0, 'Should not broadcast when models data is missing')
@@ -7403,15 +7321,7 @@ describe('localhost encryption bypass', () => {
     )
 
     // Wait for auth_ok
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'auth_ok')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Auth timeout'
-    )
+    await waitForMessage(messages, 'auth_ok')
 
     const authOk = messages.find(m => m.type === 'auth_ok')
     assert.equal(authOk.encryption, 'disabled',
@@ -7450,15 +7360,7 @@ describe('localhost encryption bypass', () => {
     )
 
     // Wait for auth_ok
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'auth_ok')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Auth timeout'
-    )
+    await waitForMessage(messages, 'auth_ok')
 
     // Wait past the key exchange timeout period
     await new Promise(r => setTimeout(r, 400))
@@ -7500,15 +7402,7 @@ describe('localhost encryption bypass', () => {
     )
 
     // Wait for auth_ok and subsequent messages
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'status')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Timeout waiting for status message'
-    )
+    await waitForMessage(messages, 'status')
 
     // Messages should arrive in plaintext (not queued behind encryption pending)
     const authOk = messages.find(m => m.type === 'auth_ok')
@@ -7565,15 +7459,7 @@ describe('localhost encryption bypass', () => {
     }))
 
     // Wait for auth_ok
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'auth_ok')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Auth timeout — dashboard deviceInfo should be accepted'
-    )
+    await waitForMessage(messages, 'auth_ok')
 
     const authOk = messages.find(m => m.type === 'auth_ok')
     assert.ok(authOk, 'Should receive auth_ok with dashboard deviceInfo')
@@ -7757,15 +7643,7 @@ describe('localhost bypass uses socketIp not proxy headers (#755)', () => {
     ws.send(JSON.stringify({ type: 'auth', token: 'tok-localhost-enc' }))
 
     // Wait for auth_ok
-    await withTimeout(
-      (async () => {
-        while (!messages.find(m => m.type === 'auth_ok')) {
-          await new Promise(r => setTimeout(r, 10))
-        }
-      })(),
-      2000,
-      'Auth timeout'
-    )
+    await waitForMessage(messages, 'auth_ok')
 
     const authOk = messages.find(m => m.type === 'auth_ok')
     assert.ok(authOk, 'Should receive auth_ok')
@@ -7805,10 +7683,11 @@ describe('session-targeted routing (#611)', () => {
     // Client's activeSessionId is 'session-a' (set by auth_ok)
     // Send input targeted at session-b via msg.sessionId
     send(ws, { type: 'input', data: 'hello session b', sessionId: 'session-b' })
-    await new Promise(r => setTimeout(r, 100))
+
+    const entryB = sessionsMap.get('session-b')
+    await waitFor(() => entryB.session.sendMessage.callCount >= 1, { label: 'session-b sendMessage called' })
 
     const entryA = sessionsMap.get('session-a')
-    const entryB = sessionsMap.get('session-b')
     assert.equal(entryA.session.sendMessage.callCount, 0, 'session-a should NOT receive input')
     assert.equal(entryB.session.sendMessage.callCount, 1, 'session-b should receive input')
     assert.equal(entryB.session.sendMessage.lastCall[0], 'hello session b')
@@ -7833,9 +7712,10 @@ describe('session-targeted routing (#611)', () => {
 
     // No sessionId → should use activeSessionId (session-a from auth_ok)
     send(ws, { type: 'input', data: 'hello default' })
-    await new Promise(r => setTimeout(r, 100))
 
     const entryA = sessionsMap.get('session-a')
+    await waitFor(() => entryA.session.sendMessage.callCount >= 1, { label: 'session-a sendMessage called' })
+
     const entryB = sessionsMap.get('session-b')
     assert.equal(entryA.session.sendMessage.callCount, 1, 'session-a (active) should receive input')
     assert.equal(entryB.session.sendMessage.callCount, 0, 'session-b should NOT receive input')
@@ -7859,10 +7739,11 @@ describe('session-targeted routing (#611)', () => {
     const { ws } = await createClient(port, true)
 
     send(ws, { type: 'interrupt', sessionId: 'session-b' })
-    await new Promise(r => setTimeout(r, 100))
+
+    const entryB = sessionsMap.get('session-b')
+    await waitFor(() => entryB.session.interrupt.callCount >= 1, { label: 'session-b interrupted' })
 
     const entryA = sessionsMap.get('session-a')
-    const entryB = sessionsMap.get('session-b')
     assert.equal(entryA.session.interrupt.callCount, 0, 'session-a should NOT be interrupted')
     assert.equal(entryB.session.interrupt.callCount, 1, 'session-b should be interrupted')
 
@@ -7885,10 +7766,11 @@ describe('session-targeted routing (#611)', () => {
     const { ws } = await createClient(port, true)
 
     send(ws, { type: 'set_model', model: 'sonnet', sessionId: 'session-b' })
-    await new Promise(r => setTimeout(r, 100))
+
+    const entryB = sessionsMap.get('session-b')
+    await waitFor(() => entryB.session.setModel.callCount >= 1, { label: 'session-b setModel called' })
 
     const entryA = sessionsMap.get('session-a')
-    const entryB = sessionsMap.get('session-b')
     assert.equal(entryA.session.setModel.callCount, 0, 'session-a should NOT have model changed')
     assert.equal(entryB.session.setModel.callCount, 1, 'session-b should have model changed')
     assert.equal(entryB.session.setModel.lastCall[0], 'sonnet')
@@ -7916,10 +7798,11 @@ describe('session-targeted routing (#611)', () => {
     const { ws } = await createClient(port, true)
 
     send(ws, { type: 'set_permission_mode', mode: 'plan', sessionId: 'session-b' })
-    await new Promise(r => setTimeout(r, 100))
+
+    const entryB = sessionsMap.get('session-b')
+    await waitFor(() => entryB.session.setPermissionMode.callCount >= 1, { label: 'session-b setPermissionMode called' })
 
     const entryA = sessionsMap.get('session-a')
-    const entryB = sessionsMap.get('session-b')
     assert.equal(entryA.session.setPermissionMode.callCount, 0, 'session-a should NOT have permission mode changed')
     assert.equal(entryB.session.setPermissionMode.callCount, 1, 'session-b should have permission mode changed')
     assert.equal(entryB.session.setPermissionMode.lastCall[0], 'plan')
@@ -8711,9 +8594,8 @@ describe('_sendSessionInfo sessionId tagging (#1417)', () => {
     // Switch to sess-2 — _sendSessionInfo should send tagged messages
     send(ws, { type: 'switch_session', sessionId: 'sess-2' })
     await waitForMessage(messages, 'session_switched', 2000)
-    await new Promise(r => setTimeout(r, 100))
 
-    const modelMsg = messages.find(m => m.type === 'model_changed')
+    const modelMsg = await waitForMessage(messages, 'model_changed')
     assert.ok(modelMsg, 'Should receive model_changed after switch')
     assert.equal(modelMsg.sessionId, 'sess-2', 'model_changed should include sessionId')
 
@@ -8743,9 +8625,8 @@ describe('_sendSessionInfo sessionId tagging (#1417)', () => {
     const { ws, messages } = await createClient(port, false)
     send(ws, { type: 'auth', token: 'test-token' })
     await waitForMessage(messages, 'auth_ok', 2000)
-    await new Promise(r => setTimeout(r, 100))
 
-    const modelMsg = messages.find(m => m.type === 'model_changed')
+    const modelMsg = await waitForMessage(messages, 'model_changed')
     assert.ok(modelMsg, 'Should receive model_changed after auth')
     assert.equal(modelMsg.sessionId, 'sess-1', 'model_changed should include sessionId for default session')
 
@@ -8826,10 +8707,7 @@ describe('Pre-auth connection limit', () => {
     const messages1 = []
     ws1.on('message', (data) => messages1.push(JSON.parse(data.toString())))
     ws1.send(JSON.stringify({ type: 'auth', token: 'test-token' }))
-    await withTimeout(
-      (async () => { while (!messages1.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
-      2000, 'Auth timeout'
-    )
+    await waitForMessage(messages1, 'auth_ok')
 
     // Now a new connection should succeed
     const ws3 = new WebSocket(`ws://127.0.0.1:${port}`)
@@ -8862,10 +8740,7 @@ describe('Pre-auth connection limit', () => {
     for (let i = 0; i < MAX_PENDING; i++) {
       const { ws, messages } = await createClient(port, false)
       ws.send(JSON.stringify({ type: 'auth', token: 'test-token' }))
-      await withTimeout(
-        (async () => { while (!messages.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
-        2000, 'Auth timeout'
-      )
+      await waitForMessage(messages, 'auth_ok')
       authed.push(ws)
     }
 
@@ -8906,10 +8781,7 @@ describe('Protocol version enforcement (#1058)', () => {
 
     const { ws, messages } = await createClient(port, false)
     ws.send(JSON.stringify({ type: 'auth', token: 'test-token' }))
-    await withTimeout(
-      (async () => { while (!messages.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
-      2000, 'Auth timeout'
-    )
+    await waitForMessage(messages, 'auth_ok')
 
     // Check stored client version
     const clientData = [...server.clients.values()][0]
@@ -8929,10 +8801,7 @@ describe('Protocol version enforcement (#1058)', () => {
 
     const { ws, messages } = await createClient(port, false)
     ws.send(JSON.stringify({ type: 'auth', token: 'test-token', protocolVersion: 999 }))
-    await withTimeout(
-      (async () => { while (!messages.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
-      2000, 'Auth timeout'
-    )
+    await waitForMessage(messages, 'auth_ok')
 
     const clientData = [...server.clients.values()][0]
     assert.equal(clientData.protocolVersion, SERVER_PROTOCOL_VERSION,
@@ -8951,10 +8820,7 @@ describe('Protocol version enforcement (#1058)', () => {
 
     const { ws, messages } = await createClient(port, false)
     ws.send(JSON.stringify({ type: 'auth', token: 'test-token', protocolVersion: 0 }))
-    await withTimeout(
-      (async () => { while (!messages.find(m => m.type === 'auth_fail')) await new Promise(r => setTimeout(r, 10)) })(),
-      2000, 'Should receive auth_fail for version 0'
-    )
+    await waitForMessage(messages, 'auth_fail')
 
     const failMsg = messages.find(m => m.type === 'auth_fail')
     assert.ok(failMsg, 'Should receive auth_fail')
@@ -9001,10 +8867,9 @@ describe('subscribedSessionIds consistency (#1488)', () => {
 
     send(ws, { type: 'create_session', name: 'Test Session' })
     // Wait for session_switched with the created session ID (not the initial one from auth)
-    await withTimeout(
-      (async () => { while (!messages.find(m => m.type === 'session_switched' && m.sessionId === 'created-sess')) await new Promise(r => setTimeout(r, 10)) })(),
-      2000, 'Timeout waiting for session_switched for created-sess'
-    )
+    await waitForMessageMatch(messages,
+      m => m.type === 'session_switched' && m.sessionId === 'created-sess',
+      2000, 'session_switched for created-sess')
 
     // Verify the client's subscribedSessionIds contains the new session
     const client = Array.from(server.clients.values())[0]
@@ -9046,10 +8911,9 @@ describe('subscribedSessionIds consistency (#1488)', () => {
 
     send(ws, { type: 'resume_conversation', conversationId: '12345678-1234-1234-1234-123456789abc' })
     // Wait for session_switched with the resumed session ID (not the initial one from auth)
-    await withTimeout(
-      (async () => { while (!messages.find(m => m.type === 'session_switched' && m.sessionId === 'resumed-sess')) await new Promise(r => setTimeout(r, 10)) })(),
-      2000, 'Timeout waiting for session_switched for resumed-sess'
-    )
+    await waitForMessageMatch(messages,
+      m => m.type === 'session_switched' && m.sessionId === 'resumed-sess',
+      2000, 'session_switched for resumed-sess')
 
     // Verify the client's subscribedSessionIds contains the resumed session
     const client = Array.from(server.clients.values())[0]
@@ -9078,10 +8942,9 @@ describe('subscribedSessionIds consistency (#1488)', () => {
 
     send(ws, { type: 'switch_session', sessionId: 'sess-b' })
     // Wait for session_switched with sess-b (not the initial one from auth)
-    await withTimeout(
-      (async () => { while (!messages.find(m => m.type === 'session_switched' && m.sessionId === 'sess-b')) await new Promise(r => setTimeout(r, 10)) })(),
-      2000, 'Timeout waiting for session_switched for sess-b'
-    )
+    await waitForMessageMatch(messages,
+      m => m.type === 'session_switched' && m.sessionId === 'sess-b',
+      2000, 'session_switched for sess-b')
 
     // Verify the client's subscribedSessionIds contains the switched session
     const client = Array.from(server.clients.values())[0]

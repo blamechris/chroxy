@@ -4,6 +4,32 @@ import { EventEmitter } from 'node:events'
 export { GIT } from '../src/git.js'
 
 /**
+ * Poll until a predicate returns a truthy value, then return it.
+ * Throws if timeoutMs elapses before the predicate is satisfied.
+ *
+ * Usage:
+ *   const msg = await waitFor(() => messages.find(m => m.type === 'foo'))
+ *   await waitFor(() => spy.callCount >= 1)
+ *
+ * @param {() => any} predicate  - checked every `intervalMs`; resolves when truthy
+ * @param {number}    timeoutMs  - max wait (default 2000)
+ * @param {number}    intervalMs - polling interval (default 10)
+ * @param {string}    label      - included in timeout error message
+ * @returns {Promise<any>} the truthy value returned by predicate
+ */
+export async function waitFor(predicate, { timeoutMs = 2000, intervalMs = 10, label = 'waitFor condition' } = {}) {
+  const start = Date.now()
+  while (true) {
+    const result = predicate()
+    if (result) return result
+    if (Date.now() - start >= timeoutMs) {
+      throw new Error(`Timeout after ${timeoutMs}ms: ${label}`)
+    }
+    await new Promise(r => setTimeout(r, intervalMs))
+  }
+}
+
+/**
  * Create a spy function that records all calls.
  *
  * Usage:
