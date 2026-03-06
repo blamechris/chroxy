@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { getSessionStatus, formatCost, getStatusColor, SessionStatus } from '../../components/SessionOverview';
+import { getSessionStatus, formatCost, getStatusColor } from '../../components/SessionOverview';
 
 describe('SessionOverview visible prop removal (#1072)', () => {
   const source = fs.readFileSync(
