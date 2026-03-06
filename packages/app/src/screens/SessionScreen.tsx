@@ -617,7 +617,7 @@ export function SessionScreen() {
 
       {/* Session overview panel */}
       {showSessionOverview && (
-        <SessionOverview visible={showSessionOverview} onClose={() => setShowSessionOverview(false)} />
+        <SessionOverview onClose={() => setShowSessionOverview(false)} />
       )}
 
       {/* Selection bar or view mode toggle */}

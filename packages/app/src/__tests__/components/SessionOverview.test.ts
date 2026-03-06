@@ -1,4 +1,27 @@
-import { getSessionStatus, formatCost, getStatusColor, SessionStatus } from '../../components/SessionOverview';
+import * as fs from 'fs';
+import * as path from 'path';
+import { getSessionStatus, formatCost, getStatusColor } from '../../components/SessionOverview';
+
+describe('SessionOverview visible prop removal (#1072)', () => {
+  const source = fs.readFileSync(
+    path.resolve(__dirname, '../../components/SessionOverview.tsx'),
+    'utf-8',
+  );
+
+  it('SessionOverviewProps does not include visible', () => {
+    // Extract the interface definition
+    const propsMatch = source.match(/interface SessionOverviewProps\s*\{([^}]+)\}/);
+    expect(propsMatch).not.toBeNull();
+    expect(propsMatch![1]).not.toMatch(/visible/);
+  });
+
+  it('SessionOverview function does not use visible parameter', () => {
+    // The function signature should not destructure visible
+    const fnMatch = source.match(/function SessionOverview\(\{([^}]+)\}/);
+    expect(fnMatch).not.toBeNull();
+    expect(fnMatch![1]).not.toMatch(/visible/);
+  });
+});
 
 describe('SessionOverview helpers', () => {
   describe('getSessionStatus', () => {
