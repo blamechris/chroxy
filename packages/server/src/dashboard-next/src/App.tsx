@@ -140,6 +140,7 @@ export function App() {
 
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
+  const [pendingCwd, setPendingCwd] = useState<string | null>(null)
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -304,6 +305,7 @@ export function App() {
   }, [sendInterrupt])
 
   const handleNewSession = useCallback(() => {
+    setPendingCwd(null)
     setShowCreateSession(true)
   }, [])
 
@@ -510,7 +512,8 @@ export function App() {
             /* Will be wired in #1107 */
             console.log('Resume session:', convId)
           }}
-          onNewSession={() => {
+          onNewSession={(cwd) => {
+            setPendingCwd(cwd || null)
             setShowCreateSession(true)
           }}
           onToggle={() => setSidebarOpen(prev => !prev)}
@@ -624,6 +627,7 @@ export function App() {
         open={showCreateSession}
         onClose={() => setShowCreateSession(false)}
         onCreate={handleCreateSession}
+        initialCwd={pendingCwd}
       />
 
       {/* Toasts */}
