@@ -11,6 +11,7 @@ import {
 import { useConnectionStore, SessionInfo, SessionHealth } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
+import { hapticMedium } from '../utils/haptics';
 
 
 interface SessionPillProps {
@@ -110,6 +111,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
   }, [activeSessionId, scrollToSession]);
 
   const handleLongPress = (session: SessionInfo) => {
+    hapticMedium();
     const health = sessionStates[session.sessionId]?.health || 'healthy';
     const isCrashed = health === 'crashed';
 
