@@ -1070,6 +1070,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'result': {
+      hapticSuccess();
       // Flush any buffered deltas before clearing streaming state
       if (deltaFlushTimer) {
         clearTimeout(deltaFlushTimer);
