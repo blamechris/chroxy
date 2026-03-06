@@ -4,7 +4,7 @@
  * The CWD field is a combobox: shows known directories from existing sessions
  * as suggestions, but also accepts free-form typed paths.
  */
-import { useState, useEffect, useCallback, useRef, type KeyboardEvent } from 'react'
+import { useState, useEffect, useCallback, useRef, useId, type KeyboardEvent } from 'react'
 import { flushSync } from 'react-dom'
 import { Modal } from './Modal'
 
@@ -46,6 +46,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1)
   const cwdInputRef = useRef<HTMLInputElement>(null)
+  const listboxId = useId()
 
   // Imperative refs for submit — React 19 resets controlled input DOM values
   // before the next event fires, so we can't read from the DOM in submit.
@@ -184,8 +185,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           autoComplete="off"
           role="combobox"
           aria-expanded={showSuggestions && suggestions.length > 0}
-          aria-controls="cwd-suggestions"
+          aria-controls={listboxId}
           aria-autocomplete="list"
+          aria-activedescendant={showSuggestions && selectedSuggestion >= 0 ? `${listboxId}-opt-${selectedSuggestion}` : undefined}
         />
         {suggestions.length > 0 && (
           <button
@@ -202,12 +204,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           </button>
         )}
         {showSuggestions && suggestions.length > 0 && (
-          <ul id="cwd-suggestions" className="cwd-suggestions" role="listbox">
+          <ul id={listboxId} className="cwd-suggestions" role="listbox">
             {suggestions.map((path, i) => {
               const label = basename(path)
               return (
                 <li
                   key={path}
+                  id={`${listboxId}-opt-${i}`}
                   role="option"
                   aria-selected={i === selectedSuggestion}
                   className={`cwd-suggestion${i === selectedSuggestion ? ' selected' : ''}`}
