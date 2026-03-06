@@ -634,10 +634,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const mode = msg.mode;
       if (mode === 'cli' || mode === 'terminal') {
         set({ serverMode: mode });
-        // Force chat view in CLI mode (no terminal available)
-        if (mode === 'cli' && get().viewMode === 'terminal') {
-          set({ viewMode: 'chat' });
-        }
       } else {
         console.warn('[chroxy] Ignoring invalid server_mode value:', mode);
       }
@@ -928,6 +924,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       let deltaId = msg.messageId as string;
       const capturedSessionId = (msg.sessionId as string) || get().activeSessionId;
 
+      // Forward delta text to terminal view (synthesize raw output in CLI mode)
+      if (typeof msg.delta === 'string' && msg.delta.length > 0) {
+        get().appendTerminalData(msg.delta);
+      }
+
       // Permission boundary split: first delta after a split creates a new message
       if (_postPermissionSplits.has(deltaId)) {
         _postPermissionSplits.delete(deltaId);
@@ -988,6 +989,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'tool_start': {
       const targetId = (msg.sessionId as string) || get().activeSessionId;
+      // Forward tool invocation to terminal view
+      {
+        const toolName = (msg.tool as string) || 'tool';
+        get().appendTerminalData(`\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
+      }
       // During reconnect replay, skip if app already has messages (cache is fresh)
       if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
       // Use server messageId as stable identifier for dedup (same ID on live + replay)
@@ -1022,6 +1028,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (!toolUseId) break;
       const resultText = (msg.result as string) || '';
       const truncated = !!(msg.truncated as boolean);
+      // Forward tool result to terminal view
+      if (resultText) {
+        const preview = resultText.length > 500 ? resultText.slice(0, 500) + '...' : resultText;
+        get().appendTerminalData(`\x1b[2m${preview}\x1b[0m\r\n`);
+      }
       const images = Array.isArray(msg.images) ? msg.images as ToolResultImage[] : undefined;
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       // Find the matching tool_use message and attach the result
