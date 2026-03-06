@@ -3,7 +3,7 @@
  * items on next open (#1418).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, cleanup } from '@testing-library/react'
 import { CommandPalette, type Command } from './CommandPalette'
 import { useMruStore } from '../store/mru'
 
