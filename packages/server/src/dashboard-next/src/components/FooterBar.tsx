@@ -1,0 +1,76 @@
+/**
+ * FooterBar — VSCode-style status bar pinned to the bottom of the window.
+ *
+ * Left: version, connection status, session cwd breadcrumb.
+ * Right: model, cost, context tokens, busy indicator, agent count.
+ * Spans full width across sidebar + main content (grid-column: 1 / -1).
+ */
+
+declare const __APP_VERSION__: string
+
+export interface FooterBarProps {
+  connectionPhase: string
+  serverVersion?: string | null
+  cwd?: string
+  model?: string
+  cost?: number
+  context?: string
+  isBusy?: boolean
+  agentCount?: number
+}
+
+/** Abbreviate a full path to the last 2 segments: /Users/foo/Projects/bar → Projects/bar */
+function abbreviateCwd(cwd: string): string {
+  const parts = cwd.replace(/\/+$/, '').split('/')
+  return parts.length <= 2 ? cwd : parts.slice(-2).join('/')
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  connected: 'Connected',
+  connecting: 'Connecting',
+  reconnecting: 'Reconnecting',
+  server_restarting: 'Restarting',
+  disconnected: 'Disconnected',
+}
+
+export function FooterBar({
+  connectionPhase,
+  serverVersion,
+  cwd,
+  model,
+  cost,
+  context,
+  isBusy,
+  agentCount,
+}: FooterBarProps) {
+  const version = serverVersion ?? (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
+  const statusLabel = STATUS_LABELS[connectionPhase] ?? connectionPhase
+
+  return (
+    <footer className="footer-bar" data-testid="footer-bar">
+      <div className="footer-left">
+        <span className="footer-version">v{version}</span>
+        <span className={`footer-status-dot ${connectionPhase}`} />
+        <span className="footer-status-label">{statusLabel}</span>
+        {cwd && (
+          <span className="footer-cwd" title={cwd}>
+            {abbreviateCwd(cwd)}
+          </span>
+        )}
+      </div>
+      <div className="footer-right">
+        {isBusy && <span className="footer-busy" />}
+        {agentCount != null && agentCount > 0 && (
+          <span className="footer-agents">
+            {agentCount} {agentCount === 1 ? 'agent' : 'agents'}
+          </span>
+        )}
+        {model && <span className="footer-model">{model}</span>}
+        {cost != null && (
+          <span className="footer-cost">${cost.toFixed(4)}</span>
+        )}
+        {context && <span className="footer-context">{context}</span>}
+      </div>
+    </footer>
+  )
+}

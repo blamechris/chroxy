@@ -218,6 +218,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
           style={styles.addButton}
           onPress={onCreatePress}
           activeOpacity={0.7}
+          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
           accessibilityRole="button"
           accessibilityLabel="Create new session"
         >
@@ -229,6 +230,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
           style={[styles.followButton, followMode && styles.followButtonActive]}
           onPress={() => setFollowMode(!followMode)}
           activeOpacity={0.7}
+          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
         >
           <Text style={styles.followButtonText}>{'\u{1F517}'}</Text>
         </TouchableOpacity>
