@@ -101,7 +101,7 @@ For each issue in the current wave's queue, run the full `/autonomous-dev-flow` 
 
 - **Two fix attempts per issue per wave** (same as original). If still failing after 2 attempts, mark as `retry` instead of just `flagged`.
 - **Track the failure reason** in `MASTER_LOG` — this informs the retry strategy in later waves.
-- **High-complexity decomposition** happens in Wave 1 only. Sub-issues created during decomposition are added to the current wave's queue (not deferred to Wave 2).
+- **High-complexity decomposition** happens in Wave 1 only. Sub-issues created during decomposition are added to the current wave's queue (not deferred to Wave 2). If decomposition would push the global unique issue count past the hard cap (30), truncate to the cap and list deferred sub-issues in the morning summary.
 
 After each issue, output the wave progress table:
 
@@ -160,18 +160,22 @@ Note merged PRs. If a merged PR's issue is in the retry queue, remove it — the
 
 #### 2d. Clean Up Failed Branches
 
-For issues entering Wave 2+, delete the stale branch and PR from the previous attempt:
+For issues entering Wave 2+, capture the diff for retry context, then clean up:
 
 ```bash
 # For each retry candidate:
-# Close the old PR (it had issues)
+# 1. Capture the diff from the closed PR (available via GitHub API even after branch deletion)
+#    Store in MASTER_LOG for retry strategy reference
+gh pr diff ${OLD_PR_NUM} > /tmp/wave${WAVE_NUM}_issue${ISSUE_NUM}.patch
+
+# 2. Close the old PR (it had issues)
 gh pr close ${OLD_PR_NUM} --comment "Closing for retry in Wave ${NEXT_WAVE} — previous attempt had: ${FAILURE_REASON}"
 
-# Delete the old remote branch
+# 3. Delete the old remote branch
 git push origin --delete ${OLD_BRANCH}
 ```
 
-This ensures each retry starts completely fresh — new branch from latest main, no stale code.
+This ensures each retry starts completely fresh — new branch from latest main, no stale code. The captured diff is available for retry strategy analysis in later waves.
 
 #### 2e. Build Next Wave Queue
 
@@ -181,6 +185,8 @@ Combine:
 3. Remaining issues not yet attempted (if queue was large)
 
 Cap at `max` setting. Retry candidates go first (they have the most context built up).
+
+**Global unique issue cap:** Track all unique issues ever attempted across all waves (including sub-issues from decomposition). If replenishment would push the global count past 30, stop adding new issues and list deferred candidates in the morning summary. Retries of previously attempted issues do NOT count against this cap (they're already tracked).
 
 If the next wave queue is empty, skip to Morning Summary.
 
@@ -193,7 +199,7 @@ Each wave uses an escalating strategy for issues that failed in prior waves:
 For issues that failed in Wave 1:
 1. **Re-read the issue** completely — don't rely on Wave 1 understanding
 2. **Read the failed PR's review comments** — understand what went wrong
-3. **Read the diff from the failed attempt** (before branch deletion) to understand what was tried
+3. **Read the diff from the failed attempt** (from the closed PR via `gh pr diff` or the captured patch from Phase 2d) to understand what was tried
 4. **Start fresh** — new branch from latest main, new implementation
 5. **Address the specific failure** — if tests failed, focus on why; if review found issues, incorporate feedback
 6. Same TDD cycle, same review process
@@ -387,15 +393,11 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 
 ## Customization Points
 
-Lines and sections marked with `{{CUSTOMIZE}}` need repo-specific adaptation. These mirror `/autonomous-dev-flow` customizations:
+The following values are hardcoded for this repo (matching `/autonomous-dev-flow`):
 
-- **Branch prefix** for session branches and resume detection
-- **Branch naming convention**
-- **Decomposition trigger label**
-- **Test runner command**
-- **Test file conventions**
-- **Lint/typecheck commands**
-- **PR test plan items**
-- **Commit scope conventions**
-- **Skip labels** beyond the defaults (`blocked`, `wontfix`)
+- **Branch prefix:** `feat/` (line 41)
+- **Hard cap:** 30 issues (line 10, `max` default 20)
+- **Skip labels:** `blocked`, `wontfix`
+
+When adapting for another repo, update these values and the test/lint commands referenced in the `/autonomous-dev-flow` phases.
 <!-- skill-templates: tackle-issues 87ae770 2026-03-06 -->
