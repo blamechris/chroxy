@@ -138,11 +138,25 @@ export function App() {
   const commands = useCommands()
   const [paletteOpen, setPaletteOpen] = useState(false)
 
+  // Local state
+  const [showCreateSession, setShowCreateSession] = useState(false)
+  const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
+  const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sidebarWidth] = useState(240)
+  const [sidebarFilter, setSidebarFilter] = useState('')
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault()
         setPaletteOpen(prev => !prev)
+        return
+      }
+      // Cmd+N / Ctrl+N: open new session modal
+      if ((e.metaKey || e.ctrlKey) && e.key === 'n' && !e.shiftKey) {
+        e.preventDefault()
+        setShowCreateSession(true)
         return
       }
       // Cmd+1-9: switch to tab by index
@@ -185,19 +199,16 @@ export function App() {
       ...cmd,
       action: () => {
         recordMruCommand(cmd.id)
-        cmd.action()
+        // Override new-session to open the modal instead of creating directly
+        if (cmd.id === 'new-session') {
+          setShowCreateSession(true)
+        } else {
+          cmd.action()
+        }
       },
     })),
     [commands],
   )
-
-  // Local state
-  const [showCreateSession, setShowCreateSession] = useState(false)
-  const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
-  const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
-  const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [sidebarWidth] = useState(240)
-  const [sidebarFilter, setSidebarFilter] = useState('')
 
   // Auto-connect on mount
   useEffect(() => {
