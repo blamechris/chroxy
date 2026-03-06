@@ -13,9 +13,10 @@ export interface CreateSessionModalProps {
   open: boolean
   onClose: () => void
   onCreate: (data: CreateSessionData) => void
+  initialCwd?: string | null
 }
 
-export function CreateSessionModal({ open, onClose, onCreate }: CreateSessionModalProps) {
+export function CreateSessionModal({ open, onClose, onCreate, initialCwd }: CreateSessionModalProps) {
   const [name, setName] = useState('')
   const [cwd, setCwd] = useState('')
   const [nameError, setNameError] = useState('')
@@ -23,10 +24,10 @@ export function CreateSessionModal({ open, onClose, onCreate }: CreateSessionMod
   useEffect(() => {
     if (open) {
       setName('')
-      setCwd('')
+      setCwd(initialCwd || '')
       setNameError('')
     }
-  }, [open])
+  }, [open, initialCwd])
 
   const submit = useCallback(() => {
     const trimmed = name.trim()
