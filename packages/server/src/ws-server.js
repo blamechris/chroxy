@@ -438,7 +438,10 @@ export class WsServer {
           'Access-Control-Allow-Headers': 'Authorization, Content-Type',
           'Access-Control-Max-Age': '86400',
         }
-        if (corsOrigin) headers['Access-Control-Allow-Origin'] = corsOrigin
+        if (corsOrigin) {
+          headers['Access-Control-Allow-Origin'] = corsOrigin
+          if (isRestricted) headers['Vary'] = 'Origin'
+        }
         res.writeHead(204, headers)
         res.end()
         return
@@ -516,7 +519,10 @@ export class WsServer {
         }
         const connectCors = _matchAllowedOrigin(req.headers['origin'])
         const connectHeaders = { 'Content-Type': 'application/json' }
-        if (connectCors) connectHeaders['Access-Control-Allow-Origin'] = connectCors
+        if (connectCors) {
+          connectHeaders['Access-Control-Allow-Origin'] = connectCors
+          connectHeaders['Vary'] = 'Origin'
+        }
         res.writeHead(200, connectHeaders)
         res.end(JSON.stringify(connInfo))
         return

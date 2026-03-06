@@ -9283,6 +9283,27 @@ describe('CORS origin restrictions (#1533)', () => {
     })
     assert.equal(res.status, 204)
     assert.equal(res.headers.get('access-control-allow-origin'), 'https://tauri.localhost')
+    assert.equal(res.headers.get('vary'), 'Origin')
+  })
+
+  it('OPTIONS preflight on /qr from unknown origin does not include CORS headers', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-cors-preflight-evil',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/qr`, {
+      method: 'OPTIONS',
+      headers: {
+        'Origin': 'https://evil.com',
+        'Access-Control-Request-Method': 'GET',
+      },
+    })
+    assert.equal(res.status, 204)
+    assert.equal(res.headers.get('access-control-allow-origin'), null)
   })
 
   it('OPTIONS preflight on / keeps wildcard origin', async () => {
