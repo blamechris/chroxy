@@ -4,6 +4,7 @@ import { join, resolve, normalize, extname, relative } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { parseDiff } from './diff-parser.js'
+import { GIT } from './git.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -345,7 +346,7 @@ export function createFileOps(sendFn) {
 
       let diffOutput = ''
       try {
-        const { stdout } = await execFileAsync('git', ['diff', diffBase], {
+        const { stdout } = await execFileAsync(GIT, ['diff', diffBase], {
           cwd: cwdReal,
           maxBuffer: 2 * 1024 * 1024,
           timeout: 10000,
@@ -354,7 +355,7 @@ export function createFileOps(sendFn) {
       } catch (err) {
         if (err.message && err.message.includes('unknown revision')) {
           try {
-            const { stdout } = await execFileAsync('git', ['diff'], {
+            const { stdout } = await execFileAsync(GIT, ['diff'], {
               cwd: cwdReal,
               maxBuffer: 2 * 1024 * 1024,
               timeout: 10000,
@@ -381,7 +382,7 @@ export function createFileOps(sendFn) {
       // Also get staged changes if diffBase is HEAD
       if (diffBase === 'HEAD') {
         try {
-          const { stdout: stagedOutput } = await execFileAsync('git', ['diff', '--cached', 'HEAD'], {
+          const { stdout: stagedOutput } = await execFileAsync(GIT, ['diff', '--cached', 'HEAD'], {
             cwd: cwdReal,
             maxBuffer: 2 * 1024 * 1024,
             timeout: 10000,
@@ -412,7 +413,7 @@ export function createFileOps(sendFn) {
       // Discover untracked files (new files not yet staged)
       try {
         const { stdout: untrackedOutput } = await execFileAsync(
-          'git', ['ls-files', '--others', '--exclude-standard'],
+          GIT, ['ls-files', '--others', '--exclude-standard'],
           { cwd: cwdReal, maxBuffer: 512 * 1024, timeout: 5000 }
         )
         if (untrackedOutput.trim()) {

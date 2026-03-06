@@ -1,6 +1,7 @@
 import { execFile } from 'child_process'
 import { readFile } from 'fs/promises'
 import { basename, join } from 'path'
+import { GIT } from './git.js'
 
 const TIMEOUT_MS = 3000
 
@@ -31,7 +32,7 @@ export async function readSessionContext(cwd) {
 
 function gitCommand(cwd, args) {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, timeout: TIMEOUT_MS }, (err, stdout) => {
+    execFile(GIT, args, { cwd, timeout: TIMEOUT_MS }, (err, stdout) => {
       if (err) return reject(err)
       resolve(stdout.trim())
     })
