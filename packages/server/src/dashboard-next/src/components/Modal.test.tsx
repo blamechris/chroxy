@@ -148,7 +148,7 @@ describe('CreateSessionModal', () => {
     fireEvent.change(screen.getByPlaceholderText('Session name'), { target: { value: 'My Session' } })
     fireEvent.change(screen.getByPlaceholderText(/working directory/i), { target: { value: '/home/user' } })
     fireEvent.click(screen.getByText('Create'))
-    expect(onCreate).toHaveBeenCalledWith({ name: 'My Session', cwd: '/home/user' })
+    expect(onCreate).toHaveBeenCalledWith({ name: 'My Session', cwd: '/home/user', provider: 'claude-sdk' })
   })
 
   it('does not submit with empty name', () => {
@@ -207,7 +207,7 @@ describe('CreateSessionModal', () => {
     const nameInput = screen.getByPlaceholderText('Session name')
     fireEvent.change(nameInput, { target: { value: 'Quick' } })
     fireEvent.keyDown(nameInput, { key: 'Enter' })
-    expect(onCreate).toHaveBeenCalledWith({ name: 'Quick', cwd: '' })
+    expect(onCreate).toHaveBeenCalledWith({ name: 'Quick', cwd: '', provider: 'claude-sdk' })
   })
 
   it('calls onClose when Cancel clicked', () => {

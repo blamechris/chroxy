@@ -312,8 +312,8 @@ export function App() {
     setShowCreateSession(true)
   }, [])
 
-  const handleCreateSession = useCallback((data: { name: string; cwd: string }) => {
-    createSession(data.name, data.cwd || undefined)
+  const handleCreateSession = useCallback((data: { name: string; cwd: string; provider?: string }) => {
+    createSession(data.name, data.cwd || undefined, data.provider)
     setShowCreateSession(false)
   }, [createSession])
 
