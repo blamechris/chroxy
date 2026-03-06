@@ -2527,7 +2527,8 @@
   .tab-busy-dot,
   .busy-indicator,
   .thinking-dot,
-  .loading-spinner {
+  .loading-spinner,
+  .qr-spinner {
     animation: none;
   }
 

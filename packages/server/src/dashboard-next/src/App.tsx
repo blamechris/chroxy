@@ -430,6 +430,7 @@ export function App() {
     setQrModalOpen(true)
     setQrLoading(true)
     setQrError(null)
+    setQrSvg(null)
     const token = getAuthToken()
     if (!token) {
       setQrLoading(false)
