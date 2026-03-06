@@ -8,12 +8,14 @@ describe('SessionPicker touch targets', () => {
   );
 
   it('addButton TouchableOpacity has hitSlop for 44pt touch target', () => {
-    // The addButton's TouchableOpacity should have hitSlop to expand its 32pt visual size to 44pt
-    expect(source).toMatch(/addButton[\s\S]*?hitSlop/);
+    // Match addButton style ref up to hitSlop, but stop before followButton to avoid false match
+    const addButtonSection = source.split('followButton')[0];
+    expect(addButtonSection).toMatch(/addButton[\s\S]*?hitSlop/);
   });
 
   it('followButton TouchableOpacity has hitSlop for 44pt touch target', () => {
-    // The followButton's TouchableOpacity should have hitSlop to expand its 32pt visual size to 44pt
-    expect(source).toMatch(/followButton[\s\S]*?hitSlop/);
+    // Match followButton style ref through to hitSlop
+    const followButtonSection = source.slice(source.indexOf('followButton'));
+    expect(followButtonSection).toMatch(/followButton[\s\S]*?hitSlop/);
   });
 });
