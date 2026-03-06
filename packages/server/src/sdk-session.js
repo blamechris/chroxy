@@ -214,6 +214,16 @@ export class SdkSession extends EventEmitter {
               }
               // Fetch dynamic model list from SDK (non-blocking)
               this._fetchSupportedModels()
+            } else {
+              // Forward non-init system events (e.g. /usage, /cost, other
+              // slash command responses) as system messages to the client
+              const text = msg.message || msg.text || msg.subtype || 'System event'
+              console.log(`[sdk-session] System event (${msg.subtype || 'unknown'}): ${typeof text === 'string' ? text.slice(0, 120) : text}`)
+              this.emit('message', {
+                type: 'system',
+                content: text,
+                timestamp: Date.now(),
+              })
             }
             break
           }
