@@ -8710,3 +8710,130 @@ describe('_sendSessionInfo sessionId tagging (#1417)', () => {
     ws.close()
   })
 })
+
+describe('Pre-auth connection limit', () => {
+  let server
+
+  afterEach(async () => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('rejects new connections when pre-auth limit is reached', async () => {
+    const MAX_PENDING = 3
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+      maxPendingConnections: MAX_PENDING,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Open MAX_PENDING unauthenticated connections
+    const pending = []
+    for (let i = 0; i < MAX_PENDING; i++) {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+      await new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      })
+      pending.push(ws)
+    }
+
+    // The next connection should be rejected (closed quickly)
+    const rejected = new WebSocket(`ws://127.0.0.1:${port}`)
+    const closePromise = new Promise(resolve => {
+      rejected.on('close', resolve)
+      rejected.on('error', resolve)
+    })
+    await withTimeout(closePromise, 3000, 'Expected rejected connection to close')
+
+    // Clean up
+    for (const ws of pending) ws.close()
+  })
+
+  it('allows new connections after pending ones authenticate', async () => {
+    const MAX_PENDING = 2
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+      maxPendingConnections: MAX_PENDING,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Fill up pending slots
+    const ws1 = new WebSocket(`ws://127.0.0.1:${port}`)
+    await new Promise((resolve, reject) => {
+      ws1.once('open', resolve)
+      ws1.once('error', reject)
+    })
+    const ws2 = new WebSocket(`ws://127.0.0.1:${port}`)
+    await new Promise((resolve, reject) => {
+      ws2.once('open', resolve)
+      ws2.once('error', reject)
+    })
+
+    // Authenticate ws1 to free a slot
+    const messages1 = []
+    ws1.on('message', (data) => messages1.push(JSON.parse(data.toString())))
+    ws1.send(JSON.stringify({ type: 'auth', token: 'test-token' }))
+    await withTimeout(
+      (async () => { while (!messages1.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
+      2000, 'Auth timeout'
+    )
+
+    // Now a new connection should succeed
+    const ws3 = new WebSocket(`ws://127.0.0.1:${port}`)
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws3.once('open', resolve)
+        ws3.once('error', reject)
+      }),
+      2000,
+      'New connection should succeed after auth freed a slot'
+    )
+
+    ws1.close()
+    ws2.close()
+    ws3.close()
+  })
+
+  it('does not count authenticated connections toward the limit', async () => {
+    const MAX_PENDING = 2
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+      maxPendingConnections: MAX_PENDING,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Create and authenticate MAX_PENDING connections
+    for (let i = 0; i < MAX_PENDING; i++) {
+      const { ws } = await createClient(port, false)
+      ws.send(JSON.stringify({ type: 'auth', token: 'test-token' }))
+      const msgs = []
+      ws.on('message', (data) => msgs.push(JSON.parse(data.toString())))
+      await withTimeout(
+        (async () => { while (!msgs.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
+        2000, 'Auth timeout'
+      )
+    }
+
+    // Should still accept new connections since authenticated ones don't count
+    const ws3 = new WebSocket(`ws://127.0.0.1:${port}`)
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws3.once('open', resolve)
+        ws3.once('error', reject)
+      }),
+      2000,
+      'Should accept new connection when all existing are authenticated'
+    )
+
+    ws3.close()
+  })
+})
