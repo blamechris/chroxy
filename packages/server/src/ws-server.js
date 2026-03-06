@@ -223,7 +223,7 @@ function _isSecureRequest(req) {
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, maxPendingConnections } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, maxPendingConnections, backpressureThreshold } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -233,6 +233,7 @@ export class WsServer {
     this._keyExchangeTimeoutMs = keyExchangeTimeoutMs ?? 10_000
     this._localhostBypass = localhostBypass ?? true
     this._maxPendingConnections = maxPendingConnections ?? 20
+    this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024 // 1MB default
     this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
     this.httpServer = null
     this.wss = null
@@ -1000,6 +1001,10 @@ export class WsServer {
   _broadcast(message, filter = () => true) {
     for (const [ws, client] of this.clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
+        if (ws.bufferedAmount > this._backpressureThreshold) {
+          console.debug(`[ws] Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount})`)
+          continue
+        }
         this._send(ws, message)
       }
     }
@@ -1016,6 +1021,10 @@ export class WsServer {
     const tagged = { ...message, sessionId }
     for (const [ws, client] of this.clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
+        if (ws.bufferedAmount > this._backpressureThreshold) {
+          console.debug(`[ws] Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount})`)
+          continue
+        }
         this._send(ws, tagged)
       }
     }

@@ -9247,3 +9247,48 @@ describe('CORS origin restrictions (#1533)', () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 })
+
+describe('broadcast backpressure', () => {
+  it('skips clients whose bufferedAmount exceeds the threshold', async () => {
+    const mockSession = createMockSession()
+    const server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      backpressureThreshold: 100,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+
+    // Verify normal broadcast works
+    server.broadcast({ type: 'discovered_sessions', tmux: [] })
+    await waitFor(() => messages.find(m => m.type === 'discovered_sessions'), { label: 'normal broadcast' })
+    assert.ok(messages.find(m => m.type === 'discovered_sessions'), 'Should receive broadcast when under threshold')
+
+    // Stub bufferedAmount to simulate backpressure
+    const clientWs = [...server.clients.keys()][0]
+    Object.defineProperty(clientWs, 'bufferedAmount', { get: () => 200, configurable: true })
+
+    // This broadcast should be skipped due to backpressure
+    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'bp-test' }] })
+
+    // Give time for the message to arrive (it shouldn't)
+    await new Promise(r => setTimeout(r, 100))
+    const bpMsg = messages.find(m => m.type === 'discovered_sessions' && m.tmux?.length === 1)
+    assert.equal(bpMsg, undefined, 'Should NOT receive broadcast when over backpressure threshold')
+
+    // Restore bufferedAmount and verify broadcast resumes
+    Object.defineProperty(clientWs, 'bufferedAmount', { get: () => 0, configurable: true })
+    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'resumed' }] })
+    await waitFor(
+      () => messages.find(m => m.type === 'discovered_sessions' && m.tmux?.[0]?.sessionName === 'resumed'),
+      { label: 'resumed broadcast' }
+    )
+    assert.ok(true, 'Should receive broadcast after backpressure clears')
+
+    ws.close()
+    server.close()
+  })
+})
