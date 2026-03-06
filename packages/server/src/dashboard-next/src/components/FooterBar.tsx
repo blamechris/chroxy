@@ -17,6 +17,7 @@ export interface FooterBarProps {
   context?: string
   isBusy?: boolean
   agentCount?: number
+  onShowQr?: () => void
 }
 
 /** Abbreviate a full path to the last 2 segments: /Users/foo/Projects/bar → Projects/bar */
@@ -42,6 +43,7 @@ export function FooterBar({
   context,
   isBusy,
   agentCount,
+  onShowQr,
 }: FooterBarProps) {
   const version = serverVersion ?? (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
   const statusLabel = STATUS_LABELS[connectionPhase] ?? connectionPhase
@@ -59,6 +61,11 @@ export function FooterBar({
         )}
       </div>
       <div className="footer-right">
+        {onShowQr && (
+          <button className="footer-qr-btn" onClick={onShowQr} type="button" aria-label="Show QR code">
+            QR
+          </button>
+        )}
         {isBusy && <span className="footer-busy" />}
         {agentCount != null && agentCount > 0 && (
           <span className="footer-agents">

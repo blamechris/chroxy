@@ -29,6 +29,7 @@ import { WelcomeScreen } from './components/WelcomeScreen'
 import { CreateSessionModal } from './components/CreateSessionModal'
 import { Toast, type ToastItem } from './components/Toast'
 import { FooterBar } from './components/FooterBar'
+import { QrModal } from './components/QrModal'
 import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
 import { persistSidebarWidth, loadPersistedSidebarWidth } from './store/persistence'
 
@@ -150,6 +151,10 @@ export function App() {
   const [sessionCreateError, setSessionCreateError] = useState<string | null>(null)
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
+  const [qrModalOpen, setQrModalOpen] = useState(false)
+  const [qrSvg, setQrSvg] = useState<string | null>(null)
+  const [qrLoading, setQrLoading] = useState(false)
+  const [qrError, setQrError] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
@@ -419,6 +424,37 @@ export function App() {
 
   const handleRemoveImage = useCallback((index: number) => {
     setImageAttachments(prev => prev.filter((_, i) => i !== index))
+  }, [])
+
+  const handleShowQr = useCallback(async () => {
+    setQrModalOpen(true)
+    setQrLoading(true)
+    setQrError(null)
+    const token = getAuthToken()
+    if (!token) {
+      setQrLoading(false)
+      setQrError('No auth token available')
+      return
+    }
+    try {
+      const res = await fetch('/qr', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: 'Request failed' }))
+        setQrError(body.error || `HTTP ${res.status}`)
+        setQrSvg(null)
+      } else {
+        const svg = await res.text()
+        setQrSvg(svg)
+        setQrError(null)
+      }
+    } catch (err) {
+      setQrError(err instanceof Error ? err.message : 'Failed to fetch QR code')
+      setQrSvg(null)
+    } finally {
+      setQrLoading(false)
+    }
   }, [])
 
   const handleRetry = useCallback(() => {
@@ -701,6 +737,16 @@ export function App() {
         context={formatContext(contextUsage)}
         isBusy={!isIdle}
         agentCount={activeAgents.length}
+        onShowQr={isConnected ? handleShowQr : undefined}
+      />
+
+      {/* QR code modal */}
+      <QrModal
+        open={qrModalOpen}
+        onClose={() => setQrModalOpen(false)}
+        qrSvg={qrSvg}
+        loading={qrLoading}
+        error={qrError ?? undefined}
       />
 
       {/* Modals */}
