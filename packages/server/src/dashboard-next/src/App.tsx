@@ -350,10 +350,10 @@ export function App() {
     setShowCreateSession(true)
   }, [])
 
-  const handleCreateSession = useCallback((data: { name: string; cwd: string }) => {
+  const handleCreateSession = useCallback((data: { name: string; cwd: string; provider?: string }) => {
     setSessionCreateError(null)
     setIsCreatingSession(true)
-    createSession(data.name, data.cwd || undefined)
+    createSession(data.name, data.cwd || undefined, data.provider)
   }, [createSession])
 
   const handlePlanApprove = useCallback(() => {

@@ -11,6 +11,7 @@ import { Modal } from './Modal'
 export interface CreateSessionData {
   name: string
   cwd: string
+  provider?: string
 }
 
 export interface CreateSessionModalProps {
@@ -44,6 +45,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [name, setName] = useState('')
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)
   const [cwd, setCwd] = useState('')
+  const [provider, setProvider] = useState('claude-sdk')
   const [nameError, setNameError] = useState('')
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1)
@@ -89,8 +91,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       flushSync(() => setNameError('Session name is required'))
       return
     }
-    onCreate({ name: trimmed, cwd: cwdValRef.current.trim() })
-  }, [onCreate])
+    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider })
+  }, [onCreate, provider])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -232,6 +234,18 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       {cwd && !suggestions.includes(cwd) && (
         <span className="cwd-hint">New directory — session will start here</span>
       )}
+      <div className="provider-select">
+        <label htmlFor="provider-select">Provider</label>
+        <select
+          id="provider-select"
+          value={provider}
+          onChange={e => setProvider(e.target.value)}
+          aria-label="Select provider"
+        >
+          <option value="claude-sdk">Claude Code (SDK)</option>
+          <option value="claude-cli">Claude Code (CLI)</option>
+        </select>
+      </div>
       {serverError && (
         <span className="form-error" role="alert">{serverError}</span>
       )}
