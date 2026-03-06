@@ -1091,10 +1091,21 @@ export class WsServer {
         client.authTime = Date.now()
         // Clear rate limit on successful auth
         this._authFailures.delete(ip)
-        // Extract client protocol version (default to 1 for old clients)
-        client.protocolVersion = typeof msg.protocolVersion === 'number' &&
-          Number.isInteger(msg.protocolVersion) && msg.protocolVersion >= 1
-          ? msg.protocolVersion : 1
+        // Extract and validate client protocol version
+        const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)
+        const clientVersion = hasVersion ? msg.protocolVersion : null
+
+        // Reject clients below minimum supported version
+        if (clientVersion !== null && clientVersion < MIN_PROTOCOL_VERSION) {
+          this._send(ws, { type: 'auth_fail', reason: `unsupported protocol version ${clientVersion} (minimum: ${MIN_PROTOCOL_VERSION})` })
+          ws.close()
+          return
+        }
+
+        // Clamp to server version and default old clients to MIN_PROTOCOL_VERSION
+        client.protocolVersion = clientVersion !== null
+          ? Math.min(clientVersion, SERVER_PROTOCOL_VERSION)
+          : MIN_PROTOCOL_VERSION
         // Extract optional device info from auth message
         if (msg.deviceInfo && typeof msg.deviceInfo === 'object') {
           client.deviceInfo = {

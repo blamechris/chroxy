@@ -6,7 +6,7 @@ import { execSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
-import { WsServer as _WsServer } from '../src/ws-server.js'
+import { WsServer as _WsServer, MIN_PROTOCOL_VERSION, SERVER_PROTOCOL_VERSION } from '../src/ws-server.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
 import { createMockSession, createMockSessionManager } from './test-helpers.js'
 
@@ -8883,5 +8883,83 @@ describe('Pre-auth connection limit', () => {
     // Clean up all sockets
     for (const ws of authed) ws.close()
     ws3.close()
+  })
+})
+
+describe('Protocol version enforcement (#1058)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('defaults client protocolVersion to MIN_PROTOCOL_VERSION when omitted', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    ws.send(JSON.stringify({ type: 'auth', token: 'test-token' }))
+    await withTimeout(
+      (async () => { while (!messages.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
+      2000, 'Auth timeout'
+    )
+
+    // Check stored client version
+    const clientData = [...server.clients.values()][0]
+    assert.equal(clientData.protocolVersion, MIN_PROTOCOL_VERSION,
+      'Should default to MIN_PROTOCOL_VERSION when client omits protocolVersion')
+
+    ws.close()
+  })
+
+  it('clamps client protocolVersion to SERVER_PROTOCOL_VERSION', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    ws.send(JSON.stringify({ type: 'auth', token: 'test-token', protocolVersion: 999 }))
+    await withTimeout(
+      (async () => { while (!messages.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
+      2000, 'Auth timeout'
+    )
+
+    const clientData = [...server.clients.values()][0]
+    assert.equal(clientData.protocolVersion, SERVER_PROTOCOL_VERSION,
+      'Should clamp client version to SERVER_PROTOCOL_VERSION')
+
+    ws.close()
+  })
+
+  it('rejects client with protocolVersion below MIN_PROTOCOL_VERSION', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    ws.send(JSON.stringify({ type: 'auth', token: 'test-token', protocolVersion: 0 }))
+    await withTimeout(
+      (async () => { while (!messages.find(m => m.type === 'auth_fail')) await new Promise(r => setTimeout(r, 10)) })(),
+      2000, 'Should receive auth_fail for version 0'
+    )
+
+    const failMsg = messages.find(m => m.type === 'auth_fail')
+    assert.ok(failMsg, 'Should receive auth_fail')
+    assert.ok(failMsg.reason.includes('protocol'), 'Reason should mention protocol version')
+
+    ws.close()
   })
 })

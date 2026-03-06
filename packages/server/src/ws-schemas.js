@@ -29,7 +29,7 @@ const DeviceInfoSchema = z.object({
 export const AuthSchema = z.object({
   type: z.literal('auth'),
   token: z.string(),
-  protocolVersion: z.number().int().min(1).optional(),
+  protocolVersion: z.number().int().min(0).optional(),
   deviceInfo: DeviceInfoSchema.optional(),
 }).passthrough()
 
