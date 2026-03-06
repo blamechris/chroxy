@@ -4,7 +4,7 @@
  * The CWD field is a combobox: shows known directories from existing sessions
  * as suggestions, but also accepts free-form typed paths.
  */
-import { useState, useEffect, useCallback, useRef, type KeyboardEvent } from 'react'
+import { useState, useEffect, useCallback, useRef, useId, type KeyboardEvent } from 'react'
 import { flushSync } from 'react-dom'
 import { Modal } from './Modal'
 
@@ -21,11 +21,18 @@ export interface CreateSessionModalProps {
   initialCwd?: string | null
   knownCwds?: string[]
   existingNames?: string[]
+  serverError?: string
+  isCreating?: boolean
+}
+
+/** Extract the last path segment, handling both POSIX and Windows separators. */
+function basename(p: string): string {
+  return p.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || p
 }
 
 /** Generate a default session name from a directory path, avoiding collisions. */
 function generateDefaultName(cwdPath: string, existingNames: string[]): string {
-  const base = cwdPath.replace(/\/+$/, '').split('/').pop() || 'Session'
+  const base = basename(cwdPath) || 'Session'
   if (!existingNames.includes(base)) return base
   let n = 2
   while (existingNames.includes(`${base} (${n})`)) n++
@@ -34,7 +41,7 @@ function generateDefaultName(cwdPath: string, existingNames: string[]): string {
 
 const EMPTY_STRINGS: string[] = []
 
-export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS }: CreateSessionModalProps) {
+export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS, serverError, isCreating }: CreateSessionModalProps) {
   const [name, setName] = useState('')
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)
   const [cwd, setCwd] = useState('')
@@ -43,6 +50,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1)
   const cwdInputRef = useRef<HTMLInputElement>(null)
+  const listboxId = useId()
 
   // Imperative refs for submit — React 19 resets controlled input DOM values
   // before the next event fires, so we can't read from the DOM in submit.
@@ -181,8 +189,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           autoComplete="off"
           role="combobox"
           aria-expanded={showSuggestions && suggestions.length > 0}
-          aria-controls="cwd-suggestions"
+          aria-controls={listboxId}
           aria-autocomplete="list"
+          aria-activedescendant={showSuggestions && selectedSuggestion >= 0 ? `${listboxId}-opt-${selectedSuggestion}` : undefined}
         />
         {suggestions.length > 0 && (
           <button
@@ -199,12 +208,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           </button>
         )}
         {showSuggestions && suggestions.length > 0 && (
-          <ul id="cwd-suggestions" className="cwd-suggestions" role="listbox">
+          <ul id={listboxId} className="cwd-suggestions" role="listbox">
             {suggestions.map((path, i) => {
-              const label = path.split('/').pop() || path
+              const label = basename(path)
               return (
                 <li
                   key={path}
+                  id={`${listboxId}-opt-${i}`}
                   role="option"
                   aria-selected={i === selectedSuggestion}
                   className={`cwd-suggestion${i === selectedSuggestion ? ' selected' : ''}`}
@@ -236,12 +246,15 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           <option value="claude-cli">Claude Code (CLI)</option>
         </select>
       </div>
+      {serverError && (
+        <span className="form-error" role="alert">{serverError}</span>
+      )}
       <div className="modal-buttons">
         <button className="btn-modal-cancel" onClick={onClose} type="button">
           Cancel
         </button>
-        <button className="btn-modal-create" onClick={submit} type="button">
-          Create
+        <button className="btn-modal-create" onClick={submit} type="button" disabled={isCreating}>
+          {isCreating ? 'Creating...' : 'Create'}
         </button>
       </div>
     </Modal>

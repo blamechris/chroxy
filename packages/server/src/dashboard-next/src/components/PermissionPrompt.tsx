@@ -97,10 +97,10 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
 
       {showButtons && (
         <div className="perm-buttons">
-          <button className="btn-allow" onClick={() => respond('allow')} type="button">
+          <button className="btn-allow" onClick={() => respond('allow')} type="button" aria-label={`Allow ${tool}`}>
             Allow
           </button>
-          <button className="btn-deny" onClick={() => respond('deny')} type="button">
+          <button className="btn-deny" onClick={() => respond('deny')} type="button" aria-label={`Deny ${tool}`}>
             Deny
           </button>
         </div>
