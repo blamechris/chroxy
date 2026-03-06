@@ -28,6 +28,7 @@ import { ReconnectBanner } from './components/ReconnectBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { CreateSessionModal } from './components/CreateSessionModal'
 import { Toast, type ToastItem } from './components/Toast'
+import { FooterBar } from './components/FooterBar'
 import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
 
 /** Server-injected config from window.__CHROXY_CONFIG__ */
@@ -661,6 +662,18 @@ export function App() {
           </>
         )}
       </div>
+
+      {/* Footer bar */}
+      <FooterBar
+        connectionPhase={connectionPhase}
+        serverVersion={serverVersion}
+        cwd={sessionCwd ?? undefined}
+        model={activeModel || undefined}
+        cost={sessionCost ?? undefined}
+        context={formatContext(contextUsage)}
+        isBusy={!isIdle}
+        agentCount={activeAgents.length}
+      />
 
       {/* Modals */}
       <CreateSessionModal
