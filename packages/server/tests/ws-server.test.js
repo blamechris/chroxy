@@ -8963,3 +8963,130 @@ describe('Protocol version enforcement (#1058)', () => {
     ws.close()
   })
 })
+
+describe('subscribedSessionIds consistency (#1488)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('create_session adds sessionId to subscribedSessionIds', async () => {
+    const { manager: mockManager, sessionsMap } = createMockSessionManager([
+      { id: 'initial', name: 'Initial', cwd: '/tmp' },
+    ])
+
+    mockManager.createSession = ({ name, cwd }) => {
+      const id = 'created-sess'
+      const s = createMockSession()
+      s.cwd = cwd || '/tmp'
+      sessionsMap.set(id, { session: s, name: name || 'New', cwd: cwd || '/tmp', type: 'cli', isBusy: false })
+      return id
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    send(ws, { type: 'create_session', name: 'Test Session' })
+    // Wait for session_switched with the created session ID (not the initial one from auth)
+    await withTimeout(
+      (async () => { while (!messages.find(m => m.type === 'session_switched' && m.sessionId === 'created-sess')) await new Promise(r => setTimeout(r, 10)) })(),
+      2000, 'Timeout waiting for session_switched for created-sess'
+    )
+
+    // Verify the client's subscribedSessionIds contains the new session
+    const client = Array.from(server.clients.values())[0]
+    assert.ok(client.subscribedSessionIds.has('created-sess'), 'create_session should add sessionId to subscribedSessionIds')
+
+    ws.close()
+  })
+
+  it('resume_conversation adds sessionId to subscribedSessionIds', async () => {
+    const { manager: mockManager, sessionsMap } = createMockSessionManager([
+      { id: 'initial', name: 'Initial', cwd: '/tmp' },
+    ])
+
+    // resume_conversation checks capabilities.resume on the active session's constructor
+    const ResumeCapableClass = function() {}
+    ResumeCapableClass.capabilities = { resume: true }
+    Object.setPrototypeOf(sessionsMap.get('initial').session, ResumeCapableClass.prototype)
+
+    mockManager.createSession = ({ name, cwd, resumeSessionId }) => {
+      const id = 'resumed-sess'
+      const s = createMockSession()
+      s.cwd = cwd || '/tmp'
+      s.resumeSessionId = resumeSessionId
+      sessionsMap.set(id, { session: s, name: name || 'Resumed', cwd: cwd || '/tmp', type: 'cli', isBusy: false })
+      return id
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    send(ws, { type: 'resume_conversation', conversationId: '12345678-1234-1234-1234-123456789abc' })
+    // Wait for session_switched with the resumed session ID (not the initial one from auth)
+    await withTimeout(
+      (async () => { while (!messages.find(m => m.type === 'session_switched' && m.sessionId === 'resumed-sess')) await new Promise(r => setTimeout(r, 10)) })(),
+      2000, 'Timeout waiting for session_switched for resumed-sess'
+    )
+
+    // Verify the client's subscribedSessionIds contains the resumed session
+    const client = Array.from(server.clients.values())[0]
+    assert.ok(client.subscribedSessionIds.has('resumed-sess'), 'resume_conversation should add sessionId to subscribedSessionIds')
+
+    ws.close()
+  })
+
+  it('switch_session adds sessionId to subscribedSessionIds (baseline)', async () => {
+    const { manager: mockManager } = createMockSessionManager([
+      { id: 'sess-a', name: 'Session A', cwd: '/tmp/a' },
+      { id: 'sess-b', name: 'Session B', cwd: '/tmp/b' },
+    ])
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    send(ws, { type: 'switch_session', sessionId: 'sess-b' })
+    // Wait for session_switched with sess-b (not the initial one from auth)
+    await withTimeout(
+      (async () => { while (!messages.find(m => m.type === 'session_switched' && m.sessionId === 'sess-b')) await new Promise(r => setTimeout(r, 10)) })(),
+      2000, 'Timeout waiting for session_switched for sess-b'
+    )
+
+    // Verify the client's subscribedSessionIds contains the switched session
+    const client = Array.from(server.clients.values())[0]
+    assert.ok(client.subscribedSessionIds.has('sess-b'), 'switch_session should add sessionId to subscribedSessionIds')
+
+    ws.close()
+  })
+})

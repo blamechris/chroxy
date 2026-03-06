@@ -404,6 +404,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       try {
         const sessionId = ctx.sessionManager.createSession({ name, cwd, provider })
         client.activeSessionId = sessionId
+        client.subscribedSessionIds.add(sessionId)
         const entry = ctx.sessionManager.getSession(sessionId)
         ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
         ctx.sendSessionInfo(ws, sessionId)
@@ -674,6 +675,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
           name,
         })
         client.activeSessionId = sessionId
+        client.subscribedSessionIds.add(sessionId)
         const entry = ctx.sessionManager.getSession(sessionId)
         ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
         ctx.sendSessionInfo(ws, sessionId)
