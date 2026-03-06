@@ -27,6 +27,7 @@ import { InputBar } from '../components/InputBar';
 import { FileBrowser } from '../components/FileBrowser';
 import { DiffViewer } from '../components/DiffViewer';
 import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
+import { BackgroundSessionProgress } from '../components/BackgroundSessionProgress';
 import { DevPreviewBanner } from '../components/DevPreviewBanner';
 import { SessionOverview } from '../components/SessionOverview';
 import { useNavigation } from '@react-navigation/native';
@@ -892,6 +893,9 @@ export function SessionScreen() {
 
       {/* Background session notifications */}
       <SessionNotificationBanner />
+
+      {/* Background session progress indicators */}
+      <BackgroundSessionProgress />
 
       {/* Dev server preview banner */}
       <DevPreviewBanner previews={devPreviews} onClose={closeDevPreview} />
