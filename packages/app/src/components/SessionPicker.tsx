@@ -230,6 +230,9 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
           style={[styles.followButton, followMode && styles.followButtonActive]}
           onPress={() => setFollowMode(!followMode)}
           activeOpacity={0.7}
+          accessibilityRole="switch"
+          accessibilityLabel="Toggle follow mode"
+          accessibilityState={{ checked: followMode }}
           hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
         >
           <Text style={styles.followButtonText}>{'\u{1F517}'}</Text>
