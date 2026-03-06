@@ -390,6 +390,36 @@ describe('message handler', () => {
     expect(parsed.type).toBe('test');
     expect(parsed.data).toBe('hello');
   });
+
+  it('session_error surfaces non-crash errors via addServerError', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    // Set up a mock connection context so handleMessage doesn't bail
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    // Clear any prior server errors
+    useConnectionStore.setState({ serverErrors: [] });
+
+    // Feed a non-crash session_error (handleMessage expects a parsed object)
+    _testMessageHandler.handle({
+      type: 'session_error',
+      category: 'validation',
+      message: 'Invalid working directory',
+    });
+
+    const { serverErrors } = useConnectionStore.getState();
+    expect(serverErrors.length).toBeGreaterThanOrEqual(1);
+    expect(serverErrors.some((e: { message: string }) => e.message === 'Invalid working directory')).toBe(true);
+
+    _testMessageHandler.clearContext();
+  });
 });
 
 // ---------------------------------------------------------------------------
