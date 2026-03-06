@@ -25,10 +25,44 @@ const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
 const SERVER_VERSION = packageJson.version
 
-/** Protocol version — bumped when the WS message set changes (additive only) */
+/**
+ * Protocol version — controls client/server compatibility negotiation.
+ *
+ * BUMP POLICY (Option B — breaking changes only):
+ *
+ *   - DO NOT bump for additive changes (new message types, new optional fields).
+ *     Clients already ignore unknown message types with a console.warn when
+ *     serverProtocolVersion > clientProtocolVersion.
+ *
+ *   - DO bump (increment by 1) for breaking changes:
+ *       * Removing or renaming an existing message type
+ *       * Changing the shape of an existing message (renaming/removing fields,
+ *         changing field types, making optional fields required)
+ *       * Changing auth handshake semantics
+ *
+ *   - When bumping, update PROTOCOL_CHANGELOG below and coordinate with
+ *     CLIENT_PROTOCOL_VERSION in:
+ *       * packages/app/src/store/message-handler.ts
+ *       * packages/server/src/dashboard-next/src/store/message-handler.ts
+ *
+ *   - If a bump would break old clients, consider whether MIN_PROTOCOL_VERSION
+ *     should also increase (rejecting clients that cannot speak the new protocol).
+ *
+ * See also: #1058 (enforce MIN_PROTOCOL_VERSION during auth)
+ */
 export const SERVER_PROTOCOL_VERSION = 1
 /** Minimum protocol version this server can speak */
 export const MIN_PROTOCOL_VERSION = 1
+
+/**
+ * PROTOCOL_CHANGELOG
+ *
+ * v1 (initial) — baseline message set: auth, auth_ok, message, assistant,
+ *   result, raw_output, model_changed, permission_request, tool_use, etc.
+ *   All subsequent additive message types (e.g. plan_started, plan_ready,
+ *   models_updated, client_focus_changed) do NOT bump the version per the
+ *   breaking-changes-only policy above.
+ */
 
 /** Cached latest version from npm registry (null if unavailable) */
 let _latestVersionCache = { version: null, checkedAt: 0 }
@@ -645,6 +679,8 @@ export class WsServer {
         encryptionState: null,    // { sharedKey, sendNonce, recvNonce } when active
         encryptionPending: false, // true while waiting for key_exchange
         postAuthQueue: null,      // queued messages during key exchange
+        _flushing: false,         // gates _send during setImmediate gaps in post-auth flush
+        _flushOverflow: null,     // messages that arrived during flush
       })
 
       // Track pong responses for keepalive detection
@@ -952,15 +988,33 @@ export class WsServer {
    *  Same chunking pattern as _replayHistory — prevents blocking when queue is
    *  large (500+ messages with nacl.secretbox() encryption per send). */
   _flushPostAuthQueue(ws, queue) {
+    const client = this.clients.get(ws)
+    if (client) client._flushing = true
     const CHUNK_SIZE = 20
     const drainChunk = (offset) => {
-      if (ws.readyState !== 1) return
+      if (ws.readyState !== 1) {
+        if (client) {
+          client._flushing = false
+          client._flushOverflow = null
+        }
+        return
+      }
       const end = Math.min(offset + CHUNK_SIZE, queue.length)
+      // Temporarily disable flushing guard so _send goes to wire
+      if (client) client._flushing = false
       for (let i = offset; i < end; i++) {
         this._send(ws, queue[i])
       }
       if (end < queue.length) {
+        if (client) client._flushing = true
         setImmediate(() => drainChunk(end))
+      } else if (client) {
+        // Flush complete — drain any overflow that accumulated
+        if (client._flushOverflow?.length) {
+          const overflow = client._flushOverflow
+          client._flushOverflow = null
+          this._flushPostAuthQueue(ws, overflow)
+        }
       }
     }
     drainChunk(0)
@@ -1316,6 +1370,12 @@ export class WsServer {
     // Queue messages while key exchange is pending
     if (client?.encryptionPending && client.postAuthQueue) {
       client.postAuthQueue.push(message)
+      return
+    }
+    // Buffer messages while post-auth queue is still flushing
+    if (client?._flushing) {
+      client._flushOverflow = client._flushOverflow || []
+      client._flushOverflow.push(message)
       return
     }
     // Assign per-client monotonic sequence number
