@@ -210,11 +210,14 @@ async function run() {
     } else {
       // Try finding tabs by role or content
       const anyTabs = await page.$$('[role="tab"], .tab-bar button, .session-bar button')
-      pass('Session tabs', `${anyTabs.length} tab-like element(s)`)
+      if (anyTabs.length > 0) {
+        pass('Session tabs', `${anyTabs.length} tab-like element(s)`)
+      } else {
+        fail('Session tabs', 'No tabs found')
+      }
     }
 
     // ---- Test 6: Full-width layout ----
-    const viewportWidth = 1280
     const chatArea = await page.$('.chat-messages, .chat-view, [class*="chat"], main')
     if (chatArea) {
       const box = await chatArea.boundingBox()
@@ -306,8 +309,14 @@ async function run() {
       await page.waitForTimeout(300)
     } else {
       // Check if any new visible element appeared
-      const dialogs = await page.$$('[role="dialog"]:visible, .modal-overlay:visible')
-      if (dialogs.length > 0) {
+      const dialogs = await page.$$('[role="dialog"], .modal-overlay')
+      const visibleDialog = await (async () => {
+        for (const d of dialogs) {
+          if (await d.isVisible()) return d
+        }
+        return null
+      })()
+      if (visibleDialog) {
         pass('? opens shortcut help', 'found dialog')
         await page.keyboard.press('Escape')
       } else {
