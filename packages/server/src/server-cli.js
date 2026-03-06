@@ -60,7 +60,7 @@ export async function startCliServer(config) {
     maxSessions: 5,
     port: PORT,
     apiToken: API_TOKEN,
-    defaultCwd: config.cwd || process.cwd(),
+    defaultCwd: config.cwd || (process.cwd().startsWith(homedir()) ? process.cwd() : homedir()),
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
     providerType,

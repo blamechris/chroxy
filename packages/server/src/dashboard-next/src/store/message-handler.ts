@@ -787,7 +787,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         pushSessionNotification(errorSessionId, 'error', 'Session crashed');
       }
       if (msg.category !== 'crash') {
-        console.warn(`[chroxy] Session Error: ${(msg.message as string) || 'Unknown error'}`);
+        const errorMsg = (msg.message as string) || 'Unknown error';
+        console.warn(`[chroxy] Session Error: ${errorMsg}`);
+        get().addServerError(errorMsg);
       }
       break;
     }

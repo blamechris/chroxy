@@ -510,8 +510,8 @@ export function App() {
             /* Will be wired in #1107 */
             console.log('Resume session:', convId)
           }}
-          onNewSession={(cwd) => {
-            createSession('New Session', cwd)
+          onNewSession={() => {
+            setShowCreateSession(true)
           }}
           onToggle={() => setSidebarOpen(prev => !prev)}
           onContextMenu={() => {
