@@ -529,8 +529,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
       // Extract server context from auth_ok
-      const authServerMode: 'cli' | 'terminal' | null =
-        msg.serverMode === 'cli' || msg.serverMode === 'terminal' ? msg.serverMode : null;
+      const authServerMode: 'cli' | null =
+        msg.serverMode === 'cli' ? 'cli' : null;
       const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
       const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
       const authLatestVersion = typeof msg.latestVersion === 'string' ? msg.latestVersion : null;
@@ -653,7 +653,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
 
     case 'server_mode':
-      set({ serverMode: msg.mode as 'cli' | 'terminal' });
+      set({ serverMode: msg.mode === 'cli' ? 'cli' : null });
       // Force chat view in CLI mode (no terminal available)
       if (msg.mode === 'cli' && get().viewMode === 'terminal') {
         set({ viewMode: 'chat' });

@@ -621,6 +621,32 @@ describe('client_focus_changed follow mode', () => {
   });
 });
 
+describe('server_mode handler (PTY removal)', () => {
+  it('sets serverMode to cli for cli mode', () => {
+    const store = createMockStore({
+      serverMode: null,
+      viewMode: 'chat',
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'server_mode', mode: 'cli' });
+    expect(store.getState().serverMode).toBe('cli');
+  });
+
+  it('sets serverMode to null for unknown mode values', () => {
+    const store = createMockStore({
+      serverMode: 'cli',
+      viewMode: 'chat',
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'server_mode', mode: 'terminal' });
+    expect(store.getState().serverMode).toBeNull();
+  });
+});
+
 afterAll(() => {
   _testMessageHandler.clearContext();
 });
