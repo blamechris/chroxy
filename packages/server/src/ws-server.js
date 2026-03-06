@@ -215,7 +215,7 @@ function getGitInfo() {
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, maxPendingConnections } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -224,6 +224,7 @@ export class WsServer {
     this._encryptionEnabled = !noEncrypt
     this._keyExchangeTimeoutMs = keyExchangeTimeoutMs ?? 10_000
     this._localhostBypass = localhostBypass ?? true
+    this._maxPendingConnections = maxPendingConnections ?? 20
     this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
     this.httpServer = null
     this.wss = null
@@ -646,6 +647,13 @@ export class WsServer {
     })
 
     this.httpServer.on('upgrade', (req, socket, head) => {
+      // Enforce pre-auth connection limit to prevent FD exhaustion
+      const pendingCount = this._countPendingConnections()
+      if (pendingCount >= this._maxPendingConnections) {
+        console.warn(`[ws] Pre-auth connection limit reached (${pendingCount}/${this._maxPendingConnections}), rejecting upgrade`)
+        socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+        return
+      }
       this.wss.handleUpgrade(req, socket, head, (ws) => {
         this.wss.emit('connection', ws, req)
       })
@@ -1230,6 +1238,15 @@ export class WsServer {
         this._send(ws, tagged)
       }
     }
+  }
+
+  /** Count unauthenticated connections for pre-auth limit enforcement */
+  _countPendingConnections() {
+    let count = 0
+    for (const [ws, client] of this.clients) {
+      if (!client.authenticated && ws.readyState === 1) count++
+    }
+    return count
   }
 
   /** Get list of connected clients for auth_ok payload */
