@@ -319,6 +319,7 @@ export interface ConnectionState {
 
   // Server context (from auth_ok)
   sessionCwd: string | null;
+  defaultCwd: string | null;
   serverVersion: string | null;
   latestVersion: string | null;
   serverCommit: string | null;

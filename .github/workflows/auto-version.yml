@@ -1,0 +1,44 @@
+name: Auto Version
+
+# Bump patch version after every PR merge to main.
+# Branch protection requires CI to pass before merge, so this only
+# fires on commits that already passed CI.
+
+on:
+  push:
+    branches: [main]
+
+# GitHub Actions does not trigger workflows from commits made by GITHUB_TOKEN,
+# which prevents infinite loops. The commit message check is belt-and-suspenders.
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    name: Bump Patch Version
+    runs-on: ubuntu-24.04
+    # Skip version-bump commits
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Bump patch version
+        run: bash scripts/bump-version.sh
+
+      - name: Commit and push
+        run: |
+          NEXT=$(node -p "require('./packages/server/package.json').version")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/server/package.json packages/desktop/src-tauri/tauri.conf.json packages/desktop/src-tauri/Cargo.toml packages/desktop/src-tauri/Cargo.lock
+          git commit -m "chore: bump version to v${NEXT}"
+          git push

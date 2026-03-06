@@ -512,6 +512,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const authServerMode: 'cli' | 'terminal' | null =
         msg.serverMode === 'cli' || msg.serverMode === 'terminal' ? msg.serverMode : null;
       const authSessionCwd = typeof msg.cwd === 'string' ? msg.cwd : null;
+      const authDefaultCwd = typeof msg.defaultCwd === 'string' ? msg.defaultCwd : null;
       const authServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : null;
       const authLatestVersion = typeof msg.latestVersion === 'string' ? msg.latestVersion : null;
       const authServerCommit = typeof msg.serverCommit === 'string' ? msg.serverCommit : null;
@@ -553,6 +554,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         claudeReady: false,
         serverMode: authServerMode,
         sessionCwd: authSessionCwd,
+        defaultCwd: authDefaultCwd,
         serverVersion: authServerVersion,
         latestVersion: authLatestVersion,
         serverCommit: authServerCommit,
