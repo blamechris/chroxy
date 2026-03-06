@@ -295,7 +295,7 @@ export class WsServer {
     this._devPreview = new DevPreviewManager()
 
     // Web task manager (Claude Code Web cloud delegation)
-    this._webTaskManager = new WebTaskManager({ cwd: sessionManager?._defaultCwd || process.cwd() })
+    this._webTaskManager = new WebTaskManager({ cwd: sessionManager?.defaultCwd || process.cwd() })
 
     // Legacy single-session mode: wrap cliSession in a minimal shim
     if (!sessionManager && cliSession) {
@@ -856,7 +856,7 @@ export class WsServer {
       latestVersion: this._latestVersion,
       serverCommit: this._gitInfo.commit,
       cwd: sessionInfo.cwd,
-      defaultCwd: this.sessionManager?._defaultCwd || null,
+      defaultCwd: this.sessionManager?.defaultCwd || null,
       connectedClients: this._getConnectedClientList(),
       encryption: requireEncryption ? 'required' : 'disabled',
       protocolVersion: SERVER_PROTOCOL_VERSION,
