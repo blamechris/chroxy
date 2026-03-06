@@ -7,19 +7,25 @@ describe('SessionPicker follow button accessibility', () => {
     'utf-8',
   );
 
-  // Extract the followButton TouchableOpacity section
+  // Extract the followButton TouchableOpacity section with validation
   const followButtonIdx = source.indexOf('styles.followButton');
-  const followButtonSection = source.slice(followButtonIdx, source.indexOf('</TouchableOpacity>', followButtonIdx));
+  const followButtonEndIdx = source.indexOf('</TouchableOpacity>', followButtonIdx);
+  if (followButtonIdx < 0 || followButtonEndIdx < 0 || followButtonEndIdx <= followButtonIdx) {
+    throw new Error(
+      'Unable to locate a valid follow button <TouchableOpacity> section in SessionPicker.tsx',
+    );
+  }
+  const followButtonSection = source.slice(followButtonIdx, followButtonEndIdx);
 
-  it('has accessibilityLabel on follow button', () => {
-    expect(followButtonSection).toMatch(/accessibilityLabel/);
+  it('has accessibilityLabel "Toggle follow mode" on follow button', () => {
+    expect(followButtonSection).toMatch(/accessibilityLabel[^\n]*Toggle follow mode/);
   });
 
-  it('has accessibilityRole on follow button', () => {
-    expect(followButtonSection).toMatch(/accessibilityRole/);
+  it('has accessibilityRole "switch" on follow button', () => {
+    expect(followButtonSection).toMatch(/accessibilityRole[^\n]*['"]switch['"]/);
   });
 
-  it('has accessibilityState for checked/unchecked', () => {
-    expect(followButtonSection).toMatch(/accessibilityState/);
+  it('has accessibilityState using checked: followMode', () => {
+    expect(followButtonSection).toMatch(/accessibilityState[^\n]*checked\s*:\s*followMode/);
   });
 });
