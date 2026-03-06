@@ -31,21 +31,6 @@ export function createSpy(impl) {
 }
 
 /**
- * Create a mock session with spy methods.
- *
- * All methods are spies — you can check calls, arguments, and call counts.
- *
- *   const session = createMockSession()
- *   session.sendMessage('hello')
- *   session.sendMessage.callCount  // 1
- *   session.sendMessage.lastCall   // ['hello']
- *
- * Override individual methods:
- *   const session = createMockSession({
- *     sendMessage: createSpy(() => 'sent'),
- *   })
- */
-/**
  * Create a mock session manager with spy methods.
  *
  * Always returns { manager, sessionsMap } so callers can access
@@ -100,14 +85,39 @@ export function createMockSessionManager(sessions = [], overrides = {}) {
   manager.isBudgetPaused = () => false
   manager.getSessionContext = async () => null
   Object.defineProperty(manager, 'firstSessionId', {
-    get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
+    get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null,
+    configurable: true,
   })
 
-  Object.assign(manager, overrides)
+  for (const [key, value] of Object.entries(overrides)) {
+    const desc = Object.getOwnPropertyDescriptor(manager, key)
+    if (desc && !desc.writable && !desc.set) {
+      Object.defineProperty(manager, key, typeof value === 'function'
+        ? { get: value, configurable: true }
+        : { value, configurable: true })
+    } else {
+      manager[key] = value
+    }
+  }
 
   return { manager, sessionsMap }
 }
 
+/**
+ * Create a mock session with spy methods.
+ *
+ * All methods are spies — you can check calls, arguments, and call counts.
+ *
+ *   const session = createMockSession()
+ *   session.sendMessage('hello')
+ *   session.sendMessage.callCount  // 1
+ *   session.sendMessage.lastCall   // ['hello']
+ *
+ * Override individual methods:
+ *   const session = createMockSession({
+ *     sendMessage: createSpy(() => 'sent'),
+ *   })
+ */
 export function createMockSession(overrides = {}) {
   const session = new EventEmitter()
   session.isReady = true
