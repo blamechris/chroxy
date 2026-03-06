@@ -27,7 +27,7 @@ export interface SettingsBarProps {
   costBudget?: number | null;
   contextUsage: ContextUsage | null;
   sessionCwd: string | null;
-  serverMode: 'cli' | 'terminal' | null;
+  serverMode: 'cli' | null;
   isIdle: boolean;
   activeAgents: AgentInfo[];
   connectedClients: ConnectedClient[];
