@@ -28,7 +28,9 @@ import { ReconnectBanner } from './components/ReconnectBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { CreateSessionModal } from './components/CreateSessionModal'
 import { Toast, type ToastItem } from './components/Toast'
+import { FooterBar } from './components/FooterBar'
 import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
+import { persistSidebarWidth, loadPersistedSidebarWidth } from './store/persistence'
 
 /** Server-injected config from window.__CHROXY_CONFIG__ */
 interface ChroxyConfig {
@@ -144,10 +146,12 @@ export function App() {
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
   const [pendingCwd, setPendingCwd] = useState<string | null>(null)
+  const [isCreatingSession, setIsCreatingSession] = useState(false)
+  const [sessionCreateError, setSessionCreateError] = useState<string | null>(null)
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [sidebarWidth] = useState(240)
+  const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
 
   useEffect(() => {
@@ -155,6 +159,18 @@ export function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault()
         setPaletteOpen(prev => !prev)
+        return
+      }
+      // Cmd+Shift+P: toggle command palette (VSCode-style alias)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault()
+        setPaletteOpen(prev => !prev)
+        return
+      }
+      // Cmd+Shift+D: toggle view mode (chat ↔ terminal)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'd') {
+        e.preventDefault()
+        setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
         return
       }
       // Cmd+N / Ctrl+N: open new session modal
@@ -196,16 +212,18 @@ export function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, switchSession, destroySession])
+  }, [sessions, activeSessionId, switchSession, destroySession, viewMode, setViewMode])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
       ...cmd,
       action: () => {
         recordMruCommand(cmd.id)
-        // Override new-session to open the modal instead of creating directly
+        // Override commands that need App-level state
         if (cmd.id === 'new-session') {
           setShowCreateSession(true)
+        } else if (cmd.id === 'toggle-sidebar') {
+          setSidebarOpen(prev => !prev)
         } else {
           cmd.action()
         }
@@ -223,6 +241,26 @@ export function App() {
     const wsUrl = `${proto}://${window.location.host}/ws`
     connect(wsUrl, token)
   }, [connect])
+
+  // Close Create Session modal when server confirms (activeSessionId changes)
+  useEffect(() => {
+    if (isCreatingSession && activeSessionId) {
+      setShowCreateSession(false)
+      setIsCreatingSession(false)
+      setSessionCreateError(null)
+    }
+  }, [activeSessionId, isCreatingSession])
+
+  // Show session_error in modal when creating
+  useEffect(() => {
+    if (isCreatingSession && serverErrors.length > 0) {
+      const latest = serverErrors[serverErrors.length - 1]
+      if (latest) {
+        setSessionCreateError(latest.message)
+        setIsCreatingSession(false)
+      }
+    }
+  }, [serverErrors, isCreatingSession])
 
   // Convert store messages to ChatViewMessage[]
   const chatMessages = useMemo(
@@ -319,8 +357,9 @@ export function App() {
   }, [])
 
   const handleCreateSession = useCallback((data: { name: string; cwd: string }) => {
+    setSessionCreateError(null)
+    setIsCreatingSession(true)
     createSession(data.name, data.cwd || undefined)
-    setShowCreateSession(false)
   }, [createSession])
 
   const handlePlanApprove = useCallback(() => {
@@ -526,6 +565,7 @@ export function App() {
             setShowCreateSession(true)
           }}
           onToggle={() => setSidebarOpen(prev => !prev)}
+          onWidthChange={(w: number) => { setSidebarWidth(w); persistSidebarWidth(w) }}
           onContextMenu={() => {
             /* Context menus will be added in a follow-up */
           }}
@@ -613,6 +653,7 @@ export function App() {
               onSend={handleSend}
               onInterrupt={handleInterrupt}
               disabled={!isConnected}
+              isBusy={!isIdle}
               isStreaming={streamingMessageId !== null}
               placeholder={isConnected ? 'Type a message... (Cmd+Enter to send)' : 'Connecting...'}
               filePickerFiles={filePickerFiles}
@@ -631,14 +672,28 @@ export function App() {
         )}
       </div>
 
+      {/* Footer bar */}
+      <FooterBar
+        connectionPhase={connectionPhase}
+        serverVersion={serverVersion}
+        cwd={sessionCwd ?? undefined}
+        model={activeModel || undefined}
+        cost={sessionCost ?? undefined}
+        context={formatContext(contextUsage)}
+        isBusy={!isIdle}
+        agentCount={activeAgents.length}
+      />
+
       {/* Modals */}
       <CreateSessionModal
         open={showCreateSession}
-        onClose={() => setShowCreateSession(false)}
+        onClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null) }}
         onCreate={handleCreateSession}
         initialCwd={pendingCwd}
         knownCwds={knownCwds}
         existingNames={sessions.map(s => s.name)}
+        serverError={sessionCreateError ?? undefined}
+        isCreating={isCreatingSession}
       />
 
       {/* Toasts */}
