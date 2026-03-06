@@ -29,7 +29,7 @@ const DeviceInfoSchema = z.object({
 export const AuthSchema = z.object({
   type: z.literal('auth'),
   token: z.string(),
-  protocolVersion: z.number().int().min(1).optional(),
+  protocolVersion: z.number().int().min(0).optional(),
   deviceInfo: DeviceInfoSchema.optional(),
 }).passthrough()
 
@@ -111,6 +111,12 @@ export const BrowseFilesSchema = z.object({
 export const ReadFileSchema = z.object({
   type: z.literal('read_file'),
   path: z.string(),
+}).passthrough()
+
+export const WriteFileSchema = z.object({
+  type: z.literal('write_file'),
+  path: z.string(),
+  content: z.string(),
 }).passthrough()
 
 export const ListFilesSchema = z.object({
@@ -517,6 +523,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ListDirectorySchema,
   BrowseFilesSchema,
   ReadFileSchema,
+  WriteFileSchema,
   ListFilesSchema,
   ListSlashCommandsSchema,
   ListAgentsSchema,

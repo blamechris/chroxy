@@ -6,7 +6,7 @@ import { execSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
-import { WsServer as _WsServer } from '../src/ws-server.js'
+import { WsServer as _WsServer, MIN_PROTOCOL_VERSION, SERVER_PROTOCOL_VERSION } from '../src/ws-server.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
 import { createMockSession, createMockSessionManager } from './test-helpers.js'
 
@@ -8598,6 +8598,48 @@ describe('client_focus_changed broadcast', () => {
 
     client1.ws.close()
   })
+
+  it('broadcasts client_focus_changed when a client creates a session', async () => {
+    const { manager: mockManager, sessionsMap } = createMockSessionManager([
+      { id: 'sess-a', name: 'Session A', cwd: '/tmp/a' },
+    ])
+
+    // Add createSession to mock — inserts into sessionsMap so getSession/listSessions/firstSessionId all reflect it
+    let nextId = 1
+    mockManager.createSession = ({ name, cwd }) => {
+      const id = `new-sess-${nextId++}`
+      const mockSession = createMockSession()
+      mockSession.cwd = cwd || '/tmp'
+      sessionsMap.set(id, { session: mockSession, name: name || 'New Session', cwd: cwd || '/tmp', type: 'cli', isBusy: false })
+      return id
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const client1 = await createClient(port, true)
+    const client2 = await createClient(port, true)
+    await waitForMessage(client1.messages, 'auth_ok', 2000)
+    await waitForMessage(client2.messages, 'auth_ok', 2000)
+
+    // Client 1 creates a new session
+    send(client1.ws, { type: 'create_session', name: 'My Session' })
+
+    // Client 2 should receive client_focus_changed
+    const focusMsg = await waitForMessage(client2.messages, 'client_focus_changed', 2000)
+    assert.ok(focusMsg, 'Client 2 should receive client_focus_changed')
+    assert.ok(focusMsg.sessionId.startsWith('new-sess-'), 'Should reference the new session')
+    assert.equal(typeof focusMsg.clientId, 'string', 'Should include clientId')
+    assert.equal(typeof focusMsg.timestamp, 'number', 'Should include timestamp')
+
+    client1.ws.close()
+    client2.ws.close()
+  })
 })
 
 describe('_sendSessionInfo sessionId tagging (#1417)', () => {
@@ -8706,6 +8748,217 @@ describe('_sendSessionInfo sessionId tagging (#1417)', () => {
     const modelMsg = messages.find(m => m.type === 'model_changed')
     assert.ok(modelMsg, 'Should receive model_changed after auth')
     assert.equal(modelMsg.sessionId, 'sess-1', 'model_changed should include sessionId for default session')
+
+    ws.close()
+  })
+})
+
+describe('Pre-auth connection limit', () => {
+  let server
+
+  afterEach(async () => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('rejects new connections when pre-auth limit is reached', async () => {
+    const MAX_PENDING = 3
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+      maxPendingConnections: MAX_PENDING,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Open MAX_PENDING unauthenticated connections
+    const pending = []
+    for (let i = 0; i < MAX_PENDING; i++) {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+      await new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      })
+      pending.push(ws)
+    }
+
+    // The next connection should be rejected with 503
+    const rejected = new WebSocket(`ws://127.0.0.1:${port}`)
+    const rejectPromise = new Promise(resolve => {
+      rejected.on('unexpected-response', (_req, res) => resolve({ event: 'unexpected-response', statusCode: res.statusCode }))
+      rejected.on('close', () => resolve({ event: 'close' }))
+      rejected.on('error', () => resolve({ event: 'error' }))
+    })
+    const result = await withTimeout(rejectPromise, 3000, 'Expected rejected connection to close')
+    if (result.event === 'unexpected-response') {
+      assert.strictEqual(result.statusCode, 503, 'Should reject with 503')
+    }
+
+    // Clean up
+    for (const ws of pending) ws.close()
+  })
+
+  it('allows new connections after pending ones authenticate', async () => {
+    const MAX_PENDING = 2
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+      maxPendingConnections: MAX_PENDING,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Fill up pending slots
+    const ws1 = new WebSocket(`ws://127.0.0.1:${port}`)
+    await new Promise((resolve, reject) => {
+      ws1.once('open', resolve)
+      ws1.once('error', reject)
+    })
+    const ws2 = new WebSocket(`ws://127.0.0.1:${port}`)
+    await new Promise((resolve, reject) => {
+      ws2.once('open', resolve)
+      ws2.once('error', reject)
+    })
+
+    // Authenticate ws1 to free a slot
+    const messages1 = []
+    ws1.on('message', (data) => messages1.push(JSON.parse(data.toString())))
+    ws1.send(JSON.stringify({ type: 'auth', token: 'test-token' }))
+    await withTimeout(
+      (async () => { while (!messages1.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
+      2000, 'Auth timeout'
+    )
+
+    // Now a new connection should succeed
+    const ws3 = new WebSocket(`ws://127.0.0.1:${port}`)
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws3.once('open', resolve)
+        ws3.once('error', reject)
+      }),
+      2000,
+      'New connection should succeed after auth freed a slot'
+    )
+
+    ws1.close()
+    ws2.close()
+    ws3.close()
+  })
+
+  it('does not count authenticated connections toward the limit', async () => {
+    const MAX_PENDING = 2
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+      maxPendingConnections: MAX_PENDING,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Create and authenticate MAX_PENDING connections
+    const authed = []
+    for (let i = 0; i < MAX_PENDING; i++) {
+      const { ws, messages } = await createClient(port, false)
+      ws.send(JSON.stringify({ type: 'auth', token: 'test-token' }))
+      await withTimeout(
+        (async () => { while (!messages.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
+        2000, 'Auth timeout'
+      )
+      authed.push(ws)
+    }
+
+    // Should still accept new connections since authenticated ones don't count
+    const ws3 = new WebSocket(`ws://127.0.0.1:${port}`)
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws3.once('open', resolve)
+        ws3.once('error', reject)
+      }),
+      2000,
+      'Should accept new connection when all existing are authenticated'
+    )
+
+    // Clean up all sockets
+    for (const ws of authed) ws.close()
+    ws3.close()
+  })
+})
+
+describe('Protocol version enforcement (#1058)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('defaults client protocolVersion to MIN_PROTOCOL_VERSION when omitted', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    ws.send(JSON.stringify({ type: 'auth', token: 'test-token' }))
+    await withTimeout(
+      (async () => { while (!messages.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
+      2000, 'Auth timeout'
+    )
+
+    // Check stored client version
+    const clientData = [...server.clients.values()][0]
+    assert.equal(clientData.protocolVersion, MIN_PROTOCOL_VERSION,
+      'Should default to MIN_PROTOCOL_VERSION when client omits protocolVersion')
+
+    ws.close()
+  })
+
+  it('clamps client protocolVersion to SERVER_PROTOCOL_VERSION', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    ws.send(JSON.stringify({ type: 'auth', token: 'test-token', protocolVersion: 999 }))
+    await withTimeout(
+      (async () => { while (!messages.find(m => m.type === 'auth_ok')) await new Promise(r => setTimeout(r, 10)) })(),
+      2000, 'Auth timeout'
+    )
+
+    const clientData = [...server.clients.values()][0]
+    assert.equal(clientData.protocolVersion, SERVER_PROTOCOL_VERSION,
+      'Should clamp client version to SERVER_PROTOCOL_VERSION')
+
+    ws.close()
+  })
+
+  it('rejects client with protocolVersion below MIN_PROTOCOL_VERSION', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: createMockSession(),
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    ws.send(JSON.stringify({ type: 'auth', token: 'test-token', protocolVersion: 0 }))
+    await withTimeout(
+      (async () => { while (!messages.find(m => m.type === 'auth_fail')) await new Promise(r => setTimeout(r, 10)) })(),
+      2000, 'Should receive auth_fail for version 0'
+    )
+
+    const failMsg = messages.find(m => m.type === 'auth_fail')
+    assert.ok(failMsg, 'Should receive auth_fail')
+    assert.ok(failMsg.reason.includes('protocol'), 'Reason should mention protocol version')
 
     ws.close()
   })

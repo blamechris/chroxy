@@ -834,46 +834,48 @@ describe('SessionManager budget pause lifecycle', () => {
   })
 })
 
-describe('#987 — dead code removal in session-manager', () => {
+describe('#987 — dead code removal in session-manager (behavioral)', () => {
   it('does not export SessionNotFoundError', async () => {
     const mod = await import('../src/session-manager.js')
     assert.equal(mod.SessionNotFoundError, undefined,
       'SessionNotFoundError should be removed — it is never used')
   })
 
-  it('does not have a sync getFullHistory method', async () => {
-    const { readFileSync: readFs } = await import('node:fs')
-    const { dirname: dn, join: joinPath } = await import('node:path')
-    const { fileURLToPath: toPath } = await import('node:url')
-    const dir = dn(toPath(import.meta.url))
-    const source = readFs(joinPath(dir, '../src/session-manager.js'), 'utf-8')
-    // Should have getFullHistoryAsync but NOT a standalone getFullHistory method
-    const syncMethod = /^\s+getFullHistory\(sessionId\)\s*\{/m.test(source)
-    assert.ok(!syncMethod,
-      'getFullHistory (sync) should be removed — only getFullHistoryAsync is used')
+  it('does not have a sync getFullHistory method on instances', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    assert.equal(typeof mgr.getFullHistory, 'undefined',
+      'getFullHistory (sync) should not exist — only getFullHistoryAsync')
+    assert.equal(typeof mgr.getFullHistoryAsync, 'function',
+      'getFullHistoryAsync should still exist')
   })
 
-  it('does not import readConversationHistory (sync)', async () => {
-    const { readFileSync: readFs } = await import('node:fs')
-    const { dirname: dn, join: joinPath } = await import('node:path')
-    const { fileURLToPath: toPath } = await import('node:url')
-    const dir = dn(toPath(import.meta.url))
-    const source = readFs(joinPath(dir, '../src/session-manager.js'), 'utf-8')
-    assert.ok(!source.includes('readConversationHistory,'),
-      'Should not import sync readConversationHistory (only async variant needed)')
-  })
+  it('destroySession calls _schedulePersist exactly once', () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'sm-persist-'))
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: join(tmpDir, 'state.json'),
+    })
 
-  it('calls _schedulePersist only once in destroySession', async () => {
-    const { readFileSync: readFs } = await import('node:fs')
-    const { dirname: dn, join: joinPath } = await import('node:path')
-    const { fileURLToPath: toPath } = await import('node:url')
-    const dir = dn(toPath(import.meta.url))
-    const source = readFs(joinPath(dir, '../src/session-manager.js'), 'utf-8')
-    const destroyMethod = source.match(/destroySession\(sessionId\)\s*\{[\s\S]*?^\s{2}\}/m)
-    assert.ok(destroyMethod, 'destroySession method should exist')
-    const persistCalls = (destroyMethod[0].match(/_schedulePersist\(\)/g) || []).length
-    assert.equal(persistCalls, 1,
-      `destroySession should call _schedulePersist once, found ${persistCalls} calls`)
+    // Insert a mock session
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'S1', cwd: '/tmp' })
+    mgr._lastActivity = new Map([['s1', Date.now()]])
+
+    // Spy on _schedulePersist
+    let persistCallCount = 0
+    const original = mgr._schedulePersist.bind(mgr)
+    mgr._schedulePersist = () => { persistCallCount++; original() }
+
+    mgr.destroySession('s1')
+
+    assert.equal(persistCallCount, 1,
+      `destroySession should call _schedulePersist once, got ${persistCallCount}`)
+
+    // Clean up timer and temp dir
+    clearTimeout(mgr._persistTimer)
+    rmSync(tmpDir, { recursive: true, force: true })
   })
 })
 
@@ -1260,5 +1262,17 @@ describe('#1091 — destroy-while-streaming event leak', () => {
     const remainingKeys = [...mgr._pendingStreams.keys()].filter(k => k.startsWith(sessionId))
     assert.equal(remainingKeys.length, 0, '_pendingStreams should be empty for destroyed session')
     assert.equal(mgr._pendingStreams.get('other-session:msg-c'), 'other content')
+  })
+})
+
+describe('SessionManager.defaultCwd getter (#1475)', () => {
+  it('exposes defaultCwd via public getter', () => {
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp/test-cwd' })
+    assert.equal(mgr.defaultCwd, '/tmp/test-cwd')
+  })
+
+  it('defaults to process.cwd() when no defaultCwd provided', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    assert.equal(mgr.defaultCwd, process.cwd())
   })
 })

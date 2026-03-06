@@ -135,6 +135,7 @@ function getGitInfo() {
  *   { type: 'list_directory', path? }                  — request directory listing for file browser
  *   { type: 'browse_files', path? }                   — request file/directory listing for file browser
  *   { type: 'read_file', path }                       — request file content for file viewer
+ *   { type: 'write_file', path, content }              — write file content (path validated, 5MB limit)
  *   { type: 'list_slash_commands' }                     — request available slash commands
  *   { type: 'list_agents' }                             — request available custom agents
  *   { type: 'request_full_history', sessionId? }         — request full JSONL history for a session
@@ -215,7 +216,7 @@ function getGitInfo() {
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, maxPendingConnections } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -224,6 +225,7 @@ export class WsServer {
     this._encryptionEnabled = !noEncrypt
     this._keyExchangeTimeoutMs = keyExchangeTimeoutMs ?? 10_000
     this._localhostBypass = localhostBypass ?? true
+    this._maxPendingConnections = maxPendingConnections ?? 20
     this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
     this.httpServer = null
     this.wss = null
@@ -296,7 +298,7 @@ export class WsServer {
     this._devPreview = new DevPreviewManager()
 
     // Web task manager (Claude Code Web cloud delegation)
-    this._webTaskManager = new WebTaskManager({ cwd: sessionManager?._defaultCwd || process.cwd() })
+    this._webTaskManager = new WebTaskManager({ cwd: sessionManager?.defaultCwd || process.cwd() })
 
     // Legacy single-session mode: wrap cliSession in a minimal shim
     if (!sessionManager && cliSession) {
@@ -646,6 +648,13 @@ export class WsServer {
     })
 
     this.httpServer.on('upgrade', (req, socket, head) => {
+      // Enforce pre-auth connection limit to prevent FD exhaustion
+      const pendingCount = this._countPendingConnections()
+      if (pendingCount >= this._maxPendingConnections) {
+        console.warn(`[ws] Pre-auth connection limit reached (${pendingCount}/${this._maxPendingConnections}), rejecting upgrade`)
+        socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+        return
+      }
       this.wss.handleUpgrade(req, socket, head, (ws) => {
         this.wss.emit('connection', ws, req)
       })
@@ -857,7 +866,7 @@ export class WsServer {
       latestVersion: this._latestVersion,
       serverCommit: this._gitInfo.commit,
       cwd: sessionInfo.cwd,
-      defaultCwd: this.sessionManager?._defaultCwd || null,
+      defaultCwd: this.sessionManager?.defaultCwd || null,
       connectedClients: this._getConnectedClientList(),
       encryption: requireEncryption ? 'required' : 'disabled',
       protocolVersion: SERVER_PROTOCOL_VERSION,
@@ -906,6 +915,14 @@ export class WsServer {
         this._send(ws, { type: 'session_switched', sessionId: activeId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
         this._sendSessionInfo(ws, activeId)
         this._replayHistory(ws, activeId)
+      }
+
+      // Notify other clients about this client's initial session focus
+      if (activeId) {
+        this._broadcast(
+          { type: 'client_focus_changed', clientId: client.id, sessionId: activeId, timestamp: Date.now() },
+          (c) => c.id !== client.id
+        )
       }
 
       this._send(ws, { type: 'available_models', models: getModels() })
@@ -1075,10 +1092,21 @@ export class WsServer {
         client.authTime = Date.now()
         // Clear rate limit on successful auth
         this._authFailures.delete(ip)
-        // Extract client protocol version (default to 1 for old clients)
-        client.protocolVersion = typeof msg.protocolVersion === 'number' &&
-          Number.isInteger(msg.protocolVersion) && msg.protocolVersion >= 1
-          ? msg.protocolVersion : 1
+        // Extract and validate client protocol version
+        const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)
+        const clientVersion = hasVersion ? msg.protocolVersion : null
+
+        // Reject clients below minimum supported version
+        if (clientVersion !== null && clientVersion < MIN_PROTOCOL_VERSION) {
+          this._send(ws, { type: 'auth_fail', reason: `unsupported protocol version ${clientVersion} (minimum: ${MIN_PROTOCOL_VERSION})` })
+          ws.close()
+          return
+        }
+
+        // Clamp to server version and default old clients to MIN_PROTOCOL_VERSION
+        client.protocolVersion = clientVersion !== null
+          ? Math.min(clientVersion, SERVER_PROTOCOL_VERSION)
+          : MIN_PROTOCOL_VERSION
         // Extract optional device info from auth message
         if (msg.deviceInfo && typeof msg.deviceInfo === 'object') {
           client.deviceInfo = {
@@ -1222,6 +1250,15 @@ export class WsServer {
         this._send(ws, tagged)
       }
     }
+  }
+
+  /** Count unauthenticated connections for pre-auth limit enforcement */
+  _countPendingConnections() {
+    let count = 0
+    for (const [ws, client] of this.clients) {
+      if (!client.authenticated && ws.readyState === 1) count++
+    }
+    return count
   }
 
   /** Get list of connected clients for auth_ok payload */
