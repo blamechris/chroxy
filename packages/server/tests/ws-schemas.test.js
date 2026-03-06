@@ -303,6 +303,18 @@ describe('CreateSessionSchema', () => {
     const result = CreateSessionSchema.safeParse({ type: 'create_session', name: 'dev', cwd: '/tmp' })
     assert.ok(result.success)
   })
+
+  it('preserves provider field through validation', () => {
+    const result = CreateSessionSchema.safeParse({ type: 'create_session', name: 'dev', cwd: '/tmp', provider: 'claude-sdk' })
+    assert.ok(result.success)
+    assert.equal(result.data.provider, 'claude-sdk', 'provider should not be stripped by schema validation')
+  })
+
+  it('accepts without provider', () => {
+    const result = CreateSessionSchema.safeParse({ type: 'create_session', name: 'dev' })
+    assert.ok(result.success)
+    assert.equal(result.data.provider, undefined)
+  })
 })
 
 describe('DestroySessionSchema', () => {
