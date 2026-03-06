@@ -17,12 +17,48 @@ fn parse_major(version: &str) -> Option<u32> {
 pub fn resolve_node22() -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    // Homebrew (Apple Silicon)
-    candidates.push(PathBuf::from("/opt/homebrew/opt/node@22/bin/node"));
-    // Homebrew (Intel)
-    candidates.push(PathBuf::from("/usr/local/opt/node@22/bin/node"));
+    // macOS/Linux: Homebrew paths
+    #[cfg(unix)]
+    {
+        // Homebrew (Apple Silicon)
+        candidates.push(PathBuf::from("/opt/homebrew/opt/node@22/bin/node"));
+        // Homebrew (Intel)
+        candidates.push(PathBuf::from("/usr/local/opt/node@22/bin/node"));
+    }
 
-    // nvm — glob for v22.* and above, prefer v22 first
+    // Windows: common install locations
+    #[cfg(windows)]
+    {
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            candidates.push(PathBuf::from(format!("{}/nodejs/node.exe", pf)));
+        }
+        // nvm-windows
+        if let Some(home) = dirs::home_dir() {
+            let nvm_dir = home.join("AppData/Roaming/nvm");
+            if nvm_dir.is_dir() {
+                if let Ok(entries) = fs::read_dir(&nvm_dir) {
+                    let mut eligible: Vec<PathBuf> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            p.file_name()
+                                .and_then(|n| n.to_str())
+                                .and_then(|n| parse_major(&format!("v{}", n)))
+                                .map(|major| major >= MIN_NODE_MAJOR)
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                    eligible.sort();
+                    for d in eligible {
+                        candidates.push(d.join("node.exe"));
+                    }
+                }
+            }
+        }
+    }
+
+    // nvm (Unix) — glob for v22.* and above, prefer v22 first
+    #[cfg(unix)]
     if let Some(home) = dirs::home_dir() {
         let nvm_dir = home.join(".nvm/versions/node");
         if nvm_dir.is_dir() {
@@ -47,9 +83,12 @@ pub fn resolve_node22() -> Result<PathBuf, String> {
         }
     }
 
-    // Homebrew "current" node (may be 22+)
-    candidates.push(PathBuf::from("/opt/homebrew/bin/node"));
-    candidates.push(PathBuf::from("/usr/local/bin/node"));
+    // Unix: Homebrew "current" node (may be 22+)
+    #[cfg(unix)]
+    {
+        candidates.push(PathBuf::from("/opt/homebrew/bin/node"));
+        candidates.push(PathBuf::from("/usr/local/bin/node"));
+    }
 
     // Check each candidate
     for candidate in &candidates {
@@ -65,8 +104,12 @@ pub fn resolve_node22() -> Result<PathBuf, String> {
         }
     }
 
-    // Fall back to `which node` and check version
-    if let Ok(output) = Command::new("which").arg("node").output() {
+    // Fall back to `which`/`where` node and check version
+    #[cfg(unix)]
+    let which_cmd = "which";
+    #[cfg(windows)]
+    let which_cmd = "where";
+    if let Ok(output) = Command::new(which_cmd).arg("node").output() {
         let which_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !which_path.is_empty() {
             let node_path = PathBuf::from(&which_path);
