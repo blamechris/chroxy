@@ -6489,6 +6489,72 @@ describe('postAuthQueue flush batching (#1348)', () => {
 
     server.clients.delete(mockWs)
   })
+
+  it('buffers messages sent during flush and drains them after', async () => {
+    const mockManager = createHistoryMockManager({
+      history: [],
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+
+    const sentData = []
+    const mockWs = {
+      readyState: 1,
+      send(data) { sentData.push(JSON.parse(data)) },
+    }
+
+    server.clients.set(mockWs, {
+      id: 'mock-client',
+      _seq: 0,
+      activeSessionId: 'sess-1',
+      encryptionPending: false,
+      encryptionState: null,
+      postAuthQueue: null,
+      _flushing: false,
+      _flushOverflow: null,
+    })
+
+    // Build a queue of 30 messages
+    const queue = []
+    for (let i = 0; i < 30; i++) {
+      queue.push({ type: 'message', content: `queued-${i}` })
+    }
+
+    server._flushPostAuthQueue(mockWs, queue)
+
+    // First chunk (20) sent synchronously
+    assert.equal(sentData.length, 20)
+
+    // Now simulate a message arriving during the setImmediate gap
+    // The _flushing flag should be true between chunks
+    const client = server.clients.get(mockWs)
+    assert.equal(client._flushing, true, '_flushing should be true between chunks')
+
+    server._send(mockWs, { type: 'live_message', content: 'live-1' })
+
+    // live message should be buffered, not sent
+    assert.equal(sentData.length, 20, 'Live message should be buffered during flush')
+    assert.ok(client._flushOverflow?.length === 1, 'Overflow should contain the buffered message')
+
+    // Allow flush to complete
+    await new Promise(r => setImmediate(r))
+
+    // After flush: remaining 10 queued + 1 overflow = 31 total
+    assert.equal(sentData.length, 31, 'All queued + overflow messages should be sent')
+
+    // Verify ordering: first 20 queued, then 10 more queued, then live
+    assert.equal(sentData[20].content, 'queued-20')
+    assert.equal(sentData[29].content, 'queued-29')
+    assert.equal(sentData[30].content, 'live-1')
+
+    server.clients.delete(mockWs)
+  })
 })
 
 describe('encryption integration (end-to-end)', () => {

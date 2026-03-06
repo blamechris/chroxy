@@ -645,6 +645,8 @@ export class WsServer {
         encryptionState: null,    // { sharedKey, sendNonce, recvNonce } when active
         encryptionPending: false, // true while waiting for key_exchange
         postAuthQueue: null,      // queued messages during key exchange
+        _flushing: false,         // true while draining post-auth queue
+        _flushOverflow: null,     // messages that arrived during flush
       })
 
       // Track pong responses for keepalive detection
@@ -952,15 +954,30 @@ export class WsServer {
    *  Same chunking pattern as _replayHistory — prevents blocking when queue is
    *  large (500+ messages with nacl.secretbox() encryption per send). */
   _flushPostAuthQueue(ws, queue) {
+    const client = this.clients.get(ws)
+    if (client) client._flushing = true
     const CHUNK_SIZE = 20
     const drainChunk = (offset) => {
-      if (ws.readyState !== 1) return
+      if (ws.readyState !== 1) {
+        if (client) client._flushing = false
+        return
+      }
       const end = Math.min(offset + CHUNK_SIZE, queue.length)
+      // Temporarily disable flushing guard so _send goes to wire
+      if (client) client._flushing = false
       for (let i = offset; i < end; i++) {
         this._send(ws, queue[i])
       }
       if (end < queue.length) {
+        if (client) client._flushing = true
         setImmediate(() => drainChunk(end))
+      } else if (client) {
+        // Flush complete — drain any overflow that accumulated
+        if (client._flushOverflow?.length) {
+          const overflow = client._flushOverflow
+          client._flushOverflow = null
+          this._flushPostAuthQueue(ws, overflow)
+        }
       }
     }
     drainChunk(0)
@@ -1316,6 +1333,12 @@ export class WsServer {
     // Queue messages while key exchange is pending
     if (client?.encryptionPending && client.postAuthQueue) {
       client.postAuthQueue.push(message)
+      return
+    }
+    // Buffer messages while post-auth queue is still flushing
+    if (client?._flushing) {
+      client._flushOverflow = client._flushOverflow || []
+      client._flushOverflow.push(message)
       return
     }
     // Assign per-client monotonic sequence number
