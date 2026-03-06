@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { renderHook } from '@testing-library/react'
-import { useCommands, getMruCommands, recordMruCommand } from './commands'
+import { useCommands, getMruCommands, recordMruCommand, useMruStore } from './commands'
 
 // Mock the connection store
 const mockStore = {
@@ -25,7 +25,7 @@ vi.mock('./connection', () => ({
 
 afterEach(() => {
   vi.clearAllMocks()
-  localStorage.clear()
+  useMruStore.setState({ mruList: [] })
 })
 
 describe('useCommands', () => {
@@ -80,7 +80,7 @@ describe('useCommands', () => {
 
 describe('MRU tracking', () => {
   beforeEach(() => {
-    localStorage.clear()
+    useMruStore.setState({ mruList: [] })
   })
 
   it('records command usage', () => {
@@ -114,11 +114,9 @@ describe('MRU tracking', () => {
     expect(mru).toHaveLength(10)
   })
 
-  it('persists to localStorage', () => {
+  it('exposes state via Zustand store', () => {
     recordMruCommand('test-cmd')
-    const raw = localStorage.getItem('chroxy-mru-commands')
-    expect(raw).toBeTruthy()
-    const parsed = JSON.parse(raw!)
-    expect(parsed).toContain('test-cmd')
+    const state = useMruStore.getState()
+    expect(state.mruList).toContain('test-cmd')
   })
 })
