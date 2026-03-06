@@ -7,7 +7,7 @@ import { PushManager } from './push.js'
 import { hostname, homedir } from 'os'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
+import { dirname, join, relative, sep } from 'path'
 import qrcode from 'qrcode-terminal'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
@@ -18,6 +18,11 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
 const SERVER_VERSION = packageJson.version
+
+function isWithinHome(dir) {
+  const rel = relative(homedir(), dir)
+  return !rel.startsWith('..') && !rel.startsWith(sep)
+}
 
 /**
  * Start the Chroxy server in CLI headless mode.
@@ -60,7 +65,7 @@ export async function startCliServer(config) {
     maxSessions: 5,
     port: PORT,
     apiToken: API_TOKEN,
-    defaultCwd: config.cwd || (process.cwd().startsWith(homedir()) ? process.cwd() : homedir()),
+    defaultCwd: config.cwd || (isWithinHome(process.cwd()) ? process.cwd() : homedir()),
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
     providerType,
