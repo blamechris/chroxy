@@ -267,6 +267,12 @@ export function App() {
     return [...repoMap.values()]
   }, [sessions])
 
+  // Known CWDs for CreateSessionModal suggestions
+  const knownCwds = useMemo(
+    () => [...sidebarRepos.map(r => r.path), ...(defaultCwd ? [defaultCwd] : []), ...(sessionCwd ? [sessionCwd] : [])],
+    [sidebarRepos, defaultCwd, sessionCwd],
+  )
+
   // Derive plan content from the last assistant message (plan text is streamed
   // before plan_ready fires — the WS protocol doesn't include plan content separately)
   const planHtml = useMemo(() => {
@@ -631,7 +637,7 @@ export function App() {
         onClose={() => setShowCreateSession(false)}
         onCreate={handleCreateSession}
         initialCwd={pendingCwd}
-        knownCwds={[...sidebarRepos.map(r => r.path), ...(defaultCwd ? [defaultCwd] : []), ...(sessionCwd ? [sessionCwd] : [])]}
+        knownCwds={knownCwds}
         existingNames={sessions.map(s => s.name)}
       />
 
