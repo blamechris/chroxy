@@ -101,8 +101,8 @@ describe('SessionOverview helpers', () => {
       expect(formatCost(0)).toBe('\u2014');
     });
 
-    it('formats cents for small amounts', () => {
-      expect(formatCost(0.0042)).toBe('$0.00');
+    it('formats sub-cent amounts as <$0.01', () => {
+      expect(formatCost(0.0042)).toBe('<$0.01');
     });
 
     it('formats dollars with 2 decimals', () => {
