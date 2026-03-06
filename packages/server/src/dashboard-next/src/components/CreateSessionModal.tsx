@@ -4,7 +4,7 @@
  * The CWD field is a combobox: shows known directories from existing sessions
  * as suggestions, but also accepts free-form typed paths.
  */
-import { useState, useEffect, useCallback, useRef, useId, type KeyboardEvent } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo, useId, type KeyboardEvent } from 'react'
 import { flushSync } from 'react-dom'
 import { Modal } from './Modal'
 
@@ -58,7 +58,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const cwdValRef = useRef('')
 
   // Deduplicate and sort known cwds
-  const suggestions = [...new Set(knownCwds)].sort()
+  const suggestions = useMemo(() => [...new Set(knownCwds)].sort(), [knownCwds])
 
   const prevOpenRef = useRef(false)
   useEffect(() => {
