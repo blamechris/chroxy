@@ -650,8 +650,7 @@ export class WsServer {
       const pendingCount = this._countPendingConnections()
       if (pendingCount >= this._maxPendingConnections) {
         console.warn(`[ws] Pre-auth connection limit reached (${pendingCount}/${this._maxPendingConnections}), rejecting upgrade`)
-        socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
-        socket.destroy()
+        socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
         return
       }
       this.wss.handleUpgrade(req, socket, head, (ws) => {
