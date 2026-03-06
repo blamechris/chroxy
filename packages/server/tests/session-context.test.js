@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { execFileSync } from 'child_process'
 import { readSessionContext } from '../src/session-context.js'
+import { GIT } from './test-helpers.js'
 
 describe('readSessionContext', () => {
   let gitDir   // temp dir with git init + commit
@@ -13,12 +14,12 @@ describe('readSessionContext', () => {
   before(async () => {
     // Create a temp git repo fixture
     gitDir = await mkdtemp(join(tmpdir(), 'session-ctx-git-'))
-    execFileSync('git', ['init', '-b', 'main'], { cwd: gitDir })
-    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: gitDir })
-    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: gitDir })
+    execFileSync(GIT, ['init', '-b', 'main'], { cwd: gitDir })
+    execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: gitDir })
+    execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: gitDir })
     await writeFile(join(gitDir, 'package.json'), JSON.stringify({ name: 'test-project' }))
-    execFileSync('git', ['add', '.'], { cwd: gitDir })
-    execFileSync('git', ['commit', '-m', 'init'], { cwd: gitDir })
+    execFileSync(GIT, ['add', '.'], { cwd: gitDir })
+    execFileSync(GIT, ['commit', '-m', 'init'], { cwd: gitDir })
 
     // Create a plain temp dir (no git, no package.json)
     plainDir = await mkdtemp(join(tmpdir(), 'session-ctx-plain-'))
@@ -46,7 +47,7 @@ describe('readSessionContext', () => {
     const ctx = await readSessionContext(gitDir)
     assert.ok(ctx.gitDirty >= 1, `expected dirty >= 1, got ${ctx.gitDirty}`)
     // Clean up: reset tracked files and index, then remove untracked file
-    execFileSync('git', ['reset', '--hard'], { cwd: gitDir })
+    execFileSync(GIT, ['reset', '--hard'], { cwd: gitDir })
     await rm(join(gitDir, 'dirty.txt'), { force: true })
   })
 

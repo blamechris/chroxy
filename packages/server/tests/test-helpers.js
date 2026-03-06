@@ -1,5 +1,8 @@
 import { EventEmitter } from 'node:events'
 
+// Re-export GIT from the source module so test files can import it from here
+export { GIT } from '../src/git.js'
+
 /**
  * Create a spy function that records all calls.
  *
