@@ -4,7 +4,7 @@
  * Tests: handle renders, cursor style, min/max clamping, drag behavior.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, cleanup, fireEvent } from '@testing-library/react'
+import { render, cleanup, fireEvent } from '@testing-library/react'
 import { Sidebar } from './Sidebar'
 
 afterEach(cleanup)
