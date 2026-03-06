@@ -28,6 +28,7 @@ export interface InputBarProps {
   onSend: (text: string, attachments?: FileAttachment[]) => void
   onInterrupt: () => void
   disabled?: boolean
+  isBusy?: boolean
   isStreaming?: boolean
   placeholder?: string
   filePickerFiles?: FilePickerItem[] | null
@@ -43,7 +44,7 @@ export interface InputBarProps {
   onFileAttach?: (path: string) => void
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach }: InputBarProps) {
   const [value, setValue] = useState('')
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
@@ -371,14 +372,20 @@ export function InputBar({ onSend, onInterrupt, disabled, isStreaming, placehold
           selectedIndex={selectedIndex}
         />
       )}
+      {isBusy && !isStreaming && (
+        <div className="thinking-indicator" data-testid="thinking-indicator">
+          <span className="thinking-dot" /><span className="thinking-dot" /><span className="thinking-dot" />
+          <span className="thinking-text">Thinking...</span>
+        </div>
+      )}
       <textarea
         ref={textareaRef}
         value={value}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
-        disabled={disabled}
-        placeholder={placeholder}
+        disabled={disabled || isBusy}
+        placeholder={isBusy ? 'Claude is processing...' : placeholder}
         aria-label="Message input"
         aria-describedby={shortcutsId}
         rows={1}

@@ -21,11 +21,28 @@ const EVENT_LABELS: Record<SessionNotification['eventType'], string> = {
 function NotificationRow({ notification }: { notification: SessionNotification }) {
   const switchSession = useConnectionStore((s) => s.switchSession);
   const dismiss = useConnectionStore((s) => s.dismissSessionNotification);
+  const sendPermissionResponse = useConnectionStore((s) => s.sendPermissionResponse);
 
   const dotColor =
     notification.eventType === 'error' ? COLORS.accentRed :
     notification.eventType === 'completed' ? COLORS.accentGreen :
     COLORS.accentOrange;
+
+  const isPermission = notification.eventType === 'permission' && !!notification.requestId;
+
+  const handleApprove = () => {
+    if (notification.requestId) {
+      sendPermissionResponse(notification.requestId, 'allow');
+      dismiss(notification.id);
+    }
+  };
+
+  const handleDeny = () => {
+    if (notification.requestId) {
+      sendPermissionResponse(notification.requestId, 'deny');
+      dismiss(notification.id);
+    }
+  };
 
   return (
     <View style={styles.row}>
@@ -44,14 +61,35 @@ function NotificationRow({ notification }: { notification: SessionNotification }
           {EVENT_LABELS[notification.eventType]}
         </Text>
       </TouchableOpacity>
-      <TouchableOpacity
-        onPress={() => dismiss(notification.id)}
-        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        accessibilityRole="button"
-        accessibilityLabel="Dismiss notification"
-      >
-        <Icon name="close" size={14} color={COLORS.textMuted} />
-      </TouchableOpacity>
+      {isPermission ? (
+        <View style={styles.actionButtons}>
+          <TouchableOpacity
+            style={styles.approveButton}
+            onPress={handleApprove}
+            accessibilityRole="button"
+            accessibilityLabel="Approve permission"
+          >
+            <Text style={styles.approveText}>Approve</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.denyButton}
+            onPress={handleDeny}
+            accessibilityRole="button"
+            accessibilityLabel="Deny permission"
+          >
+            <Text style={styles.denyText}>Deny</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <TouchableOpacity
+          onPress={() => dismiss(notification.id)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          accessibilityRole="button"
+          accessibilityLabel="Dismiss notification"
+        >
+          <Icon name="close" size={14} color={COLORS.textMuted} />
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -109,6 +147,32 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: 13,
     flex: 1,
+  },
+  actionButtons: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  approveButton: {
+    backgroundColor: COLORS.accentGreen,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 4,
+  },
+  approveText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  denyButton: {
+    backgroundColor: COLORS.accentRed,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 4,
+  },
+  denyText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
   },
   dismissText: {
     color: COLORS.textMuted,
