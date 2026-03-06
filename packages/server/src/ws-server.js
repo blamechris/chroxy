@@ -151,7 +151,7 @@ function getGitInfo() {
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
- *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, connectedClients, encryption } — auth succeeded (encryption: 'required'|'disabled')
+ *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, defaultCwd, connectedClients, encryption } — auth succeeded (encryption: 'required'|'disabled')
  *   { type: 'key_exchange_ok', publicKey }               — server's ephemeral X25519 public key (E2E encryption)
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli' }             — which backend mode is active
