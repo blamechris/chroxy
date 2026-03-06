@@ -2,29 +2,21 @@
  * Command registry — maps palette entries to store actions.
  *
  * Exports a `useCommands()` hook returning Command[] wired to the
- * connection store, and MRU helpers persisted to localStorage.
+ * connection store. MRU state managed by useMruStore.
  */
 import { useMemo } from 'react'
 import { useConnectionStore } from './connection'
+import { useMruStore } from './mru'
 import type { Command } from '../components/CommandPalette'
 
-const MRU_KEY = 'chroxy-mru-commands'
-const MRU_MAX = 10
+export { useMruStore } from './mru'
 
 export function getMruCommands(): string[] {
-  try {
-    const raw = localStorage.getItem(MRU_KEY)
-    if (!raw) return []
-    return JSON.parse(raw)
-  } catch {
-    return []
-  }
+  return [...useMruStore.getState().mruList]
 }
 
 export function recordMruCommand(id: string): void {
-  const mru = getMruCommands().filter(x => x !== id)
-  mru.unshift(id)
-  localStorage.setItem(MRU_KEY, JSON.stringify(mru.slice(0, MRU_MAX)))
+  useMruStore.getState().recordCommand(id)
 }
 
 export function useCommands(): Command[] {
