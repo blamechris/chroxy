@@ -4,7 +4,7 @@
  * Shows repos with active/resumable sessions, filter, status footer.
  * Collapsible with Cmd+B toggle.
  */
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { ConversationSearch } from './ConversationSearch'
 import type { SearchResult } from '../store/types'
 
@@ -56,6 +56,7 @@ export interface SidebarProps {
   searchQuery?: string
   searchConversations?: (query: string) => void
   clearSearchResults?: () => void
+  onWidthChange?: (width: number) => void
 }
 
 function abbreviateTunnel(url: string): string {
@@ -86,12 +87,41 @@ export function Sidebar({
   searchQuery = '',
   searchConversations,
   clearSearchResults,
+  onWidthChange,
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
 
   const toggleRepo = useCallback((path: string) => {
     setCollapsed(prev => ({ ...prev, [path]: !prev[path] }))
   }, [])
+
+  // Resize handle drag logic
+  const isDragging = useRef(false)
+  const startX = useRef(0)
+  const startWidth = useRef(width)
+
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    isDragging.current = true
+    startX.current = e.clientX
+    startWidth.current = width
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isDragging.current) return
+      const delta = ev.clientX - startX.current
+      const newWidth = Math.min(480, Math.max(160, startWidth.current + delta))
+      onWidthChange?.(newWidth)
+    }
+
+    const onMouseUp = () => {
+      isDragging.current = false
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }, [width, onWidthChange])
 
   const filteredRepos = filter
     ? repos
@@ -264,6 +294,12 @@ export function Sidebar({
             <span className="sidebar-client-count">{clientCount} client{clientCount !== 1 ? 's' : ''}</span>
           </div>
         </>
+      )}
+      {isOpen && (
+        <div
+          className="sidebar-resize-handle"
+          onMouseDown={handleResizeMouseDown}
+        />
       )}
     </aside>
   )
