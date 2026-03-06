@@ -2,7 +2,7 @@
  * CreateSessionModal combobox and auto-naming tests (#1477)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import { CreateSessionModal, type CreateSessionModalProps } from './CreateSessionModal'
 
 afterEach(cleanup)
@@ -86,8 +86,10 @@ describe('CreateSessionModal combobox keyboard (#1477)', () => {
     })
     const cwdInput = screen.getByLabelText('Working directory')
     fireEvent.focus(cwdInput)
-    expect(screen.getByRole('listbox')).toBeInTheDocument()
-    expect(screen.getAllByRole('option')).toHaveLength(2)
+    const listbox = screen.getByRole('listbox')
+    expect(listbox).toBeInTheDocument()
+    const { getAllByRole } = within(listbox)
+    expect(getAllByRole('option')).toHaveLength(2)
   })
 
   it('ArrowDown navigates through suggestions', () => {

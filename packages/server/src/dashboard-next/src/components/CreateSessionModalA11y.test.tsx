@@ -2,7 +2,7 @@
  * CreateSessionModal ARIA combobox tests (#1478)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import { CreateSessionModal } from './CreateSessionModal'
 
 afterEach(cleanup)
@@ -37,7 +37,8 @@ describe('CreateSessionModal ARIA combobox (#1478)', () => {
     renderModal()
     const cwdInput = screen.getByLabelText('Working directory')
     fireEvent.focus(cwdInput)
-    const options = screen.getAllByRole('option')
+    const listbox = screen.getByRole('listbox')
+    const options = within(listbox).getAllByRole('option')
     for (const opt of options) {
       expect(opt.id).toBeTruthy()
     }
