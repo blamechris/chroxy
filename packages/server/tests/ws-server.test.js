@@ -9271,22 +9271,25 @@ describe('broadcast backpressure', () => {
     const clientWs = [...server.clients.keys()][0]
     Object.defineProperty(clientWs, 'bufferedAmount', { get: () => 200, configurable: true })
 
-    // This broadcast should be skipped due to backpressure
+    // Spy on _send to verify backpressure skips the client
+    const sendCalls = []
+    const originalSend = server._send.bind(server)
+    server._send = (ws, msg) => { sendCalls.push({ ws, msg }); return originalSend(ws, msg) }
+
     server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'bp-test' }] })
 
-    // Give time for the message to arrive (it shouldn't)
-    await new Promise(r => setTimeout(r, 100))
-    const bpMsg = messages.find(m => m.type === 'discovered_sessions' && m.tmux?.length === 1)
-    assert.equal(bpMsg, undefined, 'Should NOT receive broadcast when over backpressure threshold')
+    const clientSends = sendCalls.filter(call => call.ws === clientWs)
+    assert.equal(clientSends.length, 0, 'Should NOT send broadcast to client when over backpressure threshold')
+    server._send = originalSend
 
     // Restore bufferedAmount and verify broadcast resumes
     Object.defineProperty(clientWs, 'bufferedAmount', { get: () => 0, configurable: true })
     server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'resumed' }] })
-    await waitFor(
+    const resumedMsg = await waitFor(
       () => messages.find(m => m.type === 'discovered_sessions' && m.tmux?.[0]?.sessionName === 'resumed'),
       { label: 'resumed broadcast' }
     )
-    assert.ok(true, 'Should receive broadcast after backpressure clears')
+    assert.ok(resumedMsg, 'Should receive broadcast after backpressure clears')
 
     ws.close()
     server.close()

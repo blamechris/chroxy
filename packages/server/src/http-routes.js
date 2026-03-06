@@ -136,7 +136,10 @@ export function createHttpHandler(server) {
       const connInfo = readConnectionInfo()
       if (!connInfo || !connInfo.connectionUrl) {
         const errHeaders = { 'Content-Type': 'application/json' }
-        if (qrCors) errHeaders['Access-Control-Allow-Origin'] = qrCors
+        if (qrCors) {
+          errHeaders['Access-Control-Allow-Origin'] = qrCors
+          errHeaders['Vary'] = 'Origin'
+        }
         res.writeHead(503, errHeaders)
         res.end(JSON.stringify({ error: 'Connection info not available yet' }))
         return
@@ -151,7 +154,10 @@ export function createHttpHandler(server) {
           'Content-Type': 'image/svg+xml',
           'Cache-Control': 'no-store',
         }
-        if (qrCors) qrHeaders['Access-Control-Allow-Origin'] = qrCors
+        if (qrCors) {
+          qrHeaders['Access-Control-Allow-Origin'] = qrCors
+          qrHeaders['Vary'] = 'Origin'
+        }
         res.writeHead(200, qrHeaders)
         res.end(svg)
       } catch (_err) {
@@ -225,7 +231,7 @@ export function createHttpHandler(server) {
       // Serve static assets WITHOUT auth — hashed filenames from Vite build
       if (relPath.startsWith('assets/')) {
         const filePath = resolve(distDir, relPath)
-        if (!filePath.startsWith(distDir)) {
+        if (!filePath.startsWith(distDir + '/')) {
           res.writeHead(403)
           res.end('Forbidden')
           return

@@ -1,4 +1,4 @@
-import { describe, it, after } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
@@ -58,8 +58,9 @@ describe('http-routes', () => {
     return port
   }
 
-  after(() => {
+  afterEach(() => {
     httpServer?.close()
+    httpServer = null
   })
 
   describe('health endpoint', () => {
@@ -72,7 +73,6 @@ describe('http-routes', () => {
       assert.equal(body.status, 'ok')
       assert.equal(body.mode, 'multi')
       assert.ok(body.version)
-      httpServer.close()
     })
 
     it('GET /health returns JSON health status', async () => {
@@ -82,7 +82,6 @@ describe('http-routes', () => {
       assert.equal(res.status, 200)
       const body = await res.json()
       assert.equal(body.status, 'ok')
-      httpServer.close()
     })
 
     it('GET / with Accept: text/html redirects to /dashboard when apiToken set', async () => {
@@ -94,7 +93,6 @@ describe('http-routes', () => {
       })
       assert.equal(res.status, 302)
       assert.equal(res.headers.get('location'), '/dashboard')
-      httpServer.close()
     })
   })
 
@@ -111,7 +109,6 @@ describe('http-routes', () => {
       assert.equal(body.gitCommit, 'abc123')
       assert.equal(body.gitBranch, 'main')
       assert.equal(typeof body.uptime, 'number')
-      httpServer.close()
     })
 
     it('GET /version rejects without auth', async () => {
@@ -119,7 +116,6 @@ describe('http-routes', () => {
       await startWith(mock)
       const res = await globalThis.fetch(`http://127.0.0.1:${port}/version`)
       assert.equal(res.status, 403)
-      httpServer.close()
     })
   })
 
@@ -132,7 +128,6 @@ describe('http-routes', () => {
       })
       assert.equal(res.status, 204)
       assert.equal(res.headers.get('access-control-allow-methods'), 'GET, POST, OPTIONS')
-      httpServer.close()
     })
   })
 
@@ -143,9 +138,7 @@ describe('http-routes', () => {
       const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr`, {
         headers: { 'Authorization': 'Bearer test-token' },
       })
-      // Connection info is not available (no server running), so 503
       assert.equal(res.status, 503)
-      httpServer.close()
     })
   })
 
@@ -155,7 +148,6 @@ describe('http-routes', () => {
       await startWith(mock)
       const res = await globalThis.fetch(`http://127.0.0.1:${port}/nonexistent`)
       assert.equal(res.status, 404)
-      httpServer.close()
     })
   })
 })
