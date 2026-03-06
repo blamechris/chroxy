@@ -74,6 +74,7 @@ export const CreateSessionSchema = z.object({
   type: z.literal('create_session'),
   name: z.string().optional(),
   cwd: z.string().optional(),
+  provider: z.string().optional(),
 })
 
 export const DestroySessionSchema = z.object({
