@@ -28,7 +28,7 @@
 #app.with-sidebar {
   display: grid;
   grid-template-columns: auto 1fr;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto auto 1fr auto;
 }
 
 #app.with-sidebar > .reconnect-banner {
@@ -136,10 +136,27 @@
   overflow: hidden;
   flex-shrink: 0;
   min-width: 0;
+  position: relative;
 }
 
 .sidebar.collapsed {
   width: 32px !important;
+}
+
+.sidebar-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+  transition: background 0.15s;
+}
+
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle:active {
+  background: var(--accent-blue);
 }
 
 .sidebar-toggle {
@@ -1469,6 +1486,83 @@
 @keyframes busyPulse {
   0%, 100% { opacity: 0.4; }
   50% { opacity: 1; }
+}
+
+/* ---- Footer Bar (VSCode-style) ---- */
+.footer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 12px;
+  background: var(--bg-header);
+  border-top: 1px solid var(--border-primary);
+  font-size: 12px;
+  color: var(--text-dim);
+  grid-column: 1 / -1;
+  min-height: 22px;
+  flex-shrink: 0;
+}
+
+.footer-left, .footer-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.footer-version {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.footer-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.footer-status-dot.connected { background: var(--accent-green); }
+.footer-status-dot.connecting, .footer-status-dot.reconnecting { background: var(--accent-orange); }
+.footer-status-dot.server_restarting { background: var(--accent-orange); }
+.footer-status-dot.disconnected { background: var(--text-muted); }
+
+.footer-status-label {
+  color: var(--text-secondary);
+}
+
+.footer-cwd {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.footer-model {
+  color: var(--text-secondary);
+}
+
+.footer-cost {
+  color: var(--accent-green);
+  font-family: var(--font-mono);
+}
+
+.footer-context {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.footer-agents {
+  color: var(--text-secondary);
+}
+
+.footer-busy {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-blue);
+  animation: busyPulse 1s infinite ease-in-out;
+  flex-shrink: 0;
 }
 
 .agent-badge {
