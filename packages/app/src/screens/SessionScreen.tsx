@@ -599,12 +599,13 @@ export function SessionScreen() {
       {/* Session picker (CLI mode with multi-session support) */}
       {isCliMode && sessions.length > 0 && (
         <View style={styles.sessionPickerRow}>
-          <View style={{ flex: 1 }}>
+          <View style={styles.sessionPickerWrapper}>
             <SessionPicker onCreatePress={() => setShowCreateModal(true)} />
           </View>
           <TouchableOpacity
             style={styles.overviewButton}
             onPress={() => setShowSessionOverview(!showSessionOverview)}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
             accessibilityRole="button"
             accessibilityLabel={showSessionOverview ? 'Hide session overview' : 'Show session overview'}
           >
@@ -617,7 +618,7 @@ export function SessionScreen() {
 
       {/* Session overview panel */}
       {showSessionOverview && (
-        <SessionOverview visible={showSessionOverview} onClose={() => setShowSessionOverview(false)} />
+        <SessionOverview onClose={() => setShowSessionOverview(false)} />
       )}
 
       {/* Selection bar or view mode toggle */}
@@ -906,59 +907,61 @@ export function SessionScreen() {
       )}
 
       {/* Content area — split view on tablets in landscape */}
-      {!showSessionOverview && layout.isSplitView && hasTerminal && viewMode !== 'files' ? (
-        <View style={styles.splitContainer}>
-          <View style={styles.splitPane}>
-            <ChatView
-              messages={messages}
-              scrollViewRef={scrollViewRef}
-              claudeReady={claudeReady}
-              onSelectOption={handleSelectOption}
-              isCliMode={isCliMode}
-              selectedIds={selectedIds}
-              isSelecting={isSelecting}
-              isSelectingRef={isSelectingRef}
-              onToggleSelection={toggleSelection}
-              streamingMessageId={streamingMessageId}
-              isPlanPending={isPlanPending}
-              planAllowedPrompts={planAllowedPrompts}
-              onApprovePlan={handleApprovePlan}
-              onFocusInput={handleFocusInput}
-              searchQuery={searchVisible ? searchQuery : undefined}
-              searchMatchIds={searchVisible ? searchMatchIds : undefined}
-              currentMatchId={searchVisible ? currentMatchId : undefined}
-            />
+      {!showSessionOverview && (
+        layout.isSplitView && hasTerminal && viewMode !== 'files' ? (
+          <View style={styles.splitContainer}>
+            <View style={styles.splitPane}>
+              <ChatView
+                messages={messages}
+                scrollViewRef={scrollViewRef}
+                claudeReady={claudeReady}
+                onSelectOption={handleSelectOption}
+                isCliMode={isCliMode}
+                selectedIds={selectedIds}
+                isSelecting={isSelecting}
+                isSelectingRef={isSelectingRef}
+                onToggleSelection={toggleSelection}
+                streamingMessageId={streamingMessageId}
+                isPlanPending={isPlanPending}
+                planAllowedPrompts={planAllowedPrompts}
+                onApprovePlan={handleApprovePlan}
+                onFocusInput={handleFocusInput}
+                searchQuery={searchVisible ? searchQuery : undefined}
+                searchMatchIds={searchVisible ? searchMatchIds : undefined}
+                currentMatchId={searchVisible ? currentMatchId : undefined}
+              />
+            </View>
+            <View style={styles.splitDivider} />
+            <View style={styles.splitPane}>
+              <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+            </View>
           </View>
-          <View style={styles.splitDivider} />
-          <View style={styles.splitPane}>
-            <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
-          </View>
-        </View>
-      ) : !showSessionOverview && viewMode === 'chat' ? (
-        <ChatView
-          messages={messages}
-          scrollViewRef={scrollViewRef}
-          claudeReady={claudeReady}
-          onSelectOption={handleSelectOption}
-          isCliMode={isCliMode}
-          selectedIds={selectedIds}
-          isSelecting={isSelecting}
-          isSelectingRef={isSelectingRef}
-          onToggleSelection={toggleSelection}
-          streamingMessageId={streamingMessageId}
-          isPlanPending={isPlanPending}
-          planAllowedPrompts={planAllowedPrompts}
-          onApprovePlan={handleApprovePlan}
-          onFocusInput={handleFocusInput}
-          searchQuery={searchVisible ? searchQuery : undefined}
-          searchMatchIds={searchVisible ? searchMatchIds : undefined}
-          currentMatchId={searchVisible ? currentMatchId : undefined}
-        />
-      ) : !showSessionOverview && viewMode === 'files' ? (
-        <FileBrowser />
-      ) : !showSessionOverview ? (
-        <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
-      ) : null}
+        ) : viewMode === 'chat' ? (
+          <ChatView
+            messages={messages}
+            scrollViewRef={scrollViewRef}
+            claudeReady={claudeReady}
+            onSelectOption={handleSelectOption}
+            isCliMode={isCliMode}
+            selectedIds={selectedIds}
+            isSelecting={isSelecting}
+            isSelectingRef={isSelectingRef}
+            onToggleSelection={toggleSelection}
+            streamingMessageId={streamingMessageId}
+            isPlanPending={isPlanPending}
+            planAllowedPrompts={planAllowedPrompts}
+            onApprovePlan={handleApprovePlan}
+            onFocusInput={handleFocusInput}
+            searchQuery={searchVisible ? searchQuery : undefined}
+            searchMatchIds={searchVisible ? searchMatchIds : undefined}
+            currentMatchId={searchVisible ? currentMatchId : undefined}
+          />
+        ) : viewMode === 'files' ? (
+          <FileBrowser />
+        ) : (
+          <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+        )
+      )}
 
       {/* Input area */}
       <InputBar
@@ -1272,6 +1275,9 @@ const styles = StyleSheet.create({
   sessionPickerRow: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  sessionPickerWrapper: {
+    flex: 1,
   },
   overviewButton: {
     paddingHorizontal: 12,
