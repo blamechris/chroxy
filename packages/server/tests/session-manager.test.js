@@ -1264,3 +1264,15 @@ describe('#1091 — destroy-while-streaming event leak', () => {
     assert.equal(mgr._pendingStreams.get('other-session:msg-c'), 'other content')
   })
 })
+
+describe('SessionManager.defaultCwd getter (#1475)', () => {
+  it('exposes defaultCwd via public getter', () => {
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp/test-cwd' })
+    assert.equal(mgr.defaultCwd, '/tmp/test-cwd')
+  })
+
+  it('defaults to process.cwd() when no defaultCwd provided', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    assert.equal(mgr.defaultCwd, process.cwd())
+  })
+})

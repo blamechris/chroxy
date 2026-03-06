@@ -599,6 +599,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   disconnect: () => {
+    hapticMedium();
     // Bump attempt ID to cancel any pending health checks / retry timers
     bumpConnectionAttemptId();
     setDisconnectedAttemptId(connectionAttemptId);

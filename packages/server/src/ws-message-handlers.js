@@ -16,6 +16,14 @@ export const PERMISSION_MODES = [
 ]
 export const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
 
+/** Broadcast client_focus_changed to other clients when a client's active session changes */
+function broadcastFocusChanged(client, sessionId, ctx) {
+  ctx.broadcast(
+    { type: 'client_focus_changed', clientId: client.id, sessionId, timestamp: Date.now() },
+    (c) => c.id !== client.id
+  )
+}
+
 // -- Attachment validation constants --
 export const MAX_ATTACHMENT_COUNT = 5
 export const MAX_IMAGE_SIZE = 2 * 1024 * 1024       // 2MB decoded
@@ -245,6 +253,12 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       entry.session.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
 
       ctx.updatePrimary(targetSessionId, client.id)
+
+      // Echo user_input to other clients so they see what was sent (#1119)
+      ctx.broadcast(
+        { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, timestamp: Date.now() },
+        (c) => c.id !== client.id
+      )
       break
     }
 
@@ -370,11 +384,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       ctx.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
       ctx.sendSessionInfo(ws, targetId)
       ctx.replayHistory(ws, targetId)
-      // Notify other clients about this client's focus change
-      ctx.broadcast(
-        { type: 'client_focus_changed', clientId: client.id, sessionId: targetId, timestamp: Date.now() },
-        (c) => c.id !== client.id
-      )
+      broadcastFocusChanged(client, targetId, ctx)
       break
     }
 
@@ -398,6 +408,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
         ctx.sendSessionInfo(ws, sessionId)
         ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+        broadcastFocusChanged(client, sessionId, ctx)
       } catch (err) {
         ctx.send(ws, { type: 'session_error', message: err.message })
       }
@@ -429,6 +440,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
             ctx.send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
             ctx.sendSessionInfo(clientWs, firstId)
           }
+          broadcastFocusChanged(c, firstId, ctx)
         }
       }
 
@@ -527,6 +539,13 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       const readSessionId = msg.sessionId || client.activeSessionId
       const readEntry = ctx.sessionManager.getSession(readSessionId)
       ctx.fileOps.readFile(ws, msg.path, readEntry?.cwd || null)
+      break
+    }
+
+    case 'write_file': {
+      const writeSessionId = msg.sessionId || client.activeSessionId
+      const writeEntry = ctx.sessionManager.getSession(writeSessionId)
+      ctx.fileOps.writeFile(ws, msg.path, msg.content, writeEntry?.cwd || null)
       break
     }
 
@@ -660,6 +679,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         ctx.sendSessionInfo(ws, sessionId)
         ctx.replayHistory(ws, sessionId)
         ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+        broadcastFocusChanged(client, sessionId, ctx)
       } catch (err) {
         ctx.send(ws, { type: 'session_error', message: err.message })
       }
@@ -909,6 +929,12 @@ export function handleCliMessage(ws, client, msg, ctx) {
       console.log(`[ws] Message from ${client.id}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
       ctx.cliSession.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
       ctx.updatePrimary('default', client.id)
+
+      // Echo user_input to other clients so they see what was sent (#1119)
+      ctx.broadcast(
+        { type: 'user_input', sessionId: 'default', clientId: client.id, text: trimmed, timestamp: Date.now() },
+        (c) => c.id !== client.id
+      )
       break
     }
 
@@ -987,6 +1013,10 @@ export function handleCliMessage(ws, client, msg, ctx) {
 
     case 'read_file':
       ctx.fileOps.readFile(ws, msg.path, ctx.cliSession?.cwd || null)
+      break
+
+    case 'write_file':
+      ctx.fileOps.writeFile(ws, msg.path, msg.content, ctx.cliSession?.cwd || null)
       break
 
     case 'get_diff':

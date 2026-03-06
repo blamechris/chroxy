@@ -560,3 +560,114 @@ describe('#988 — _killAndRespawn extraction', () => {
       'setPermissionMode should not contain inline kill logic (forceKillTimer)')
   })
 })
+
+describe('_killAndRespawn behavioral tests (#1009)', () => {
+  it('setModel kills old child and respawns after close', async () => {
+    const session = createReadySession({ model: 'sonnet' })
+    const oldChild = session._child
+
+    // Stub start() to prevent actual process spawning
+    let startCalled = false
+    session.start = () => { startCalled = true }
+
+    // Trigger model change → _killAndRespawn
+    session.setModel('opus')
+
+    // _destroying should be set before kill
+    assert.equal(session._destroying, true)
+    assert.equal(session._processReady, false)
+    assert.equal(session._child, null, 'Old child should be detached')
+    assert.equal(oldChild.kill.mock.calls.length, 1, 'kill() should be called on old child')
+    assert.equal(oldChild.kill.mock.calls[0].arguments[0], 'SIGTERM')
+
+    // start() not called yet (waiting for close)
+    assert.equal(startCalled, false)
+
+    // Simulate old child closing
+    oldChild.emit('close', 0)
+
+    // Now start() should have been called
+    assert.equal(startCalled, true)
+    assert.equal(session._destroying, false)
+    assert.equal(session._respawnCount, 0)
+  })
+
+  it('setPermissionMode kills old child and respawns after close', async () => {
+    const session = createReadySession({ permissionMode: 'approve' })
+    const oldChild = session._child
+
+    let startCalled = false
+    session.start = () => { startCalled = true }
+
+    session.setPermissionMode('auto')
+
+    assert.equal(session._destroying, true)
+    assert.equal(session.permissionMode, 'auto')
+    assert.equal(oldChild.kill.mock.calls.length, 1)
+
+    oldChild.emit('close', 0)
+
+    assert.equal(startCalled, true)
+    assert.equal(session._destroying, false)
+  })
+
+  it('_killAndRespawn clears timers before killing', () => {
+    const session = createReadySession({ model: 'sonnet' })
+    const oldChild = session._child
+
+    // Set up timers that should be cleared
+    session._interruptTimer = setTimeout(() => {}, 100000)
+    session._respawnTimer = setTimeout(() => {}, 100000)
+
+    session.start = () => {}
+    session.setModel('opus')
+
+    assert.equal(session._interruptTimer, null)
+    assert.equal(session._respawnTimer, null)
+
+    // Emit close to clean up the forceKillTimer created by _killAndRespawn
+    oldChild.emit('close', 0)
+  })
+
+  it('_killAndRespawn starts immediately when no child exists', () => {
+    const session = createSession({ model: 'sonnet' })
+    session._processReady = true
+    session._child = null // no child process
+
+    let startCalled = false
+    session.start = () => { startCalled = true }
+
+    session.setModel('opus')
+
+    // Should call start() immediately (no child to kill)
+    assert.equal(startCalled, true)
+    assert.equal(session._destroying, false)
+  })
+
+  it('setModel ignores change when busy', () => {
+    const session = createReadySession({ model: 'sonnet' })
+    session._isBusy = true
+
+    let startCalled = false
+    session.start = () => { startCalled = true }
+
+    session.setModel('opus')
+
+    // Should be a no-op — model unchanged, no kill
+    assert.equal(session.model, 'sonnet')
+    assert.equal(session._child.kill.mock.calls.length, 0)
+    assert.equal(startCalled, false)
+  })
+
+  it('setModel ignores change when model is the same', () => {
+    const session = createReadySession({ model: 'claude-sonnet-4-20250514' })
+
+    let startCalled = false
+    session.start = () => { startCalled = true }
+
+    session.setModel('sonnet') // resolves to same full ID
+
+    assert.equal(session._child.kill.mock.calls.length, 0)
+    assert.equal(startCalled, false)
+  })
+})

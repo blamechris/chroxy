@@ -285,6 +285,8 @@ export function ConnectScreen() {
             setAutoConnecting(false);
             useConnectionStore.getState().disconnect();
           }}
+          accessibilityRole="button"
+          accessibilityLabel="Cancel auto-connect"
         >
           <Text style={styles.autoConnectCancelText}>Cancel</Text>
         </TouchableOpacity>
@@ -310,6 +312,8 @@ export function ConnectScreen() {
         <TouchableOpacity
           style={styles.cancelButton}
           onPress={() => setShowScanner(false)}
+          accessibilityRole="button"
+          accessibilityLabel="Cancel scan"
         >
           <Text style={styles.cancelButtonText}>Cancel</Text>
         </TouchableOpacity>
@@ -342,11 +346,11 @@ export function ConnectScreen() {
       {/* Quick reconnect */}
       {savedConnection && (
         <View style={styles.savedSection}>
-          <TouchableOpacity style={styles.reconnectButton} onPress={handleReconnect}>
+          <TouchableOpacity style={styles.reconnectButton} onPress={handleReconnect} accessibilityRole="button" accessibilityLabel="Reconnect">
             <Text style={styles.reconnectButtonText}>Reconnect</Text>
             <Text style={styles.reconnectUrl}>{formatUrl(savedConnection.url)}</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.forgetButton} onPress={clearSavedConnection}>
+          <TouchableOpacity style={styles.forgetButton} onPress={clearSavedConnection} accessibilityRole="button" accessibilityLabel="Forget saved connection">
             <Text style={styles.forgetButtonText}>Forget</Text>
           </TouchableOpacity>
         </View>
@@ -365,7 +369,7 @@ export function ConnectScreen() {
         </TouchableOpacity>
       )}
 
-      <TouchableOpacity style={styles.qrButton} onPress={handleScanQR}>
+      <TouchableOpacity style={styles.qrButton} onPress={handleScanQR} accessibilityRole="button" accessibilityLabel="Scan QR Code">
         <View style={styles.qrButtonContent}>
           <Icon name="camera" size={20} color={COLORS.textPrimary} />
           <Text style={styles.qrButtonText}>Scan QR Code</Text>
@@ -377,6 +381,8 @@ export function ConnectScreen() {
         <TouchableOpacity
           style={[styles.lanButton, styles.lanButtonFlex, scanning && styles.lanButtonScanning]}
           onPress={handleScanLAN}
+          accessibilityRole="button"
+          accessibilityLabel="Scan local network"
         >
         {scanning ? (
           <View style={styles.lanButtonContent}>
@@ -414,6 +420,8 @@ export function ConnectScreen() {
               style={styles.discoveredItem}
               onPress={() => handleSelectDiscovered(server)}
               activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`Connect to ${server.hostname}`}
             >
               <View style={styles.discoveredInfo}>
                 <Text style={styles.discoveredHostname}>{server.hostname}</Text>
@@ -437,6 +445,8 @@ export function ConnectScreen() {
       <TouchableOpacity
         style={styles.manualToggle}
         onPress={() => setShowManual(!showManual)}
+        accessibilityRole="button"
+        accessibilityLabel="Toggle manual entry"
       >
         <Text style={styles.manualToggleText}>
           {showManual ? `${ICON_TRIANGLE_DOWN} Hide manual entry` : `${ICON_TRIANGLE_RIGHT} Enter manually`}
@@ -472,7 +482,7 @@ export function ConnectScreen() {
             secureTextEntry
           />
 
-          <TouchableOpacity style={styles.connectButton} onPress={handleConnect}>
+          <TouchableOpacity style={styles.connectButton} onPress={handleConnect} accessibilityRole="button" accessibilityLabel="Connect">
             <Text style={styles.connectButtonText}>Connect</Text>
           </TouchableOpacity>
         </View>

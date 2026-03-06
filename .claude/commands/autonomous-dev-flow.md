@@ -289,6 +289,37 @@ EOF
 PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$')
 ```
 
+### Phase 4.5: Smoke Test (if applicable)
+
+If the PR modified **UI or frontend files**, run the smoke test to catch visual regressions before review. This prevents wasting review cycles on PRs that break the UI.
+
+```bash
+NEEDS_SMOKE_TEST=false
+CHANGED_FILES=$(git diff --name-only main...HEAD)
+if echo "$CHANGED_FILES" | grep -qE 'dashboard-next|\.tsx$|\.css$|\.html$|components\.css|theme'; then
+  NEEDS_SMOKE_TEST=true
+fi
+```
+
+If `NEEDS_SMOKE_TEST` is true:
+
+1. **Rebuild dashboard** — source changes are NOT visible without rebuild:
+   ```bash
+   cd packages/server
+   PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dashboard:build
+   ```
+2. **Run `/smoke-test`** — launches headless browser, verifies key UI elements, takes screenshots
+3. **Check results:**
+   - **All pass:** Continue to Phase 5 (review)
+   - **Failures:** Read the screenshots, diagnose whether it's an app bug or a test selector issue
+     - **App bug:** Fix the code, rebuild, re-run smoke test
+     - **Test issue:** Note it in the PR description, continue (don't block on flaky test selectors)
+4. **Max 2 smoke test fix attempts** — if still failing after 2 fixes, flag the PR as "Needs attention (smoke test failure)" and move on
+
+If `NEEDS_SMOKE_TEST` is false, skip directly to Phase 5.
+
+**CRITICAL:** The smoke test must NOT send real messages or create persistent state. It only verifies UI rendering and navigation.
+
 ### Phase 5: Full Review
 
 **Pre-Skill Checkpoint** (MANDATORY — prevents context drift in long sessions):
@@ -326,13 +357,13 @@ Output cumulative progress table:
 ```markdown
 ## Session Progress ({completed}/{total})
 
-| # | Issue | Branch | PR | Review | Status |
-|---|-------|--------|----|--------|--------|
-| 1 | #12 — Add retry logic | 12-add-retry | #45 | Approve (0 critical) | Done |
-| 2 | #15 — Add leaderboard | — | — | — | Decomposed → #20, #21 |
-| 3 | #20 — Leaderboard data model | 20-lb-model | #46 | Approve (1 suggestion) | Done |
-| 4 | #18 — Add auth tests | — | — | — | In progress |
-| 5 | #22 — Update error handling | — | — | — | Queued |
+| # | Issue | Branch | PR | Smoke | Review | Status |
+|---|-------|--------|----|-------|--------|--------|
+| 1 | #12 — Add retry logic | 12-add-retry | #45 | — | Approve (0 critical) | Done |
+| 2 | #15 — Add leaderboard | — | — | — | — | Decomposed → #20, #21 |
+| 3 | #20 — Leaderboard data model | 20-lb-model | #46 | 12/13 | Approve (1 suggestion) | Done |
+| 4 | #18 — Add auth tests | — | — | — | — | In progress |
+| 5 | #22 — Update error handling | — | — | — | — | Queued |
 ```
 
 **CRITICAL: Never block the session on a flagged PR.** Flag and move on. The user handles flagged PRs during check-ins.
@@ -351,12 +382,12 @@ After all issues are processed (or the queue is exhausted), output final summary
 
 ### Results
 
-| # | Issue | PR | Review Verdict | Status |
-|---|-------|----|---------------|--------|
-| 1 | #12 — Add retry logic | [#45](url) | Approve | Ready to merge |
-| 2 | #15 — Add leaderboard | — | — | Decomposed → #20, #21, #22 |
-| 3 | #20 — Leaderboard data model | [#46](url) | Approve | Ready to merge |
-| 4 | #18 — Add auth tests | [#47](url) | Request Changes | Needs attention |
+| # | Issue | PR | Smoke | Review Verdict | Status |
+|---|-------|----|-------|---------------|--------|
+| 1 | #12 — Add retry logic | [#45](url) | — | Approve | Ready to merge |
+| 2 | #15 — Add leaderboard | — | — | — | Decomposed → #20, #21, #22 |
+| 3 | #20 — Leaderboard data model | [#46](url) | 12/13 | Approve | Ready to merge |
+| 4 | #18 — Add auth tests | [#47](url) | — | Request Changes | Needs attention |
 
 ### Summary
 - **Ready to merge:** N PRs

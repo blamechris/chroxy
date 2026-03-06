@@ -474,7 +474,7 @@ export interface ConnectionState {
 
   // Session actions
   switchSession: (sessionId: string) => void;
-  createSession: (name: string, cwd?: string) => void;
+  createSession: (name: string, cwd?: string, provider?: string) => void;
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
   forgetSession: () => void;
