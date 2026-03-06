@@ -20,6 +20,8 @@ export interface CreateSessionModalProps {
   initialCwd?: string | null
   knownCwds?: string[]
   existingNames?: string[]
+  serverError?: string
+  isCreating?: boolean
 }
 
 /** Extract the last path segment, handling both POSIX and Windows separators. */
@@ -38,7 +40,7 @@ function generateDefaultName(cwdPath: string, existingNames: string[]): string {
 
 const EMPTY_STRINGS: string[] = []
 
-export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS }: CreateSessionModalProps) {
+export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS, serverError, isCreating }: CreateSessionModalProps) {
   const [name, setName] = useState('')
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)
   const [cwd, setCwd] = useState('')
@@ -230,12 +232,15 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       {cwd && !suggestions.includes(cwd) && (
         <span className="cwd-hint">New directory — session will start here</span>
       )}
+      {serverError && (
+        <span className="form-error" role="alert">{serverError}</span>
+      )}
       <div className="modal-buttons">
         <button className="btn-modal-cancel" onClick={onClose} type="button">
           Cancel
         </button>
-        <button className="btn-modal-create" onClick={submit} type="button">
-          Create
+        <button className="btn-modal-create" onClick={submit} type="button" disabled={isCreating}>
+          {isCreating ? 'Creating...' : 'Create'}
         </button>
       </div>
     </Modal>
