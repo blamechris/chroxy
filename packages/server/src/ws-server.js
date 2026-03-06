@@ -135,6 +135,7 @@ function getGitInfo() {
  *   { type: 'list_directory', path? }                  — request directory listing for file browser
  *   { type: 'browse_files', path? }                   — request file/directory listing for file browser
  *   { type: 'read_file', path }                       — request file content for file viewer
+ *   { type: 'write_file', path, content }              — write file content (path validated, 5MB limit)
  *   { type: 'list_slash_commands' }                     — request available slash commands
  *   { type: 'list_agents' }                             — request available custom agents
  *   { type: 'request_full_history', sessionId? }         — request full JSONL history for a session
