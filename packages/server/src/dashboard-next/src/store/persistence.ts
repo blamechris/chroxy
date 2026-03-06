@@ -15,6 +15,7 @@ const KEY_VIEW_MODE = `${KEY_PREFIX}view_mode`;
 const KEY_ACTIVE_SESSION = `${KEY_PREFIX}active_session_id`;
 const KEY_TERMINAL_BUFFER = `${KEY_PREFIX}terminal_buffer`;
 const KEY_SESSION_LIST = `${KEY_PREFIX}session_list`;
+const KEY_SIDEBAR_WIDTH = `${KEY_PREFIX}sidebar_width`;
 
 /** Max messages to persist per session (keeps storage bounded) */
 const MAX_MESSAGES = 100;
@@ -131,6 +132,27 @@ export function persistTerminalBuffer(buffer: string): void {
       // localStorage quota exceeded
     }
   });
+}
+
+/** Persist sidebar width */
+export function persistSidebarWidth(width: number): void {
+  try {
+    localStorage.setItem(KEY_SIDEBAR_WIDTH, String(width));
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Load persisted sidebar width */
+export function loadPersistedSidebarWidth(): number | null {
+  try {
+    const raw = localStorage.getItem(KEY_SIDEBAR_WIDTH);
+    if (!raw) return null;
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Persist the session list (debounced) */
