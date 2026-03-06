@@ -4,7 +4,7 @@
  * Tests rendering of version, connection status, cwd, model, cost, context,
  * busy indicator, and agent count.
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
 import { FooterBar } from './FooterBar'
 
@@ -78,5 +78,22 @@ describe('FooterBar', () => {
   it('hides agent count when 0', () => {
     render(<FooterBar {...baseProps} agentCount={0} />)
     expect(screen.queryByText(/agent/)).not.toBeInTheDocument()
+  })
+
+  it('shows QR button when onShowQr is provided', () => {
+    render(<FooterBar {...baseProps} onShowQr={vi.fn()} />)
+    expect(screen.getByLabelText('Show QR code')).toBeInTheDocument()
+  })
+
+  it('hides QR button when onShowQr is not provided', () => {
+    render(<FooterBar {...baseProps} />)
+    expect(screen.queryByLabelText('Show QR code')).not.toBeInTheDocument()
+  })
+
+  it('calls onShowQr when QR button clicked', () => {
+    const onShowQr = vi.fn()
+    render(<FooterBar {...baseProps} onShowQr={onShowQr} />)
+    screen.getByLabelText('Show QR code').click()
+    expect(onShowQr).toHaveBeenCalledOnce()
   })
 })
