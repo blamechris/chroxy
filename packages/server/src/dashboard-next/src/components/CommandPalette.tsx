@@ -40,25 +40,25 @@ export function CommandPalette({ commands, isOpen, onClose, mruList }: CommandPa
       const mruRank = new Map(mruList.map((id, i) => [id, i]))
       for (const [, cmds] of map) {
         cmds.sort((a, b) => {
-          const ra = mruRank.get(a.id) ?? Infinity
-          const rb = mruRank.get(b.id) ?? Infinity
-          return ra - rb
+          const ra = mruRank.get(a.id)
+          const rb = mruRank.get(b.id)
+          if (ra !== undefined && rb !== undefined) return ra - rb
+          if (ra !== undefined) return -1
+          if (rb !== undefined) return 1
+          return 0
         })
       }
     }
     return map
   }, [filtered, mruList])
 
-  // Build stable id→flatIndex map for aria-selected
-  const indexMap = useMemo(() => {
-    const map = new Map<string, number>()
-    let idx = 0
+  // Flat ordered list matching the visual render order (grouped + MRU-sorted)
+  const flatItems = useMemo(() => {
+    const items: Command[] = []
     for (const [, cmds] of grouped) {
-      for (const cmd of cmds) {
-        map.set(cmd.id, idx++)
-      }
+      items.push(...cmds)
     }
-    return map
+    return items
   }, [grouped])
 
   useEffect(() => {
@@ -84,16 +84,16 @@ export function CommandPalette({ commands, isOpen, onClose, mruList }: CommandPa
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault()
-        if (filtered.length > 0) setSelectedIndex(i => (i + 1) % filtered.length)
+        if (flatItems.length > 0) setSelectedIndex(i => (i + 1) % flatItems.length)
         break
       case 'ArrowUp':
         e.preventDefault()
-        if (filtered.length > 0) setSelectedIndex(i => (i - 1 + filtered.length) % filtered.length)
+        if (flatItems.length > 0) setSelectedIndex(i => (i - 1 + flatItems.length) % flatItems.length)
         break
       case 'Enter':
         e.preventDefault()
-        if (filtered[selectedIndex]) {
-          executeCommand(filtered[selectedIndex])
+        if (flatItems[selectedIndex]) {
+          executeCommand(flatItems[selectedIndex])
         }
         break
       case 'Escape':
@@ -125,14 +125,14 @@ export function CommandPalette({ commands, isOpen, onClose, mruList }: CommandPa
           autoFocus
         />
         <div id="command-palette-list" role="listbox" className="command-palette-list">
-          {filtered.length === 0 && (
+          {flatItems.length === 0 && (
             <div className="command-palette-empty">No matching commands</div>
           )}
           {Array.from(grouped.entries()).map(([category, cmds]) => (
             <div key={category} className="command-palette-group">
               <div className="command-palette-category">{category}</div>
               {cmds.map(cmd => {
-                const idx = indexMap.get(cmd.id) ?? 0
+                const idx = flatItems.indexOf(cmd)
                 return (
                   <div
                     key={cmd.id}

@@ -141,11 +141,15 @@ describe('CommandPalette', () => {
     const names = options.map(opt => opt.textContent?.replace(/Cmd\+\w+/, '').trim())
     const settingsStart = names.indexOf('Toggle Theme')
     const changeModelIdx = names.indexOf('Change Model')
-    expect(settingsStart).toBeLessThan(changeModelIdx!)
+    expect(settingsStart).toBeGreaterThanOrEqual(0)
+    expect(changeModelIdx).toBeGreaterThanOrEqual(0)
+    expect(settingsStart).toBeLessThan(changeModelIdx)
     // Within View category: switch-terminal (MRU) should come before switch-chat
     const terminalIdx = names.indexOf('Switch to Terminal')
     const chatIdx = names.indexOf('Switch to Chat')
-    expect(terminalIdx).toBeLessThan(chatIdx!)
+    expect(terminalIdx).toBeGreaterThanOrEqual(0)
+    expect(chatIdx).toBeGreaterThanOrEqual(0)
+    expect(terminalIdx).toBeLessThan(chatIdx)
   })
 
   it('integration: execute command → reopen → MRU reorders', () => {
@@ -159,7 +163,9 @@ describe('CommandPalette', () => {
     )
     let options = screen.getAllByRole('option')
     let names = options.map(opt => opt.textContent?.replace(/Cmd\+\w+/, '').trim())
-    expect(names.indexOf('Change Model')).toBeLessThan(names.indexOf('Toggle Theme')!)
+    expect(names.indexOf('Change Model')).toBeGreaterThanOrEqual(0)
+    expect(names.indexOf('Toggle Theme')).toBeGreaterThanOrEqual(0)
+    expect(names.indexOf('Change Model')).toBeLessThan(names.indexOf('Toggle Theme'))
 
     // Execute "Toggle Theme" — this records it as MRU
     fireEvent.click(screen.getByText('Toggle Theme'))
@@ -173,6 +179,8 @@ describe('CommandPalette', () => {
     options = screen.getAllByRole('option')
     names = options.map(opt => opt.textContent?.replace(/Cmd\+\w+/, '').trim())
     // Toggle Theme should now appear before Change Model in Settings
-    expect(names.indexOf('Toggle Theme')).toBeLessThan(names.indexOf('Change Model')!)
+    expect(names.indexOf('Toggle Theme')).toBeGreaterThanOrEqual(0)
+    expect(names.indexOf('Change Model')).toBeGreaterThanOrEqual(0)
+    expect(names.indexOf('Toggle Theme')).toBeLessThan(names.indexOf('Change Model'))
   })
 })
