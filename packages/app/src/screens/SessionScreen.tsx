@@ -604,7 +604,7 @@ export function SessionScreen() {
           <TouchableOpacity
             style={styles.overviewButton}
             onPress={() => setShowSessionOverview(!showSessionOverview)}
-            hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
             accessibilityRole="button"
             accessibilityLabel={showSessionOverview ? 'Hide session overview' : 'Show session overview'}
           >
