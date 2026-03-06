@@ -22,9 +22,14 @@ export interface CreateSessionModalProps {
   existingNames?: string[]
 }
 
+/** Extract the last path segment, handling both POSIX and Windows separators. */
+function basename(p: string): string {
+  return p.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || p
+}
+
 /** Generate a default session name from a directory path, avoiding collisions. */
 function generateDefaultName(cwdPath: string, existingNames: string[]): string {
-  const base = cwdPath.replace(/\/+$/, '').split('/').pop() || 'Session'
+  const base = basename(cwdPath) || 'Session'
   if (!existingNames.includes(base)) return base
   let n = 2
   while (existingNames.includes(`${base} (${n})`)) n++
@@ -201,7 +206,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
         {showSuggestions && suggestions.length > 0 && (
           <ul id={listboxId} className="cwd-suggestions" role="listbox">
             {suggestions.map((path, i) => {
-              const label = path.split('/').pop() || path
+              const label = basename(path)
               return (
                 <li
                   key={path}
