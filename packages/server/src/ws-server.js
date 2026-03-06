@@ -907,6 +907,14 @@ export class WsServer {
         this._replayHistory(ws, activeId)
       }
 
+      // Notify other clients about this client's initial session focus
+      if (activeId) {
+        this._broadcast(
+          { type: 'client_focus_changed', clientId: client.id, sessionId: activeId, timestamp: Date.now() },
+          (c) => c.id !== client.id
+        )
+      }
+
       this._send(ws, { type: 'available_models', models: getModels() })
       this._send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
 
