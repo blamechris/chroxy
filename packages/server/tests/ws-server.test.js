@@ -8742,13 +8742,17 @@ describe('Pre-auth connection limit', () => {
       pending.push(ws)
     }
 
-    // The next connection should be rejected (closed quickly)
+    // The next connection should be rejected with 503
     const rejected = new WebSocket(`ws://127.0.0.1:${port}`)
-    const closePromise = new Promise(resolve => {
-      rejected.on('close', resolve)
-      rejected.on('error', resolve)
+    const rejectPromise = new Promise(resolve => {
+      rejected.on('unexpected-response', (_req, res) => resolve({ event: 'unexpected-response', statusCode: res.statusCode }))
+      rejected.on('close', () => resolve({ event: 'close' }))
+      rejected.on('error', () => resolve({ event: 'error' }))
     })
-    await withTimeout(closePromise, 3000, 'Expected rejected connection to close')
+    const result = await withTimeout(rejectPromise, 3000, 'Expected rejected connection to close')
+    if (result.event === 'unexpected-response') {
+      assert.strictEqual(result.statusCode, 503, 'Should reject with 503')
+    }
 
     // Clean up
     for (const ws of pending) ws.close()
