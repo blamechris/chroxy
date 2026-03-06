@@ -15,9 +15,10 @@ export interface CommandPaletteProps {
   commands: Command[]
   isOpen: boolean
   onClose: () => void
+  mruList?: string[]
 }
 
-export function CommandPalette({ commands, isOpen, onClose }: CommandPaletteProps) {
+export function CommandPalette({ commands, isOpen, onClose, mruList }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -35,8 +36,18 @@ export function CommandPalette({ commands, isOpen, onClose }: CommandPaletteProp
       list.push(cmd)
       map.set(cmd.category, list)
     }
+    if (mruList && mruList.length > 0) {
+      const mruRank = new Map(mruList.map((id, i) => [id, i]))
+      for (const [, cmds] of map) {
+        cmds.sort((a, b) => {
+          const ra = mruRank.get(a.id) ?? Infinity
+          const rb = mruRank.get(b.id) ?? Infinity
+          return ra - rb
+        })
+      }
+    }
     return map
-  }, [filtered])
+  }, [filtered, mruList])
 
   // Build stable id→flatIndex map for aria-selected
   const indexMap = useMemo(() => {

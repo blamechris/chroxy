@@ -132,4 +132,19 @@ describe('CommandPalette', () => {
     render(<CommandPalette commands={mockCommands} isOpen={true} onClose={vi.fn()} />)
     expect(screen.getByRole('combobox')).toHaveFocus()
   })
+
+  it('sorts commands within categories by MRU order', () => {
+    const mruList = ['toggle-theme', 'switch-terminal']
+    render(<CommandPalette commands={mockCommands} isOpen={true} onClose={vi.fn()} mruList={mruList} />)
+    // Within Settings category: toggle-theme (MRU) should come before change-model
+    const options = screen.getAllByRole('option')
+    const names = options.map(opt => opt.textContent?.replace(/Cmd\+\w+/, '').trim())
+    const settingsStart = names.indexOf('Toggle Theme')
+    const changeModelIdx = names.indexOf('Change Model')
+    expect(settingsStart).toBeLessThan(changeModelIdx!)
+    // Within View category: switch-terminal (MRU) should come before switch-chat
+    const terminalIdx = names.indexOf('Switch to Terminal')
+    const chatIdx = names.indexOf('Switch to Chat')
+    expect(terminalIdx).toBeLessThan(chatIdx!)
+  })
 })

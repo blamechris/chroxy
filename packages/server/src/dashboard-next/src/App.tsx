@@ -12,7 +12,7 @@ import type { ChatViewMessage } from './components/ChatView'
 
 import { Sidebar, type RepoNode } from './components/Sidebar'
 import { CommandPalette } from './components/CommandPalette'
-import { useCommands, recordMruCommand } from './store/commands'
+import { useCommands, recordMruCommand, getMruCommands } from './store/commands'
 import { ChatView } from './components/ChatView'
 import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
@@ -638,6 +638,7 @@ export function App() {
         commands={trackedCommands}
         isOpen={paletteOpen}
         onClose={() => setPaletteOpen(false)}
+        mruList={paletteOpen ? getMruCommands() : undefined}
       />
     </div>
   )
