@@ -1648,6 +1648,7 @@
 }
 
 .modal-content {
+  position: relative;
   background: var(--bg-modal);
   border: 1px solid var(--scrollbar-thumb);
   border-radius: 12px;
