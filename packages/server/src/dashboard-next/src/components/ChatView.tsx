@@ -35,6 +35,15 @@ const TYPE_CLASS: Record<string, string> = {
 
 const SCROLL_THRESHOLD = 60
 
+function formatTime(ts: number): string {
+  const d = new Date(ts)
+  let h = d.getHours()
+  const m = d.getMinutes().toString().padStart(2, '0')
+  const ampm = h >= 12 ? 'PM' : 'AM'
+  h = h % 12 || 12
+  return `${h}:${m} ${ampm}`
+}
+
 export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
@@ -102,6 +111,9 @@ export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps
               data-testid={`msg-${msg.id}`}
             >
               {msg.content}
+              {msg.timestamp > 0 && (
+                <span className="msg-timestamp">{formatTime(msg.timestamp)}</span>
+              )}
             </div>
           )
         })}
