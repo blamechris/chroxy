@@ -613,6 +613,7 @@ describe('_killAndRespawn behavioral tests (#1009)', () => {
 
   it('_killAndRespawn clears timers before killing', () => {
     const session = createReadySession({ model: 'sonnet' })
+    const oldChild = session._child
 
     // Set up timers that should be cleared
     session._interruptTimer = setTimeout(() => {}, 100000)
@@ -624,8 +625,8 @@ describe('_killAndRespawn behavioral tests (#1009)', () => {
     assert.equal(session._interruptTimer, null)
     assert.equal(session._respawnTimer, null)
 
-    // Clean up — emit close so respawn runs
-    session._child = null // already detached
+    // Emit close to clean up the forceKillTimer created by _killAndRespawn
+    oldChild.emit('close', 0)
   })
 
   it('_killAndRespawn starts immediately when no child exists', () => {
