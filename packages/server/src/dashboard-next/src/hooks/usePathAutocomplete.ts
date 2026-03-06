@@ -8,14 +8,27 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { DirectoryListing } from '../store/types'
 
-/** Split a path into the parent directory and the partial segment being typed. */
+/** Split a path into the parent directory and the partial segment being typed.
+ *  Handles both POSIX (/) and Windows (\) separators. */
 export function splitPath(input: string): { parent: string; partial: string } {
   if (!input) return { parent: '', partial: '' }
 
-  const lastSlash = input.lastIndexOf('/')
-  if (lastSlash === -1) return { parent: '', partial: input }
-  if (lastSlash === 0) return { parent: '/', partial: input.slice(1) }
-  return { parent: input.slice(0, lastSlash), partial: input.slice(lastSlash + 1) }
+  // Find the last separator (either / or \)
+  const lastFwd = input.lastIndexOf('/')
+  const lastBack = input.lastIndexOf('\\')
+  const lastSep = Math.max(lastFwd, lastBack)
+
+  if (lastSep === -1) return { parent: '', partial: input }
+
+  // Handle root paths: "/" or "C:\"
+  const parent = input.slice(0, lastSep)
+  const partial = input.slice(lastSep + 1)
+
+  if (!parent) return { parent: input[lastSep]!, partial }
+  // Windows drive root: "C:" → "C:\"
+  if (parent.length === 2 && parent[1] === ':') return { parent: parent + '\\', partial }
+
+  return { parent, partial }
 }
 
 const DEBOUNCE_MS = 200
@@ -48,7 +61,7 @@ export function usePathAutocomplete(input: string) {
       .filter(e => e.isDirectory)
       .filter(e => !partial || e.name.toLowerCase().startsWith(partial.toLowerCase()))
       .map(e => {
-        const sep = parentPath.endsWith('/') ? '' : '/'
+        const sep = parentPath.endsWith('/') || parentPath.endsWith('\\') ? '' : '/'
         return `${parentPath}${sep}${e.name}`
       })
 
@@ -71,8 +84,9 @@ export function usePathAutocomplete(input: string) {
       return
     }
 
-    // If input ends with /, query the full path (user wants contents of this dir)
-    const queryPath = input.endsWith('/') ? input.replace(/\/+$/, '') : parent
+    // If input ends with a separator, query the full path (user wants contents of this dir)
+    const endsWithSep = input.endsWith('/') || input.endsWith('\\')
+    const queryPath = endsWithSep ? input.replace(/[/\\]+$/, '') : parent
 
     if (debounceRef.current) clearTimeout(debounceRef.current)
 
