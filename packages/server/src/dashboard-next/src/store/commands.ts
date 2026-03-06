@@ -43,6 +43,26 @@ export function useCommands(): Command[] {
       },
       // View
       {
+        id: 'toggle-view',
+        name: 'Toggle View',
+        category: 'View',
+        shortcut: 'Cmd+Shift+D',
+        action: () => {
+          const current = useConnectionStore.getState().viewMode
+          setViewMode(current === 'chat' ? 'terminal' : 'chat')
+        },
+      },
+      {
+        id: 'toggle-sidebar',
+        name: 'Toggle Sidebar',
+        category: 'View',
+        shortcut: 'Cmd+B',
+        action: () => {
+          // No-op here — sidebar state is managed in App.tsx
+          // The global shortcut handler handles this directly
+        },
+      },
+      {
         id: 'switch-chat',
         name: 'Switch to Chat',
         category: 'View',
