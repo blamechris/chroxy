@@ -4,7 +4,7 @@
  * Shows repos with active/resumable sessions, filter, status footer.
  * Collapsible with Cmd+B toggle.
  */
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { ConversationSearch } from './ConversationSearch'
 import type { SearchResult } from '../store/types'
 
@@ -88,6 +88,8 @@ export function Sidebar({
   clearSearchResults,
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const [focusedIndex, setFocusedIndex] = useState(0)
+  const treeRef = useRef<HTMLDivElement>(null)
 
   const toggleRepo = useCallback((path: string) => {
     setCollapsed(prev => ({ ...prev, [path]: !prev[path] }))
@@ -114,6 +116,98 @@ export function Sidebar({
         })
         .filter((r): r is RepoNode => r !== null)
     : repos
+
+  // Get all visible treeitem elements for keyboard navigation
+  const getVisibleItems = useCallback((): HTMLElement[] => {
+    if (!treeRef.current) return []
+    return Array.from(treeRef.current.querySelectorAll<HTMLElement>('[role="treeitem"]')).filter(el => {
+      const group = el.closest('[role="group"]')
+      if (!group) return true
+      const parent = group.closest('[role="treeitem"]')
+      return !parent || parent.getAttribute('aria-expanded') !== 'false'
+    })
+  }, [])
+
+  // Keyboard handler for WAI-ARIA TreeView pattern
+  const handleTreeKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const items = getVisibleItems()
+    if (items.length === 0) return
+
+    const focused = document.activeElement as HTMLElement
+    const currentIdx = items.indexOf(focused)
+    if (currentIdx < 0) return
+
+    switch (e.key) {
+      case 'ArrowDown': {
+        e.preventDefault()
+        const next = Math.min(currentIdx + 1, items.length - 1)
+        items[next]!.focus()
+        setFocusedIndex(next)
+        break
+      }
+      case 'ArrowUp': {
+        e.preventDefault()
+        const prev = Math.max(currentIdx - 1, 0)
+        items[prev]!.focus()
+        setFocusedIndex(prev)
+        break
+      }
+      case 'ArrowRight': {
+        e.preventDefault()
+        const item = items[currentIdx]!
+        if (item.getAttribute('aria-expanded') === 'false') {
+          // Expand collapsed repo
+          const repoPath = item.querySelector('[data-testid^="repo-header-"]')?.getAttribute('data-testid')?.replace('repo-header-', '')
+          if (repoPath) setCollapsed(prev => ({ ...prev, [repoPath]: false }))
+        }
+        break
+      }
+      case 'ArrowLeft': {
+        e.preventDefault()
+        const item = items[currentIdx]!
+        if (item.getAttribute('aria-expanded') === 'true') {
+          // Collapse expanded repo
+          const repoPath = item.querySelector('[data-testid^="repo-header-"]')?.getAttribute('data-testid')?.replace('repo-header-', '')
+          if (repoPath) setCollapsed(prev => ({ ...prev, [repoPath]: true }))
+        }
+        break
+      }
+      case 'Enter':
+      case ' ': {
+        e.preventDefault()
+        focused.click()
+        break
+      }
+      case 'Home': {
+        e.preventDefault()
+        items[0]!.focus()
+        setFocusedIndex(0)
+        break
+      }
+      case 'End': {
+        e.preventDefault()
+        items[items.length - 1]!.focus()
+        setFocusedIndex(items.length - 1)
+        break
+      }
+    }
+  }, [getVisibleItems, setCollapsed])
+
+  // Build a flat list of treeitem IDs for tabIndex assignment
+  const flatItemIds = useCallback((): string[] => {
+    const ids: string[] = []
+    for (const repo of filteredRepos) {
+      ids.push(`repo:${repo.path}`)
+      const isCollapsed = filter ? false : (collapsed[repo.path] ?? false)
+      if (!isCollapsed) {
+        for (const s of repo.activeSessions) ids.push(`session:${s.sessionId}`)
+        for (const c of repo.resumableSessions) ids.push(`resumable:${c.conversationId}`)
+      }
+    }
+    return ids
+  }, [filteredRepos, collapsed, filter])
+
+  const visibleIds = flatItemIds()
 
   const statusLabel = serverStatus === 'connected' ? 'Running'
     : serverStatus === 'reconnecting' ? 'Reconnecting'
@@ -162,11 +256,11 @@ export function Sidebar({
           )}
 
           {/* Repo tree */}
-          <div className="sidebar-tree" role="tree" aria-label="Repository sessions">
+          <div className="sidebar-tree" role="tree" aria-label="Repository sessions" ref={treeRef} onKeyDown={handleTreeKeyDown}>
             {filteredRepos.map(repo => {
               const isCollapsed = filter ? false : (collapsed[repo.path] ?? false)
               return (
-                <div key={repo.path} className="sidebar-repo" role="treeitem" aria-expanded={!isCollapsed}>
+                <div key={repo.path} className="sidebar-repo" role="treeitem" aria-expanded={!isCollapsed} tabIndex={visibleIds.indexOf(`repo:${repo.path}`) === focusedIndex ? 0 : -1}>
                   <div
                     className={`sidebar-repo-header${!repo.exists ? ' missing' : ''}`}
                     data-testid={`repo-header-${repo.path}`}
@@ -203,6 +297,7 @@ export function Sidebar({
                           key={session.sessionId}
                           role="treeitem"
                           aria-selected={activeSessionId === session.sessionId}
+                          tabIndex={visibleIds.indexOf(`session:${session.sessionId}`) === focusedIndex ? 0 : -1}
                           className={`sidebar-session-item${activeSessionId === session.sessionId ? ' active' : ''}`}
                           data-testid={`session-item-${session.sessionId}`}
                           onClick={() => onSessionClick(session.sessionId)}
@@ -226,6 +321,7 @@ export function Sidebar({
                           key={conv.conversationId}
                           role="treeitem"
                           aria-selected={false}
+                          tabIndex={visibleIds.indexOf(`resumable:${conv.conversationId}`) === focusedIndex ? 0 : -1}
                           className="sidebar-resumable-item"
                           data-testid={`resumable-item-${conv.conversationId}`}
                           onClick={() => onResumeSession(conv.conversationId)}
