@@ -1,14 +1,15 @@
 /**
  * Dashboard Smoke Test — Playwright-based visual verification
  *
- * Connects to a running chroxy server, opens the dashboard in a headless
+ * Connects to a chroxy server (either already running or started
+ * automatically by this script), opens the dashboard in a headless
  * browser, takes screenshots at each step, and verifies key UI elements.
  *
  * Usage:
  *   node tests/smoke-test.mjs [--headed]    # --headed to see the browser
  *
- * Prerequisites: server must be running (npx chroxy start).
- * Screenshots are saved to tests/screenshots/ (gitignored).
+ * If no server is detected, one is started automatically and stopped when done.
+ * Screenshots are saved to packages/server/tests/screenshots/ (gitignored).
  * Exit code 0 = all checks pass, 1 = failures found.
  */
 
@@ -132,8 +133,9 @@ async function run() {
   }
 
   if (!apiToken) {
-    log('\x1b[31mNo API token found in ~/.chroxy/config.json\x1b[0m')
-    process.exit(1)
+    const msg = 'No API token found in ~/.chroxy/config.json'
+    log(`\x1b[31m${msg}\x1b[0m`)
+    throw new Error(msg)
   }
 
   // Build dashboard URL
@@ -171,7 +173,7 @@ async function run() {
       pass('WebSocket connects')
     } else {
       fail('WebSocket connects', 'Still showing Disconnected/Connecting after 8s')
-      // Take a screenshot and bail — most tests need connection
+      // Take a screenshot; subsequent tests may be unreliable without connection
       await screenshot(page, '01-dashboard-disconnected')
     }
 

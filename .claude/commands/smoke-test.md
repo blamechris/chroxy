@@ -130,7 +130,7 @@ rm -rf packages/server/tests/screenshots
 |----------|--------|-----------------|
 | Dashboard Core | Page loads, WS connects, version badge, sidebar, session tabs, full-width layout, input bar | Basic rendering and connectivity |
 | Session Creation | Ctrl+N opens modal, session name input, CWD combobox, provider picker (SDK/CLI) | New session flow works |
-| Keyboard Shortcuts | `?` help overlay, `Ctrl+K` command palette, `Ctrl+N` new session | Shortcut bindings active |
+| Keyboard Shortcuts | `?` help overlay, `Ctrl+N` new session | Shortcut bindings active |
 | Health | Console errors | No JS exceptions |
 
 ## Adding New Checks

@@ -294,6 +294,7 @@ PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$')
 If the PR modified **UI or frontend files**, run the smoke test to catch visual regressions before review. This prevents wasting review cycles on PRs that break the UI.
 
 ```bash
+NEEDS_SMOKE_TEST=false
 CHANGED_FILES=$(git diff --name-only main...HEAD)
 if echo "$CHANGED_FILES" | grep -qE 'dashboard-next|\.tsx$|\.css$|\.html$|components\.css|theme'; then
   NEEDS_SMOKE_TEST=true
