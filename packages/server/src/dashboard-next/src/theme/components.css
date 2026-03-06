@@ -1680,6 +1680,35 @@
 
 .modal-content input::placeholder { color: var(--text-disabled); }
 
+.provider-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.provider-select label {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.provider-select select {
+  flex: 1;
+  background: var(--bg-session-bar);
+  color: var(--text-primary);
+  border: 1px solid var(--scrollbar-thumb);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: var(--text-md);
+  cursor: pointer;
+}
+
+.provider-select select:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
 .modal-buttons {
   display: flex;
   gap: 8px;
