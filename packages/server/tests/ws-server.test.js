@@ -8598,6 +8598,48 @@ describe('client_focus_changed broadcast', () => {
 
     client1.ws.close()
   })
+
+  it('broadcasts client_focus_changed when a client creates a session', async () => {
+    const { manager: mockManager, sessionsMap } = createMockSessionManager([
+      { id: 'sess-a', name: 'Session A', cwd: '/tmp/a' },
+    ])
+
+    // Add createSession to mock — inserts into sessionsMap so getSession/listSessions/firstSessionId all reflect it
+    let nextId = 1
+    mockManager.createSession = ({ name, cwd }) => {
+      const id = `new-sess-${nextId++}`
+      const mockSession = createMockSession()
+      mockSession.cwd = cwd || '/tmp'
+      sessionsMap.set(id, { session: mockSession, name: name || 'New Session', cwd: cwd || '/tmp', type: 'cli', isBusy: false })
+      return id
+    }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const client1 = await createClient(port, true)
+    const client2 = await createClient(port, true)
+    await waitForMessage(client1.messages, 'auth_ok', 2000)
+    await waitForMessage(client2.messages, 'auth_ok', 2000)
+
+    // Client 1 creates a new session
+    send(client1.ws, { type: 'create_session', name: 'My Session' })
+
+    // Client 2 should receive client_focus_changed
+    const focusMsg = await waitForMessage(client2.messages, 'client_focus_changed', 2000)
+    assert.ok(focusMsg, 'Client 2 should receive client_focus_changed')
+    assert.ok(focusMsg.sessionId.startsWith('new-sess-'), 'Should reference the new session')
+    assert.equal(typeof focusMsg.clientId, 'string', 'Should include clientId')
+    assert.equal(typeof focusMsg.timestamp, 'number', 'Should include timestamp')
+
+    client1.ws.close()
+    client2.ws.close()
+  })
 })
 
 describe('_sendSessionInfo sessionId tagging (#1417)', () => {
