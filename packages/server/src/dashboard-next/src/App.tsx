@@ -666,6 +666,7 @@ export function App() {
               onSend={handleSend}
               onInterrupt={handleInterrupt}
               disabled={!isConnected}
+              isBusy={!isIdle}
               isStreaming={streamingMessageId !== null}
               placeholder={isConnected ? 'Type a message... (Cmd+Enter to send)' : 'Connecting...'}
               filePickerFiles={filePickerFiles}

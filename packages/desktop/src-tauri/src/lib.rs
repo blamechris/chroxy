@@ -41,6 +41,35 @@ struct TrayMenuItems {
 }
 
 
+// ── Tauri IPC commands ──────────────────────────────────────────────
+
+#[tauri::command]
+fn get_server_info(state: tauri::State<'_, Mutex<ServerManager>>) -> Result<serde_json::Value, String> {
+    let mgr = lock_or_recover(&state);
+    Ok(serde_json::json!({
+        "port": mgr.port(),
+        "token": mgr.token(),
+        "status": mgr.status().label(),
+        "tunnelMode": mgr.tunnel_mode(),
+        "isRunning": mgr.is_running(),
+    }))
+}
+
+#[tauri::command]
+fn start_server(app: tauri::AppHandle) {
+    handle_start(&app);
+}
+
+#[tauri::command]
+fn stop_server(app: tauri::AppHandle) {
+    handle_stop(&app);
+}
+
+#[tauri::command]
+fn restart_server(app: tauri::AppHandle) {
+    handle_restart(&app);
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
@@ -65,7 +94,12 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![])
+        .invoke_handler(tauri::generate_handler![
+            get_server_info,
+            start_server,
+            stop_server,
+            restart_server,
+        ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
         .setup(|app| {
