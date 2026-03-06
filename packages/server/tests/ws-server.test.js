@@ -2,13 +2,13 @@ import { describe, it, before, beforeEach, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { once, EventEmitter } from 'node:events'
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync, existsSync } from 'node:fs'
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer, MIN_PROTOCOL_VERSION, SERVER_PROTOCOL_VERSION } from '../src/ws-server.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
-import { createMockSession, createMockSessionManager } from './test-helpers.js'
+import { createMockSession, createMockSessionManager, GIT } from './test-helpers.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
 class WsServer extends _WsServer {
@@ -5238,13 +5238,13 @@ describe('get_diff handler', () => {
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'chroxy-diff-test-'))
     // Initialize a git repo in the temp directory
-    execSync('git init', { cwd: tempDir, stdio: 'pipe' })
-    execSync('git config user.email "test@test.com"', { cwd: tempDir, stdio: 'pipe' })
-    execSync('git config user.name "Test"', { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['init'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: tempDir, stdio: 'pipe' })
     // Create an initial commit
     writeFileSync(join(tempDir, 'file.txt'), 'initial content\n')
-    execSync('git add .', { cwd: tempDir, stdio: 'pipe' })
-    execSync('git commit -m "initial"', { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['add', '.'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['commit', '-m', 'initial'], { cwd: tempDir, stdio: 'pipe' })
   })
 
   afterEach(() => {

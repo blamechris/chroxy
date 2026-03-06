@@ -5,16 +5,17 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { CheckpointManager } from '../src/checkpoint-manager.js'
+import { GIT } from './test-helpers.js'
 
 // Create a temporary git repo for testing
 function createTempGitRepo() {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-cp-test-'))
-  execFileSync('git', ['init'], { cwd: dir })
-  execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: dir })
-  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir })
+  execFileSync(GIT, ['init'], { cwd: dir })
+  execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: dir })
+  execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: dir })
   writeFileSync(join(dir, 'file.txt'), 'initial content')
-  execFileSync('git', ['add', '.'], { cwd: dir })
-  execFileSync('git', ['commit', '-m', 'initial'], { cwd: dir })
+  execFileSync(GIT, ['add', '.'], { cwd: dir })
+  execFileSync(GIT, ['commit', '-m', 'initial'], { cwd: dir })
   return dir
 }
 

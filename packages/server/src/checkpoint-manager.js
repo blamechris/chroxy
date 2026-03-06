@@ -6,6 +6,7 @@ import { homedir } from 'os'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { writeFileRestricted } from './platform.js'
+import { GIT } from './git.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -180,7 +181,7 @@ export class CheckpointManager extends EventEmitter {
 
   async _isGitRepo(cwd) {
     try {
-      await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd })
+      await execFileAsync(GIT, ['rev-parse', '--is-inside-work-tree'], { cwd })
       return true
     } catch {
       return false
@@ -198,29 +199,29 @@ export class CheckpointManager extends EventEmitter {
     try {
       // Check if there are any changes (tracked or untracked) to capture
       const { stdout: status } = await execFileAsync(
-        'git', ['status', '--porcelain'],
+        GIT, ['status', '--porcelain'],
         { cwd }
       )
 
       if (!status.trim()) {
         // Working tree is clean — tag HEAD directly
-        await execFileAsync('git', ['tag', tagName, 'HEAD'], { cwd })
+        await execFileAsync(GIT, ['tag', tagName, 'HEAD'], { cwd })
         return tagName
       }
 
       // Use stash push to capture full state (including untracked files),
       // tag the stash entry, then drop it from the stack to avoid clutter.
       await execFileAsync(
-        'git', ['stash', 'push', '--include-untracked', '-m', `chroxy-checkpoint/${checkpointId}`],
+        GIT, ['stash', 'push', '--include-untracked', '-m', `chroxy-checkpoint/${checkpointId}`],
         { cwd }
       )
-      await execFileAsync('git', ['tag', tagName, 'stash@{0}'], { cwd })
+      await execFileAsync(GIT, ['tag', tagName, 'stash@{0}'], { cwd })
       // Pop the stash to restore the working tree to its pre-snapshot state
-      await execFileAsync('git', ['stash', 'pop'], { cwd })
+      await execFileAsync(GIT, ['stash', 'pop'], { cwd })
       return tagName
     } catch (err) {
       // If stash push succeeded but tag/pop failed, try to recover
-      try { await execFileAsync('git', ['stash', 'pop'], { cwd }) } catch { /* best effort */ }
+      try { await execFileAsync(GIT, ['stash', 'pop'], { cwd }) } catch { /* best effort */ }
       console.warn(`[checkpoint] Failed to create git snapshot: ${err.message}`)
       return null
     }
@@ -230,22 +231,22 @@ export class CheckpointManager extends EventEmitter {
     try {
       // First check if working tree has changes
       const { stdout: status } = await execFileAsync(
-        'git', ['status', '--porcelain'],
+        GIT, ['status', '--porcelain'],
         { cwd }
       )
 
       if (status.trim()) {
         // Stash current changes before restoring
-        await execFileAsync('git', ['stash', 'push', '-m', 'chroxy: auto-stash before rewind'], { cwd })
+        await execFileAsync(GIT, ['stash', 'push', '-m', 'chroxy: auto-stash before rewind'], { cwd })
       }
 
       // Check if tag points to HEAD (clean state at checkpoint)
       const { stdout: tagCommit } = await execFileAsync(
-        'git', ['rev-parse', gitRef],
+        GIT, ['rev-parse', gitRef],
         { cwd }
       )
       const { stdout: headCommit } = await execFileAsync(
-        'git', ['rev-parse', 'HEAD'],
+        GIT, ['rev-parse', 'HEAD'],
         { cwd }
       )
 
@@ -258,9 +259,9 @@ export class CheckpointManager extends EventEmitter {
       // stash apply restores tracked + untracked files from the stash object.
       // Fall back to checkout if the ref is a plain commit (e.g., HEAD tag).
       try {
-        await execFileAsync('git', ['stash', 'apply', gitRef], { cwd })
+        await execFileAsync(GIT, ['stash', 'apply', gitRef], { cwd })
       } catch {
-        await execFileAsync('git', ['checkout', gitRef, '--', '.'], { cwd })
+        await execFileAsync(GIT, ['checkout', gitRef, '--', '.'], { cwd })
       }
     } catch (err) {
       console.warn(`[checkpoint] Failed to restore git snapshot: ${err.message}`)
@@ -270,7 +271,7 @@ export class CheckpointManager extends EventEmitter {
 
   async _deleteGitRef(cwd, gitRef) {
     try {
-      await execFileAsync('git', ['tag', '-d', gitRef], { cwd })
+      await execFileAsync(GIT, ['tag', '-d', gitRef], { cwd })
     } catch { /* tag may already be gone */ }
   }
 
