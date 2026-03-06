@@ -157,6 +157,18 @@ export function App() {
         setPaletteOpen(prev => !prev)
         return
       }
+      // Cmd+Shift+P: toggle command palette (VSCode-style alias)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault()
+        setPaletteOpen(prev => !prev)
+        return
+      }
+      // Cmd+Shift+D: toggle view mode (chat ↔ terminal)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'd') {
+        e.preventDefault()
+        setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
+        return
+      }
       // Cmd+N / Ctrl+N: open new session modal
       if ((e.metaKey || e.ctrlKey) && e.key === 'n' && !e.shiftKey) {
         e.preventDefault()
@@ -196,16 +208,18 @@ export function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, switchSession, destroySession])
+  }, [sessions, activeSessionId, switchSession, destroySession, viewMode, setViewMode])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
       ...cmd,
       action: () => {
         recordMruCommand(cmd.id)
-        // Override new-session to open the modal instead of creating directly
+        // Override commands that need App-level state
         if (cmd.id === 'new-session') {
           setShowCreateSession(true)
+        } else if (cmd.id === 'toggle-sidebar') {
+          setSidebarOpen(prev => !prev)
         } else {
           cmd.action()
         }
