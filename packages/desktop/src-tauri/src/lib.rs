@@ -8,6 +8,7 @@ mod window;
 
 use server::{ServerManager, ServerStatus};
 use settings::DesktopSettings;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 /// Lock a Mutex, recovering from poisoning instead of panicking.
@@ -613,8 +614,35 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
 }
 
 fn handle_check_updates(app: &tauri::AppHandle) {
+    /// Guard to prevent concurrent update checks.
+    static UPDATE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+    // Atomically set the flag; bail if already in flight.
+    if UPDATE_IN_FLIGHT.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return;
+    }
+
+    // Disable the menu item while the check runs.
+    if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
+        let items = lock_or_recover(&items);
+        let _ = items.check_updates.set_enabled(false);
+    }
+
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
+        // Ensure guard is cleared and menu re-enabled on every exit path.
+        struct ResetGuard<'a>(&'a AtomicBool, tauri::AppHandle);
+        impl Drop for ResetGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+                if let Some(items) = self.1.try_state::<Mutex<TrayMenuItems>>() {
+                    let items = lock_or_recover(&items);
+                    let _ = items.check_updates.set_enabled(true);
+                }
+            }
+        }
+        let _guard = ResetGuard(&UPDATE_IN_FLIGHT, app_handle.clone());
+
         use tauri_plugin_updater::UpdaterExt;
         let updater = match app_handle.updater() {
             Ok(u) => u,

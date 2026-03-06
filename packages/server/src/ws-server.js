@@ -25,10 +25,44 @@ const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
 const SERVER_VERSION = packageJson.version
 
-/** Protocol version — bumped when the WS message set changes (additive only) */
+/**
+ * Protocol version — controls client/server compatibility negotiation.
+ *
+ * BUMP POLICY (Option B — breaking changes only):
+ *
+ *   - DO NOT bump for additive changes (new message types, new optional fields).
+ *     Clients already ignore unknown message types with a console.warn when
+ *     serverProtocolVersion > clientProtocolVersion.
+ *
+ *   - DO bump (increment by 1) for breaking changes:
+ *       * Removing or renaming an existing message type
+ *       * Changing the shape of an existing message (renaming/removing fields,
+ *         changing field types, making optional fields required)
+ *       * Changing auth handshake semantics
+ *
+ *   - When bumping, update PROTOCOL_CHANGELOG below and coordinate with
+ *     CLIENT_PROTOCOL_VERSION in:
+ *       * packages/app/src/store/message-handler.ts
+ *       * packages/server/src/dashboard-next/src/store/message-handler.ts
+ *
+ *   - If a bump would break old clients, consider whether MIN_PROTOCOL_VERSION
+ *     should also increase (rejecting clients that cannot speak the new protocol).
+ *
+ * See also: #1058 (enforce MIN_PROTOCOL_VERSION during auth)
+ */
 export const SERVER_PROTOCOL_VERSION = 1
 /** Minimum protocol version this server can speak */
 export const MIN_PROTOCOL_VERSION = 1
+
+/**
+ * PROTOCOL_CHANGELOG
+ *
+ * v1 (initial) — baseline message set: auth, auth_ok, message, assistant,
+ *   result, raw_output, model_changed, permission_request, tool_use, etc.
+ *   All subsequent additive message types (e.g. plan_started, plan_ready,
+ *   models_updated, client_focus_changed) do NOT bump the version per the
+ *   breaking-changes-only policy above.
+ */
 
 /** Cached latest version from npm registry (null if unavailable) */
 let _latestVersionCache = { version: null, checkedAt: 0 }
