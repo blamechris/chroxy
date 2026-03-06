@@ -30,6 +30,7 @@ import { CreateSessionModal } from './components/CreateSessionModal'
 import { Toast, type ToastItem } from './components/Toast'
 import { FooterBar } from './components/FooterBar'
 import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
+import { persistSidebarWidth, loadPersistedSidebarWidth } from './store/persistence'
 
 /** Server-injected config from window.__CHROXY_CONFIG__ */
 interface ChroxyConfig {
@@ -150,7 +151,7 @@ export function App() {
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [sidebarWidth] = useState(240)
+  const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
 
   useEffect(() => {
@@ -558,6 +559,7 @@ export function App() {
             setShowCreateSession(true)
           }}
           onToggle={() => setSidebarOpen(prev => !prev)}
+          onWidthChange={(w: number) => { setSidebarWidth(w); persistSidebarWidth(w) }}
           onContextMenu={() => {
             /* Context menus will be added in a follow-up */
           }}
