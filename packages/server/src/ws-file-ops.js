@@ -1,4 +1,4 @@
-import { readdir, readFile, stat, realpath } from 'fs/promises'
+import { readdir, readFile, writeFile as fsWriteFile, stat, realpath, mkdir } from 'fs/promises'
 import { homedir } from 'os'
 import { join, resolve, normalize, extname, relative } from 'path'
 import { execFile as execFileCb } from 'child_process'
@@ -785,10 +785,87 @@ export function createFileOps(sendFn) {
     }
   }
 
+  /** Write file content at a given path within the session CWD */
+  async function writeFileContent(ws, requestedPath, content, sessionCwd) {
+    if (!sessionCwd) {
+      sendFn(ws, {
+        type: 'write_file_result',
+        path: null,
+        error: 'File writing is not available in this mode',
+      })
+      return
+    }
+
+    if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
+      sendFn(ws, {
+        type: 'write_file_result',
+        path: null,
+        error: 'No file path provided',
+      })
+      return
+    }
+
+    // 5MB size limit
+    const MAX_SIZE = 5 * 1024 * 1024
+    if (typeof content === 'string' && content.length > MAX_SIZE) {
+      sendFn(ws, {
+        type: 'write_file_result',
+        path: requestedPath,
+        error: 'Content too large (max 5MB)',
+      })
+      return
+    }
+
+    let absPath = null
+    try {
+      absPath = normalize(resolve(sessionCwd, requestedPath.trim()))
+
+      const cwdReal = await resolveSessionCwd(sessionCwd)
+
+      // Resolve absPath through realpath of the session CWD to handle symlinks
+      // (e.g. macOS /var → /private/var)
+      const absInCwd = normalize(resolve(cwdReal, requestedPath.trim()))
+
+      // Path traversal check: target must be within session CWD
+      if (!absInCwd.startsWith(cwdReal + '/') && absInCwd !== cwdReal) {
+        sendFn(ws, {
+          type: 'write_file_result',
+          path: requestedPath,
+          error: 'Access denied: file writing is restricted to the project directory',
+        })
+        return
+      }
+      absPath = absInCwd
+
+      // Create parent directories if needed
+      await mkdir(resolve(absPath, '..'), { recursive: true })
+
+      // Write the file
+      await fsWriteFile(absPath, content || '', 'utf-8')
+
+      sendFn(ws, {
+        type: 'write_file_result',
+        path: absPath,
+        error: null,
+      })
+    } catch (err) {
+      let errorMessage
+      if (err.code === 'EACCES') errorMessage = 'Permission denied'
+      else errorMessage = err.message || 'Unknown error'
+
+      sendFn(ws, {
+        type: 'write_file_result',
+        path: absPath || requestedPath || null,
+        error: errorMessage,
+      })
+    }
+  }
+
   return {
     listDirectory,
     browseFiles,
     readFile: readFileContent,
+    writeFile: writeFileContent,
     getDiff,
     listSlashCommands,
     listAgents,
