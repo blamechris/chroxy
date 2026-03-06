@@ -3,6 +3,11 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+
+vi.mock('../hooks/usePathAutocomplete', () => ({
+  usePathAutocomplete: () => ({ suggestions: [] }),
+}))
+
 import { Modal } from './Modal'
 import { CreateSessionModal } from './CreateSessionModal'
 import { Toast, type ToastItem } from './Toast'

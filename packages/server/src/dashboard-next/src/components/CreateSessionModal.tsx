@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useId, type KeyboardEvent } from 'react'
 import { flushSync } from 'react-dom'
 import { Modal } from './Modal'
+import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 
 export interface CreateSessionData {
   name: string
@@ -57,8 +58,15 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const nameValRef = useRef('')
   const cwdValRef = useRef('')
 
-  // Deduplicate and sort known cwds
-  const suggestions = useMemo(() => [...new Set(knownCwds)].sort(), [knownCwds])
+  // Autocomplete suggestions from server
+  const { suggestions: autocompleteSuggestions } = usePathAutocomplete(cwd)
+
+  // Merge autocomplete with known cwds, deduplicate and sort
+  const suggestions = useMemo(() => {
+    const known = knownCwds.filter(p => !cwd || p.toLowerCase().includes(cwd.toLowerCase()))
+    const merged = [...new Set([...autocompleteSuggestions, ...known])]
+    return merged.sort()
+  }, [knownCwds, autocompleteSuggestions, cwd])
 
   const prevOpenRef = useRef(false)
   useEffect(() => {
@@ -107,6 +115,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   }, [nameManuallyEdited, existingNames])
 
   const handleCwdKeyDown = useCallback((e: KeyboardEvent) => {
+    // Tab completion
+    if (e.key === 'Tab' && suggestions.length > 0) {
+      e.preventDefault()
+      const idx = selectedSuggestion >= 0 ? selectedSuggestion : 0
+      selectSuggestion(suggestions[idx]! + '/')
+      return
+    }
     if (showSuggestions && suggestions.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()

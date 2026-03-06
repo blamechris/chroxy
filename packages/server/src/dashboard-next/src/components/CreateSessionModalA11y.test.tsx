@@ -3,6 +3,11 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
+
+vi.mock('../hooks/usePathAutocomplete', () => ({
+  usePathAutocomplete: () => ({ suggestions: [] }),
+}))
+
 import { CreateSessionModal } from './CreateSessionModal'
 
 afterEach(cleanup)
