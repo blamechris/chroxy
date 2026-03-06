@@ -363,6 +363,10 @@ export class SessionManager extends EventEmitter {
     return first.done ? null : first.value
   }
 
+  get defaultCwd() {
+    return this._defaultCwd
+  }
+
   /**
    * Serialize session state to disk for graceful restart.
    * Called during drain before the process exits.
