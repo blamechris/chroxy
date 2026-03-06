@@ -215,11 +215,10 @@ function SessionCard({ session, sessionState, isActive, hasNotification, notific
 // -- Session Overview Panel --
 
 interface SessionOverviewProps {
-  visible: boolean;
   onClose: () => void;
 }
 
-export function SessionOverview({ visible, onClose }: SessionOverviewProps) {
+export function SessionOverview({ onClose }: SessionOverviewProps) {
   const sessions = useConnectionStore((s) => s.sessions);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
   const sessionStates = useConnectionStore((s) => s.sessionStates);
@@ -233,12 +232,9 @@ export function SessionOverview({ visible, onClose }: SessionOverviewProps) {
   // Tick for elapsed time updates
   const [, setTick] = useState(0);
   useEffect(() => {
-    if (!visible) return;
     const interval = setInterval(() => setTick((t) => t + 1), 5000);
     return () => clearInterval(interval);
-  }, [visible]);
-
-  if (!visible) return null;
+  }, []);
 
   const notificationSet = new Set(notifications.map((n) => n.sessionId));
   const notificationMap = new Map(notifications.map((n) => [n.sessionId, n]));
