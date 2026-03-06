@@ -194,6 +194,7 @@ function getGitInfo() {
  *   { type: 'agent_list', agents: [{ name, description, source }] } — available custom agents
  *   { type: 'client_joined', client: { clientId, deviceName, deviceType, platform } } — new client connected
  *   { type: 'client_left', clientId }                — client disconnected
+ *   { type: 'client_focus_changed', clientId, sessionId, timestamp } — another client changed session focus
  *   { type: 'checkpoint_created', sessionId, checkpoint } — checkpoint created (auto or manual)
  *   { type: 'checkpoint_list', sessionId, checkpoints }   — list of checkpoints
  *   { type: 'checkpoint_restored', checkpointId, newSessionId, name } — checkpoint restored (new session created)
