@@ -192,11 +192,30 @@ export function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
         e.preventDefault()
         setSidebarOpen(prev => !prev)
+        return
+      }
+      // Cmd+Shift+P: command palette (VSCode alias)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault()
+        setPaletteOpen(prev => !prev)
+        return
+      }
+      // Cmd+Shift+D: toggle chat/terminal view
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'd') {
+        e.preventDefault()
+        setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
+        return
+      }
+      // Cmd+.: interrupt active session
+      if ((e.metaKey || e.ctrlKey) && e.key === '.') {
+        e.preventDefault()
+        sendInterrupt()
+        return
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, switchSession, destroySession])
+  }, [sessions, activeSessionId, switchSession, destroySession, viewMode, setViewMode, sendInterrupt])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
