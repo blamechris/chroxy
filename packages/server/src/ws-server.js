@@ -1232,7 +1232,7 @@ export class WsServer {
     }
   }
 
-  /** Get list of connected clients for auth_ok payload */
+  /** Count unauthenticated connections for pre-auth limit enforcement */
   _countPendingConnections() {
     let count = 0
     for (const [, client] of this.clients) {
@@ -1241,6 +1241,7 @@ export class WsServer {
     return count
   }
 
+  /** Get list of connected clients for auth_ok payload */
   _getConnectedClientList() {
     const list = []
     for (const [ws, client] of this.clients) {
