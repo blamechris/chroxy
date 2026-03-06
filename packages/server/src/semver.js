@@ -32,7 +32,7 @@ export function parseSemver(str) {
  *  - Numeric identifiers compared as integers
  *  - String identifiers compared lexically
  *  - Numeric < string when types differ
- *  - Shorter tuple wins if all preceding ids are equal
+ *  - Longer tuple has higher precedence if all preceding ids are equal
  */
 function comparePre(a, b) {
   if (a === null && b === null) return 0

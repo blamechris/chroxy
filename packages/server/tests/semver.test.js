@@ -85,7 +85,7 @@ describe('compareSemver', () => {
     assert.equal(compareSemver('1.0.0-1', '1.0.0-alpha'), -1)
   })
 
-  it('shorter pre-release tuple wins when prefix matches', () => {
+  it('longer pre-release tuple has higher precedence when prefix matches', () => {
     assert.equal(compareSemver('1.0.0-alpha', '1.0.0-alpha.1'), -1)
   })
 
