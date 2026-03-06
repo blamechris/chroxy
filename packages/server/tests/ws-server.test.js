@@ -7174,8 +7174,10 @@ describe('dashboard endpoint', () => {
         createdPaths.push(assetsDir)
       }
       const jsFile = join(assetsDir, 'index-testHash.js')
-      writeFileSync(jsFile, '// test bundle')
-      createdPaths.push(jsFile)
+      if (!existsSync(jsFile)) {
+        writeFileSync(jsFile, '// test bundle')
+        createdPaths.push(jsFile)
+      }
       const htmlFile = join(distDir, 'index.html')
       writeFileSync(htmlFile, [
         '<!DOCTYPE html>',
