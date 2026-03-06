@@ -245,6 +245,12 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       entry.session.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
 
       ctx.updatePrimary(targetSessionId, client.id)
+
+      // Echo user_input to other clients so they see what was sent (#1119)
+      ctx.broadcast(
+        { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, timestamp: Date.now() },
+        (c) => c.id !== client.id
+      )
       break
     }
 
@@ -909,6 +915,12 @@ export function handleCliMessage(ws, client, msg, ctx) {
       console.log(`[ws] Message from ${client.id}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
       ctx.cliSession.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
       ctx.updatePrimary('default', client.id)
+
+      // Echo user_input to other clients so they see what was sent (#1119)
+      ctx.broadcast(
+        { type: 'user_input', sessionId: 'default', clientId: client.id, text: trimmed, timestamp: Date.now() },
+        (c) => c.id !== client.id
+      )
       break
     }
 
