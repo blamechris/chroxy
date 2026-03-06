@@ -1234,8 +1234,8 @@ export class WsServer {
   /** Count unauthenticated connections for pre-auth limit enforcement */
   _countPendingConnections() {
     let count = 0
-    for (const [, client] of this.clients) {
-      if (!client.authenticated) count++
+    for (const [ws, client] of this.clients) {
+      if (!client.authenticated && ws.readyState === 1) count++
     }
     return count
   }
