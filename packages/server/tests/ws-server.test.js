@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
-import { createMockSession } from './test-helpers.js'
+import { createMockSession, createMockSessionManager } from './test-helpers.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
 class WsServer extends _WsServer {
@@ -1211,55 +1211,8 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
     }
   })
 
-  /** Create a minimal mock SessionManager */
-  function createMockSessionManager(sessions = []) {
-    const manager = new EventEmitter()
-    const sessionsMap = new Map()
-
-    // Initialize with provided sessions
-    for (const sessionData of sessions) {
-      const mockSession = createMockSession()
-      mockSession.cwd = sessionData.cwd
-      sessionsMap.set(sessionData.id, {
-        session: mockSession,
-        name: sessionData.name,
-        cwd: sessionData.cwd,
-        type: sessionData.type || 'cli',
-        isBusy: false,
-      })
-    }
-
-    manager.getSession = (id) => sessionsMap.get(id)
-    manager.listSessions = () => {
-      const list = []
-      for (const [id, entry] of sessionsMap) {
-        list.push({
-          id,
-          name: entry.name,
-          cwd: entry.cwd,
-          type: entry.type,
-          isBusy: entry.isBusy,
-        })
-      }
-      return list
-    }
-    manager.getHistory = () => []
-    manager.recordUserInput = () => {}
-    manager.touchActivity = () => {}
-    manager.getFullHistoryAsync = async () => []
-    manager.isBudgetPaused = () => false
-    manager.getSessionContext = async () => null
-
-    // Add firstSessionId getter
-    Object.defineProperty(manager, 'firstSessionId', {
-      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
-    })
-
-    return manager
-  }
-
   it('includes serverMode "cli" when sessionManager is provided', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'session-1', name: 'Project 1', cwd: '/tmp/project-1' }
     ])
 
@@ -1281,7 +1234,7 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
   })
 
   it('includes cwd from first session when no defaultSessionId is provided', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'session-1', name: 'First Project', cwd: '/tmp/first-project' },
       { id: 'session-2', name: 'Second Project', cwd: '/tmp/second-project' }
     ])
@@ -1305,7 +1258,7 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
   })
 
   it('includes cwd from default session when defaultSessionId is provided', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'session-1', name: 'First Project', cwd: '/tmp/first-project' },
       { id: 'session-default', name: 'Default Project', cwd: '/tmp/default-project' },
       { id: 'session-3', name: 'Third Project', cwd: '/tmp/third-project' }
@@ -1330,7 +1283,7 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
   })
 
   it('sends session_list after auth_ok when sessionManager is present', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'session-1', name: 'Project 1', cwd: '/tmp/project-1' },
       { id: 'session-2', name: 'Project 2', cwd: '/tmp/project-2' }
     ])
@@ -1354,7 +1307,7 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
 
     // Verify session structure
     const firstSession = sessionList.sessions[0]
-    assert.ok(firstSession.id, 'Session should have id')
+    assert.ok(firstSession.sessionId, 'Session should have sessionId')
     assert.ok(firstSession.name, 'Session should have name')
     assert.ok(firstSession.cwd, 'Session should have cwd')
     assert.ok(firstSession.type, 'Session should have type')
@@ -1364,7 +1317,7 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
   })
 
   it('includes session info in correct order: auth_ok, server_mode, status, session_list', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'session-1', name: 'Project 1', cwd: '/tmp/project-1' }
     ])
 
@@ -1401,7 +1354,7 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
   })
 
   it('sends session_switched after session_list when sessionManager has sessions', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'session-1', name: 'Active Project', cwd: '/tmp/active' }
     ])
 
@@ -1427,7 +1380,7 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
   })
 
   it('sets cwd to null when sessionManager has no sessions', async () => {
-    const mockManager = createMockSessionManager([])
+    const { manager: mockManager } = createMockSessionManager([])
 
     server = new WsServer({
       port: 0,
@@ -1447,7 +1400,7 @@ describe('auth_ok payload with sessionManager (multi-session mode)', () => {
   })
 
   it('includes available_models and available_permission_modes after session info', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'session-1', name: 'Project 1', cwd: '/tmp/project-1' }
     ])
 
@@ -1488,47 +1441,8 @@ describe('user_question_response forwarding (multi-session)', () => {
     }
   })
 
-  function createMockSessionManagerForQuestion(sessions = []) {
-    const manager = new EventEmitter()
-    const sessionsMap = new Map()
-
-    for (const sessionData of sessions) {
-      const mockSession = createMockSession()
-      mockSession.respondToQuestion = () => {}
-      mockSession.cwd = sessionData.cwd
-
-      sessionsMap.set(sessionData.id, {
-        session: mockSession,
-        name: sessionData.name,
-        cwd: sessionData.cwd,
-        type: sessionData.type || 'cli',
-        isBusy: false,
-      })
-    }
-
-    manager.getSession = (id) => sessionsMap.get(id)
-    manager.listSessions = () => {
-      const list = []
-      for (const [id, entry] of sessionsMap) {
-        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
-      }
-      return list
-    }
-    manager.getHistory = () => []
-    manager.recordUserInput = () => {}
-    manager.touchActivity = () => {}
-    manager.getFullHistoryAsync = async () => []
-    manager.isBudgetPaused = () => false
-    manager.getSessionContext = async () => null
-    Object.defineProperty(manager, 'firstSessionId', {
-      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
-    })
-
-    return { manager, sessionsMap }
-  }
-
   it('forwards user_question_response to active cli session', async () => {
-    const { manager, sessionsMap } = createMockSessionManagerForQuestion([
+    const { manager, sessionsMap } = createMockSessionManager([
       { id: 'sess-1', name: 'Test', cwd: '/tmp', type: 'cli' },
     ])
 
@@ -3966,37 +3880,9 @@ describe('request_session_context error paths', () => {
     }
   })
 
-  function createMockSessionManager(sessions = []) {
-    const manager = new EventEmitter()
-    const sessionsMap = new Map()
-    for (const s of sessions) {
-      const mockSession = createMockSession()
-      mockSession.cwd = s.cwd
-      sessionsMap.set(s.id, { session: mockSession, name: s.name, cwd: s.cwd, type: 'cli', isBusy: false })
-    }
-    manager.getSession = (id) => sessionsMap.get(id)
-    manager.listSessions = () => {
-      const list = []
-      for (const [id, entry] of sessionsMap) {
-        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
-      }
-      return list
-    }
-    manager.getHistory = () => []
-    manager.recordUserInput = () => {}
-    manager.touchActivity = () => {}
-    manager.getFullHistoryAsync = async () => []
-    manager.isBudgetPaused = () => false
-    manager.getSessionContext = async () => null
-    Object.defineProperty(manager, 'firstSessionId', {
-      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
-    })
-    return manager
-  }
-
   it('returns session_error when no active session', async () => {
     // Manager with no sessions — no activeSessionId can be set
-    const mockManager = createMockSessionManager([])
+    const { manager: mockManager } = createMockSessionManager([])
     server = new WsServer({
       port: 0,
       apiToken: 'test-token',
@@ -4014,7 +3900,7 @@ describe('request_session_context error paths', () => {
   })
 
   it('returns session_error when session not found', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'sess-1', name: 'Test', cwd: '/tmp' }
     ])
     mockManager.getSessionContext = async () => null
@@ -4036,7 +3922,7 @@ describe('request_session_context error paths', () => {
   })
 
   it('returns session_error when getSessionContext throws', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'sess-1', name: 'Test', cwd: '/tmp' }
     ])
     mockManager.getSessionContext = async () => { throw new Error('git not found') }
@@ -7901,42 +7787,6 @@ describe('session-targeted routing (#611)', () => {
     }
   })
 
-  function createMockSessionManager(sessions = []) {
-    const manager = new EventEmitter()
-    const sessionsMap = new Map()
-
-    for (const sessionData of sessions) {
-      const mockSession = createMockSession()
-      mockSession.cwd = sessionData.cwd
-      sessionsMap.set(sessionData.id, {
-        session: mockSession,
-        name: sessionData.name,
-        cwd: sessionData.cwd,
-        type: sessionData.type || 'cli',
-        isBusy: false,
-      })
-    }
-
-    manager.getSession = (id) => sessionsMap.get(id)
-    manager.listSessions = () => {
-      const list = []
-      for (const [id, entry] of sessionsMap) {
-        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
-      }
-      return list
-    }
-    manager.getHistory = () => []
-    manager.recordUserInput = () => {}
-    manager.touchActivity = () => {}
-    manager.getFullHistoryAsync = async () => []
-    manager.isBudgetPaused = () => false
-    manager.getSessionContext = async () => null
-    Object.defineProperty(manager, 'firstSessionId', {
-      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
-    })
-    return { manager, sessionsMap }
-  }
-
   it('routes input to msg.sessionId instead of activeSessionId', async () => {
     const { manager, sessionsMap } = createMockSessionManager([
       { id: 'session-a', name: 'A', cwd: '/tmp/a' },
@@ -8218,41 +8068,8 @@ describe('restore_checkpoint idle guard', () => {
     }
   })
 
-  function createMockSessionManager(sessions = [], checkpointManager = null) {
-    const manager = new EventEmitter()
-    const sessionsMap = new Map()
-    for (const s of sessions) {
-      const mockSession = createMockSession()
-      mockSession.isRunning = s.isRunning || false
-      sessionsMap.set(s.id, {
-        session: mockSession,
-        name: s.name,
-        cwd: s.cwd || '/tmp',
-        type: 'cli',
-      })
-    }
-    manager.getSession = (id) => sessionsMap.get(id)
-    manager.listSessions = () => {
-      const list = []
-      for (const [id, entry] of sessionsMap) {
-        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, isBusy: entry.session.isRunning })
-      }
-      return list
-    }
-    manager.getHistory = () => []
-    manager.recordUserInput = () => {}
-    manager.touchActivity = () => {}
-    manager.getFullHistoryAsync = async () => []
-    manager.isBudgetPaused = () => false
-    manager.getSessionContext = async () => null
-    Object.defineProperty(manager, 'firstSessionId', {
-      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
-    })
-    return manager
-  }
-
   it('rejects restore_checkpoint when session is busy (isRunning=true)', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'session-1', name: 'Busy Session', cwd: '/tmp', isRunning: true }
     ])
 
@@ -8280,7 +8097,7 @@ describe('restore_checkpoint idle guard', () => {
   })
 
   it('allows restore_checkpoint when session is idle (isRunning=false)', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'session-1', name: 'Idle Session', cwd: '/tmp', isRunning: false }
     ])
 
@@ -8717,42 +8534,8 @@ describe('client_focus_changed broadcast', () => {
     }
   })
 
-  function createMockSessionManager(sessions = []) {
-    const manager = new EventEmitter()
-    const sessionsMap = new Map()
-    for (const s of sessions) {
-      const mockSession = createMockSession()
-      mockSession.cwd = s.cwd
-      sessionsMap.set(s.id, {
-        session: mockSession,
-        name: s.name,
-        cwd: s.cwd,
-        type: 'cli',
-        isBusy: false,
-      })
-    }
-    manager.getSession = (id) => sessionsMap.get(id)
-    manager.listSessions = () => {
-      const list = []
-      for (const [id, entry] of sessionsMap) {
-        list.push({ sessionId: id, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy })
-      }
-      return list
-    }
-    manager.getHistory = () => []
-    manager.recordUserInput = () => {}
-    manager.touchActivity = () => {}
-    manager.getFullHistoryAsync = async () => []
-    manager.isBudgetPaused = () => false
-    manager.getSessionContext = async () => null
-    Object.defineProperty(manager, 'firstSessionId', {
-      get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null
-    })
-    return manager
-  }
-
   it('broadcasts client_focus_changed when a client switches session', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'sess-a', name: 'Session A', cwd: '/tmp/a' },
       { id: 'sess-b', name: 'Session B', cwd: '/tmp/b' },
     ])
@@ -8786,7 +8569,7 @@ describe('client_focus_changed broadcast', () => {
   })
 
   it('does not send client_focus_changed to the switching client itself', async () => {
-    const mockManager = createMockSessionManager([
+    const { manager: mockManager } = createMockSessionManager([
       { id: 'sess-a', name: 'Session A', cwd: '/tmp/a' },
       { id: 'sess-b', name: 'Session B', cwd: '/tmp/b' },
     ])

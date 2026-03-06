@@ -31,6 +31,79 @@ export function createSpy(impl) {
 }
 
 /**
+ * Create a mock session manager with spy methods.
+ *
+ * Always returns { manager, sessionsMap } so callers can access
+ * individual session entries when needed.
+ *
+ * Session data objects support:
+ *   { id, name, cwd, type?, isRunning? }
+ *
+ * The manager is an EventEmitter with the same API surface as
+ * the real SessionManager: getSession, listSessions, getHistory,
+ * recordUserInput, touchActivity, getFullHistoryAsync,
+ * isBudgetPaused, getSessionContext, firstSessionId.
+ *
+ * Override any method via the overrides parameter:
+ *   createMockSessionManager(sessions, { getHistory: () => [...] })
+ */
+export function createMockSessionManager(sessions = [], overrides = {}) {
+  const manager = new EventEmitter()
+  const sessionsMap = new Map()
+
+  for (const s of sessions) {
+    const mockSession = createMockSession()
+    mockSession.cwd = s.cwd
+    if (s.isRunning !== undefined) mockSession.isRunning = s.isRunning
+    sessionsMap.set(s.id, {
+      session: mockSession,
+      name: s.name,
+      cwd: s.cwd || '/tmp',
+      type: s.type || 'cli',
+      isBusy: s.isRunning || false,
+    })
+  }
+
+  manager.getSession = (id) => sessionsMap.get(id)
+  manager.listSessions = () => {
+    const list = []
+    for (const [sessionId, entry] of sessionsMap) {
+      list.push({
+        sessionId,
+        name: entry.name,
+        cwd: entry.cwd,
+        type: entry.type,
+        isBusy: entry.isBusy,
+      })
+    }
+    return list
+  }
+  manager.getHistory = () => []
+  manager.recordUserInput = () => {}
+  manager.touchActivity = () => {}
+  manager.getFullHistoryAsync = async () => []
+  manager.isBudgetPaused = () => false
+  manager.getSessionContext = async () => null
+  Object.defineProperty(manager, 'firstSessionId', {
+    get: () => sessionsMap.size > 0 ? sessionsMap.keys().next().value : null,
+    configurable: true,
+  })
+
+  for (const [key, value] of Object.entries(overrides)) {
+    const desc = Object.getOwnPropertyDescriptor(manager, key)
+    if (desc && !desc.writable && !desc.set) {
+      Object.defineProperty(manager, key, typeof value === 'function'
+        ? { get: value, configurable: true }
+        : { value, configurable: true })
+    } else {
+      manager[key] = value
+    }
+  }
+
+  return { manager, sessionsMap }
+}
+
+/**
  * Create a mock session with spy methods.
  *
  * All methods are spies — you can check calls, arguments, and call counts.
