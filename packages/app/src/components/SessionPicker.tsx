@@ -2,8 +2,10 @@ import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react'
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   ScrollView,
+  Modal,
   StyleSheet,
   Alert,
   LayoutChangeEvent,
@@ -11,6 +13,7 @@ import {
 import { useConnectionStore, SessionInfo, SessionHealth } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
+import { hapticMedium } from '../utils/haptics';
 
 
 interface SessionPillProps {
@@ -66,6 +69,9 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
   const setFollowMode = useConnectionStore((s) => s.setFollowMode);
   const connectedClients = useConnectionStore((s) => s.connectedClients);
 
+  const [renameTarget, setRenameTarget] = useState<{ sessionId: string; name: string } | null>(null);
+  const [renameText, setRenameText] = useState('');
+
   const scrollViewRef = useRef<ScrollView>(null);
   const pillLayouts = useRef<Map<string, { x: number; width: number }>>(new Map());
   const [viewportWidth, setViewportWidth] = useState(0);
@@ -110,6 +116,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
   }, [activeSessionId, scrollToSession]);
 
   const handleLongPress = (session: SessionInfo) => {
+    hapticMedium();
     const health = sessionStates[session.sessionId]?.health || 'healthy';
     const isCrashed = health === 'crashed';
 
@@ -143,22 +150,8 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
         {
           text: 'Rename',
           onPress: () => {
-            // Alert.prompt is iOS-only; guard for Android
-            if (typeof Alert.prompt === 'function') {
-              Alert.prompt(
-                'Rename Session',
-                'Enter a new name:',
-                (name) => {
-                  if (name && name.trim()) {
-                    renameSession(session.sessionId, name.trim());
-                  }
-                },
-                'plain-text',
-                session.name,
-              );
-            } else {
-              Alert.alert('Rename', 'Session renaming is not available on this platform.');
-            }
+            setRenameText(session.name);
+            setRenameTarget({ sessionId: session.sessionId, name: session.name });
           },
         },
         {
@@ -227,6 +220,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
           style={styles.addButton}
           onPress={onCreatePress}
           activeOpacity={0.7}
+          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
           accessibilityRole="button"
           accessibilityLabel="Create new session"
         >
@@ -238,10 +232,54 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
           style={[styles.followButton, followMode && styles.followButtonActive]}
           onPress={() => setFollowMode(!followMode)}
           activeOpacity={0.7}
+          accessibilityRole="switch"
+          accessibilityLabel="Toggle follow mode"
+          accessibilityState={{ checked: followMode }}
+          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
         >
           <Text style={styles.followButtonText}>{'\u{1F517}'}</Text>
         </TouchableOpacity>
       )}
+      <Modal
+        visible={renameTarget !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRenameTarget(null)}
+      >
+        <View style={styles.renameOverlay}>
+          <View style={styles.renameModal}>
+            <Text style={styles.renameTitle}>Rename Session</Text>
+            <TextInput
+              style={styles.renameInput}
+              value={renameText}
+              onChangeText={setRenameText}
+              autoFocus
+              selectTextOnFocus
+              placeholder="Session name"
+              placeholderTextColor={COLORS.textDim}
+            />
+            <View style={styles.renameButtons}>
+              <TouchableOpacity
+                style={styles.renameCancelBtn}
+                onPress={() => setRenameTarget(null)}
+              >
+                <Text style={styles.renameCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.renameSaveBtn}
+                onPress={() => {
+                  if (renameTarget && renameText.trim()) {
+                    renameSession(renameTarget.sessionId, renameText.trim());
+                  }
+                  setRenameTarget(null);
+                }}
+              >
+                <Text style={styles.renameSaveText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -369,5 +407,58 @@ const styles = StyleSheet.create({
   },
   followButtonText: {
     fontSize: 14,
+  },
+  renameOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  renameModal: {
+    backgroundColor: COLORS.backgroundSecondary,
+    borderRadius: 12,
+    padding: 20,
+    width: '80%',
+    maxWidth: 320,
+  },
+  renameTitle: {
+    color: COLORS.textPrimary,
+    fontSize: 17,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  renameInput: {
+    backgroundColor: COLORS.backgroundCard,
+    color: COLORS.textPrimary,
+    borderRadius: 8,
+    padding: 10,
+    fontSize: 15,
+    borderWidth: 1,
+    borderColor: COLORS.borderSecondary,
+    marginBottom: 16,
+  },
+  renameButtons: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+  },
+  renameCancelBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+  },
+  renameCancelText: {
+    color: COLORS.textMuted,
+    fontSize: 15,
+  },
+  renameSaveBtn: {
+    backgroundColor: COLORS.accentBlue,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+  },
+  renameSaveText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
   },
 });

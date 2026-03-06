@@ -113,6 +113,12 @@ export const ReadFileSchema = z.object({
   path: z.string(),
 }).passthrough()
 
+export const WriteFileSchema = z.object({
+  type: z.literal('write_file'),
+  path: z.string(),
+  content: z.string(),
+}).passthrough()
+
 export const ListFilesSchema = z.object({
   type: z.literal('list_files'),
   query: z.string().optional(),
@@ -517,6 +523,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ListDirectorySchema,
   BrowseFilesSchema,
   ReadFileSchema,
+  WriteFileSchema,
   ListFilesSchema,
   ListSlashCommandsSchema,
   ListAgentsSchema,
