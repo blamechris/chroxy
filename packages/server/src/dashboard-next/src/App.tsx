@@ -565,7 +565,7 @@ export function App() {
                 onClick={() => setViewMode('terminal')}
                 type="button"
               >
-                Terminal
+                Output
               </button>
             </div>
 
