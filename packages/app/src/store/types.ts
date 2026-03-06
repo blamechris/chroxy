@@ -256,6 +256,7 @@ export interface SessionNotification {
   eventType: 'permission' | 'question' | 'completed' | 'error';
   message: string;
   timestamp: number;
+  requestId?: string;
 }
 
 export interface SlashCommand {
