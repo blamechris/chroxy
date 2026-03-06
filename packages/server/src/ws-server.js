@@ -110,6 +110,36 @@ function getGitInfo() {
 }
 
 /**
+ * Allowed CORS origins for sensitive endpoints (/qr, /connect).
+ * Health endpoint (/) keeps wildcard.
+ */
+const ALLOWED_ORIGINS = [
+  'tauri://localhost',
+  'https://tauri.localhost',
+]
+
+/**
+ * Check if an Origin header matches the allowed list.
+ * Localhost origins with any port are allowed for dev.
+ */
+function _matchAllowedOrigin(origin) {
+  if (!origin) return null
+  if (ALLOWED_ORIGINS.includes(origin)) return origin
+  // Allow http://localhost:<port> and http://127.0.0.1:<port>
+  if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return origin
+  if (/^http:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) return origin
+  return null
+}
+
+/**
+ * Determine if request is served over HTTPS (tunnel or reverse proxy).
+ */
+function _isSecureRequest(req) {
+  const proto = req.headers['x-forwarded-proto']
+  return proto === 'https'
+}
+
+/**
  * WebSocket server that bridges the phone client to the backend.
  *
  * Supports two modes:
@@ -371,7 +401,8 @@ export class WsServer {
       // Set cookie for future requests, but DON'T redirect — serve content
       // directly. Tauri's WKWebView doesn't reliably send cookies on 302
       // redirects to 127.0.0.1 with SameSite=Strict.
-      res.setHeader('Set-Cookie', `chroxy_auth=${encoded}; Path=/dashboard; SameSite=Strict; Max-Age=86400`)
+      const securePart = _isSecureRequest(req) ? '; Secure' : ''
+      res.setHeader('Set-Cookie', `chroxy_auth=${encoded}; Path=/dashboard; SameSite=Strict; HttpOnly${securePart}; Max-Age=86400`)
     }
     return true
   }
@@ -398,12 +429,17 @@ export class WsServer {
       // CORS preflight — allow cross-origin requests from the Tauri WebView
       // (loads from http://tauri.localhost, needs to reach http://127.0.0.1:PORT)
       if (req.method === 'OPTIONS') {
-        res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
+        const isRestricted = req.url?.startsWith('/qr') || req.url?.startsWith('/connect')
+        const corsOrigin = isRestricted
+          ? _matchAllowedOrigin(req.headers['origin'])
+          : '*'
+        const headers = {
           'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
           'Access-Control-Allow-Headers': 'Authorization, Content-Type',
           'Access-Control-Max-Age': '86400',
-        })
+        }
+        if (corsOrigin) headers['Access-Control-Allow-Origin'] = corsOrigin
+        res.writeHead(204, headers)
         res.end()
         return
       }
@@ -478,7 +514,10 @@ export class WsServer {
           // connectionUrl contains the token embedded in the query string (chroxy://host?token=...)
           delete connInfo.connectionUrl
         }
-        res.writeHead(200, { 'Content-Type': 'application/json' })
+        const connectCors = _matchAllowedOrigin(req.headers['origin'])
+        const connectHeaders = { 'Content-Type': 'application/json' }
+        if (connectCors) connectHeaders['Access-Control-Allow-Origin'] = connectCors
+        res.writeHead(200, connectHeaders)
         res.end(JSON.stringify(connInfo))
         return
       }
@@ -487,9 +526,12 @@ export class WsServer {
       // Auth required: QR contains the connection token
       if (req.method === 'GET' && req.url?.startsWith('/qr')) {
         if (!this._validateBearerAuth(req, res)) return
+        const qrCors = _matchAllowedOrigin(req.headers['origin'])
         const connInfo = readConnectionInfo()
         if (!connInfo || !connInfo.connectionUrl) {
-          res.writeHead(503, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+          const errHeaders = { 'Content-Type': 'application/json' }
+          if (qrCors) errHeaders['Access-Control-Allow-Origin'] = qrCors
+          res.writeHead(503, errHeaders)
           res.end(JSON.stringify({ error: 'Connection info not available yet' }))
           return
         }
@@ -499,11 +541,12 @@ export class WsServer {
             color: { dark: '#e0e0e0', light: '#00000000' },
             margin: 1,
           })
-          res.writeHead(200, {
+          const qrHeaders = {
             'Content-Type': 'image/svg+xml',
             'Cache-Control': 'no-store',
-            'Access-Control-Allow-Origin': '*',
-          })
+          }
+          if (qrCors) qrHeaders['Access-Control-Allow-Origin'] = qrCors
+          res.writeHead(200, qrHeaders)
           res.end(svg)
         } catch (_err) {
           res.writeHead(500, { 'Content-Type': 'application/json' })

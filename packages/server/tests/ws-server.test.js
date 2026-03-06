@@ -9090,3 +9090,253 @@ describe('subscribedSessionIds consistency (#1488)', () => {
     ws.close()
   })
 })
+
+describe('cookie security flags (#1532)', () => {
+  let server
+  const __cookie_test_dirname = dirname(fileURLToPath(import.meta.url))
+  const cookieDistDir = join(__cookie_test_dirname, '..', 'src', 'dashboard-next', 'dist')
+  let createdCookieFixture = false
+
+  before(() => {
+    if (!existsSync(join(cookieDistDir, 'index.html'))) {
+      createdCookieFixture = true
+      mkdirSync(join(cookieDistDir, 'assets'), { recursive: true })
+      writeFileSync(join(cookieDistDir, 'index.html'), '<html><body><div id="root"></div></body></html>')
+    }
+  })
+
+  after(() => {
+    if (createdCookieFixture) {
+      rmSync(cookieDistDir, { recursive: true, force: true })
+    }
+  })
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('sets HttpOnly flag on chroxy_auth cookie', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-cookie-flags',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard?token=tok-cookie-flags`)
+    assert.equal(res.status, 200)
+    const setCookie = res.headers.get('set-cookie')
+    assert.ok(setCookie, 'Set-Cookie header should be present')
+    assert.ok(setCookie.includes('HttpOnly'), 'cookie should have HttpOnly flag')
+  })
+
+  it('sets Secure flag when request comes via HTTPS (x-forwarded-proto)', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-cookie-secure',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard?token=tok-cookie-secure`, {
+      headers: { 'x-forwarded-proto': 'https' },
+    })
+    assert.equal(res.status, 200)
+    const setCookie = res.headers.get('set-cookie')
+    assert.ok(setCookie, 'Set-Cookie header should be present')
+    assert.ok(setCookie.includes('Secure'), 'cookie should have Secure flag when served over HTTPS')
+    assert.ok(setCookie.includes('HttpOnly'), 'cookie should always have HttpOnly flag')
+  })
+
+  it('omits Secure flag for plain HTTP requests', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-cookie-http',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard?token=tok-cookie-http`)
+    assert.equal(res.status, 200)
+    const setCookie = res.headers.get('set-cookie')
+    assert.ok(setCookie, 'Set-Cookie header should be present')
+    assert.ok(!setCookie.includes('Secure'), 'cookie should NOT have Secure flag on plain HTTP')
+  })
+})
+
+describe('CORS origin restrictions (#1533)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('health endpoint keeps Access-Control-Allow-Origin: *', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-cors-health',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/health`)
+    assert.equal(res.headers.get('access-control-allow-origin'), '*')
+  })
+
+  it('/qr endpoint returns allowed Tauri origin instead of *', async () => {
+    const { writeConnectionInfo } = await import('../src/connection-info.js')
+    const originalConfigDir = process.env.CHROXY_CONFIG_DIR
+    const tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-cors-qr-'))
+    process.env.CHROXY_CONFIG_DIR = tmpDir
+
+    writeConnectionInfo({
+      wsUrl: 'wss://cors-test.example.com',
+      httpUrl: 'https://cors-test.example.com',
+      apiToken: 'tok-cors-qr',
+      connectionUrl: 'chroxy://cors-test.example.com?token=tok-cors-qr',
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-cors-qr',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/qr`, {
+      headers: {
+        'Authorization': 'Bearer tok-cors-qr',
+        'Origin': 'tauri://localhost',
+      },
+    })
+    assert.equal(res.status, 200)
+    const origin = res.headers.get('access-control-allow-origin')
+    assert.equal(origin, 'tauri://localhost', 'should reflect allowed Tauri origin')
+
+    process.env.CHROXY_CONFIG_DIR = originalConfigDir || ''
+    if (!originalConfigDir) delete process.env.CHROXY_CONFIG_DIR
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('/qr endpoint rejects unknown origins', async () => {
+    const { writeConnectionInfo } = await import('../src/connection-info.js')
+    const originalConfigDir = process.env.CHROXY_CONFIG_DIR
+    const tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-cors-qr2-'))
+    process.env.CHROXY_CONFIG_DIR = tmpDir
+
+    writeConnectionInfo({
+      wsUrl: 'wss://cors-test2.example.com',
+      httpUrl: 'https://cors-test2.example.com',
+      apiToken: 'tok-cors-qr2',
+      connectionUrl: 'chroxy://cors-test2.example.com?token=tok-cors-qr2',
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-cors-qr2',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/qr`, {
+      headers: {
+        'Authorization': 'Bearer tok-cors-qr2',
+        'Origin': 'https://evil.com',
+      },
+    })
+    assert.equal(res.status, 200)
+    const origin = res.headers.get('access-control-allow-origin')
+    assert.equal(origin, null, 'should NOT set CORS header for unknown origins')
+
+    process.env.CHROXY_CONFIG_DIR = originalConfigDir || ''
+    if (!originalConfigDir) delete process.env.CHROXY_CONFIG_DIR
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('OPTIONS preflight on /qr reflects allowed origin', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-cors-preflight',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/qr`, {
+      method: 'OPTIONS',
+      headers: {
+        'Origin': 'https://tauri.localhost',
+        'Access-Control-Request-Method': 'GET',
+      },
+    })
+    assert.equal(res.status, 204)
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://tauri.localhost')
+  })
+
+  it('OPTIONS preflight on / keeps wildcard origin', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-cors-preflight-health',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      method: 'OPTIONS',
+      headers: {
+        'Origin': 'https://random-site.com',
+        'Access-Control-Request-Method': 'GET',
+      },
+    })
+    assert.equal(res.status, 204)
+    assert.equal(res.headers.get('access-control-allow-origin'), '*')
+  })
+
+  it('/connect endpoint reflects allowed localhost origin', async () => {
+    const { writeConnectionInfo } = await import('../src/connection-info.js')
+    const originalConfigDir = process.env.CHROXY_CONFIG_DIR
+    const tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-cors-connect-'))
+    process.env.CHROXY_CONFIG_DIR = tmpDir
+
+    writeConnectionInfo({
+      wsUrl: 'wss://cors-connect.example.com',
+      httpUrl: 'https://cors-connect.example.com',
+      apiToken: 'tok-cors-connect',
+      connectionUrl: 'chroxy://cors-connect.example.com?token=tok-cors-connect',
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-cors-connect',
+      cliSession: createMockSession(),
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const res = await fetch(`http://127.0.0.1:${port}/connect`, {
+      headers: {
+        'Authorization': 'Bearer tok-cors-connect',
+        'Origin': 'http://localhost:3000',
+      },
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get('access-control-allow-origin'), 'http://localhost:3000')
+
+    process.env.CHROXY_CONFIG_DIR = originalConfigDir || ''
+    if (!originalConfigDir) delete process.env.CHROXY_CONFIG_DIR
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+})
