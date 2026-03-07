@@ -347,6 +347,98 @@ describe('session_list GC handler', () => {
   });
 });
 
+describe('checkpoint_restored handler', () => {
+  it('calls switchSession with newSessionId when present', () => {
+    const switchSession = jest.fn();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+      switchSession,
+    } as any);
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: 's2' });
+
+    expect(switchSession).toHaveBeenCalledWith('s2');
+  });
+
+  it('does not call switchSession when newSessionId is missing', () => {
+    const switchSession = jest.fn();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+      switchSession,
+    } as any);
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'checkpoint_restored' });
+
+    expect(switchSession).not.toHaveBeenCalled();
+  });
+
+  it('does not call switchSession when newSessionId is empty string', () => {
+    const switchSession = jest.fn();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+      switchSession,
+    } as any);
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: '' });
+
+    expect(switchSession).not.toHaveBeenCalled();
+  });
+
+  it('does not call switchSession when newSessionId is whitespace-only', () => {
+    const switchSession = jest.fn();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+      switchSession,
+    } as any);
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: '   ' });
+
+    expect(switchSession).not.toHaveBeenCalled();
+  });
+
+  it('does not call switchSession when newSessionId is non-string', () => {
+    const switchSession = jest.fn();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+      switchSession,
+    } as any);
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: 42 });
+
+    expect(switchSession).not.toHaveBeenCalled();
+  });
+});
+
 describe('session_updated handler (#1381)', () => {
   it('updates session name in store', () => {
     const store = createMockStore({
