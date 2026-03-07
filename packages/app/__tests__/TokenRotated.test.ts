@@ -27,7 +27,7 @@ describe('token_rotated handler (#989)', () => {
     // The handler should do more than just log — must have actual re-auth logic
     const match = src.match(/case 'token_rotated':\s*\{([\s\S]*?)\n    \}/)
     expect(match).toBeTruthy()
-    expect(match[1]).toContain('clearSavedConnection')
-    expect(match[1]).toContain('disconnect')
+    expect(match![1]).toContain('clearSavedConnection')
+    expect(match![1]).toContain('disconnect')
   })
 })
