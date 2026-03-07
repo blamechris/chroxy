@@ -321,13 +321,9 @@ export function App() {
     [commands],
   )
 
-  // Server registry for auto-connect fallback
-  const serverRegistry = useConnectionStore(s => s.serverRegistry)
-  const activeServerId = useConnectionStore(s => s.activeServerId)
-  const connectToServer = useConnectionStore(s => s.connectToServer)
-
   // Auto-connect on mount — use page token (served by local server),
-  // or fall back to the last active server from the registry
+  // or fall back to the last active server from the registry.
+  // Reads registry via getState() to avoid reactive deps (mount-only effect).
   useEffect(() => {
     const token = getAuthToken()
     if (token) {
@@ -336,11 +332,12 @@ export function App() {
       connect(wsUrl, token)
       return
     }
-    // No page token — try to reconnect to last active server from registry
-    if (activeServerId && serverRegistry.some(s => s.id === activeServerId)) {
-      connectToServer(activeServerId)
+    const { activeServerId: savedId, serverRegistry: registry, connectToServer: connectSrv } = useConnectionStore.getState()
+    if (savedId && registry.some(s => s.id === savedId)) {
+      connectSrv(savedId)
     }
-  }, [connect, connectToServer, activeServerId, serverRegistry])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connect])
 
   // Close Create Session modal when server confirms (activeSessionId changes)
   useEffect(() => {

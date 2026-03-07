@@ -62,7 +62,7 @@ describe('loadPersistedActiveServer', () => {
 
 describe('credential lifecycle', () => {
   it('preserves token through add and load cycle', () => {
-    const [servers] = addServerEntry([], 'Dev', 'wss://dev/ws', 'secret-token')
+    addServerEntry([], 'Dev', 'wss://dev/ws', 'secret-token')
     const loaded = loadServerRegistry()
     expect(loaded[0]!.token).toBe('secret-token')
   })
