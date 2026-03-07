@@ -149,6 +149,7 @@ export function App() {
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
   const dismissSessionNotification = useConnectionStore(s => s.dismissSessionNotification)
+  const markPromptAnsweredByRequestId = useConnectionStore(s => s.markPromptAnsweredByRequestId)
   const conversationHistory = useConnectionStore(s => s.conversationHistory)
   const fetchConversationHistory = useConnectionStore(s => s.fetchConversationHistory)
   const resumeConversation = useConnectionStore(s => s.resumeConversation)
@@ -500,8 +501,6 @@ export function App() {
       setQrLoading(false)
     }
   }, [])
-
-  const markPromptAnsweredByRequestId = useConnectionStore(s => s.markPromptAnsweredByRequestId)
 
   const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
     sendPermissionResponse(requestId, 'allow')

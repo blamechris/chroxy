@@ -37,7 +37,7 @@ export function NotificationBanners({
   const overflow = notifications.length - MAX_VISIBLE
 
   return (
-    <div className="notification-banners" role="status" aria-label="Background session notifications">
+    <div className="notification-banners" role="log" aria-label="Background session notifications">
       {visible.map((n) => (
         <div
           key={n.id}

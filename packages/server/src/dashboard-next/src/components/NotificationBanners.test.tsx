@@ -187,7 +187,7 @@ describe('NotificationBanners', () => {
         onSwitchSession={vi.fn()}
       />
     )
-    expect(screen.getByRole('status')).toBeInTheDocument()
+    expect(screen.getByRole('log')).toBeInTheDocument()
   })
 })
 
