@@ -929,9 +929,9 @@ export function createFileOps(sendFn) {
         timeout: 30000,
       })
 
-      // Extract commit hash from output (first line typically: "[branch hash] message")
+      // Extract commit hash from output by finding a hex hash before closing bracket
       let hash = null
-      const match = stdout.match(/\[[\w/.-]+ ([a-f0-9]+)\]/)
+      const match = stdout.match(/\b([a-f0-9]{7,})\]/)
       if (match) hash = match[1]
 
       sendFn(ws, {
