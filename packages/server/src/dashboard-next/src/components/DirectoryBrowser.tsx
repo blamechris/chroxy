@@ -8,7 +8,6 @@
 import type { DirectoryEntry } from '../store/types'
 
 export interface DirectoryBrowserProps {
-  initialPath: string
   entries: DirectoryEntry[]
   currentPath: string
   loading: boolean
