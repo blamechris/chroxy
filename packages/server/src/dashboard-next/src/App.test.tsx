@@ -75,18 +75,18 @@ vi.mock('./store/connection', () => {
     connectToServer: vi.fn(),
     updateServer: vi.fn(),
   }
-  return {
-    useConnectionStore: (
-      selector?: (s: typeof baseState) => unknown,
-    ) => {
-      // Merge overrides at call time so tests can set them before render
-      const state = { ...baseState, ...stateOverrides }
-      if (typeof selector === 'function') {
-        return selector(state as typeof baseState)
-      }
-      return state
-    },
+  const useConnectionStore = (
+    selector?: (s: typeof baseState) => unknown,
+  ) => {
+    // Merge overrides at call time so tests can set them before render
+    const state = { ...baseState, ...stateOverrides }
+    if (typeof selector === 'function') {
+      return selector(state as typeof baseState)
+    }
+    return state
   }
+  useConnectionStore.getState = () => ({ ...baseState, ...stateOverrides })
+  return { useConnectionStore }
 })
 
 // Mock zustand/react/shallow — just pass through the selector

@@ -321,14 +321,22 @@ export function App() {
     [commands],
   )
 
-  // Auto-connect on mount
+  // Auto-connect on mount — use page token (served by local server),
+  // or fall back to the last active server from the registry.
+  // Reads registry via getState() to avoid reactive deps (mount-only effect).
   useEffect(() => {
     const token = getAuthToken()
-    if (!token) return
-
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const wsUrl = `${proto}://${window.location.host}/ws`
-    connect(wsUrl, token)
+    if (token) {
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const wsUrl = `${proto}://${window.location.host}/ws`
+      connect(wsUrl, token)
+      return
+    }
+    const { activeServerId: savedId, serverRegistry: registry, connectToServer: connectSrv } = useConnectionStore.getState()
+    if (savedId && registry.some(s => s.id === savedId)) {
+      connectSrv(savedId)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connect])
 
   // Close Create Session modal when server confirms (activeSessionId changes)
