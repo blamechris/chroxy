@@ -156,6 +156,14 @@ export const GetDiffSchema = z.object({
   type: z.literal('get_diff'),
 }).passthrough()
 
+export const GitStatusSchema = z.object({
+  type: z.literal('git_status'),
+}).passthrough()
+
+export const GitBranchesSchema = z.object({
+  type: z.literal('git_branches'),
+}).passthrough()
+
 export const ResumeBudgetSchema = z.object({
   type: z.literal('resume_budget'),
   sessionId: z.string().optional(),
@@ -531,6 +539,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   RequestFullHistorySchema,
   RequestSessionContextSchema,
   GetDiffSchema,
+  GitStatusSchema,
+  GitBranchesSchema,
   ResumeBudgetSchema,
   ListCheckpointsSchema,
   RestoreCheckpointSchema,
