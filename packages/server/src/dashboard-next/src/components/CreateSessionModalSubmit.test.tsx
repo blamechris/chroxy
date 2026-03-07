@@ -15,7 +15,7 @@ vi.mock('../hooks/usePathAutocomplete', () => ({
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) =>
-    selector({ defaultProvider: 'claude-sdk' }),
+    selector({ defaultProvider: 'claude-sdk', availableProviders: [] }),
 }))
 
 import { CreateSessionModal } from './CreateSessionModal'

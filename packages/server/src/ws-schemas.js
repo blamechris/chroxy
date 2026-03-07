@@ -264,6 +264,10 @@ export const UnsubscribeSessionsSchema = z.object({
 
 // -- Repo management schemas --
 
+export const ListProvidersSchema = z.object({
+  type: z.literal('list_providers'),
+})
+
 export const ListReposSchema = z.object({
   type: z.literal('list_repos'),
 })
@@ -574,6 +578,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   RequestCostSummarySchema,
   SubscribeSessionsSchema,
   UnsubscribeSessionsSchema,
+  ListProvidersSchema,
   ListReposSchema,
   AddRepoSchema,
   RemoveRepoSchema,

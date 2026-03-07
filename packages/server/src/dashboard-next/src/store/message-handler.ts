@@ -40,6 +40,7 @@ import type {
   SlashCommand,
   FilePickerItem,
   ConversationSummary,
+  ProviderInfo,
   ToolResultImage,
   WebTask,
 } from './types';
@@ -597,6 +598,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // Post-auth messages will be sent after key_exchange_ok arrives
       } else {
         // No encryption — send post-auth messages immediately
+        wsSend(ctx.socket, { type: 'list_providers' });
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
       }
@@ -620,6 +622,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         _pendingKeyPair = null;
         console.log('[crypto] E2E encryption established');
         // Now send the post-auth messages that were deferred
+        wsSend(ctx.socket, { type: 'list_providers' });
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
       }
@@ -1592,6 +1595,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (msg.sessionId && agentSid && msg.sessionId !== agentSid) break;
       if (Array.isArray(msg.agents)) {
         set({ customAgents: msg.agents as CustomAgent[] });
+      }
+      break;
+    }
+
+    case 'provider_list': {
+      if (Array.isArray(msg.providers)) {
+        set({ availableProviders: msg.providers as ProviderInfo[] });
       }
       break;
     }

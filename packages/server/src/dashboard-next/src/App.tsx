@@ -362,7 +362,7 @@ export function App() {
         repo = { path: s.cwd, name, source: 'auto', exists: true, activeSessions: [], resumableSessions: [] }
         repoMap.set(s.cwd, repo)
       }
-      repo.activeSessions.push({ sessionId: s.sessionId, name: s.name, isBusy: s.isBusy })
+      repo.activeSessions.push({ sessionId: s.sessionId, name: s.name, isBusy: s.isBusy, provider: s.provider })
     }
 
     // If no repos from sessions, create a default
