@@ -27,6 +27,7 @@ export function ShortcutHelp({ isOpen, onClose, shortcuts }: ShortcutHelpProps) 
         const overlays = document.querySelectorAll('[data-modal-overlay]')
         if (overlays.length > 0 && overlays[overlays.length - 1] === backdropRef.current) {
           e.preventDefault()
+          e.stopPropagation()
           onClose()
         }
       }

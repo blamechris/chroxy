@@ -247,7 +247,9 @@ export function App() {
       if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const tag = (e.target as HTMLElement).tagName
         if (tag !== 'INPUT' && tag !== 'TEXTAREA' && !(e.target as HTMLElement).isContentEditable) {
-          if (!document.querySelector('[data-modal-overlay]')) {
+          const overlays = document.querySelectorAll('[data-modal-overlay]')
+          const onlyShortcutHelp = overlays.length === 1 && overlays[0]?.classList.contains('shortcut-help-overlay')
+          if (overlays.length === 0 || onlyShortcutHelp) {
             e.preventDefault()
             setShortcutHelpOpen(prev => !prev)
           }
@@ -554,8 +556,9 @@ export function App() {
     { keys: 'Cmd+1-9', description: 'Switch to tab by number', section: 'Session' },
     { keys: 'Cmd+Shift+[', description: 'Previous tab', section: 'Session' },
     { keys: 'Cmd+Shift+]', description: 'Next tab', section: 'Session' },
+    { keys: 'Cmd+W', description: 'Close tab (desktop)', section: 'Session' },
     { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
-    { keys: 'Escape', description: 'Close modal / overlay', section: 'Global' },
+    { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
   ], [])
 
   const isConnected = connectionPhase === 'connected'

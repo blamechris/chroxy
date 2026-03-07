@@ -67,4 +67,19 @@ describe('ShortcutHelp', () => {
     const backdrop = document.querySelector('[data-modal-overlay]')
     expect(backdrop).toBeInTheDocument()
   })
+
+  it('does not close on Escape when another overlay is on top', () => {
+    const onClose = vi.fn()
+    render(<ShortcutHelp isOpen={true} onClose={onClose} shortcuts={testShortcuts} />)
+    // Add another overlay on top
+    const topOverlay = document.createElement('div')
+    topOverlay.setAttribute('data-modal-overlay', '')
+    document.body.appendChild(topOverlay)
+    try {
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(onClose).not.toHaveBeenCalled()
+    } finally {
+      topOverlay.remove()
+    }
+  })
 })
