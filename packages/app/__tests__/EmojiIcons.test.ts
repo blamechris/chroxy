@@ -8,7 +8,7 @@ const connectPath = path.resolve(__dirname, '../src/screens/ConnectScreen.tsx')
 const connectSrc = fs.readFileSync(connectPath, 'utf-8')
 
 // Emoji ranges: surrogate pairs (\uD800-\uDBFF followed by \uDC00-\uDFFF)
-const SURROGATE_PAIR = /\\uD[89A-Fa-f][0-9A-Fa-f]{2}\\uD[C-Fc-f][0-9A-Fa-f]{2}/
+const SURROGATE_PAIR = /\\u[dD][89A-Fa-f][0-9A-Fa-f]{2}\\u[dD][C-Fc-f][0-9A-Fa-f]{2}/
 
 describe('Emoji icon removal', () => {
   test('icons.ts contains no emoji (surrogate pair) constants', () => {
