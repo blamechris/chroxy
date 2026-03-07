@@ -417,6 +417,7 @@ function pushSessionNotification(
   sessionId: string,
   eventType: SessionNotification['eventType'],
   message: string,
+  requestId?: string,
 ): void {
   const state = getStore().getState();
   if (sessionId === state.activeSessionId) return;
@@ -429,6 +430,7 @@ function pushSessionNotification(
     eventType,
     message,
     timestamp: Date.now(),
+    ...(requestId ? { requestId } : {}),
   };
   getStore().setState((s) => {
     const filtered = s.sessionNotifications.filter(
@@ -1346,7 +1348,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       if (permTargetId) {
         const toolDesc = msg.tool ? `${msg.tool}` : 'Permission needed';
-        pushSessionNotification(permTargetId, 'permission', toolDesc);
+        pushSessionNotification(permTargetId, 'permission', toolDesc, permRequestId);
       }
       break;
     }

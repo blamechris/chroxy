@@ -27,6 +27,7 @@ import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { CreateSessionModal } from './components/CreateSessionModal'
+import { NotificationBanners } from './components/NotificationBanners'
 import { Toast, type ToastItem } from './components/Toast'
 import { FooterBar } from './components/FooterBar'
 import { QrModal } from './components/QrModal'
@@ -97,6 +98,7 @@ export function App() {
   const serverErrors = useConnectionStore(s => s.serverErrors)
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
+  const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
 
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
@@ -146,6 +148,8 @@ export function App() {
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
+  const dismissSessionNotification = useConnectionStore(s => s.dismissSessionNotification)
+  const markPromptAnsweredByRequestId = useConnectionStore(s => s.markPromptAnsweredByRequestId)
   const conversationHistory = useConnectionStore(s => s.conversationHistory)
   const fetchConversationHistory = useConnectionStore(s => s.fetchConversationHistory)
   const resumeConversation = useConnectionStore(s => s.resumeConversation)
@@ -498,6 +502,18 @@ export function App() {
     }
   }, [])
 
+  const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
+    sendPermissionResponse(requestId, 'allow')
+    markPromptAnsweredByRequestId(requestId, 'Allowed')
+    dismissSessionNotification(notificationId)
+  }, [sendPermissionResponse, markPromptAnsweredByRequestId, dismissSessionNotification])
+
+  const handleBannerDeny = useCallback((requestId: string, notificationId: string) => {
+    sendPermissionResponse(requestId, 'deny')
+    markPromptAnsweredByRequestId(requestId, 'Denied')
+    dismissSessionNotification(notificationId)
+  }, [sendPermissionResponse, markPromptAnsweredByRequestId, dismissSessionNotification])
+
   const handleRetry = useCallback(() => {
     const token = getAuthToken()
     if (!token) return
@@ -719,6 +735,17 @@ export function App() {
             recentSessions={recentSessions}
             onResumeSession={resumeConversation}
             className="main-content"
+          />
+        )}
+
+        {/* Cross-session notification banners */}
+        {sessionNotifications.length > 0 && (
+          <NotificationBanners
+            notifications={sessionNotifications}
+            onApprove={handleBannerApprove}
+            onDeny={handleBannerDeny}
+            onDismiss={dismissSessionNotification}
+            onSwitchSession={switchSession}
           />
         )}
 
