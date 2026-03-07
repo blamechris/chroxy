@@ -12,7 +12,7 @@
  * Ported from packages/app/src/store/message-handler.ts for the web dashboard.
  * Connection persistence uses @chroxy/store-core adapters for DI.
  */
-import { consoleAlert, noopHaptic, noopPush, type PlatformAdapters } from '@chroxy/store-core'
+import { consoleAlert, noopHaptic, noopPush, createStorageAdapter, type PlatformAdapters, type StorageAdapter } from '@chroxy/store-core'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -98,8 +98,6 @@ import { encrypt } from './crypto';
 // ---------------------------------------------------------------------------
 // Platform adapters — web dashboard uses console.warn + no-op haptics
 // ---------------------------------------------------------------------------
-import { createStorageAdapter, type StorageAdapter } from '@chroxy/store-core'
-
 const _storage: StorageAdapter = createStorageAdapter(localStorage)
 
 const _adapters: PlatformAdapters = {
