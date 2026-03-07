@@ -46,17 +46,19 @@ describe('GeminiSession', () => {
     session.start()
     await new Promise(r => setTimeout(r, 50))
 
-    assert.equal(session.isRunning, true)
+    assert.equal(session.isReady, true)
+    assert.equal(session.isRunning, false) // Not busy until sendMessage
     assert.equal(events.length, 1)
     assert.ok(events[0].model)
   })
 
-  it('destroy sets isRunning to false', async () => {
+  it('destroy resets isReady and isRunning', async () => {
     const session = new GeminiSession({ cwd: '/tmp' })
     session.start()
     await new Promise(r => setTimeout(r, 50))
 
     session.destroy()
+    assert.equal(session.isReady, false)
     assert.equal(session.isRunning, false)
   })
 
@@ -81,23 +83,20 @@ describe('GeminiSession', () => {
   })
 
   describe('event mapping', () => {
-    it('maps assistant text event to stream events', () => {
+    it('_processGeminiEvent skips assistant text (handled in sendMessage)', () => {
       const session = new GeminiSession({ cwd: '/tmp' })
       const events = []
       session.on('stream_start', (d) => events.push({ type: 'stream_start', ...d }))
       session.on('stream_delta', (d) => events.push({ type: 'stream_delta', ...d }))
       session.on('stream_end', (d) => events.push({ type: 'stream_end', ...d }))
 
+      // Text blocks are now handled inline in sendMessage, not _processGeminiEvent
       session._processGeminiEvent({
         type: 'assistant',
         content: [{ type: 'text', text: 'Hello world' }],
       })
 
-      assert.equal(events.length, 3)
-      assert.equal(events[0].type, 'stream_start')
-      assert.equal(events[1].type, 'stream_delta')
-      assert.equal(events[1].delta, 'Hello world')
-      assert.equal(events[2].type, 'stream_end')
+      assert.equal(events.length, 0) // No stream events from _processGeminiEvent
     })
 
     it('maps result event with usage to result', () => {
