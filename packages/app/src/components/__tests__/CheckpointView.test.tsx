@@ -79,6 +79,10 @@ describe('CheckpointView', () => {
     jest.clearAllMocks();
   });
 
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   it('calls listCheckpoints when visible', () => {
     setupStore([]);
     act(() => {
@@ -256,5 +260,51 @@ describe('CheckpointView', () => {
       root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
     });
     expect(findTextNodes(root!.root, 'Create Checkpoint').length).toBeGreaterThan(0);
+  });
+
+  it('create flow: tap Create, enter name, confirm calls createCheckpoint', () => {
+    setupStore([]);
+    let root: renderer.ReactTestRenderer;
+    act(() => {
+      root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
+    });
+
+    // Tap "Create new checkpoint" to show input
+    act(() => {
+      findByLabel(root!.root, 'Create new checkpoint').props.onPress();
+    });
+
+    // Enter a name in the TextInput
+    const input = root!.root.findByProps({ placeholder: 'Checkpoint name (optional)' });
+    act(() => {
+      input.props.onChangeText('My checkpoint');
+    });
+
+    // Tap confirm button
+    act(() => {
+      findByLabel(root!.root, 'Create checkpoint').props.onPress();
+    });
+
+    expect(mockCreateCheckpoint).toHaveBeenCalledWith('My checkpoint');
+  });
+
+  it('create flow with empty name passes undefined', () => {
+    setupStore([]);
+    let root: renderer.ReactTestRenderer;
+    act(() => {
+      root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
+    });
+
+    // Tap "Create new checkpoint" to show input
+    act(() => {
+      findByLabel(root!.root, 'Create new checkpoint').props.onPress();
+    });
+
+    // Confirm without entering a name
+    act(() => {
+      findByLabel(root!.root, 'Create checkpoint').props.onPress();
+    });
+
+    expect(mockCreateCheckpoint).toHaveBeenCalledWith(undefined);
   });
 });

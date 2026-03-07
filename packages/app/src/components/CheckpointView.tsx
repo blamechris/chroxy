@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -121,11 +121,20 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
   const [showCreateInput, setShowCreateInput] = useState(false);
   const [newCheckpointName, setNewCheckpointName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  const creatingTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
-  // Fetch checkpoints when modal opens
+  // Clean up timer on unmount
+  useEffect(() => () => clearTimeout(creatingTimerRef.current), []);
+
+  // Fetch checkpoints when modal opens; reset local state when it closes
   useEffect(() => {
     if (visible) {
       listCheckpoints();
+    } else {
+      setShowCreateInput(false);
+      setNewCheckpointName('');
+      setIsCreating(false);
+      clearTimeout(creatingTimerRef.current);
     }
   }, [visible, listCheckpoints]);
 
@@ -142,7 +151,8 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
     setShowCreateInput(false);
     setIsCreating(true);
     // Clear creating state after a short delay (server will update the list)
-    setTimeout(() => setIsCreating(false), 2000);
+    clearTimeout(creatingTimerRef.current);
+    creatingTimerRef.current = setTimeout(() => setIsCreating(false), 2000);
   }, [newCheckpointName, createCheckpoint]);
 
   const handleDelete = useCallback(
@@ -321,9 +331,9 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
   },
   closeButton: {
-    padding: 4,
-    minWidth: 32,
-    minHeight: 32,
+    padding: 8,
+    minWidth: 44,
+    minHeight: 44,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -367,15 +377,15 @@ const styles = StyleSheet.create({
   },
   createConfirmButton: {
     padding: 8,
-    minWidth: 36,
-    minHeight: 36,
+    minWidth: 44,
+    minHeight: 44,
     alignItems: 'center',
     justifyContent: 'center',
   },
   createCancelButton: {
-    padding: 6,
-    minWidth: 32,
-    minHeight: 32,
+    padding: 8,
+    minWidth: 44,
+    minHeight: 44,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -506,9 +516,9 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   deleteButton: {
-    padding: 6,
-    minWidth: 28,
-    minHeight: 28,
+    padding: 8,
+    minWidth: 44,
+    minHeight: 44,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 6,

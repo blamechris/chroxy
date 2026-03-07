@@ -31,7 +31,7 @@ describe('CheckpointView component structure', () => {
   test('renders as a Modal', () => {
     expect(componentSrc).toMatch(/<Modal/)
     expect(componentSrc).toMatch(/visible/)
-    expect(componentSrc).toMatch(/onClose/)
+    expect(componentSrc).toMatch(/onRequestClose/)
   })
 
   test('sorts checkpoints in reverse chronological order', () => {
