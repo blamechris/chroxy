@@ -22,6 +22,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+qrcode = "0.14"
+tauri-plugin-dialog = "2"
 
 [dev-dependencies]
 tempfile = "3"

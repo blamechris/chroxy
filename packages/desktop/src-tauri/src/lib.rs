@@ -1,6 +1,7 @@
 mod config;
 mod node;
 mod platform;
+mod qrcode;
 mod server;
 mod settings;
 mod setup;
@@ -32,6 +33,7 @@ struct TrayMenuItems {
     stop: MenuItem<tauri::Wry>,
     restart: MenuItem<tauri::Wry>,
     dashboard: MenuItem<tauri::Wry>,
+    show_qr: MenuItem<tauri::Wry>,
     check_updates: MenuItem<tauri::Wry>,
     auto_start_login: CheckMenuItem<tauri::Wry>,
     auto_start_server: CheckMenuItem<tauri::Wry>,
@@ -70,6 +72,34 @@ fn restart_server(app: tauri::AppHandle) {
     handle_restart(&app);
 }
 
+#[tauri::command]
+fn get_qr_code_svg(state: tauri::State<'_, Mutex<ServerManager>>) -> Result<serde_json::Value, String> {
+    let mgr = lock_or_recover(&state);
+    if !mgr.is_running() {
+        return Err("Server is not running".to_string());
+    }
+    drop(mgr);
+
+    let (hostname, token) = qrcode::get_connection_info()?;
+    let url = qrcode::build_connection_url(&hostname, &token);
+    let svg = qrcode::generate_qr_svg(&url)?;
+    Ok(serde_json::json!({
+        "svg": svg,
+        "url": url,
+    }))
+}
+
+#[tauri::command]
+fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut builder = app.dialog().file();
+    if let Some(ref path) = default_path {
+        builder = builder.set_directory(path);
+    }
+    let result = builder.blocking_pick_folder();
+    Ok(result.map(|p| p.to_string()))
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
@@ -92,6 +122,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
@@ -99,6 +130,8 @@ pub fn run() {
             start_server,
             stop_server,
             restart_server,
+            get_qr_code_svg,
+            pick_directory,
         ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
@@ -176,6 +209,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let dashboard = MenuItemBuilder::with_id("dashboard", "Open Dashboard")
         .enabled(false)
         .build(app)?;
+    let show_qr = MenuItemBuilder::with_id("show_qr", "Show QR Code")
+        .enabled(false)
+        .build(app)?;
 
     // Settings toggles
     let autostart_enabled = app
@@ -225,7 +261,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let menu = MenuBuilder::new(app)
         .items(&[&start, &stop, &restart])
         .separator()
-        .items(&[&dashboard])
+        .items(&[&dashboard, &show_qr])
         .separator()
         .item(&auto_start_login)
         .item(&auto_start_server)
@@ -241,6 +277,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         stop: stop.clone(),
         restart: restart.clone(),
         dashboard: dashboard.clone(),
+        show_qr: show_qr.clone(),
         check_updates: check_updates.clone(),
         auto_start_login: auto_start_login.clone(),
         auto_start_server: auto_start_server.clone(),
@@ -268,6 +305,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 "stop" => handle_stop(app),
                 "restart" => handle_restart(app),
                 "dashboard" => handle_dashboard(app),
+                "show_qr" => handle_show_qr(app),
                 "auto_start_login" => handle_toggle_login(app),
                 "auto_start_server" => handle_toggle_auto_start(app),
                 "tunnel_quick" => handle_set_tunnel_mode(app, "quick"),
@@ -310,18 +348,21 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
                 let _ = items.stop.set_enabled(true);
                 let _ = items.restart.set_enabled(true);
                 let _ = items.dashboard.set_enabled(true);
+                let _ = items.show_qr.set_enabled(true);
             }
             MenuState::Stopped => {
                 let _ = items.start.set_enabled(true);
                 let _ = items.stop.set_enabled(false);
                 let _ = items.restart.set_enabled(false);
                 let _ = items.dashboard.set_enabled(false);
+                let _ = items.show_qr.set_enabled(false);
             }
             MenuState::Restarting => {
                 let _ = items.start.set_enabled(false);
                 let _ = items.stop.set_enabled(false);
                 let _ = items.restart.set_enabled(false);
                 let _ = items.dashboard.set_enabled(false);
+                let _ = items.show_qr.set_enabled(false);
             }
         }
     }
@@ -562,6 +603,62 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     drop(mgr);
 
     window::emit_server_ready(app, port, token.as_deref());
+}
+
+fn handle_show_qr(app: &tauri::AppHandle) {
+    // Verify server is running (menu state can become stale on crash/restart)
+    let state = app.state::<Mutex<ServerManager>>();
+    let mgr = lock_or_recover(&state);
+    if !mgr.is_running() {
+        send_notification(app, "QR Code", "Server is not running");
+        return;
+    }
+    drop(mgr);
+
+    // If popup already exists, focus it
+    if let Some(win) = app.get_webview_window("qr_popup") {
+        let _ = win.set_focus();
+        return;
+    }
+
+    let (hostname, token) = match qrcode::get_connection_info() {
+        Ok(info) => info,
+        Err(e) => {
+            send_notification(app, "QR Code Error", &e);
+            return;
+        }
+    };
+
+    let url = qrcode::build_connection_url(&hostname, &token);
+    let svg = match qrcode::generate_qr_svg(&url) {
+        Ok(s) => s,
+        Err(e) => {
+            send_notification(app, "QR Code Error", &e);
+            return;
+        }
+    };
+
+    let html = qrcode::build_qr_popup_html(&svg, &url);
+
+    match tauri::WebviewWindowBuilder::new(app, "qr_popup", tauri::WebviewUrl::default())
+        .title("Chroxy — QR Code")
+        .inner_size(320.0, 400.0)
+        .resizable(false)
+        .center()
+        .build()
+    {
+        Ok(win) => {
+            // Navigate to the HTML content via data URL
+            let _ = win.eval(&format!(
+                "document.open(); document.write({}); document.close();",
+                serde_json::to_string(&html).unwrap_or_default()
+            ));
+        }
+        Err(e) => {
+            eprintln!("[tray] Failed to create QR popup: {}", e);
+            send_notification(app, "QR Code Error", &format!("Failed to open popup: {}", e));
+        }
+    }
 }
 
 fn handle_toggle_login(app: &tauri::AppHandle) {

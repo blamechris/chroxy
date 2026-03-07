@@ -199,11 +199,38 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     requestDirectoryListing(path)
   }, [requestDirectoryListing, setDirectoryListingCallback])
 
-  const handleBrowseOpen = useCallback(() => {
+  const handleBrowseOpen = useCallback(async () => {
+    // In Tauri context, use native OS folder picker via IPC command.
+    // Detect via __TAURI_INTERNALS__ (consistent with useTauriIPC.ts) rather than
+    // __TAURI__ (useTauriEvents.ts) since we need the internals for invoke.
+    const tauriInternals = typeof window !== 'undefined'
+      ? (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ as
+        { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } | undefined
+      : undefined
+    if (tauriInternals) {
+      try {
+        const selected = await tauriInternals.invoke('pick_directory', {
+          defaultPath: cwd || initialCwd || defaultCwd || undefined,
+        }) as string | null
+        if (selected) {
+          setCwd(selected)
+          cwdValRef.current = selected
+          if (!nameManuallyEdited) {
+            const generated = generateDefaultName(selected, existingNames)
+            setName(generated)
+            nameValRef.current = generated
+          }
+        }
+        return
+      } catch {
+        // Fall through to server-based browser on error
+      }
+    }
+    // Web context (or Tauri fallback): use server-based directory browser
     const startPath = cwd || initialCwd || defaultCwd || '/'
     setBrowsing(true)
     handleBrowseNavigate(startPath)
-  }, [cwd, initialCwd, defaultCwd, handleBrowseNavigate])
+  }, [cwd, initialCwd, defaultCwd, handleBrowseNavigate, nameManuallyEdited, existingNames])
 
   const handleBrowseSelect = useCallback((path: string) => {
     setCwd(path)

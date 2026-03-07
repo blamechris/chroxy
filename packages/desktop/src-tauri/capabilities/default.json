@@ -1,13 +1,14 @@
 {
   "identifier": "default",
   "description": "Default capabilities for Chroxy desktop",
-  "windows": ["main", "dashboard"],
+  "windows": ["main", "dashboard", "qr_popup"],
   "permissions": [
     "core:default",
     "shell:allow-open",
     "autostart:default",
     "notification:default",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "dialog:allow-open"
   ]
 }
