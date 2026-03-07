@@ -31,6 +31,7 @@ import { Toast, type ToastItem } from './components/Toast'
 import { FooterBar } from './components/FooterBar'
 import { QrModal } from './components/QrModal'
 import { SettingsPanel } from './components/SettingsPanel'
+import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
 import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
 import { persistSidebarWidth, loadPersistedSidebarWidth } from './store/persistence'
 
@@ -157,6 +158,7 @@ export function App() {
   const [qrLoading, setQrLoading] = useState(false)
   const [qrError, setQrError] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
@@ -241,6 +243,18 @@ export function App() {
         sendInterrupt()
         return
       }
+      // ?: toggle shortcut help (no modifiers, not in text input)
+      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const tag = (e.target as HTMLElement).tagName
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA' && !(e.target as HTMLElement).isContentEditable) {
+          const overlays = document.querySelectorAll('[data-modal-overlay]')
+          const onlyShortcutHelp = overlays.length === 1 && overlays[0]?.classList.contains('shortcut-help-overlay')
+          if (overlays.length === 0 || onlyShortcutHelp) {
+            e.preventDefault()
+            setShortcutHelpOpen(prev => !prev)
+          }
+        }
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
@@ -309,6 +323,7 @@ export function App() {
       isActive: s.sessionId === activeSessionId,
       cwd: s.cwd,
       model: s.model ?? undefined,
+      provider: s.provider,
     })),
     [sessions, activeSessionId],
   )
@@ -529,6 +544,23 @@ export function App() {
     // Default rendering
     return null
   }, [storeMsgMap, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
+
+  const SHORTCUTS: ShortcutEntry[] = useMemo(() => [
+    { keys: '?', description: 'Show keyboard shortcuts', section: 'Global' },
+    { keys: 'Cmd+K', description: 'Command palette', section: 'Global' },
+    { keys: 'Cmd+Shift+P', description: 'Command palette (VSCode)', section: 'Global' },
+    { keys: 'Cmd+N', description: 'New session', section: 'Global' },
+    { keys: 'Cmd+B', description: 'Toggle sidebar', section: 'Global' },
+    { keys: 'Cmd+,', description: 'Settings', section: 'Global' },
+    { keys: 'Cmd+.', description: 'Interrupt session', section: 'Session' },
+    { keys: 'Cmd+Shift+D', description: 'Toggle chat / terminal', section: 'Session' },
+    { keys: 'Cmd+1-9', description: 'Switch to tab by number', section: 'Session' },
+    { keys: 'Cmd+Shift+[', description: 'Previous tab', section: 'Session' },
+    { keys: 'Cmd+Shift+]', description: 'Next tab', section: 'Session' },
+    { keys: 'Cmd+W', description: 'Close tab (desktop)', section: 'Session' },
+    { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
+    { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
+  ], [])
 
   const isConnected = connectionPhase === 'connected'
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
@@ -761,6 +793,9 @@ export function App() {
 
       {/* Settings panel */}
       <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      {/* Keyboard shortcut help */}
+      <ShortcutHelp isOpen={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} shortcuts={SHORTCUTS} />
 
       {/* QR code modal */}
       <QrModal

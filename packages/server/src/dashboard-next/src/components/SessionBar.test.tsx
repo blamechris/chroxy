@@ -249,6 +249,42 @@ describe('SessionBar', () => {
     const closeButtons = screen.getAllByTestId('tab-close')
     expect(closeButtons[0]).toHaveAttribute('aria-label', 'Close session Default')
   })
+
+  it('shows provider badge when provider is set (#1366)', () => {
+    const sessions: SessionTabData[] = [
+      { sessionId: 's1', name: 'SDK Session', isBusy: false, isActive: true, provider: 'claude-sdk' },
+      { sessionId: 's2', name: 'CLI Session', isBusy: false, isActive: false, provider: 'claude-cli' },
+    ]
+    render(
+      <SessionBar
+        sessions={sessions}
+        onSwitch={vi.fn()}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onNewSession={vi.fn()}
+      />
+    )
+    // Provider badges should show on tabs
+    const tab2 = screen.getByTestId('session-tab-s2')
+    expect(within(tab2).getByText('CLI')).toBeInTheDocument()
+  })
+
+  it('shows provider tooltip on badge (#1366)', () => {
+    const sessions: SessionTabData[] = [
+      { sessionId: 's1', name: 'Test', isBusy: false, isActive: true, provider: 'claude-cli' },
+    ]
+    render(
+      <SessionBar
+        sessions={sessions}
+        onSwitch={vi.fn()}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onNewSession={vi.fn()}
+      />
+    )
+    const badge = screen.getByText('CLI')
+    expect(badge).toHaveAttribute('title', 'claude-cli')
+  })
 })
 
 describe('StatusBar', () => {

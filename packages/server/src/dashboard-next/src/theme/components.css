@@ -531,6 +531,16 @@
   flex-shrink: 0;
 }
 
+.tab-provider {
+  color: var(--accent-blue);
+  font-size: 9px;
+  background: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+  border-radius: 3px;
+  padding: 1px 4px;
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
 .tab-close {
   background: none;
   border: none;
@@ -2705,4 +2715,94 @@
   .loading-spinner {
     border-top-color: var(--accent-blue);
   }
+}
+
+/* ── Shortcut Help Overlay ── */
+.shortcut-help-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.shortcut-help-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 12px;
+  width: 480px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.shortcut-help-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.shortcut-help-header h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+  color: var(--text-primary);
+}
+
+.shortcut-help-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.shortcut-section {
+  margin-bottom: 16px;
+}
+
+.shortcut-section h3 {
+  margin: 0 0 8px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.shortcut-list {
+  margin: 0;
+  padding: 0;
+}
+
+.shortcut-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.shortcut-row dt {
+  flex-shrink: 0;
+}
+
+.shortcut-row dd {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.shortcut-row kbd {
+  display: inline-block;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  min-width: 20px;
+  text-align: center;
 }
