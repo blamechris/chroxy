@@ -81,7 +81,7 @@ function CheckpointItem({
 
         <View style={styles.itemMeta}>
           <Text style={styles.itemMetaText}>
-            {checkpoint.messageCount} message{checkpoint.messageCount !== 1 ? 's' : ''}
+            {`${checkpoint.messageCount} message${checkpoint.messageCount !== 1 ? 's' : ''}`}
           </Text>
           {checkpoint.hasGitSnapshot && (
             <Text style={styles.itemMetaBadge}>git snapshot</Text>

@@ -57,14 +57,15 @@ const sampleCheckpoints = [
   },
 ];
 
-/** Find all text nodes containing a substring */
+/** Find all text nodes containing a substring (handles both string and array children) */
 function findTextNodes(root: ReactTestInstance, text: string): ReactTestInstance[] {
-  return root.findAll(
-    (node) =>
-      node.type === Text &&
-      typeof node.props.children === 'string' &&
-      node.props.children.includes(text),
-  );
+  return root.findAll((node) => {
+    if (node.type !== Text) return false;
+    const children = node.props.children;
+    if (typeof children === 'string') return children.includes(text);
+    if (Array.isArray(children)) return children.join('').includes(text);
+    return false;
+  });
 }
 
 /** Find a touchable by accessibilityLabel */
