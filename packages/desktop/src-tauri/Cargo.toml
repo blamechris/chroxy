@@ -22,6 +22,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 qrcode = "0.14"
+tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 
 [target.'cfg(unix)'.dependencies]
