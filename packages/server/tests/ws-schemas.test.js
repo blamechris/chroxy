@@ -58,6 +58,7 @@ import {
   ServerPlanStartedSchema,
   ServerPlanReadySchema,
   ServerSessionListSchema,
+  ServerProviderListSchema,
   ServerErrorSchema,
   ServerShutdownSchema,
   ServerPongSchema,
@@ -1091,6 +1092,31 @@ describe('ServerSessionListSchema', () => {
       sessions: [{ sessionId: 's1', name: 'Test', isBusy: false }],
     })
     assert.ok(result.success)
+  })
+})
+
+describe('ServerProviderListSchema', () => {
+  it('accepts valid provider list', () => {
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [
+        { name: 'claude-sdk', capabilities: { permissions: true, modelSwitch: true } },
+        { name: 'cli', capabilities: { permissions: false } },
+      ],
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts providers without capabilities', () => {
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [{ name: 'claude-sdk' }],
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing providers array', () => {
+    assert.ok(!ServerProviderListSchema.safeParse({ type: 'provider_list' }).success)
   })
 })
 
