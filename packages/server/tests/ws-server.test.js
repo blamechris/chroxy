@@ -7222,8 +7222,8 @@ describe('dashboard endpoint', () => {
 
     const res = await fetch(`http://127.0.0.1:${port}/dashboard`)
     const body = await res.text()
-    assert.ok(body.includes('__CHROXY_CONFIG__'), 'should inject server config')
-    assert.ok(body.match(/port:\s*\d+/), 'should contain port number')
+    assert.ok(body.includes('chroxy-config'), 'should inject server config via meta tag')
+    assert.ok(body.includes('"port"'), 'should contain port in config')
     assert.ok(!body.includes('tok-dn-config'), 'token must NOT appear in HTML')
   })
 
@@ -7253,10 +7253,14 @@ describe('dashboard endpoint', () => {
     assert.equal(res.headers.get('x-frame-options'), 'DENY')
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
 
-    // CSP uses 'unsafe-inline' for script-src (required for WKWebView + Vite builds)
-    assert.ok(csp.includes("'unsafe-inline'"), 'CSP should include unsafe-inline for script-src')
+    // script-src must NOT include unsafe-inline (config injected via meta tag, not inline script)
+    assert.ok(!csp.includes("script-src 'self' 'unsafe-inline'"), 'CSP script-src must not include unsafe-inline')
+    assert.ok(csp.includes("script-src 'self'"), 'CSP should restrict script-src to self')
+    assert.ok(csp.includes("frame-src 'none'"), 'CSP should forbid frame-src')
+    assert.ok(csp.includes("object-src 'none'"), 'CSP should forbid object-src')
     const body = await res.text()
-    assert.ok(body.includes('__CHROXY_CONFIG__'), 'injected config script should be present')
+    assert.ok(body.includes('chroxy-config'), 'config should be injected via meta tag')
+    assert.ok(!body.includes('<script>'), 'no inline script tags should be present')
   })
 
   it('403 response has security headers when auth required', async () => {
