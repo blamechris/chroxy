@@ -390,7 +390,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         aria-describedby={shortcutsId}
         rows={1}
       />
-      {isStreaming ? (
+      {(isStreaming || isBusy) ? (
         <button
           data-testid="interrupt-button"
           className="btn-interrupt"

@@ -89,6 +89,8 @@ export interface ChatViewMessage {
 export interface ChatViewProps {
   messages: ChatViewMessage[]
   isStreaming: boolean
+  /** Show thinking indicator during pre-streaming busy state */
+  isBusy?: boolean
   /** Optional custom renderer. Return a node to override default rendering, or null to fall back. */
   renderMessage?: (msg: ChatViewMessage) => ReactNode | null
 }
@@ -113,7 +115,7 @@ function formatTime(ts: number): string {
   return `${h}:${m} ${ampm}`
 }
 
-export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps) {
+export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
 
@@ -141,7 +143,8 @@ export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps
     setUserScrolledUp(false)
   }, [])
 
-  // Auto-scroll: on new messages (count change) or during streaming (content growth).
+  // Auto-scroll: on new messages (count change), during streaming (content growth),
+  // or when busy state changes (ThinkingDots appear/disappear).
   // When streaming, include messages reference so content growth triggers scroll.
   // When idle, only message count changes matter (avoids needless DOM writes).
   const scrollTrigger = isStreaming ? messages : dedupedMessages.length
@@ -150,7 +153,7 @@ export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps
       const el = containerRef.current
       if (el) el.scrollTop = el.scrollHeight
     }
-  }, [scrollTrigger, userScrolledUp])
+  }, [scrollTrigger, userScrolledUp, isBusy])
 
   return (
     <div className="chat-view" data-testid="chat-view">
@@ -198,7 +201,7 @@ export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps
             </div>
           )
         })}
-        {isStreaming && <ThinkingDots />}
+        {(isStreaming || isBusy) && <ThinkingDots />}
       </div>
 
       {userScrolledUp && (

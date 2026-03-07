@@ -89,6 +89,22 @@ describe('InputBar', () => {
     expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
   })
 
+  it('shows interrupt button when busy but not streaming', () => {
+    render(
+      <InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isBusy />
+    )
+    expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+  })
+
+  it('calls onInterrupt when clicking stop button while busy', () => {
+    const onInterrupt = vi.fn()
+    render(
+      <InputBar onSend={vi.fn()} onInterrupt={onInterrupt} isBusy />
+    )
+    fireEvent.click(screen.getByTestId('interrupt-button'))
+    expect(onInterrupt).toHaveBeenCalled()
+  })
+
   it('shows placeholder text', () => {
     render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} placeholder="Ask Claude..." />)
     expect(screen.getByPlaceholderText('Ask Claude...')).toBeInTheDocument()
