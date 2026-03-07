@@ -190,7 +190,6 @@ describe('DirectoryBrowser', () => {
   it('shows error message when error prop is set', () => {
     render(
       <DirectoryBrowser
-        initialPath="/restricted"
         entries={[]}
         currentPath="/restricted"
         loading={false}
@@ -207,7 +206,6 @@ describe('DirectoryBrowser', () => {
   it('does not show "No subdirectories" when error is present', () => {
     render(
       <DirectoryBrowser
-        initialPath="/restricted"
         entries={[]}
         currentPath="/restricted"
         loading={false}
