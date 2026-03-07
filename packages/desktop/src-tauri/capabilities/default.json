@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default capabilities for Chroxy desktop",
-  "windows": ["main", "dashboard"],
+  "windows": ["main", "dashboard", "qr_popup"],
   "permissions": [
     "core:default",
     "shell:allow-open",
