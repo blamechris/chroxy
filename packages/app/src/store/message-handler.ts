@@ -44,6 +44,8 @@ import type {
   ConversationSummary,
   ToolResultImage,
   WebTask,
+  GitFileStatus,
+  GitBranch,
 } from './types';
 import { createEmptySessionState } from './utils';
 import { clearPersistedSession } from './persistence';
@@ -1577,6 +1579,53 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (diffCb) {
         diffCb({
           files: Array.isArray(msg.files) ? msg.files as DiffFile[] : [],
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
+    case 'git_status_result': {
+      const cb = get()._gitStatusCallback;
+      if (cb) {
+        cb({
+          branch: typeof msg.branch === 'string' ? msg.branch : null,
+          staged: Array.isArray(msg.staged) ? msg.staged as GitFileStatus[] : [],
+          unstaged: Array.isArray(msg.unstaged) ? msg.unstaged as GitFileStatus[] : [],
+          untracked: Array.isArray(msg.untracked) ? msg.untracked as string[] : [],
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
+    case 'git_branches_result': {
+      const cb = get()._gitBranchesCallback;
+      if (cb) {
+        cb({
+          branches: Array.isArray(msg.branches) ? msg.branches as GitBranch[] : [],
+          currentBranch: typeof msg.currentBranch === 'string' ? msg.currentBranch : null,
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
+    case 'git_stage_result':
+    case 'git_unstage_result': {
+      const cb = get()._gitStageCallback;
+      if (cb) {
+        cb({ error: typeof msg.error === 'string' ? msg.error : null });
+      }
+      break;
+    }
+
+    case 'git_commit_result': {
+      const cb = get()._gitCommitCallback;
+      if (cb) {
+        cb({
+          hash: typeof msg.hash === 'string' ? msg.hash : null,
+          message: typeof msg.message === 'string' ? msg.message : null,
           error: typeof msg.error === 'string' ? msg.error : null,
         });
       }
