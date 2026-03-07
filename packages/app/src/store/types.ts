@@ -471,7 +471,7 @@ export interface ConnectionState {
   requestDiff: (base?: string) => void;
 
   // Session actions
-  switchSession: (sessionId: string) => void;
+  switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => void;
   createSession: (name: string, cwd?: string) => void;
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
