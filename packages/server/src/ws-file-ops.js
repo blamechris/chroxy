@@ -886,9 +886,11 @@ export function createFileOps(sendFn) {
           cwd: cwdReal,
           timeout: 5000,
         })
-        branch = stdout.trim()
+        const ref = stdout.trim()
+        // In detached HEAD state, git prints literal "HEAD" with exit code 0
+        branch = ref === 'HEAD' ? null : ref
       } catch {
-        // Not a git repo or detached HEAD
+        // Not a git repo
       }
 
       // Get porcelain status
@@ -910,11 +912,16 @@ export function createFileOps(sendFn) {
         'C': 'copied',
       }
 
-      for (const line of statusOutput.split('\n')) {
+      for (const rawLine of statusOutput.split(/\r?\n/)) {
+        const line = rawLine.trimEnd()
         if (!line) continue
         const x = line[0] // index/staged status
         const y = line[1] // working tree status
-        const filePath = line.slice(3)
+        let filePath = line.slice(3)
+        // Rename/copy entries use "old -> new" format; extract destination
+        if ((x === 'R' || x === 'C') && filePath.includes(' -> ')) {
+          filePath = filePath.split(' -> ').pop()
+        }
 
         if (x === '?' && y === '?') {
           untracked.push(filePath)
