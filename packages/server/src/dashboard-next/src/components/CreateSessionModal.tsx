@@ -81,6 +81,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       if (!prevOpenRef.current) {
         setNameError('')
       }
+      setProvider(defaultProvider)
       setShowSuggestions(false)
       setSelectedSuggestion(-1)
       if (cwdValue) {

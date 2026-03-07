@@ -1,8 +1,8 @@
 /**
  * SettingsPanel tests (#1526)
  *
- * Tests theme picker, session defaults, gear icon trigger, Cmd+, shortcut,
- * and localStorage persistence.
+ * Tests theme picker, session defaults, close/backdrop behavior,
+ * and Escape key dismissal.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
