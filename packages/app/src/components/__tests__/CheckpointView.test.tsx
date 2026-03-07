@@ -1,4 +1,3 @@
-// @ts-nocheck — react-test-renderer lacks type declarations in this project
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
 import { Alert, Text } from 'react-native';
