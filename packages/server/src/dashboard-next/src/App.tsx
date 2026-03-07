@@ -33,6 +33,7 @@ import { QrModal } from './components/QrModal'
 import { SettingsPanel } from './components/SettingsPanel'
 import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
 import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
+import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { persistSidebarWidth, loadPersistedSidebarWidth } from './store/persistence'
 
 /** Server-injected config from window.__CHROXY_CONFIG__ */
@@ -113,6 +114,22 @@ export function App() {
     activeAgents,
     isPlanPending,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
+
+  // Fire native notifications for permission requests when window is not focused
+  const permissionPrompts = useMemo<PermissionPromptInfo[]>(() =>
+    storeMessages
+      .filter(m => m.requestId && m.expiresAt && m.type === 'prompt')
+      .map(m => ({
+        id: m.id,
+        requestId: m.requestId!,
+        tool: m.tool || 'Unknown',
+        description: m.content,
+        expiresAt: m.expiresAt!,
+        answered: m.answered,
+      })),
+    [storeMessages],
+  )
+  usePermissionNotification(permissionPrompts)
 
   const slashCommands = useConnectionStore(s => s.slashCommands)
 
