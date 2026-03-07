@@ -86,6 +86,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               if (!session.isActive) onSwitch(session.sessionId)
             }}
             onKeyDown={e => {
+              if (renamingId === session.sessionId) return
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()
                 if (!session.isActive) onSwitch(session.sessionId)
