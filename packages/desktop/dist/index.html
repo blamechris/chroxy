@@ -15,7 +15,7 @@
       align-items: center;
       justify-content: center;
     }
-    .container { text-align: center; }
+    .container { text-align: center; max-width: 480px; width: 100%; padding: 2rem; }
     .logo {
       font-size: 2rem;
       font-weight: 700;
@@ -34,21 +34,165 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     .status { font-size: 0.9rem; color: #888; }
     .error { color: #f87171; }
+
+    /* Wizard styles */
+    .wizard { display: none; text-align: left; }
+    .wizard.active { display: block; }
+    .wizard h2 { font-size: 1.1rem; color: #4a9eff; margin-bottom: 1rem; }
+    .wizard p { font-size: 0.85rem; color: #999; margin-bottom: 1rem; line-height: 1.5; }
+
+    .steps { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; justify-content: center; }
+    .step-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #252540; transition: background 0.3s;
+    }
+    .step-dot.active { background: #4a9eff; }
+    .step-dot.done { background: #34d399; }
+
+    .dep-list { list-style: none; margin-bottom: 1.5rem; }
+    .dep-item {
+      display: flex; align-items: center; gap: 0.75rem;
+      padding: 0.75rem; background: #1a1a2e; border-radius: 8px;
+      margin-bottom: 0.5rem; font-size: 0.85rem;
+    }
+    .dep-icon { font-size: 1.1rem; width: 24px; text-align: center; flex-shrink: 0; }
+    .dep-info { flex: 1; }
+    .dep-name { font-weight: 600; color: #e0e0e0; }
+    .dep-detail { font-size: 0.75rem; color: #888; margin-top: 2px; }
+    .dep-optional { font-size: 0.65rem; color: #666; font-style: italic; }
+
+    .config-group { margin-bottom: 1rem; }
+    .config-label {
+      display: block; font-size: 0.8rem; color: #999;
+      margin-bottom: 0.4rem; font-weight: 500;
+    }
+    .config-input {
+      width: 100%; padding: 0.6rem 0.8rem; background: #1a1a2e;
+      border: 1px solid #252540; border-radius: 6px; color: #e0e0e0;
+      font-size: 0.85rem; outline: none; transition: border-color 0.2s;
+    }
+    .config-input:focus { border-color: #4a9eff; }
+
+    .radio-group { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .radio-option {
+      flex: 1; min-width: 120px; padding: 0.6rem; background: #1a1a2e;
+      border: 1px solid #252540; border-radius: 6px; cursor: pointer;
+      text-align: center; font-size: 0.8rem; transition: all 0.2s;
+    }
+    .radio-option:hover { border-color: #4a9eff40; }
+    .radio-option.selected { border-color: #4a9eff; background: #1a1a3e; }
+    .radio-option .label { font-weight: 600; color: #e0e0e0; }
+    .radio-option .desc { font-size: 0.7rem; color: #888; margin-top: 2px; }
+
+    .btn {
+      display: inline-block; padding: 0.7rem 1.5rem; border-radius: 8px;
+      font-size: 0.85rem; font-weight: 600; cursor: pointer;
+      border: none; transition: all 0.2s;
+    }
+    .btn-primary { background: #4a9eff; color: #fff; }
+    .btn-primary:hover { background: #3b8bef; }
+    .btn-primary:disabled { background: #252540; color: #666; cursor: not-allowed; }
+    .btn-secondary { background: #252540; color: #999; }
+    .btn-secondary:hover { background: #2a2a45; }
+
+    .btn-row { display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1.5rem; }
+
+    .ready-summary { text-align: center; margin-bottom: 1.5rem; }
+    .ready-summary .token-display {
+      font-family: 'SF Mono', Monaco, monospace; font-size: 0.8rem;
+      background: #1a1a2e; padding: 0.5rem 0.75rem; border-radius: 6px;
+      color: #34d399; margin-top: 0.5rem; word-break: break-all;
+      display: inline-block; max-width: 100%;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="logo">Chroxy</div>
-    <div id="spinner" class="spinner"></div>
-    <div id="status" class="status">Starting server...</div>
+
+    <!-- Loading view (non-first-run) -->
+    <div id="loading">
+      <div id="spinner" class="spinner"></div>
+      <div id="status" class="status">Starting server...</div>
+    </div>
+
+    <!-- First-run wizard -->
+    <div id="wizard" class="wizard">
+      <div class="steps">
+        <div class="step-dot active" id="dot-1"></div>
+        <div class="step-dot" id="dot-2"></div>
+        <div class="step-dot" id="dot-3"></div>
+      </div>
+
+      <!-- Step 1: Dependency Check -->
+      <div id="step-1" class="wizard-step">
+        <h2>Dependency Check</h2>
+        <p>Checking your system for required tools...</p>
+        <ul class="dep-list" id="dep-list"></ul>
+        <div class="btn-row">
+          <button class="btn btn-primary" id="btn-step1-next" disabled>Next</button>
+        </div>
+      </div>
+
+      <!-- Step 2: Configuration -->
+      <div id="step-2" class="wizard-step" style="display:none">
+        <h2>Configuration</h2>
+        <div class="config-group">
+          <label class="config-label">Port</label>
+          <input type="number" class="config-input" id="cfg-port" value="8765" min="1024" max="65535">
+        </div>
+        <div class="config-group">
+          <label class="config-label">Tunnel Mode</label>
+          <div class="radio-group" id="tunnel-group">
+            <div class="radio-option selected" data-value="quick">
+              <div class="label">Quick Tunnel</div>
+              <div class="desc">Random URL, no setup</div>
+            </div>
+            <div class="radio-option" data-value="named">
+              <div class="label">Named Tunnel</div>
+              <div class="desc">Stable URL, needs account</div>
+            </div>
+            <div class="radio-option" data-value="none">
+              <div class="label">Local Only</div>
+              <div class="desc">No remote access</div>
+            </div>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" id="btn-step2-back">Back</button>
+          <button class="btn btn-primary" id="btn-step2-next">Next</button>
+        </div>
+      </div>
+
+      <!-- Step 3: Ready -->
+      <div id="step-3" class="wizard-step" style="display:none">
+        <h2>Ready to Start</h2>
+        <div class="ready-summary">
+          <p>Your API token:</p>
+          <div class="token-display" id="token-display">...</div>
+          <p style="margin-top: 0.75rem; font-size: 0.75rem; color: #666;">
+            Use this token to connect from the mobile app or scan the QR code from the tray menu.
+          </p>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" id="btn-step3-back">Back</button>
+          <button class="btn btn-primary" id="btn-step3-start">Start Server</button>
+        </div>
+      </div>
+    </div>
   </div>
+
   <script>
   (function() {
+    var loading = document.getElementById('loading');
     var status = document.getElementById('status');
     var spinner = document.getElementById('spinner');
+    var wizard = document.getElementById('wizard');
 
-    // Listen for Tauri events (withGlobalTauri: true provides window.__TAURI__)
-    if (window.__TAURI__ && window.__TAURI__.event) {
+    // -- Event listeners for loading view --
+    function listenForEvents() {
+      if (!window.__TAURI__ || !window.__TAURI__.event) return;
+
       window.__TAURI__.event.listen('server_ready', function(event) {
         status.textContent = 'Connected!';
         status.className = 'status';
@@ -74,6 +218,140 @@
         status.className = 'status';
       });
     }
+
+    listenForEvents();
+
+    // -- Check if first run --
+    if (!window.__TAURI__ || !window.__TAURI__.core) return;
+    var invoke = window.__TAURI__.core.invoke;
+
+    invoke('get_setup_state').then(function(state) {
+      if (state.isFirstRun) {
+        loading.style.display = 'none';
+        wizard.classList.add('active');
+        runDependencyCheck();
+      }
+      // If not first run and server is already running, the event listeners handle navigation
+    });
+
+    // -- Wizard state --
+    var tunnelMode = 'quick';
+    var depResults = null;
+    var dots = [document.getElementById('dot-1'), document.getElementById('dot-2'), document.getElementById('dot-3')];
+
+    function showStep(n) {
+      for (var i = 1; i <= 3; i++) {
+        var el = document.getElementById('step-' + i);
+        el.style.display = i === n ? '' : 'none';
+        dots[i-1].className = 'step-dot' + (i < n ? ' done' : (i === n ? ' active' : ''));
+      }
+    }
+
+    // -- Step 1: Dependency check --
+    function runDependencyCheck() {
+      var list = document.getElementById('dep-list');
+      list.innerHTML = '<li class="dep-item"><div class="dep-icon">...</div><div class="dep-info"><div class="dep-name">Checking dependencies...</div></div></li>';
+
+      invoke('check_dependencies').then(function(deps) {
+        depResults = deps;
+        list.innerHTML = '';
+
+        // Node 22
+        var nodeItem = document.createElement('li');
+        nodeItem.className = 'dep-item';
+        nodeItem.innerHTML = '<div class="dep-icon">' + (deps.node22.found ? checkIcon() : crossIcon()) + '</div>'
+          + '<div class="dep-info"><div class="dep-name">Node.js 22</div>'
+          + '<div class="dep-detail">' + (deps.node22.found
+              ? (deps.node22.version || '') + ' at ' + (deps.node22.path || '')
+              : 'Not found. Install: brew install node@22') + '</div></div>';
+        list.appendChild(nodeItem);
+
+        // cloudflared
+        var cfItem = document.createElement('li');
+        cfItem.className = 'dep-item';
+        cfItem.innerHTML = '<div class="dep-icon">' + (deps.cloudflared.found ? checkIcon() : warnIcon()) + '</div>'
+          + '<div class="dep-info"><div class="dep-name">cloudflared</div>'
+          + '<div class="dep-detail">' + (deps.cloudflared.found
+              ? 'Found on PATH'
+              : 'Not found. Install: brew install cloudflared') + '</div>'
+          + '<div class="dep-optional">Optional — required for remote access</div></div>';
+        list.appendChild(cfItem);
+
+        // Claude CLI
+        var clItem = document.createElement('li');
+        clItem.className = 'dep-item';
+        clItem.innerHTML = '<div class="dep-icon">' + (deps.claude.found ? checkIcon() : crossIcon()) + '</div>'
+          + '<div class="dep-info"><div class="dep-name">Claude CLI</div>'
+          + '<div class="dep-detail">' + (deps.claude.found
+              ? (deps.claude.version || 'Found on PATH')
+              : 'Not found. Install from claude.ai') + '</div></div>';
+        list.appendChild(clItem);
+
+        // Enable Next if Node is found (minimum requirement)
+        var btn = document.getElementById('btn-step1-next');
+        btn.disabled = !deps.node22.found;
+
+        // Auto-select local-only if cloudflared missing
+        if (!deps.cloudflared.found) {
+          tunnelMode = 'none';
+          selectTunnel('none');
+        }
+      });
+    }
+
+    function checkIcon() { return '<span style="color:#34d399">&#10003;</span>'; }
+    function crossIcon() { return '<span style="color:#f87171">&#10007;</span>'; }
+    function warnIcon() { return '<span style="color:#fbbf24">!</span>'; }
+
+    // -- Step 2: Configuration --
+    function selectTunnel(value) {
+      tunnelMode = value;
+      var options = document.querySelectorAll('#tunnel-group .radio-option');
+      for (var i = 0; i < options.length; i++) {
+        options[i].className = 'radio-option' + (options[i].getAttribute('data-value') === value ? ' selected' : '');
+      }
+    }
+
+    var tunnelOptions = document.querySelectorAll('#tunnel-group .radio-option');
+    for (var i = 0; i < tunnelOptions.length; i++) {
+      tunnelOptions[i].addEventListener('click', function() {
+        selectTunnel(this.getAttribute('data-value'));
+      });
+    }
+
+    // -- Step 3: Ready --
+    function loadToken() {
+      invoke('get_server_info').then(function(info) {
+        document.getElementById('token-display').textContent = info.token || '(none)';
+      });
+    }
+
+    // -- Navigation --
+    document.getElementById('btn-step1-next').addEventListener('click', function() { showStep(2); });
+    document.getElementById('btn-step2-back').addEventListener('click', function() { showStep(1); });
+    document.getElementById('btn-step2-next').addEventListener('click', function() {
+      loadToken();
+      showStep(3);
+    });
+    document.getElementById('btn-step3-back').addEventListener('click', function() { showStep(2); });
+
+    document.getElementById('btn-step3-start').addEventListener('click', function() {
+      var port = parseInt(document.getElementById('cfg-port').value, 10) || 8765;
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = 'Starting...';
+
+      invoke('save_setup_config', { port: port, tunnelMode: tunnelMode }).then(function() {
+        // Switch to loading view
+        wizard.classList.remove('active');
+        loading.style.display = '';
+        spinner.style.display = '';
+        status.textContent = 'Starting server...';
+        status.className = 'status';
+
+        invoke('start_server');
+      });
+    });
   })();
   </script>
 </body>
