@@ -4,7 +4,7 @@
  * Triggered via gear icon in header or Cmd+,. Changes apply instantly
  * and persist to localStorage.
  */
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
@@ -35,6 +35,7 @@ function ThemeSwatches({ theme }: { theme: ThemeDefinition }) {
 }
 
 export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
+  const backdropRef = useRef<HTMLDivElement>(null)
   const activeTheme = useConnectionStore(s => s.activeTheme)
   const setTheme = useConnectionStore(s => s.setTheme)
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
@@ -54,19 +55,22 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     if (!isOpen) return
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        e.preventDefault()
-        onClose()
+        const overlays = document.querySelectorAll('[data-modal-overlay]')
+        if (overlays.length > 0 && overlays[overlays.length - 1] === backdropRef.current) {
+          e.preventDefault()
+          onClose()
+        }
       }
     }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
   }, [isOpen, onClose])
 
   if (!isOpen) return null
 
   return (
     <>
-      <div className="settings-backdrop" onClick={onClose} />
+      <div ref={backdropRef} className="settings-backdrop" data-modal-overlay onClick={onClose} />
       <div className="settings-panel" role="dialog" aria-label="Settings">
         <div className="settings-header">
           <h2>Settings</h2>

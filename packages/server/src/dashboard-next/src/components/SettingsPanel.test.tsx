@@ -127,7 +127,28 @@ describe('SettingsPanel', () => {
   it('closes on Escape key', () => {
     const onClose = vi.fn()
     render(<SettingsPanel isOpen={true} onClose={onClose} />)
-    fireEvent.keyDown(window, { key: 'Escape' })
+    fireEvent.keyDown(document, { key: 'Escape' })
     expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('has data-modal-overlay attribute on backdrop (#1557)', () => {
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+    const backdrop = document.querySelector('.settings-backdrop')!
+    expect(backdrop).toHaveAttribute('data-modal-overlay')
+  })
+
+  it('suppresses Escape when not the topmost modal (#1557)', () => {
+    const onClose = vi.fn()
+    render(<SettingsPanel isOpen={true} onClose={onClose} />)
+
+    // Simulate another modal overlay on top
+    const topOverlay = document.createElement('div')
+    topOverlay.setAttribute('data-modal-overlay', '')
+    document.body.appendChild(topOverlay)
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).not.toHaveBeenCalled()
+
+    document.body.removeChild(topOverlay)
   })
 })
