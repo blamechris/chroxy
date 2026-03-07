@@ -16,10 +16,9 @@ const MOCK_ENTRIES: DirectoryEntry[] = [
 ]
 
 describe('DirectoryBrowser', () => {
-  it('renders with initial path and breadcrumb', () => {
+  it('renders breadcrumb from currentPath', () => {
     render(
       <DirectoryBrowser
-        initialPath="/home/user"
         entries={MOCK_ENTRIES}
         currentPath="/home/user"
         loading={false}
@@ -35,7 +34,6 @@ describe('DirectoryBrowser', () => {
   it('shows only directories (not files)', () => {
     render(
       <DirectoryBrowser
-        initialPath="/home/user"
         entries={MOCK_ENTRIES}
         currentPath="/home/user"
         loading={false}
@@ -53,7 +51,6 @@ describe('DirectoryBrowser', () => {
     const onNavigate = vi.fn()
     render(
       <DirectoryBrowser
-        initialPath="/home/user"
         entries={MOCK_ENTRIES}
         currentPath="/home/user"
         loading={false}
@@ -70,7 +67,6 @@ describe('DirectoryBrowser', () => {
     const onSelect = vi.fn()
     render(
       <DirectoryBrowser
-        initialPath="/home/user"
         entries={MOCK_ENTRIES}
         currentPath="/home/user"
         loading={false}
@@ -87,7 +83,6 @@ describe('DirectoryBrowser', () => {
     const onCancel = vi.fn()
     render(
       <DirectoryBrowser
-        initialPath="/home/user"
         entries={MOCK_ENTRIES}
         currentPath="/home/user"
         loading={false}
@@ -103,7 +98,6 @@ describe('DirectoryBrowser', () => {
   it('shows loading state', () => {
     render(
       <DirectoryBrowser
-        initialPath="/home/user"
         entries={[]}
         currentPath="/home/user"
         loading={true}
@@ -119,7 +113,6 @@ describe('DirectoryBrowser', () => {
     const onNavigate = vi.fn()
     render(
       <DirectoryBrowser
-        initialPath="/home/user/projects"
         entries={MOCK_ENTRIES}
         currentPath="/home/user/projects"
         loading={false}
@@ -137,7 +130,6 @@ describe('DirectoryBrowser', () => {
     const onNavigate = vi.fn()
     render(
       <DirectoryBrowser
-        initialPath="/home/user"
         entries={MOCK_ENTRIES}
         currentPath="/home/user"
         loading={false}
@@ -156,7 +148,6 @@ describe('DirectoryBrowser', () => {
   it('shows empty state when no directories', () => {
     render(
       <DirectoryBrowser
-        initialPath="/empty"
         entries={[{ name: 'file.txt', isDirectory: false }]}
         currentPath="/empty"
         loading={false}
@@ -171,7 +162,6 @@ describe('DirectoryBrowser', () => {
   it('has accessible navigation role', () => {
     render(
       <DirectoryBrowser
-        initialPath="/home"
         entries={MOCK_ENTRIES}
         currentPath="/home"
         loading={false}
@@ -186,7 +176,6 @@ describe('DirectoryBrowser', () => {
   it('has accessible list role for entries', () => {
     render(
       <DirectoryBrowser
-        initialPath="/home"
         entries={MOCK_ENTRIES}
         currentPath="/home"
         loading={false}

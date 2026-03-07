@@ -21,6 +21,7 @@ import {
   ListFilesSchema,
   ListSlashCommandsSchema,
   ListAgentsSchema,
+  ListProvidersSchema,
   RequestFullHistorySchema,
   KeyExchangeSchema,
   PingSchema,
@@ -57,6 +58,7 @@ import {
   ServerPlanStartedSchema,
   ServerPlanReadySchema,
   ServerSessionListSchema,
+  ServerProviderListSchema,
   ServerErrorSchema,
   ServerShutdownSchema,
   ServerPongSchema,
@@ -445,6 +447,13 @@ describe('ListAgentsSchema', () => {
   })
 })
 
+describe('ListProvidersSchema', () => {
+  it('accepts valid message', () => {
+    const result = ListProvidersSchema.safeParse({ type: 'list_providers' })
+    assert.ok(result.success)
+  })
+})
+
 
 // -- History --
 describe('RequestFullHistorySchema', () => {
@@ -650,6 +659,7 @@ describe('ClientMessageSchema', () => {
       'list_checkpoints',
       'create_checkpoint',
       'list_repos',
+      'list_providers',
     ]
     for (const type of simpleTypes) {
       const result = ClientMessageSchema.safeParse({ type })
@@ -1082,6 +1092,31 @@ describe('ServerSessionListSchema', () => {
       sessions: [{ sessionId: 's1', name: 'Test', isBusy: false }],
     })
     assert.ok(result.success)
+  })
+})
+
+describe('ServerProviderListSchema', () => {
+  it('accepts valid provider list', () => {
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [
+        { name: 'claude-sdk', capabilities: { permissions: true, modelSwitch: true } },
+        { name: 'cli', capabilities: { permissions: false } },
+      ],
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts providers without capabilities', () => {
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [{ name: 'claude-sdk' }],
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects missing providers array', () => {
+    assert.ok(!ServerProviderListSchema.safeParse({ type: 'provider_list' }).success)
   })
 })
 
