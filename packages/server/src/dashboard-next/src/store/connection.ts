@@ -252,6 +252,38 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   terminalRawBuffer: '',
   _terminalWriteCallback: null,
 
+  // PTY mirror actions
+  spawnPty: (cols?: number, rows?: number) => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN && activeSessionId) {
+      const payload: Record<string, unknown> = { type: 'pty_spawn', sessionId: activeSessionId };
+      if (cols) payload.cols = cols;
+      if (rows) payload.rows = rows;
+      wsSend(socket, payload);
+    }
+  },
+
+  writePty: (data: string) => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN && activeSessionId) {
+      wsSend(socket, { type: 'pty_write', sessionId: activeSessionId, data });
+    }
+  },
+
+  resizePty: (cols: number, rows: number) => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN && activeSessionId) {
+      wsSend(socket, { type: 'pty_resize', sessionId: activeSessionId, cols, rows });
+    }
+  },
+
+  killPty: () => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN && activeSessionId) {
+      wsSend(socket, { type: 'pty_kill', sessionId: activeSessionId });
+    }
+  },
+
   closeDevPreview: (port: number) => {
     const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -342,6 +374,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionContext: null,
       mcpServers: EMPTY_MCP_SERVERS,
       devPreviews: EMPTY_DEV_PREVIEWS,
+      ptyActive: false,
     };
   },
 
