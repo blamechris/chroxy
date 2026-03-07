@@ -1,7 +1,7 @@
 /**
  * SessionBar — horizontal tab strip for session management.
  *
- * Features: active highlight, busy dot, close/rename, cwd badge, model badge.
+ * Features: active highlight, busy dot, close/rename, cwd badge, model badge, provider badge.
  */
 import { useState, useCallback, useRef, useEffect } from 'react'
 

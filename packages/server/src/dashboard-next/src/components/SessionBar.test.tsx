@@ -250,7 +250,7 @@ describe('SessionBar', () => {
     expect(closeButtons[0]).toHaveAttribute('aria-label', 'Close session Default')
   })
 
-  it('shows provider badge when provider differs from default (#1366)', () => {
+  it('shows provider badge when provider is set (#1366)', () => {
     const sessions: SessionTabData[] = [
       { sessionId: 's1', name: 'SDK Session', isBusy: false, isActive: true, provider: 'claude-sdk' },
       { sessionId: 's2', name: 'CLI Session', isBusy: false, isActive: false, provider: 'claude-cli' },
