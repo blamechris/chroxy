@@ -331,6 +331,15 @@ export interface QueuedMessage {
   maxAge: number;
 }
 
+/** A registered remote Chroxy server */
+export interface ServerEntry {
+  id: string;
+  name: string;
+  wsUrl: string;
+  token: string;
+  lastConnectedAt: number | null;
+}
+
 export interface ConnectionState {
   // Connection
   connectionPhase: ConnectionPhase;
@@ -340,6 +349,10 @@ export interface ConnectionState {
 
   // Saved connection for quick reconnect
   savedConnection: SavedConnection | null;
+
+  // Multi-server registry
+  serverRegistry: ServerEntry[];
+  activeServerId: string | null;
 
   // User explicitly disconnected — prevents auto-reconnect on ConnectScreen mount
   userDisconnected: boolean;
@@ -586,6 +599,13 @@ export interface ConnectionState {
   // Session defaults
   defaultProvider: string;
   setDefaultProvider: (provider: string) => void;
+
+  // Multi-server registry actions
+  addServer: (name: string, wsUrl: string, token: string) => ServerEntry;
+  removeServer: (serverId: string) => void;
+  updateServer: (serverId: string, patch: Partial<Pick<ServerEntry, 'name' | 'wsUrl' | 'token'>>) => void;
+  switchServer: (serverId: string) => void;
+  connectToServer: (serverId: string) => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;

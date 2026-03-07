@@ -17,6 +17,7 @@ const KEY_TERMINAL_BUFFER = `${KEY_PREFIX}terminal_buffer`;
 const KEY_SESSION_LIST = `${KEY_PREFIX}session_list`;
 const KEY_SIDEBAR_WIDTH = `${KEY_PREFIX}sidebar_width`;
 const KEY_SPLIT_MODE = `${KEY_PREFIX}split_mode`;
+const KEY_ACTIVE_SERVER = `${KEY_PREFIX}active_server_id`;
 
 /** Max messages to persist per session (keeps storage bounded) */
 const MAX_MESSAGES = 100;
@@ -179,6 +180,28 @@ export function loadPersistedSplitMode(): 'horizontal' | 'vertical' | null {
     return (VALID_SPLIT_MODES as readonly string[]).includes(raw)
       ? (raw as 'horizontal' | 'vertical')
       : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the active server ID */
+export function persistActiveServer(serverId: string | null): void {
+  try {
+    if (serverId) {
+      localStorage.setItem(KEY_ACTIVE_SERVER, serverId);
+    } else {
+      localStorage.removeItem(KEY_ACTIVE_SERVER);
+    }
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Load the persisted active server ID */
+export function loadPersistedActiveServer(): string | null {
+  try {
+    return localStorage.getItem(KEY_ACTIVE_SERVER) || null;
   } catch {
     return null;
   }

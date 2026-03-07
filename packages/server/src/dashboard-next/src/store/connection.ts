@@ -12,6 +12,9 @@
  */
 import { create } from 'zustand';
 
+// Re-export server registry types
+export type { ServerEntry } from './types';
+
 // Re-export all types for backward compatibility
 export type {
   MessageAttachment,
@@ -58,8 +61,16 @@ import type {
   ChatMessage,
   ConnectionContext,
   ConnectionState,
+  ServerEntry,
   SessionInfo,
 } from './types';
+import {
+  loadServerRegistry,
+  addServerEntry,
+  removeServerEntry,
+  updateServerEntry,
+  markServerConnected,
+} from './server-registry';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
 import {
   setStore,
@@ -99,6 +110,8 @@ import {
   persistActiveSession,
   persistTerminalBuffer,
   persistSessionList,
+  persistActiveServer,
+  loadPersistedActiveServer,
   clearPersistedState,
 } from './persistence';
 
@@ -171,6 +184,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   wsUrl: null,
   apiToken: null,
   socket: null,
+  serverRegistry: loadServerRegistry(),
+  activeServerId: loadPersistedActiveServer(),
   serverMode: null,
   sessionCwd: null,
   defaultCwd: null,
@@ -1276,6 +1291,51 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionNotifications: state.sessionNotifications.filter((n) => n.id !== id),
     }));
   },
+
+  // Multi-server registry actions
+  addServer: (name: string, wsUrl: string, token: string): ServerEntry => {
+    const [updated, entry] = addServerEntry(get().serverRegistry, name, wsUrl, token);
+    set({ serverRegistry: updated });
+    return entry;
+  },
+
+  removeServer: (serverId: string) => {
+    const updated = removeServerEntry(get().serverRegistry, serverId);
+    // If removing the active server, disconnect
+    if (get().activeServerId === serverId) {
+      get().disconnect();
+      set({ activeServerId: null });
+    }
+    set({ serverRegistry: updated });
+  },
+
+  updateServer: (serverId: string, patch: Partial<Pick<ServerEntry, 'name' | 'wsUrl' | 'token'>>) => {
+    const updated = updateServerEntry(get().serverRegistry, serverId, patch);
+    set({ serverRegistry: updated });
+  },
+
+  switchServer: (serverId: string) => {
+    const server = get().serverRegistry.find(s => s.id === serverId);
+    if (!server) return;
+    // No-op if already connected to this server
+    if (serverId === get().activeServerId && get().connectionPhase === 'connected') return;
+    // Disconnect from current server (if connected)
+    if (get().connectionPhase !== 'disconnected') {
+      get().disconnect();
+    }
+    // Clear session state for clean switch
+    get().forgetSession();
+    set({ activeServerId: serverId, userDisconnected: false });
+    // Connect to the new server
+    get().connect(server.wsUrl, server.token);
+  },
+
+  connectToServer: (serverId: string) => {
+    const server = get().serverRegistry.find(s => s.id === serverId);
+    if (!server) return;
+    set({ activeServerId: serverId });
+    get().connect(server.wsUrl, server.token);
+  },
 }));
 
 // Type for the store API used by message-handler
@@ -1288,6 +1348,26 @@ type StoreApi = {
 setStore({
   getState: useConnectionStore.getState,
   setState: useConnectionStore.setState as StoreApi['setState'],
+});
+
+// Track server connection status — mark registry entry as connected + persist active server ID
+let _prevConnectionPhase: string | null = null;
+let _prevActiveServerId: string | null = null;
+useConnectionStore.subscribe((state) => {
+  const wasConnected = _prevConnectionPhase === 'connected';
+  _prevConnectionPhase = state.connectionPhase;
+  if (state.connectionPhase === 'connected' && !wasConnected) {
+    if (state.activeServerId) {
+      const updated = markServerConnected(state.serverRegistry, state.activeServerId);
+      useConnectionStore.setState({ serverRegistry: updated });
+    }
+  }
+
+  // Persist active server ID changes
+  if (state.activeServerId !== _prevActiveServerId) {
+    _prevActiveServerId = state.activeServerId;
+    persistActiveServer(state.activeServerId);
+  }
 });
 
 // Persist session messages, active session, session list when they change
