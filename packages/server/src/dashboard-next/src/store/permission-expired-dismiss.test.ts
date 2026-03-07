@@ -72,7 +72,7 @@ describe('permission_expired auto-dismisses notification banner (#1580)', () => 
 
     const remaining = store.getState().sessionNotifications
     expect(remaining).toHaveLength(1)
-    expect(remaining[0].requestId).toBe('req-def')
+    expect(remaining[0]!.requestId).toBe('req-def')
   })
 
   it('leaves other notifications untouched', () => {
@@ -83,8 +83,8 @@ describe('permission_expired auto-dismisses notification banner (#1580)', () => 
     }, mockCtx)
 
     const remaining = store.getState().sessionNotifications
-    expect(remaining[0].id).toBe('n-2')
-    expect(remaining[0].message).toBe('Read /etc/hosts')
+    expect(remaining[0]!.id).toBe('n-2')
+    expect(remaining[0]!.message).toBe('Read /etc/hosts')
   })
 
   it('does nothing when requestId does not match any notification', () => {
