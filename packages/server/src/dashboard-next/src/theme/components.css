@@ -3081,3 +3081,37 @@
   min-width: 20px;
   text-align: center;
 }
+
+/* ── Split Pane ─────────────────────────────────────────────── */
+
+.split-pane {
+  height: 100%;
+  width: 100%;
+}
+
+.split-panel-content {
+  height: 100%;
+  width: 100%;
+  overflow: auto;
+}
+
+.split-resize-handle {
+  flex-shrink: 0;
+  background: var(--border-primary);
+  transition: background 0.15s;
+}
+
+.split-horizontal > .split-resize-handle {
+  width: 4px;
+  cursor: col-resize;
+}
+
+.split-vertical > .split-resize-handle {
+  height: 4px;
+  cursor: row-resize;
+}
+
+.split-resize-handle:hover,
+.split-resize-handle[data-separator="active"] {
+  background: var(--accent);
+}
