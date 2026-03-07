@@ -60,7 +60,7 @@ describe('ConnectScreen accessibility', () => {
   })
 
   test('port input has accessibility label', () => {
-    expect(src).toMatch(/portInput[\s\S]*?accessibilityLabel|accessibilityLabel[\s\S]*?scanPort/)
+    expect(src).toMatch(/portInput[\s\S]*?accessibilityLabel=["']LAN scan port number["']/)
   })
 
   test('URL input has accessibility label', () => {
