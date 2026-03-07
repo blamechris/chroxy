@@ -21,6 +21,7 @@ import {
   ListFilesSchema,
   ListSlashCommandsSchema,
   ListAgentsSchema,
+  ListProvidersSchema,
   RequestFullHistorySchema,
   KeyExchangeSchema,
   PingSchema,
@@ -445,6 +446,13 @@ describe('ListAgentsSchema', () => {
   })
 })
 
+describe('ListProvidersSchema', () => {
+  it('accepts valid message', () => {
+    const result = ListProvidersSchema.safeParse({ type: 'list_providers' })
+    assert.ok(result.success)
+  })
+})
+
 
 // -- History --
 describe('RequestFullHistorySchema', () => {
@@ -650,6 +658,7 @@ describe('ClientMessageSchema', () => {
       'list_checkpoints',
       'create_checkpoint',
       'list_repos',
+      'list_providers',
     ]
     for (const type of simpleTypes) {
       const result = ClientMessageSchema.safeParse({ type })
