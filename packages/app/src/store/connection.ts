@@ -28,10 +28,17 @@ export type {
   FileEntry,
   FileListing,
   FileContent,
+  FileWriteResult,
   DiffHunkLine,
   DiffHunk,
   DiffFile,
   DiffResult,
+  GitFileStatus,
+  GitBranch,
+  GitStatusResult,
+  GitBranchesResult,
+  GitStageResult,
+  GitCommitResult,
   AgentInfo,
   ConnectedClient,
   SessionHealth,
@@ -203,6 +210,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _directoryListingCallback: null,
   _fileBrowserCallback: null,
   _fileContentCallback: null,
+  _fileWriteCallback: null,
+  _gitStatusCallback: null,
+  _gitBranchesCallback: null,
+  _gitStageCallback: null,
+  _gitCommitCallback: null,
   _diffCallback: null,
   conversationHistory: [],
   conversationHistoryLoading: false,
@@ -960,6 +972,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  setFileWriteCallback: (cb) => {
+    set({ _fileWriteCallback: cb });
+  },
+
+  requestFileWrite: (path: string, content: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'write_file', path, content });
+    }
+  },
+
   // Diff viewer
 
   setDiffCallback: (cb) => {
@@ -972,6 +995,48 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const msg: Record<string, string> = { type: 'get_diff' };
       if (base) msg.base = base;
       wsSend(socket, msg);
+    }
+  },
+
+  // Git operations
+
+  setGitStatusCallback: (cb) => { set({ _gitStatusCallback: cb }); },
+  setGitBranchesCallback: (cb) => { set({ _gitBranchesCallback: cb }); },
+  setGitStageCallback: (cb) => { set({ _gitStageCallback: cb }); },
+  setGitCommitCallback: (cb) => { set({ _gitCommitCallback: cb }); },
+
+  requestGitStatus: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_status' });
+    }
+  },
+
+  requestGitBranches: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_branches' });
+    }
+  },
+
+  requestGitStage: (paths: string[]) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_stage', files: paths });
+    }
+  },
+
+  requestGitUnstage: (paths: string[]) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_unstage', files: paths });
+    }
+  },
+
+  requestGitCommit: (message: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_commit', message });
     }
   },
 
@@ -991,14 +1056,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   // Session actions
 
-  switchSession: (sessionId: string) => {
+  switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => {
     const { socket, activeSessionId, sessionStates } = get();
+    const serverNotify = options?.serverNotify ?? true;
+    const haptic = options?.haptic ?? true;
 
     if (sessionId === activeSessionId) return;
-    hapticLight();
+    if (haptic) hapticLight();
 
     // Mark as user-initiated switch so session_switched handler uses session-switch dedup
-    setPendingSwitchSessionId(sessionId);
+    if (serverNotify) setPendingSwitchSessionId(sessionId);
 
     // Optimistically switch to cached state + dismiss notifications for target session
     const cached = sessionStates[sessionId];
@@ -1019,10 +1086,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         sessionNotifications: filteredNotifications,
       });
     } else {
-      set({ sessionNotifications: filteredNotifications });
+      set({ activeSessionId: sessionId, sessionNotifications: filteredNotifications });
     }
 
-    if (socket && socket.readyState === WebSocket.OPEN) {
+    if (serverNotify && socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'switch_session', sessionId });
     }
   },

@@ -4,9 +4,9 @@ import { handleSessionMessage, handleCliMessage } from '../src/ws-message-handle
 import { createSpy, createMockSession, createMockSessionManager } from './test-helpers.js'
 
 /**
- * Tests for cross-device input echo (#1119).
- * When a client sends a message, the server should broadcast a user_input
- * message to all OTHER connected clients so they see what was sent.
+ * Tests for cross-device input conflict resolution (#1119).
+ * 1. Echo: broadcast user_input to other clients
+ * 2. Conflict: reject input when session is busy from a different client
  */
 
 function createMockCtx(sessionManager, opts = {}) {
@@ -68,6 +68,66 @@ describe('cross-device input echo (#1119)', () => {
 
       const [broadcastMsg] = ctx._spies.broadcast.lastCall
       assert.equal(broadcastMsg.text, 'padded')
+    })
+  })
+
+  describe('input conflict rejection', () => {
+    let ctx, sessionManager, ws
+
+    beforeEach(() => {
+      const { manager } = createMockSessionManager([
+        { id: 'sess-1', name: 'Test', cwd: '/tmp', isRunning: true },
+      ])
+      sessionManager = manager
+      const primaryClients = new Map([['sess-1', 'client-A']])
+      ctx = createMockCtx(sessionManager, { primaryClients })
+    })
+
+    it('rejects input from different client when session is busy', async () => {
+      ws = {}
+      const clientB = { id: 'client-B', activeSessionId: 'sess-1' }
+      const msg = { type: 'input', data: 'conflicting input', sessionId: 'sess-1' }
+      await handleSessionMessage(ws, clientB, msg, ctx)
+
+      // Should send error to client B, not forward the message
+      const errorMsg = ctx._spies.send.calls.find(c => c[1]?.type === 'session_error')
+      assert.ok(errorMsg, 'should send session_error')
+      assert.equal(errorMsg[1].category, 'input_conflict')
+
+      // Should NOT broadcast user_input
+      assert.equal(ctx._spies.broadcast.callCount, 0)
+    })
+
+    it('allows input from the same client even when busy', async () => {
+      ws = {}
+      const clientA = { id: 'client-A', activeSessionId: 'sess-1' }
+      const msg = { type: 'input', data: 'follow-up', sessionId: 'sess-1' }
+      await handleSessionMessage(ws, clientA, msg, ctx)
+
+      // Should NOT send error
+      const errorMsg = ctx._spies.send.calls.find(c => c[1]?.type === 'session_error')
+      assert.ok(!errorMsg, 'should not send session_error for same client')
+
+      // Should broadcast user_input
+      assert.equal(ctx._spies.broadcast.callCount, 1)
+    })
+
+    it('allows input when session is not busy', async () => {
+      // Override isRunning to false
+      const { manager } = createMockSessionManager([
+        { id: 'sess-1', name: 'Test', cwd: '/tmp', isRunning: false },
+      ])
+      const primaryClients = new Map([['sess-1', 'client-A']])
+      const idleCtx = createMockCtx(manager, { primaryClients })
+
+      ws = {}
+      const clientB = { id: 'client-B', activeSessionId: 'sess-1' }
+      const msg = { type: 'input', data: 'new input', sessionId: 'sess-1' }
+      await handleSessionMessage(ws, clientB, msg, idleCtx)
+
+      // Should NOT send error
+      const errorMsg = idleCtx._spies.send.calls.find(c => c[1]?.type === 'session_error')
+      assert.ok(!errorMsg, 'should not send session_error when idle')
     })
   })
 

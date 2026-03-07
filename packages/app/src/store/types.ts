@@ -117,6 +117,46 @@ export interface FileContent {
   error: string | null;
 }
 
+export interface FileWriteResult {
+  path: string | null;
+  error: string | null;
+}
+
+export interface GitFileStatus {
+  path: string;
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'unknown';
+}
+
+export interface GitBranch {
+  name: string;
+  isCurrent: boolean;
+  isRemote: boolean;
+}
+
+export interface GitStatusResult {
+  branch: string | null;
+  staged: GitFileStatus[];
+  unstaged: GitFileStatus[];
+  untracked: string[];
+  error: string | null;
+}
+
+export interface GitBranchesResult {
+  branches: GitBranch[];
+  currentBranch: string | null;
+  error: string | null;
+}
+
+export interface GitStageResult {
+  error: string | null;
+}
+
+export interface GitCommitResult {
+  hash: string | null;
+  message: string | null;
+  error: string | null;
+}
+
 export interface Checkpoint {
   id: string;
   name: string;
@@ -402,6 +442,13 @@ export interface ConnectionState {
   // File browser callbacks
   _fileBrowserCallback: ((listing: FileListing) => void) | null;
   _fileContentCallback: ((content: FileContent) => void) | null;
+  _fileWriteCallback: ((result: FileWriteResult) => void) | null;
+
+  // Git callbacks
+  _gitStatusCallback: ((result: GitStatusResult) => void) | null;
+  _gitBranchesCallback: ((result: GitBranchesResult) => void) | null;
+  _gitStageCallback: ((result: GitStageResult) => void) | null;
+  _gitCommitCallback: ((result: GitCommitResult) => void) | null;
 
   // Diff viewer callback
   _diffCallback: ((result: DiffResult) => void) | null;
@@ -457,13 +504,26 @@ export interface ConnectionState {
   setFileContentCallback: (cb: ((content: FileContent) => void) | null) => void;
   requestFileListing: (path?: string) => void;
   requestFileContent: (path: string) => void;
+  setFileWriteCallback: (cb: ((result: FileWriteResult) => void) | null) => void;
+  requestFileWrite: (path: string, content: string) => void;
+
+  // Git operations
+  setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;
+  setGitBranchesCallback: (cb: ((result: GitBranchesResult) => void) | null) => void;
+  setGitStageCallback: (cb: ((result: GitStageResult) => void) | null) => void;
+  setGitCommitCallback: (cb: ((result: GitCommitResult) => void) | null) => void;
+  requestGitStatus: () => void;
+  requestGitBranches: () => void;
+  requestGitStage: (paths: string[]) => void;
+  requestGitUnstage: (paths: string[]) => void;
+  requestGitCommit: (message: string) => void;
 
   // Diff viewer
   setDiffCallback: (cb: ((result: DiffResult) => void) | null) => void;
   requestDiff: (base?: string) => void;
 
   // Session actions
-  switchSession: (sessionId: string) => void;
+  switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => void;
   createSession: (name: string, cwd?: string) => void;
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;

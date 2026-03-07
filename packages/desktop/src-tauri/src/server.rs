@@ -233,20 +233,26 @@ impl ServerManager {
         let node_bin = node_path.parent().unwrap().display().to_string();
         let base_path = std::env::var("PATH").unwrap_or_default();
         let mut extra_dirs: Vec<String> = vec![node_bin];
-        // Homebrew
+        // Homebrew (macOS only)
+        #[cfg(target_os = "macos")]
         for dir in &["/opt/homebrew/bin", "/usr/local/bin"] {
             if !base_path.contains(dir) {
                 extra_dirs.push(dir.to_string());
             }
         }
-        // User-local bins
+        // User-local bins (Unix)
+        #[cfg(unix)]
         if let Some(home) = dirs::home_dir() {
             let local_bin = home.join(".local/bin");
             if local_bin.is_dir() {
                 extra_dirs.push(local_bin.display().to_string());
             }
         }
-        let full_path = format!("{}:{}", extra_dirs.join(":"), base_path);
+        #[cfg(unix)]
+        let path_sep = ":";
+        #[cfg(windows)]
+        let path_sep = ";";
+        let full_path = format!("{}{}{}", extra_dirs.join(path_sep), path_sep, base_path);
         cmd.env("PATH", &full_path);
         // Ensure HOME is set — macOS GUI apps may not inherit it
         if let Some(home) = dirs::home_dir() {
@@ -559,8 +565,12 @@ impl ServerManager {
             }
         }
 
-        // Strategy 4: `which chroxy` and resolve to its cli.js
-        if let Ok(output) = Command::new("which").arg("chroxy").output() {
+        // Strategy 4: `which chroxy` (Unix) / `where chroxy` (Windows) and resolve to its cli.js
+        #[cfg(unix)]
+        let which_cmd = "which";
+        #[cfg(windows)]
+        let which_cmd = "where";
+        if let Ok(output) = Command::new(which_cmd).arg("chroxy").output() {
             let which_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !which_path.is_empty() {
                 // chroxy bin is a Node script, the actual cli.js should be nearby

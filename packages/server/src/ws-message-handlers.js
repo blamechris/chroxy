@@ -239,6 +239,19 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         break
       }
 
+      // Input conflict: reject if session is already processing input from a different client
+      if (entry.session.isRunning) {
+        const primaryClientId = ctx.primaryClients.get(targetSessionId)
+        if (primaryClientId && primaryClientId !== client.id) {
+          ctx.send(ws, {
+            type: 'session_error',
+            category: 'input_conflict',
+            message: 'Session is already processing input from another device. Wait for it to finish or interrupt first.',
+          })
+          break
+        }
+      }
+
       if (entry.session.resumeSessionId) {
         ctx.checkpointManager.createCheckpoint({
           sessionId: targetSessionId,

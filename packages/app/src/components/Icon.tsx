@@ -20,6 +20,7 @@ export const iconMap = {
   paperclip: 'attach-outline',
   download: 'download-outline',
   export: 'share-outline',
+  edit: 'create-outline',
 
   // Content & Files
   folder: 'folder-outline',
@@ -48,10 +49,13 @@ export const iconMap = {
   checkCircle: 'checkmark-circle',
   closeCircle: 'close-circle',
   alertCircle: 'alert-circle-outline',
+  warning: 'warning-outline',
   bullet: 'ellipse',
   square: 'square',
 
   // Misc
+  minus: 'remove',
+  gitBranch: 'git-branch-outline',
   returnKey: 'return-down-back',
   checkboxChecked: 'checkbox',
   checkboxUnchecked: 'square-outline',

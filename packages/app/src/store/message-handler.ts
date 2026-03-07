@@ -44,6 +44,8 @@ import type {
   ConversationSummary,
   ToolResultImage,
   WebTask,
+  GitFileStatus,
+  GitBranch,
 } from './types';
 import { createEmptySessionState } from './utils';
 import { clearPersistedSession } from './persistence';
@@ -1561,11 +1563,69 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'write_file_result': {
+      const fileWriteCb = get()._fileWriteCallback;
+      if (fileWriteCb) {
+        fileWriteCb({
+          path: typeof msg.path === 'string' ? msg.path : null,
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
     case 'diff_result': {
       const diffCb = get()._diffCallback;
       if (diffCb) {
         diffCb({
           files: Array.isArray(msg.files) ? msg.files as DiffFile[] : [],
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
+    case 'git_status_result': {
+      const cb = get()._gitStatusCallback;
+      if (cb) {
+        cb({
+          branch: typeof msg.branch === 'string' ? msg.branch : null,
+          staged: Array.isArray(msg.staged) ? msg.staged as GitFileStatus[] : [],
+          unstaged: Array.isArray(msg.unstaged) ? msg.unstaged as GitFileStatus[] : [],
+          untracked: Array.isArray(msg.untracked) ? msg.untracked as string[] : [],
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
+    case 'git_branches_result': {
+      const cb = get()._gitBranchesCallback;
+      if (cb) {
+        cb({
+          branches: Array.isArray(msg.branches) ? msg.branches as GitBranch[] : [],
+          currentBranch: typeof msg.currentBranch === 'string' ? msg.currentBranch : null,
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
+    case 'git_stage_result':
+    case 'git_unstage_result': {
+      const cb = get()._gitStageCallback;
+      if (cb) {
+        cb({ error: typeof msg.error === 'string' ? msg.error : null });
+      }
+      break;
+    }
+
+    case 'git_commit_result': {
+      const cb = get()._gitCommitCallback;
+      if (cb) {
+        cb({
+          hash: typeof msg.hash === 'string' ? msg.hash : null,
+          message: typeof msg.message === 'string' ? msg.message : null,
           error: typeof msg.error === 'string' ? msg.error : null,
         });
       }
@@ -1610,8 +1670,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'checkpoint_restored': {
-      // Server has created a new session from the checkpoint
-      // The session_list update will follow from the server
+      // Server created a new session at the checkpoint state.
+      // Auto-switch to it; session_list update follows from server.
+      const rawNewSid = msg.newSessionId;
+      const restoredNewSid =
+        typeof rawNewSid === 'string' ? rawNewSid.trim() : '';
+      if (restoredNewSid.length > 0) {
+        get().switchSession(restoredNewSid, { serverNotify: false, haptic: false });
+      }
       break;
     }
 
@@ -1858,6 +1924,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Token was rotated on the server — the new token is NOT sent over the wire.
       // The client must re-authenticate (re-scan QR or re-enter token).
       console.log('[ws] Server token rotated — re-authentication required');
+      // Clear saved connection so stale token isn't reused
+      void get().clearSavedConnection();
+      // Disconnect the socket (sends user back to ConnectScreen)
+      get().disconnect();
+      // Alert the user after a brief delay (so disconnect state settles first)
+      setTimeout(() => {
+        Alert.alert(
+          'Token Rotated',
+          'The server API token has been rotated. Please re-scan the QR code or re-enter the new token to reconnect.',
+          [{ text: 'OK' }],
+        );
+      }, 100);
       break;
     }
 

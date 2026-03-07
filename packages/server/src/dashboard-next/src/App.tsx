@@ -37,7 +37,7 @@ import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { persistSidebarWidth, loadPersistedSidebarWidth } from './store/persistence'
 
-/** Server-injected config from window.__CHROXY_CONFIG__ */
+/** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
   port: number
   noEncrypt: boolean
@@ -45,9 +45,14 @@ interface ChroxyConfig {
 
 declare const __APP_VERSION__: string
 
-declare global {
-  interface Window {
-    __CHROXY_CONFIG__?: ChroxyConfig
+/** Read server-injected config from meta tag (CSP-safe, no inline scripts) */
+export function getChroxyConfig(): ChroxyConfig | undefined {
+  const meta = document.querySelector('meta[name="chroxy-config"]')
+  if (!meta) return undefined
+  try {
+    return JSON.parse(meta.getAttribute('content') || '') as ChroxyConfig
+  } catch {
+    return undefined
   }
 }
 
