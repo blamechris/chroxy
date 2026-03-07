@@ -118,7 +118,7 @@ export function App() {
   // Fire native notifications for permission requests when window is not focused
   const permissionPrompts = useMemo<PermissionPromptInfo[]>(() =>
     storeMessages
-      .filter(m => m.requestId && m.expiresAt && m.type === 'prompt')
+      .filter(m => m.requestId && m.expiresAt && m.type === 'prompt' && !m.answered)
       .map(m => ({
         id: m.id,
         requestId: m.requestId!,
