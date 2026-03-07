@@ -639,6 +639,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       claudeReady: false,
       streamingMessageId: null,
       activeModel: null,
+      availableProviders: [],
       availableModels: [],
       permissionMode: null,
       availablePermissionModes: [],

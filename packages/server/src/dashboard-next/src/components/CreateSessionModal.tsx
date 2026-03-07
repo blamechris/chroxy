@@ -98,7 +98,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       if (!prevOpenRef.current) {
         setNameError('')
       }
-      setProvider(defaultProvider)
+      // Normalize provider: if server has responded with available providers and
+      // the persisted default isn't in the list, fall back to first available
+      if (availableProviders.length > 0 && !availableProviders.some(p => p.name === defaultProvider)) {
+        setProvider(availableProviders[0]!.name)
+      } else {
+        setProvider(defaultProvider)
+      }
       setShowSuggestions(false)
       setSelectedSuggestion(-1)
       if (cwdValue) {
