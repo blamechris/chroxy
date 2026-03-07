@@ -296,7 +296,7 @@ export function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, switchSession, destroySession, viewMode, setViewMode, sendInterrupt, splitMode])
+  }, [sessions, activeSessionId, switchSession, destroySession, viewMode, setViewMode, sendInterrupt])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({

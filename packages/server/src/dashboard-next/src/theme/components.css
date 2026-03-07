@@ -3101,17 +3101,17 @@
   transition: background 0.15s;
 }
 
-[data-panel-group-direction="horizontal"] > .split-resize-handle {
+.split-horizontal > .split-resize-handle {
   width: 4px;
   cursor: col-resize;
 }
 
-[data-panel-group-direction="vertical"] > .split-resize-handle {
+.split-vertical > .split-resize-handle {
   height: 4px;
   cursor: row-resize;
 }
 
 .split-resize-handle:hover,
-.split-resize-handle[data-resize-handle-active] {
+.split-resize-handle[data-separator="active"] {
   background: var(--accent);
 }
