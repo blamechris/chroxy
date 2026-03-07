@@ -700,6 +700,7 @@ export function App() {
                 <ChatView
                   messages={chatMessages}
                   isStreaming={streamingMessageId !== null}
+                  isBusy={!isIdle}
                   renderMessage={renderMessage}
                 />
               )}

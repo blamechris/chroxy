@@ -89,6 +89,8 @@ export interface ChatViewMessage {
 export interface ChatViewProps {
   messages: ChatViewMessage[]
   isStreaming: boolean
+  /** Show thinking indicator during pre-streaming busy state */
+  isBusy?: boolean
   /** Optional custom renderer. Return a node to override default rendering, or null to fall back. */
   renderMessage?: (msg: ChatViewMessage) => ReactNode | null
 }
@@ -113,7 +115,7 @@ function formatTime(ts: number): string {
   return `${h}:${m} ${ampm}`
 }
 
-export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps) {
+export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
 
@@ -198,7 +200,7 @@ export function ChatView({ messages, isStreaming, renderMessage }: ChatViewProps
             </div>
           )
         })}
-        {isStreaming && <ThinkingDots />}
+        {(isStreaming || isBusy) && <ThinkingDots />}
       </div>
 
       {userScrolledUp && (
