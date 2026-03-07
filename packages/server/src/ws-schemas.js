@@ -156,6 +156,14 @@ export const GetDiffSchema = z.object({
   type: z.literal('get_diff'),
 }).passthrough()
 
+export const GitStatusSchema = z.object({
+  type: z.literal('git_status'),
+}).passthrough()
+
+export const GitBranchesSchema = z.object({
+  type: z.literal('git_branches'),
+}).passthrough()
+
 export const GitStageSchema = z.object({
   type: z.literal('git_stage'),
   files: z.array(z.string()).min(1),
@@ -546,6 +554,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   RequestFullHistorySchema,
   RequestSessionContextSchema,
   GetDiffSchema,
+  GitStatusSchema,
+  GitBranchesSchema,
   GitStageSchema,
   GitUnstageSchema,
   GitCommitSchema,

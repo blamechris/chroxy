@@ -557,6 +557,20 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       break
     }
 
+    case 'git_status': {
+      const gitStatusSessionId = msg.sessionId || client.activeSessionId
+      const gitStatusEntry = ctx.sessionManager.getSession(gitStatusSessionId)
+      ctx.fileOps.gitStatus(ws, gitStatusEntry?.cwd || null)
+      break
+    }
+
+    case 'git_branches': {
+      const gitBranchesSessionId = msg.sessionId || client.activeSessionId
+      const gitBranchesEntry = ctx.sessionManager.getSession(gitBranchesSessionId)
+      ctx.fileOps.gitBranches(ws, gitBranchesEntry?.cwd || null)
+      break
+    }
+
     case 'git_stage': {
       const gitStageSessionId = msg.sessionId || client.activeSessionId
       const gitStageEntry = ctx.sessionManager.getSession(gitStageSessionId)
@@ -1044,6 +1058,14 @@ export function handleCliMessage(ws, client, msg, ctx) {
 
     case 'get_diff':
       ctx.fileOps.getDiff(ws, msg.base, ctx.cliSession?.cwd || null)
+      break
+
+    case 'git_status':
+      ctx.fileOps.gitStatus(ws, ctx.cliSession?.cwd || null)
+      break
+
+    case 'git_branches':
+      ctx.fileOps.gitBranches(ws, ctx.cliSession?.cwd || null)
       break
 
     case 'git_stage':
