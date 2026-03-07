@@ -961,163 +961,53 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
   }
 }
 
-/** Handle messages in legacy single CLI mode */
-export function handleCliMessage(ws, client, msg, ctx) {
-  switch (msg.type) {
-    case 'input': {
-      const text = msg.data
-      let attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
-      if (attachments?.length) {
-        const err = validateAttachments(attachments)
-        if (err) {
-          ctx.send(ws, { type: 'session_error', message: `Invalid attachment: ${err}` })
-          attachments = undefined
-          break
-        }
-      }
-      // Resolve file_ref attachments to actual file content
-      if (attachments?.length) {
-        attachments = resolveFileRefAttachments(attachments, ctx.cliSession?.cwd || null)
-      }
-      if ((!text || !text.trim()) && !attachments?.length) break
-      const trimmed = text?.trim() || ''
-      const attCount = attachments?.length || 0
-      console.log(`[ws] Message from ${client.id}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
-      ctx.cliSession.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
-      ctx.updatePrimary('default', client.id)
+/**
+ * Create a session-manager adapter that wraps a single CLI session.
+ * This allows handleCliMessage to delegate to handleSessionMessage
+ * without duplicating all the message handling logic.
+ */
+function createCliSessionAdapter(cliSession) {
+  const cwd = cliSession?.cwd || null
+  const defaultEntry = { session: cliSession, cwd, name: 'Default' }
 
-      // Echo user_input to other clients so they see what was sent (#1119)
-      ctx.broadcast(
-        { type: 'user_input', sessionId: 'default', clientId: client.id, text: trimmed, timestamp: Date.now() },
-        (c) => c.id !== client.id
-      )
-      break
-    }
-
-    case 'interrupt':
-      console.log(`[ws] Interrupt from ${client.id}`)
-      ctx.cliSession.interrupt()
-      break
-
-    case 'set_model': {
-      if (
-        typeof msg.model === 'string' &&
-        ALLOWED_MODEL_IDS.has(msg.model)
-      ) {
-        console.log(`[ws] Model change from ${client.id}: ${msg.model}`)
-        ctx.cliSession.setModel(msg.model)
-        ctx.broadcast({ type: 'model_changed', model: toShortModelId(msg.model) })
-      } else {
-        console.warn(`[ws] Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
-      }
-      break
-    }
-
-    case 'set_permission_mode': {
-      if (
-        typeof msg.mode === 'string' &&
-        ALLOWED_PERMISSION_MODE_IDS.has(msg.mode)
-      ) {
-        if (msg.mode === 'auto' && !msg.confirmed) {
-          console.log(`[ws] Auto mode requested by ${client.id}, awaiting confirmation`)
-          ctx.send(ws, {
-            type: 'confirm_permission_mode',
-            mode: 'auto',
-            warning: 'Auto mode bypasses all permission checks. Claude will execute tools without asking.',
-          })
-        } else {
-          if (msg.mode === 'auto') {
-            console.log(`[ws] Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()}`)
-          } else {
-            console.log(`[ws] Permission mode change from ${client.id}: ${msg.mode}`)
-          }
-          ctx.cliSession.setPermissionMode(msg.mode)
-          ctx.broadcast({ type: 'permission_mode_changed', mode: msg.mode })
-        }
-      } else {
-        console.warn(`[ws] Rejected invalid permission mode from ${client.id}: ${JSON.stringify(msg.mode)}`)
-      }
-      break
-    }
-
-    case 'permission_response': {
-      const { requestId, decision } = msg
-      if (requestId && decision) {
-        ctx.permissions.resolvePermission(requestId, decision)
-      }
-      break
-    }
-
-    case 'user_question_response': {
-      if (ctx.cliSession && typeof msg.answer === 'string') {
-        ctx.cliSession.respondToQuestion(msg.answer)
-      }
-      break
-    }
-
-    case 'list_directory':
-      ctx.fileOps.listDirectory(ws, msg.path)
-      break
-
-    case 'browse_files':
-      ctx.fileOps.browseFiles(ws, msg.path, ctx.cliSession?.cwd || null)
-      break
-
-    case 'list_files':
-      ctx.fileOps.listFiles(ws, ctx.cliSession?.cwd || null, msg.query || null)
-      break
-
-    case 'read_file':
-      ctx.fileOps.readFile(ws, msg.path, ctx.cliSession?.cwd || null)
-      break
-
-    case 'write_file':
-      ctx.fileOps.writeFile(ws, msg.path, msg.content, ctx.cliSession?.cwd || null)
-      break
-
-    case 'get_diff':
-      ctx.fileOps.getDiff(ws, msg.base, ctx.cliSession?.cwd || null)
-      break
-
-    case 'git_status':
-      ctx.fileOps.gitStatus(ws, ctx.cliSession?.cwd || null)
-      break
-
-    case 'git_branches':
-      ctx.fileOps.gitBranches(ws, ctx.cliSession?.cwd || null)
-      break
-
-    case 'git_stage':
-      ctx.fileOps.gitStage(ws, msg.files, ctx.cliSession?.cwd || null)
-      break
-
-    case 'git_unstage':
-      ctx.fileOps.gitUnstage(ws, msg.files, ctx.cliSession?.cwd || null)
-      break
-
-    case 'git_commit':
-      ctx.fileOps.gitCommit(ws, msg.message, ctx.cliSession?.cwd || null)
-      break
-
-    case 'list_slash_commands': {
-      const cwd = ctx.cliSession?.cwd || null
-      ctx.fileOps.listSlashCommands(ws, cwd, null)
-      break
-    }
-
-    case 'list_agents': {
-      const cwd = ctx.cliSession?.cwd || null
-      ctx.fileOps.listAgents(ws, cwd, null)
-      break
-    }
-
-    case 'list_providers': {
-      ctx.send(ws, { type: 'provider_list', providers: listProviders() })
-      break
-    }
-
-    default:
-      console.log(`[ws] Unknown message type: ${msg.type}`)
+  return {
+    getSession: (id) => (id === 'default' || !id) ? defaultEntry : null,
+    isBudgetPaused: () => false,
+    recordUserInput: () => {},
+    touchActivity: () => {},
+    listSessions: () => [{
+      sessionId: 'default',
+      name: 'Default',
+      cwd,
+      isBusy: cliSession?.isRunning || false,
+      model: null,
+      provider: null,
+      createdAt: Date.now(),
+    }],
+    createSession: () => { throw new Error('Session management not available in single-CLI mode') },
+    destroySession: () => { throw new Error('Session management not available in single-CLI mode') },
+    renameSession: () => false,
+    getHistoryCount: () => 0,
+    getFullHistoryAsync: () => Promise.resolve([]),
+    getSessionContext: () => Promise.resolve(null),
+    getSessionCost: () => 0,
+    getTotalCost: () => 0,
+    getCostBudget: () => null,
+    resumeBudget: () => {},
+    get firstSessionId() { return 'default' },
+    get defaultCwd() { return cwd },
   }
+}
+
+/** Handle messages in legacy single CLI mode — delegates to handleSessionMessage via adapter */
+export function handleCliMessage(ws, client, msg, ctx) {
+  const adaptedCtx = {
+    ...ctx,
+    sessionManager: createCliSessionAdapter(ctx.cliSession),
+    broadcastToSession: (_sid, message, filter) => ctx.broadcast(message, filter),
+    broadcastSessionList: () => {},
+  }
+
+  return handleSessionMessage(ws, client, msg, adaptedCtx)
 }
 
