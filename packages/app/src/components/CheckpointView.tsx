@@ -121,7 +121,7 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
   const [showCreateInput, setShowCreateInput] = useState(false);
   const [newCheckpointName, setNewCheckpointName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
-  const creatingTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const creatingTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // Clean up timer on unmount
   useEffect(() => () => clearTimeout(creatingTimerRef.current), []);
