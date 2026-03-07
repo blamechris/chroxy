@@ -1924,6 +1924,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Token was rotated on the server — the new token is NOT sent over the wire.
       // The client must re-authenticate (re-scan QR or re-enter token).
       console.log('[ws] Server token rotated — re-authentication required');
+      // Clear saved connection so stale token isn't reused
+      void get().clearSavedConnection();
+      // Disconnect the socket (sends user back to ConnectScreen)
+      get().disconnect();
+      // Alert the user after a brief delay (so disconnect state settles first)
+      setTimeout(() => {
+        Alert.alert(
+          'Token Rotated',
+          'The server API token has been rotated. Please re-scan the QR code or re-enter the new token to reconnect.',
+          [{ text: 'OK' }],
+        );
+      }, 100);
       break;
     }
 
