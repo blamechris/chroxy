@@ -16,52 +16,15 @@ describe('Emoji icon removal', () => {
     expect(iconsSrc).not.toMatch(SURROGATE_PAIR)
   })
 
-  test('icons.ts does not export ICON_SATELLITE', () => {
-    expect(iconsSrc).not.toMatch(/ICON_SATELLITE/)
-  })
+  // Removed emoji constants (PR #1573) + removed unused text-symbol constants (PR #1575)
+  const removedConstants = [
+    'ICON_SATELLITE', 'ICON_CAMERA', 'ICON_MICROPHONE', 'ICON_CLOCK',
+    'ICON_CHEVRON_DOWN', 'ICON_ARROW_UP', 'ICON_ARROW_DOWN', 'ICON_SQUARE',
+    'ICON_PLUS', 'ICON_GEAR', 'ICON_CLOUD', 'ICON_DOWNLOAD',
+  ]
 
-  test('icons.ts does not export ICON_CAMERA', () => {
-    expect(iconsSrc).not.toMatch(/ICON_CAMERA/)
-  })
-
-  test('icons.ts does not export ICON_MICROPHONE', () => {
-    expect(iconsSrc).not.toMatch(/ICON_MICROPHONE/)
-  })
-
-  test('icons.ts does not export ICON_CLOCK', () => {
-    expect(iconsSrc).not.toMatch(/ICON_CLOCK/)
-  })
-
-  test('icons.ts does not export ICON_CHEVRON_DOWN', () => {
-    expect(iconsSrc).not.toMatch(/ICON_CHEVRON_DOWN/)
-  })
-
-  test('icons.ts does not export ICON_ARROW_UP', () => {
-    expect(iconsSrc).not.toMatch(/ICON_ARROW_UP/)
-  })
-
-  test('icons.ts does not export ICON_ARROW_DOWN', () => {
-    expect(iconsSrc).not.toMatch(/ICON_ARROW_DOWN/)
-  })
-
-  test('icons.ts does not export ICON_SQUARE', () => {
-    expect(iconsSrc).not.toMatch(/ICON_SQUARE/)
-  })
-
-  test('icons.ts does not export ICON_PLUS', () => {
-    expect(iconsSrc).not.toMatch(/ICON_PLUS/)
-  })
-
-  test('icons.ts does not export ICON_GEAR', () => {
-    expect(iconsSrc).not.toMatch(/ICON_GEAR/)
-  })
-
-  test('icons.ts does not export ICON_CLOUD', () => {
-    expect(iconsSrc).not.toMatch(/ICON_CLOUD/)
-  })
-
-  test('icons.ts does not export ICON_DOWNLOAD', () => {
-    expect(iconsSrc).not.toMatch(/ICON_DOWNLOAD/)
+  test.each(removedConstants)('icons.ts does not export %s', (name) => {
+    expect(iconsSrc).not.toMatch(new RegExp(`export const ${name}\\b`))
   })
 
   test('icons.ts still exports text-symbol constants', () => {
