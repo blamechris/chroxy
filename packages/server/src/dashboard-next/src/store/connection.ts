@@ -184,6 +184,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
+  availableProviders: [],
   availableModels: [],
   permissionMode: null,
   availablePermissionModes: [],
@@ -638,6 +639,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       claudeReady: false,
       streamingMessageId: null,
       activeModel: null,
+      availableProviders: [],
       availableModels: [],
       permissionMode: null,
       availablePermissionModes: [],
@@ -894,22 +896,33 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => {
-    const { activeSessionId, sessionStates } = get();
+    const { sessionStates } = get();
     const now = Date.now();
 
-    if (activeSessionId && sessionStates[activeSessionId]) {
-      updateActiveSession((ss) => ({
-        messages: ss.messages.map((m) =>
-          m.requestId === requestId ? { ...m, answered: answer, answeredAt: now } : m
-        ),
-      }));
-    } else {
-      set((state) => ({
-        messages: state.messages.map((m) =>
-          m.requestId === requestId ? { ...m, answered: answer, answeredAt: now } : m
-        ),
-      }));
+    // Search all sessions (cross-session banners may answer prompts in background sessions)
+    for (const [sid, ss] of Object.entries(sessionStates)) {
+      if (ss.messages.some((m) => m.requestId === requestId)) {
+        set((state) => ({
+          sessionStates: {
+            ...state.sessionStates,
+            [sid]: {
+              ...state.sessionStates[sid]!,
+              messages: state.sessionStates[sid]!.messages.map((m) =>
+                m.requestId === requestId ? { ...m, answered: answer, answeredAt: now } : m
+              ),
+            },
+          },
+        }));
+        return;
+      }
     }
+
+    // Fallback: check legacy flat messages
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.requestId === requestId ? { ...m, answered: answer, answeredAt: now } : m
+      ),
+    }));
   },
 
   setModel: (model: string) => {
@@ -1006,6 +1019,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const msg: Record<string, string> = { type: 'get_diff' };
       if (base) msg.base = base;
       wsSend(socket, msg);
+    }
+  },
+
+  fetchProviders: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'list_providers' });
     }
   },
 

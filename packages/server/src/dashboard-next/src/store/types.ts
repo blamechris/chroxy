@@ -83,6 +83,21 @@ export interface SessionInfo {
   provider?: string;
 }
 
+export interface ProviderCapabilities {
+  permissions: boolean;
+  inProcessPermissions: boolean;
+  modelSwitch: boolean;
+  permissionModeSwitch: boolean;
+  planMode: boolean;
+  resume: boolean;
+  terminal: boolean;
+}
+
+export interface ProviderInfo {
+  name: string;
+  capabilities: ProviderCapabilities;
+}
+
 export interface DirectoryEntry {
   name: string;
   isDirectory: boolean;
@@ -257,6 +272,7 @@ export interface SessionNotification {
   eventType: 'permission' | 'question' | 'completed' | 'error';
   message: string;
   timestamp: number;
+  requestId?: string;
 }
 
 export interface SlashCommand {
@@ -344,6 +360,9 @@ export interface ConnectionState {
   // Cost tracking
   totalCost: number | null;
   costBudget: number | null;
+
+  // Available providers from server
+  availableProviders: ProviderInfo[];
 
   // Available models from server (CLI mode)
   availableModels: ModelInfo[];
@@ -478,6 +497,9 @@ export interface ConnectionState {
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
   forgetSession: () => void;
+
+  // Providers
+  fetchProviders: () => void;
 
   // Slash commands
   fetchSlashCommands: () => void;

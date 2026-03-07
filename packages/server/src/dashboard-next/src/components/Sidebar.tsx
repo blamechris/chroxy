@@ -12,6 +12,7 @@ export interface ActiveSessionNode {
   sessionId: string
   name: string
   isBusy: boolean
+  provider?: string
 }
 
 export interface ResumableSessionNode {
@@ -342,6 +343,11 @@ export function Sidebar({
                             <span className="sidebar-idle-dot" title="Session idle — ready for input" />
                           )}
                           <span className="sidebar-session-name">{session.name}</span>
+                          {session.provider && session.provider !== 'claude-sdk' && (
+                            <span className="sidebar-provider-badge" title={session.provider}>
+                              {session.provider.replace(/^claude-/, '').toUpperCase()}
+                            </span>
+                          )}
                         </div>
                       ))}
 

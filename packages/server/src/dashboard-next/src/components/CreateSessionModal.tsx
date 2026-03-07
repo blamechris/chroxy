@@ -45,8 +45,25 @@ function generateDefaultName(cwdPath: string, existingNames: string[]): string {
 
 const EMPTY_STRINGS: string[] = []
 
+/** Human-readable labels for known providers. */
+const PROVIDER_LABELS: Record<string, string> = {
+  'claude-sdk': 'Claude Code (SDK)',
+  'claude-cli': 'Claude Code (CLI)',
+  'codex': 'OpenAI Codex',
+  'gemini': 'Gemini CLI',
+}
+
+/** Short labels for capability badges. */
+const CAPABILITY_BADGES: [keyof import('../store/types').ProviderCapabilities, string][] = [
+  ['resume', 'Resume'],
+  ['planMode', 'Plan'],
+  ['permissions', 'Permissions'],
+  ['terminal', 'Terminal'],
+]
+
 export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS, serverError, isCreating }: CreateSessionModalProps) {
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
+  const availableProviders = useConnectionStore(s => s.availableProviders)
   const [name, setName] = useState('')
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)
   const [cwd, setCwd] = useState('')
@@ -91,7 +108,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       if (!prevOpenRef.current) {
         setNameError('')
       }
-      setProvider(defaultProvider)
+      // Normalize provider: if server has responded with available providers and
+      // the persisted default isn't in the list, fall back to first available
+      if (availableProviders.length > 0 && !availableProviders.some(p => p.name === defaultProvider)) {
+        setProvider(availableProviders[0]!.name)
+      } else {
+        setProvider(defaultProvider)
+      }
       setShowSuggestions(false)
       setSelectedSuggestion(-1)
       setBrowsing(false)
@@ -337,9 +360,31 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           onChange={e => setProvider(e.target.value)}
           aria-label="Select provider"
         >
-          <option value="claude-sdk">Claude Code (SDK)</option>
-          <option value="claude-cli">Claude Code (CLI)</option>
+          {availableProviders.length > 0
+            ? availableProviders.map(p => (
+                <option key={p.name} value={p.name}>
+                  {PROVIDER_LABELS[p.name] || p.name}
+                </option>
+              ))
+            : <>
+                <option value="claude-sdk">Claude Code (SDK)</option>
+                <option value="claude-cli">Claude Code (CLI)</option>
+              </>
+          }
         </select>
+        {availableProviders.length > 0 && (() => {
+          const selected = availableProviders.find(p => p.name === provider)
+          if (!selected?.capabilities) return null
+          const badges = CAPABILITY_BADGES.filter(([key]) => selected.capabilities[key])
+          if (badges.length === 0) return null
+          return (
+            <div className="provider-capabilities">
+              {badges.map(([, label]) => (
+                <span key={label} className="capability-badge">{label}</span>
+              ))}
+            </div>
+          )
+        })()}
       </div>
       {serverError && (
         <span className="form-error" role="alert">{serverError}</span>
