@@ -1018,6 +1018,95 @@ export function createFileOps(sendFn) {
     }
   }
 
+
+  /** Stage specified files via git add */
+  async function gitStage(ws, files, sessionCwd) {
+    if (!sessionCwd) {
+      sendFn(ws, { type: 'git_stage_result', error: 'Git staging is not available in this mode' })
+      return
+    }
+
+    if (!Array.isArray(files) || files.length === 0) {
+      sendFn(ws, { type: 'git_stage_result', error: 'No files specified to stage' })
+      return
+    }
+
+    try {
+      const cwdReal = await resolveSessionCwd(sessionCwd)
+      await execFileAsync(GIT, ['add', '--', ...files], {
+        cwd: cwdReal,
+        timeout: 10000,
+      })
+      sendFn(ws, { type: 'git_stage_result', error: null })
+    } catch (err) {
+      sendFn(ws, { type: 'git_stage_result', error: err.message || 'Failed to stage files' })
+    }
+  }
+
+  /** Unstage specified files via git reset HEAD */
+  async function gitUnstage(ws, files, sessionCwd) {
+    if (!sessionCwd) {
+      sendFn(ws, { type: 'git_unstage_result', error: 'Git unstaging is not available in this mode' })
+      return
+    }
+
+    if (!Array.isArray(files) || files.length === 0) {
+      sendFn(ws, { type: 'git_unstage_result', error: 'No files specified to unstage' })
+      return
+    }
+
+    try {
+      const cwdReal = await resolveSessionCwd(sessionCwd)
+      await execFileAsync(GIT, ['reset', 'HEAD', '--', ...files], {
+        cwd: cwdReal,
+        timeout: 10000,
+      })
+      sendFn(ws, { type: 'git_unstage_result', error: null })
+    } catch (err) {
+      sendFn(ws, { type: 'git_unstage_result', error: err.message || 'Failed to unstage files' })
+    }
+  }
+
+  /** Create a git commit with the given message */
+  async function gitCommit(ws, message, sessionCwd) {
+    if (!sessionCwd) {
+      sendFn(ws, { type: 'git_commit_result', hash: null, message: null, error: 'Git commit is not available in this mode' })
+      return
+    }
+
+    if (!message || typeof message !== 'string' || !message.trim()) {
+      sendFn(ws, { type: 'git_commit_result', hash: null, message: null, error: 'Commit message cannot be empty' })
+      return
+    }
+
+    try {
+      const cwdReal = await resolveSessionCwd(sessionCwd)
+      const { stdout } = await execFileAsync(GIT, ['commit', '-m', message.trim()], {
+        cwd: cwdReal,
+        timeout: 30000,
+      })
+
+      // Extract commit hash from output by finding a hex hash before closing bracket
+      let hash = null
+      const match = stdout.match(/\b([a-f0-9]{7,})\]/)
+      if (match) hash = match[1]
+
+      sendFn(ws, {
+        type: 'git_commit_result',
+        hash,
+        message: message.trim(),
+        error: null,
+      })
+    } catch (err) {
+      sendFn(ws, {
+        type: 'git_commit_result',
+        hash: null,
+        message: null,
+        error: err.message || 'Failed to create commit',
+      })
+    }
+  }
+
   return {
     listDirectory,
     browseFiles,
@@ -1029,5 +1118,8 @@ export function createFileOps(sendFn) {
     listFiles,
     gitStatus,
     gitBranches,
+    gitStage,
+    gitUnstage,
+    gitCommit,
   }
 }

@@ -571,6 +571,27 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       break
     }
 
+    case 'git_stage': {
+      const gitStageSessionId = msg.sessionId || client.activeSessionId
+      const gitStageEntry = ctx.sessionManager.getSession(gitStageSessionId)
+      ctx.fileOps.gitStage(ws, msg.files, gitStageEntry?.cwd || null)
+      break
+    }
+
+    case 'git_unstage': {
+      const gitUnstageSessionId = msg.sessionId || client.activeSessionId
+      const gitUnstageEntry = ctx.sessionManager.getSession(gitUnstageSessionId)
+      ctx.fileOps.gitUnstage(ws, msg.files, gitUnstageEntry?.cwd || null)
+      break
+    }
+
+    case 'git_commit': {
+      const gitCommitSessionId = msg.sessionId || client.activeSessionId
+      const gitCommitEntry = ctx.sessionManager.getSession(gitCommitSessionId)
+      ctx.fileOps.gitCommit(ws, msg.message, gitCommitEntry?.cwd || null)
+      break
+    }
+
     case 'list_slash_commands': {
       const cmdSessionId = msg.sessionId || client.activeSessionId
       const entry = ctx.sessionManager.getSession(cmdSessionId)
@@ -1045,6 +1066,18 @@ export function handleCliMessage(ws, client, msg, ctx) {
 
     case 'git_branches':
       ctx.fileOps.gitBranches(ws, ctx.cliSession?.cwd || null)
+      break
+
+    case 'git_stage':
+      ctx.fileOps.gitStage(ws, msg.files, ctx.cliSession?.cwd || null)
+      break
+
+    case 'git_unstage':
+      ctx.fileOps.gitUnstage(ws, msg.files, ctx.cliSession?.cwd || null)
+      break
+
+    case 'git_commit':
+      ctx.fileOps.gitCommit(ws, msg.message, ctx.cliSession?.cwd || null)
       break
 
     case 'list_slash_commands': {
