@@ -3824,4 +3824,95 @@
 .diff-line-empty {
   background: var(--bg-primary);
   opacity: 0.5;
+/* ---- Agent Monitor Panel ---- */
+.agent-monitor-panel {
+  border-top: 1px solid var(--border-primary);
+  background: var(--bg-card);
+  flex-shrink: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.agent-monitor-header {
+  padding: 6px 16px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.agent-monitor-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-count {
+  background: var(--accent-blue);
+  color: #fff;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 700;
+}
+
+.agent-monitor-body {
+  padding: 8px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-empty {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  padding: 8px 0;
+}
+
+.agent-card {
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+}
+
+.agent-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.agent-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-green);
+  animation: agent-pulse-anim 1.5s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes agent-pulse-anim {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.agent-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.agent-elapsed {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent-yellow);
+}
+
+.agent-description {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
 }

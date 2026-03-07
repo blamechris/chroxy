@@ -40,6 +40,7 @@ import { usePermissionNotification, type PermissionPromptInfo } from './hooks/us
 import { SplitPane, type SplitDirection } from './components/SplitPane'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode } from './store/persistence'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
+import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -882,6 +883,9 @@ export function App() {
               )}
               {viewMode === 'diff' && <DiffViewerPanel />}
             </div>
+
+            {/* Agent monitor — shows when agents are active */}
+            {activeAgents.length > 0 && <AgentMonitorPanel />}
 
             {/* Plan approval */}
             {isPlanPending && (
