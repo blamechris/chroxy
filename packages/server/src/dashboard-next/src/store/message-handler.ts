@@ -1966,6 +1966,38 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'pty_spawned': {
+      const ptySpawnSessionId = (msg.sessionId as string) || get().activeSessionId;
+      if (ptySpawnSessionId && get().sessionStates[ptySpawnSessionId]) {
+        updateSession(ptySpawnSessionId, () => ({ ptyActive: true }));
+      }
+      break;
+    }
+
+    case 'pty_data': {
+      // Forward raw PTY bytes to the terminal — same path as appendTerminalData
+      // but from the dedicated PTY channel (true 1:1 terminal mirror)
+      const ptyData = msg.data as string;
+      if (ptyData) {
+        get().appendTerminalData(ptyData);
+      }
+      break;
+    }
+
+    case 'pty_exit': {
+      const ptySessionId = (msg.sessionId as string) || get().activeSessionId;
+      if (ptySessionId && get().sessionStates[ptySessionId]) {
+        updateSession(ptySessionId, () => ({ ptyActive: false }));
+      }
+      break;
+    }
+
+    case 'pty_error': {
+      const ptyErrMsg = msg.message as string;
+      console.warn(`[pty] Error: ${ptyErrMsg}`);
+      break;
+    }
+
     default: {
       // Log unknown message types when server protocol is newer (likely new features)
       const serverPV = getStore().getState().serverProtocolVersion;

@@ -18,6 +18,7 @@ import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
+import { PtyMirror } from './pty-mirror.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -279,6 +280,7 @@ export class WsServer {
       sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
       replayHistory: (ws, sid) => self._replayHistory(ws, sid),
       get draining() { return self._draining },
+      ptyMirrors: this._ptyMirrors,
     }
     this.pushManager = pushManager
 
@@ -298,6 +300,20 @@ export class WsServer {
           this._checkpointManager.clearCheckpoints(sessionId)
         } catch (err) {
           console.warn(`[ws] Failed to clear checkpoints for destroyed session ${sessionId}: ${err.message}`)
+        }
+      })
+    }
+
+    // PTY mirrors: one per session, keyed by sessionId
+    this._ptyMirrors = new Map()
+
+    // Clean up PTY mirrors when sessions are destroyed
+    if (sessionManager && typeof sessionManager.on === 'function') {
+      sessionManager.on('session_destroyed', ({ sessionId }) => {
+        const pty = this._ptyMirrors.get(sessionId)
+        if (pty) {
+          pty.destroy()
+          this._ptyMirrors.delete(sessionId)
         }
       })
     }

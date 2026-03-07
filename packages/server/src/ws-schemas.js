@@ -538,6 +538,27 @@ export const ServerWebTaskListSchema = z.object({
   tasks: z.array(WebTaskSchema),
 })
 
+// -- PTY mirror messages --
+export const PtySpawnSchema = z.object({
+  type: z.literal('pty_spawn'),
+  sessionId: z.string().optional(),
+})
+
+export const PtyWriteSchema = z.object({
+  type: z.literal('pty_write'),
+  data: z.string(),
+})
+
+export const PtyResizeSchema = z.object({
+  type: z.literal('pty_resize'),
+  cols: z.number().int().min(1),
+  rows: z.number().int().min(1),
+})
+
+export const PtyKillSchema = z.object({
+  type: z.literal('pty_kill'),
+})
+
 // -- Discriminated union of all client->server message types --
 // Note: auth, key_exchange, and encrypted are handled before the main
 // switch and are not included in this union. They are validated inline
@@ -590,4 +611,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ListReposSchema,
   AddRepoSchema,
   RemoveRepoSchema,
+  PtySpawnSchema,
+  PtyWriteSchema,
+  PtyResizeSchema,
+  PtyKillSchema,
 ])

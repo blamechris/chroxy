@@ -268,6 +268,7 @@ export interface SessionState {
   sessionContext: SessionContext | null;
   mcpServers: McpServer[];
   devPreviews: DevPreview[];
+  ptyActive: boolean;
 }
 
 export interface ServerError {
@@ -546,6 +547,12 @@ export interface ConnectionState {
   listCheckpoints: () => void;
   restoreCheckpoint: (checkpointId: string) => void;
   deleteCheckpoint: (checkpointId: string) => void;
+
+  // PTY mirror actions
+  spawnPty: (cols?: number, rows?: number) => void;
+  writePty: (data: string) => void;
+  resizePty: (cols: number, rows: number) => void;
+  killPty: () => void;
 
   // Plan mode actions
   clearPlanState: () => void;

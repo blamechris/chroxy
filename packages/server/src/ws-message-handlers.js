@@ -2,6 +2,7 @@ import { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { resolve, relative, basename } from 'path'
 import { ALLOWED_MODEL_IDS, toShortModelId } from './models.js'
+import { PtyMirror } from './pty-mirror.js'
 import { WebTaskUnavailableError } from './web-task-manager.js'
 import { scanConversations, groupConversationsByRepo } from './conversation-scanner.js'
 import { searchConversations } from './conversation-search.js'
@@ -952,6 +953,83 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         ctx.send(ws, { type: 'repo_list', repos })
       } catch (err) {
         ctx.send(ws, { type: 'server_error', message: `Failed to list repos: ${err.message}`, recoverable: true })
+      }
+      break
+    }
+
+    case 'pty_spawn': {
+      const targetSessionId = msg.sessionId || client.activeSessionId
+      if (!targetSessionId) {
+        ctx.send(ws, { type: 'error', code: 'NO_SESSION', details: 'No active session for PTY spawn' })
+        break
+      }
+      if (!PtyMirror.available) {
+        ctx.send(ws, { type: 'pty_error', sessionId: targetSessionId, message: 'node-pty is not installed — PTY mirroring unavailable' })
+        break
+      }
+      if (ctx.ptyMirrors.has(targetSessionId)) {
+        ctx.send(ws, { type: 'pty_error', sessionId: targetSessionId, message: 'PTY already active for this session' })
+        break
+      }
+      const entry = ctx.sessionManager.getSession(targetSessionId)
+      if (!entry) {
+        ctx.send(ws, { type: 'pty_error', sessionId: targetSessionId, message: 'Session not found' })
+        break
+      }
+      const ptyMirror = new PtyMirror({
+        cwd: entry.cwd || ctx.sessionManager.defaultCwd || process.cwd(),
+        cols: msg.cols || 120,
+        rows: msg.rows || 40,
+        conversationId: entry.session?.resumeSessionId || null,
+        model: entry.session?.model || null,
+      })
+
+      ptyMirror.on('spawned', ({ pid, cols, rows }) => {
+        ctx.broadcastToSession(targetSessionId, { type: 'pty_spawned', pid, cols, rows })
+      })
+      ptyMirror.on('data', (data) => {
+        ctx.broadcastToSession(targetSessionId, { type: 'pty_data', data })
+      })
+      ptyMirror.on('exit', ({ exitCode, signal }) => {
+        ctx.broadcastToSession(targetSessionId, { type: 'pty_exit', exitCode, signal })
+        ctx.ptyMirrors.delete(targetSessionId)
+      })
+      ptyMirror.on('error', ({ message }) => {
+        ctx.broadcastToSession(targetSessionId, { type: 'pty_error', message })
+      })
+
+      ctx.ptyMirrors.set(targetSessionId, ptyMirror)
+      const spawned = ptyMirror.spawn()
+      if (!spawned) {
+        ctx.ptyMirrors.delete(targetSessionId)
+      }
+      break
+    }
+
+    case 'pty_write': {
+      const targetSessionId = msg.sessionId || client.activeSessionId
+      const ptyInstance = targetSessionId ? ctx.ptyMirrors.get(targetSessionId) : null
+      if (ptyInstance) {
+        ptyInstance.write(msg.data)
+      }
+      break
+    }
+
+    case 'pty_resize': {
+      const targetSessionId = msg.sessionId || client.activeSessionId
+      const ptyInstance = targetSessionId ? ctx.ptyMirrors.get(targetSessionId) : null
+      if (ptyInstance) {
+        ptyInstance.resize(msg.cols, msg.rows)
+      }
+      break
+    }
+
+    case 'pty_kill': {
+      const targetSessionId = msg.sessionId || client.activeSessionId
+      const ptyInstance = targetSessionId ? ctx.ptyMirrors.get(targetSessionId) : null
+      if (ptyInstance) {
+        ptyInstance.destroy()
+        ctx.ptyMirrors.delete(targetSessionId)
       }
       break
     }
