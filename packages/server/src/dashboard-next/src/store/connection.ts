@@ -184,6 +184,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
+  availableProviders: [],
   availableModels: [],
   permissionMode: null,
   availablePermissionModes: [],
@@ -1006,6 +1007,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const msg: Record<string, string> = { type: 'get_diff' };
       if (base) msg.base = base;
       wsSend(socket, msg);
+    }
+  },
+
+  fetchProviders: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'list_providers' });
     }
   },
 
