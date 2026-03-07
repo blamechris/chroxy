@@ -156,7 +156,6 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   }, [nameManuallyEdited, existingNames])
 
   const handleBrowseNavigate = useCallback((path: string) => {
-    browsePathRef.current = path
     setBrowsePath(path)
     setBrowseLoading(true)
     setBrowseEntries([])

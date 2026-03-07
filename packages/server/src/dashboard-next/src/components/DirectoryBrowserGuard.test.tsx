@@ -14,19 +14,19 @@ const modalSource = fs.readFileSync(
 )
 
 describe('Directory browse out-of-order guard (#1584)', () => {
-  it('tracks requested browse path in a ref', () => {
-    // The modal should have a ref that tracks the last-requested browse path
-    expect(modalSource).toMatch(/useRef.*browse|browsePathRef/)
+  it('captures requested path in closure for comparison', () => {
+    // The navigate handler should capture the requested path in a closure variable
+    expect(modalSource).toMatch(/const requestedPath/)
   })
 
-  it('compares listing.path against tracked path before applying', () => {
+  it('compares listing.path against requested path before applying', () => {
     // The callback should check listing.path matches the expected path
     expect(modalSource).toMatch(/listing\.path|listing\.parentPath/)
   })
 
-  it('ignores responses where path does not match current request', () => {
+  it('ignores stale responses from previous navigations', () => {
     // There should be a conditional return/guard in the callback
     // that prevents stale responses from updating state
-    expect(modalSource).toMatch(/return\b.*\/\/ stale|!==.*browsePathRef|!==.*requestedPath/)
+    expect(modalSource).toMatch(/!==.*requestedPath.*return|return.*\/\/ stale/)
   })
 })
