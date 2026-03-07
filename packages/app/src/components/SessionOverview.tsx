@@ -2,8 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   ScrollView,
+  Modal,
   StyleSheet,
   Alert,
   Platform,
@@ -230,6 +232,9 @@ export function SessionOverview({ onClose }: SessionOverviewProps) {
   const totalCost = useConnectionStore((s) => s.totalCost);
   const costBudget = useConnectionStore((s) => s.costBudget);
 
+  const [renameTarget, setRenameTarget] = useState<{ sessionId: string; name: string } | null>(null);
+  const [renameText, setRenameText] = useState('');
+
   // Tick for elapsed time updates
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -266,16 +271,13 @@ export function SessionOverview({ onClose }: SessionOverviewProps) {
 
   const handleLongPress = (session: SessionInfo) => {
     const buttons: any[] = [];
-    if (Platform.OS === 'ios') {
-      buttons.push({
-        text: 'Rename',
-        onPress: () => {
-          Alert.prompt('Rename Session', '', (name: string) => {
-            if (name?.trim()) renameSession(session.sessionId, name.trim());
-          }, 'plain-text', session.name);
-        },
-      });
-    }
+    buttons.push({
+      text: 'Rename',
+      onPress: () => {
+        setRenameText(session.name);
+        setRenameTarget({ sessionId: session.sessionId, name: session.name });
+      },
+    });
     buttons.push({
       text: 'Delete',
       style: 'destructive',
@@ -339,6 +341,48 @@ export function SessionOverview({ onClose }: SessionOverviewProps) {
           <Text style={styles.emptyText}>No sessions yet</Text>
         )}
       </ScrollView>
+
+      {/* Rename modal */}
+      <Modal
+        visible={renameTarget !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRenameTarget(null)}
+      >
+        <View style={styles.renameOverlay}>
+          <View style={styles.renameModal}>
+            <Text style={styles.renameTitle}>Rename Session</Text>
+            <TextInput
+              style={styles.renameInput}
+              value={renameText}
+              onChangeText={setRenameText}
+              autoFocus
+              selectTextOnFocus
+              placeholder="Session name"
+              placeholderTextColor={COLORS.textDim}
+            />
+            <View style={styles.renameButtons}>
+              <TouchableOpacity
+                style={styles.renameCancelBtn}
+                onPress={() => setRenameTarget(null)}
+              >
+                <Text style={styles.renameCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.renameSaveBtn}
+                onPress={() => {
+                  if (renameTarget && renameText.trim()) {
+                    renameSession(renameTarget.sessionId, renameText.trim());
+                  }
+                  setRenameTarget(null);
+                }}
+              >
+                <Text style={styles.renameSaveText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -473,5 +517,58 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: 'center',
     marginTop: 40,
+  },
+  renameOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  renameModal: {
+    backgroundColor: COLORS.backgroundSecondary,
+    borderRadius: 12,
+    padding: 20,
+    width: '80%',
+    maxWidth: 320,
+  },
+  renameTitle: {
+    color: COLORS.textPrimary,
+    fontSize: 17,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  renameInput: {
+    backgroundColor: COLORS.backgroundCard,
+    color: COLORS.textPrimary,
+    borderRadius: 8,
+    padding: 10,
+    fontSize: 15,
+    borderWidth: 1,
+    borderColor: COLORS.borderSecondary,
+    marginBottom: 16,
+  },
+  renameButtons: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+  },
+  renameCancelBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+  },
+  renameCancelText: {
+    color: COLORS.textMuted,
+    fontSize: 15,
+  },
+  renameSaveBtn: {
+    backgroundColor: COLORS.accentBlue,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+  },
+  renameSaveText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
   },
 });
