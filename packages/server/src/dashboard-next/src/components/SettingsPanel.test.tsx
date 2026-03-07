@@ -123,4 +123,11 @@ describe('SettingsPanel', () => {
     render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
     expect(screen.getByLabelText('Default provider')).toBeInTheDocument()
   })
+
+  it('closes on Escape key', () => {
+    const onClose = vi.fn()
+    render(<SettingsPanel isOpen={true} onClose={onClose} />)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledOnce()
+  })
 })

@@ -4,7 +4,7 @@
  * Triggered via gear icon in header or Cmd+,. Changes apply instantly
  * and persist to localStorage.
  */
-import { useCallback } from 'react'
+import { useCallback, useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
@@ -49,6 +49,18 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const handleProviderChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     setDefaultProvider(e.target.value)
   }, [setDefaultProvider])
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [isOpen, onClose])
 
   if (!isOpen) return null
 
