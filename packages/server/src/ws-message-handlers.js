@@ -967,7 +967,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
  * without duplicating all the message handling logic.
  */
 function createCliSessionAdapter(cliSession) {
-  const cwd = cliSession?.cwd || process.cwd()
+  const cwd = cliSession?.cwd || null
   const defaultEntry = { session: cliSession, cwd, name: 'Default' }
 
   return {
@@ -1001,13 +1001,10 @@ function createCliSessionAdapter(cliSession) {
 
 /** Handle messages in legacy single CLI mode — delegates to handleSessionMessage via adapter */
 export function handleCliMessage(ws, client, msg, ctx) {
-  // Ensure client has a default active session
-  if (!client.activeSessionId) client.activeSessionId = 'default'
-
   const adaptedCtx = {
     ...ctx,
     sessionManager: createCliSessionAdapter(ctx.cliSession),
-    broadcastToSession: (sid, message, filter) => ctx.broadcast(message, filter),
+    broadcastToSession: (_sid, message, filter) => ctx.broadcast(message, filter),
     broadcastSessionList: () => {},
   }
 
