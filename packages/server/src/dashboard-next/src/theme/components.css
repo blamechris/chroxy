@@ -1123,6 +1123,126 @@
 
 .btn-retry:hover { opacity: 0.85; }
 
+/* Directory Browser (#1434) */
+.directory-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.directory-browser-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 6px 8px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+}
+
+.directory-browser-sep {
+  color: var(--text-secondary);
+  margin: 0 1px;
+}
+
+.directory-browser-crumb {
+  background: none;
+  border: none;
+  color: var(--accent-blue);
+  cursor: pointer;
+  padding: 0 2px;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.directory-browser-crumb:hover {
+  text-decoration: underline;
+}
+
+.directory-browser-crumb--current {
+  color: var(--text-primary);
+  cursor: default;
+}
+
+.directory-browser-list-container {
+  max-height: 250px;
+  overflow-y: auto;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-primary);
+}
+
+.directory-browser-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.directory-browser-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-align: left;
+}
+
+.directory-browser-entry:hover {
+  background: var(--bg-hover);
+}
+
+.directory-browser-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.directory-browser-loading,
+.directory-browser-empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.directory-browser-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.cwd-browse-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  color: var(--text-primary);
+  padding: 6px 12px;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.cwd-browse-btn:hover {
+  background: var(--bg-hover);
+}
+
+.cwd-input-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.cwd-input-row .cwd-combobox {
+  flex: 1;
+  min-width: 0;
+}
+
 /* ---- Slash Command Picker (#1281) ---- */
 .slash-picker {
   position: absolute;

@@ -8,7 +8,9 @@ import { useState, useEffect, useCallback, useRef, useMemo, useId, type Keyboard
 import { flushSync } from 'react-dom'
 import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
+import { DirectoryBrowser } from './DirectoryBrowser'
 import { useConnectionStore } from '../store/connection'
+import type { DirectoryListing, DirectoryEntry } from '../store/types'
 
 export interface CreateSessionData {
   name: string
@@ -55,6 +57,14 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const cwdInputRef = useRef<HTMLInputElement>(null)
   const listboxId = useId()
 
+  // Directory browser state
+  const [browsing, setBrowsing] = useState(false)
+  const [browsePath, setBrowsePath] = useState('')
+  const [browseEntries, setBrowseEntries] = useState<DirectoryEntry[]>([])
+  const [browseLoading, setBrowseLoading] = useState(false)
+  const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
+  const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
+
   // Imperative refs for submit — React 19 resets controlled input DOM values
   // before the next event fires, so we can't read from the DOM in submit.
   const nameValRef = useRef('')
@@ -84,6 +94,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       setProvider(defaultProvider)
       setShowSuggestions(false)
       setSelectedSuggestion(-1)
+      setBrowsing(false)
+      setBrowseEntries([])
       if (cwdValue) {
         const generated = generateDefaultName(cwdValue, existingNames)
         setName(generated)
@@ -116,6 +128,44 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       nameValRef.current = generated
     }
   }, [nameManuallyEdited, existingNames])
+
+  const handleBrowseNavigate = useCallback((path: string) => {
+    setBrowsePath(path)
+    setBrowseLoading(true)
+    setBrowseEntries([])
+    setDirectoryListingCallback((listing: DirectoryListing) => {
+      setBrowseLoading(false)
+      if (listing.error || !listing.entries) {
+        setBrowseEntries([])
+      } else {
+        setBrowseEntries(listing.entries)
+      }
+    })
+    requestDirectoryListing(path)
+  }, [requestDirectoryListing, setDirectoryListingCallback])
+
+  const handleBrowseOpen = useCallback(() => {
+    const startPath = cwd || initialCwd || '/'
+    setBrowsing(true)
+    handleBrowseNavigate(startPath)
+  }, [cwd, initialCwd, handleBrowseNavigate])
+
+  const handleBrowseSelect = useCallback((path: string) => {
+    setCwd(path)
+    cwdValRef.current = path
+    setBrowsing(false)
+    setDirectoryListingCallback(null)
+    if (!nameManuallyEdited) {
+      const generated = generateDefaultName(path, existingNames)
+      setName(generated)
+      nameValRef.current = generated
+    }
+  }, [nameManuallyEdited, existingNames, setDirectoryListingCallback])
+
+  const handleBrowseCancel = useCallback(() => {
+    setBrowsing(false)
+    setDirectoryListingCallback(null)
+  }, [setDirectoryListingCallback])
 
   const handleCwdKeyDown = useCallback((e: KeyboardEvent) => {
     // Tab completion — only when dropdown is visible to avoid trapping keyboard focus
@@ -186,73 +236,97 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           {nameError}
         </span>
       )}
-      <div className="cwd-combobox">
-        <input
-          ref={cwdInputRef}
-          type="text"
-          placeholder="Working directory (optional)"
-          aria-label="Working directory"
-          value={cwd}
-          onChange={e => {
-            const val = e.target.value
-            setCwd(val)
-            cwdValRef.current = val
-            setShowSuggestions(true)
-            setSelectedSuggestion(-1)
-          }}
-          onFocus={() => setShowSuggestions(true)}
-          onBlur={() => {
-            // Delay to allow click on suggestion
-            setTimeout(() => setShowSuggestions(false), 150)
-          }}
-          onKeyDown={handleCwdKeyDown}
-          autoComplete="off"
-          role="combobox"
-          aria-expanded={showSuggestions && suggestions.length > 0}
-          aria-controls={listboxId}
-          aria-autocomplete="list"
-          aria-activedescendant={showSuggestions && selectedSuggestion >= 0 ? `${listboxId}-opt-${selectedSuggestion}` : undefined}
+      {browsing ? (
+        <DirectoryBrowser
+          initialPath={browsePath}
+          entries={browseEntries}
+          currentPath={browsePath}
+          loading={browseLoading}
+          onNavigate={handleBrowseNavigate}
+          onSelect={handleBrowseSelect}
+          onCancel={handleBrowseCancel}
         />
-        {suggestions.length > 0 && (
-          <button
-            type="button"
-            className="cwd-dropdown-toggle"
-            tabIndex={-1}
-            aria-label="Show directory suggestions"
-            onClick={() => {
-              setShowSuggestions(!showSuggestions)
-              cwdInputRef.current?.focus()
-            }}
-          >
-            <span className="cwd-dropdown-arrow" />
-          </button>
-        )}
-        {showSuggestions && suggestions.length > 0 && (
-          <ul id={listboxId} className="cwd-suggestions" role="listbox">
-            {suggestions.map((path, i) => {
-              const label = basename(path)
-              return (
-                <li
-                  key={path}
-                  id={`${listboxId}-opt-${i}`}
-                  role="option"
-                  aria-selected={i === selectedSuggestion}
-                  className={`cwd-suggestion${i === selectedSuggestion ? ' selected' : ''}`}
-                  onMouseDown={e => {
-                    e.preventDefault()
-                    selectSuggestion(path)
+      ) : (
+        <>
+          <div className="cwd-input-row">
+            <div className="cwd-combobox">
+              <input
+                ref={cwdInputRef}
+                type="text"
+                placeholder="Working directory (optional)"
+                aria-label="Working directory"
+                value={cwd}
+                onChange={e => {
+                  const val = e.target.value
+                  setCwd(val)
+                  cwdValRef.current = val
+                  setShowSuggestions(true)
+                  setSelectedSuggestion(-1)
+                }}
+                onFocus={() => setShowSuggestions(true)}
+                onBlur={() => {
+                  // Delay to allow click on suggestion
+                  setTimeout(() => setShowSuggestions(false), 150)
+                }}
+                onKeyDown={handleCwdKeyDown}
+                autoComplete="off"
+                role="combobox"
+                aria-expanded={showSuggestions && suggestions.length > 0}
+                aria-controls={listboxId}
+                aria-autocomplete="list"
+                aria-activedescendant={showSuggestions && selectedSuggestion >= 0 ? `${listboxId}-opt-${selectedSuggestion}` : undefined}
+              />
+              {suggestions.length > 0 && (
+                <button
+                  type="button"
+                  className="cwd-dropdown-toggle"
+                  tabIndex={-1}
+                  aria-label="Show directory suggestions"
+                  onClick={() => {
+                    setShowSuggestions(!showSuggestions)
+                    cwdInputRef.current?.focus()
                   }}
                 >
-                  <span className="cwd-suggestion-name">{label}</span>
-                  <span className="cwd-suggestion-path">{path}</span>
-                </li>
-              )
-            })}
-          </ul>
-        )}
-      </div>
-      {cwd && !suggestions.includes(cwd) && (
-        <span className="cwd-hint">New directory — session will start here</span>
+                  <span className="cwd-dropdown-arrow" />
+                </button>
+              )}
+              {showSuggestions && suggestions.length > 0 && (
+                <ul id={listboxId} className="cwd-suggestions" role="listbox">
+                  {suggestions.map((path, i) => {
+                    const label = basename(path)
+                    return (
+                      <li
+                        key={path}
+                        id={`${listboxId}-opt-${i}`}
+                        role="option"
+                        aria-selected={i === selectedSuggestion}
+                        className={`cwd-suggestion${i === selectedSuggestion ? ' selected' : ''}`}
+                        onMouseDown={e => {
+                          e.preventDefault()
+                          selectSuggestion(path)
+                        }}
+                      >
+                        <span className="cwd-suggestion-name">{label}</span>
+                        <span className="cwd-suggestion-path">{path}</span>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </div>
+            <button
+              type="button"
+              className="cwd-browse-btn"
+              onClick={handleBrowseOpen}
+              aria-label="Browse directories"
+            >
+              Browse...
+            </button>
+          </div>
+          {cwd && !suggestions.includes(cwd) && (
+            <span className="cwd-hint">New directory — session will start here</span>
+          )}
+        </>
       )}
       <div className="provider-select">
         <label htmlFor="provider-select">Provider</label>
