@@ -1610,8 +1610,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'checkpoint_restored': {
-      // Server has created a new session from the checkpoint
-      // The session_list update will follow from the server
+      // Server created a new session at the checkpoint state.
+      // Auto-switch to it; session_list update follows from server.
+      const restoredNewSid = msg.newSessionId as string | undefined;
+      if (restoredNewSid) {
+        get().switchSession(restoredNewSid);
+      }
       break;
     }
 
