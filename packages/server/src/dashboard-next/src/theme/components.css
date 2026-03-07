@@ -500,6 +500,11 @@
   border-color: var(--accent-blue);
 }
 
+.session-tab:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
 .tab-name {
   pointer-events: none;
 }
@@ -563,6 +568,12 @@
   background: var(--accent-red-light);
 }
 
+.tab-close:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--border-focus);
+  outline-offset: -1px;
+}
+
 .tab-rename-input {
   background: var(--bg-session-bar);
   color: var(--text-primary);
@@ -593,6 +604,11 @@
   background: #222244;
 }
 
+.btn-new-session:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
 /* ---- View Switcher ---- */
 .view-switch {
   display: flex;
@@ -621,6 +637,11 @@
 .view-tab.active {
   color: var(--accent-blue);
   border-bottom-color: var(--accent-blue);
+}
+
+.view-tab:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
 }
 
 /* ---- Main Content ---- */
@@ -910,6 +931,12 @@
 }
 
 .btn-deny:hover { background: #dc2626; }
+
+.btn-allow:focus-visible,
+.btn-deny:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
 
 .permission-prompt.answered {
   opacity: 0.5;
@@ -1669,6 +1696,12 @@
 }
 
 .btn-interrupt:hover { background: #dc2626; }
+
+.btn-send:focus-visible,
+.btn-interrupt:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
 
 .thinking-indicator {
   display: flex;
