@@ -197,4 +197,37 @@ describe('DirectoryBrowser', () => {
     )
     expect(screen.getByRole('list')).toBeInTheDocument()
   })
+
+  it('shows error message when error prop is set', () => {
+    render(
+      <DirectoryBrowser
+        initialPath="/restricted"
+        entries={[]}
+        currentPath="/restricted"
+        loading={false}
+        error="Permission denied"
+        onNavigate={vi.fn()}
+        onSelect={vi.fn()}
+        onCancel={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Permission denied')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+  })
+
+  it('does not show "No subdirectories" when error is present', () => {
+    render(
+      <DirectoryBrowser
+        initialPath="/restricted"
+        entries={[]}
+        currentPath="/restricted"
+        loading={false}
+        error="Access denied"
+        onNavigate={vi.fn()}
+        onSelect={vi.fn()}
+        onCancel={vi.fn()}
+      />
+    )
+    expect(screen.queryByText(/no subdirectories/i)).not.toBeInTheDocument()
+  })
 })
