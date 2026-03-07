@@ -21,6 +21,12 @@ export function usePermissionNotification(prompts: PermissionPromptInfo[]) {
   useEffect(() => {
     if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
 
+    // Prune stale IDs no longer in the active prompts list
+    const activeIds = new Set(prompts.map(p => p.requestId))
+    for (const id of notifiedRef.current) {
+      if (!activeIds.has(id)) notifiedRef.current.delete(id)
+    }
+
     for (const prompt of prompts) {
       // Skip answered or expired prompts
       if (prompt.answered) continue
@@ -28,7 +34,7 @@ export function usePermissionNotification(prompts: PermissionPromptInfo[]) {
       // Skip already-notified
       if (notifiedRef.current.has(prompt.requestId)) continue
       // Only notify when window is not focused
-      if (!document.hidden) continue
+      if (document.hasFocus()) continue
 
       notifiedRef.current.add(prompt.requestId)
 

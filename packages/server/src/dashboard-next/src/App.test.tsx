@@ -6,7 +6,7 @@
  * avoiding real WebSocket connections.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 
 vi.mock('./hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
@@ -120,5 +120,42 @@ describe('App', () => {
     render(<App />)
     expect(screen.queryByTestId('welcome-screen')).not.toBeInTheDocument()
     expect(screen.getByTestId('input-bar')).toBeInTheDocument()
+  })
+
+  it('opens shortcut help when ? is pressed', () => {
+    render(<App />)
+    expect(screen.queryByText('Keyboard Shortcuts')).not.toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: '?' })
+    expect(screen.getByText('Keyboard Shortcuts')).toBeInTheDocument()
+  })
+
+  it('does not open shortcut help when ? is typed in an input', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+    render(<App />)
+    const textarea = screen.getByRole('textbox', { name: /message input/i })
+
+    fireEvent.keyDown(textarea, { key: '?' })
+    expect(screen.queryByText('Keyboard Shortcuts')).not.toBeInTheDocument()
+  })
+
+  it('does not open shortcut help when another modal overlay is open', () => {
+    render(<App />)
+    // Simulate another modal overlay being open
+    const overlay = document.createElement('div')
+    overlay.setAttribute('data-modal-overlay', '')
+    overlay.classList.add('other-modal')
+    document.body.appendChild(overlay)
+
+    try {
+      fireEvent.keyDown(window, { key: '?' })
+      expect(screen.queryByText('Keyboard Shortcuts')).not.toBeInTheDocument()
+    } finally {
+      overlay.remove()
+    }
   })
 })
