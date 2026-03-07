@@ -40,6 +40,15 @@ function normalizeBrowsePath(p: string): string {
   return p.replace(/\/+$/, '')
 }
 
+/** Check if two browse paths refer to the same directory, accounting for server normalization. */
+function browsePathsMatch(requested: string, response: string): boolean {
+  if (!response) return true // no path to compare — accept
+  if (normalizeBrowsePath(response) === normalizeBrowsePath(requested)) return true
+  // Server expands ~ to home dir — if request started with ~, accept the server's canonical path
+  if (requested.startsWith('~')) return true
+  return false
+}
+
 /** Generate a default session name from a directory path, avoiding collisions. */
 function generateDefaultName(cwdPath: string, existingNames: string[]): string {
   const base = basename(cwdPath) || 'Session'
@@ -171,7 +180,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       // Guard: ignore stale responses from previous navigations (#1584)
       // Normalize paths before comparing — server may expand ~ or add/strip slashes (#1592)
       const responsePath = listing.path || listing.parentPath || ''
-      if (responsePath && normalizeBrowsePath(responsePath) !== normalizeBrowsePath(requestedPath)) return // stale
+      if (!browsePathsMatch(requestedPath, responsePath)) return // stale
       // Update browsePath to the server's canonical path when it differs
       if (responsePath && responsePath !== requestedPath) {
         setBrowsePath(responsePath)

@@ -19,15 +19,29 @@ describe('Path normalization in stale-response guard (#1592)', () => {
     expect(modalSource).toMatch(/function normalizeBrowsePath/)
   })
 
-  it('normalizes both requestedPath and responsePath before comparing', () => {
-    // Both sides of the !== comparison should go through normalization
-    expect(modalSource).toMatch(/normalizeBrowsePath\(responsePath\)/)
-    expect(modalSource).toMatch(/normalizeBrowsePath\(requestedPath\)/)
+  it('has a browsePathsMatch helper for comparing requested vs response paths', () => {
+    expect(modalSource).toMatch(/function browsePathsMatch/)
+  })
+
+  it('normalizes both sides before comparing in browsePathsMatch', () => {
+    // Both sides of the comparison should go through normalization
+    expect(modalSource).toMatch(/normalizeBrowsePath\(response\)/)
+    expect(modalSource).toMatch(/normalizeBrowsePath\(requested\)/)
   })
 
   it('strips trailing slashes in normalization', () => {
     // The normalize function should strip trailing slashes
     expect(modalSource).toMatch(/replace\(\/\\\/\+\$\//)
+  })
+
+  it('accepts server response when request started with tilde', () => {
+    // Server expands ~ to home dir — guard should accept the canonical path
+    expect(modalSource).toMatch(/requested\.startsWith\('~'\)/)
+  })
+
+  it('uses browsePathsMatch in the stale-response guard', () => {
+    // The callback should use browsePathsMatch instead of direct comparison
+    expect(modalSource).toMatch(/browsePathsMatch\(requestedPath, responsePath\)/)
   })
 
   it('updates browsePath to canonical server path when response differs', () => {
