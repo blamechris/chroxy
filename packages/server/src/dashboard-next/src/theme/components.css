@@ -677,6 +677,217 @@
   flex-shrink: 0;
 }
 
+/* ---- Checkpoint Timeline ---- */
+.checkpoint-timeline {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.cp-create-section {
+  margin-bottom: 12px;
+}
+
+.cp-new-btn {
+  width: 100%;
+  padding: 8px;
+  background: var(--bg-primary);
+  border: 1px dashed var(--border-primary);
+  border-radius: 6px;
+  color: var(--accent-blue);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.cp-new-btn:hover { background: var(--bg-card); }
+
+.cp-create-form {
+  display: flex;
+  gap: 6px;
+}
+
+.cp-create-input {
+  flex: 1;
+  padding: 6px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+
+.cp-create-input:focus {
+  border-color: var(--accent-blue);
+  outline: none;
+}
+
+.cp-btn {
+  padding: 4px 10px;
+  font-size: var(--text-sm);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cp-btn:hover { background: var(--bg-card); }
+
+.cp-create-btn {
+  background: var(--accent-blue);
+  color: #fff;
+  border-color: var(--accent-blue);
+}
+
+.cp-create-btn:hover { background: #2563eb; }
+
+.cp-empty {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  padding: 24px 8px;
+}
+
+.cp-timeline-track {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  position: relative;
+  padding-left: 16px;
+}
+
+.cp-timeline-track::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border-primary);
+}
+
+.cp-node {
+  position: relative;
+  padding: 8px 0;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.cp-node.cp-latest .cp-dot {
+  background: var(--accent-blue);
+  box-shadow: 0 0 6px var(--accent-blue);
+}
+
+.cp-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  border: 2px solid var(--bg-card);
+  flex-shrink: 0;
+  margin-top: 4px;
+  position: relative;
+  z-index: 1;
+}
+
+.cp-card {
+  flex: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+
+.cp-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.cp-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cp-time {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.cp-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.cp-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.cp-messages { color: var(--text-dim); }
+
+.cp-git-badge {
+  background: rgba(34, 197, 94, 0.2);
+  color: var(--accent-green);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.cp-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.cp-restore {
+  color: var(--accent-blue);
+  border-color: var(--accent-blue);
+}
+
+.cp-restore:hover {
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.cp-delete {
+  color: var(--accent-red);
+  border-color: transparent;
+}
+
+.cp-delete:hover {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: var(--accent-red);
+}
+
+.cp-delete-confirm {
+  background: var(--accent-red);
+  color: #fff;
+  border-color: var(--accent-red);
+}
+
+.cp-delete-confirm:hover { background: #dc2626; }
+
+.cp-cancel {
+  color: var(--text-dim);
+}
+
 /* ---- Chat View ---- */
 .chat-view {
   flex: 1;
