@@ -11,6 +11,7 @@ export interface DirectoryBrowserProps {
   entries: DirectoryEntry[]
   currentPath: string
   loading: boolean
+  error?: string | null
   onNavigate: (path: string) => void
   onSelect: (path: string) => void
   onCancel: () => void
@@ -34,6 +35,7 @@ export function DirectoryBrowser({
   entries,
   currentPath,
   loading,
+  error,
   onNavigate,
   onSelect,
   onCancel,
@@ -68,7 +70,10 @@ export function DirectoryBrowser({
         {loading && (
           <div className="directory-browser-loading">Loading...</div>
         )}
-        {!loading && dirs.length === 0 && (
+        {!loading && error && (
+          <div className="directory-browser-error" role="alert">{error}</div>
+        )}
+        {!loading && !error && dirs.length === 0 && (
           <div className="directory-browser-empty">No subdirectories</div>
         )}
         {!loading && dirs.length > 0 && (
