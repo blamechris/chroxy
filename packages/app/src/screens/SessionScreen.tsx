@@ -26,6 +26,7 @@ import { WebTasksPanel } from '../components/WebTasksPanel';
 import { InputBar } from '../components/InputBar';
 import { FileBrowser } from '../components/FileBrowser';
 import { DiffViewer } from '../components/DiffViewer';
+import { CheckpointView } from '../components/CheckpointView';
 import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
 import { BackgroundSessionProgress } from '../components/BackgroundSessionProgress';
 import { DevPreviewBanner } from '../components/DevPreviewBanner';
@@ -209,6 +210,7 @@ export function SessionScreen() {
   const isCliMode = serverMode === 'cli';
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showDiffViewer, setShowDiffViewer] = useState(false);
+  const [showCheckpoints, setShowCheckpoints] = useState(false);
   const [showSessionOverview, setShowSessionOverview] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
 
@@ -677,6 +679,9 @@ export function SessionScreen() {
           <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)} accessibilityRole="button" accessibilityLabel="View changes">
             <Icon name="diff" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
+          <TouchableOpacity style={styles.diffButton} onPress={() => setShowCheckpoints(true)} accessibilityRole="button" accessibilityLabel="View checkpoints">
+            <Icon name="clock" size={16} color={COLORS.textMuted} />
+          </TouchableOpacity>
           {(viewMode === 'chat' || (layout.isSplitView && viewMode !== 'files')) && (
             <TouchableOpacity style={styles.diffButton} onPress={handleSearchOpen} accessibilityRole="button" accessibilityLabel="Search messages">
               <Icon name="search" size={16} color={COLORS.textMuted} />
@@ -1004,6 +1009,12 @@ export function SessionScreen() {
       <DiffViewer
         visible={showDiffViewer}
         onClose={() => setShowDiffViewer(false)}
+      />
+
+      {/* Checkpoint timeline modal */}
+      <CheckpointView
+        visible={showCheckpoints}
+        onClose={() => setShowCheckpoints(false)}
       />
 
       {/* Attachment picker bottom sheet */}
