@@ -38,22 +38,30 @@ export function FileEditor({ visible, filePath, initialContent, onClose, onSave 
   const requestFileWrite = useConnectionStore((s) => s.requestFileWrite);
 
   const writeCallbackRef = useRef<((result: FileWriteResult) => void) | null>(null);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const confirmingRef = useRef(false);
 
   // Reset content when modal opens with new file
   useEffect(() => {
     if (visible) {
       setContent(initialContent);
       setSaving(false);
+      confirmingRef.current = false;
     }
   }, [visible, initialContent]);
 
-  // Clean up callback on unmount
+  // Clean up callback and save timeout on unmount
   useEffect(() => {
     return () => {
       if (writeCallbackRef.current) {
         setFileWriteCallback(null);
         writeCallbackRef.current = null;
       }
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+      }
+      confirmingRef.current = false;
     };
   }, [setFileWriteCallback]);
 
@@ -61,19 +69,32 @@ export function FileEditor({ visible, filePath, initialContent, onClose, onSave 
   const fileName = filePath ? filePath.split('/').pop() || filePath : '';
 
   const handleSave = useCallback(() => {
-    if (!filePath || saving) return;
+    if (!filePath || saving || confirmingRef.current) return;
+
+    confirmingRef.current = true;
 
     Alert.alert(
       'Save Changes',
       `Save changes to ${fileName}?`,
       [
-        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => {
+            confirmingRef.current = false;
+          },
+        },
         {
           text: 'Save',
           onPress: () => {
+            confirmingRef.current = false;
             setSaving(true);
 
             const cb = (result: FileWriteResult) => {
+              if (saveTimeoutRef.current) {
+                clearTimeout(saveTimeoutRef.current);
+                saveTimeoutRef.current = null;
+              }
               setSaving(false);
               setFileWriteCallback(null);
               writeCallbackRef.current = null;
@@ -91,7 +112,8 @@ export function FileEditor({ visible, filePath, initialContent, onClose, onSave 
             requestFileWrite(filePath, content);
 
             // Timeout after 10 seconds
-            setTimeout(() => {
+            saveTimeoutRef.current = setTimeout(() => {
+              saveTimeoutRef.current = null;
               if (writeCallbackRef.current === cb) {
                 setSaving(false);
                 setFileWriteCallback(null);

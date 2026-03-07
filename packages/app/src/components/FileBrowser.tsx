@@ -66,6 +66,17 @@ function FileViewerModal({
 
   const requestIdRef = useRef(0);
   const activeRequestRef = useRef(0);
+  const refetchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clean up refetch timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (refetchTimeoutRef.current) {
+        clearTimeout(refetchTimeoutRef.current);
+        refetchTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!visible || !filePath) return;
@@ -80,6 +91,11 @@ function FileViewerModal({
     const handleContent = (fc: FileContent) => {
       if (activeRequestRef.current !== requestIdRef.current) return;
       activeRequestRef.current = -1;
+      // Clear any pending refetch timeout
+      if (refetchTimeoutRef.current) {
+        clearTimeout(refetchTimeoutRef.current);
+        refetchTimeoutRef.current = null;
+      }
       setLoading(false);
       if (fc.error) {
         setError(fc.error);
@@ -181,6 +197,19 @@ function FileViewerModal({
               const id = ++requestIdRef.current;
               activeRequestRef.current = id;
               requestFileContent(filePath);
+
+              // Timeout for re-fetch, matching initial fetch behavior
+              if (refetchTimeoutRef.current) {
+                clearTimeout(refetchTimeoutRef.current);
+              }
+              refetchTimeoutRef.current = setTimeout(() => {
+                refetchTimeoutRef.current = null;
+                if (activeRequestRef.current === id) {
+                  activeRequestRef.current = -1;
+                  setLoading(false);
+                  setError('Request timed out');
+                }
+              }, 8000);
             }
           }}
         />
