@@ -530,6 +530,14 @@ export interface ConnectionState {
   // Follow mode
   setFollowMode: (enabled: boolean) => void;
 
+  // Theme
+  activeTheme: string;
+  setTheme: (themeId: string) => void;
+
+  // Session defaults
+  defaultProvider: string;
+  setDefaultProvider: (provider: string) => void;
+
   // Convenience accessor
   getActiveSessionState: () => SessionState;
 }

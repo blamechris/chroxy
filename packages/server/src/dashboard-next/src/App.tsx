@@ -30,6 +30,7 @@ import { CreateSessionModal } from './components/CreateSessionModal'
 import { Toast, type ToastItem } from './components/Toast'
 import { FooterBar } from './components/FooterBar'
 import { QrModal } from './components/QrModal'
+import { SettingsPanel } from './components/SettingsPanel'
 import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
 import { persistSidebarWidth, loadPersistedSidebarWidth } from './store/persistence'
 
@@ -155,6 +156,7 @@ export function App() {
   const [qrSvg, setQrSvg] = useState<string | null>(null)
   const [qrLoading, setQrLoading] = useState(false)
   const [qrError, setQrError] = useState<string | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
@@ -225,6 +227,12 @@ export function App() {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'd') {
         e.preventDefault()
         setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
+        return
+      }
+      // Cmd+,: open settings
+      if ((e.metaKey || e.ctrlKey) && e.key === ',') {
+        e.preventDefault()
+        setSettingsOpen(prev => !prev)
         return
       }
       // Cmd+.: interrupt active session
@@ -589,6 +597,15 @@ export function App() {
           )}
         </div>
         <div className="header-right">
+          <button
+            className="header-icon-btn"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Settings"
+            title="Settings (Cmd+,)"
+            type="button"
+          >
+            &#9881;
+          </button>
           <StatusBar
             model={activeModel || undefined}
             cost={sessionCost ?? undefined}
@@ -740,6 +757,9 @@ export function App() {
         agentCount={activeAgents.length}
         onShowQr={isConnected ? handleShowQr : undefined}
       />
+
+      {/* Settings panel */}
+      <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       {/* QR code modal */}
       <QrModal

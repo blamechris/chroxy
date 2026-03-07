@@ -104,6 +104,15 @@ import {
 
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
+/** Read a simple string setting from localStorage with fallback */
+function loadPersistedSetting(key: string, fallback: string): string {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 // Stable empty arrays for getActiveSessionState() fallback.
 // Inline [] creates new refs each call → useShallow detects false changes → infinite re-render.
 const EMPTY_AGENTS: never[] = [];
@@ -182,6 +191,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectedClients: [],
   primaryClientId: null,
   followMode: false,
+  activeTheme: loadPersistedSetting('chroxy_persist_theme', 'default'),
+  defaultProvider: loadPersistedSetting('chroxy_default_provider', 'claude-sdk'),
   connectionError: null,
   connectionRetryCount: 0,
   latencyMs: null,
@@ -273,6 +284,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   setFollowMode: (enabled: boolean) => {
     set({ followMode: enabled });
+  },
+
+  setTheme: (themeId: string) => {
+    set({ activeTheme: themeId });
+    try { localStorage.setItem('chroxy_persist_theme', themeId); } catch { /* noop */ }
+  },
+
+  setDefaultProvider: (provider: string) => {
+    set({ defaultProvider: provider });
+    try { localStorage.setItem('chroxy_default_provider', provider); } catch { /* noop */ }
   },
 
   getActiveSessionState: () => {
