@@ -96,6 +96,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       setSelectedSuggestion(-1)
       setBrowsing(false)
       setBrowseEntries([])
+      setDirectoryListingCallback(null)
       if (cwdValue) {
         const generated = generateDefaultName(cwdValue, existingNames)
         setName(generated)

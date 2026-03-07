@@ -47,7 +47,7 @@ export function DirectoryBrowser({
       <nav className="directory-browser-breadcrumb" role="navigation" aria-label="Breadcrumb">
         {crumbs.map((crumb, i) => (
           <span key={crumb.path}>
-            {i > 0 && <span className="directory-browser-sep">/</span>}
+            {i > 1 && <span className="directory-browser-sep">/</span>}
             {i < crumbs.length - 1 ? (
               <button
                 type="button"
@@ -57,7 +57,7 @@ export function DirectoryBrowser({
                 {crumb.label}
               </button>
             ) : (
-              <span className="directory-browser-crumb directory-browser-crumb--current">
+              <span className="directory-browser-crumb directory-browser-crumb--current" aria-current="location">
                 {crumb.label}
               </span>
             )}
@@ -85,7 +85,7 @@ export function DirectoryBrowser({
                       : `${currentPath}/${entry.name}`
                   )}
                 >
-                  <span className="directory-browser-icon">&#128193;</span>
+                  <span className="directory-browser-icon" aria-hidden="true">&#128193;</span>
                   {entry.name}
                 </button>
               </li>
