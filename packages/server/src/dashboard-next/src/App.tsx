@@ -35,7 +35,8 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
 import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
-import { persistSidebarWidth, loadPersistedSidebarWidth } from './store/persistence'
+import { SplitPane, type SplitDirection } from './components/SplitPane'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode } from './store/persistence'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -188,6 +189,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
+  const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -257,6 +259,16 @@ export function App() {
         setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
         return
       }
+      // Cmd+\: cycle split mode (none → horizontal → vertical → none)
+      if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
+        e.preventDefault()
+        setSplitMode(prev => {
+          const next = prev === null ? 'horizontal' : prev === 'horizontal' ? 'vertical' : null
+          persistSplitMode(next)
+          return next
+        })
+        return
+      }
       // Cmd+,: open settings
       if ((e.metaKey || e.ctrlKey) && e.key === ',') {
         e.preventDefault()
@@ -284,7 +296,7 @@ export function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, switchSession, destroySession, viewMode, setViewMode, sendInterrupt])
+  }, [sessions, activeSessionId, switchSession, destroySession, viewMode, setViewMode, sendInterrupt, splitMode])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
@@ -592,6 +604,7 @@ export function App() {
     { keys: 'Cmd+,', description: 'Settings', section: 'Global' },
     { keys: 'Cmd+.', description: 'Interrupt session', section: 'Session' },
     { keys: 'Cmd+Shift+D', description: 'Toggle chat / terminal', section: 'Session' },
+    { keys: 'Cmd+\\', description: 'Cycle split view', section: 'Session' },
     { keys: 'Cmd+1-9', description: 'Switch to tab by number', section: 'Session' },
     { keys: 'Cmd+Shift+[', description: 'Previous tab', section: 'Session' },
     { keys: 'Cmd+Shift+]', description: 'Next tab', section: 'Session' },
@@ -760,37 +773,75 @@ export function App() {
             {/* View switcher */}
             <div className="view-switch">
               <button
-                className={`view-tab${viewMode === 'chat' ? ' active' : ''}`}
-                onClick={() => setViewMode('chat')}
+                className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`}
+                onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }}
                 type="button"
               >
                 Chat
               </button>
               <button
-                className={`view-tab${viewMode === 'terminal' ? ' active' : ''}`}
-                onClick={() => setViewMode('terminal')}
+                className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`}
+                onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }}
                 type="button"
               >
                 Output
+              </button>
+              <button
+                className={`view-tab${splitMode ? ' active' : ''}`}
+                onClick={() => {
+                  const next: SplitDirection | null = splitMode ? null : 'horizontal'
+                  setSplitMode(next)
+                  persistSplitMode(next)
+                }}
+                type="button"
+                title="Split view (Cmd+\)"
+              >
+                Split
               </button>
             </div>
 
             {/* Main content */}
             <div className="main-content">
-              {viewMode === 'chat' && (
-                <ChatView
-                  messages={chatMessages}
-                  isStreaming={streamingMessageId !== null}
-                  isBusy={!isIdle}
-                  renderMessage={renderMessage}
+              {splitMode ? (
+                <SplitPane
+                  direction={splitMode}
+                  first={
+                    <ChatView
+                      messages={chatMessages}
+                      isStreaming={streamingMessageId !== null}
+                      isBusy={!isIdle}
+                      renderMessage={renderMessage}
+                    />
+                  }
+                  second={
+                    <MultiTerminalView
+                      sessions={sessions}
+                      activeSessionId={activeSessionId}
+                      className="terminal-container"
+                    />
+                  }
+                  onReset={() => {
+                    /* double-click resets to 50/50 — handled by react-resizable-panels */
+                  }}
                 />
-              )}
-              {viewMode === 'terminal' && (
-                <MultiTerminalView
-                  sessions={sessions}
-                  activeSessionId={activeSessionId}
-                  className="terminal-container"
-                />
+              ) : (
+                <>
+                  {viewMode === 'chat' && (
+                    <ChatView
+                      messages={chatMessages}
+                      isStreaming={streamingMessageId !== null}
+                      isBusy={!isIdle}
+                      renderMessage={renderMessage}
+                    />
+                  )}
+                  {viewMode === 'terminal' && (
+                    <MultiTerminalView
+                      sessions={sessions}
+                      activeSessionId={activeSessionId}
+                      className="terminal-container"
+                    />
+                  )}
+                </>
               )}
             </div>
 

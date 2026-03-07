@@ -16,6 +16,7 @@ const KEY_ACTIVE_SESSION = `${KEY_PREFIX}active_session_id`;
 const KEY_TERMINAL_BUFFER = `${KEY_PREFIX}terminal_buffer`;
 const KEY_SESSION_LIST = `${KEY_PREFIX}session_list`;
 const KEY_SIDEBAR_WIDTH = `${KEY_PREFIX}sidebar_width`;
+const KEY_SPLIT_MODE = `${KEY_PREFIX}split_mode`;
 
 /** Max messages to persist per session (keeps storage bounded) */
 const MAX_MESSAGES = 100;
@@ -150,6 +151,34 @@ export function loadPersistedSidebarWidth(): number | null {
     if (!raw) return null;
     const parsed = parseInt(raw, 10);
     return Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist split mode */
+export function persistSplitMode(mode: string | null): void {
+  try {
+    if (mode) {
+      localStorage.setItem(KEY_SPLIT_MODE, mode);
+    } else {
+      localStorage.removeItem(KEY_SPLIT_MODE);
+    }
+  } catch {
+    // Storage not available
+  }
+}
+
+const VALID_SPLIT_MODES = ['horizontal', 'vertical'] as const;
+
+/** Load persisted split mode */
+export function loadPersistedSplitMode(): 'horizontal' | 'vertical' | null {
+  try {
+    const raw = localStorage.getItem(KEY_SPLIT_MODE);
+    if (!raw) return null;
+    return (VALID_SPLIT_MODES as readonly string[]).includes(raw)
+      ? (raw as 'horizontal' | 'vertical')
+      : null;
   } catch {
     return null;
   }
