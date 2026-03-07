@@ -742,6 +742,23 @@ describe('git result handlers', () => {
     expect(cb).toHaveBeenCalledWith({ error: null });
   });
 
+  it('dispatches git_unstage_result to _gitStageCallback', () => {
+    const cb = jest.fn();
+    const store = createMockStore({
+      _gitStageCallback: cb,
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'git_unstage_result' });
+
+    expect(cb).toHaveBeenCalledWith({ error: null });
+  });
+
   it('dispatches git_stage_result with error', () => {
     const cb = jest.fn();
     const store = createMockStore({

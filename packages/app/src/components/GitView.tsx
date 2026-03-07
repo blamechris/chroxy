@@ -190,7 +190,12 @@ export function GitView({ visible, onClose }: GitViewProps) {
   }, []);
 
   const handleStageSelected = useCallback(() => {
-    const paths = Array.from(selectedPaths);
+    // Only stage unstaged + untracked files (not already-staged ones)
+    const unstagedPaths = new Set(unstaged.map((f) => f.path));
+    const untrackedSet = new Set(untracked);
+    const paths = Array.from(selectedPaths).filter(
+      (p) => unstagedPaths.has(p) || untrackedSet.has(p),
+    );
     if (paths.length === 0) return;
 
     const cb = (result: GitStageResult) => {
@@ -217,10 +222,12 @@ export function GitView({ visible, onClose }: GitViewProps) {
     stageCallbackRef.current = cb;
     setGitStageCallback(cb);
     requestGitStage(paths);
-  }, [selectedPaths, setGitStageCallback, requestGitStage, setGitStatusCallback, requestGitStatus]);
+  }, [selectedPaths, unstaged, untracked, setGitStageCallback, requestGitStage, setGitStatusCallback, requestGitStatus]);
 
   const handleUnstageSelected = useCallback(() => {
-    const paths = Array.from(selectedPaths);
+    // Only unstage staged files (not unstaged/untracked ones)
+    const stagedPaths = new Set(staged.map((f) => f.path));
+    const paths = Array.from(selectedPaths).filter((p) => stagedPaths.has(p));
     if (paths.length === 0) return;
 
     const cb = (result: GitStageResult) => {
@@ -246,7 +253,7 @@ export function GitView({ visible, onClose }: GitViewProps) {
     stageCallbackRef.current = cb;
     setGitStageCallback(cb);
     requestGitUnstage(paths);
-  }, [selectedPaths, setGitStageCallback, requestGitUnstage, setGitStatusCallback, requestGitStatus]);
+  }, [selectedPaths, staged, setGitStageCallback, requestGitUnstage, setGitStatusCallback, requestGitStatus]);
 
   const handleCommit = useCallback(() => {
     const msg = commitMessage.trim();

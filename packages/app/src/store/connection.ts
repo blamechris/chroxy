@@ -1022,14 +1022,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   requestGitStage: (paths: string[]) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'git_stage', paths, action: 'stage' });
+      wsSend(socket, { type: 'git_stage', files: paths });
     }
   },
 
   requestGitUnstage: (paths: string[]) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'git_stage', paths, action: 'unstage' });
+      wsSend(socket, { type: 'git_unstage', files: paths });
     }
   },
 

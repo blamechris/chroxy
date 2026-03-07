@@ -1611,7 +1611,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'git_stage_result': {
+    case 'git_stage_result':
+    case 'git_unstage_result': {
       const cb = get()._gitStageCallback;
       if (cb) {
         cb({ error: typeof msg.error === 'string' ? msg.error : null });
