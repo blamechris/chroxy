@@ -262,7 +262,6 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       )}
       {browsing ? (
         <DirectoryBrowser
-          initialPath={browsePath}
           entries={browseEntries}
           currentPath={browsePath}
           loading={browseLoading}
