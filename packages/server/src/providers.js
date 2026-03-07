@@ -116,6 +116,8 @@ export function listProviders() {
 // Register built-in providers
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
+import { GeminiSession } from './gemini-session.js'
 
 registerProvider('claude-cli', CliSession)
 registerProvider('claude-sdk', SdkSession)
+registerProvider('gemini', GeminiSession)
