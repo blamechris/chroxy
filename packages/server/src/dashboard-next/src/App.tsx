@@ -39,6 +39,7 @@ import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode } from './store/persistence'
+import { DiffViewerPanel } from './components/DiffViewerPanel'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -817,6 +818,13 @@ export function App() {
               >
                 Checkpoints
               </button>
+              <button
+                className={`view-tab${viewMode === 'diff' ? ' active' : ''}`}
+                onClick={() => setViewMode('diff')}
+                type="button"
+              >
+                Diff
+              </button>
             </div>
 
             {/* Main content */}
@@ -872,6 +880,7 @@ export function App() {
                   <CheckpointTimeline />
                 </div>
               )}
+              {viewMode === 'diff' && <DiffViewerPanel />}
             </div>
 
             {/* Plan approval */}
