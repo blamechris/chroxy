@@ -10,6 +10,8 @@ import { useState, useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { AgentInfo } from '../store/types'
 
+const EMPTY_AGENTS: AgentInfo[] = []
+
 function formatElapsed(startedAt: number): string {
   const diff = Math.max(0, Date.now() - startedAt)
   const secs = Math.floor(diff / 1000)
@@ -49,7 +51,7 @@ function AgentCard({ agent }: { agent: AgentInfo }) {
 export function AgentMonitorPanel() {
   const activeAgents = useConnectionStore(s => {
     const sid = s.activeSessionId
-    if (!sid || !s.sessionStates[sid]) return []
+    if (!sid || !s.sessionStates[sid]) return EMPTY_AGENTS
     return s.sessionStates[sid].activeAgents
   })
 
