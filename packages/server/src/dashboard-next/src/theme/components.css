@@ -1211,6 +1211,13 @@
   font-size: var(--text-sm);
 }
 
+.directory-browser-error {
+  padding: 20px;
+  text-align: center;
+  color: var(--error, #ef4444);
+  font-size: var(--text-sm);
+}
+
 .directory-browser-actions {
   display: flex;
   justify-content: flex-end;

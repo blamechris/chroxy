@@ -449,6 +449,14 @@ export const ServerSessionListSchema = z.object({
   sessions: z.array(z.any()),
 })
 
+export const ServerProviderListSchema = z.object({
+  type: z.literal('provider_list'),
+  providers: z.array(z.object({
+    name: z.string(),
+    capabilities: z.record(z.string(), z.boolean()).optional(),
+  })),
+})
+
 export const ServerErrorSchema = z.object({
   type: z.literal('server_error'),
   category: z.string().optional(),

@@ -79,8 +79,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [browsePath, setBrowsePath] = useState('')
   const [browseEntries, setBrowseEntries] = useState<DirectoryEntry[]>([])
   const [browseLoading, setBrowseLoading] = useState(false)
+  const [browseError, setBrowseError] = useState<string | null>(null)
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
+  const defaultCwd = useConnectionStore(s => s.defaultCwd)
 
   // Imperative refs for submit — React 19 resets controlled input DOM values
   // before the next event fires, so we can't read from the DOM in submit.
@@ -157,11 +159,20 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setBrowsePath(path)
     setBrowseLoading(true)
     setBrowseEntries([])
+    setBrowseError(null)
+    const requestedPath = path
     setDirectoryListingCallback((listing: DirectoryListing) => {
+      // Guard: ignore stale responses from previous navigations (#1584)
+      const responsePath = listing.path || listing.parentPath || ''
+      if (responsePath && responsePath !== requestedPath) return // stale
       setBrowseLoading(false)
-      if (listing.error || !listing.entries) {
+      if (listing.error) {
+        setBrowseError(listing.error)
+        setBrowseEntries([])
+      } else if (!listing.entries) {
         setBrowseEntries([])
       } else {
+        setBrowseError(null)
         setBrowseEntries(listing.entries)
       }
     })
@@ -169,10 +180,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   }, [requestDirectoryListing, setDirectoryListingCallback])
 
   const handleBrowseOpen = useCallback(() => {
-    const startPath = cwd || initialCwd || '/'
+    const startPath = cwd || initialCwd || defaultCwd || '/'
     setBrowsing(true)
     handleBrowseNavigate(startPath)
-  }, [cwd, initialCwd, handleBrowseNavigate])
+  }, [cwd, initialCwd, defaultCwd, handleBrowseNavigate])
 
   const handleBrowseSelect = useCallback((path: string) => {
     setCwd(path)
@@ -262,10 +273,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       )}
       {browsing ? (
         <DirectoryBrowser
-          initialPath={browsePath}
           entries={browseEntries}
           currentPath={browsePath}
           loading={browseLoading}
+          error={browseError}
           onNavigate={handleBrowseNavigate}
           onSelect={handleBrowseSelect}
           onCancel={handleBrowseCancel}
