@@ -10,7 +10,6 @@ import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
 import { useConnectionStore } from '../store/connection'
-import { isTauri } from '../hooks/useTauriEvents'
 import type { DirectoryListing, DirectoryEntry } from '../store/types'
 
 export interface CreateSessionData {
@@ -201,13 +200,15 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   }, [requestDirectoryListing, setDirectoryListingCallback])
 
   const handleBrowseOpen = useCallback(async () => {
-    // In Tauri context, use native OS folder picker via IPC command
-    if (isTauri()) {
+    // In Tauri context, use native OS folder picker via IPC command.
+    // Detect via __TAURI_INTERNALS__ (consistent with useTauriIPC.ts) rather than
+    // __TAURI__ (useTauriEvents.ts) since we need the internals for invoke.
+    const tauriInternals = typeof window !== 'undefined'
+      ? (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ as
+        { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } | undefined
+      : undefined
+    if (tauriInternals) {
       try {
-        // Access invoke via __TAURI_INTERNALS__ to avoid bundler resolution issues in tests
-        const tauriInternals = (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ as
-          { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } | undefined
-        if (!tauriInternals) throw new Error('No Tauri internals')
         const selected = await tauriInternals.invoke('pick_directory', {
           defaultPath: cwd || initialCwd || defaultCwd || undefined,
         }) as string | null

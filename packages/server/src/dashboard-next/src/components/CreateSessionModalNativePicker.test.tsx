@@ -15,8 +15,8 @@ const modalSource = fs.readFileSync(
 )
 
 describe('Native folder picker integration (#1473)', () => {
-  it('checks isTauri() before opening native dialog', () => {
-    expect(modalSource).toMatch(/isTauri\(\)/)
+  it('detects Tauri via __TAURI_INTERNALS__ before opening native dialog', () => {
+    expect(modalSource).toMatch(/__TAURI_INTERNALS__/)
   })
 
   it('invokes pick_directory Tauri command', () => {
