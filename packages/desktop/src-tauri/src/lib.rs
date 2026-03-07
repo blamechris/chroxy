@@ -89,6 +89,17 @@ fn get_qr_code_svg(state: tauri::State<'_, Mutex<ServerManager>>) -> Result<serd
     }))
 }
 
+#[tauri::command]
+fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut builder = app.dialog().file();
+    if let Some(ref path) = default_path {
+        builder = builder.set_directory(path);
+    }
+    let result = builder.blocking_pick_folder();
+    Ok(result.map(|p| p.to_string()))
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
@@ -111,6 +122,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
@@ -119,6 +131,7 @@ pub fn run() {
             stop_server,
             restart_server,
             get_qr_code_svg,
+            pick_directory,
         ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
