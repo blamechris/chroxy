@@ -132,6 +132,19 @@ export interface FileContent {
   error: string | null;
 }
 
+export interface GitStatusEntry {
+  path: string;
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'unknown';
+}
+
+export interface GitStatusResult {
+  branch: string | null;
+  staged: GitStatusEntry[];
+  unstaged: GitStatusEntry[];
+  untracked: string[];
+  error: string | null;
+}
+
 export interface Checkpoint {
   id: string;
   name: string;
@@ -432,6 +445,9 @@ export interface ConnectionState {
   _fileBrowserCallback: ((listing: FileListing) => void) | null;
   _fileContentCallback: ((content: FileContent) => void) | null;
 
+  // Git status callback
+  _gitStatusCallback: ((result: GitStatusResult) => void) | null;
+
   // Diff viewer callback
   _diffCallback: ((result: DiffResult) => void) | null;
 
@@ -486,6 +502,10 @@ export interface ConnectionState {
   setFileContentCallback: (cb: ((content: FileContent) => void) | null) => void;
   requestFileListing: (path?: string) => void;
   requestFileContent: (path: string) => void;
+
+  // Git status
+  setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;
+  requestGitStatus: () => void;
 
   // Diff viewer
   setDiffCallback: (cb: ((result: DiffResult) => void) | null) => void;

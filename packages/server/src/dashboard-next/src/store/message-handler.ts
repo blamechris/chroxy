@@ -32,6 +32,7 @@ import type {
   DiffFile,
   DirectoryEntry,
   FileEntry,
+  GitStatusEntry,
   McpServer,
   ModelInfo,
   QueuedMessage,
@@ -1567,6 +1568,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (diffCb) {
         diffCb({
           files: Array.isArray(msg.files) ? msg.files as DiffFile[] : [],
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
+    case 'git_status_result': {
+      const gitStatusCb = get()._gitStatusCallback;
+      if (gitStatusCb) {
+        gitStatusCb({
+          branch: typeof msg.branch === 'string' ? msg.branch : null,
+          staged: Array.isArray(msg.staged) ? msg.staged as GitStatusEntry[] : [],
+          unstaged: Array.isArray(msg.unstaged) ? msg.unstaged as GitStatusEntry[] : [],
+          untracked: Array.isArray(msg.untracked) ? msg.untracked as string[] : [],
           error: typeof msg.error === 'string' ? msg.error : null,
         });
       }

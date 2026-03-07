@@ -29,6 +29,7 @@ import { WelcomeScreen } from './components/WelcomeScreen'
 import { CreateSessionModal } from './components/CreateSessionModal'
 import { NotificationBanners } from './components/NotificationBanners'
 import { Toast, type ToastItem } from './components/Toast'
+import { FileBrowserPanel } from './components/FileBrowserPanel'
 import { FooterBar } from './components/FooterBar'
 import { QrModal } from './components/QrModal'
 import { SettingsPanel } from './components/SettingsPanel'
@@ -798,6 +799,13 @@ export function App() {
               >
                 Split
               </button>
+              <button
+                className={`view-tab${viewMode === 'files' ? ' active' : ''}`}
+                onClick={() => setViewMode('files')}
+                type="button"
+              >
+                Files
+              </button>
             </div>
 
             {/* Main content */}
@@ -842,6 +850,9 @@ export function App() {
                     />
                   )}
                 </>
+              )}
+              {viewMode === 'files' && (
+                <FileBrowserPanel />
               )}
             </div>
 

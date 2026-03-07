@@ -211,6 +211,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _directoryListingCallback: null,
   _fileBrowserCallback: null,
   _fileContentCallback: null,
+  _gitStatusCallback: null,
   _diffCallback: null,
   conversationHistory: [],
   conversationHistoryLoading: false,
@@ -1004,6 +1005,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'read_file', path });
+    }
+  },
+
+  // Git status
+
+  setGitStatusCallback: (cb) => {
+    set({ _gitStatusCallback: cb });
+  },
+
+  requestGitStatus: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_status' });
     }
   },
 
