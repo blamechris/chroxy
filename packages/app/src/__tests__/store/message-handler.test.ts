@@ -647,6 +647,168 @@ describe('server_mode handler (PTY removal)', () => {
   });
 });
 
+describe('git result handlers', () => {
+  it('dispatches git_status_result to _gitStatusCallback', () => {
+    const cb = jest.fn();
+    const store = createMockStore({
+      _gitStatusCallback: cb,
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'git_status_result',
+      branch: 'main',
+      staged: [{ path: 'a.ts', status: 'modified' }],
+      unstaged: [{ path: 'b.ts', status: 'added' }],
+      untracked: ['c.ts'],
+      error: null,
+    });
+
+    expect(cb).toHaveBeenCalledWith({
+      branch: 'main',
+      staged: [{ path: 'a.ts', status: 'modified' }],
+      unstaged: [{ path: 'b.ts', status: 'added' }],
+      untracked: ['c.ts'],
+      error: null,
+    });
+  });
+
+  it('does not crash when _gitStatusCallback is null', () => {
+    const store = createMockStore({
+      _gitStatusCallback: null,
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    expect(() => {
+      _testMessageHandler.handle({
+        type: 'git_status_result',
+        branch: 'main',
+        staged: [],
+        unstaged: [],
+        untracked: [],
+      });
+    }).not.toThrow();
+  });
+
+  it('dispatches git_branches_result to _gitBranchesCallback', () => {
+    const cb = jest.fn();
+    const store = createMockStore({
+      _gitBranchesCallback: cb,
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'git_branches_result',
+      branches: [{ name: 'main', isCurrent: true, isRemote: false }],
+      currentBranch: 'main',
+    });
+
+    expect(cb).toHaveBeenCalledWith({
+      branches: [{ name: 'main', isCurrent: true, isRemote: false }],
+      currentBranch: 'main',
+      error: null,
+    });
+  });
+
+  it('dispatches git_stage_result to _gitStageCallback', () => {
+    const cb = jest.fn();
+    const store = createMockStore({
+      _gitStageCallback: cb,
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'git_stage_result' });
+
+    expect(cb).toHaveBeenCalledWith({ error: null });
+  });
+
+  it('dispatches git_stage_result with error', () => {
+    const cb = jest.fn();
+    const store = createMockStore({
+      _gitStageCallback: cb,
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'git_stage_result', error: 'failed to stage' });
+
+    expect(cb).toHaveBeenCalledWith({ error: 'failed to stage' });
+  });
+
+  it('dispatches git_commit_result to _gitCommitCallback', () => {
+    const cb = jest.fn();
+    const store = createMockStore({
+      _gitCommitCallback: cb,
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'git_commit_result',
+      hash: 'abc123',
+      message: 'feat: add feature',
+    });
+
+    expect(cb).toHaveBeenCalledWith({
+      hash: 'abc123',
+      message: 'feat: add feature',
+      error: null,
+    });
+  });
+
+  it('dispatches git_commit_result with error', () => {
+    const cb = jest.fn();
+    const store = createMockStore({
+      _gitCommitCallback: cb,
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'git_commit_result',
+      error: 'nothing to commit',
+    });
+
+    expect(cb).toHaveBeenCalledWith({
+      hash: null,
+      message: null,
+      error: 'nothing to commit',
+    });
+  });
+});
+
 afterAll(() => {
   _testMessageHandler.clearContext();
 });

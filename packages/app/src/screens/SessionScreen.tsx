@@ -27,6 +27,7 @@ import { InputBar } from '../components/InputBar';
 import { FileBrowser } from '../components/FileBrowser';
 import { DiffViewer } from '../components/DiffViewer';
 import { CheckpointView } from '../components/CheckpointView';
+import { GitView } from '../components/GitView';
 import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
 import { BackgroundSessionProgress } from '../components/BackgroundSessionProgress';
 import { DevPreviewBanner } from '../components/DevPreviewBanner';
@@ -211,6 +212,7 @@ export function SessionScreen() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showDiffViewer, setShowDiffViewer] = useState(false);
   const [showCheckpoints, setShowCheckpoints] = useState(false);
+  const [showGitView, setShowGitView] = useState(false);
   const [showSessionOverview, setShowSessionOverview] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
 
@@ -682,6 +684,9 @@ export function SessionScreen() {
           <TouchableOpacity style={styles.diffButton} onPress={() => setShowCheckpoints(true)} accessibilityRole="button" accessibilityLabel="View checkpoints">
             <Icon name="clock" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
+          <TouchableOpacity style={styles.diffButton} onPress={() => setShowGitView(true)} accessibilityRole="button" accessibilityLabel="Git operations">
+            <Icon name="gitBranch" size={16} color={COLORS.textMuted} />
+          </TouchableOpacity>
           {(viewMode === 'chat' || (layout.isSplitView && viewMode !== 'files')) && (
             <TouchableOpacity style={styles.diffButton} onPress={handleSearchOpen} accessibilityRole="button" accessibilityLabel="Search messages">
               <Icon name="search" size={16} color={COLORS.textMuted} />
@@ -1015,6 +1020,12 @@ export function SessionScreen() {
       <CheckpointView
         visible={showCheckpoints}
         onClose={() => setShowCheckpoints(false)}
+      />
+
+      {/* Git view modal */}
+      <GitView
+        visible={showGitView}
+        onClose={() => setShowGitView(false)}
       />
 
       {/* Attachment picker bottom sheet */}

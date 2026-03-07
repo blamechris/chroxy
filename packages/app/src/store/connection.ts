@@ -33,6 +33,12 @@ export type {
   DiffHunk,
   DiffFile,
   DiffResult,
+  GitFileStatus,
+  GitBranch,
+  GitStatusResult,
+  GitBranchesResult,
+  GitStageResult,
+  GitCommitResult,
   AgentInfo,
   ConnectedClient,
   SessionHealth,
@@ -205,6 +211,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _fileBrowserCallback: null,
   _fileContentCallback: null,
   _fileWriteCallback: null,
+  _gitStatusCallback: null,
+  _gitBranchesCallback: null,
+  _gitStageCallback: null,
+  _gitCommitCallback: null,
   _diffCallback: null,
   conversationHistory: [],
   conversationHistoryLoading: false,
@@ -985,6 +995,48 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const msg: Record<string, string> = { type: 'get_diff' };
       if (base) msg.base = base;
       wsSend(socket, msg);
+    }
+  },
+
+  // Git operations
+
+  setGitStatusCallback: (cb) => { set({ _gitStatusCallback: cb }); },
+  setGitBranchesCallback: (cb) => { set({ _gitBranchesCallback: cb }); },
+  setGitStageCallback: (cb) => { set({ _gitStageCallback: cb }); },
+  setGitCommitCallback: (cb) => { set({ _gitCommitCallback: cb }); },
+
+  requestGitStatus: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_status' });
+    }
+  },
+
+  requestGitBranches: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_branches' });
+    }
+  },
+
+  requestGitStage: (paths: string[]) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_stage', paths, action: 'stage' });
+    }
+  },
+
+  requestGitUnstage: (paths: string[]) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_stage', paths, action: 'unstage' });
+    }
+  },
+
+  requestGitCommit: (message: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'git_commit', message });
     }
   },
 
