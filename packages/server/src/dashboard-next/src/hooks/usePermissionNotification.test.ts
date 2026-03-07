@@ -75,16 +75,15 @@ describe('usePermissionNotification', () => {
   })
 
   it('does not fire duplicate notification for the same request', () => {
-    const prompts = [makePrompt()]
-
     const { rerender } = renderHook(
       ({ p }) => usePermissionNotification(p),
-      { initialProps: { p: prompts } }
+      { initialProps: { p: [makePrompt()] } }
     )
 
     expect(mockNotification).toHaveBeenCalledOnce()
 
-    rerender({ p: prompts })
+    // New array instance with same requestId — effect reruns but should not re-notify
+    rerender({ p: [makePrompt()] })
     expect(mockNotification).toHaveBeenCalledOnce()
   })
 
