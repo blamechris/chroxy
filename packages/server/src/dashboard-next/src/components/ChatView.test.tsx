@@ -41,6 +41,16 @@ describe('ChatView', () => {
     expect(screen.queryByTestId('thinking-dots')).not.toBeInTheDocument()
   })
 
+  it('shows thinking dots when busy but not streaming', () => {
+    render(<ChatView messages={makeMessages(1)} isStreaming={false} isBusy />)
+    expect(screen.getByTestId('thinking-dots')).toBeInTheDocument()
+  })
+
+  it('hides thinking dots when not busy and not streaming', () => {
+    render(<ChatView messages={makeMessages(1)} isStreaming={false} isBusy={false} />)
+    expect(screen.queryByTestId('thinking-dots')).not.toBeInTheDocument()
+  })
+
   it('shows scroll-to-bottom button when scrolled up', () => {
     const messages = makeMessages(3)
     render(<ChatView messages={messages} isStreaming={false} />)
