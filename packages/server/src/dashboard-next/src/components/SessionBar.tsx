@@ -12,6 +12,7 @@ export interface SessionTabData {
   isActive: boolean
   cwd?: string
   model?: string
+  provider?: string
 }
 
 export interface SessionBarProps {
@@ -29,6 +30,10 @@ function shortenModel(model: string): string {
 function abbreviateCwd(cwd: string): string {
   const parts = cwd.split('/')
   return parts[parts.length - 1] || cwd
+}
+
+function shortenProvider(provider: string): string {
+  return provider.replace(/^claude-/, '').toUpperCase()
 }
 
 export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession }: SessionBarProps) {
@@ -132,6 +137,12 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             {session.model && (
               <span className="tab-model">
                 {shortenModel(session.model)}
+              </span>
+            )}
+
+            {session.provider && (
+              <span className="tab-provider" title={session.provider}>
+                {shortenProvider(session.provider)}
               </span>
             )}
 

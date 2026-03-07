@@ -309,6 +309,7 @@ export function App() {
       isActive: s.sessionId === activeSessionId,
       cwd: s.cwd,
       model: s.model ?? undefined,
+      provider: s.provider,
     })),
     [sessions, activeSessionId],
   )
