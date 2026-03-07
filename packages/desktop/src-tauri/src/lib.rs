@@ -27,6 +27,9 @@ use tauri::{
 use tauri_plugin_single_instance::init as single_instance_init;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
+/// Tracks whether this is a first-run (config was just created).
+static IS_FIRST_RUN: AtomicBool = AtomicBool::new(false);
+
 /// Menu item handles so we can enable/disable them from anywhere.
 struct TrayMenuItems {
     start: MenuItem<tauri::Wry>,
@@ -90,6 +93,115 @@ fn get_qr_code_svg(state: tauri::State<'_, Mutex<ServerManager>>) -> Result<serd
 }
 
 #[tauri::command]
+fn check_dependencies() -> serde_json::Value {
+    // Check Node 22
+    let node_result = node::resolve_node22();
+    let (node_found, node_path, node_version) = match &node_result {
+        Ok(path) => {
+            let version = std::process::Command::new(path)
+                .arg("--version")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+            (true, Some(path.display().to_string()), version)
+        }
+        Err(_) => (false, None, None),
+    };
+
+    // Check cloudflared
+    let cloudflared_found = server::ServerManager::check_cloudflared();
+
+    // Check claude CLI
+    #[cfg(unix)]
+    let which_cmd = "which";
+    #[cfg(windows)]
+    let which_cmd = "where";
+    let claude_result = std::process::Command::new(which_cmd)
+        .arg("claude")
+        .output();
+    let (claude_found, claude_version) = match claude_result {
+        Ok(output) if output.status.success() => {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let version = std::process::Command::new(&path)
+                .arg("--version")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+            (true, version)
+        }
+        _ => (false, None),
+    };
+
+    serde_json::json!({
+        "node22": {
+            "found": node_found,
+            "path": node_path,
+            "version": node_version,
+        },
+        "cloudflared": {
+            "found": cloudflared_found,
+        },
+        "claude": {
+            "found": claude_found,
+            "version": claude_version,
+        },
+    })
+}
+
+#[tauri::command]
+fn get_setup_state(
+    mgr_state: tauri::State<'_, Mutex<server::ServerManager>>,
+    settings_state: tauri::State<'_, Mutex<DesktopSettings>>,
+) -> serde_json::Value {
+    let config = config::load_config();
+    let settings = lock_or_recover(&settings_state);
+    let mgr = lock_or_recover(&mgr_state);
+    serde_json::json!({
+        "isFirstRun": IS_FIRST_RUN.load(std::sync::atomic::Ordering::Relaxed),
+        "port": config.port,
+        "tunnelMode": settings.tunnel_mode,
+        "isRunning": mgr.is_running(),
+    })
+}
+
+#[tauri::command]
+fn save_setup_config(
+    app: tauri::AppHandle,
+    port: u16,
+    tunnel_mode: String,
+) -> Result<(), String> {
+    // Update settings
+    if let Some(settings_state) = app.try_state::<Mutex<DesktopSettings>>() {
+        let mut settings = lock_or_recover(&settings_state);
+        settings.tunnel_mode = tunnel_mode.clone();
+        let _ = settings.save();
+    }
+
+    // Update port in config.json
+    if let Some(path) = config::config_path() {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if let Ok(mut cfg) = serde_json::from_str::<serde_json::Value>(&contents) {
+                cfg["port"] = serde_json::json!(port);
+                if let Ok(json_str) = serde_json::to_string_pretty(&cfg) {
+                    let _ = std::fs::write(&path, json_str);
+                }
+            }
+        }
+    }
+
+    // Apply tunnel mode to server manager
+    if let Some(mgr_state) = app.try_state::<Mutex<server::ServerManager>>() {
+        let mut mgr = lock_or_recover(&mgr_state);
+        mgr.set_tunnel_mode(&tunnel_mode);
+    }
+
+    // Clear first-run flag
+    IS_FIRST_RUN.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    Ok(())
+}
+
+#[tauri::command]
 fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let mut builder = app.dialog().file();
@@ -132,22 +244,28 @@ pub fn run() {
             restart_server,
             get_qr_code_svg,
             pick_directory,
+            check_dependencies,
+            get_setup_state,
+            save_setup_config,
         ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
         .setup(|app| {
             // First-run: generate config if needed
-            setup::ensure_config();
+            let is_first_run = setup::ensure_config();
+            IS_FIRST_RUN.store(is_first_run, Ordering::Relaxed);
 
             setup_tray(app)?;
 
-            // Auto-start server on launch if configured
-            let settings = app.state::<Mutex<DesktopSettings>>();
-            let auto_start = lock_or_recover(&settings).auto_start_server;
-            if auto_start {
-                let config = config::load_config();
-                if config.api_token.is_some() {
-                    handle_start(app.handle());
+            // Auto-start server on launch if configured (skip on first run — wizard handles it)
+            if !is_first_run {
+                let settings = app.state::<Mutex<DesktopSettings>>();
+                let auto_start = lock_or_recover(&settings).auto_start_server;
+                if auto_start {
+                    let config = config::load_config();
+                    if config.api_token.is_some() {
+                        handle_start(app.handle());
+                    }
                 }
             }
 
