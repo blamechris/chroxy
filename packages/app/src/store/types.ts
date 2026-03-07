@@ -117,6 +117,11 @@ export interface FileContent {
   error: string | null;
 }
 
+export interface FileWriteResult {
+  path: string | null;
+  error: string | null;
+}
+
 export interface Checkpoint {
   id: string;
   name: string;
@@ -402,6 +407,7 @@ export interface ConnectionState {
   // File browser callbacks
   _fileBrowserCallback: ((listing: FileListing) => void) | null;
   _fileContentCallback: ((content: FileContent) => void) | null;
+  _fileWriteCallback: ((result: FileWriteResult) => void) | null;
 
   // Diff viewer callback
   _diffCallback: ((result: DiffResult) => void) | null;
@@ -457,6 +463,8 @@ export interface ConnectionState {
   setFileContentCallback: (cb: ((content: FileContent) => void) | null) => void;
   requestFileListing: (path?: string) => void;
   requestFileContent: (path: string) => void;
+  setFileWriteCallback: (cb: ((result: FileWriteResult) => void) | null) => void;
+  requestFileWrite: (path: string, content: string) => void;
 
   // Diff viewer
   setDiffCallback: (cb: ((result: DiffResult) => void) | null) => void;

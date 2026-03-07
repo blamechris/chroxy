@@ -1561,6 +1561,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'write_file_result': {
+      const fileWriteCb = get()._fileWriteCallback;
+      if (fileWriteCb) {
+        fileWriteCb({
+          path: typeof msg.path === 'string' ? msg.path : null,
+          error: typeof msg.error === 'string' ? msg.error : null,
+        });
+      }
+      break;
+    }
+
     case 'diff_result': {
       const diffCb = get()._diffCallback;
       if (diffCb) {
