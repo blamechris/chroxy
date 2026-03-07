@@ -286,7 +286,7 @@ export function ConnectScreen() {
             useConnectionStore.getState().disconnect();
           }}
           accessibilityRole="button"
-          accessibilityLabel="Cancel auto-connect"
+          accessibilityLabel="Cancel connection attempt"
         >
           <Text style={styles.autoConnectCancelText}>Cancel</Text>
         </TouchableOpacity>
@@ -346,11 +346,11 @@ export function ConnectScreen() {
       {/* Quick reconnect */}
       {savedConnection && (
         <View style={styles.savedSection}>
-          <TouchableOpacity style={styles.reconnectButton} onPress={handleReconnect} accessibilityRole="button" accessibilityLabel="Reconnect">
+          <TouchableOpacity style={styles.reconnectButton} onPress={handleReconnect} accessibilityRole="button" accessibilityLabel={`Reconnect to ${formatUrl(savedConnection.url)}`}>
             <Text style={styles.reconnectButtonText}>Reconnect</Text>
             <Text style={styles.reconnectUrl}>{formatUrl(savedConnection.url)}</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.forgetButton} onPress={clearSavedConnection} accessibilityRole="button" accessibilityLabel="Forget saved connection">
+          <TouchableOpacity style={styles.forgetButton} onPress={clearSavedConnection} accessibilityRole="button" accessibilityLabel="Remove saved server connection">
             <Text style={styles.forgetButtonText}>Forget</Text>
           </TouchableOpacity>
         </View>
@@ -369,7 +369,7 @@ export function ConnectScreen() {
         </TouchableOpacity>
       )}
 
-      <TouchableOpacity style={styles.qrButton} onPress={handleScanQR} accessibilityRole="button" accessibilityLabel="Scan QR Code">
+      <TouchableOpacity style={styles.qrButton} onPress={handleScanQR} accessibilityRole="button" accessibilityLabel="Open camera to scan QR code">
         <View style={styles.qrButtonContent}>
           <Icon name="camera" size={20} color={COLORS.textPrimary} />
           <Text style={styles.qrButtonText}>Scan QR Code</Text>
@@ -382,7 +382,7 @@ export function ConnectScreen() {
           style={[styles.lanButton, styles.lanButtonFlex, scanning && styles.lanButtonScanning]}
           onPress={handleScanLAN}
           accessibilityRole="button"
-          accessibilityLabel="Scan local network"
+          accessibilityLabel="Scan local network for Chroxy servers"
         >
         {scanning ? (
           <View style={styles.lanButtonContent}>
@@ -407,6 +407,7 @@ export function ConnectScreen() {
           placeholder="Port"
           placeholderTextColor={COLORS.textDim}
           editable={!scanning}
+          accessibilityLabel="LAN scan port number"
         />
       </View>
 
@@ -447,7 +448,7 @@ export function ConnectScreen() {
         style={styles.manualToggle}
         onPress={() => setShowManual(!showManual)}
         accessibilityRole="button"
-        accessibilityLabel="Toggle manual entry"
+        accessibilityLabel="Enter server address manually"
       >
         <Text style={styles.manualToggleText}>
           {showManual ? `${ICON_TRIANGLE_DOWN} Hide manual entry` : `${ICON_TRIANGLE_RIGHT} Enter manually`}
@@ -466,6 +467,7 @@ export function ConnectScreen() {
             onFocus={scrollToInput}
             autoCapitalize="none"
             autoCorrect={false}
+            accessibilityLabel="Server URL"
           />
 
           <Text style={styles.label}>
@@ -481,9 +483,10 @@ export function ConnectScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             secureTextEntry
+            accessibilityLabel="API Token"
           />
 
-          <TouchableOpacity style={styles.connectButton} onPress={handleConnect} accessibilityRole="button" accessibilityLabel="Connect">
+          <TouchableOpacity style={styles.connectButton} onPress={handleConnect} accessibilityRole="button" accessibilityLabel="Connect to server">
             <Text style={styles.connectButtonText}>Connect</Text>
           </TouchableOpacity>
         </View>
@@ -609,6 +612,8 @@ const styles = StyleSheet.create({
   manualToggle: {
     alignItems: 'center',
     paddingVertical: 12,
+    minHeight: 44,
+    justifyContent: 'center',
   },
   manualToggleText: {
     color: COLORS.accentBlue,
