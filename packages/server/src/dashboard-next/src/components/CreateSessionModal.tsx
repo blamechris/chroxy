@@ -34,6 +34,12 @@ function basename(p: string): string {
   return p.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || p
 }
 
+/** Normalize a browse path for comparison: strip trailing slashes. */
+function normalizeBrowsePath(p: string): string {
+  if (!p || p === '/') return p
+  return p.replace(/\/+$/, '')
+}
+
 /** Generate a default session name from a directory path, avoiding collisions. */
 function generateDefaultName(cwdPath: string, existingNames: string[]): string {
   const base = basename(cwdPath) || 'Session'
@@ -163,8 +169,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     const requestedPath = path
     setDirectoryListingCallback((listing: DirectoryListing) => {
       // Guard: ignore stale responses from previous navigations (#1584)
+      // Normalize paths before comparing — server may expand ~ or add/strip slashes (#1592)
       const responsePath = listing.path || listing.parentPath || ''
-      if (responsePath && responsePath !== requestedPath) return // stale
+      if (responsePath && normalizeBrowsePath(responsePath) !== normalizeBrowsePath(requestedPath)) return // stale
+      // Update browsePath to the server's canonical path when it differs
+      if (responsePath && responsePath !== requestedPath) {
+        setBrowsePath(responsePath)
+      }
       setBrowseLoading(false)
       if (listing.error) {
         setBrowseError(listing.error)
