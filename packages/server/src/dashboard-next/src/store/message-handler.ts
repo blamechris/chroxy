@@ -10,7 +10,9 @@
  * avoid circular imports.
  *
  * Ported from packages/app/src/store/message-handler.ts for the web dashboard.
+ * Connection persistence uses @chroxy/store-core adapters for DI.
  */
+import { consoleAlert, noopHaptic, noopPush, createStorageAdapter, type PlatformAdapters, type StorageAdapter } from '@chroxy/store-core'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -92,6 +94,18 @@ export function wsSend(socket: WebSocket, payload: Record<string, unknown>): voi
 
 // Re-export encrypt for wsSend (import is used inside the function)
 import { encrypt } from './crypto';
+
+// ---------------------------------------------------------------------------
+// Platform adapters — web dashboard uses console.warn + no-op haptics
+// ---------------------------------------------------------------------------
+const _storage: StorageAdapter = createStorageAdapter(localStorage)
+
+const _adapters: PlatformAdapters = {
+  alert: consoleAlert,
+  haptic: noopHaptic,
+  push: noopPush,
+  storage: _storage,
+}
 
 // ---------------------------------------------------------------------------
 // Connection context (set by connect(), read by handleMessage)
@@ -441,39 +455,19 @@ function pushSessionNotification(
 }
 
 // ---------------------------------------------------------------------------
-// Connection persistence helpers
+// Connection persistence helpers — delegated to @chroxy/store-core adapter
 // ---------------------------------------------------------------------------
 
-const STORAGE_KEY_URL = 'chroxy_last_url';
-const STORAGE_KEY_TOKEN = 'chroxy_last_token';
-
 export function saveConnection(url: string, token: string): void {
-  try {
-    localStorage.setItem(STORAGE_KEY_URL, url);
-    localStorage.setItem(STORAGE_KEY_TOKEN, token);
-  } catch {
-    // Storage not available
-  }
+  _storage.saveConnection(url, token)
 }
 
 export function loadConnection(): { url: string; token: string } | null {
-  try {
-    const url = localStorage.getItem(STORAGE_KEY_URL);
-    const token = localStorage.getItem(STORAGE_KEY_TOKEN);
-    if (url && token) return { url, token };
-  } catch {
-    // Storage not available
-  }
-  return null;
+  return _storage.loadConnection() as { url: string; token: string } | null
 }
 
 export function clearConnection(): void {
-  try {
-    localStorage.removeItem(STORAGE_KEY_URL);
-    localStorage.removeItem(STORAGE_KEY_TOKEN);
-  } catch {
-    // Storage not available
-  }
+  _storage.clearConnection()
 }
 
 // ---------------------------------------------------------------------------
@@ -633,7 +627,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       ctx.socket.close();
       set({ connectionPhase: 'disconnected', socket: null });
       if (!ctx.silent) {
-        console.warn(`[chroxy] Auth Failed: ${(msg.reason as string) || 'Invalid token'}`);
+        _adapters.alert.alert('Auth Failed', (msg.reason as string) || 'Invalid token');
       }
       break;
 
@@ -642,7 +636,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (mode === 'cli' || mode === 'terminal') {
         set({ serverMode: mode });
       } else {
-        console.warn('[chroxy] Ignoring invalid server_mode value:', mode);
+        _adapters.alert.alert('Invalid Server Mode', `Ignoring invalid server_mode value: ${mode}`);
       }
       break;
     }
@@ -795,7 +789,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       if (msg.category !== 'crash') {
         const errorMsg = (msg.message as string) || 'Unknown error';
-        console.warn(`[chroxy] Session Error: ${errorMsg}`);
+        _adapters.alert.alert('Session Error', errorMsg);
         get().addServerError(errorMsg);
       }
       break;
@@ -890,7 +884,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (msgType === 'error' && typeof msg.content === 'string') {
         const content = (msg.content as string).toLowerCase();
         if (content.includes('rate limit') || content.includes('usage limit') || content.includes('quota') || content.includes('overloaded')) {
-          console.warn(`[chroxy] Usage Limit: ${msg.content as string}`);
+          _adapters.alert.alert('Usage Limit', msg.content as string);
         }
       }
       break;
@@ -1660,7 +1654,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'budget_warning': {
       const warningMessage = typeof msg.message === 'string' ? msg.message : 'Approaching cost budget limit';
-      console.warn(`[chroxy] Budget Warning: ${warningMessage}`);
+      _adapters.alert.alert('Budget Warning', warningMessage);
       const budgetWarnMsg: ChatMessage = {
         id: nextMessageId('system'),
         type: 'system',
@@ -1682,7 +1676,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const exceededMessage = typeof msg.message === 'string' ? msg.message : 'Cost budget exceeded';
       const budgetExceededTargetId = (msg.sessionId as string) || get().activeSessionId;
       // Show warning and auto-resume (no interactive Alert on web)
-      console.warn(`[chroxy] Budget Exceeded: ${exceededMessage}\n\nNew messages are paused.`);
+      _adapters.alert.alert('Budget Exceeded', `${exceededMessage}\n\nNew messages are paused.`);
       const socket = get().socket;
       if (socket && budgetExceededTargetId) {
         wsSend(socket, { type: 'resume_budget', sessionId: budgetExceededTargetId });
@@ -1864,7 +1858,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         get().addMessage(errorMsg);
       }
       if (!serverError.recoverable) {
-        console.warn(`[chroxy] Server Error: ${serverError.message}`);
+        _adapters.alert.alert('Server Error', serverError.message);
       }
       break;
     }
@@ -1902,7 +1896,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         });
         // Also show console warning if the session isn't currently active
         if (prevActiveId !== warnSessionId) {
-          console.warn(`[chroxy] Session Warning: ${message}`);
+          _adapters.alert.alert('Session Warning', message);
         }
       } else {
         get().addMessage(warningMsg);
@@ -1913,7 +1907,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'session_timeout': {
       const timeoutSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
       const name = typeof msg.name === 'string' ? msg.name : 'Unknown';
-      console.warn(`[chroxy] Session Closed: Session "${name}" was closed due to inactivity.`);
+      _adapters.alert.alert('Session Closed', `Session "${name}" was closed due to inactivity.`);
       if (timeoutSessionId) {
         // Clean up sessionStates entry for the destroyed session (#816)
         const { sessionStates, sessions } = get();
