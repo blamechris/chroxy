@@ -26,4 +26,5 @@ export {
 
 export {
   createStorageAdapter,
+  createAsyncStorageAdapter,
 } from './storage'
