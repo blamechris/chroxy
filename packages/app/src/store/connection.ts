@@ -1034,7 +1034,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         sessionNotifications: filteredNotifications,
       });
     } else {
-      set({ sessionNotifications: filteredNotifications });
+      set({ activeSessionId: sessionId, sessionNotifications: filteredNotifications });
     }
 
     if (serverNotify && socket && socket.readyState === WebSocket.OPEN) {
