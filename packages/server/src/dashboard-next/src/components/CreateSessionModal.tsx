@@ -8,6 +8,7 @@ import { useState, useEffect, useCallback, useRef, useMemo, useId, type Keyboard
 import { flushSync } from 'react-dom'
 import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
+import { useConnectionStore } from '../store/connection'
 
 export interface CreateSessionData {
   name: string
@@ -43,10 +44,11 @@ function generateDefaultName(cwdPath: string, existingNames: string[]): string {
 const EMPTY_STRINGS: string[] = []
 
 export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS, serverError, isCreating }: CreateSessionModalProps) {
+  const defaultProvider = useConnectionStore(s => s.defaultProvider)
   const [name, setName] = useState('')
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)
   const [cwd, setCwd] = useState('')
-  const [provider, setProvider] = useState('claude-sdk')
+  const [provider, setProvider] = useState(defaultProvider)
   const [nameError, setNameError] = useState('')
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1)
