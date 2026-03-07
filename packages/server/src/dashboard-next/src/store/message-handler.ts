@@ -1368,7 +1368,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           }));
         }
         // Auto-dismiss matching notification banner (#1580)
-        getStore().setState((s) => ({
+        set((s) => ({
           sessionNotifications: s.sessionNotifications.filter(
             (n) => n.requestId !== expiredRequestId
           ),
