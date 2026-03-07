@@ -53,7 +53,7 @@ export function saveServerRegistry(servers: ServerEntry[]): void {
 }
 
 // ---------------------------------------------------------------------------
-// Operations (pure — return new arrays, caller updates store)
+// Operations — return new arrays, caller updates store
 // ---------------------------------------------------------------------------
 
 /** Add a new server entry. Returns [updatedList, newEntry]. */
@@ -88,8 +88,12 @@ export function updateServerEntry(
   serverId: string,
   patch: Partial<Pick<ServerEntry, 'name' | 'wsUrl' | 'token'>>,
 ): ServerEntry[] {
+  const trimmed: typeof patch = {}
+  if (patch.name !== undefined) trimmed.name = patch.name.trim() || 'Unnamed Server'
+  if (patch.wsUrl !== undefined) trimmed.wsUrl = patch.wsUrl.trim()
+  if (patch.token !== undefined) trimmed.token = patch.token.trim()
   const updated = servers.map(s =>
-    s.id === serverId ? { ...s, ...patch } : s,
+    s.id === serverId ? { ...s, ...trimmed } : s,
   )
   saveServerRegistry(updated)
   return updated
