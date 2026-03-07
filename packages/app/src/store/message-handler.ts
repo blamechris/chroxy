@@ -1627,7 +1627,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const restoredNewSid =
         typeof rawNewSid === 'string' ? rawNewSid.trim() : '';
       if (restoredNewSid.length > 0) {
-        get().switchSession(restoredNewSid);
+        get().switchSession(restoredNewSid, { serverNotify: false, haptic: false });
       }
       break;
     }

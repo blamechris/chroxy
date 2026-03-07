@@ -348,7 +348,7 @@ describe('session_list GC handler', () => {
 });
 
 describe('checkpoint_restored handler', () => {
-  it('calls switchSession with newSessionId when present', () => {
+  it('calls switchSession with serverNotify:false and haptic:false', () => {
     const switchSession = jest.fn();
     const store = createMockStore({
       activeSessionId: 's1',
@@ -363,7 +363,7 @@ describe('checkpoint_restored handler', () => {
 
     _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: 's2' });
 
-    expect(switchSession).toHaveBeenCalledWith('s2');
+    expect(switchSession).toHaveBeenCalledWith('s2', { serverNotify: false, haptic: false });
   });
 
   it('does not call switchSession when newSessionId is missing', () => {

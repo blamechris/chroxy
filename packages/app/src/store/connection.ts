@@ -1004,14 +1004,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   // Session actions
 
-  switchSession: (sessionId: string) => {
+  switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => {
     const { socket, activeSessionId, sessionStates } = get();
+    const serverNotify = options?.serverNotify ?? true;
+    const haptic = options?.haptic ?? true;
 
     if (sessionId === activeSessionId) return;
-    hapticLight();
+    if (haptic) hapticLight();
 
     // Mark as user-initiated switch so session_switched handler uses session-switch dedup
-    setPendingSwitchSessionId(sessionId);
+    if (serverNotify) setPendingSwitchSessionId(sessionId);
 
     // Optimistically switch to cached state + dismiss notifications for target session
     const cached = sessionStates[sessionId];
@@ -1032,10 +1034,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         sessionNotifications: filteredNotifications,
       });
     } else {
-      set({ sessionNotifications: filteredNotifications });
+      set({ activeSessionId: sessionId, sessionNotifications: filteredNotifications });
     }
 
-    if (socket && socket.readyState === WebSocket.OPEN) {
+    if (serverNotify && socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'switch_session', sessionId });
     }
   },
