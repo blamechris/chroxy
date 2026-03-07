@@ -127,10 +127,13 @@ pub fn resolve_node22() -> Result<PathBuf, String> {
         }
     }
 
-    Err(
-        "Could not find Node.js >= 22. Install it via:\n  \
+    #[cfg(unix)]
+    let install_hint = "Could not find Node.js >= 22. Install it via:\n  \
          brew install node@22\n  \
-         or use nvm: nvm install 22"
-            .to_string(),
-    )
+         or use nvm: nvm install 22";
+    #[cfg(windows)]
+    let install_hint = "Could not find Node.js >= 22. Install it from:\n  \
+         https://nodejs.org/\n  \
+         or use nvm-windows: nvm install 22";
+    Err(install_hint.to_string())
 }
