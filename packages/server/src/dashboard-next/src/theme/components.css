@@ -531,6 +531,16 @@
   flex-shrink: 0;
 }
 
+.tab-provider {
+  color: var(--accent-blue);
+  font-size: 9px;
+  background: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+  border-radius: 3px;
+  padding: 1px 4px;
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
 .tab-close {
   background: none;
   border: none;
