@@ -71,9 +71,9 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   return (
     <>
       <div ref={backdropRef} className="settings-backdrop" data-modal-overlay onClick={onClose} />
-      <div className="settings-panel" role="dialog" aria-label="Settings">
+      <div className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <div className="settings-header">
-          <h2>Settings</h2>
+          <h2 id="settings-title">Settings</h2>
           <button className="settings-close" onClick={onClose} aria-label="Close settings" type="button">
             &times;
           </button>

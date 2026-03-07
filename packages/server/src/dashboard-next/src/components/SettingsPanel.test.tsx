@@ -146,9 +146,11 @@ describe('SettingsPanel', () => {
     topOverlay.setAttribute('data-modal-overlay', '')
     document.body.appendChild(topOverlay)
 
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(onClose).not.toHaveBeenCalled()
-
-    document.body.removeChild(topOverlay)
+    try {
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(onClose).not.toHaveBeenCalled()
+    } finally {
+      document.body.removeChild(topOverlay)
+    }
   })
 })
