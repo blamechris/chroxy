@@ -47,17 +47,19 @@ describe('CodexSession', () => {
     // Allow event to fire
     await new Promise(r => setTimeout(r, 50))
 
-    assert.equal(session.isRunning, true)
+    assert.equal(session.isReady, true)
+    assert.equal(session.isRunning, false) // Not busy until sendMessage
     assert.equal(events.length, 1)
     assert.ok(events[0].model)
   })
 
-  it('destroy sets isRunning to false', async () => {
+  it('destroy resets isReady and isRunning', async () => {
     const session = new CodexSession({ cwd: '/tmp' })
     session.start()
     await new Promise(r => setTimeout(r, 50))
 
     session.destroy()
+    assert.equal(session.isReady, false)
     assert.equal(session.isRunning, false)
   })
 

@@ -66,7 +66,8 @@ export class CodexSession extends EventEmitter {
     this.cwd = cwd || process.cwd()
     this.model = model || DEFAULT_MODEL
     this.permissionMode = permissionMode || 'auto'
-    this.isRunning = false
+    this._isReady = false
+    this._isBusy = false
     this.resumeSessionId = null
     this._process = null
     this._messageCounter = 0
@@ -74,17 +75,26 @@ export class CodexSession extends EventEmitter {
     this._threadId = null
   }
 
+  get isRunning() {
+    return this._isBusy
+  }
+
+  get isReady() {
+    return this._isReady
+  }
+
   start() {
-    this.isRunning = true
+    this._isReady = true
     // Emit ready asynchronously to match SdkSession/CliSession behavior
     process.nextTick(() => {
-      this.emit('ready', { model: this.model })
+      this.emit('ready', { sessionId: null, model: this.model, tools: [] })
     })
   }
 
   destroy() {
     this._destroying = true
-    this.isRunning = false
+    this._isReady = false
+    this._isBusy = false
     if (this._process) {
       try {
         this._process.kill('SIGTERM')
@@ -94,11 +104,21 @@ export class CodexSession extends EventEmitter {
     this.removeAllListeners()
   }
 
-  sendMessage(text) {
-    if (!this.isRunning) {
+  sendMessage(text, attachments, options) {
+    if (!this._isReady) {
       this.emit('error', { message: 'Session is not running' })
       return
     }
+    if (this._isBusy) {
+      this.emit('error', { message: 'Session is busy' })
+      return
+    }
+    if (attachments && attachments.length > 0) {
+      this.emit('error', { message: 'Codex provider does not support attachments' })
+      return
+    }
+
+    this._isBusy = true
 
     const args = ['exec', '--json']
     if (this.model) {
@@ -126,14 +146,15 @@ export class CodexSession extends EventEmitter {
 
     proc.stderr.on('data', (chunk) => {
       if (this._destroying) return
-      const text = chunk.toString().trim()
-      if (text) {
-        console.error(`[codex] stderr: ${text}`)
+      const msg = chunk.toString().trim()
+      if (msg) {
+        console.error(`[codex] stderr: ${msg}`)
       }
     })
 
     proc.on('close', (code) => {
       this._process = null
+      this._isBusy = false
       if (this._destroying) return
       if (code !== 0 && code !== null) {
         this.emit('error', { message: `Codex process exited with code ${code}` })
@@ -142,6 +163,7 @@ export class CodexSession extends EventEmitter {
 
     proc.on('error', (err) => {
       this._process = null
+      this._isBusy = false
       if (this._destroying) return
       this.emit('error', { message: err.message || 'Failed to spawn codex' })
     })
@@ -216,8 +238,9 @@ export class CodexSession extends EventEmitter {
             input: item.arguments || item.input || {},
           })
         } else if (item.type === 'tool_result') {
+          const toolUseId = item.tool_call_id || item.id || `codex-tool-${this._messageCounter}`
           this.emit('tool_result', {
-            toolUseId: item.tool_call_id || item.id || '',
+            toolUseId,
             result: item.output || item.text || '',
           })
         }
