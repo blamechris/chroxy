@@ -160,7 +160,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setBrowseLoading(true)
     setBrowseEntries([])
     setBrowseError(null)
+    const requestedPath = path
     setDirectoryListingCallback((listing: DirectoryListing) => {
+      // Guard: ignore stale responses from previous navigations (#1584)
+      const responsePath = listing.path || listing.parentPath || ''
+      if (responsePath && responsePath !== requestedPath) return // stale
       setBrowseLoading(false)
       if (listing.error) {
         setBrowseError(listing.error)
