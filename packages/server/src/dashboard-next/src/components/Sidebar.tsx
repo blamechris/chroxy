@@ -6,6 +6,7 @@
  */
 import { useState, useCallback, useRef } from 'react'
 import { ConversationSearch } from './ConversationSearch'
+import { ServerPicker } from './ServerPicker'
 import type { SearchResult } from '../store/types'
 
 export interface ActiveSessionNode {
@@ -379,6 +380,9 @@ export function Sidebar({
               )
             })}
           </div>
+
+          {/* Server picker (multi-machine) */}
+          <ServerPicker />
 
           {/* Footer */}
           <div className="sidebar-footer" data-testid="sidebar-footer">
