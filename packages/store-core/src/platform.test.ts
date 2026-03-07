@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { noopHaptic, consoleAlert, noopPush } from './platform'
-import { createStorageAdapter } from './storage'
+import { createStorageAdapter, createAsyncStorageAdapter } from './storage'
 
 describe('noopHaptic', () => {
   it('has all haptic methods as no-ops', () => {
@@ -77,5 +77,55 @@ describe('createStorageAdapter', () => {
     expect(() => adapter.saveConnection('url', 'token')).not.toThrow()
     expect(adapter.loadConnection()).toBeNull()
     expect(() => adapter.clearConnection()).not.toThrow()
+  })
+})
+
+describe('createAsyncStorageAdapter', () => {
+  it('saves and loads connection with async backend', async () => {
+    const store = new Map<string, string>()
+    const adapter = createAsyncStorageAdapter({
+      getItem: async (k: string) => store.get(k) ?? null,
+      setItem: async (k: string, v: string) => { store.set(k, v) },
+      removeItem: async (k: string) => { store.delete(k) },
+    })
+
+    await adapter.saveConnection('wss://example.com', 'token123')
+    const result = await adapter.loadConnection()
+    expect(result).toEqual({ url: 'wss://example.com', token: 'token123' })
+  })
+
+  it('returns null when no connection saved', async () => {
+    const adapter = createAsyncStorageAdapter({
+      getItem: async () => null,
+      setItem: async () => {},
+      removeItem: async () => {},
+    })
+
+    expect(await adapter.loadConnection()).toBeNull()
+  })
+
+  it('clears saved connection', async () => {
+    const store = new Map<string, string>()
+    const adapter = createAsyncStorageAdapter({
+      getItem: async (k: string) => store.get(k) ?? null,
+      setItem: async (k: string, v: string) => { store.set(k, v) },
+      removeItem: async (k: string) => { store.delete(k) },
+    })
+
+    await adapter.saveConnection('wss://example.com', 'token123')
+    await adapter.clearConnection()
+    expect(await adapter.loadConnection()).toBeNull()
+  })
+
+  it('handles async storage errors gracefully', async () => {
+    const adapter = createAsyncStorageAdapter({
+      getItem: async () => { throw new Error('no storage') },
+      setItem: async () => { throw new Error('no storage') },
+      removeItem: async () => { throw new Error('no storage') },
+    })
+
+    await expect(adapter.saveConnection('url', 'token')).resolves.not.toThrow()
+    expect(await adapter.loadConnection()).toBeNull()
+    await expect(adapter.clearConnection()).resolves.not.toThrow()
   })
 })
