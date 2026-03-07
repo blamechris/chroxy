@@ -321,15 +321,26 @@ export function App() {
     [commands],
   )
 
-  // Auto-connect on mount
+  // Server registry for auto-connect fallback
+  const serverRegistry = useConnectionStore(s => s.serverRegistry)
+  const activeServerId = useConnectionStore(s => s.activeServerId)
+  const connectToServer = useConnectionStore(s => s.connectToServer)
+
+  // Auto-connect on mount — use page token (served by local server),
+  // or fall back to the last active server from the registry
   useEffect(() => {
     const token = getAuthToken()
-    if (!token) return
-
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const wsUrl = `${proto}://${window.location.host}/ws`
-    connect(wsUrl, token)
-  }, [connect])
+    if (token) {
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const wsUrl = `${proto}://${window.location.host}/ws`
+      connect(wsUrl, token)
+      return
+    }
+    // No page token — try to reconnect to last active server from registry
+    if (activeServerId && serverRegistry.some(s => s.id === activeServerId)) {
+      connectToServer(activeServerId)
+    }
+  }, [connect, connectToServer, activeServerId, serverRegistry])
 
   // Close Create Session modal when server confirms (activeSessionId changes)
   useEffect(() => {

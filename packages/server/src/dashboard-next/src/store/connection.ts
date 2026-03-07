@@ -110,6 +110,8 @@ import {
   persistActiveSession,
   persistTerminalBuffer,
   persistSessionList,
+  persistActiveServer,
+  loadPersistedActiveServer,
   clearPersistedState,
 } from './persistence';
 
@@ -183,7 +185,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   apiToken: null,
   socket: null,
   serverRegistry: loadServerRegistry(),
-  activeServerId: null,
+  activeServerId: loadPersistedActiveServer(),
   serverMode: null,
   sessionCwd: null,
   defaultCwd: null,
@@ -1315,8 +1317,9 @@ setStore({
   setState: useConnectionStore.setState as StoreApi['setState'],
 });
 
-// Track server connection status — mark registry entry as connected
+// Track server connection status — mark registry entry as connected + persist active server ID
 let _prevConnectionPhase: string | null = null;
+let _prevActiveServerId: string | null = null;
 useConnectionStore.subscribe((state) => {
   const wasConnected = _prevConnectionPhase === 'connected';
   _prevConnectionPhase = state.connectionPhase;
@@ -1325,6 +1328,12 @@ useConnectionStore.subscribe((state) => {
       const updated = markServerConnected(state.serverRegistry, state.activeServerId);
       useConnectionStore.setState({ serverRegistry: updated });
     }
+  }
+
+  // Persist active server ID changes
+  if (state.activeServerId !== _prevActiveServerId) {
+    _prevActiveServerId = state.activeServerId;
+    persistActiveServer(state.activeServerId);
   }
 });
 
