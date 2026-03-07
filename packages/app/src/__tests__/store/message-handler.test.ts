@@ -384,7 +384,25 @@ describe('checkpoint_restored handler', () => {
     expect(switchSession).not.toHaveBeenCalled();
   });
 
-  it('does not call switchSession when newSessionId is empty or whitespace', () => {
+  it('does not call switchSession when newSessionId is empty string', () => {
+    const switchSession = jest.fn();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+      switchSession,
+    } as any);
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: '' });
+
+    expect(switchSession).not.toHaveBeenCalled();
+  });
+
+  it('does not call switchSession when newSessionId is whitespace-only', () => {
     const switchSession = jest.fn();
     const store = createMockStore({
       activeSessionId: 's1',
@@ -398,9 +416,7 @@ describe('checkpoint_restored handler', () => {
     _testMessageHandler.setContext(createMockContext() as any);
 
     _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: '   ' });
-    expect(switchSession).not.toHaveBeenCalled();
 
-    _testMessageHandler.handle({ type: 'checkpoint_restored', newSessionId: '' });
     expect(switchSession).not.toHaveBeenCalled();
   });
 
