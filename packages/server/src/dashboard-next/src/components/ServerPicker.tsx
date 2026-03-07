@@ -6,9 +6,7 @@
  */
 import { useState, useCallback } from 'react'
 import { useConnectionStore } from '../store/connection'
-import type { ServerEntry } from '../store/types'
-
-type ConnectionPhase = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'server_restarting'
+import type { ServerEntry, ConnectionPhase } from '../store/types'
 
 function statusDot(phase: ConnectionPhase, isActive: boolean): string {
   if (!isActive) return 'server-dot disconnected'
@@ -159,10 +157,10 @@ function ServerItem({ server, isActive, connectionPhase, onConnect, onRemove }: 
           type="button"
           className="server-remove-btn"
           onClick={() => setConfirmRemove(true)}
-          title="Remove server"
+          aria-label={`Remove ${server.name}`}
           data-testid="server-remove-btn"
         >
-          &times;
+          <span aria-hidden="true">&times;</span>
         </button>
       )}
     </div>
@@ -195,9 +193,9 @@ export function ServerPicker() {
           className="server-btn server-btn-add"
           onClick={() => setShowAddForm(true)}
           data-testid="server-add-btn"
-          title="Add server"
+          aria-label="Add server"
         >
-          +
+          <span aria-hidden="true">+</span>
         </button>
       </div>
 

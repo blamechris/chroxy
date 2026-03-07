@@ -4071,7 +4071,9 @@
   transition: opacity 0.15s;
 }
 
-.server-item:hover .server-remove-btn { opacity: 1; }
+.server-item:hover .server-remove-btn,
+.server-remove-btn:focus-visible,
+.server-item:focus-within .server-remove-btn { opacity: 1; }
 .server-remove-btn:hover { background: var(--bg-hover); color: var(--accent-red); }
 
 .server-item-confirm {
@@ -4096,7 +4098,7 @@
   font-size: 12px;
 }
 
-.server-input:focus {
+.server-input:focus-visible {
   outline: none;
   border-color: var(--accent-blue);
 }

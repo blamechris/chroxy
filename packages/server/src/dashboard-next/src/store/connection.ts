@@ -1282,6 +1282,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   switchServer: (serverId: string) => {
     const server = get().serverRegistry.find(s => s.id === serverId);
     if (!server) return;
+    // No-op if already connected to this server
+    if (serverId === get().activeServerId && get().connectionPhase === 'connected') return;
     // Disconnect from current server (if connected)
     if (get().connectionPhase !== 'disconnected') {
       get().disconnect();
@@ -1316,13 +1318,14 @@ setStore({
 // Track server connection status — mark registry entry as connected
 let _prevConnectionPhase: string | null = null;
 useConnectionStore.subscribe((state) => {
-  if (state.connectionPhase === 'connected' && _prevConnectionPhase !== 'connected') {
+  const wasConnected = _prevConnectionPhase === 'connected';
+  _prevConnectionPhase = state.connectionPhase;
+  if (state.connectionPhase === 'connected' && !wasConnected) {
     if (state.activeServerId) {
       const updated = markServerConnected(state.serverRegistry, state.activeServerId);
       useConnectionStore.setState({ serverRegistry: updated });
     }
   }
-  _prevConnectionPhase = state.connectionPhase;
 });
 
 // Persist session messages, active session, session list when they change
