@@ -16,6 +16,7 @@ import { COLORS } from '../constants/colors';
 import { Icon } from './Icon';
 import { tokenize, SYNTAX_COLORS } from '../utils/syntax';
 import type { Token } from '../utils/syntax';
+import { FileEditor } from './FileEditor';
 
 /** Format bytes into human-readable size */
 function formatSize(bytes: number): string {
@@ -58,6 +59,7 @@ function FileViewerModal({
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [editorVisible, setEditorVisible] = useState(false);
 
   const setFileContentCallback = useConnectionStore((s) => s.setFileContentCallback);
   const requestFileContent = useConnectionStore((s) => s.requestFileContent);
@@ -128,6 +130,16 @@ function FileViewerModal({
               <Text style={styles.viewerFileSize}>{formatSize(fileSize)}</Text>
             )}
           </View>
+          {!loading && !error && content != null && !truncated && (
+            <TouchableOpacity
+              style={styles.viewerEditButton}
+              onPress={() => setEditorVisible(true)}
+              accessibilityRole="button"
+              accessibilityLabel="Edit file"
+            >
+              <Icon name="edit" size={18} color={COLORS.accentBlue} />
+            </TouchableOpacity>
+          )}
         </View>
 
         {loading && (
@@ -154,6 +166,24 @@ function FileViewerModal({
             )}
           </ScrollView>
         )}
+
+        <FileEditor
+          visible={editorVisible}
+          filePath={filePath}
+          initialContent={content || ''}
+          onClose={() => setEditorVisible(false)}
+          onSave={() => {
+            setEditorVisible(false);
+            // Re-fetch file content to reflect the saved changes
+            if (filePath) {
+              setLoading(true);
+              setContent(null);
+              const id = ++requestIdRef.current;
+              activeRequestRef.current = id;
+              requestFileContent(filePath);
+            }
+          }}
+        />
       </View>
     </Modal>
   );
@@ -428,6 +458,12 @@ const styles = StyleSheet.create({
   viewerCloseText: {
     color: COLORS.accentBlue,
     fontSize: 18,
+  },
+  viewerEditButton: {
+    minHeight: 44,
+    minWidth: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   viewerHeaderInfo: {
     flex: 1,

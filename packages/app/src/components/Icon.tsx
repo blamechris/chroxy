@@ -20,6 +20,7 @@ export const iconMap = {
   paperclip: 'attach-outline',
   download: 'download-outline',
   export: 'share-outline',
+  edit: 'create-outline',
 
   // Content & Files
   folder: 'folder-outline',

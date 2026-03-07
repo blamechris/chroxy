@@ -28,6 +28,7 @@ export type {
   FileEntry,
   FileListing,
   FileContent,
+  FileWriteResult,
   DiffHunkLine,
   DiffHunk,
   DiffFile,
@@ -203,6 +204,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _directoryListingCallback: null,
   _fileBrowserCallback: null,
   _fileContentCallback: null,
+  _fileWriteCallback: null,
   _diffCallback: null,
   conversationHistory: [],
   conversationHistoryLoading: false,
@@ -957,6 +959,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'read_file', path });
+    }
+  },
+
+  setFileWriteCallback: (cb) => {
+    set({ _fileWriteCallback: cb });
+  },
+
+  requestFileWrite: (path: string, content: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'write_file', path, content });
     }
   },
 
