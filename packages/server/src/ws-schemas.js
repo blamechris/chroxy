@@ -542,21 +542,26 @@ export const ServerWebTaskListSchema = z.object({
 export const PtySpawnSchema = z.object({
   type: z.literal('pty_spawn'),
   sessionId: z.string().optional(),
+  cols: z.number().int().min(1).optional(),
+  rows: z.number().int().min(1).optional(),
 })
 
 export const PtyWriteSchema = z.object({
   type: z.literal('pty_write'),
+  sessionId: z.string().optional(),
   data: z.string(),
 })
 
 export const PtyResizeSchema = z.object({
   type: z.literal('pty_resize'),
+  sessionId: z.string().optional(),
   cols: z.number().int().min(1),
   rows: z.number().int().min(1),
 })
 
 export const PtyKillSchema = z.object({
   type: z.literal('pty_kill'),
+  sessionId: z.string().optional(),
 })
 
 // -- Discriminated union of all client->server message types --

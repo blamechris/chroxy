@@ -68,6 +68,16 @@ describe('PtyMirror', () => {
     mirror.destroy()
   })
 
+  it('refuses to spawn after destroy', () => {
+    const mirror = new PtyMirror({})
+    mirror.destroy()
+    const errors = []
+    mirror.on('error', (e) => errors.push(e))
+    const result = mirror.spawn()
+    assert.equal(result, false)
+    assert.ok(errors.some(e => e.message.includes('destroyed')))
+  })
+
   it('destroy is idempotent', () => {
     const mirror = new PtyMirror({})
     mirror.destroy()

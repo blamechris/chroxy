@@ -18,7 +18,6 @@ import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
-import { PtyMirror } from './pty-mirror.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -280,7 +279,7 @@ export class WsServer {
       sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
       replayHistory: (ws, sid) => self._replayHistory(ws, sid),
       get draining() { return self._draining },
-      ptyMirrors: this._ptyMirrors,
+      get ptyMirrors() { return self._ptyMirrors },
     }
     this.pushManager = pushManager
 
@@ -1259,6 +1258,12 @@ export class WsServer {
 
     // Clean up web task manager
     this._webTaskManager.destroy()
+
+    // Clean up all PTY mirrors
+    for (const ptyMirror of this._ptyMirrors.values()) {
+      ptyMirror.destroy()
+    }
+    this._ptyMirrors.clear()
 
     for (const [ws] of this.clients) {
       ws.close()

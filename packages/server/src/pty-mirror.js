@@ -62,6 +62,11 @@ export class PtyMirror extends EventEmitter {
    * @returns {boolean} true if spawned successfully
    */
   spawn() {
+    if (this._destroyed) {
+      this.emit('error', { message: 'Cannot spawn — PTY instance has been destroyed' })
+      return false
+    }
+
     if (!pty) {
       this.emit('error', { message: 'node-pty is not installed — PTY mirroring unavailable' })
       return false
@@ -80,7 +85,7 @@ export class PtyMirror extends EventEmitter {
       args.push('--model', this._model)
     }
     if (this._permissionMode) {
-      args.push('--allowedTools', this._permissionMode)
+      args.push('--permission-mode', this._permissionMode)
     }
 
     try {
