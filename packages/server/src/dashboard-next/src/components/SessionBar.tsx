@@ -86,9 +86,19 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               if (!session.isActive) onSwitch(session.sessionId)
             }}
             onKeyDown={e => {
+              if (renamingId === session.sessionId) return
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()
                 if (!session.isActive) onSwitch(session.sessionId)
+              } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                e.preventDefault()
+                const tabs = (e.currentTarget.parentElement as HTMLElement)?.querySelectorAll<HTMLElement>('[role="tab"]')
+                if (!tabs) return
+                const idx = Array.from(tabs).indexOf(e.currentTarget)
+                const next = e.key === 'ArrowRight'
+                  ? (idx + 1) % tabs.length
+                  : (idx - 1 + tabs.length) % tabs.length
+                tabs[next]?.focus()
               }
             }}
           >
