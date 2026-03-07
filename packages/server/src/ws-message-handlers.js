@@ -6,6 +6,7 @@ import { WebTaskUnavailableError } from './web-task-manager.js'
 import { scanConversations, groupConversationsByRepo } from './conversation-scanner.js'
 import { searchConversations } from './conversation-search.js'
 import { readReposFromConfig, writeReposToConfig } from './config.js'
+import { listProviders } from './providers.js'
 
 // -- Permission modes --
 export const PERMISSION_MODES = [
@@ -608,6 +609,11 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       break
     }
 
+    case 'list_providers': {
+      ctx.send(ws, { type: 'provider_list', providers: listProviders() })
+      break
+    }
+
     case 'request_full_history': {
       const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
       if (!targetId || !ctx.sessionManager.getSession(targetId)) {
@@ -1089,6 +1095,11 @@ export function handleCliMessage(ws, client, msg, ctx) {
     case 'list_agents': {
       const cwd = ctx.cliSession?.cwd || null
       ctx.fileOps.listAgents(ws, cwd, null)
+      break
+    }
+
+    case 'list_providers': {
+      ctx.send(ws, { type: 'provider_list', providers: listProviders() })
       break
     }
 
