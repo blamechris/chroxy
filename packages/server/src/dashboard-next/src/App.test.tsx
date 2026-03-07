@@ -67,6 +67,13 @@ vi.mock('./store/connection', () => {
     conversationHistory: [],
     fetchConversationHistory: vi.fn(),
     resumeConversation: vi.fn(),
+    serverRegistry: [],
+    activeServerId: null,
+    addServer: vi.fn(),
+    removeServer: vi.fn(),
+    switchServer: vi.fn(),
+    connectToServer: vi.fn(),
+    updateServer: vi.fn(),
   }
   return {
     useConnectionStore: (

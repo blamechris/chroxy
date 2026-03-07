@@ -5,6 +5,21 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { Sidebar, type SidebarProps, type RepoNode } from './Sidebar'
 
+// Mock the connection store (used by ServerPicker inside Sidebar)
+vi.mock('../store/connection', () => ({
+  useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => {
+    const store = {
+      serverRegistry: [],
+      activeServerId: null,
+      connectionPhase: 'disconnected',
+      addServer: vi.fn(),
+      removeServer: vi.fn(),
+      switchServer: vi.fn(),
+    }
+    return selector(store)
+  },
+}))
+
 afterEach(cleanup)
 
 const noop = vi.fn()

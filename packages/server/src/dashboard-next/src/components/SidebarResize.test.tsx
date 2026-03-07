@@ -7,6 +7,16 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, cleanup, fireEvent } from '@testing-library/react'
 import { Sidebar } from './Sidebar'
 
+vi.mock('../store/connection', () => ({
+  useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => {
+    const store = {
+      serverRegistry: [], activeServerId: null, connectionPhase: 'disconnected',
+      addServer: vi.fn(), removeServer: vi.fn(), switchServer: vi.fn(),
+    }
+    return selector(store)
+  },
+}))
+
 afterEach(cleanup)
 
 const baseProps = {
