@@ -54,7 +54,7 @@ describe('ConnectScreen component structure', () => {
 
   test('shows auto-connect spinner with cancel option', () => {
     expect(src).toMatch(/autoConnecting/)
-    expect(src).toMatch(/Cancel auto-connect/)
+    expect(src).toMatch(/Cancel connection attempt/)
     expect(src).toMatch(/ActivityIndicator/)
   })
 
