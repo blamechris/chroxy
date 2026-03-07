@@ -1,5 +1,4 @@
 use crate::config;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use qrcode::QrCode;
 
 /// Build the chroxy:// connection URL from config.
@@ -20,28 +19,18 @@ pub fn generate_qr_svg(data: &str) -> Result<String, String> {
     Ok(svg)
 }
 
-/// Generate a QR code as a PNG data URL (base64-encoded).
-pub fn generate_qr_png_data_url(data: &str) -> Result<String, String> {
-    let code = QrCode::new(data.as_bytes()).map_err(|e| format!("QR encode error: {}", e))?;
-    let image = code.render::<image::Luma<u8>>().quiet_zone(true).build();
-
-    let mut png_bytes = Vec::new();
-    let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
-    image::ImageEncoder::write_image(
-        encoder,
-        image.as_raw(),
-        image.width(),
-        image.height(),
-        image::ExtendedColorType::L8,
-    )
-    .map_err(|e| format!("PNG encode error: {}", e))?;
-
-    let b64 = BASE64.encode(&png_bytes);
-    Ok(format!("data:image/png;base64,{}", b64))
+/// HTML-escape a string for safe interpolation into HTML content.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
 }
 
 /// Build the HTML page for the QR code popup.
 pub fn build_qr_popup_html(svg: &str, connection_url: &str) -> String {
+    let escaped_url = html_escape(connection_url);
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -98,13 +87,15 @@ pub fn build_qr_popup_html(svg: &str, connection_url: &str) -> String {
   <div class="qr-container">{}</div>
   <div class="url">{}</div>
   <div class="hint">Open the Chroxy app on your phone and scan this code</div>
+<script>document.addEventListener('keydown', function(e) {{ if (e.key === 'Escape') window.close(); }});</script>
 </body>
 </html>"#,
-        svg, connection_url
+        svg, escaped_url
     )
 }
 
 /// Read the connection info from ~/.chroxy/connection.json.
+/// The server writes fields: connectionUrl, wsUrl, httpUrl, apiToken, tunnelMode.
 /// Returns (hostname, token) or an error.
 pub fn read_connection_info() -> Result<(String, String), String> {
     let path = dirs::home_dir()
@@ -117,27 +108,44 @@ pub fn read_connection_info() -> Result<(String, String), String> {
     let json: serde_json::Value =
         serde_json::from_str(&contents).map_err(|e| format!("Invalid JSON: {}", e))?;
 
-    let hostname = json
-        .get("hostname")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'hostname' in connection.json")?
-        .to_string();
-
-    let token = json
-        .get("token")
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            // Fall back to config.json token
-            None
-        })
-        .unwrap_or("")
-        .to_string();
-
-    if hostname.is_empty() {
-        return Err("Empty hostname in connection.json".to_string());
+    // The server writes connectionUrl as "chroxy://hostname?token=TOKEN".
+    // Parse hostname and token from it if available.
+    if let Some(conn_url) = json.get("connectionUrl").and_then(|v| v.as_str()) {
+        let without_scheme = conn_url.strip_prefix("chroxy://").unwrap_or(conn_url);
+        let mut parts = without_scheme.splitn(2, '?');
+        let hostname = parts.next().unwrap_or("").to_string();
+        let mut token = String::new();
+        if let Some(query) = parts.next() {
+            for pair in query.split('&') {
+                if let Some(value) = pair.strip_prefix("token=") {
+                    token = value.to_string();
+                    break;
+                }
+            }
+        }
+        if !hostname.is_empty() {
+            return Ok((hostname, token));
+        }
     }
 
-    Ok((hostname, token))
+    // Fall back to wsUrl + apiToken fields
+    if let Some(ws_url) = json.get("wsUrl").and_then(|v| v.as_str()) {
+        // wsUrl is like "wss://hostname" or "ws://host:port"
+        let host = ws_url
+            .strip_prefix("wss://")
+            .or_else(|| ws_url.strip_prefix("ws://"))
+            .unwrap_or(ws_url);
+        let token = json
+            .get("apiToken")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !host.is_empty() {
+            return Ok((host.to_string(), token));
+        }
+    }
+
+    Err("Missing 'connectionUrl' or 'wsUrl' in connection.json".to_string())
 }
 
 /// Try to get connection info from connection.json, falling back to config.json.
@@ -196,9 +204,30 @@ mod tests {
     }
 
     #[test]
+    fn build_qr_popup_html_escapes_html_in_url() {
+        let html = build_qr_popup_html("<svg></svg>", "chroxy://test?token=<script>alert(1)</script>");
+        assert!(!html.contains("<script>alert"));
+        assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
     fn build_qr_popup_html_is_valid_html() {
         let html = build_qr_popup_html("<svg></svg>", "chroxy://test");
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("</html>"));
+    }
+
+    #[test]
+    fn build_qr_popup_html_has_escape_handler() {
+        let html = build_qr_popup_html("<svg></svg>", "chroxy://test");
+        assert!(html.contains("Escape"));
+        assert!(html.contains("window.close()"));
+    }
+
+    #[test]
+    fn html_escape_handles_special_chars() {
+        assert_eq!(html_escape("<b>\"hi\"</b>"), "&lt;b&gt;&quot;hi&quot;&lt;/b&gt;");
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+        assert_eq!(html_escape("it's"), "it&#x27;s");
     }
 }

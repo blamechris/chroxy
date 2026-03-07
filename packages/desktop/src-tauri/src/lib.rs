@@ -593,6 +593,15 @@ fn handle_dashboard(app: &tauri::AppHandle) {
 }
 
 fn handle_show_qr(app: &tauri::AppHandle) {
+    // Verify server is running (menu state can become stale on crash/restart)
+    let state = app.state::<Mutex<ServerManager>>();
+    let mgr = lock_or_recover(&state);
+    if !mgr.is_running() {
+        send_notification(app, "QR Code", "Server is not running");
+        return;
+    }
+    drop(mgr);
+
     // If popup already exists, focus it
     if let Some(win) = app.get_webview_window("qr_popup") {
         let _ = win.set_focus();
