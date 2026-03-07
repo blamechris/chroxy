@@ -30,6 +30,7 @@ import { CreateSessionModal } from './components/CreateSessionModal'
 import { NotificationBanners } from './components/NotificationBanners'
 import { Toast, type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
+import { CheckpointTimeline } from './components/CheckpointTimeline'
 import { FooterBar } from './components/FooterBar'
 import { QrModal } from './components/QrModal'
 import { SettingsPanel } from './components/SettingsPanel'
@@ -191,6 +192,7 @@ export function App() {
   const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
   const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -806,53 +808,69 @@ export function App() {
               >
                 Files
               </button>
+              <div className="view-switch-spacer" />
+              <button
+                className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`}
+                onClick={() => setCheckpointsOpen(prev => !prev)}
+                type="button"
+                title="Toggle checkpoint timeline"
+              >
+                Checkpoints
+              </button>
             </div>
 
             {/* Main content */}
-            <div className="main-content">
-              {splitMode ? (
-                <SplitPane
-                  direction={splitMode}
-                  first={
-                    <ChatView
-                      messages={chatMessages}
-                      isStreaming={streamingMessageId !== null}
-                      isBusy={!isIdle}
-                      renderMessage={renderMessage}
-                    />
-                  }
-                  second={
-                    <MultiTerminalView
-                      sessions={sessions}
-                      activeSessionId={activeSessionId}
-                      className="terminal-container"
-                    />
-                  }
-                  onReset={() => {
-                    /* double-click resets to 50/50 — handled by react-resizable-panels */
-                  }}
-                />
-              ) : (
-                <>
-                  {viewMode === 'chat' && (
-                    <ChatView
-                      messages={chatMessages}
-                      isStreaming={streamingMessageId !== null}
-                      isBusy={!isIdle}
-                      renderMessage={renderMessage}
-                    />
-                  )}
-                  {viewMode === 'terminal' && (
-                    <MultiTerminalView
-                      sessions={sessions}
-                      activeSessionId={activeSessionId}
-                      className="terminal-container"
-                    />
-                  )}
-                </>
-              )}
-              {viewMode === 'files' && (
-                <FileBrowserPanel />
+            <div className={`main-content${checkpointsOpen ? ' with-checkpoint-panel' : ''}`}>
+              <div className="main-content-primary">
+                {splitMode ? (
+                  <SplitPane
+                    direction={splitMode}
+                    first={
+                      <ChatView
+                        messages={chatMessages}
+                        isStreaming={streamingMessageId !== null}
+                        isBusy={!isIdle}
+                        renderMessage={renderMessage}
+                      />
+                    }
+                    second={
+                      <MultiTerminalView
+                        sessions={sessions}
+                        activeSessionId={activeSessionId}
+                        className="terminal-container"
+                      />
+                    }
+                    onReset={() => {
+                      /* double-click resets to 50/50 — handled by react-resizable-panels */
+                    }}
+                  />
+                ) : (
+                  <>
+                    {viewMode === 'chat' && (
+                      <ChatView
+                        messages={chatMessages}
+                        isStreaming={streamingMessageId !== null}
+                        isBusy={!isIdle}
+                        renderMessage={renderMessage}
+                      />
+                    )}
+                    {viewMode === 'terminal' && (
+                      <MultiTerminalView
+                        sessions={sessions}
+                        activeSessionId={activeSessionId}
+                        className="terminal-container"
+                      />
+                    )}
+                  </>
+                )}
+                {viewMode === 'files' && (
+                  <FileBrowserPanel />
+                )}
+              </div>
+              {checkpointsOpen && (
+                <div className="checkpoint-panel">
+                  <CheckpointTimeline />
+                </div>
               )}
             </div>
 

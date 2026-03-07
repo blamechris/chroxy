@@ -644,6 +644,10 @@
   outline-offset: -2px;
 }
 
+.view-switch-spacer { flex: 1; }
+
+.view-tab-right { margin-left: auto; font-size: 12px; }
+
 /* ---- Main Content ---- */
 .main-content {
   flex: 1;
@@ -651,6 +655,26 @@
   flex-direction: column;
   overflow: hidden;
   position: relative;
+}
+
+.main-content.with-checkpoint-panel {
+  flex-direction: row;
+}
+
+.main-content-primary {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.checkpoint-panel {
+  width: 300px;
+  min-width: 240px;
+  border-left: 1px solid var(--border-primary);
+  overflow: hidden;
+  flex-shrink: 0;
 }
 
 /* ---- Chat View ---- */
