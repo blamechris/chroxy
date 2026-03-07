@@ -16,7 +16,7 @@ import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-ca
 import * as Network from 'expo-network';
 import { useConnectionStore } from '../store/connection';
 import { Icon } from '../components/Icon';
-import { ICON_SATELLITE, ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
+import { ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 
 const DEFAULT_PORT = 8765;
@@ -392,9 +392,10 @@ export function ConnectScreen() {
             </Text>
           </View>
         ) : (
-          <Text style={styles.lanButtonText}>
-            {ICON_SATELLITE} Scan Local Network
-          </Text>
+          <View style={styles.lanButtonContent}>
+            <Icon name="satellite" size={16} color={COLORS.textPrimary} />
+            <Text style={styles.lanButtonText}>Scan Local Network</Text>
+          </View>
         )}
         </TouchableOpacity>
         <TextInput
