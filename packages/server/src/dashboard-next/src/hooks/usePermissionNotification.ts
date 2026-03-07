@@ -22,8 +22,9 @@ export function usePermissionNotification(prompts: PermissionPromptInfo[]) {
     if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
 
     for (const prompt of prompts) {
-      // Skip answered prompts
+      // Skip answered or expired prompts
       if (prompt.answered) continue
+      if (prompt.expiresAt <= Date.now()) continue
       // Skip already-notified
       if (notifiedRef.current.has(prompt.requestId)) continue
       // Only notify when window is not focused
@@ -32,7 +33,7 @@ export function usePermissionNotification(prompts: PermissionPromptInfo[]) {
       notifiedRef.current.add(prompt.requestId)
 
       new Notification('Chroxy: Permission Requested', {
-        body: `${prompt.tool}: ${prompt.description}`,
+        body: prompt.description,
         tag: `chroxy-perm-${prompt.requestId}`,
       })
     }

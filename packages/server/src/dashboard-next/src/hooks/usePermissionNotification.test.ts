@@ -46,7 +46,7 @@ describe('usePermissionNotification', () => {
     expect(mockNotification).toHaveBeenCalledWith(
       'Chroxy: Permission Requested',
       expect.objectContaining({
-        body: expect.stringContaining('Bash'),
+        body: 'Run: npm install',
       })
     )
 
