@@ -32,6 +32,38 @@ describe('Emoji icon removal', () => {
     expect(iconsSrc).not.toMatch(/ICON_CLOCK/)
   })
 
+  test('icons.ts does not export ICON_CHEVRON_DOWN', () => {
+    expect(iconsSrc).not.toMatch(/ICON_CHEVRON_DOWN/)
+  })
+
+  test('icons.ts does not export ICON_ARROW_UP', () => {
+    expect(iconsSrc).not.toMatch(/ICON_ARROW_UP/)
+  })
+
+  test('icons.ts does not export ICON_ARROW_DOWN', () => {
+    expect(iconsSrc).not.toMatch(/ICON_ARROW_DOWN/)
+  })
+
+  test('icons.ts does not export ICON_SQUARE', () => {
+    expect(iconsSrc).not.toMatch(/ICON_SQUARE/)
+  })
+
+  test('icons.ts does not export ICON_PLUS', () => {
+    expect(iconsSrc).not.toMatch(/ICON_PLUS/)
+  })
+
+  test('icons.ts does not export ICON_GEAR', () => {
+    expect(iconsSrc).not.toMatch(/ICON_GEAR/)
+  })
+
+  test('icons.ts does not export ICON_CLOUD', () => {
+    expect(iconsSrc).not.toMatch(/ICON_CLOUD/)
+  })
+
+  test('icons.ts does not export ICON_DOWNLOAD', () => {
+    expect(iconsSrc).not.toMatch(/ICON_DOWNLOAD/)
+  })
+
   test('icons.ts still exports text-symbol constants', () => {
     expect(iconsSrc).toMatch(/ICON_CHECK/)
     expect(iconsSrc).toMatch(/ICON_CLOSE/)
