@@ -117,7 +117,9 @@ export function listProviders() {
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { CodexSession } from './codex-session.js'
+import { GeminiSession } from './gemini-session.js'
 
 registerProvider('claude-cli', CliSession)
 registerProvider('claude-sdk', SdkSession)
 registerProvider('codex', CodexSession)
+registerProvider('gemini', GeminiSession)
