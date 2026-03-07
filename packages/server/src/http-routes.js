@@ -220,7 +220,7 @@ export function createHttpHandler(server) {
       const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
 
       const securityHeaders = {
-        'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*; img-src 'self' data:; font-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         'X-Frame-Options': 'DENY',
         'X-Content-Type-Options': 'nosniff',
       }
@@ -265,8 +265,8 @@ export function createHttpHandler(server) {
       const indexPath = join(distDir, 'index.html')
       if (existsSync(indexPath)) {
         let html = readFileSync(indexPath, 'utf-8')
-        const configScript = `<script>window.__CHROXY_CONFIG__={port:${server.port},noEncrypt:${!server._encryptionEnabled}}</script>`
-        html = html.replace('</head>', `${configScript}\n</head>`)
+        const configMeta = `<meta name="chroxy-config" content='${JSON.stringify({port: server.port, noEncrypt: !server._encryptionEnabled})}'>`
+        html = html.replace('</head>', `${configMeta}\n</head>`)
         res.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8',
           'Cache-Control': 'no-store',
