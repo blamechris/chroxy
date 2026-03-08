@@ -5,8 +5,10 @@ import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { parseMcpToolName } from './mcp-tools.js'
+import { createLogger } from './logger.js'
 
 const ACCEPT_EDITS_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
+const log = createLogger('sdk')
 
 /**
  * Manages a Claude Code session using the Agent SDK.
@@ -109,7 +111,7 @@ export class SdkSession extends EventEmitter {
    */
   start() {
     this._processReady = true
-    console.log('[sdk-session] Ready for messages')
+    log.info('Ready for messages')
     this.emit('ready', { sessionId: null, model: this.model, tools: [] })
   }
 
@@ -174,7 +176,7 @@ export class SdkSession extends EventEmitter {
     // Safety timeout: force-clear if result never arrives (5 min)
     this._resultTimeout = setTimeout(() => {
       if (this._isBusy) {
-        console.warn('[sdk-session] Result timeout (5 min) — force-clearing busy state')
+        log.warn('Result timeout (5 min) — force-clearing busy state')
         if (hasStreamStarted) {
           this.emit('stream_end', { messageId })
         }
@@ -199,7 +201,7 @@ export class SdkSession extends EventEmitter {
             if (msg.subtype === 'init') {
               this._sdkSessionId = msg.session_id
               this._sessionId = msg.session_id
-              console.log(`[sdk-session] Session initialized: ${msg.session_id} (model: ${msg.model})`)
+              log.info(`Session initialized: ${msg.session_id} (model: ${msg.model})`)
               this.emit('ready', {
                 sessionId: msg.session_id,
                 model: msg.model,
@@ -208,7 +210,7 @@ export class SdkSession extends EventEmitter {
               // Emit MCP server status if present (including empty list to clear stale state)
               if (Array.isArray(msg.mcp_servers)) {
                 if (msg.mcp_servers.length > 0) {
-                  console.log(`[sdk-session] MCP servers: ${msg.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+                  log.info(`MCP servers: ${msg.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
                 }
                 this.emit('mcp_servers', { servers: msg.mcp_servers })
               }
@@ -218,7 +220,7 @@ export class SdkSession extends EventEmitter {
               // Forward non-init system events (e.g. /usage, /cost, other
               // slash command responses) as system messages to the client
               const text = msg.message || msg.text || msg.subtype || 'System event'
-              console.log(`[sdk-session] System event (${msg.subtype || 'unknown'}): ${typeof text === 'string' ? text.slice(0, 120) : text}`)
+              log.info(`System event (${msg.subtype || 'unknown'}): ${typeof text === 'string' ? text.slice(0, 120) : text}`)
               this.emit('message', {
                 type: 'system',
                 content: text,
@@ -327,7 +329,7 @@ export class SdkSession extends EventEmitter {
         this.emit('stream_end', { messageId })
       }
       if (!this._destroying) {
-        console.error(`[sdk-session] Query error: ${err.message}`)
+        log.error(`Query error: ${err.message}`)
         this.emit('error', { message: err.message })
       }
       this._clearMessageState()
@@ -348,7 +350,7 @@ export class SdkSession extends EventEmitter {
     // Guard against oversized tool inputs
     const inputStr = JSON.stringify(block.input || {})
     if (Buffer.byteLength(inputStr, 'utf8') > this._maxToolInput) {
-      console.warn(`[sdk-session] Tool input for ${block.name} exceeded ${this._maxToolInput} bytes, skipping`)
+      log.warn(`Tool input for ${block.name} exceeded ${this._maxToolInput} bytes, skipping`)
       this.emit('error', {
         message: `Tool input too large (>${Math.round(this._maxToolInput / 1024)}KB) for ${block.name} — tool use was skipped`,
       })
@@ -400,7 +402,7 @@ export class SdkSession extends EventEmitter {
         || toolInput.query
         || (Object.keys(toolInput).length > 0 ? JSON.stringify(toolInput).slice(0, 200) : toolName)
 
-      console.log(`[sdk-session] Permission request ${requestId}: ${toolName}`)
+      log.info(`Permission request ${requestId}: ${toolName}`)
 
       const permPayload = {
         requestId,
@@ -429,7 +431,7 @@ export class SdkSession extends EventEmitter {
       const timer = setTimeout(() => {
         this._permissionTimers.delete(requestId)
         if (this._pendingPermissions.has(requestId)) {
-          console.log(`[sdk-session] Permission ${requestId} timed out, auto-denying`)
+          log.info(`Permission ${requestId} timed out, auto-denying`)
           this._pendingPermissions.delete(requestId)
           this._lastPermissionData.delete(requestId)
           resolve({ behavior: 'deny', message: 'Permission timed out' })
@@ -451,7 +453,7 @@ export class SdkSession extends EventEmitter {
       this._pendingUserAnswer = { resolve, input: questionInput }
 
       const toolUseId = `ask-${++this._permissionCounter}-${Date.now()}`
-      console.log(`[sdk-session] AskUserQuestion detected (${toolUseId})`)
+      log.info(`AskUserQuestion detected (${toolUseId})`)
 
       this.emit('user_question', {
         toolUseId,
@@ -474,7 +476,7 @@ export class SdkSession extends EventEmitter {
       this._questionTimer = setTimeout(() => {
         this._questionTimer = null
         if (this._pendingUserAnswer) {
-          console.log(`[sdk-session] Question ${toolUseId} timed out, auto-denying`)
+          log.info(`Question ${toolUseId} timed out, auto-denying`)
           this._pendingUserAnswer = null
           this._waitingForAnswer = false
           resolve({ behavior: 'deny', message: 'Question timed out' })
@@ -516,14 +518,14 @@ export class SdkSession extends EventEmitter {
   respondToPermission(requestId, decision) {
     const pending = this._pendingPermissions.get(requestId)
     if (!pending) {
-      console.warn(`[sdk-session] No pending permission for ${requestId}`)
+      log.warn(`No pending permission for ${requestId}`)
       return
     }
     this._pendingPermissions.delete(requestId)
     this._lastPermissionData.delete(requestId)
     this._clearPermissionTimer(requestId)
 
-    console.log(`[sdk-session] Permission ${requestId} resolved: ${decision}`)
+    log.info(`Permission ${requestId} resolved: ${decision}`)
 
     if (decision === 'allow') {
       pending.resolve({ behavior: 'allow', updatedInput: pending.input })
@@ -546,7 +548,7 @@ export class SdkSession extends EventEmitter {
     this._pendingUserAnswer = null
     this._waitingForAnswer = false
 
-    console.log(`[sdk-session] Question response received: "${text.slice(0, 60)}"`)
+    log.info(`Question response received: "${text.slice(0, 60)}"`)
 
     // Build structured answers map: SDK expects { [questionText]: selectedLabel }
     const answers = {}
@@ -574,18 +576,18 @@ export class SdkSession extends EventEmitter {
    */
   setModel(model) {
     if (this._isBusy) {
-      console.warn('[sdk-session] Ignoring model change while message is in-flight')
+      log.warn('Ignoring model change while message is in-flight')
       return
     }
 
     const newModel = model ? resolveModelId(model) : null
     if (newModel === this.model) {
-      console.log(`[sdk-session] Model unchanged: ${this.model || 'default'}`)
+      log.info(`Model unchanged: ${this.model || 'default'}`)
       return
     }
 
     this.model = newModel
-    console.log(`[sdk-session] Model changed to ${this.model || 'default'}`)
+    log.info(`Model changed to ${this.model || 'default'}`)
   }
 
   /**
@@ -594,22 +596,22 @@ export class SdkSession extends EventEmitter {
   setPermissionMode(mode) {
     const VALID_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
     if (!VALID_MODES.includes(mode)) {
-      console.warn(`[sdk-session] Ignoring invalid permission mode: ${mode}`)
+      log.warn(`Ignoring invalid permission mode: ${mode}`)
       return
     }
 
     if (this._isBusy) {
-      console.warn('[sdk-session] Ignoring permission mode change while message is in-flight')
+      log.warn('Ignoring permission mode change while message is in-flight')
       return
     }
 
     if (mode === this.permissionMode) {
-      console.log(`[sdk-session] Permission mode unchanged: ${this.permissionMode}`)
+      log.info(`Permission mode unchanged: ${this.permissionMode}`)
       return
     }
 
     this.permissionMode = mode
-    console.log(`[sdk-session] Permission mode changed to ${mode}`)
+    log.info(`Permission mode changed to ${mode}`)
   }
 
   /**
@@ -634,11 +636,11 @@ export class SdkSession extends EventEmitter {
       const sdkModels = await this._query.supportedModels()
       const converted = updateModels(sdkModels)
       if (converted && converted.length > 0) {
-        console.log(`[sdk-session] Dynamic model list: ${converted.map(m => m.id).join(', ')}`)
+        log.info(`Dynamic model list: ${converted.map(m => m.id).join(', ')}`)
         this.emit('models_updated', { models: converted })
       }
     } catch (err) {
-      console.warn(`[sdk-session] Failed to fetch supported models: ${err.message}`)
+      log.warn(`Failed to fetch supported models: ${err.message}`)
     }
   }
 
@@ -648,11 +650,11 @@ export class SdkSession extends EventEmitter {
   async interrupt() {
     if (!this._query) return
 
-    console.log('[sdk-session] Interrupting query')
+    log.info('Interrupting query')
     try {
       await this._query.interrupt()
     } catch (err) {
-      console.warn(`[sdk-session] Interrupt error: ${err.message}`)
+      log.warn(`Interrupt error: ${err.message}`)
     }
   }
 
