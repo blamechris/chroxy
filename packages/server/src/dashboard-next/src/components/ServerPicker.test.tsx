@@ -91,6 +91,24 @@ describe('ServerPicker', () => {
     expect(screen.getByText('Connected')).toBeTruthy()
   })
 
+  it('adds aria-label to status dots', () => {
+    storeState.serverRegistry = SERVERS
+    storeState.activeServerId = 'srv_1'
+    storeState.connectionPhase = 'connected'
+    render(<ServerPicker />)
+    const dots = document.querySelectorAll('.server-dot')
+    expect(dots[0]!.getAttribute('aria-label')).toBe('Connected')
+    expect(dots[1]!.getAttribute('aria-label')).toBe('Idle')
+  })
+
+  it('links server button to status via aria-describedby', () => {
+    storeState.serverRegistry = SERVERS
+    render(<ServerPicker />)
+    const buttons = screen.getAllByTitle(/Connect to/)
+    expect(buttons[0]!.getAttribute('aria-describedby')).toBe('server-status-srv_1')
+    expect(buttons[1]!.getAttribute('aria-describedby')).toBe('server-status-srv_2')
+  })
+
   it('highlights the active server', () => {
     storeState.serverRegistry = SERVERS
     storeState.activeServerId = 'srv_1'
