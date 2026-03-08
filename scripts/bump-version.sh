@@ -69,7 +69,11 @@ node -e "
 
 # Update Cargo.toml (line-based replacement to preserve formatting)
 # Read the Cargo.toml version independently — it may differ from CURRENT if synced separately
-CARGO_CURRENT=$(grep -m1 '^version = ' "$CARGO_TOML" | sed 's/^version = "\(.*\)"/\1/')
+CARGO_CURRENT=$(grep -m1 '^version = ' "$CARGO_TOML" | sed -n 's/^version = "\([^"]*\)".*/\1/p')
+if [ -z "$CARGO_CURRENT" ]; then
+  echo "Error: Failed to parse current version from $CARGO_TOML" >&2
+  exit 1
+fi
 sed -i.bak "s/^version = \"$CARGO_CURRENT\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
 rm -f "$CARGO_TOML.bak"
 # Verify the replacement succeeded (catches future silent no-ops)
