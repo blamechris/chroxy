@@ -18,6 +18,7 @@ const KEY_SESSION_LIST = `${KEY_PREFIX}session_list`;
 const KEY_SIDEBAR_WIDTH = `${KEY_PREFIX}sidebar_width`;
 const KEY_SPLIT_MODE = `${KEY_PREFIX}split_mode`;
 const KEY_ACTIVE_SERVER = `${KEY_PREFIX}active_server_id`;
+const KEY_THEME = `${KEY_PREFIX}theme`;
 
 // ---------------------------------------------------------------------------
 // Server-scoped persistence — keys scoped by server ID to prevent data loss
@@ -36,6 +37,23 @@ export function setServerScope(serverId: string | null): void {
 function scopedKey(baseKey: string): string {
   if (!_serverScope) return baseKey;
   return `${KEY_PREFIX}${_serverScope}_${baseKey.replace(KEY_PREFIX, '')}`;
+}
+
+/**
+ * Read from scoped key with migration fallback: if scoped key is empty
+ * and an unscoped legacy key has data, read from legacy and copy to scoped.
+ */
+function scopedRead(baseKey: string): string | null {
+  const key = scopedKey(baseKey);
+  const value = localStorage.getItem(key);
+  if (value !== null || !_serverScope) return value;
+  // Fallback: check legacy unscoped key and migrate
+  const legacy = localStorage.getItem(baseKey);
+  if (legacy !== null) {
+    localStorage.setItem(key, legacy);
+    localStorage.removeItem(baseKey);
+  }
+  return legacy;
 }
 
 /** Max messages to persist per session (keeps storage bounded) */
@@ -253,9 +271,9 @@ export function loadPersistedState(): PersistedState {
   try {
     // View mode is global (not per-server)
     const rawViewMode = localStorage.getItem(KEY_VIEW_MODE);
-    // Session data is server-scoped
-    const activeSessionId = localStorage.getItem(scopedKey(KEY_ACTIVE_SESSION));
-    const terminalBuffer = localStorage.getItem(scopedKey(KEY_TERMINAL_BUFFER));
+    // Session data is server-scoped (with legacy migration fallback)
+    const activeSessionId = scopedRead(KEY_ACTIVE_SESSION);
+    const terminalBuffer = scopedRead(KEY_TERMINAL_BUFFER);
 
     const validatedViewMode: ViewMode | null =
       rawViewMode && (VALID_VIEW_MODES as readonly string[]).includes(rawViewMode)
@@ -275,7 +293,17 @@ export function loadPersistedState(): PersistedState {
 /** Load persisted messages for a specific session */
 export function loadSessionMessages(sessionId: string): ChatMessage[] {
   try {
-    const raw = localStorage.getItem(sessionMessagesKey(sessionId));
+    const key = sessionMessagesKey(sessionId);
+    let raw = localStorage.getItem(key);
+    // Migration fallback: check legacy unscoped key
+    if (raw === null && _serverScope) {
+      const legacyKey = `${KEY_PREFIX}messages_${sessionId}`;
+      raw = localStorage.getItem(legacyKey);
+      if (raw !== null) {
+        localStorage.setItem(key, raw);
+        localStorage.removeItem(legacyKey);
+      }
+    }
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -287,7 +315,7 @@ export function loadSessionMessages(sessionId: string): ChatMessage[] {
 /** Load persisted session list (server-scoped) */
 export function loadSessionList(): SessionInfo[] {
   try {
-    const raw = localStorage.getItem(scopedKey(KEY_SESSION_LIST));
+    const raw = scopedRead(KEY_SESSION_LIST);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -351,14 +379,15 @@ function isGlobalKey(key: string): boolean {
   return key === KEY_VIEW_MODE
     || key === KEY_SIDEBAR_WIDTH
     || key === KEY_SPLIT_MODE
-    || key === KEY_ACTIVE_SERVER;
+    || key === KEY_ACTIVE_SERVER
+    || key === KEY_THEME;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Reset module-level debounce state for deterministic testing */
+/** Reset module-level debounce state and server scope for deterministic testing */
 export function _resetForTesting(): void {
   for (const persister of Object.values(_messagePersisters)) {
     persister.cancel();
@@ -368,6 +397,7 @@ export function _resetForTesting(): void {
   }
   _terminalPersister.cancel();
   _sessionListPersister.cancel();
+  _serverScope = null;
 }
 
 /** Strip base64 image data from messages to keep storage bounded */
