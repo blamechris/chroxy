@@ -342,6 +342,7 @@ describe('useConnectionStore', () => {
     useConnectionStore.getState().switchSession('session-b');
 
     expect(useConnectionStore.getState().activeSessionId).toBe('session-b');
+    expect(useConnectionStore.getState().messages).toEqual([]);
 
     // Cleanup
     useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, messages: [] });
