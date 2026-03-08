@@ -130,8 +130,6 @@ describe('ChatMessage', () => {
     const el = screen.getByTestId('chat-message-msg-resp')
     expect(el).not.toHaveAttribute('data-muted')
   })
-})
-
 
   it('does not render thinking bubble when content is empty string', () => {
     const { container } = render(
@@ -168,6 +166,7 @@ describe('ChatMessage', () => {
     )
     expect(screen.getByTestId('chat-message-msg-thinking-ok')).toBeInTheDocument()
   })
+})
 
 describe('ToolBubble', () => {
   it('renders tool name', () => {

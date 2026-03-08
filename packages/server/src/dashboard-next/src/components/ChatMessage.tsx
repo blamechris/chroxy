@@ -27,7 +27,6 @@ function getClassName(type: string, isStreaming?: boolean): string {
 }
 
 export function ChatMessage({ id, type, content, isStreaming }: ChatMessageProps) {
-  if (type === 'thinking' && !content.trim()) return null
   const className = getClassName(type, isStreaming)
 
   const html = useMemo(() => {
@@ -36,6 +35,8 @@ export function ChatMessage({ id, type, content, isStreaming }: ChatMessageProps
     }
     return null
   }, [type, content])
+
+  if (type === 'thinking' && !content.trim()) return null
 
   return (
     <div
