@@ -5,7 +5,7 @@
  * with a mock Zustand store.
  */
 import { Alert } from 'react-native';
-import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION, SUBSCRIBE_SESSIONS_CHUNK_SIZE } from '../../store/message-handler';
+import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION, SUBSCRIBE_SESSIONS_CHUNK_SIZE, clearPermissionSplits, clearDeltaBuffers } from '../../store/message-handler';
 import { createEmptySessionState } from '../../store/utils';
 import { clearPersistedSession } from '../../store/persistence';
 import type { ConnectionState } from '../../store/types';
@@ -1238,4 +1238,373 @@ describe('user_input cross-client echo', () => {
 
 afterAll(() => {
   _testMessageHandler.clearContext();
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1728 — comprehensive tests for streaming, tool, permission, result
+// ---------------------------------------------------------------------------
+
+describe('stream_start handler', () => {
+  beforeEach(() => {
+    clearDeltaBuffers();
+    clearPermissionSplits();
+  });
+
+  it('adds a response message and sets streamingMessageId', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.streamingMessageId).toBe('msg-1');
+    expect(ss.messages).toHaveLength(1);
+    expect(ss.messages[0]).toMatchObject({ id: 'msg-1', type: 'response', content: '' });
+  });
+
+  it('reuses existing response message on reconnect replay', () => {
+    const existing = { id: 'msg-1', type: 'response' as const, content: 'partial', timestamp: 1 };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [existing], streamingMessageId: null } },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
+
+    const ss = store.getState().sessionStates.s1;
+    // Should set streamingMessageId without duplicating the message
+    expect(ss.streamingMessageId).toBe('msg-1');
+    expect(ss.messages).toHaveLength(1);
+    expect(ss.messages[0].content).toBe('partial');
+  });
+
+  it('ID collision: creates suffixed response message when ID is already used by tool_use', () => {
+    const toolMsg = { id: 'msg-1', type: 'tool_use' as const, content: 'Bash: ls', timestamp: 1 };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [toolMsg] } },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
+
+    const ss = store.getState().sessionStates.s1;
+    // Suffixed ID used to avoid clobbering tool_use message
+    expect(ss.streamingMessageId).toBe('msg-1-response');
+    expect(ss.messages).toHaveLength(2);
+    const responseMsg = ss.messages.find((m) => m.id === 'msg-1-response');
+    expect(responseMsg).toBeDefined();
+    expect(responseMsg?.type).toBe('response');
+    // Original tool_use message untouched
+    expect(ss.messages[0].id).toBe('msg-1');
+    expect(ss.messages[0].type).toBe('tool_use');
+  });
+});
+
+describe('stream_delta handler', () => {
+  beforeEach(() => {
+    clearDeltaBuffers();
+    clearPermissionSplits();
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('accumulates delta content after stream_start', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'Hello' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: ' world' });
+    // Flush deltas via timer
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    const msg = ss.messages.find((m) => m.id === 'msg-1');
+    expect(msg?.content).toBe('Hello world');
+  });
+
+  it('ID collision: routes deltas to suffixed response ID', () => {
+    const toolMsg = { id: 'msg-1', type: 'tool_use' as const, content: 'ls', timestamp: 1 };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [toolMsg] } },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'Content' });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    const responseMsg = ss.messages.find((m) => m.id === 'msg-1-response');
+    expect(responseMsg?.content).toBe('Content');
+    // tool_use message content unchanged
+    const toolUseMsg = ss.messages.find((m) => m.id === 'msg-1');
+    expect(toolUseMsg?.content).toBe('ls');
+  });
+});
+
+describe('stream_end handler', () => {
+  beforeEach(() => {
+    clearDeltaBuffers();
+    clearPermissionSplits();
+  });
+
+  it('clears streamingMessageId and flushes pending deltas', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'Final text' });
+    _testMessageHandler.handle({ type: 'stream_end', messageId: 'msg-1', sessionId: 's1' });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.streamingMessageId).toBeNull();
+    // Buffered delta flushed synchronously on stream_end
+    const msg = ss.messages.find((m) => m.id === 'msg-1');
+    expect(msg?.content).toBe('Final text');
+  });
+});
+
+describe('tool_start handler', () => {
+  it('adds a tool_use message to session state', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'tool-1',
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'use-1',
+      input: { command: 'ls' },
+    });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.messages).toHaveLength(1);
+    expect(ss.messages[0]).toMatchObject({
+      id: 'tool-1',
+      type: 'tool_use',
+      tool: 'Bash',
+      toolUseId: 'use-1',
+    });
+    expect(ss.messages[0].content).toContain('ls');
+  });
+});
+
+describe('tool_result handler', () => {
+  it('patches the matching tool_use message with the result', () => {
+    const toolMsg = {
+      id: 'tool-1',
+      type: 'tool_use' as const,
+      content: 'Bash: ls',
+      toolUseId: 'use-1',
+      timestamp: 1,
+    };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [toolMsg] } },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'tool_result',
+      sessionId: 's1',
+      toolUseId: 'use-1',
+      result: 'file1.txt\nfile2.txt',
+    });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.messages[0].toolResult).toBe('file1.txt\nfile2.txt');
+  });
+
+  it('skips when toolUseId is missing', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    expect(() => {
+      _testMessageHandler.handle({ type: 'tool_result', sessionId: 's1' });
+    }).not.toThrow();
+  });
+});
+
+describe('result handler', () => {
+  beforeEach(() => {
+    clearDeltaBuffers();
+  });
+
+  it('clears streamingMessageId and sets context usage', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          streamingMessageId: 'msg-1',
+          messages: [{ id: 'msg-1', type: 'response' as const, content: 'done', timestamp: 1 }],
+        },
+      },
+      messages: [],
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'result',
+      sessionId: 's1',
+      usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 10, cache_read_input_tokens: 5 },
+      cost: 0.002,
+      duration: 1500,
+    });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.streamingMessageId).toBeNull();
+    expect(ss.contextUsage).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheCreation: 10,
+      cacheRead: 5,
+    });
+    expect(ss.lastResultCost).toBe(0.002);
+    expect(ss.lastResultDuration).toBe(1500);
+  });
+});
+
+describe('permission_resolved handler', () => {
+  it('marks the permission prompt as answered in session state', () => {
+    const permMsg = {
+      id: 'perm-1',
+      type: 'prompt' as const,
+      content: 'Allow bash?',
+      requestId: 'req-1',
+      timestamp: 1,
+    };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [permMsg] } },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_resolved',
+      requestId: 'req-1',
+      decision: 'allow',
+    });
+
+    const ss = store.getState().sessionStates.s1;
+    const msg = ss.messages.find((m) => m.requestId === 'req-1');
+    expect(msg?.answered).toBe('allow');
+    expect(msg?.options).toBeUndefined();
+  });
+
+  it('searches all session states for the matching requestId', () => {
+    const permMsg = {
+      id: 'perm-2',
+      type: 'prompt' as const,
+      content: 'Allow write?',
+      requestId: 'req-2',
+      timestamp: 1,
+    };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Active' } as any,
+        { sessionId: 's2', name: 'Background' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: { ...createEmptySessionState(), messages: [permMsg] },
+      },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_resolved',
+      requestId: 'req-2',
+      decision: 'deny',
+    });
+
+    const msg = store.getState().sessionStates.s2.messages.find((m) => m.requestId === 'req-2');
+    expect(msg?.answered).toBe('deny');
+  });
+
+  it('falls back to flat messages when requestId not in any session state', () => {
+    const permMsg = {
+      id: 'perm-3',
+      type: 'prompt' as const,
+      content: 'Allow?',
+      requestId: 'req-3',
+      timestamp: 1,
+    };
+    const store = createMockStore({
+      activeSessionId: null,
+      sessions: [],
+      sessionStates: {},
+      messages: [permMsg],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_resolved',
+      requestId: 'req-3',
+      decision: 'allowAlways',
+    });
+
+    const msg = store.getState().messages.find((m: any) => m.requestId === 'req-3');
+    expect((msg as any)?.answered).toBe('allowAlways');
+  });
 });
