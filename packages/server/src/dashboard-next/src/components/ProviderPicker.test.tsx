@@ -107,6 +107,15 @@ describe('Provider picker in session creation (#1366)', () => {
     expect(modalSrc).toMatch(/capabilit/i)
   })
 
+  test('capability badges are wrapped in a container with gap spacing', () => {
+    expect(modalSrc).toMatch(/provider-capabilities/)
+    expect(modalSrc).toMatch(/capability-badge/)
+  })
+
+  test('provider section wraps both select and badges', () => {
+    expect(modalSrc).toMatch(/provider-section/)
+  })
+
   test('ActiveSessionNode includes provider field', () => {
     expect(sidebarSrc).toMatch(/interface ActiveSessionNode[\s\S]*?provider\??\s*:\s*string/)
   })

@@ -68,6 +68,14 @@ const PROVIDER_LABELS: Record<string, string> = {
   'gemini': 'Gemini CLI',
 }
 
+/** Billing context per provider — helps users understand cost implications. */
+const PROVIDER_BILLING: Record<string, string> = {
+  'claude-sdk': 'Uses Anthropic API credits',
+  'claude-cli': 'Uses your Claude subscription',
+  'codex': 'Uses OpenAI API credits',
+  'gemini': 'Uses Google API credits',
+}
+
 /** Short labels for capability badges. */
 const CAPABILITY_BADGES: [keyof import('../store/types').ProviderCapabilities, string][] = [
   ['resume', 'Resume'],
@@ -410,33 +418,40 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           )}
         </>
       )}
-      <div className="provider-select">
-        <label htmlFor="provider-select">Provider</label>
-        <select
-          id="provider-select"
-          value={provider}
-          onChange={e => setProvider(e.target.value)}
-          aria-label="Select provider"
-        >
-          {availableProviders.length > 0
-            ? availableProviders.map(p => (
-                <option key={p.name} value={p.name}>
-                  {PROVIDER_LABELS[p.name] || p.name}
-                </option>
-              ))
-            : <>
-                <option value="claude-sdk">Claude Code (SDK)</option>
-                <option value="claude-cli">Claude Code (CLI)</option>
-              </>
-          }
-        </select>
+      <div className="provider-section">
+        <div className="provider-select">
+          <label htmlFor="provider-select">Provider</label>
+          <select
+            id="provider-select"
+            value={provider}
+            onChange={e => setProvider(e.target.value)}
+            aria-label="Select provider"
+          >
+            {availableProviders.length > 0
+              ? availableProviders.map(p => (
+                  <option key={p.name} value={p.name}>
+                    {PROVIDER_LABELS[p.name] || p.name}
+                  </option>
+                ))
+              : <>
+                  <option value="claude-sdk">Claude Code (SDK)</option>
+                  <option value="claude-cli">Claude Code (CLI)</option>
+                </>
+            }
+          </select>
+          {PROVIDER_BILLING[provider] && (
+            <span className="provider-billing-hint" data-testid="provider-billing-hint">
+              {PROVIDER_BILLING[provider]}
+            </span>
+          )}
+        </div>
         {availableProviders.length > 0 && (() => {
           const selected = availableProviders.find(p => p.name === provider)
           if (!selected?.capabilities) return null
           const badges = CAPABILITY_BADGES.filter(([key]) => selected.capabilities[key])
           if (badges.length === 0) return null
           return (
-            <div className="provider-capabilities">
+            <div className="provider-capabilities" data-testid="provider-capabilities">
               {badges.map(([, label]) => (
                 <span key={label} className="capability-badge">{label}</span>
               ))}

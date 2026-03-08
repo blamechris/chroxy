@@ -40,6 +40,8 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const setTheme = useConnectionStore(s => s.setTheme)
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
   const setDefaultProvider = useConnectionStore(s => s.setDefaultProvider)
+  const inputSettings = useConnectionStore(s => s.inputSettings)
+  const updateInputSettings = useConnectionStore(s => s.updateInputSettings)
   const themes = getAvailableThemes()
 
   const handleSelectTheme = useCallback((themeId: string) => {
@@ -50,6 +52,10 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const handleProviderChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     setDefaultProvider(e.target.value)
   }, [setDefaultProvider])
+
+  const handleSendShortcutChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    updateInputSettings({ chatEnterToSend: e.target.value === 'enter' })
+  }, [updateInputSettings])
 
   useEffect(() => {
     if (!isOpen) return
@@ -114,6 +120,18 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               >
                 <option value="claude-sdk">Claude Code (SDK)</option>
                 <option value="claude-cli">Claude Code (CLI)</option>
+              </select>
+            </div>
+            <div className="settings-field">
+              <label htmlFor="send-shortcut">Send message with</label>
+              <select
+                id="send-shortcut"
+                aria-label="Send shortcut"
+                value={inputSettings.chatEnterToSend ? 'enter' : 'cmd-enter'}
+                onChange={handleSendShortcutChange}
+              >
+                <option value="enter">Enter</option>
+                <option value="cmd-enter">Cmd/Ctrl+Enter</option>
               </select>
             </div>
           </section>

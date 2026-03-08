@@ -42,9 +42,10 @@ function formatLastConnected(ts: number | null): string {
 interface AddServerFormProps {
   onAdd: (name: string, wsUrl: string, token: string) => void
   onCancel: () => void
+  error: string | null
 }
 
-function AddServerForm({ onAdd, onCancel }: AddServerFormProps) {
+function AddServerForm({ onAdd, onCancel, error }: AddServerFormProps) {
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
   const [token, setToken] = useState('')
@@ -70,9 +71,14 @@ function AddServerForm({ onAdd, onCancel }: AddServerFormProps) {
         placeholder="wss://your-server.example.com/ws"
         value={url}
         onChange={e => setUrl(e.target.value)}
-        className="server-input"
+        className={`server-input${error ? ' server-input-error' : ''}`}
         data-testid="server-url-input"
       />
+      {error && (
+        <span className="server-form-error" data-testid="server-url-error" role="alert">
+          {error}
+        </span>
+      )}
       <input
         type="password"
         placeholder="Auth token"
@@ -177,12 +183,18 @@ export function ServerPicker() {
   const switchServer = useConnectionStore(s => s.switchServer)
 
   const [showAddForm, setShowAddForm] = useState(false)
+  const [addError, setAddError] = useState<string | null>(null)
 
   const handleAdd = useCallback((name: string, wsUrl: string, token: string) => {
-    const entry = addServer(name, wsUrl, token)
-    setShowAddForm(false)
-    // Auto-connect to newly added server
-    switchServer(entry.id)
+    try {
+      const entry = addServer(name, wsUrl, token)
+      setAddError(null)
+      setShowAddForm(false)
+      // Auto-connect to newly added server
+      switchServer(entry.id)
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : 'Failed to add server')
+    }
   }, [addServer, switchServer])
 
   return (
@@ -203,7 +215,8 @@ export function ServerPicker() {
       {showAddForm && (
         <AddServerForm
           onAdd={handleAdd}
-          onCancel={() => setShowAddForm(false)}
+          onCancel={() => { setShowAddForm(false); setAddError(null) }}
+          error={addError}
         />
       )}
 

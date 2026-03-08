@@ -109,6 +109,7 @@ export function App() {
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
   const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
+  const inputSettings = useConnectionStore(s => s.inputSettings)
 
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
@@ -911,7 +912,7 @@ export function App() {
               disabled={!isConnected}
               isBusy={!isIdle}
               isStreaming={streamingMessageId !== null}
-              placeholder={isConnected ? 'Type a message... (Cmd+Enter to send)' : 'Connecting...'}
+              placeholder={isConnected ? `Type a message... (${inputSettings.chatEnterToSend ? 'Enter' : 'Cmd+Enter'} to send)` : 'Connecting...'}
               filePickerFiles={filePickerFiles}
               onFileTrigger={fetchFileList}
               attachments={fileAttachments}
@@ -923,6 +924,7 @@ export function App() {
               imageAttachments={imageAttachments}
               onRemoveImage={handleRemoveImage}
               onFileAttach={handleFileSelect}
+              sendOnEnter={inputSettings.chatEnterToSend}
             />
           </>
         )}
