@@ -104,10 +104,8 @@ describe('ChatMessage', () => {
     const el = screen.getByTestId('chat-message-msg-6')
     expect(el).toHaveClass('streaming')
   })
-})
 
-
-  it('system message has data-muted attribute for accessibility', () => {
+  it('system message has data-muted attribute', () => {
     render(
       <ChatMessage
         id="msg-sys-muted"
@@ -132,6 +130,7 @@ describe('ChatMessage', () => {
     const el = screen.getByTestId('chat-message-msg-resp')
     expect(el).not.toHaveAttribute('data-muted')
   })
+})
 
 describe('ToolBubble', () => {
   it('renders tool name', () => {
