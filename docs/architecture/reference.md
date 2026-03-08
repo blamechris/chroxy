@@ -147,16 +147,26 @@ Store files:
 | `read_file` | Request file content within project |
 | `register_push_token` | Register Expo push token for notifications |
 | `rename_session` | Rename existing session by ID |
+| `request_cost_summary` | Request per-session cost breakdown |
 | `request_full_history` | Request complete JSONL history for session |
 | `request_session_context` | Get context info for specific session |
 | `restore_checkpoint` | Restore from a checkpoint (creates new session) |
 | `resume_budget` | Resume a paused session after budget exceeded |
 | `resume_conversation` | Resume a past conversation by creating a new session |
+| `search_conversations` | Search conversation history by query |
 | `set_model` | Change active Claude model |
 | `set_permission_mode` | Change permission handling mode |
+| `subscribe_sessions` | Subscribe to updates for non-active sessions |
 | `switch_session` | Switch to different active session |
 | `teleport_web_task` | Pull cloud task result into local session |
+| `unsubscribe_sessions` | Unsubscribe from non-active session updates |
 | `user_question_response` | Respond to AskUserQuestion prompt |
+| `write_file` | Write content to a file within the project |
+| `git_status` | Request git status for session project |
+| `git_branches` | Request git branch list for session project |
+| `git_stage` | Stage files for commit |
+| `git_unstage` | Unstage files from commit |
+| `git_commit` | Commit staged changes with a message |
 
 ### Server → Client
 
@@ -200,21 +210,32 @@ Store files:
 | `permission_expired` | Permission request expired or already handled |
 | `permission_mode_changed` | Permission mode changed by user |
 | `permission_request` | Permission prompt from hook/SDK |
+| `permission_resolved` | Permission resolved by another client — dismiss prompt |
 | `plan_ready` | Plan complete, awaiting user approval |
 | `plan_started` | Claude entered plan mode |
 | `pong` | Heartbeat response to client ping |
 | `primary_changed` | Last-writer-wins primary client changed |
 | `result` | Query stats (cost/duration/tokens) |
+| `search_results` | Search results for a `search_conversations` query |
 | `server_error` | Server-side error forwarded to app |
 | `server_mode` | Which backend mode active (cli/terminal) |
 | `server_shutdown` | Server shutting down (reason/ETA) |
 | `server_status` | Non-error status update (e.g., recovery) |
+| `session_activity` | Session busy state change (isBusy, lastCost) — global broadcast |
 | `session_context` | Context info for specific session |
 | `session_created` | New session created |
 | `session_destroyed` | Session removed |
 | `session_error` | Session operation error |
 | `session_list` | All available sessions |
 | `session_switched` | Switched to active session |
+| `subscriptions_updated` | Confirmation that session subscriptions were updated |
+| `cost_summary` | Per-session cost breakdown in response to `request_cost_summary` |
+| `write_file_result` | Result of a `write_file` operation |
+| `git_status_result` | Git status response (branch, staged, unstaged, untracked) |
+| `git_branches_result` | Git branch list response |
+| `git_stage_result` | Result of a `git_stage` operation |
+| `git_unstage_result` | Result of a `git_unstage` operation |
+| `git_commit_result` | Result of a `git_commit` operation (hash, message, or error) |
 | `session_timeout` | Session destroyed due to idle timeout |
 | `session_updated` | Session metadata changed (e.g., rename) |
 | `session_warning` | Session about to timeout (with remainingMs) |
@@ -262,6 +283,13 @@ Store files:
 - **Broadcast scoping (#1138):** `_broadcastToSession(sessionId, message)` defaults to `client.activeSessionId === sessionId || client.subscribedSessionIds.has(sessionId)`, delivering to clients viewing or subscribed to that session. Session-scoped messages: `stream_delta`, `model_changed`, `permission_mode_changed`, `budget_resumed`, `primary_changed`, `session_context`, `dev_preview`, `dev_preview_stopped`, and normalizer event messages. Global messages use `broadcast()`: `session_list`, `session_destroyed`, `session_activity`, `session_updated`, `client_joined`, `client_left`, `token_rotated`, `available_models`, `session_warning`, `session_timeout`, `server_error`, `server_status`, `server_shutdown`, `web_task_created`, `web_task_updated`, `web_task_error`.
 - `mcp_servers` lists connected MCP tool servers and their status
 - `auth_ok` includes `protocolVersion` (integer, currently `1`) — bumped when the WS message set changes; the app stores this and logs unknown message types when the server version is newer, enabling graceful degradation when the app lags behind the server
+- `permission_resolved` broadcast to all clients when another client approves or denies a `permission_request`; payload: `{ requestId, decision, sessionId }`; receiving clients should dismiss the corresponding prompt
+- `subscribe_sessions` / `unsubscribe_sessions`: clients send these to receive session-scoped messages for non-active sessions (background monitoring); `subscriptions_updated` confirms the current set of subscribed session IDs
+- `session_activity` global broadcast on stream start/end: `{ sessionId, isBusy: true/false, lastCost }` — allows clients to show busy state for any session
+- `search_conversations` accepts `{ query }` and responds with `search_results`: `{ query, results: [{ conversationId, project, projectName, preview, cwd, score }] }`
+- `request_cost_summary` responds with `cost_summary`: `{ sessions: [{ sessionId, name, sessionCost, contextTokens }], totalCost }`
+- `write_file` accepts `{ sessionId, path, content, encoding? }` and responds with `write_file_result`: `{ success, error }`
+- `git_status` / `git_branches` / `git_stage` / `git_unstage` / `git_commit` are project-scoped git operations; results dispatched via `_gitStatusCallback`, `_gitBranchesCallback`, `_gitStageCallback`, `_gitCommitCallback` in the app store
 
 ## Project Files
 
