@@ -157,7 +157,6 @@ describe('createPermissionHandler', () => {
     })
 
     it('sends permission_request for valid SDK-mode pending permission', () => {
-      const pendingPermissions = new Map()
       const permissionSessionMap = new Map()
       const session = {
         _pendingPermissions: new Map([['sdk-req-1', {}]]),
@@ -174,7 +173,6 @@ describe('createPermissionHandler', () => {
       }
       const sm = { _sessions: new Map([['sess-1', { session }]]) }
       const opts = makeHandlerOpts({
-        pendingPermissions,
         permissionSessionMap,
         getSessionManager: mock.fn(() => sm),
       })
@@ -210,6 +208,7 @@ describe('createPermissionHandler', () => {
       })
       const { resendPendingPermissions } = createPermissionHandler(opts)
       resendPendingPermissions({})
+      assert.equal(opts.sendFn.mock.calls.length, 1)
       assert.equal(permissionSessionMap.get('sdk-req-map'), 'sess-map')
     })
 
