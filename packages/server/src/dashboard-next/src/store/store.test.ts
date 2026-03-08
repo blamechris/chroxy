@@ -625,12 +625,12 @@ describe('system message routing', () => {
     _testMessageHandler.setContext(mockContext);
 
     let setStateCalls = 0;
-    const origSetState = useConnectionStore.setState.bind(useConnectionStore);
+    const origSetState = useConnectionStore.setState;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const spy = (...args: any[]) => { setStateCalls++; return (origSetState as any)(...args); };
     try {
-      useConnectionStore.setState = (...args: Parameters<typeof origSetState>) => {
-        setStateCalls++;
-        return origSetState(...args);
-      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      useConnectionStore.setState = spy as any;
 
       _testMessageHandler.handle({
         type: 'client_joined',
@@ -648,7 +648,7 @@ describe('system message routing', () => {
     } finally {
       useConnectionStore.setState = origSetState;
       _testMessageHandler.clearContext();
-      useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
+      origSetState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
     }
   });
 
@@ -668,12 +668,12 @@ describe('system message routing', () => {
     _testMessageHandler.setContext(mockContext);
 
     let setStateCalls = 0;
-    const origSetState = useConnectionStore.setState.bind(useConnectionStore);
+    const origSetState = useConnectionStore.setState;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const spy = (...args: any[]) => { setStateCalls++; return (origSetState as any)(...args); };
     try {
-      useConnectionStore.setState = (...args: Parameters<typeof origSetState>) => {
-        setStateCalls++;
-        return origSetState(...args);
-      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      useConnectionStore.setState = spy as any;
 
       _testMessageHandler.handle({ type: 'client_left', clientId: 'phone-1' });
 
@@ -688,7 +688,7 @@ describe('system message routing', () => {
     } finally {
       useConnectionStore.setState = origSetState;
       _testMessageHandler.clearContext();
-      useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
+      origSetState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
     }
   });
 
