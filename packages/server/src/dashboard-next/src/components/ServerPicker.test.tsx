@@ -202,4 +202,42 @@ describe('ServerPicker', () => {
     fireEvent.submit(screen.getByTestId('server-add-form'))
     expect(mockAddServer).not.toHaveBeenCalled()
   })
+
+  it('shows inline error when addServer throws on invalid URL', () => {
+    mockAddServer.mockImplementationOnce(() => { throw new Error('URL must start with ws:// or wss://') })
+    render(<ServerPicker />)
+    fireEvent.click(screen.getByTestId('server-add-btn'))
+    fireEvent.change(screen.getByTestId('server-url-input'), { target: { value: 'http://bad' } })
+    fireEvent.change(screen.getByTestId('server-token-input'), { target: { value: 'tok' } })
+    fireEvent.click(screen.getByTestId('server-add-submit'))
+    expect(screen.getByTestId('server-url-error')).toBeTruthy()
+    expect(screen.getByText('URL must start with ws:// or wss://')).toBeTruthy()
+    // Form should still be visible (not closed)
+    expect(screen.getByTestId('server-add-form')).toBeTruthy()
+  })
+
+  it('clears error when cancel is clicked', () => {
+    mockAddServer.mockImplementationOnce(() => { throw new Error('Invalid URL format') })
+    render(<ServerPicker />)
+    fireEvent.click(screen.getByTestId('server-add-btn'))
+    fireEvent.change(screen.getByTestId('server-url-input'), { target: { value: 'bad' } })
+    fireEvent.change(screen.getByTestId('server-token-input'), { target: { value: 'tok' } })
+    fireEvent.click(screen.getByTestId('server-add-submit'))
+    expect(screen.getByTestId('server-url-error')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('server-add-cancel'))
+    // Re-open form — error should be gone
+    fireEvent.click(screen.getByTestId('server-add-btn'))
+    expect(screen.queryByTestId('server-url-error')).toBeNull()
+  })
+
+  it('error element has role="alert" for accessibility', () => {
+    mockAddServer.mockImplementationOnce(() => { throw new Error('URL is required') })
+    render(<ServerPicker />)
+    fireEvent.click(screen.getByTestId('server-add-btn'))
+    fireEvent.change(screen.getByTestId('server-url-input'), { target: { value: 'x' } })
+    fireEvent.change(screen.getByTestId('server-token-input'), { target: { value: 'tok' } })
+    fireEvent.click(screen.getByTestId('server-add-submit'))
+    const errorEl = screen.getByTestId('server-url-error')
+    expect(errorEl.getAttribute('role')).toBe('alert')
+  })
 })
