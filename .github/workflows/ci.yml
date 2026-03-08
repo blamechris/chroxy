@@ -206,5 +206,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('packages/desktop/src-tauri/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Create stub resource directories for Tauri build script
+        run: mkdir -p server-bundle ../dist
+
       - name: Run tests
         run: cargo test
