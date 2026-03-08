@@ -324,6 +324,57 @@ describe('useConnectionStore', () => {
     expect(typeof state.clearPlanState).toBe('function');
   });
 
+  it('switchSession updates activeSessionId even without cached state', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const makeSession = (id: string) => ({
+      sessionId: id, name: id, cwd: '/tmp', type: 'cli' as const,
+      hasTerminal: false, model: null, permissionMode: null, isBusy: false,
+      createdAt: 0, conversationId: null,
+    });
+
+    useConnectionStore.setState({
+      sessions: [makeSession('session-a'), makeSession('session-b')],
+      activeSessionId: 'session-a',
+      sessionStates: {},
+    });
+
+    useConnectionStore.getState().switchSession('session-b');
+
+    expect(useConnectionStore.getState().activeSessionId).toBe('session-b');
+    expect(useConnectionStore.getState().messages).toEqual([]);
+
+    // Cleanup
+    useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, messages: [] });
+  });
+
+  it('switchSession uses cached messages when state exists', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const makeSession = (id: string) => ({
+      sessionId: id, name: id, cwd: '/tmp', type: 'cli' as const,
+      hasTerminal: false, model: null, permissionMode: null, isBusy: false,
+      createdAt: 0, conversationId: null,
+    });
+    const cachedMsg = { id: 'msg-1', type: 'response' as const, content: 'cached', timestamp: 1 };
+
+    useConnectionStore.setState({
+      sessions: [makeSession('session-a'), makeSession('session-b')],
+      activeSessionId: 'session-a',
+      sessionStates: {
+        'session-b': { ...createEmptySessionState(), messages: [cachedMsg] },
+      },
+    });
+
+    useConnectionStore.getState().switchSession('session-b');
+
+    expect(useConnectionStore.getState().activeSessionId).toBe('session-b');
+    expect(useConnectionStore.getState().messages).toEqual([cachedMsg]);
+
+    // Cleanup
+    useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, messages: [] });
+  });
+
   it('addMessage appends to messages array', async () => {
     const { useConnectionStore } = await import('./connection');
     const msg: ChatMessage = {
@@ -492,6 +543,128 @@ describe('message handler', () => {
     expect(sessionStates.s1!.messages).toHaveLength(0);
 
     _testMessageHandler.clearContext();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// System message routing (#1706)
+// ---------------------------------------------------------------------------
+describe('system message routing', () => {
+  const mockContext = {
+    url: 'ws://localhost:3000',
+    token: 'test-token',
+    isReconnect: false,
+    silent: false,
+    socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+  };
+
+  it('client_joined adds system message to ALL session states', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      connectedClients: [],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+        s2: { ...createEmptySessionState(), messages: [] },
+      },
+    });
+    _testMessageHandler.setContext(mockContext);
+
+    _testMessageHandler.handle({
+      type: 'client_joined',
+      client: { clientId: 'phone-1', deviceName: 'iPhone 17 Pro', deviceType: 'phone', platform: 'ios' },
+    });
+
+    const { sessionStates } = useConnectionStore.getState();
+    expect(sessionStates.s1!.messages.some((m) => m.content.includes('iPhone 17 Pro'))).toBe(true);
+    expect(sessionStates.s2!.messages.some((m) => m.content.includes('iPhone 17 Pro'))).toBe(true);
+
+    _testMessageHandler.clearContext();
+    useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
+  });
+
+  it('client_left adds system message to ALL session states', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      connectedClients: [{ clientId: 'phone-1', deviceName: 'My Phone', deviceType: 'phone', platform: 'ios', isSelf: false }],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+        s2: { ...createEmptySessionState(), messages: [] },
+      },
+    });
+    _testMessageHandler.setContext(mockContext);
+
+    _testMessageHandler.handle({ type: 'client_left', clientId: 'phone-1' });
+
+    const { sessionStates } = useConnectionStore.getState();
+    expect(sessionStates.s1!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
+    expect(sessionStates.s2!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
+
+    _testMessageHandler.clearContext();
+    useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
+  });
+
+  it('server_error with sessionId routes only to that session', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      serverErrors: [],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+        s2: { ...createEmptySessionState(), messages: [] },
+      },
+    });
+    _testMessageHandler.setContext(mockContext);
+
+    _testMessageHandler.handle({
+      type: 'server_error',
+      category: 'session',
+      message: 'Process exited with code 1',
+      recoverable: true,
+      sessionId: 's2',
+    });
+
+    const { sessionStates } = useConnectionStore.getState();
+    expect(sessionStates.s2!.messages.some((m) => m.content.includes('Process exited'))).toBe(true);
+    expect(sessionStates.s1!.messages).toHaveLength(0);
+
+    _testMessageHandler.clearContext();
+    useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, serverErrors: [] });
+  });
+
+  it('server_error without sessionId routes to active session', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      serverErrors: [],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+        s2: { ...createEmptySessionState(), messages: [] },
+      },
+    });
+    _testMessageHandler.setContext(mockContext);
+
+    _testMessageHandler.handle({
+      type: 'server_error',
+      category: 'tunnel',
+      message: 'Tunnel connection lost',
+      recoverable: true,
+    });
+
+    const { sessionStates } = useConnectionStore.getState();
+    expect(sessionStates.s1!.messages.some((m) => m.content.includes('Tunnel connection lost'))).toBe(true);
+
+    _testMessageHandler.clearContext();
+    useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, serverErrors: [] });
   });
 });
 

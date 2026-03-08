@@ -11,6 +11,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 SERVER_PKG="$ROOT/packages/server/package.json"
+APP_PKG="$ROOT/packages/app/package.json"
+ROOT_PKG="$ROOT/package.json"
 TAURI_CONF="$ROOT/packages/desktop/src-tauri/tauri.conf.json"
 CARGO_TOML="$ROOT/packages/desktop/src-tauri/Cargo.toml"
 
@@ -25,6 +27,12 @@ else
   NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
 fi
 
+# Validate version format (semver x.y.z)
+if ! echo "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "Error: Invalid version format '$NEW_VERSION' — must be x.y.z"
+  exit 1
+fi
+
 echo "Bumping version: $CURRENT → $NEW_VERSION"
 
 # Update server package.json
@@ -33,6 +41,22 @@ node -e "
   const pkg = JSON.parse(fs.readFileSync('$SERVER_PKG', 'utf-8'));
   pkg.version = '$NEW_VERSION';
   fs.writeFileSync('$SERVER_PKG', JSON.stringify(pkg, null, 2) + '\n');
+"
+
+# Update app package.json
+node -e "
+  const fs = require('fs');
+  const pkg = JSON.parse(fs.readFileSync('$APP_PKG', 'utf-8'));
+  pkg.version = '$NEW_VERSION';
+  fs.writeFileSync('$APP_PKG', JSON.stringify(pkg, null, 2) + '\n');
+"
+
+# Update root package.json
+node -e "
+  const fs = require('fs');
+  const pkg = JSON.parse(fs.readFileSync('$ROOT_PKG', 'utf-8'));
+  pkg.version = '$NEW_VERSION';
+  fs.writeFileSync('$ROOT_PKG', JSON.stringify(pkg, null, 2) + '\n');
 "
 
 # Update tauri.conf.json
@@ -51,7 +75,9 @@ rm -f "$CARGO_TOML.bak"
 (cd "$ROOT/packages/desktop/src-tauri" && cargo generate-lockfile 2>/dev/null)
 
 echo "Updated:"
+echo "  $ROOT_PKG"
 echo "  $SERVER_PKG"
+echo "  $APP_PKG"
 echo "  $TAURI_CONF"
 echo "  $CARGO_TOML"
 echo "  Cargo.lock"

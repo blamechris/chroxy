@@ -21,6 +21,22 @@ function getInputSummary(input: ToolBubbleProps['input']): string {
   return summary.slice(0, 100)
 }
 
+const capitalize = (word: string) => (word ? word.charAt(0).toUpperCase() + word.slice(1) : '')
+
+function formatToolName(name: string): string {
+  const MCP_PREFIX = 'mcp__'
+  if (name.startsWith(MCP_PREFIX)) {
+    const withoutPrefix = name.slice(MCP_PREFIX.length)
+    const sep = withoutPrefix.indexOf('__')
+    if (sep > 0) {
+      const server = withoutPrefix.slice(0, sep).split('_').filter(Boolean).map(capitalize).join(' ')
+      const tool = withoutPrefix.slice(sep + 2).split('_').filter(Boolean).map(capitalize).join(' ')
+      return tool ? `${server}: ${tool}` : server
+    }
+  }
+  return name.split('_').filter(Boolean).map(capitalize).join(' ')
+}
+
 export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubbleProps) {
   const [expanded, setExpanded] = useState(false)
   const summary = getInputSummary(input)
@@ -50,7 +66,7 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
       onClick={toggle}
       onKeyDown={handleKeyDown}
     >
-      <span className="tool-name">{toolName}</span>
+      <span className="tool-name">{formatToolName(toolName)}</span>
       {summary && (
         <span className="tool-input" data-testid="tool-input-summary" style={{ color: '#666' }}>
           {summary}

@@ -113,4 +113,31 @@ describe('ToolBubble', () => {
     const summary = screen.getByTestId('tool-input-summary')
     expect(summary.textContent!.length).toBeLessThanOrEqual(100)
   })
+
+  describe('formatToolName', () => {
+    it('formats snake_case tool names to Title Case', () => {
+      render(<ToolBubble toolName="edit_file" toolUseId="tool-fmt-1" />)
+      expect(screen.getByText('Edit File')).toBeInTheDocument()
+    })
+
+    it('formats multi-word snake_case names', () => {
+      render(<ToolBubble toolName="list_directory" toolUseId="tool-fmt-2" />)
+      expect(screen.getByText('List Directory')).toBeInTheDocument()
+    })
+
+    it('passes through already-formatted names unchanged', () => {
+      render(<ToolBubble toolName="Read" toolUseId="tool-fmt-3" />)
+      expect(screen.getByText('Read')).toBeInTheDocument()
+    })
+
+    it('formats names with three or more words', () => {
+      render(<ToolBubble toolName="web_search_results" toolUseId="tool-fmt-4" />)
+      expect(screen.getByText('Web Search Results')).toBeInTheDocument()
+    })
+
+    it('formats MCP tool names (mcp__<server>__<tool_name>)', () => {
+      render(<ToolBubble toolName="mcp__fs__read_file" toolUseId="tool-fmt-mcp-1" />)
+      expect(screen.getByText('Fs: Read File')).toBeInTheDocument()
+    })
+  })
 })
