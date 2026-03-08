@@ -33,12 +33,8 @@ function countConsoleCalls(source) {
 function discoverLoggerFiles() {
   const files = readdirSync(SRC).filter(f => f.endsWith('.js') && f !== 'logger.js')
   return files.filter(f => {
-    try {
-      const src = readSrc(f)
-      return src.includes("from './logger.js'") && src.includes('createLogger')
-    } catch {
-      return false
-    }
+    const src = readSrc(f)  // let errors propagate — a read failure is a test failure
+    return src.includes("from './logger.js'") && src.includes('createLogger')
   })
 }
 

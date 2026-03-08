@@ -182,6 +182,9 @@ describe('Supervisor', () => {
       assert.ok(!output.includes('...'), 'Output should not contain ...')
 
       assert.ok(output.includes('Dashboard:'), 'Should print a Dashboard: line')
+      const dashboardLine = (output.split('\n').find((line) => line.includes('Dashboard:')) ?? '')
+      assert.ok(dashboardLine.includes('abcdef1234567890fulltoken'), 'Dashboard URL should contain the full API token')
+      assert.ok(!dashboardLine.includes('...'), 'Dashboard URL should not contain ellipsis')
 
       supervisor._shuttingDown = true
       clearInterval(supervisor._heartbeatInterval)
