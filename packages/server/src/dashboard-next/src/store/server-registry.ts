@@ -7,20 +7,11 @@
  * server and connects to the new one.
  */
 
+import type { ServerEntry } from './types'
+
 const STORAGE_KEY = 'chroxy_server_registry'
 
-export interface ServerEntry {
-  /** Unique ID for this server (stable across renames) */
-  id: string
-  /** User-defined display name */
-  name: string
-  /** WebSocket URL (e.g. wss://my-server.example.com/ws) */
-  wsUrl: string
-  /** Auth token for this server */
-  token: string
-  /** Timestamp of last successful connection */
-  lastConnectedAt: number | null
-}
+export type { ServerEntry }
 
 /** Generate a short unique ID */
 function generateId(): string {
