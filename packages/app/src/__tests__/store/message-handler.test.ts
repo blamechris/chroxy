@@ -1184,6 +1184,58 @@ describe('session subscription (#1692)', () => {
   });
 });
 
+describe('user_input cross-client echo', () => {
+  it('adds user_input from another client to the session messages', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      myClientId: 'client-a',
+      sessions: [{ sessionId: 's1', name: 'Session 1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'user_input',
+      sessionId: 's1',
+      clientId: 'client-b',
+      text: 'Hello from dashboard',
+      timestamp: 1000,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].type).toBe('user_input');
+    expect(msgs[0].content).toBe('Hello from dashboard');
+  });
+
+  it('skips user_input from self (same clientId)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      myClientId: 'client-a',
+      sessions: [{ sessionId: 's1', name: 'Session 1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'user_input',
+      sessionId: 's1',
+      clientId: 'client-a',
+      text: 'My own message',
+      timestamp: 1000,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(0);
+  });
+});
+
 afterAll(() => {
   _testMessageHandler.clearContext();
 });
