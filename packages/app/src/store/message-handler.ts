@@ -414,13 +414,15 @@ export function updateActiveSession(updater: (session: SessionState) => Partial<
 
 /** Build a short preview string from a tool input object (max 120 chars). */
 function truncateInput(input: Record<string, unknown>): string {
+  const str = (v: unknown): string | undefined =>
+    typeof v === 'string' && v ? v : undefined;
   // For common tools, pick the most informative field
   const preview =
-    (input.command as string) ||
-    (input.file_path as string) ||
-    (input.pattern as string) ||
-    (input.content as string) ||
-    (input.query as string) ||
+    str(input.command) ??
+    str(input.file_path) ??
+    str(input.pattern) ??
+    str(input.content) ??
+    str(input.query) ??
     '';
   if (preview.length > 120) return preview.slice(0, 117) + '...';
   return preview || JSON.stringify(input).slice(0, 120);
@@ -1286,6 +1288,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           planAllowedPrompts: prompts,
         }));
       }
+      if (planReadyTargetId) {
+        pushSessionNotification(planReadyTargetId, 'plan', 'Plan ready for approval');
+      }
       break;
     }
 
@@ -1370,13 +1375,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }
       }
       if (permTargetId) {
-        const toolDesc = msg.tool ? `${msg.tool}` : 'Permission needed';
+        const toolName = typeof msg.tool === 'string' ? msg.tool : undefined;
+        const toolDesc = toolName ?? 'Permission needed';
+        const toolDescription = typeof msg.description === 'string' ? msg.description : undefined;
         const inputPreview = msg.input && typeof msg.input === 'object'
           ? truncateInput(msg.input as Record<string, unknown>)
           : undefined;
         pushSessionNotification(permTargetId, 'permission', toolDesc, permRequestId, {
-          tool: msg.tool as string | undefined,
-          description: msg.description as string | undefined,
+          tool: toolName,
+          description: toolDescription,
           inputPreview,
         });
       }
