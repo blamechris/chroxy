@@ -36,6 +36,8 @@ export function ChatMessage({ id, type, content, isStreaming }: ChatMessageProps
     return null
   }, [type, content])
 
+  if (type === 'thinking' && !content.trim()) return null
+
   return (
     <div
       className={className}
