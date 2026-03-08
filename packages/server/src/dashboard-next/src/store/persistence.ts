@@ -28,8 +28,21 @@ const KEY_THEME = `${KEY_PREFIX}theme`;
 /** Current server scope for persistence operations */
 let _serverScope: string | null = null;
 
+/** Flush all pending debounced writes (call before changing scope) */
+export function flushPendingWrites(): void {
+  for (const persister of Object.values(_messagePersisters)) {
+    persister.flush();
+  }
+  _terminalPersister.flush();
+  _sessionListPersister.flush();
+}
+
 /** Set the active server scope for persistence keys */
 export function setServerScope(serverId: string | null): void {
+  // Flush pending writes so they land in the old scope
+  if (serverId !== _serverScope) {
+    flushPendingWrites();
+  }
   _serverScope = serverId;
 }
 
@@ -77,6 +90,7 @@ function sessionMessagesKey(sessionId: string): string {
 interface DebouncedPersister {
   schedule: (fn: () => void) => void;
   cancel: () => void;
+  flush: () => void;
 }
 
 /** Create an independent debounced persister with its own timer */
@@ -105,6 +119,14 @@ function createDebouncedPersist(delayMs: number): DebouncedPersister {
       if (timer) { clearTimeout(timer); timer = null; }
       pending = null;
     },
+    flush(): void {
+      if (timer) { clearTimeout(timer); timer = null; }
+      const save = pending;
+      pending = null;
+      if (save) {
+        try { save(); } catch { /* best-effort */ }
+      }
+    },
   };
 }
 
@@ -127,10 +149,12 @@ function getMessagePersister(sessionId: string): DebouncedPersister {
 
 /** Persist messages for a specific session (per-session debounce) */
 export function persistSessionMessages(sessionId: string, messages: ChatMessage[]): void {
+  // Capture scoped key at schedule-time to avoid race with scope changes
+  const key = sessionMessagesKey(sessionId);
   getMessagePersister(sessionId).schedule(() => {
     const trimmed = messages.slice(-MAX_MESSAGES).map(stripLargeData);
     try {
-      localStorage.setItem(sessionMessagesKey(sessionId), JSON.stringify(trimmed));
+      localStorage.setItem(key, JSON.stringify(trimmed));
     } catch {
       // localStorage quota exceeded or not available
     }
@@ -162,12 +186,14 @@ export function persistActiveSession(sessionId: string | null): void {
 
 /** Persist terminal buffer (debounced, server-scoped) */
 export function persistTerminalBuffer(buffer: string): void {
+  // Capture scoped key at schedule-time to avoid race with scope changes
+  const key = scopedKey(KEY_TERMINAL_BUFFER);
   _terminalPersister.schedule(() => {
     const trimmed = buffer.length > MAX_TERMINAL_SIZE
       ? buffer.slice(-MAX_TERMINAL_SIZE)
       : buffer;
     try {
-      localStorage.setItem(scopedKey(KEY_TERMINAL_BUFFER), trimmed);
+      localStorage.setItem(key, trimmed);
     } catch {
       // localStorage quota exceeded
     }
@@ -247,9 +273,11 @@ export function loadPersistedActiveServer(): string | null {
 
 /** Persist the session list (debounced, server-scoped) */
 export function persistSessionList(sessions: SessionInfo[]): void {
+  // Capture scoped key at schedule-time to avoid race with scope changes
+  const key = scopedKey(KEY_SESSION_LIST);
   _sessionListPersister.schedule(() => {
     try {
-      localStorage.setItem(scopedKey(KEY_SESSION_LIST), JSON.stringify(sessions));
+      localStorage.setItem(key, JSON.stringify(sessions));
     } catch {
       // localStorage quota exceeded
     }
@@ -343,6 +371,15 @@ export function loadAllSessionMessages(
 export function clearPersistedSession(sessionId: string): void {
   try {
     localStorage.removeItem(sessionMessagesKey(sessionId));
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Clear the persisted terminal buffer (server-scoped) */
+export function clearPersistedTerminalBuffer(): void {
+  try {
+    localStorage.removeItem(scopedKey(KEY_TERMINAL_BUFFER));
   } catch {
     // Storage not available
   }

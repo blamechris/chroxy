@@ -536,6 +536,7 @@ export interface ConnectionState {
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
   forgetSession: () => void;
+  _resetSessionMemory: () => void;
 
   // Providers
   fetchProviders: () => void;
