@@ -168,4 +168,20 @@ describe('ServerPicker', () => {
     const submit = screen.getByTestId('server-add-submit') as HTMLButtonElement
     expect(submit.disabled).toBe(true)
   })
+
+  it('submits form on Enter key in token input', () => {
+    render(<ServerPicker />)
+    fireEvent.click(screen.getByTestId('server-add-btn'))
+    fireEvent.change(screen.getByTestId('server-url-input'), { target: { value: 'wss://x/ws' } })
+    fireEvent.change(screen.getByTestId('server-token-input'), { target: { value: 'tok' } })
+    fireEvent.submit(screen.getByTestId('server-add-form'))
+    expect(mockAddServer).toHaveBeenCalledWith('wss://x/ws', 'wss://x/ws', 'tok')
+  })
+
+  it('does not submit form when required fields are empty', () => {
+    render(<ServerPicker />)
+    fireEvent.click(screen.getByTestId('server-add-btn'))
+    fireEvent.submit(screen.getByTestId('server-add-form'))
+    expect(mockAddServer).not.toHaveBeenCalled()
+  })
 })
