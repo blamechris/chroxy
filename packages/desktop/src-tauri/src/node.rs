@@ -137,3 +137,42 @@ pub fn resolve_node22() -> Result<PathBuf, String> {
          or use nvm-windows: nvm install 22";
     Err(install_hint.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_major_standard_version() {
+        assert_eq!(parse_major("v22.22.0"), Some(22));
+        assert_eq!(parse_major("v20.11.0"), Some(20));
+        assert_eq!(parse_major("v18.0.0"), Some(18));
+    }
+
+    #[test]
+    fn parse_major_single_digit() {
+        assert_eq!(parse_major("v8.0.0"), Some(8));
+    }
+
+    #[test]
+    fn parse_major_no_prefix() {
+        assert_eq!(parse_major("22.22.0"), None);
+        assert_eq!(parse_major("nope"), None);
+    }
+
+    #[test]
+    fn parse_major_empty_string() {
+        assert_eq!(parse_major(""), None);
+        assert_eq!(parse_major("v"), None);
+    }
+
+    #[test]
+    fn parse_major_only_major_version() {
+        assert_eq!(parse_major("v22"), Some(22));
+    }
+
+    #[test]
+    fn min_node_major_is_22() {
+        assert_eq!(MIN_NODE_MAJOR, 22);
+    }
+}

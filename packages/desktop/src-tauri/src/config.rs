@@ -47,3 +47,80 @@ pub fn load_config() -> ChroxyConfig {
         }
     }
 }
+
+/// Parse config from a JSON string. Test-only helper.
+#[cfg(test)]
+pub(crate) fn parse_config(json: &str) -> Result<ChroxyConfig, serde_json::Error> {
+    serde_json::from_str(json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_has_zero_port() {
+        // Note: #[derive(Default)] sets port to 0, not 8765.
+        // The default_port() serde function only applies during deserialization.
+        let config = ChroxyConfig::default();
+        assert_eq!(config.port, 0);
+        assert!(config.api_token.is_none());
+        assert!(config.tunnel.is_none());
+        assert!(config.model.is_none());
+        assert!(config.cwd.is_none());
+    }
+
+    #[test]
+    fn deserialized_default_port_is_8765() {
+        // When deserializing an empty object, serde uses default_port()
+        let config: ChroxyConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.port, 8765);
+    }
+
+    #[test]
+    fn parse_full_config() {
+        let json = r#"{
+            "apiToken": "test-token-123",
+            "port": 9999,
+            "tunnel": "named",
+            "model": "sonnet",
+            "cwd": "/home/user/projects"
+        }"#;
+        let config = parse_config(json).unwrap();
+        assert_eq!(config.api_token.as_deref(), Some("test-token-123"));
+        assert_eq!(config.port, 9999);
+        assert_eq!(config.tunnel.as_deref(), Some("named"));
+        assert_eq!(config.model.as_deref(), Some("sonnet"));
+        assert_eq!(config.cwd.as_deref(), Some("/home/user/projects"));
+    }
+
+    #[test]
+    fn parse_partial_config_uses_defaults() {
+        let json = r#"{"apiToken": "tok"}"#;
+        let config = parse_config(json).unwrap();
+        assert_eq!(config.api_token.as_deref(), Some("tok"));
+        assert_eq!(config.port, 8765); // default
+        assert!(config.tunnel.is_none());
+    }
+
+    #[test]
+    fn parse_empty_object_uses_all_defaults() {
+        let config = parse_config("{}").unwrap();
+        assert_eq!(config.port, 8765);
+        assert!(config.api_token.is_none());
+    }
+
+    #[test]
+    fn parse_invalid_json_returns_error() {
+        assert!(parse_config("not json").is_err());
+    }
+
+    #[test]
+    fn config_path_returns_some() {
+        // Should work on any machine with a home directory
+        let path = config_path();
+        assert!(path.is_some());
+        let p = path.unwrap();
+        assert!(p.ends_with(".chroxy/config.json"));
+    }
+}
