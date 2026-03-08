@@ -26,6 +26,9 @@ function broadcastFocusChanged(client, sessionId, ctx) {
   )
 }
 
+// -- PTY limits --
+export const MAX_CONCURRENT_PTY = 4
+
 // -- Attachment validation constants --
 export const MAX_ATTACHMENT_COUNT = 5
 export const MAX_IMAGE_SIZE = 2 * 1024 * 1024       // 2MB decoded
@@ -965,6 +968,10 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       }
       if (!PtyMirror.available) {
         ctx.send(ws, { type: 'pty_error', sessionId: targetSessionId, message: 'node-pty is not installed — PTY mirroring unavailable' })
+        break
+      }
+      if (ctx.ptyMirrors.size >= MAX_CONCURRENT_PTY) {
+        ctx.send(ws, { type: 'pty_error', sessionId: targetSessionId, message: `Max concurrent PTY limit reached (${MAX_CONCURRENT_PTY})` })
         break
       }
       if (ctx.ptyMirrors.has(targetSessionId)) {
