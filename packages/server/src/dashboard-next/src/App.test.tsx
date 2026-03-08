@@ -23,6 +23,8 @@ vi.mock('./store/connection', () => {
     connectionPhase: 'disconnected',
     sessions: [],
     activeSessionId: null,
+    sessionStates: {} as Record<string, unknown>,
+    messages: [] as unknown[],
     viewMode: 'chat',
     availableProviders: [],
     availableModels: [],

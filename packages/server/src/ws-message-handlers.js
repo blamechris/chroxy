@@ -364,23 +364,37 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
       const originSessionId = ctx.permissionSessionMap.get(requestId) || client.activeSessionId
       ctx.permissionSessionMap.delete(requestId)
 
+      let resolved = false
+
       if (originSessionId && ctx.sessionManager) {
         const entry = ctx.sessionManager.getSession(originSessionId)
         if (entry && typeof entry.session.respondToPermission === 'function') {
           const hasPending = entry.session._pendingPermissions?.has(requestId)
           if (hasPending !== false) {
             entry.session.respondToPermission(requestId, decision)
+            resolved = true
           } else {
             ctx.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
           }
-          break
+          if (!resolved) break
         }
       }
 
-      if (ctx.pendingPermissions.has(requestId)) {
+      if (!resolved && ctx.pendingPermissions.has(requestId)) {
         ctx.permissions.resolvePermission(requestId, decision)
-      } else {
+        resolved = true
+      }
+
+      if (!resolved) {
         ctx.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
+      }
+
+      // Notify all OTHER clients that this permission was resolved so they dismiss their prompts
+      if (resolved) {
+        ctx.broadcast(
+          { type: 'permission_resolved', requestId, decision, sessionId: originSessionId },
+          (c) => c.id !== client.id
+        )
       }
       break
     }
