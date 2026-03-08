@@ -1,8 +1,9 @@
 /**
- * Modal, CreateSessionModal, Toast tests (#1164)
+ * Modal and CreateSessionModal tests (#1164)
+ * Toast tests are in Toast.test.tsx
  */
-import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 
 vi.mock('../hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
@@ -15,7 +16,6 @@ vi.mock('../store/connection', () => ({
 
 import { Modal } from './Modal'
 import { CreateSessionModal } from './CreateSessionModal'
-import { Toast, type ToastItem } from './Toast'
 
 afterEach(cleanup)
 
@@ -238,89 +238,5 @@ describe('CreateSessionModal', () => {
     )
     const nameInput = screen.getByPlaceholderText('Session name') as HTMLInputElement
     expect(nameInput.value).toBe('')
-  })
-})
-
-describe('Toast', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
-  it('renders toast messages', () => {
-    const items: ToastItem[] = [
-      { id: '1', message: 'Error occurred' },
-    ]
-    render(<Toast items={items} onDismiss={vi.fn()} />)
-    expect(screen.getByText('Error occurred')).toBeInTheDocument()
-  })
-
-  it('renders multiple toasts', () => {
-    const items: ToastItem[] = [
-      { id: '1', message: 'First' },
-      { id: '2', message: 'Second' },
-    ]
-    render(<Toast items={items} onDismiss={vi.fn()} />)
-    expect(screen.getByText('First')).toBeInTheDocument()
-    expect(screen.getByText('Second')).toBeInTheDocument()
-  })
-
-  it('calls onDismiss when close button clicked', () => {
-    const onDismiss = vi.fn()
-    const items: ToastItem[] = [{ id: '1', message: 'Closable toast' }]
-    render(<Toast items={items} onDismiss={onDismiss} />)
-    fireEvent.click(screen.getByTestId('toast-close-1'))
-    expect(onDismiss).toHaveBeenCalledWith('1')
-  })
-
-  it('auto-dismisses after 5 seconds', () => {
-    const onDismiss = vi.fn()
-    const items: ToastItem[] = [{ id: '1', message: 'Auto dismiss' }]
-    render(<Toast items={items} onDismiss={onDismiss} />)
-
-    act(() => { vi.advanceTimersByTime(5000) })
-    expect(onDismiss).toHaveBeenCalledWith('1')
-  })
-
-  it('renders empty when no items', () => {
-    const { container } = render(<Toast items={[]} onDismiss={vi.fn()} />)
-    expect(container.querySelector('[data-testid="toast-container"]')).toBeInTheDocument()
-    expect(container.querySelectorAll('.toast').length).toBe(0)
-  })
-
-  it('has alert role on each toast item', () => {
-    const items: ToastItem[] = [
-      { id: '1', message: 'First' },
-      { id: '2', message: 'Second' },
-    ]
-    render(<Toast items={items} onDismiss={vi.fn()} />)
-    expect(screen.getAllByRole('alert')).toHaveLength(2)
-  })
-
-  it('container has no role and uses aria-live="assertive" (#1177)', () => {
-    const items: ToastItem[] = [{ id: '1', message: 'Alert' }]
-    const { container } = render(<Toast items={items} onDismiss={vi.fn()} />)
-    const toastContainer = container.querySelector('[data-testid="toast-container"]')!
-    // Container should have no role (items carry their own role="alert")
-    expect(toastContainer).not.toHaveAttribute('role')
-    // Container is a stable live region for reliable screen reader support
-    expect(toastContainer).toHaveAttribute('aria-live', 'assertive')
-  })
-
-  it('clears auto-dismiss timer when manually closed (#1187)', () => {
-    const onDismiss = vi.fn()
-    const items: ToastItem[] = [{ id: '1', message: 'Manual close' }]
-    render(<Toast items={items} onDismiss={onDismiss} />)
-
-    // Manually close the toast
-    fireEvent.click(screen.getByTestId('toast-close-1'))
-    expect(onDismiss).toHaveBeenCalledTimes(1)
-
-    // Advance past auto-dismiss timeout — should NOT trigger a second call
-    act(() => { vi.advanceTimersByTime(6000) })
-    expect(onDismiss).toHaveBeenCalledTimes(1)
   })
 })

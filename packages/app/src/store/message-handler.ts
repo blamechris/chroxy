@@ -930,8 +930,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'user_input': {
       const parsed = parseUserInputMessage(msg as Record<string, unknown>, get().myClientId, get().activeSessionId);
       if (!parsed) break;
-      const { sessionId: parsedSessionId, ...messageFields } = parsed;
-      const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...messageFields };
+      const { sessionId: parsedSessionId, ...parsedMsg } = parsed;
+      const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...parsedMsg };
       updateSession(parsedSessionId, (ss) => ({
         messages: [...ss.messages, uiMsg],
       }));
