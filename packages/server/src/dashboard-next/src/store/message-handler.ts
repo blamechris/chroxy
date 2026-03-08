@@ -12,7 +12,7 @@
  * Ported from packages/app/src/store/message-handler.ts for the web dashboard.
  * Connection persistence uses @chroxy/store-core adapters for DI.
  */
-import { consoleAlert, noopHaptic, noopPush, createStorageAdapter, type PlatformAdapters, type StorageAdapter } from '@chroxy/store-core'
+import { consoleAlert, noopHaptic, noopPush, createStorageAdapter, parseUserInputMessage, type PlatformAdapters, type StorageAdapter } from '@chroxy/store-core'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -859,17 +859,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'user_input': {
       // Server broadcasts user_input to all OTHER clients when someone sends a message.
       // Skip if it came from this client (we already show it via optimistic UI).
-      const senderClientId = msg.clientId as string | undefined;
-      if (senderClientId && senderClientId === get().myClientId) break;
-      const uiTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (!uiTargetId) break;
-      const uiMsg: ChatMessage = {
-        id: nextMessageId('user_input'),
-        type: 'user_input',
-        content: (msg.text as string) || '',
-        timestamp: (msg.timestamp as number) || Date.now(),
-      };
-      updateSession(uiTargetId, (ss) => ({
+      const parsed = parseUserInputMessage(msg as Record<string, unknown>, get().myClientId, get().activeSessionId);
+      if (!parsed) break;
+      const { sessionId: parsedSessionId, ...messageFields } = parsed;
+      const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...messageFields };
+      updateSession(parsedSessionId, (ss) => ({
         messages: [...ss.messages, uiMsg],
       }));
       break;
