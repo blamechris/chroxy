@@ -21,11 +21,6 @@ import {
   _resetForTesting,
 } from './persistence'
 
-// We need to flush debounced persisters — use a small helper
-// Terminal persister has 1000ms delay, so wait 1100ms
-function flushPersisters(): Promise<void> {
-  return new Promise(r => setTimeout(r, 1100))
-}
 
 beforeEach(() => {
   localStorage.clear()
@@ -52,14 +47,14 @@ describe('server-scoped persistence (#1647)', () => {
     expect(stateB.activeSessionId).toBe('session-2')
   })
 
-  it('isolates session messages by server', async () => {
+  it('isolates session messages by server', () => {
     setServerScope('srv_A')
     persistSessionMessages('s1', [{ id: 'msg-1', type: 'user', content: 'hello A' } as never])
-    await flushPersisters()
+    flushPendingWrites()
 
     setServerScope('srv_B')
     persistSessionMessages('s1', [{ id: 'msg-2', type: 'user', content: 'hello B' } as never])
-    await flushPersisters()
+    flushPendingWrites()
 
     setServerScope('srv_A')
     const msgsA = loadSessionMessages('s1')
@@ -72,14 +67,14 @@ describe('server-scoped persistence (#1647)', () => {
     expect(msgsB[0]!.content).toBe('hello B')
   })
 
-  it('isolates session list by server', async () => {
+  it('isolates session list by server', () => {
     setServerScope('srv_A')
     persistSessionList([{ id: 's1', name: 'Session A' } as never])
-    await flushPersisters()
+    flushPendingWrites()
 
     setServerScope('srv_B')
     persistSessionList([{ id: 's2', name: 'Session B' } as never])
-    await flushPersisters()
+    flushPendingWrites()
 
     setServerScope('srv_A')
     const listA = loadSessionList()
@@ -136,14 +131,14 @@ describe('server-scoped persistence (#1647)', () => {
 })
 
 describe('debounce race condition (#1689)', () => {
-  it('debounced terminal buffer writes land in the correct scope', async () => {
+  it('debounced terminal buffer writes land in the correct scope', () => {
     setServerScope('srv_A')
     persistTerminalBuffer('buffer-for-A')
 
-    // Switch scope before debounce fires
+    // Switch scope before debounce fires — setServerScope flushes pending writes
     setServerScope('srv_B')
     persistTerminalBuffer('buffer-for-B')
-    await flushPersisters()
+    flushPendingWrites()
 
     // Server A should have its buffer
     setServerScope('srv_A')
@@ -156,14 +151,14 @@ describe('debounce race condition (#1689)', () => {
     expect(stateB.terminalBuffer).toBe('buffer-for-B')
   })
 
-  it('debounced session list writes land in the correct scope', async () => {
+  it('debounced session list writes land in the correct scope', () => {
     setServerScope('srv_A')
     persistSessionList([{ id: 's1', name: 'List A' } as never])
 
-    // Switch scope before debounce fires
+    // Switch scope before debounce fires — setServerScope flushes pending writes
     setServerScope('srv_B')
     persistSessionList([{ id: 's2', name: 'List B' } as never])
-    await flushPersisters()
+    flushPendingWrites()
 
     setServerScope('srv_A')
     const listA = loadSessionList()
@@ -176,14 +171,14 @@ describe('debounce race condition (#1689)', () => {
     expect((listB[0] as { name: string }).name).toBe('List B')
   })
 
-  it('debounced message writes land in the correct scope', async () => {
+  it('debounced message writes land in the correct scope', () => {
     setServerScope('srv_A')
     persistSessionMessages('s1', [{ id: 'msg-A', type: 'user', content: 'A' } as never])
 
-    // Switch scope before debounce fires
+    // Switch scope before debounce fires — setServerScope flushes pending writes
     setServerScope('srv_B')
     persistSessionMessages('s1', [{ id: 'msg-B', type: 'user', content: 'B' } as never])
-    await flushPersisters()
+    flushPendingWrites()
 
     setServerScope('srv_A')
     const msgsA = loadSessionMessages('s1')

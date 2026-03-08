@@ -1357,10 +1357,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (get().connectionPhase !== 'disconnected') {
       get().disconnect();
     }
-    // Clear in-memory state only — persisted data stays scoped to old server
-    get()._resetSessionMemory();
-    // Switch persistence scope to new server before connecting
+    // Switch persistence scope first — flushes pending old-scope writes, then
+    // resets in-memory state so subscriber side-effects target the new scope
     setServerScope(serverId);
+    get()._resetSessionMemory();
     set({ activeServerId: serverId, userDisconnected: false });
     // Restore persisted data for the new server
     const persisted = loadPersistedState();
