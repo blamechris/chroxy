@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, mock } from 'node:test'
+import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   validateAttachments,
@@ -6,9 +6,6 @@ import {
   PERMISSION_MODES,
   ALLOWED_PERMISSION_MODE_IDS,
   MAX_ATTACHMENT_COUNT,
-  MAX_IMAGE_SIZE,
-  MAX_DOCUMENT_SIZE,
-  ALLOWED_IMAGE_TYPES,
 } from '../src/ws-message-handlers.js'
 import { createMockSession } from './test-helpers.js'
 
@@ -19,7 +16,7 @@ import { createMockSession } from './test-helpers.js'
  * - validateAttachments pure function (no IO)
  * - handleSessionMessage: input, interrupt, set_model, set_permission_mode,
  *   permission_response, user_question_response
- * - Session management: list_sessions, switch_session, destroy_session, rename_session
+ * - Session management: destroy_session, rename_session
  */
 
 // ---- Test fixtures ----
@@ -30,6 +27,7 @@ function makeSession(overrides = {}) {
 
 function makeCtx(overrides = {}) {
   const sessionMap = new Map()
+  const { sessionManager: smOverrides, ...restOverrides } = overrides
   return {
     sessionManager: {
       getSession: mock.fn((id) => sessionMap.get(id) ?? null),
@@ -39,10 +37,10 @@ function makeCtx(overrides = {}) {
       getHistoryCount: mock.fn(() => 5),
       resumeBudget: mock.fn(),
       destroySession: mock.fn(),
-      renameSession: mock.fn((id, name) => sessionMap.has(id)),
+      renameSession: mock.fn((id) => sessionMap.has(id)),
       listSessions: mock.fn(() => ['sess-1', 'sess-2']),  // 2 sessions so destroy is allowed
       firstSessionId: 'sess-2',
-      ...overrides.sessionManager,
+      ...smOverrides,
     },
     send: mock.fn(),
     broadcast: mock.fn(),
@@ -55,9 +53,13 @@ function makeCtx(overrides = {}) {
     },
     permissionSessionMap: new Map(),
     questionSessionMap: new Map(),
+    pendingPermissions: new Map(),
+    permissions: {
+      resolvePermission: mock.fn(),
+    },
     clients: new Map(),
     _sessions: sessionMap,  // Helper to add sessions directly
-    ...overrides,
+    ...restOverrides,
   }
 }
 
@@ -162,8 +164,6 @@ describe('handleSessionMessage', () => {
 
     it('sends session_error when budget is paused', async () => {
       const ctx = makeCtx({ sessionManager: { isBudgetPaused: mock.fn(() => true) } })
-      // Need getSession to return something
-      ctx.sessionManager.getSession = mock.fn(() => makeSession())
       const client = makeClient({ activeSessionId: 'sess-1' })
       addSession(ctx, 'sess-1')
       await handleSessionMessage(WS, client, { type: 'input', data: 'hi' }, ctx)
