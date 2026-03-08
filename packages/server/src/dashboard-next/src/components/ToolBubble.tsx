@@ -21,9 +21,20 @@ function getInputSummary(input: ToolBubbleProps['input']): string {
   return summary.slice(0, 100)
 }
 
+const capitalize = (word: string) => (word ? word.charAt(0).toUpperCase() + word.slice(1) : '')
 
 function formatToolName(name: string): string {
-  return name.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+  const MCP_PREFIX = 'mcp__'
+  if (name.startsWith(MCP_PREFIX)) {
+    const withoutPrefix = name.slice(MCP_PREFIX.length)
+    const sep = withoutPrefix.indexOf('__')
+    if (sep > 0) {
+      const server = withoutPrefix.slice(0, sep).split('_').filter(Boolean).map(capitalize).join(' ')
+      const tool = withoutPrefix.slice(sep + 2).split('_').filter(Boolean).map(capitalize).join(' ')
+      return tool ? `${server}: ${tool}` : server
+    }
+  }
+  return name.split('_').filter(Boolean).map(capitalize).join(' ')
 }
 
 export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubbleProps) {
