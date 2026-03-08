@@ -122,6 +122,7 @@ Store files:
 
 | Type | Purpose |
 |------|---------|
+| `add_repo` | Add a repo to the server's configured repo list |
 | `auth` | Authenticate with server token and device info |
 | `browse_files` | Request file/directory listing within project |
 | `close_dev_preview` | Close a dev server preview tunnel |
@@ -144,6 +145,8 @@ Store files:
 | `list_checkpoints` | Request list of checkpoints for session |
 | `list_conversations` | Request scan of conversation history files |
 | `list_directory` | Request home directory listing for browsing |
+| `list_files` | Recursive file search within session CWD (supports fuzzy query) |
+| `list_repos` | Request list of configured repos |
 | `list_sessions` | Request list of all sessions |
 | `list_slash_commands` | Request available slash command definitions |
 | `list_web_tasks` | Request list of cloud web tasks |
@@ -151,6 +154,7 @@ Store files:
 | `ping` | Client heartbeat for connection keep-alive |
 | `read_file` | Request file content within project |
 | `register_push_token` | Register Expo push token for notifications |
+| `remove_repo` | Remove a repo from the server's configured repo list |
 | `rename_session` | Rename existing session by ID |
 | `request_cost_summary` | Request per-session cost breakdown |
 | `request_full_history` | Request complete JSONL history for session |
@@ -221,6 +225,7 @@ Store files:
 | `plan_started` | Claude entered plan mode |
 | `pong` | Heartbeat response to client ping |
 | `primary_changed` | Last-writer-wins primary client changed |
+| `repo_list` | Updated repo list in response to `list_repos`, `add_repo`, or `remove_repo` |
 | `result` | Query stats (cost/duration/tokens) |
 | `search_results` | Search results for a `search_conversations` query |
 | `server_error` | Server-side error forwarded to app |
@@ -256,6 +261,9 @@ Store files:
 
 ### Protocol Details
 
+- `add_repo` takes `{ path, name? }` — `path` must be within the user's home directory; `name` defaults to the directory basename. `remove_repo` takes `{ path }`. Both respond with `repo_list`.
+- `list_files` takes `{ sessionId?, query? }` — performs a recursive walk of the session CWD with optional fuzzy filtering by `query`; responds with `file_listing`.
+- `list_repos`/`add_repo`/`remove_repo` all respond with a `repo_list` message: `{ type: 'repo_list', repos: [{ path, name, activeSessions }] }`.
 - `list_directory` requests a directory listing; `directory_listing` returns sorted non-hidden subdirectories (or error)
 - `server_shutdown` sent before server goes down; `reason` is `'restart'` (coming back) or `'shutdown'` (not coming back); `restartEtaMs` is estimated ms until server is available (0 for permanent shutdown); supervisor standby health check also includes `restartEtaMs` for crash recovery
 - `server_status` for non-error updates; `server_error` for error conditions
