@@ -1,7 +1,7 @@
 /**
  * Toast component tests (#1723)
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import { Toast, type ToastItem } from './Toast'
 
@@ -21,10 +21,20 @@ describe('Toast', () => {
     expect(screen.getByTestId('toast-container')).toHaveAttribute('aria-live', 'assertive')
   })
 
+  it('container has no role (items carry role="alert")', () => {
+    render(<Toast items={makeItems('Alert')} onDismiss={vi.fn()} />)
+    expect(screen.getByTestId('toast-container')).not.toHaveAttribute('role')
+  })
+
   it('renders each toast message', () => {
     render(<Toast items={makeItems('Error one', 'Error two')} onDismiss={vi.fn()} />)
     expect(screen.getByText('Error one')).toBeInTheDocument()
     expect(screen.getByText('Error two')).toBeInTheDocument()
+  })
+
+  it('each toast item has role="alert"', () => {
+    render(<Toast items={makeItems('First', 'Second')} onDismiss={vi.fn()} />)
+    expect(screen.getAllByRole('alert')).toHaveLength(2)
   })
 
   it('renders close button for each toast', () => {
@@ -39,27 +49,38 @@ describe('Toast', () => {
     expect(onDismiss).toHaveBeenCalledWith('toast-0')
   })
 
-  it('renders nothing when items array is empty', () => {
+  it('renders no toasts when items array is empty', () => {
     const { container } = render(<Toast items={[]} onDismiss={vi.fn()} />)
     expect(container.querySelector('.toast')).toBeNull()
   })
 
-  it('auto-dismisses after 5 seconds', async () => {
-    vi.useFakeTimers()
-    const onDismiss = vi.fn()
-    render(<Toast items={makeItems('Auto dismiss')} onDismiss={onDismiss} />)
-    expect(onDismiss).not.toHaveBeenCalled()
-    await act(async () => { vi.advanceTimersByTime(5000) })
-    expect(onDismiss).toHaveBeenCalledWith('toast-0')
-    vi.useRealTimers()
-  })
+  describe('timer behaviour', () => {
+    beforeEach(() => { vi.useFakeTimers() })
+    afterEach(() => { vi.runOnlyPendingTimers(); vi.useRealTimers() })
 
-  it('does not auto-dismiss before 5 seconds', async () => {
-    vi.useFakeTimers()
-    const onDismiss = vi.fn()
-    render(<Toast items={makeItems('Not yet')} onDismiss={onDismiss} />)
-    await act(async () => { vi.advanceTimersByTime(4999) })
-    expect(onDismiss).not.toHaveBeenCalled()
-    vi.useRealTimers()
+    it('auto-dismisses after 5 seconds', async () => {
+      const onDismiss = vi.fn()
+      render(<Toast items={makeItems('Auto dismiss')} onDismiss={onDismiss} />)
+      expect(onDismiss).not.toHaveBeenCalled()
+      await act(async () => { vi.advanceTimersByTime(5000) })
+      expect(onDismiss).toHaveBeenCalledWith('toast-0')
+    })
+
+    it('does not auto-dismiss before 5 seconds', async () => {
+      const onDismiss = vi.fn()
+      render(<Toast items={makeItems('Not yet')} onDismiss={onDismiss} />)
+      await act(async () => { vi.advanceTimersByTime(4999) })
+      expect(onDismiss).not.toHaveBeenCalled()
+    })
+
+    it('clears auto-dismiss timer when manually closed', async () => {
+      const onDismiss = vi.fn()
+      const items: ToastItem[] = [{ id: '1', message: 'Manual close' }]
+      render(<Toast items={items} onDismiss={onDismiss} />)
+      fireEvent.click(screen.getByTestId('toast-close-1'))
+      expect(onDismiss).toHaveBeenCalledTimes(1)
+      await act(async () => { vi.advanceTimersByTime(6000) })
+      expect(onDismiss).toHaveBeenCalledTimes(1)
+    })
   })
 })

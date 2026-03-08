@@ -1,10 +1,10 @@
 /**
- * SessionBar + StatusBar tests (#1163)
+ * SessionBar tests (#1163)
+ * StatusBar tests are in StatusBar.test.tsx
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import { SessionBar, type SessionTabData } from './SessionBar'
-import { StatusBar } from './StatusBar'
 
 afterEach(cleanup)
 
@@ -284,63 +284,5 @@ describe('SessionBar', () => {
     )
     const badge = screen.getByText('CLI')
     expect(badge).toHaveAttribute('title', 'claude-cli')
-  })
-})
-
-describe('StatusBar', () => {
-  it('renders model name', () => {
-    render(<StatusBar model="claude-opus-4-6" />)
-    expect(screen.getByText('claude-opus-4-6')).toBeInTheDocument()
-  })
-
-  it('renders formatted cost', () => {
-    render(<StatusBar cost={0.1234} />)
-    expect(screen.getByText('$0.1234')).toBeInTheDocument()
-  })
-
-  it('renders context info', () => {
-    render(<StatusBar context="42k / 200k tokens" />)
-    expect(screen.getByText('42k / 200k tokens')).toBeInTheDocument()
-  })
-
-  it('shows busy indicator when busy', () => {
-    render(<StatusBar isBusy />)
-    expect(screen.getByTestId('busy-indicator')).toBeInTheDocument()
-  })
-
-  it('hides busy indicator when not busy', () => {
-    render(<StatusBar />)
-    expect(screen.queryByTestId('busy-indicator')).not.toBeInTheDocument()
-  })
-
-  it('shows agent count badge', () => {
-    render(<StatusBar agentCount={3} />)
-    expect(screen.getByText('3 agents')).toBeInTheDocument()
-  })
-
-  it('shows singular agent label for 1 agent', () => {
-    render(<StatusBar agentCount={1} />)
-    expect(screen.getByText('1 agent')).toBeInTheDocument()
-  })
-
-  it('hides agent badge when count is 0', () => {
-    render(<StatusBar agentCount={0} />)
-    expect(screen.queryByTestId('agent-badge')).not.toBeInTheDocument()
-  })
-
-  it('shows $0.0000 when cost is zero', () => {
-    render(<StatusBar cost={0} />)
-    expect(screen.getByText('$0.0000')).toBeInTheDocument()
-  })
-
-  it('hides cost element when cost is undefined', () => {
-    const { container } = render(<StatusBar />)
-    expect(container.querySelector('.status-cost')).toBeNull()
-  })
-
-  it('renders status bar container when no props provided', () => {
-    const { container } = render(<StatusBar />)
-    const bar = container.querySelector('[data-testid="status-bar"]')
-    expect(bar).toBeInTheDocument()
   })
 })

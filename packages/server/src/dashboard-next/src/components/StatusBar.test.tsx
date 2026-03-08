@@ -18,9 +18,9 @@ describe('StatusBar', () => {
     expect(screen.getByText('claude-sonnet')).toBeInTheDocument()
   })
 
-  it('does not show model when not provided', () => {
-    render(<StatusBar />)
-    expect(screen.queryByText(/claude/)).not.toBeInTheDocument()
+  it('does not show model element when not provided', () => {
+    const { container } = render(<StatusBar />)
+    expect(container.querySelector('.status-model')).toBeNull()
   })
 
   it('shows formatted cost with 4 decimal places', () => {
@@ -28,9 +28,14 @@ describe('StatusBar', () => {
     expect(screen.getByText('$0.0123')).toBeInTheDocument()
   })
 
-  it('does not show cost when not provided', () => {
-    render(<StatusBar />)
-    expect(screen.queryByText(/\$/)).not.toBeInTheDocument()
+  it('shows $0.0000 when cost is zero', () => {
+    render(<StatusBar cost={0} />)
+    expect(screen.getByText('$0.0000')).toBeInTheDocument()
+  })
+
+  it('does not show cost element when not provided', () => {
+    const { container } = render(<StatusBar />)
+    expect(container.querySelector('.status-cost')).toBeNull()
   })
 
   it('shows context when provided', () => {
