@@ -144,16 +144,16 @@ export class Supervisor extends EventEmitter {
 
   async start() {
     if (!this._apiToken) {
-      console.error('[!] No API token configured. Run \'npx chroxy init\' first.')
+      process.stderr.write('[!] No API token configured. Run \'npx chroxy init\' first.\n')
       this._exit(1)
       return
     }
 
-    console.log('')
-    console.log('╔════════════════════════════════════════╗')
-    console.log('║   Chroxy Supervisor v0.1.0              ║')
-    console.log('╚════════════════════════════════════════╝')
-    console.log('')
+    process.stdout.write('\n')
+    process.stdout.write('╔════════════════════════════════════════╗\n')
+    process.stdout.write('║   Chroxy Supervisor v0.1.0              ║\n')
+    process.stdout.write('╚════════════════════════════════════════╝\n')
+    process.stdout.write('\n')
 
     // 1. Start the tunnel (supervisor owns it)
     this._tunnel = this._createTunnel()
@@ -168,11 +168,11 @@ export class Supervisor extends EventEmitter {
       if (newWsUrl !== this._currentWsUrl) {
         this._currentWsUrl = newWsUrl
         const connectionUrl = `chroxy://${newWsUrl.replace('wss://', '')}?token=${this._apiToken}`
-        console.log('\nNew tunnel URL:\n')
+        process.stdout.write('\nNew tunnel URL:\n\n')
         this._displayQr(connectionUrl)
-        console.log(`\n   URL:   ${newWsUrl}`)
-        console.log(`   Token: ${this._apiToken}`)
-        console.log('')
+        process.stdout.write(`\n   URL:   ${newWsUrl}\n`)
+        process.stdout.write(`   Token: ${this._apiToken}\n`)
+        process.stdout.write('\n')
 
         // Update connection info file with new tunnel URL
         writeConnectionInfo({
@@ -200,14 +200,14 @@ export class Supervisor extends EventEmitter {
     const modeLabel = tunnelArg ? `${tunnelArg.provider}:${tunnelArg.mode}` : this._tunnelMode
 
     this._log.info(`${modeLabel} ready`)
-    console.log('📱 Scan this QR code with the Chroxy app:\n')
+    process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
     this._displayQr(connectionUrl)
-    console.log(`\nOr connect manually:`)
-    console.log(`   URL:   ${wsUrl}`)
-    console.log(`   Token: ${this._apiToken}`)
+    process.stdout.write('\nOr connect manually:\n')
+    process.stdout.write(`   URL:   ${wsUrl}\n`)
+    process.stdout.write(`   Token: ${this._apiToken}\n`)
     const dashboardBase = httpUrl || `http://localhost:${this._port}`
-    console.log(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard?token=${this._apiToken}`)
-    console.log('')
+    process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard?token=${this._apiToken}\n`)
+    process.stdout.write('\n')
 
     // 3b. Write connection info file for programmatic access
     writeConnectionInfo({

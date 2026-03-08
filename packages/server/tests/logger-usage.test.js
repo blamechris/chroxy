@@ -1,15 +1,15 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /**
- * Verifies ws-server.js and sdk-session.js use the structured logger
- * (logger.js) instead of calling console.* directly.
+ * Verifies that every src/*.js file that imports createLogger uses the
+ * structured logger exclusively — no direct console.* calls.
  *
- * RED: both files currently have direct console.* calls and no logger import.
- * GREEN: after refactor, 0 direct calls, both import createLogger.
+ * Files are discovered dynamically: any file added to src/ that imports
+ * createLogger is automatically covered without manual test updates.
  */
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -29,36 +29,43 @@ function countConsoleCalls(source) {
   return (stripped.match(/\bconsole\.(log|warn|error|debug|info)\(/g) || []).length
 }
 
+/** Discover all src/*.js files that import createLogger (excluding logger.js itself). */
+function discoverLoggerFiles() {
+  const files = readdirSync(SRC).filter(f => f.endsWith('.js') && f !== 'logger.js')
+  return files.filter(f => {
+    try {
+      const src = readSrc(f)
+      return src.includes("from './logger.js'") && src.includes('createLogger')
+    } catch {
+      return false
+    }
+  })
+}
+
 describe('logger usage', () => {
-  describe('ws-server.js', () => {
-    it('imports createLogger from logger.js', () => {
-      const src = readSrc('ws-server.js')
-      assert.ok(
-        src.includes("from './logger.js'"),
-        'ws-server.js must import from ./logger.js'
-      )
-    })
+  const loggerFiles = discoverLoggerFiles()
 
-    it('has no direct console.* calls', () => {
-      const src = readSrc('ws-server.js')
-      const count = countConsoleCalls(src)
-      assert.equal(count, 0, `ws-server.js has ${count} direct console.* call(s) — use logger instead`)
-    })
+  // Sanity: always expect at least the two originally-migrated files
+  it('discovers at least ws-server.js and sdk-session.js', () => {
+    assert.ok(loggerFiles.includes('ws-server.js'), 'ws-server.js must be discovered')
+    assert.ok(loggerFiles.includes('sdk-session.js'), 'sdk-session.js must be discovered')
   })
 
-  describe('sdk-session.js', () => {
-    it('imports createLogger from logger.js', () => {
-      const src = readSrc('sdk-session.js')
-      assert.ok(
-        src.includes("from './logger.js'"),
-        'sdk-session.js must import from ./logger.js'
-      )
-    })
+  for (const filename of loggerFiles) {
+    describe(filename, () => {
+      it('imports createLogger from logger.js', () => {
+        const src = readSrc(filename)
+        assert.ok(
+          src.includes("from './logger.js'"),
+          `${filename} must import from ./logger.js`
+        )
+      })
 
-    it('has no direct console.* calls', () => {
-      const src = readSrc('sdk-session.js')
-      const count = countConsoleCalls(src)
-      assert.equal(count, 0, `sdk-session.js has ${count} direct console.* call(s) — use logger instead`)
+      it('has no direct console.* calls', () => {
+        const src = readSrc(filename)
+        const count = countConsoleCalls(src)
+        assert.equal(count, 0, `${filename} has ${count} direct console.* call(s) — use logger instead`)
+      })
     })
-  })
+  }
 })
