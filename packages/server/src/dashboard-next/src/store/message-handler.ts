@@ -861,8 +861,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Skip if it came from this client (we already show it via optimistic UI).
       const parsed = parseUserInputMessage(msg as Record<string, unknown>, get().myClientId, get().activeSessionId);
       if (!parsed) break;
-      const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...parsed };
-      updateSession(parsed.sessionId, (ss) => ({
+      const { sessionId: parsedSessionId, ...messageFields } = parsed;
+      const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...messageFields };
+      updateSession(parsedSessionId, (ss) => ({
         messages: [...ss.messages, uiMsg],
       }));
       break;

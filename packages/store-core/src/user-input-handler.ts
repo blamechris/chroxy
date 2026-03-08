@@ -41,6 +41,6 @@ export function parseUserInputMessage(
     sessionId: targetSessionId,
     type: 'user_input',
     content: msg.text || '',
-    timestamp: msg.timestamp || Date.now(),
+    timestamp: msg.timestamp ?? Date.now(),
   }
 }
