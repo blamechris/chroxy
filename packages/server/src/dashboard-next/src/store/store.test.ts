@@ -324,6 +324,56 @@ describe('useConnectionStore', () => {
     expect(typeof state.clearPlanState).toBe('function');
   });
 
+  it('switchSession updates activeSessionId even without cached state', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const makeSession = (id: string) => ({
+      sessionId: id, name: id, cwd: '/tmp', type: 'cli' as const,
+      hasTerminal: false, model: null, permissionMode: null, isBusy: false,
+      createdAt: 0, conversationId: null,
+    });
+
+    useConnectionStore.setState({
+      sessions: [makeSession('session-a'), makeSession('session-b')],
+      activeSessionId: 'session-a',
+      sessionStates: {},
+    });
+
+    useConnectionStore.getState().switchSession('session-b');
+
+    expect(useConnectionStore.getState().activeSessionId).toBe('session-b');
+
+    // Cleanup
+    useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, messages: [] });
+  });
+
+  it('switchSession uses cached messages when state exists', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const makeSession = (id: string) => ({
+      sessionId: id, name: id, cwd: '/tmp', type: 'cli' as const,
+      hasTerminal: false, model: null, permissionMode: null, isBusy: false,
+      createdAt: 0, conversationId: null,
+    });
+    const cachedMsg = { id: 'msg-1', type: 'response' as const, content: 'cached', timestamp: 1 };
+
+    useConnectionStore.setState({
+      sessions: [makeSession('session-a'), makeSession('session-b')],
+      activeSessionId: 'session-a',
+      sessionStates: {
+        'session-b': { ...createEmptySessionState(), messages: [cachedMsg] },
+      },
+    });
+
+    useConnectionStore.getState().switchSession('session-b');
+
+    expect(useConnectionStore.getState().activeSessionId).toBe('session-b');
+    expect(useConnectionStore.getState().messages).toEqual([cachedMsg]);
+
+    // Cleanup
+    useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, messages: [] });
+  });
+
   it('addMessage appends to messages array', async () => {
     const { useConnectionStore } = await import('./connection');
     const msg: ChatMessage = {

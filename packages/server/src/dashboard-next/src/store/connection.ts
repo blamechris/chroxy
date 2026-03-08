@@ -1173,7 +1173,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         sessionNotifications: filteredNotifications,
       });
     } else {
-      set({ sessionNotifications: filteredNotifications });
+      // No cached state yet — still switch the active session so the UI responds.
+      // Messages will arrive from the server via session_switched/stream_start once the
+      // switch_session WS message is processed.
+      set({ activeSessionId: sessionId, messages: [], sessionNotifications: filteredNotifications });
     }
 
     if (socket && socket.readyState === WebSocket.OPEN) {
