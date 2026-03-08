@@ -604,7 +604,9 @@ export interface ConnectionState {
   addServer: (name: string, wsUrl: string, token: string) => ServerEntry;
   removeServer: (serverId: string) => void;
   updateServer: (serverId: string, patch: Partial<Pick<ServerEntry, 'name' | 'wsUrl' | 'token'>>) => void;
+  /** Switch to a different server — disconnects, clears session, connects fresh. */
   switchServer: (serverId: string) => void;
+  /** Reconnect to a server without clearing session state (auto-reconnect/startup). */
   connectToServer: (serverId: string) => void;
 
   // Convenience accessor
