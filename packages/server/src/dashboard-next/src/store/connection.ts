@@ -113,6 +113,7 @@ import {
   persistActiveServer,
   loadPersistedActiveServer,
   clearPersistedState,
+  clearPersistedTerminalBuffer,
   setServerScope,
 } from './persistence';
 
@@ -757,6 +758,30 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
+  /** Reset in-memory session state without clearing persisted data.
+   *  Used by switchServer to preserve the old server's cached data. */
+  _resetSessionMemory: () => {
+    setLastConnectedUrl(null);
+    set({
+      messages: [],
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+      sessions: [],
+      activeSessionId: null,
+      sessionStates: {},
+      wsUrl: null,
+      apiToken: null,
+      serverMode: null,
+      sessionCwd: null,
+      defaultCwd: null,
+      serverVersion: null,
+      latestVersion: null,
+      serverCommit: null,
+      serverProtocolVersion: null,
+      viewingCachedSession: false,
+    });
+  },
+
   setViewMode: (mode) => {
     set({ viewMode: mode });
     persistViewMode(mode);
@@ -1332,8 +1357,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (get().connectionPhase !== 'disconnected') {
       get().disconnect();
     }
-    // Clear in-memory session state (persisted data stays scoped to old server)
-    get().forgetSession();
+    // Clear in-memory state only — persisted data stays scoped to old server
+    get()._resetSessionMemory();
     // Switch persistence scope to new server before connecting
     setServerScope(serverId);
     set({ activeServerId: serverId, userDisconnected: false });
@@ -1435,7 +1460,7 @@ useConnectionStore.subscribe((state) => {
       persistTerminalBuffer(state.terminalBuffer);
     } else {
       // Clear persisted terminal buffer when buffer is emptied
-      try { localStorage.removeItem('chroxy_persist_terminal_buffer'); } catch { /* ignore */ }
+      clearPersistedTerminalBuffer();
     }
   }
 });
