@@ -63,6 +63,7 @@ describe('CodexSession', () => {
 
   it('destroy resets isReady and isRunning', async () => {
     const session = new CodexSession({ cwd: '/tmp' })
+    session.on('error', () => {}) // Prevent unhandled error if codex not installed
     session.start()
     await new Promise(r => setTimeout(r, 50))
 
