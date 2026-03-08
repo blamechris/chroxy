@@ -2209,6 +2209,7 @@
 .provider-select {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -2228,6 +2229,13 @@
   color: var(--text-secondary);
   font-size: 10px;
   letter-spacing: 0.02em;
+}
+
+.provider-billing-hint {
+  width: 100%;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: -4px;
 }
 
 .provider-select label {

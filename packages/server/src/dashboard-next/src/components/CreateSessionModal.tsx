@@ -68,6 +68,14 @@ const PROVIDER_LABELS: Record<string, string> = {
   'gemini': 'Gemini CLI',
 }
 
+/** Billing context per provider — helps users understand cost implications. */
+const PROVIDER_BILLING: Record<string, string> = {
+  'claude-sdk': 'Uses Anthropic API credits',
+  'claude-cli': 'Uses your Claude subscription',
+  'codex': 'Uses OpenAI API credits',
+  'gemini': 'Uses Google API credits',
+}
+
 /** Short labels for capability badges. */
 const CAPABILITY_BADGES: [keyof import('../store/types').ProviderCapabilities, string][] = [
   ['resume', 'Resume'],
@@ -431,6 +439,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 </>
             }
           </select>
+          {PROVIDER_BILLING[provider] && (
+            <span className="provider-billing-hint" data-testid="provider-billing-hint">
+              {PROVIDER_BILLING[provider]}
+            </span>
+          )}
         </div>
         {availableProviders.length > 0 && (() => {
           const selected = availableProviders.find(p => p.name === provider)
