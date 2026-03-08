@@ -18,11 +18,13 @@ import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
+import { createLogger } from './logger.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
 const SERVER_VERSION = packageJson.version
+const log = createLogger('ws')
 
 /**
  * Protocol version — controls client/server compatibility negotiation.
@@ -297,7 +299,7 @@ export class WsServer {
         try {
           this._checkpointManager.clearCheckpoints(sessionId)
         } catch (err) {
-          console.warn(`[ws] Failed to clear checkpoints for destroyed session ${sessionId}: ${err.message}`)
+          log.warn(`Failed to clear checkpoints for destroyed session ${sessionId}: ${err.message}`)
         }
       })
     }
@@ -336,7 +338,7 @@ export class WsServer {
         // Notify clients that a rotation occurred — do NOT broadcast the new token.
         // Clients must re-authenticate (re-scan QR or re-enter token).
         this._broadcast({ type: 'token_rotated', expiresAt })
-        console.log(`[ws] Broadcasted token_rotated notification to all clients`)
+        log.info(`Broadcasted token_rotated notification to all clients`)
       }
       this._tokenManager.on('token_rotated', this._tokenRotatedHandler)
     }
@@ -421,7 +423,7 @@ export class WsServer {
       // Enforce pre-auth connection limit to prevent FD exhaustion
       const pendingCount = this._countPendingConnections()
       if (pendingCount >= this._maxPendingConnections) {
-        console.warn(`[ws] Pre-auth connection limit reached (${pendingCount}/${this._maxPendingConnections}), rejecting upgrade`)
+        log.warn(`Pre-auth connection limit reached (${pendingCount}/${this._maxPendingConnections}), rejecting upgrade`)
         socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
         return
       }
@@ -469,7 +471,7 @@ export class WsServer {
         if (client) client.isAlive = true
       })
 
-      console.log(`[ws] Client ${clientId} connected (awaiting auth)`)
+      log.info(`Client ${clientId} connected (awaiting auth)`)
 
       // When auth is disabled, auto-authenticate immediately
       if (!this.authRequired) {
@@ -478,7 +480,7 @@ export class WsServer {
         client.authTime = Date.now()
         this._sendPostAuthInfo(ws)
         this._broadcastClientJoined(client, ws)
-        console.log(`[ws] Client ${clientId} auto-authenticated (--no-auth)`)
+        log.info(`Client ${clientId} auto-authenticated (--no-auth)`)
       }
 
       // Auto-disconnect if not authenticated within 10s (skip when auth is disabled)
@@ -504,7 +506,7 @@ export class WsServer {
         if (msg.type === 'encrypted' && client?.encryptionState) {
           const envParsed = EncryptedEnvelopeSchema.safeParse(msg)
           if (!envParsed.success) {
-            console.error(`[ws] Invalid encrypted message envelope from ${client.id}`)
+            log.error(`Invalid encrypted message envelope from ${client.id}`)
             ws.close()
             return
           }
@@ -512,13 +514,13 @@ export class WsServer {
             msg = decrypt(msg, client.encryptionState.sharedKey, client.encryptionState.recvNonce, DIRECTION_CLIENT)
             client.encryptionState.recvNonce++
           } catch (err) {
-            console.error(`[ws] Decryption failed from ${client.id}:`, err.message)
+            log.error(`Decryption failed from ${client.id}: ${err.message}`)
             ws.close()
             return
           }
         }
         this._handleMessage(ws, msg).catch((err) => {
-          console.error('[ws] Unhandled error in message handler:', err)
+          log.error(`Unhandled error in message handler: ${err.message}`)
         })
       })
 
@@ -526,7 +528,7 @@ export class WsServer {
         clearTimeout(authTimeout)
         const client = this.clients.get(ws)
         if (client?._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
-        console.log(`[ws] Client ${client?.id} disconnected`)
+        log.info(`Client ${client?.id} disconnected`)
         if (client?.authenticated) {
           this._handleClientDeparture(client)
         }
@@ -534,7 +536,7 @@ export class WsServer {
       })
 
       ws.on('error', (err) => {
-        console.error(`[ws] Client error:`, err.message)
+        log.error(`Client error: ${err.message}`)
       })
     })
 
@@ -543,7 +545,7 @@ export class WsServer {
     // Detect Claude Code Web features (non-blocking)
     this._webTaskManager.detectFeatures().then(({ remote, teleport }) => {
       if (remote || teleport) {
-        console.log(`[ws] Claude Code Web features detected: remote=${remote}, teleport=${teleport}`)
+        log.info(`Claude Code Web features detected: remote=${remote}, teleport=${teleport}`)
       }
     }).catch(() => {})
 
@@ -572,7 +574,7 @@ export class WsServer {
         if (!client.authenticated) continue
         if (ws.readyState !== 1) continue
         if (!client.isAlive) {
-          console.log(`[ws] Client ${client.id} unresponsive, terminating`)
+          log.info(`Client ${client.id} unresponsive, terminating`)
           this._handleClientDeparture(client)
           this.clients.delete(ws)
           try { ws.terminate() } catch {}
@@ -593,7 +595,7 @@ export class WsServer {
       }
     }, 60_000)
 
-    console.log(`[ws] Server listening on ${host || '0.0.0.0'}:${this.port} (${this.serverMode} mode)`)
+    log.info(`Server listening on ${host || '0.0.0.0'}:${this.port} (${this.serverMode} mode)`)
   }
 
   /** Send post-auth info (server mode, readiness, models, sessions, etc.) */
@@ -652,7 +654,7 @@ export class WsServer {
       // Key exchange timeout: if no key_exchange arrives, disconnect (never downgrade to plaintext)
       client._keyExchangeTimeout = setTimeout(() => {
         if (client.encryptionPending) {
-          console.error(`[ws] Key exchange timeout for ${client.id} — disconnecting (encryption required)`)
+          log.error(`Key exchange timeout for ${client.id} — disconnecting (encryption required)`)
           client.encryptionPending = false
           client.postAuthQueue = null
           try {
@@ -851,7 +853,7 @@ export class WsServer {
       const ip = client.socketIp
       const failure = this._authFailures.get(ip)
       if (failure && failure.blockedUntil > Date.now()) {
-        console.warn(`[ws] Auth rate-limited for IP ${ip} (${failure.count} failures)`)
+        log.warn(`Auth rate-limited for IP ${ip} (${failure.count} failures)`)
         this._send(ws, { type: 'auth_fail', reason: 'rate_limited' })
         ws.close()
         return
@@ -889,7 +891,7 @@ export class WsServer {
         this._sendPostAuthInfo(ws)
         // Broadcast client_joined to other authenticated clients
         this._broadcastClientJoined(client, ws)
-        console.log(`[ws] Client ${client.id} authenticated`)
+        log.info(`Client ${client.id} authenticated`)
       } else {
         // Track auth failure for rate limiting
         const now = Date.now()
@@ -899,7 +901,7 @@ export class WsServer {
         const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
         existing.blockedUntil = now + backoff
         this._authFailures.set(ip, existing)
-        console.warn(`[ws] Auth failure from IP ${client.ip} (attempt ${existing.count}, blocked for ${backoff}ms)`)
+        log.warn(`Auth failure from IP ${client.ip} (attempt ${existing.count}, blocked for ${backoff}ms)`)
         this._send(ws, { type: 'auth_fail', reason: 'invalid_token' })
         ws.close()
       }
@@ -916,11 +918,11 @@ export class WsServer {
         const keParsed = KeyExchangeSchema.safeParse(msg)
         if (!keParsed.success) {
           const details = keParsed.error.issues.map(i => i.message).join(', ')
-          console.warn(`[ws] Invalid key_exchange message from ${client.id}: ${details}`)
+          log.warn(`Invalid key_exchange message from ${client.id}: ${details}`)
           try {
             ws.send(JSON.stringify({ type: 'error', code: 'INVALID_MESSAGE', details }))
           } catch (err) {
-            console.error('[ws] Failed to send key_exchange error:', err.message)
+            log.error(`Failed to send key_exchange error: ${err.message}`)
           }
           ws.close(1008, 'Invalid key_exchange message')
           return
@@ -933,9 +935,9 @@ export class WsServer {
         try {
           ws.send(JSON.stringify({ type: 'key_exchange_ok', publicKey: serverKp.publicKey }))
         } catch (err) {
-          console.error('[ws] Failed to send key_exchange_ok:', err.message)
+          log.error(`Failed to send key_exchange_ok: ${err.message}`)
         }
-        console.log(`[ws] E2E encryption established with ${client.id}`)
+        log.info(`E2E encryption established with ${client.id}`)
         // Flush queued messages (now encrypted) — batched to yield event loop
         const queue = client.postAuthQueue
         client.postAuthQueue = null
@@ -944,7 +946,7 @@ export class WsServer {
       }
       // Non-key_exchange message while pending — disconnect (never downgrade to plaintext)
       clearTimeout(client._keyExchangeTimeout)
-      console.error(`[ws] Client ${client.id} sent ${msg.type} instead of key_exchange — disconnecting (encryption required)`)
+      log.error(`Client ${client.id} sent ${msg.type} instead of key_exchange — disconnecting (encryption required)`)
       client.encryptionPending = false
       client.postAuthQueue = null
       try {
@@ -972,7 +974,7 @@ export class WsServer {
     const parsed = ClientMessageSchema.safeParse(msg)
     if (!parsed.success) {
       const details = parsed.error.issues.map(i => i.message).join(', ')
-      console.warn(`[ws] Invalid message from ${client.id}: ${details}`)
+      log.warn(`Invalid message from ${client.id}: ${details}`)
       this._send(ws, { type: 'error', code: 'INVALID_MESSAGE', details })
       return
     }
@@ -993,7 +995,7 @@ export class WsServer {
 
   /** Public broadcast: send a message to all authenticated clients */
   broadcast(message) {
-    console.log(`[ws] Broadcasting ${message.type || 'unknown'} to all clients`)
+    log.info(`Broadcasting ${message.type || 'unknown'} to all clients`)
     this._broadcast(message)
   }
 
@@ -1002,7 +1004,7 @@ export class WsServer {
     for (const [ws, client] of this.clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
         if (ws.bufferedAmount > this._backpressureThreshold) {
-          console.debug(`[ws] Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount})`)
+          log.debug(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount})`)
           continue
         }
         this._send(ws, message)
@@ -1022,7 +1024,7 @@ export class WsServer {
     for (const [ws, client] of this.clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
         if (ws.bufferedAmount > this._backpressureThreshold) {
-          console.debug(`[ws] Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount})`)
+          log.debug(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount})`)
           continue
         }
         this._send(ws, tagged)
@@ -1119,7 +1121,7 @@ export class WsServer {
    * @param {string|null} [sessionId] - Optional session ID for scoped errors
    */
   broadcastError(category, message, recoverable = true, sessionId = null) {
-    console.error(`[ws] Broadcasting server_error (${category}): ${message}`)
+    log.error(`Broadcasting server_error (${category}): ${message}`)
     const payload = { type: 'server_error', category, message, recoverable }
     if (sessionId) payload.sessionId = sessionId
     this._broadcast(payload)
@@ -1131,7 +1133,7 @@ export class WsServer {
    * @param {string} message - Human-readable status message
    */
   broadcastStatus(message) {
-    console.log(`[ws] Broadcasting server_status: ${message}`)
+    log.info(`Broadcasting server_status: ${message}`)
     this._broadcast({
       type: 'server_status',
       message,
@@ -1149,7 +1151,7 @@ export class WsServer {
    * @param {number} restartEtaMs - Estimated ms until server is back (0 = not coming back)
    */
   broadcastShutdown(reason, restartEtaMs) {
-    console.log(`[ws] Broadcasting server_shutdown: ${reason} (ETA: ${restartEtaMs}ms)`)
+    log.info(`Broadcasting server_shutdown: ${reason} (ETA: ${restartEtaMs}ms)`)
     this._broadcast({
       type: 'server_shutdown',
       reason,
@@ -1208,7 +1210,7 @@ export class WsServer {
         ws.send(JSON.stringify(message))
       }
     } catch (err) {
-      console.error('[ws] Send error:', err.message)
+      log.error(`Send error: ${err.message}`)
     }
   }
 
