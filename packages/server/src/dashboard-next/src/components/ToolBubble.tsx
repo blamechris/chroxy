@@ -21,6 +21,11 @@ function getInputSummary(input: ToolBubbleProps['input']): string {
   return summary.slice(0, 100)
 }
 
+
+function formatToolName(name: string): string {
+  return name.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+}
+
 export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubbleProps) {
   const [expanded, setExpanded] = useState(false)
   const summary = getInputSummary(input)
@@ -50,7 +55,7 @@ export function ToolBubble({ toolName, toolUseId, input, result }: ToolBubblePro
       onClick={toggle}
       onKeyDown={handleKeyDown}
     >
-      <span className="tool-name">{toolName}</span>
+      <span className="tool-name">{formatToolName(toolName)}</span>
       {summary && (
         <span className="tool-input" data-testid="tool-input-summary" style={{ color: '#666' }}>
           {summary}
