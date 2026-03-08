@@ -179,12 +179,36 @@ describe('ChatMessage', () => {
     expect(container.firstChild).toBeNull()
   })
 
+  it('does not render system bubble when content is whitespace-only', () => {
+    const { container } = render(
+      <ChatMessage
+        id="msg-system-ws"
+        type="system"
+        content="   "
+        timestamp={Date.now()}
+      />
+    )
+    expect(container.firstChild).toBeNull()
+  })
+
   it('does not render error bubble when content is empty', () => {
     const { container } = render(
       <ChatMessage
         id="msg-error-empty"
         type="error"
         content=""
+        timestamp={Date.now()}
+      />
+    )
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('does not render error bubble when content is whitespace-only', () => {
+    const { container } = render(
+      <ChatMessage
+        id="msg-error-ws"
+        type="error"
+        content="   "
         timestamp={Date.now()}
       />
     )
