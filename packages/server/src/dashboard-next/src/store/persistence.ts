@@ -19,6 +19,25 @@ const KEY_SIDEBAR_WIDTH = `${KEY_PREFIX}sidebar_width`;
 const KEY_SPLIT_MODE = `${KEY_PREFIX}split_mode`;
 const KEY_ACTIVE_SERVER = `${KEY_PREFIX}active_server_id`;
 
+// ---------------------------------------------------------------------------
+// Server-scoped persistence — keys scoped by server ID to prevent data loss
+// on server switch (#1647)
+// ---------------------------------------------------------------------------
+
+/** Current server scope for persistence operations */
+let _serverScope: string | null = null;
+
+/** Set the active server scope for persistence keys */
+export function setServerScope(serverId: string | null): void {
+  _serverScope = serverId;
+}
+
+/** Get a server-scoped key. Falls back to global key if no scope set. */
+function scopedKey(baseKey: string): string {
+  if (!_serverScope) return baseKey;
+  return `${KEY_PREFIX}${_serverScope}_${baseKey.replace(KEY_PREFIX, '')}`;
+}
+
 /** Max messages to persist per session (keeps storage bounded) */
 const MAX_MESSAGES = 100;
 
@@ -30,7 +49,7 @@ const VALID_VIEW_MODES = ['chat', 'terminal', 'files', 'diff'] as const;
 type ViewMode = (typeof VALID_VIEW_MODES)[number];
 
 function sessionMessagesKey(sessionId: string): string {
-  return `${KEY_PREFIX}messages_${sessionId}`;
+  return scopedKey(`${KEY_PREFIX}messages_${sessionId}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -109,27 +128,28 @@ export function persistViewMode(mode: ViewMode): void {
   }
 }
 
-/** Persist the active session ID */
+/** Persist the active session ID (server-scoped) */
 export function persistActiveSession(sessionId: string | null): void {
   try {
+    const key = scopedKey(KEY_ACTIVE_SESSION);
     if (sessionId) {
-      localStorage.setItem(KEY_ACTIVE_SESSION, sessionId);
+      localStorage.setItem(key, sessionId);
     } else {
-      localStorage.removeItem(KEY_ACTIVE_SESSION);
+      localStorage.removeItem(key);
     }
   } catch {
     // Storage not available
   }
 }
 
-/** Persist terminal buffer (debounced) */
+/** Persist terminal buffer (debounced, server-scoped) */
 export function persistTerminalBuffer(buffer: string): void {
   _terminalPersister.schedule(() => {
     const trimmed = buffer.length > MAX_TERMINAL_SIZE
       ? buffer.slice(-MAX_TERMINAL_SIZE)
       : buffer;
     try {
-      localStorage.setItem(KEY_TERMINAL_BUFFER, trimmed);
+      localStorage.setItem(scopedKey(KEY_TERMINAL_BUFFER), trimmed);
     } catch {
       // localStorage quota exceeded
     }
@@ -207,11 +227,11 @@ export function loadPersistedActiveServer(): string | null {
   }
 }
 
-/** Persist the session list (debounced) */
+/** Persist the session list (debounced, server-scoped) */
 export function persistSessionList(sessions: SessionInfo[]): void {
   _sessionListPersister.schedule(() => {
     try {
-      localStorage.setItem(KEY_SESSION_LIST, JSON.stringify(sessions));
+      localStorage.setItem(scopedKey(KEY_SESSION_LIST), JSON.stringify(sessions));
     } catch {
       // localStorage quota exceeded
     }
@@ -228,12 +248,14 @@ export interface PersistedState {
   terminalBuffer: string | null;
 }
 
-/** Load all persisted state on app startup */
+/** Load all persisted state (server-scoped for session data, global for view mode) */
 export function loadPersistedState(): PersistedState {
   try {
+    // View mode is global (not per-server)
     const rawViewMode = localStorage.getItem(KEY_VIEW_MODE);
-    const activeSessionId = localStorage.getItem(KEY_ACTIVE_SESSION);
-    const terminalBuffer = localStorage.getItem(KEY_TERMINAL_BUFFER);
+    // Session data is server-scoped
+    const activeSessionId = localStorage.getItem(scopedKey(KEY_ACTIVE_SESSION));
+    const terminalBuffer = localStorage.getItem(scopedKey(KEY_TERMINAL_BUFFER));
 
     const validatedViewMode: ViewMode | null =
       rawViewMode && (VALID_VIEW_MODES as readonly string[]).includes(rawViewMode)
@@ -262,10 +284,10 @@ export function loadSessionMessages(sessionId: string): ChatMessage[] {
   }
 }
 
-/** Load persisted session list */
+/** Load persisted session list (server-scoped) */
 export function loadSessionList(): SessionInfo[] {
   try {
-    const raw = localStorage.getItem(KEY_SESSION_LIST);
+    const raw = localStorage.getItem(scopedKey(KEY_SESSION_LIST));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -298,13 +320,21 @@ export function clearPersistedSession(sessionId: string): void {
   }
 }
 
-/** Clear all persisted session data */
+/**
+ * Clear persisted session data for the current server scope.
+ * If server scope is set, only removes keys for that server.
+ * Global settings (theme, view mode, sidebar width) are preserved.
+ */
 export function clearPersistedState(): void {
   try {
     const keysToRemove: string[] = [];
+    // If scoped, only clear keys belonging to this server
+    const scopePrefix = _serverScope ? `${KEY_PREFIX}${_serverScope}_` : KEY_PREFIX;
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
-      if (key && key.startsWith(KEY_PREFIX)) {
+      if (key && key.startsWith(scopePrefix)) {
+        // Never clear global settings even if unscoped
+        if (!_serverScope && isGlobalKey(key)) continue;
         keysToRemove.push(key);
       }
     }
@@ -314,6 +344,14 @@ export function clearPersistedState(): void {
   } catch {
     // Storage not available
   }
+}
+
+/** Keys that should never be cleared during server switch */
+function isGlobalKey(key: string): boolean {
+  return key === KEY_VIEW_MODE
+    || key === KEY_SIDEBAR_WIDTH
+    || key === KEY_SPLIT_MODE
+    || key === KEY_ACTIVE_SERVER;
 }
 
 // ---------------------------------------------------------------------------
