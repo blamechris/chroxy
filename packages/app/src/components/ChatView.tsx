@@ -196,6 +196,20 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef and isSelectingRef are stable refs
   }, [isPlanPending]);
 
+  // Auto-scroll when a permission prompt newly appears (#1711)
+  const prevHasUnansweredPrompt = useRef(hasUnansweredPrompt);
+  useEffect(() => {
+    const appearedNow = hasUnansweredPrompt && !prevHasUnansweredPrompt.current;
+    prevHasUnansweredPrompt.current = hasUnansweredPrompt;
+    if (appearedNow && !isSelectingRef.current) {
+      const timer = setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef and isSelectingRef are stable refs
+  }, [hasUnansweredPrompt]);
+
   const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string) => {
     setToolDetail({ toolName, content, toolResult, toolResultTruncated, toolResultImages, serverName });
   };
