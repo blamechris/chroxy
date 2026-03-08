@@ -953,8 +953,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       // During reconnect replay, skip if app already has messages (cache is fresh)
       if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
-      // During session-switch replay, skip if an equivalent message is already in cache (dedup)
-      if (_receivingHistoryReplay && _isSessionSwitchReplay) {
+      // During any history replay, skip if an equivalent message is already in cache (dedup).
+      // This prevents duplicates when the app already received messages via real-time
+      // subscription before switching to the session (which triggers history replay).
+      if (_receivingHistoryReplay) {
         const targetState = targetId ? get().sessionStates[targetId] : null;
         const cached = targetState ? targetState.messages : get().messages;
         const isDuplicate = cached.some((m) => {
