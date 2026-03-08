@@ -41,6 +41,7 @@ export function ChatMessage({ id, type, content, isStreaming }: ChatMessageProps
       className={className}
       data-testid={`chat-message-${id}`}
       data-msg-id={id}
+      data-muted={type === 'system' ? 'true' : undefined}
     >
       {html !== null ? (
         <div dangerouslySetInnerHTML={{ __html: html }} />

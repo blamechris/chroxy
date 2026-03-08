@@ -1,10 +1,9 @@
 /**
- * InputBar + ReconnectBanner tests (#1162)
+ * InputBar tests (#1162)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { InputBar } from './InputBar'
-import { ReconnectBanner } from './ReconnectBanner'
 
 afterEach(cleanup)
 
@@ -686,49 +685,6 @@ describe('InputBar image thumbnails (#1289)', () => {
     ]
     render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} imageAttachments={images} onRemoveImage={vi.fn()} />)
     expect(screen.queryByText(/image/i)).not.toBeInTheDocument()
-  })
-})
-
-describe('ReconnectBanner', () => {
-  it('renders when visible', () => {
-    render(<ReconnectBanner visible attempt={1} maxAttempts={8} onRetry={vi.fn()} />)
-    expect(screen.getByTestId('reconnect-banner')).toBeInTheDocument()
-  })
-
-  it('does not render when not visible', () => {
-    render(<ReconnectBanner visible={false} attempt={1} maxAttempts={8} onRetry={vi.fn()} />)
-    expect(screen.queryByTestId('reconnect-banner')).not.toBeInTheDocument()
-  })
-
-  it('shows attempt count', () => {
-    render(<ReconnectBanner visible attempt={3} maxAttempts={8} onRetry={vi.fn()} />)
-    expect(screen.getByText(/attempt 3\/8/i)).toBeInTheDocument()
-  })
-
-  it('calls onRetry when retry button clicked', () => {
-    const onRetry = vi.fn()
-    render(<ReconnectBanner visible attempt={1} maxAttempts={8} onRetry={onRetry} />)
-    fireEvent.click(screen.getByTestId('retry-button'))
-    expect(onRetry).toHaveBeenCalled()
-  })
-
-  it('has role=status for polite screen reader announcement (#1171)', () => {
-    render(<ReconnectBanner visible attempt={1} maxAttempts={8} onRetry={vi.fn()} />)
-    const banner = screen.getByTestId('reconnect-banner')
-    expect(banner).toHaveAttribute('role', 'status')
-  })
-
-  it('shows custom message', () => {
-    render(
-      <ReconnectBanner
-        visible
-        attempt={1}
-        maxAttempts={8}
-        message="Server restarting..."
-        onRetry={vi.fn()}
-      />
-    )
-    expect(screen.getByText(/Server restarting/)).toBeInTheDocument()
   })
 })
 

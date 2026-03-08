@@ -397,7 +397,9 @@ export function Sidebar({
                 {abbreviateTunnel(tunnelUrl)}
               </span>
             )}
-            <span className="sidebar-client-count">{clientCount} client{clientCount !== 1 ? 's' : ''}</span>
+            {serverStatus === 'connected' && (
+              <span className="sidebar-client-count">{clientCount} client{clientCount !== 1 ? 's' : ''}</span>
+            )}
           </div>
         </>
       )}
