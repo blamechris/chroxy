@@ -7,18 +7,18 @@ export async function waitForTunnel(httpUrl, { maxAttempts = 10, interval = 2000
   const startTime = Date.now()
 
   for (let i = 0; i < maxAttempts; i++) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 5000)
     try {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 5000)
       const res = await fetch(httpUrl, { signal: controller.signal })
-      clearTimeout(timeout)
-
       if (res.ok) {
         console.log(`[tunnel] Tunnel verified (took ${((Date.now() - startTime) / 1000).toFixed(1)}s)`)
         return
       }
     } catch {
       // Not ready yet
+    } finally {
+      clearTimeout(timeout)
     }
 
     if (i < maxAttempts - 1) {
