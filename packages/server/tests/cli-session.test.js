@@ -726,7 +726,7 @@ describe('CliSession._buildChildEnv', () => {
   it('omits CHROXY_TOKEN when apiToken is not set', () => {
     const session = createSession()
     const env = session._buildChildEnv()
-    assert.equal(env.CHROXY_TOKEN, undefined)
+    assert.ok(!Object.prototype.hasOwnProperty.call(env, 'CHROXY_TOKEN'), 'CHROXY_TOKEN should not be present in child env when apiToken is not set')
   })
 
   it('forwards arbitrary process.env keys to child env', () => {
