@@ -43,7 +43,7 @@ function resolveCodex() {
   for (const c of candidates) {
     if (existsSync(c)) return c
   }
-  return 'codex'
+  return null
 }
 
 const CODEX = resolveCodex()
@@ -84,6 +84,14 @@ export class CodexSession extends EventEmitter {
   }
 
   start() {
+    if (!CODEX) {
+      process.nextTick(() => {
+        this.emit('error', {
+          message: 'Codex CLI not found. Install it with: npm install -g @openai/codex',
+        })
+      })
+      return
+    }
     this._isReady = true
     // Emit ready asynchronously to match SdkSession/CliSession behavior
     process.nextTick(() => {
@@ -144,12 +152,10 @@ export class CodexSession extends EventEmitter {
       }
     })
 
+    let stderrBuf = ''
     proc.stderr.on('data', (chunk) => {
       if (this._destroying) return
-      const msg = chunk.toString().trim()
-      if (msg) {
-        console.error(`[codex] stderr: ${msg}`)
-      }
+      stderrBuf += chunk.toString()
     })
 
     proc.on('close', (code) => {
@@ -157,7 +163,9 @@ export class CodexSession extends EventEmitter {
       this._isBusy = false
       if (this._destroying) return
       if (code !== 0 && code !== null) {
-        this.emit('error', { message: `Codex process exited with code ${code}` })
+        const stderr = stderrBuf.trim()
+        const message = this._interpretError(code, stderr)
+        this.emit('error', { message })
       }
     })
 
@@ -165,7 +173,13 @@ export class CodexSession extends EventEmitter {
       this._process = null
       this._isBusy = false
       if (this._destroying) return
-      this.emit('error', { message: err.message || 'Failed to spawn codex' })
+      if (err.code === 'ENOENT') {
+        this.emit('error', {
+          message: 'Codex CLI not found. Install it with: npm install -g @openai/codex',
+        })
+      } else {
+        this.emit('error', { message: err.message || 'Failed to spawn codex' })
+      }
     })
   }
 
@@ -183,6 +197,32 @@ export class CodexSession extends EventEmitter {
 
   setPermissionMode(_mode) {
     // Codex doesn't support permission mode switching
+  }
+
+  /**
+   * Interpret a Codex exit code + stderr into a human-readable error message.
+   */
+  _interpretError(code, stderr) {
+    const lower = stderr.toLowerCase()
+    if (lower.includes('api key') || lower.includes('authentication') || lower.includes('unauthorized')) {
+      return 'OpenAI API key not configured. Set OPENAI_API_KEY in your environment.'
+    }
+    if (lower.includes('credit') || lower.includes('balance') || lower.includes('billing') || lower.includes('quota')) {
+      return 'OpenAI API credit balance is too low. Add credits at platform.openai.com.'
+    }
+    if (lower.includes('not found') || lower.includes('command not found') || lower.includes('enoent')) {
+      return 'Codex CLI not found. Install it with: npm install -g @openai/codex'
+    }
+    if (lower.includes('rate limit')) {
+      return 'OpenAI API rate limit exceeded. Wait a moment and try again.'
+    }
+    // Fall back to stderr content if available, otherwise generic message
+    if (stderr) {
+      // Take first meaningful line, cap at 200 chars
+      const firstLine = stderr.split('\n').find(l => l.trim()) || stderr
+      return `Codex error: ${firstLine.slice(0, 200)}`
+    }
+    return `Codex process exited with code ${code}`
   }
 
   /**

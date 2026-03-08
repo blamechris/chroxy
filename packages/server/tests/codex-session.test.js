@@ -38,19 +38,27 @@ describe('CodexSession', () => {
     assert.doesNotThrow(() => session.setPermissionMode('auto'))
   })
 
-  it('start sets isRunning and emits ready', async () => {
+  it('start sets isRunning and emits ready when codex is available', async () => {
     const session = new CodexSession({ cwd: '/tmp' })
     const events = []
+    const errors = []
     session.on('ready', (data) => events.push(data))
+    session.on('error', (data) => errors.push(data))
 
     session.start()
     // Allow event to fire
     await new Promise(r => setTimeout(r, 50))
 
-    assert.equal(session.isReady, true)
-    assert.equal(session.isRunning, false) // Not busy until sendMessage
-    assert.equal(events.length, 1)
-    assert.ok(events[0].model)
+    // If codex is not installed, start() emits error instead of ready
+    if (errors.length > 0) {
+      assert.ok(errors[0].message.includes('not found'))
+      assert.equal(session.isReady, false)
+    } else {
+      assert.equal(session.isReady, true)
+      assert.equal(session.isRunning, false) // Not busy until sendMessage
+      assert.equal(events.length, 1)
+      assert.ok(events[0].model)
+    }
   })
 
   it('destroy resets isReady and isRunning', async () => {
@@ -91,6 +99,52 @@ describe('CodexSession', () => {
       const session = new CodexSession({ cwd: '/tmp' })
       const result = session._parseCodexLine('not json')
       assert.equal(result, null)
+    })
+  })
+
+  describe('_interpretError', () => {
+    it('detects API key errors', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const msg = session._interpretError(1, 'Error: API key not set')
+      assert.ok(msg.includes('OPENAI_API_KEY'))
+    })
+
+    it('detects credit/billing errors', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const msg = session._interpretError(1, 'Error: Credit balance is too low')
+      assert.ok(msg.includes('credit'))
+    })
+
+    it('detects rate limit errors', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const msg = session._interpretError(1, 'Rate limit exceeded')
+      assert.ok(msg.includes('rate limit'))
+    })
+
+    it('detects command not found', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const msg = session._interpretError(1, 'codex: command not found')
+      assert.ok(msg.includes('Install'))
+    })
+
+    it('shows first line of stderr when no pattern matches', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const msg = session._interpretError(1, 'some unknown error\nsecond line')
+      assert.ok(msg.includes('some unknown error'))
+      assert.ok(!msg.includes('second line'))
+    })
+
+    it('falls back to exit code when no stderr', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const msg = session._interpretError(1, '')
+      assert.ok(msg.includes('code 1'))
+    })
+
+    it('truncates long stderr to 200 chars', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      const longMsg = 'x'.repeat(300)
+      const msg = session._interpretError(1, longMsg)
+      assert.ok(msg.length < 220)
     })
   })
 
