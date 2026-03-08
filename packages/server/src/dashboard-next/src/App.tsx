@@ -110,6 +110,7 @@ export function App() {
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
   const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
   const inputSettings = useConnectionStore(s => s.inputSettings)
+  const connectedClients = useConnectionStore(s => s.connectedClients)
 
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
@@ -724,7 +725,7 @@ export function App() {
           filter={sidebarFilter}
           serverStatus={isConnected ? 'connected' : isReconnecting ? 'reconnecting' : 'disconnected'}
           tunnelUrl={null}
-          clientCount={1}
+          clientCount={connectedClients.length}
           onFilterChange={setSidebarFilter}
           onSessionClick={switchSession}
           onResumeSession={(convId) => {
