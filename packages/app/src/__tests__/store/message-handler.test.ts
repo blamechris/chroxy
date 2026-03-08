@@ -1021,6 +1021,65 @@ describe('permission_request rich notification details', () => {
   });
 });
 
+describe('plan_ready notification', () => {
+  it('creates plan notification for non-active session', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Active' } as any,
+        { sessionId: 's2', name: 'Background' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+      sessionNotifications: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'plan_ready',
+      sessionId: 's2',
+      allowedPrompts: [{ tool: 'Bash', prompt: 'Run tests' }],
+    });
+
+    const state = store.getState();
+    expect(state.sessionNotifications).toHaveLength(1);
+    const notif = state.sessionNotifications[0];
+    expect(notif.eventType).toBe('plan');
+    expect(notif.sessionId).toBe('s2');
+    expect(notif.message).toBe('Plan ready for approval');
+  });
+
+  it('does not create notification for active session plan_ready', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Active' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+      },
+      messages: [],
+      sessionNotifications: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'plan_ready',
+      sessionId: 's1',
+      allowedPrompts: [],
+    });
+
+    expect(store.getState().sessionNotifications).toHaveLength(0);
+  });
+});
+
 afterAll(() => {
   _testMessageHandler.clearContext();
 });
