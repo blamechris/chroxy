@@ -394,6 +394,7 @@
   border-radius: 50%;
   background: var(--accent-green);
   flex-shrink: 0;
+  animation: dotBreathe 3s ease-in-out infinite;
 }
 
 .sidebar-resumable-dot {
@@ -3203,6 +3204,7 @@
 @media (prefers-reduced-motion: reduce) {
   .skeleton-line,
   .sidebar-busy-dot,
+  .sidebar-idle-dot,
   .tab-busy-dot,
   .busy-indicator,
   .thinking-dot,
@@ -3213,6 +3215,7 @@
 
   /* Keep indicators visible with static styling */
   .sidebar-busy-dot,
+  .sidebar-idle-dot,
   .tab-busy-dot,
   .busy-indicator {
     opacity: 1;
