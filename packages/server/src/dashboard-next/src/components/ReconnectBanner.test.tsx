@@ -1,11 +1,12 @@
 /**
  * ReconnectBanner accessibility and rendering tests (#1720)
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { ReconnectBanner } from './ReconnectBanner'
 
 afterEach(cleanup)
+beforeEach(() => vi.clearAllMocks())
 
 const baseProps = {
   visible: true,
