@@ -153,6 +153,7 @@ export function ChatView({
 }: ChatViewProps) {
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const showScrollToBottomRef = useRef(false);
   const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
@@ -196,6 +197,20 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef and isSelectingRef are stable refs
   }, [isPlanPending]);
 
+  // Auto-scroll when a permission prompt newly appears (#1711)
+  const prevHasUnansweredPrompt = useRef(hasUnansweredPrompt);
+  useEffect(() => {
+    const appearedNow = hasUnansweredPrompt && !prevHasUnansweredPrompt.current;
+    prevHasUnansweredPrompt.current = hasUnansweredPrompt;
+    if (appearedNow && !isSelectingRef.current && !showScrollToBottomRef.current) {
+      const timer = setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef, isSelectingRef, and showScrollToBottomRef are stable refs
+  }, [hasUnansweredPrompt]);
+
   const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string) => {
     setToolDetail({ toolName, content, toolResult, toolResultTruncated, toolResultImages, serverName });
   };
@@ -214,7 +229,9 @@ export function ChatView({
 
     // Show "jump to bottom" when scrolled up from the bottom
     const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
-    setShowScrollToBottom(distanceFromBottom > threshold);
+    const isScrolledUp = distanceFromBottom > threshold;
+    setShowScrollToBottom(isScrolledUp);
+    showScrollToBottomRef.current = isScrolledUp;
   };
 
   const scrollToTop = () => {
