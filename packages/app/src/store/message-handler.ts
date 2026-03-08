@@ -212,6 +212,8 @@ let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let _pongTimeout: ReturnType<typeof setTimeout> | null = null;
 let _lastPingSentAt = 0;
 let _ewmaRtt: number | null = null; // EWMA-smoothed RTT for stable quality display
+/** Max session IDs per subscribe_sessions message (must match server SubscribeSessionsSchema .max(20)) */
+export const SUBSCRIBE_SESSIONS_CHUNK_SIZE = 20;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 5_000;
 const EWMA_ALPHA = 0.3; // Weight for new samples (higher = more responsive)
@@ -756,7 +758,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         if (subscribeIds.length > 0) {
           const sock = get().socket;
           if (sock && sock.readyState === WebSocket.OPEN) {
-            wsSend(sock, { type: 'subscribe_sessions', sessionIds: subscribeIds });
+            // Server schema enforces max IDs per message — chunk if needed
+            for (let i = 0; i < subscribeIds.length; i += SUBSCRIBE_SESSIONS_CHUNK_SIZE) {
+              wsSend(sock, { type: 'subscribe_sessions', sessionIds: subscribeIds.slice(i, i + SUBSCRIBE_SESSIONS_CHUNK_SIZE) });
+            }
           }
         }
       }
