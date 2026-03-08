@@ -21,11 +21,17 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
   const handlesRef = useRef(new Map<string, TerminalHandle>())
   const setTerminalWriteCallback = useConnectionStore(s => s.setTerminalWriteCallback)
 
+  // Track whether active session has terminal data for empty state
+  const activeBuffer = useConnectionStore(s => {
+    if (!activeSessionId) return ''
+    return s.sessionStates[activeSessionId]?.terminalRawBuffer || s.terminalRawBuffer || ''
+  })
+
   // Get initial data for a session from the store (one-time, at mount)
   const getInitialData = useCallback((sessionId: string) => {
     const state = useConnectionStore.getState()
     const ss = state.sessionStates[sessionId]
-    return ss?.terminalRawBuffer || ''
+    return ss?.terminalRawBuffer || state.terminalRawBuffer || ''
   }, [])
 
   // Wire the active session's terminal to the store write callback
@@ -60,7 +66,7 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
   }, [sessions])
 
   return (
-    <div className={className} data-testid="multi-terminal-container">
+    <div className={className} data-testid="multi-terminal-container" style={{ position: 'relative' }}>
       {sessions.map(session => (
         <div
           key={session.sessionId}
@@ -78,6 +84,12 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
           />
         </div>
       ))}
+      {!activeBuffer && (
+        <div className="terminal-empty-state" data-testid="terminal-empty-state">
+          <p>No terminal output yet.</p>
+          <p className="terminal-empty-hint">Output from the active session will appear here as it runs.</p>
+        </div>
+      )}
     </div>
   )
 }
