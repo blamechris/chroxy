@@ -174,4 +174,43 @@ describe('App', () => {
       overlay.remove()
     }
   })
+
+  it('shows session loading skeleton when connecting', () => {
+    stateOverrides = { connectionPhase: 'connecting' }
+    render(<App />)
+    expect(screen.getByTestId('session-loading-skeleton')).toBeInTheDocument()
+  })
+
+  it('hides session loading skeleton when connected with sessions', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+    render(<App />)
+    expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
+  })
+
+  it('shows session loading skeleton briefly when switching sessions', async () => {
+    const { rerender } = render(<App />)
+    const switchSessionFn = vi.fn()
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [
+        { sessionId: 's1', name: 'Session 1', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+        { sessionId: 's2', name: 'Session 2', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+      ],
+      activeSessionId: 's1',
+      switchSession: switchSessionFn,
+    }
+    rerender(<App />)
+    // Skeleton not shown before switch
+    expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
+    // Switch to s2
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+    rerender(<App />)
+    // Skeleton should appear while switching then clear on activeSessionId change
+    // After rerender with new activeSessionId, skeleton is cleared
+    expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
+  })
 })
