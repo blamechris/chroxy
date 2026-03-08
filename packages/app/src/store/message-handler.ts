@@ -747,6 +747,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             );
           }
         }
+        // Subscribe to all non-active sessions so we receive their events
+        // (permissions, plan approvals, errors) in real-time
+        const activeId = get().activeSessionId;
+        const subscribeIds = sessionList
+          .map((s) => s.sessionId)
+          .filter((id) => id !== activeId);
+        if (subscribeIds.length > 0) {
+          const sock = get().socket;
+          if (sock && sock.readyState === WebSocket.OPEN) {
+            wsSend(sock, { type: 'subscribe_sessions', sessionIds: subscribeIds });
+          }
+        }
       }
       break;
 
@@ -758,6 +770,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           s.sessionId === updatedId ? { ...s, name: updatedName } : s,
         );
         set({ sessions });
+      }
+      break;
+    }
+
+    case 'subscriptions_updated': {
+      // Server confirms which sessions we're subscribed to — log for debugging
+      const subIds = Array.isArray(msg.subscribedSessionIds) ? msg.subscribedSessionIds : [];
+      if (__DEV__) {
+        console.log('[ws] subscriptions_updated:', subIds.length, 'sessions');
       }
       break;
     }

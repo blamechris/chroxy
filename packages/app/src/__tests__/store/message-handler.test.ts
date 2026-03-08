@@ -1080,6 +1080,77 @@ describe('plan_ready notification', () => {
   });
 });
 
+describe('session subscription (#1692)', () => {
+  it('sends subscribe_sessions after receiving session_list with multiple sessions', () => {
+    const mockSend = jest.fn();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+      socket: { readyState: 1, send: mockSend } as any,
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'session_list',
+      sessions: [
+        { sessionId: 's1', name: 'Session 1' },
+        { sessionId: 's2', name: 'Session 2' },
+        { sessionId: 's3', name: 'Session 3' },
+      ],
+    });
+
+    const calls = mockSend.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    const subscribeCalls = calls.filter((c: Record<string, unknown>) => c.type === 'subscribe_sessions');
+    expect(subscribeCalls).toHaveLength(1);
+    expect(subscribeCalls[0].sessionIds).toEqual(expect.arrayContaining(['s2', 's3']));
+    expect(subscribeCalls[0].sessionIds).not.toContain('s1');
+  });
+
+  it('does not send subscribe_sessions for single-session list', () => {
+    const mockSend = jest.fn();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+      socket: { readyState: 1, send: mockSend } as any,
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'session_list',
+      sessions: [{ sessionId: 's1', name: 'Session 1' }],
+    });
+
+    const calls = mockSend.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    const subscribeCalls = calls.filter((c: Record<string, unknown>) => c.type === 'subscribe_sessions');
+    expect(subscribeCalls).toHaveLength(0);
+  });
+
+  it('handles subscriptions_updated without crashing', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'subscriptions_updated',
+      subscribedSessionIds: ['s2', 's3'],
+    });
+  });
+});
+
 afterAll(() => {
   _testMessageHandler.clearContext();
 });
