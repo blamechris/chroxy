@@ -1556,7 +1556,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Global event — broadcast to all sessions so any tab shows it (single setState)
       const joinSessionIds = Object.keys(get().sessionStates);
       if (joinSessionIds.length > 0) {
-        const activeId = get().activeSessionId;
         set((state: ConnectionState) => {
           const newSessionStates = Object.fromEntries(
             Object.entries(state.sessionStates).map(([sid, ss]) => [
@@ -1564,6 +1563,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
               { ...ss, messages: [...ss.messages, joinMsg] },
             ])
           ) as typeof state.sessionStates;
+          const activeId = state.activeSessionId;
           const patch: Partial<ConnectionState> = { sessionStates: newSessionStates };
           if (activeId && newSessionStates[activeId]) {
             patch.messages = newSessionStates[activeId].messages;
@@ -1592,7 +1592,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Global event — broadcast to all sessions so any tab shows it (single setState)
       const leftSessionIds = Object.keys(get().sessionStates);
       if (leftSessionIds.length > 0) {
-        const activeId = get().activeSessionId;
         set((state: ConnectionState) => {
           const newSessionStates = Object.fromEntries(
             Object.entries(state.sessionStates).map(([sid, ss]) => [
@@ -1600,6 +1599,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
               { ...ss, messages: [...ss.messages, leftMsg] },
             ])
           ) as typeof state.sessionStates;
+          const activeId = state.activeSessionId;
           const patch: Partial<ConnectionState> = { sessionStates: newSessionStates };
           if (activeId && newSessionStates[activeId]) {
             patch.messages = newSessionStates[activeId].messages;

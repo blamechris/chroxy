@@ -626,30 +626,30 @@ describe('system message routing', () => {
 
     let setStateCalls = 0;
     const origSetState = useConnectionStore.setState.bind(useConnectionStore);
-    useConnectionStore.setState = (...args: Parameters<typeof origSetState>) => {
-      setStateCalls++;
-      return origSetState(...args);
-    };
+    try {
+      useConnectionStore.setState = (...args: Parameters<typeof origSetState>) => {
+        setStateCalls++;
+        return origSetState(...args);
+      };
 
-    _testMessageHandler.handle({
-      type: 'client_joined',
-      client: { clientId: 'phone-1', deviceName: 'iPhone', deviceType: 'phone', platform: 'ios' },
-    });
+      _testMessageHandler.handle({
+        type: 'client_joined',
+        client: { clientId: 'phone-1', deviceName: 'iPhone', deviceType: 'phone', platform: 'ios' },
+      });
 
-    // Restore
-    useConnectionStore.setState = origSetState;
+      // Should use at most 2 setState calls: 1 for connectedClients, 1 for sessionStates+flat
+      expect(setStateCalls).toBeLessThanOrEqual(2);
 
-    // Should use at most 2 setState calls: 1 for connectedClients, 1 for sessionStates+flat
-    expect(setStateCalls).toBeLessThanOrEqual(2);
-
-    // Behavior preserved: message appears in all sessions
-    const { sessionStates } = useConnectionStore.getState();
-    expect(sessionStates.s1!.messages.some((m) => m.content.includes('iPhone'))).toBe(true);
-    expect(sessionStates.s2!.messages.some((m) => m.content.includes('iPhone'))).toBe(true);
-    expect(sessionStates.s3!.messages.some((m) => m.content.includes('iPhone'))).toBe(true);
-
-    _testMessageHandler.clearContext();
-    useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
+      // Behavior preserved: message appears in all sessions
+      const { sessionStates } = useConnectionStore.getState();
+      expect(sessionStates.s1!.messages.some((m) => m.content.includes('iPhone'))).toBe(true);
+      expect(sessionStates.s2!.messages.some((m) => m.content.includes('iPhone'))).toBe(true);
+      expect(sessionStates.s3!.messages.some((m) => m.content.includes('iPhone'))).toBe(true);
+    } finally {
+      useConnectionStore.setState = origSetState;
+      _testMessageHandler.clearContext();
+      useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
+    }
   });
 
   it('client_left updates all session states in a single setState call', async () => {
@@ -669,26 +669,27 @@ describe('system message routing', () => {
 
     let setStateCalls = 0;
     const origSetState = useConnectionStore.setState.bind(useConnectionStore);
-    useConnectionStore.setState = (...args: Parameters<typeof origSetState>) => {
-      setStateCalls++;
-      return origSetState(...args);
-    };
+    try {
+      useConnectionStore.setState = (...args: Parameters<typeof origSetState>) => {
+        setStateCalls++;
+        return origSetState(...args);
+      };
 
-    _testMessageHandler.handle({ type: 'client_left', clientId: 'phone-1' });
+      _testMessageHandler.handle({ type: 'client_left', clientId: 'phone-1' });
 
-    useConnectionStore.setState = origSetState;
+      // Should use at most 2 setState calls: 1 for connectedClients, 1 for sessionStates+flat
+      expect(setStateCalls).toBeLessThanOrEqual(2);
 
-    // Should use at most 2 setState calls: 1 for connectedClients, 1 for sessionStates+flat
-    expect(setStateCalls).toBeLessThanOrEqual(2);
-
-    // Behavior preserved
-    const { sessionStates } = useConnectionStore.getState();
-    expect(sessionStates.s1!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
-    expect(sessionStates.s2!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
-    expect(sessionStates.s3!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
-
-    _testMessageHandler.clearContext();
-    useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
+      // Behavior preserved
+      const { sessionStates } = useConnectionStore.getState();
+      expect(sessionStates.s1!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
+      expect(sessionStates.s2!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
+      expect(sessionStates.s3!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
+    } finally {
+      useConnectionStore.setState = origSetState;
+      _testMessageHandler.clearContext();
+      useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
+    }
   });
 
   it('server_error with sessionId routes only to that session', async () => {
