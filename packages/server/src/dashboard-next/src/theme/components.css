@@ -394,6 +394,7 @@
   border-radius: 50%;
   background: var(--accent-green);
   flex-shrink: 0;
+  animation: dotBreathe 3s ease-in-out infinite;
 }
 
 .sidebar-resumable-dot {
@@ -2201,11 +2202,32 @@
 
 .modal-content input::placeholder { color: var(--text-disabled); }
 
+.provider-section {
+  margin-bottom: 10px;
+}
+
 .provider-select {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
+}
+
+.provider-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.capability-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg-session-bar);
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  letter-spacing: 0.02em;
 }
 
 .provider-select label {
@@ -2369,6 +2391,29 @@
 
 .terminal-container .xterm {
   height: 100%;
+}
+
+.terminal-empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.terminal-empty-state p {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.terminal-empty-hint {
+  font-size: var(--text-sm);
+  margin-top: 4px !important;
+  opacity: 0.6;
 }
 
 /* ---- Command Palette ---- */
@@ -3203,6 +3248,7 @@
 @media (prefers-reduced-motion: reduce) {
   .skeleton-line,
   .sidebar-busy-dot,
+  .sidebar-idle-dot,
   .tab-busy-dot,
   .busy-indicator,
   .thinking-dot,
@@ -3213,6 +3259,7 @@
 
   /* Keep indicators visible with static styling */
   .sidebar-busy-dot,
+  .sidebar-idle-dot,
   .tab-busy-dot,
   .busy-indicator {
     opacity: 1;
@@ -4101,6 +4148,16 @@
 .server-input:focus-visible {
   outline: none;
   border-color: var(--accent-blue);
+}
+
+.server-input-error {
+  border-color: var(--accent-red, #e53e3e);
+}
+
+.server-form-error {
+  color: var(--accent-red, #e53e3e);
+  font-size: 11px;
+  margin-top: -4px;
 }
 
 .server-add-actions {
