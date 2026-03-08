@@ -4103,6 +4103,16 @@
   border-color: var(--accent-blue);
 }
 
+.server-input-error {
+  border-color: var(--accent-red, #e53e3e);
+}
+
+.server-form-error {
+  color: var(--accent-red, #e53e3e);
+  font-size: 11px;
+  margin-top: -4px;
+}
+
 .server-add-actions {
   display: flex;
   gap: 6px;
