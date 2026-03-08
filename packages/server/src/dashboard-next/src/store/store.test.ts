@@ -119,14 +119,16 @@ describe('persistence', () => {
     expect(msgs).toEqual([]);
   });
 
-  it('clearPersistedState removes all chroxy keys', () => {
+  it('clearPersistedState removes session keys but preserves global settings', () => {
     persistViewMode('chat');
     persistActiveSession('sess-1');
     localStorage.setItem('other_key', 'keep');
     clearPersistedState();
     expect(localStorage.getItem('other_key')).toBe('keep');
     const state = loadPersistedState();
-    expect(state.viewMode).toBeNull();
+    // Global settings (view mode) are preserved
+    expect(state.viewMode).toBe('chat');
+    // Session-specific data is cleared
     expect(state.activeSessionId).toBeNull();
   });
 
