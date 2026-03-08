@@ -44,16 +44,35 @@ export function saveServerRegistry(servers: ServerEntry[]): void {
 }
 
 // ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+/** Validate a WebSocket URL. Returns null if valid, or an error message. */
+export function validateWsUrl(url: string): string | null {
+  const trimmed = url.trim()
+  if (!trimmed) return 'URL is required'
+  if (!/^wss?:\/\//i.test(trimmed)) return 'URL must start with ws:// or wss://'
+  try {
+    new URL(trimmed)
+  } catch {
+    return 'Invalid URL format'
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
 // Operations — return new arrays, caller updates store
 // ---------------------------------------------------------------------------
 
-/** Add a new server entry. Returns [updatedList, newEntry]. */
+/** Add a new server entry. Returns [updatedList, newEntry]. Throws on invalid URL. */
 export function addServerEntry(
   servers: ServerEntry[],
   name: string,
   wsUrl: string,
   token: string,
 ): [ServerEntry[], ServerEntry] {
+  const urlError = validateWsUrl(wsUrl)
+  if (urlError) throw new Error(urlError)
   const entry: ServerEntry = {
     id: generateId(),
     name: name.trim() || 'Unnamed Server',
@@ -81,7 +100,11 @@ export function updateServerEntry(
 ): ServerEntry[] {
   const trimmed: typeof patch = {}
   if (patch.name !== undefined) trimmed.name = patch.name.trim() || 'Unnamed Server'
-  if (patch.wsUrl !== undefined) trimmed.wsUrl = patch.wsUrl.trim()
+  if (patch.wsUrl !== undefined) {
+    const urlError = validateWsUrl(patch.wsUrl)
+    if (urlError) throw new Error(urlError)
+    trimmed.wsUrl = patch.wsUrl.trim()
+  }
   if (patch.token !== undefined) trimmed.token = patch.token.trim()
   const updated = servers.map(s =>
     s.id === serverId ? { ...s, ...trimmed } : s,
