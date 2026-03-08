@@ -961,6 +961,7 @@
   color: var(--text-dim);
   font-size: var(--text-sm);
   font-style: italic;
+  opacity: 0.75;
 }
 
 .msg.error {
