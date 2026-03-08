@@ -130,6 +130,42 @@ describe('ChatMessage', () => {
     const el = screen.getByTestId('chat-message-msg-resp')
     expect(el).not.toHaveAttribute('data-muted')
   })
+
+  it('does not render thinking bubble when content is empty string', () => {
+    const { container } = render(
+      <ChatMessage
+        id="msg-thinking-empty"
+        type="thinking"
+        content=""
+        timestamp={Date.now()}
+      />
+    )
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('does not render thinking bubble when content is whitespace only', () => {
+    const { container } = render(
+      <ChatMessage
+        id="msg-thinking-ws"
+        type="thinking"
+        content="   "
+        timestamp={Date.now()}
+      />
+    )
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('renders thinking bubble when content is non-empty', () => {
+    render(
+      <ChatMessage
+        id="msg-thinking-ok"
+        type="thinking"
+        content="Analyzing..."
+        timestamp={Date.now()}
+      />
+    )
+    expect(screen.getByTestId('chat-message-msg-thinking-ok')).toBeInTheDocument()
+  })
 })
 
 describe('ToolBubble', () => {

@@ -669,6 +669,104 @@ describe('system message routing', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Permission response auto-switch (#1710)
+// ---------------------------------------------------------------------------
+describe('permission response auto-switch', () => {
+  it('switches to session that owns the permission when different from active', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const makeMsg = (id: string, reqId: string) => ({
+      id,
+      type: 'prompt' as const,
+      content: 'Allow?',
+      timestamp: 1,
+      requestId: reqId,
+    });
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [makeMsg('m1', 'req-a')] },
+        s2: { ...createEmptySessionState(), messages: [makeMsg('m2', 'req-b')] },
+      },
+      socket: { readyState: 1, send: () => {} } as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().sendPermissionResponse('req-b', 'allow');
+
+    expect(useConnectionStore.getState().activeSessionId).toBe('s2');
+
+    useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, socket: null });
+  });
+
+  it('does not switch when permission belongs to the active session', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const makeMsg = (id: string, reqId: string) => ({
+      id,
+      type: 'prompt' as const,
+      content: 'Allow?',
+      timestamp: 1,
+      requestId: reqId,
+    });
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [makeMsg('m1', 'req-a')] },
+        s2: { ...createEmptySessionState(), messages: [] },
+      },
+      socket: { readyState: 1, send: () => {} } as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().sendPermissionResponse('req-a', 'deny');
+
+    expect(useConnectionStore.getState().activeSessionId).toBe('s1');
+
+    useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, socket: null });
+  });
+
+  it('sends permission_response before switch_session when cross-session', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sentMessages: { type: string }[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => {
+        sentMessages.push(JSON.parse(data));
+      },
+    };
+
+    const makeMsg = (id: string, reqId: string) => ({
+      id,
+      type: 'prompt' as const,
+      content: 'Allow?',
+      timestamp: 1,
+      requestId: reqId,
+    });
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [makeMsg('m1', 'req-a')] },
+        s2: { ...createEmptySessionState(), messages: [makeMsg('m2', 'req-b')] },
+      },
+      socket: mockSocket as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().sendPermissionResponse('req-b', 'allow');
+
+    // permission_response must be the first message sent (before switch_session)
+    expect(sentMessages[0]?.type).toBe('permission_response');
+    const switchIdx = sentMessages.findIndex((m) => m.type === 'switch_session');
+    const permIdx = sentMessages.findIndex((m) => m.type === 'permission_response');
+    expect(permIdx).toBeLessThan(switchIdx === -1 ? Infinity : switchIdx);
+
+    useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, socket: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // SSR safety — module-level DOM guards (#1151)
 // ---------------------------------------------------------------------------
 describe('SSR safety', () => {

@@ -175,4 +175,45 @@ describe('App', () => {
       overlay.remove()
     }
   })
+
+  it('shows session loading skeleton when connecting', () => {
+    stateOverrides = { connectionPhase: 'connecting' }
+    render(<App />)
+    expect(screen.getByTestId('session-loading-skeleton')).toBeInTheDocument()
+  })
+
+  it('hides session loading skeleton when connected with sessions', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+    render(<App />)
+    expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
+  })
+
+  it('shows session loading skeleton briefly when switching sessions', async () => {
+    const switchSessionFn = vi.fn()
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [
+        { sessionId: 's1', name: 'Session 1', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+        { sessionId: 's2', name: 'Session 2', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+      ],
+      activeSessionId: 's1',
+      switchSession: switchSessionFn,
+    }
+    const { rerender } = render(<App />)
+    // Skeleton not shown before switch
+    expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
+    // Simulate clicking the s2 tab — triggers handleSwitchSession which sets isSwitchingSession=true
+    // The mock switchSession does NOT update activeSessionId, so the skeleton stays visible
+    fireEvent.click(screen.getByTestId('session-tab-s2'))
+    expect(screen.getByTestId('session-loading-skeleton')).toBeInTheDocument()
+    // Simulate activeSessionId changing (store confirms the switch)
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+    rerender(<App />)
+    // Skeleton cleared once activeSessionId changes
+    expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
+  })
 })

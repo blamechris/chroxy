@@ -41,6 +41,7 @@ import { SplitPane, type SplitDirection } from './components/SplitPane'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode } from './store/persistence'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
+import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -198,6 +199,18 @@ export function App() {
   const [sidebarFilter, setSidebarFilter] = useState('')
   const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
+  const [isSwitchingSession, setIsSwitchingSession] = useState(false)
+
+  // Clear the switching flag once the active session actually changes
+  useEffect(() => {
+    setIsSwitchingSession(false)
+  }, [activeSessionId])
+
+  const handleSwitchSession = useCallback((sessionId: string) => {
+    if (sessionId === activeSessionId) return
+    setIsSwitchingSession(true)
+    switchSession(sessionId)
+  }, [switchSession, activeSessionId])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -229,7 +242,7 @@ export function App() {
         e.preventDefault()
         const idx = parseInt(e.key, 10) - 1
         const target = sessions[idx]
-        if (target) switchSession(target.sessionId)
+        if (target) handleSwitchSession(target.sessionId)
         return
       }
       // Cmd+Shift+[ / ]: prev/next tab
@@ -240,7 +253,7 @@ export function App() {
         const nextIdx = e.key === '['
           ? (currentIdx - 1 + sessions.length) % sessions.length
           : (currentIdx + 1) % sessions.length
-        switchSession(sessions[nextIdx]!.sessionId)
+        handleSwitchSession(sessions[nextIdx]!.sessionId)
         return
       }
       // Cmd+W: close active tab (if more than 1 session) — Tauri only (#1378)
@@ -304,7 +317,7 @@ export function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, switchSession, destroySession, viewMode, setViewMode, sendInterrupt])
+  }, [sessions, activeSessionId, handleSwitchSession, destroySession, viewMode, setViewMode, sendInterrupt])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
@@ -727,7 +740,7 @@ export function App() {
           tunnelUrl={null}
           clientCount={connectedClients.length}
           onFilterChange={setSidebarFilter}
-          onSessionClick={switchSession}
+          onSessionClick={handleSwitchSession}
           onResumeSession={(convId) => {
             /* Will be wired in #1107 */
             console.log('Resume session:', convId)
@@ -755,7 +768,7 @@ export function App() {
         {sessionTabs.length > 0 && (
           <SessionBar
             sessions={sessionTabs}
-            onSwitch={switchSession}
+            onSwitch={handleSwitchSession}
             onClose={destroySession}
             onRename={renameSession}
             onNewSession={handleNewSession}
@@ -779,7 +792,7 @@ export function App() {
             onApprove={handleBannerApprove}
             onDeny={handleBannerDeny}
             onDismiss={dismissSessionNotification}
-            onSwitchSession={switchSession}
+            onSwitchSession={handleSwitchSession}
           />
         )}
 
@@ -842,7 +855,11 @@ export function App() {
             {/* Main content */}
             <div className={`main-content${checkpointsOpen ? ' with-checkpoint-panel' : ''}`}>
               <div className="main-content-primary">
-                {splitMode ? (
+                {connectionPhase === 'connecting' ? (
+                  <SessionLoadingSkeleton label="Connecting..." />
+                ) : isSwitchingSession ? (
+                  <SessionLoadingSkeleton label="Switching session..." />
+                ) : splitMode ? (
                   <SplitPane
                     direction={splitMode}
                     first={
@@ -883,7 +900,7 @@ export function App() {
                     )}
                   </>
                 )}
-                {viewMode === 'files' && (
+                {viewMode === 'files' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <FileBrowserPanel />
                 )}
               </div>
@@ -892,7 +909,7 @@ export function App() {
                   <CheckpointTimeline />
                 </div>
               )}
-              {viewMode === 'diff' && <DiffViewerPanel />}
+              {viewMode === 'diff' && connectionPhase !== 'connecting' && !isSwitchingSession && <DiffViewerPanel />}
             </div>
 
             {/* Agent monitor — shows when agents are active */}
