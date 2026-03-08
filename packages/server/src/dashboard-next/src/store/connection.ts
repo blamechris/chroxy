@@ -944,14 +944,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     } else {
       result = enqueueMessage('permission_response', payload);
     }
-    // Auto-switch to the session that owns this prompt (if different from active)
-    const { activeSessionId, sessionStates } = get();
-    for (const [sid, ss] of Object.entries(sessionStates)) {
-      if (ss.messages.some((m) => m.requestId === requestId)) {
-        if (sid !== activeSessionId) get().switchSession(sid);
-        break;
-      }
-    }
+    // Auto-switch to the session that owns this prompt (if different from active).
+    // Prefer sessionNotifications lookup (covers prompts stored before sessionStates[sid] existed),
+    // fall back to scanning sessionStates messages.
+    const { activeSessionId, sessionStates, sessionNotifications } = get();
+    const notifMatch = sessionNotifications.find((n) => n.requestId === requestId);
+    const targetSid = notifMatch?.sessionId
+      ?? Object.entries(sessionStates).find(([, ss]) => ss.messages.some((m) => m.requestId === requestId))?.[0];
+    if (targetSid && targetSid !== activeSessionId) get().switchSession(targetSid);
     return result;
   },
 
