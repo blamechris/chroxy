@@ -57,6 +57,11 @@ export class PtyMirror extends EventEmitter {
     return pty !== null
   }
 
+  /** @internal Override the pty module for testing. Pass null to simulate unavailable. */
+  static _setPtyForTest(mockPty) {
+    pty = mockPty
+  }
+
   /**
    * Spawn the claude CLI in a PTY.
    * @returns {boolean} true if spawned successfully
