@@ -5,7 +5,7 @@
  * with a mock Zustand store.
  */
 import { Alert } from 'react-native';
-import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION } from '../../store/message-handler';
+import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION, SUBSCRIBE_SESSIONS_CHUNK_SIZE } from '../../store/message-handler';
 import { createEmptySessionState } from '../../store/utils';
 import { clearPersistedSession } from '../../store/persistence';
 import type { ConnectionState } from '../../store/types';
@@ -1133,7 +1133,7 @@ describe('session subscription (#1692)', () => {
     expect(subscribeCalls).toHaveLength(0);
   });
 
-  it('chunks subscribe_sessions into batches of 20', () => {
+  it('chunks subscribe_sessions into batches of SUBSCRIBE_SESSIONS_CHUNK_SIZE', () => {
     const mockSend = jest.fn();
     const store = createMockStore({
       activeSessionId: 's1',
@@ -1146,8 +1146,9 @@ describe('session subscription (#1692)', () => {
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
 
-    // Create 25 sessions (s1 active + 24 non-active)
-    const sessions = Array.from({ length: 25 }, (_, i) => ({
+    // Create enough sessions to require chunking: 1 active + (CHUNK_SIZE + 4) non-active
+    const nonActiveCount = SUBSCRIBE_SESSIONS_CHUNK_SIZE + 4;
+    const sessions = Array.from({ length: nonActiveCount + 1 }, (_, i) => ({
       sessionId: `s${i + 1}`,
       name: `Session ${i + 1}`,
     }));
@@ -1156,9 +1157,9 @@ describe('session subscription (#1692)', () => {
 
     const calls = mockSend.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
     const subscribeCalls = calls.filter((c: Record<string, unknown>) => c.type === 'subscribe_sessions');
-    // 24 non-active IDs should be split into 2 chunks: 20 + 4
+    // non-active IDs should be split into 2 chunks: CHUNK_SIZE + 4
     expect(subscribeCalls).toHaveLength(2);
-    expect(subscribeCalls[0].sessionIds).toHaveLength(20);
+    expect(subscribeCalls[0].sessionIds).toHaveLength(SUBSCRIBE_SESSIONS_CHUNK_SIZE);
     expect(subscribeCalls[1].sessionIds).toHaveLength(4);
     // Active session s1 should not be in any chunk
     const allIds = subscribeCalls.flatMap((c: Record<string, unknown>) => c.sessionIds as string[]);
