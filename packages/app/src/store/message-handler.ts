@@ -21,6 +21,7 @@ import {
 } from '../utils/crypto';
 import { registerForPushNotifications } from '../notifications';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
+import { parseUserInputMessage } from '@chroxy/store-core';
 import { hapticSuccess } from '../utils/haptics';
 import type {
   ChatMessage,
@@ -927,17 +928,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- User input echoed from other clients ---
 
     case 'user_input': {
-      const senderClientId = msg.clientId as string | undefined;
-      if (senderClientId && senderClientId === get().myClientId) break;
-      const uiTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (!uiTargetId) break;
-      const uiMsg: ChatMessage = {
-        id: nextMessageId('user_input'),
-        type: 'user_input',
-        content: (msg.text as string) || '',
-        timestamp: (msg.timestamp as number) || Date.now(),
-      };
-      updateSession(uiTargetId, (ss) => ({
+      const parsed = parseUserInputMessage(msg as Record<string, unknown>, get().myClientId, get().activeSessionId);
+      if (!parsed) break;
+      const { sessionId: parsedSessionId, ...messageFields } = parsed;
+      const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...messageFields };
+      updateSession(parsedSessionId, (ss) => ({
         messages: [...ss.messages, uiMsg],
       }));
       break;
