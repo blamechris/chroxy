@@ -767,6 +767,32 @@ describe('permission response auto-switch', () => {
 });
 
 // ---------------------------------------------------------------------------
+// PTY dead code removal (#1759)
+// ---------------------------------------------------------------------------
+describe('PTY dead code removal', () => {
+  it('connection.ts does not contain PTY mirror actions', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const src = fs.readFileSync(path.resolve(__dirname, 'connection.ts'), 'utf-8');
+    expect(src).not.toMatch(/spawnPty|writePty|resizePty|killPty|ptyActive/);
+  });
+
+  it('message-handler.ts does not contain PTY message cases', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const src = fs.readFileSync(path.resolve(__dirname, 'message-handler.ts'), 'utf-8');
+    expect(src).not.toMatch(/pty_spawned|pty_data|pty_exit|pty_error/);
+  });
+
+  it('types.ts does not contain PTY action signatures or ptyActive field', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const src = fs.readFileSync(path.resolve(__dirname, 'types.ts'), 'utf-8');
+    expect(src).not.toMatch(/spawnPty|writePty|resizePty|killPty|ptyActive/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // SSR safety — module-level DOM guards (#1151)
 // ---------------------------------------------------------------------------
 describe('SSR safety', () => {
