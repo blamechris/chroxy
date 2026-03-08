@@ -2201,11 +2201,32 @@
 
 .modal-content input::placeholder { color: var(--text-disabled); }
 
+.provider-section {
+  margin-bottom: 10px;
+}
+
 .provider-select {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
+}
+
+.provider-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.capability-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg-session-bar);
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  letter-spacing: 0.02em;
 }
 
 .provider-select label {
