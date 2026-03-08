@@ -279,6 +279,10 @@ When you modify app components (screens, UI elements, styling), verify with Maes
 - **Screenshots save to CWD** — always clean up after verification
 - **Device compatibility** — tested on iPhone 15 Pro and iPhone SE 3 (iOS 17+), portrait only; iPad and Android are untested (tap coordinates may differ)
 
+## Repo Memory MCP
+
+The `repo-memory` MCP is available. Prefer `get_file_summary` over `Read` when exploring code you won't edit — it returns cached summaries and saves tokens. Also available: `get_project_map`, `get_related_files`, `search_by_purpose`. Use `Read` when you need exact lines or plan to edit. When launching subagents, tell them repo-memory tools are available.
+
 ## Reference
 
 For detailed component tables, WebSocket protocol messages, file listings, and state management details: see [`docs/architecture/reference.md`](docs/architecture/reference.md)

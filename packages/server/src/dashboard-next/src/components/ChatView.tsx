@@ -8,6 +8,7 @@
  */
 import { useRef, useState, useCallback, useEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
 import { ThinkingDots } from './ThinkingDots'
+import { renderMarkdown } from '../lib/markdown'
 
 /* ---- Sender Icons ---- */
 
@@ -192,7 +193,11 @@ export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatV
               <div
                 className={`msg ${TYPE_CLASS[msg.type] || 'assistant'}${msg.isStreaming ? ' streaming' : ''}`}
               >
-                {msg.content}
+                {(msg.type === 'response' || msg.type === 'tool_use') ? (
+                  <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+                ) : (
+                  msg.content
+                )}
                 {msg.timestamp > 0 && (
                   <span className="msg-timestamp">{formatTime(msg.timestamp)}</span>
                 )}

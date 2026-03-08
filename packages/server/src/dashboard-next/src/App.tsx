@@ -114,8 +114,9 @@ export function App() {
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
 
-  // Session-level state — useShallow prevents re-renders when getActiveSessionState()
-  // returns a new fallback object with the same property values
+  // Session-level state via useShallow — includes messages from sessionStates.
+  // stream_end/result handlers force a new messages[] reference so useShallow
+  // detects the change even when delta flush was already completed by the timer.
   const {
     messages: storeMessages,
     streamingMessageId,
