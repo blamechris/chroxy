@@ -1672,8 +1672,11 @@ describe('dead code removal', () => {
       await import('../src/codex-session.js')
       assert.fail('codex-session.js should have been deleted')
     } catch (err) {
-      assert.ok(err.code === 'ERR_MODULE_NOT_FOUND' || err.message.includes('Cannot find'),
-        'Expected module not found error')
+      assert.ok(
+        (err.code === 'ERR_MODULE_NOT_FOUND' || err.message.includes('Cannot find')) &&
+          err.message.includes('codex-session.js'),
+        'Expected module not found error for codex-session.js',
+      )
     }
   })
 
