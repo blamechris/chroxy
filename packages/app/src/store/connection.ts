@@ -845,7 +845,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { activeSessionId, sessionStates } = get();
     for (const [sid, ss] of Object.entries(sessionStates)) {
       if (ss.messages.some((m) => m.requestId === requestId)) {
-        if (sid !== activeSessionId) get().switchSession(sid);
+        if (sid !== activeSessionId) get().switchSession(sid, { haptic: false });
         break;
       }
     }
