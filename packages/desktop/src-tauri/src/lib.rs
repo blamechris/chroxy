@@ -174,19 +174,20 @@ fn save_setup_config(
     if let Some(settings_state) = app.try_state::<Mutex<DesktopSettings>>() {
         let mut settings = lock_or_recover(&settings_state);
         settings.tunnel_mode = tunnel_mode.clone();
-        let _ = settings.save();
+        settings.save().map_err(|e| format!("Failed to save settings: {}", e))?;
     }
 
     // Update port in config.json
     if let Some(path) = config::config_path() {
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            if let Ok(mut cfg) = serde_json::from_str::<serde_json::Value>(&contents) {
-                cfg["port"] = serde_json::json!(port);
-                if let Ok(json_str) = serde_json::to_string_pretty(&cfg) {
-                    let _ = std::fs::write(&path, json_str);
-                }
-            }
-        }
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read config {}: {}", path.display(), e))?;
+        let mut cfg: serde_json::Value = serde_json::from_str(&contents)
+            .map_err(|e| format!("Failed to parse config {}: {}", path.display(), e))?;
+        cfg["port"] = serde_json::json!(port);
+        let json_str = serde_json::to_string_pretty(&cfg)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        std::fs::write(&path, json_str)
+            .map_err(|e| format!("Failed to write config {}: {}", path.display(), e))?;
     }
 
     // Apply tunnel mode to server manager
