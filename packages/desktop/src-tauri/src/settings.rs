@@ -86,13 +86,15 @@ impl DesktopSettings {
         Ok(())
     }
 
-    /// Parse settings from a JSON string. Useful for testing.
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+    /// Parse settings from a JSON string. Test-only helper.
+    #[cfg(test)]
+    pub(crate) fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
 
-    /// Serialize settings to a JSON string.
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+    /// Serialize settings to a JSON string. Test-only helper.
+    #[cfg(test)]
+    pub(crate) fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
 }

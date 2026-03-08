@@ -48,8 +48,9 @@ pub fn load_config() -> ChroxyConfig {
     }
 }
 
-/// Parse config from a JSON string. Useful for testing without file I/O.
-pub fn parse_config(json: &str) -> Result<ChroxyConfig, serde_json::Error> {
+/// Parse config from a JSON string. Test-only helper.
+#[cfg(test)]
+pub(crate) fn parse_config(json: &str) -> Result<ChroxyConfig, serde_json::Error> {
     serde_json::from_str(json)
 }
 
