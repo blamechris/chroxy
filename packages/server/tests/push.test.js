@@ -231,6 +231,16 @@ describe('PushManager', () => {
       // Rapid second send — blocked by 30s default limit
       await manager.send('custom', 'T', 'B')
       assert.equal(fetchMock.mock.calls.length, 1)
+
+      // Backdate to just under 30s — still within default rate limit window, so blocked
+      manager._lastSent.set('custom', Date.now() - 29_000)
+      await manager.send('custom', 'T', 'B')
+      assert.equal(fetchMock.mock.calls.length, 1)
+
+      // Backdate to just over 30s — outside default window, so allowed
+      manager._lastSent.set('custom', Date.now() - 31_000)
+      await manager.send('custom', 'T', 'B')
+      assert.equal(fetchMock.mock.calls.length, 2)
     })
   })
 })
