@@ -671,3 +671,49 @@ describe('_killAndRespawn behavioral tests (#1009)', () => {
     assert.equal(startCalled, false)
   })
 })
+
+describe('CliSession._buildChildEnv', () => {
+  it('strips ANTHROPIC_API_KEY from child env', () => {
+    const savedKey = process.env.ANTHROPIC_API_KEY
+    process.env.ANTHROPIC_API_KEY = 'sk-test-key-12345'
+    try {
+      const session = createSession()
+      const env = session._buildChildEnv()
+      assert.equal(env.ANTHROPIC_API_KEY, undefined,
+        'ANTHROPIC_API_KEY must be absent from child env')
+    } finally {
+      if (savedKey === undefined) {
+        delete process.env.ANTHROPIC_API_KEY
+      } else {
+        process.env.ANTHROPIC_API_KEY = savedKey
+      }
+    }
+  })
+
+  it('always includes CI and CLAUDE_HEADLESS vars', () => {
+    const session = createSession()
+    const env = session._buildChildEnv()
+    assert.equal(env.CI, '1')
+    assert.equal(env.CLAUDE_HEADLESS, '1')
+    assert.equal(env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING, '1')
+  })
+
+  it('includes CHROXY_PORT when port is set', () => {
+    const session = createSession({ port: 8765 })
+    session._hookManager?.destroy()
+    const env = session._buildChildEnv()
+    assert.equal(env.CHROXY_PORT, '8765')
+  })
+
+  it('omits CHROXY_PORT when port is not set', () => {
+    const session = createSession()
+    const env = session._buildChildEnv()
+    assert.equal(env.CHROXY_PORT, undefined)
+  })
+
+  it('sets CHROXY_PERMISSION_MODE from session', () => {
+    const session = createSession({ permissionMode: 'auto' })
+    const env = session._buildChildEnv()
+    assert.equal(env.CHROXY_PERMISSION_MODE, 'auto')
+  })
+})

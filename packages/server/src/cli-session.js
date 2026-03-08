@@ -138,25 +138,28 @@ export class CliSession extends EventEmitter {
   /**
    * Spawn the persistent claude process and wire up event handlers.
    */
+  _buildChildEnv() {
+    // Strip ANTHROPIC_API_KEY so CLI uses OAuth/subscription auth instead of API credits
+    const { ANTHROPIC_API_KEY: _, ...parentEnv } = process.env
+    return {
+      ...parentEnv,
+      CI: '1',
+      CLAUDE_HEADLESS: '1',
+      CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
+      ...(this._port ? { CHROXY_PORT: String(this._port) } : {}),
+      ...(this._apiToken ? { CHROXY_TOKEN: this._apiToken } : {}),
+      CHROXY_PERMISSION_MODE: this.permissionMode,
+    }
+  }
+
   _spawnPersistentProcess(args) {
     this._cleanupReadlines()
     this._processReady = false
 
-    // Strip ANTHROPIC_API_KEY so CLI uses OAuth/subscription auth instead of API credits
-    const { ANTHROPIC_API_KEY: _, ...parentEnv } = process.env
-
     const child = spawn('claude', args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...parentEnv,
-        CI: '1',
-        CLAUDE_HEADLESS: '1',
-        CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
-        ...(this._port ? { CHROXY_PORT: String(this._port) } : {}),
-        ...(this._apiToken ? { CHROXY_TOKEN: this._apiToken } : {}),
-        CHROXY_PERMISSION_MODE: this.permissionMode,
-      },
+      env: this._buildChildEnv(),
     })
 
     this._child = child
