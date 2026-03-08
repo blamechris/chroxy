@@ -928,7 +928,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- User input echoed from other clients ---
 
     case 'user_input': {
-      const parsed = parseUserInputMessage(msg as Record<string, unknown>, get().myClientId, get().activeSessionId);
+      const parsed = parseUserInputMessage(msg, get().myClientId, get().activeSessionId);
       if (!parsed) break;
       const { sessionId: parsedSessionId, ...parsedMsg } = parsed;
       const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...parsedMsg };
