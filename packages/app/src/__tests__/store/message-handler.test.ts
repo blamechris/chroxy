@@ -1133,6 +1133,38 @@ describe('session subscription (#1692)', () => {
     expect(subscribeCalls).toHaveLength(0);
   });
 
+  it('chunks subscribe_sessions into batches of 20', () => {
+    const mockSend = jest.fn();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [],
+      sessionStates: {},
+      messages: [],
+      socket: { readyState: 1, send: mockSend } as any,
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Create 25 sessions (s1 active + 24 non-active)
+    const sessions = Array.from({ length: 25 }, (_, i) => ({
+      sessionId: `s${i + 1}`,
+      name: `Session ${i + 1}`,
+    }));
+
+    _testMessageHandler.handle({ type: 'session_list', sessions });
+
+    const calls = mockSend.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    const subscribeCalls = calls.filter((c: Record<string, unknown>) => c.type === 'subscribe_sessions');
+    // 24 non-active IDs should be split into 2 chunks: 20 + 4
+    expect(subscribeCalls).toHaveLength(2);
+    expect(subscribeCalls[0].sessionIds).toHaveLength(20);
+    expect(subscribeCalls[1].sessionIds).toHaveLength(4);
+    // Active session s1 should not be in any chunk
+    const allIds = subscribeCalls.flatMap((c: Record<string, unknown>) => c.sessionIds as string[]);
+    expect(allIds).not.toContain('s1');
+  });
+
   it('handles subscriptions_updated without crashing', () => {
     const store = createMockStore({
       activeSessionId: 's1',

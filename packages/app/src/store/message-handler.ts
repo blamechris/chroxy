@@ -756,7 +756,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         if (subscribeIds.length > 0) {
           const sock = get().socket;
           if (sock && sock.readyState === WebSocket.OPEN) {
-            wsSend(sock, { type: 'subscribe_sessions', sessionIds: subscribeIds });
+            // Server schema enforces max 20 IDs per message — chunk if needed
+            const CHUNK_SIZE = 20;
+            for (let i = 0; i < subscribeIds.length; i += CHUNK_SIZE) {
+              wsSend(sock, { type: 'subscribe_sessions', sessionIds: subscribeIds.slice(i, i + CHUNK_SIZE) });
+            }
           }
         }
       }
