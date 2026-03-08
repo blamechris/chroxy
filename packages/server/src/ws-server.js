@@ -279,7 +279,6 @@ export class WsServer {
       sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
       replayHistory: (ws, sid) => self._replayHistory(ws, sid),
       get draining() { return self._draining },
-      get ptyMirrors() { return self._ptyMirrors },
     }
     this.pushManager = pushManager
 
@@ -299,20 +298,6 @@ export class WsServer {
           this._checkpointManager.clearCheckpoints(sessionId)
         } catch (err) {
           console.warn(`[ws] Failed to clear checkpoints for destroyed session ${sessionId}: ${err.message}`)
-        }
-      })
-    }
-
-    // PTY mirrors: one per session, keyed by sessionId
-    this._ptyMirrors = new Map()
-
-    // Clean up PTY mirrors when sessions are destroyed
-    if (sessionManager && typeof sessionManager.on === 'function') {
-      sessionManager.on('session_destroyed', ({ sessionId }) => {
-        const pty = this._ptyMirrors.get(sessionId)
-        if (pty) {
-          pty.destroy()
-          this._ptyMirrors.delete(sessionId)
         }
       })
     }
@@ -1256,12 +1241,6 @@ export class WsServer {
 
     // Clean up web task manager
     this._webTaskManager.destroy()
-
-    // Clean up all PTY mirrors
-    for (const ptyMirror of this._ptyMirrors.values()) {
-      ptyMirror.destroy()
-    }
-    this._ptyMirrors.clear()
 
     for (const [ws] of this.clients) {
       ws.close()
