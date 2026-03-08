@@ -5,6 +5,80 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-03-08
+
+### Added
+
+**Multi-Server & Provider Ecosystem**
+- Multi-server connection registry with per-server auth persistence and auto-connect
+- Server picker UI for managing multiple remote machines
+- Google Gemini CLI and OpenAI Codex CLI providers
+- Provider picker in session creation flow with billing context and capability badges
+- Native folder picker and file system browser for new session directory selection
+
+**Dashboard — Desktop IDE Features**
+- Split pane view with resizable panels
+- File browser panel with syntax highlighting
+- Checkpoint timeline visualization with create/delete
+- Diff viewer panel
+- Agent monitoring panel
+- Cross-session notification banners with quick-approve for permissions
+- Configurable send shortcut (Enter vs Cmd+Enter)
+- Encrypted server tokens at rest in localStorage
+- Server-scoped session persistence (isolated per server)
+- Subtle breathing animation for idle session dots
+- Inline URL validation in ServerPicker
+- ARIA and keyboard navigation improvements throughout
+
+**Desktop App**
+- First-run wizard with dependency checking
+- Clipboard manager plugin
+- QR code popup from tray menu
+- Cross-platform conditionals for Windows/Linux compilation
+- Hardened CSP (removed unsafe-inline)
+
+**Mobile App**
+- Checkpoint timeline UI — list, create, delete, and auto-switch session on restore
+- File editor component with save/cancel
+- Git view component for mobile git operations
+- Vector icons replacing emoji throughout
+- Multi-indicator session pills with distinct status badges
+- Rich notifications and plan approval in session banner
+- Subscribe to all sessions for real-time multi-session events
+- Session subscribe chunking for >20 sessions
+- Token rotation handling with re-auth flow
+- Cross-platform session rename
+- Component rendering tests for critical UI
+
+**Server**
+- Git operations: `git_stage`, `git_unstage`, `git_commit` WebSocket handlers
+- PTY mirror for true 1:1 terminal view with max concurrent limit
+- Cross-device input conflict resolution
+- Cross-client permission sync via `permission_resolved` broadcast
+- Unified `handleSessionMessage` (refactored from separate CLI handler)
+- Provider list schema and WS endpoint
+- Integration tests for untested WS message handlers
+
+**Shared**
+- Extracted `store-core` package with dependency injection adapters (shared between app and dashboard)
+
+### Fixed
+
+- **stream_start ID collision**: Server reuses same messageId for tool_start and post-tool stream_start, causing response text to concatenate onto tool_use messages. Now creates suffixed response ID with delta remapping.
+- Cross-client permission propagation: all connected clients now see permission outcomes in real-time
+- Dashboard markdown rendering for response and tool_use messages
+- Message deduplication during all history replays
+- Session state initialization for new sessions on session_list
+- Crypto PRNG, disconnect UX, and user message sync in app
+- Server-scoped persistence edge cases in dashboard
+- Auto-dismiss notification banner on permission_expired
+- Out-of-order directory listing response guard
+- Codex provider error messages improved
+- Empty state for Output tab and terminal data fallback
+- Config save error propagation in desktop first-run wizard
+- Deterministic time in ServerPicker tests
+- Keyboard focus indicators on various components
+
 ## [0.3.0] - 2026-03-02
 
 ### Added

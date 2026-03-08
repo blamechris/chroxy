@@ -1,6 +1,6 @@
 {
   "name": "chroxy",
-  "version": "0.3.2",
+  "version": "0.5.0",
   "private": true,
   "description": "Remote terminal for Claude Code from your phone",
   "workspaces": [
