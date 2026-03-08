@@ -691,7 +691,7 @@ describe('system message routing', () => {
 
     const { serverErrors } = useConnectionStore.getState();
     expect(serverErrors).toHaveLength(1);
-    expect(serverErrors[0].sessionId).toBe('s2');
+    expect(serverErrors[0]!.sessionId).toBe('s2');
 
     _testMessageHandler.clearContext();
     useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, serverErrors: [] });
@@ -717,7 +717,7 @@ describe('system message routing', () => {
 
     const { serverErrors } = useConnectionStore.getState();
     expect(serverErrors).toHaveLength(1);
-    expect(serverErrors[0].sessionId).toBeUndefined();
+    expect(serverErrors[0]!.sessionId).toBeUndefined();
 
     _testMessageHandler.clearContext();
     useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, serverErrors: [] });
