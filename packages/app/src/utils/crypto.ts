@@ -1,5 +1,14 @@
 import nacl from 'tweetnacl'
 import { encodeBase64, decodeBase64 } from 'tweetnacl-util'
+import { getRandomBytes } from 'expo-crypto'
+
+// React Native's JSC runtime has neither browser crypto.getRandomValues nor
+// Node.js require('crypto'), so TweetNaCl's auto-init fails with "no PRNG".
+// Explicitly wire up expo-crypto's native random bytes generator.
+nacl.setPRNG((x: Uint8Array, n: number) => {
+  const bytes = getRandomBytes(n)
+  x.set(bytes)
+})
 
 const NONCE_LENGTH = 24
 

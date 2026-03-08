@@ -10,11 +10,9 @@
 # Non-Chroxy Claude sessions don't have CHROXY_PORT set, so the hook immediately
 # falls through to Claude's normal permission prompt.
 
-# If CHROXY_PORT is not set, this isn't a Chroxy session — fall through
+# If CHROXY_PORT is not set, this isn't a Chroxy session — exit silently
+# so Claude Code uses its normal permission flow without showing a hook prompt.
 if [ -z "$CHROXY_PORT" ]; then
-  cat <<'EOF'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}
-EOF
   exit 0
 fi
 

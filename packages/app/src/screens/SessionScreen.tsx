@@ -812,17 +812,22 @@ export function SessionScreen() {
       {/* Reconnecting / restarting banner */}
       {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting') && (
         <View style={styles.reconnectingBanner}>
-          <Text style={styles.reconnectingText}>
-            {connectionPhase === 'server_restarting'
-              ? shutdownReason === 'shutdown'
-                ? 'Server shut down'
-                : restartCountdown != null && restartCountdown > 0
-                  ? `Server restarting... ~${Math.floor(restartCountdown / 60)}:${String(restartCountdown % 60).padStart(2, '0')}`
-                  : 'Server restarting...'
-              : connectionRetryCount > 0
-                ? `Reconnecting (attempt ${connectionRetryCount + 1})...`
-                : 'Reconnecting...'}
-          </Text>
+          <View style={styles.reconnectingRow}>
+            <Text style={[styles.reconnectingText, { flex: 1 }]}>
+              {connectionPhase === 'server_restarting'
+                ? shutdownReason === 'shutdown'
+                  ? 'Server shut down'
+                  : restartCountdown != null && restartCountdown > 0
+                    ? `Server restarting... ~${Math.floor(restartCountdown / 60)}:${String(restartCountdown % 60).padStart(2, '0')}`
+                    : 'Server restarting...'
+                : connectionRetryCount > 0
+                  ? `Reconnecting (attempt ${connectionRetryCount + 1})...`
+                  : 'Reconnecting...'}
+            </Text>
+            <TouchableOpacity onPress={disconnect} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Stop reconnecting">
+              <Text style={styles.reconnectDisconnectText}>Disconnect</Text>
+            </TouchableOpacity>
+          </View>
           {connectionPhase === 'server_restarting' && shutdownReason === 'restart' && (
             <Text style={styles.reconnectingDetail}>Graceful restart</Text>
           )}
@@ -1233,6 +1238,22 @@ const styles = StyleSheet.create({
     color: COLORS.accentOrange,
     fontSize: 13,
     fontWeight: '600',
+  },
+  reconnectingRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 8,
+  },
+  reconnectDisconnect: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 4,
+    backgroundColor: COLORS.accentRed,
+  },
+  reconnectDisconnectText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600' as const,
   },
   reconnectingDetail: {
     color: COLORS.accentOrange,

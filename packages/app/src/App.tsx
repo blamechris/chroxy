@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Platform, UIManager } from 'react-native';
+import { Platform, UIManager, TouchableOpacity, Text } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -91,7 +91,19 @@ export default function App() {
             <Stack.Screen
               name="Session"
               component={SessionScreen}
-              options={{ title: 'Session' }}
+              options={{
+                title: 'Session',
+                headerLeft: () => (
+                  <TouchableOpacity
+                    onPress={() => useConnectionStore.getState().disconnect()}
+                    style={{ paddingRight: 12 }}
+                    accessibilityRole="button"
+                    accessibilityLabel="Disconnect and go back"
+                  >
+                    <Text style={{ color: '#ff6b6b', fontSize: 15, fontWeight: '500' }}>Disconnect</Text>
+                  </TouchableOpacity>
+                ),
+              }}
             />
             <Stack.Screen
               name="Settings"
