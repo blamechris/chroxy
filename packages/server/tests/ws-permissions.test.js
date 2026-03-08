@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach, mock } from 'node:test'
+import { describe, it, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { createPermissionHandler } from '../src/ws-permissions.js'
@@ -158,6 +158,9 @@ describe('createPermissionHandler', () => {
   })
 
   describe('handlePermissionRequest', () => {
+    let destroyFn
+    afterEach(() => { if (destroyFn) { destroyFn(); destroyFn = null } })
+
     it('rejects unauthenticated request', async () => {
       const opts = makeHandlerOpts({ validateBearerAuth: mock.fn(() => false) })
       const { handlePermissionRequest } = createPermissionHandler(opts)
@@ -171,7 +174,8 @@ describe('createPermissionHandler', () => {
 
     it('broadcasts permission_request with tool name and description', async () => {
       const opts = makeHandlerOpts()
-      const { handlePermissionRequest } = createPermissionHandler(opts)
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
       const body = JSON.stringify({
         tool_name: 'Bash',
         tool_input: { command: 'ls -la' },
@@ -202,7 +206,8 @@ describe('createPermissionHandler', () => {
     it('calls pushManager.send when pushManager is set', async () => {
       const pushManager = { send: mock.fn() }
       const opts = makeHandlerOpts({ pushManager })
-      const { handlePermissionRequest } = createPermissionHandler(opts)
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
       const body = JSON.stringify({ tool_name: 'Write', tool_input: {} })
       const req = makeReq(body)
       const res = makeRes()
