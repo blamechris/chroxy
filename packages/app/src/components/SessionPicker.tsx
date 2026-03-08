@@ -8,6 +8,7 @@ import {
   Modal,
   StyleSheet,
   Alert,
+  Animated,
   LayoutChangeEvent,
 } from 'react-native';
 import { useConnectionStore, SessionInfo, SessionHealth } from '../store/connection';
@@ -15,20 +16,49 @@ import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 import { hapticMedium } from '../utils/haptics';
 
+/** Pulsing dot for busy sessions */
+function PulsingDot() {
+  const opacity = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    const anim = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 0.3, duration: 800, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 1, duration: 800, useNativeDriver: true }),
+      ]),
+    );
+    anim.start();
+    return () => anim.stop();
+  }, [opacity]);
+
+  return <Animated.View style={[styles.busyDot, { opacity }]} />;
+}
+
+/** Small notification count badge */
+function NotificationBadge({ count }: { count: number }) {
+  return (
+    <View style={styles.badge}>
+      <Text style={styles.badgeText}>{count > 9 ? '9+' : count}</Text>
+    </View>
+  );
+}
 
 interface SessionPillProps {
   session: SessionInfo;
   isActive: boolean;
   health: SessionHealth;
-  hasNotification: boolean;
+  notificationCount: number;
   onPress: () => void;
   onLongPress: () => void;
   onLayout: (e: LayoutChangeEvent) => void;
 }
 
-function SessionPill({ session, isActive, health, hasNotification, onPress, onLongPress, onLayout }: SessionPillProps) {
+function SessionPill({ session, isActive, health, notificationCount, onPress, onLongPress, onLayout }: SessionPillProps) {
   const isCodex = session.provider === 'codex';
   const isCrashed = health === 'crashed';
+  const hasNotification = notificationCount > 0 && !isActive;
+  const showBusy = !isCrashed && session.isBusy;
+  const hasIndicators = isCrashed || showBusy || hasNotification;
   return (
     <TouchableOpacity
       style={[
@@ -37,14 +67,20 @@ function SessionPill({ session, isActive, health, hasNotification, onPress, onLo
         isCodex && styles.pillCodex,
         isActive && isCodex && styles.pillCodexActive,
         isCrashed && styles.pillCrashed,
-        hasNotification && !isActive && styles.pillAttention,
+        hasNotification && styles.pillAttention,
       ]}
       onPress={onPress}
       onLongPress={onLongPress}
       onLayout={onLayout}
       activeOpacity={0.7}
     >
-      {isCrashed ? <View style={styles.crashDot} /> : hasNotification && !isActive ? <View style={styles.attentionDot} /> : session.isBusy && <View style={styles.busyDot} />}
+      {hasIndicators && (
+        <View style={styles.indicators}>
+          {isCrashed && <View style={styles.crashDot} />}
+          {showBusy && <PulsingDot />}
+          {hasNotification && <NotificationBadge count={notificationCount} />}
+        </View>
+      )}
       {isCodex && <Text style={[styles.codexBadge, isActive && styles.codexBadgeActive]}>CX </Text>}
       <Text style={[styles.pillText, isActive && styles.pillTextActive, isActive && isCodex && styles.pillTextCodexActive, isCrashed && styles.pillTextCrashed]} numberOfLines={1}>
         {session.name}
@@ -188,10 +224,13 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
     }
   }, [activeSessionId, scrollToSession]);
 
-  const notifiedSessionIds = useMemo(
-    () => new Set(sessionNotifications.map((n) => n.sessionId)),
-    [sessionNotifications],
-  );
+  const notificationCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const n of sessionNotifications) {
+      counts.set(n.sessionId, (counts.get(n.sessionId) || 0) + 1);
+    }
+    return counts;
+  }, [sessionNotifications]);
 
   return (
     <View style={styles.container}>
@@ -210,7 +249,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
             session={session}
             isActive={session.sessionId === activeSessionId}
             health={sessionStates[session.sessionId]?.health || 'healthy'}
-            hasNotification={notifiedSessionIds.has(session.sessionId)}
+            notificationCount={notificationCounts.get(session.sessionId) || 0}
             onPress={() => switchSession(session.sessionId)}
             onLongPress={() => handleLongPress(session)}
             onLayout={(e) => handlePillLayout(session.sessionId, e)}
@@ -351,26 +390,38 @@ const styles = StyleSheet.create({
   pillTextCrashed: {
     color: COLORS.accentRed,
   },
+  indicators: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    marginRight: 4,
+  },
   crashDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
     backgroundColor: COLORS.accentRed,
-    marginRight: 6,
-  },
-  attentionDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: COLORS.accentOrange,
-    marginRight: 6,
   },
   busyDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
+    backgroundColor: COLORS.accentBlue,
+  },
+  badge: {
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
     backgroundColor: COLORS.accentOrange,
-    marginRight: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  badgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+    lineHeight: 14,
   },
   addButton: {
     width: 32,
