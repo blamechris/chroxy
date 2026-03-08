@@ -25,10 +25,13 @@ vi.mock('../store/connection', () => ({
   },
 }))
 
+const FAKE_NOW = 1_741_348_800_000 // 2025-03-07T12:00:00Z
+
 afterEach(() => cleanup())
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.spyOn(Date, 'now').mockReturnValue(FAKE_NOW)
   storeState = {
     serverRegistry: [],
     activeServerId: null,
@@ -37,7 +40,7 @@ beforeEach(() => {
 })
 
 const SERVERS: ServerEntry[] = [
-  { id: 'srv_1', name: 'Dev Machine', wsUrl: 'wss://dev.example.com/ws', token: 'abc', lastConnectedAt: Date.now() - 330_000 },
+  { id: 'srv_1', name: 'Dev Machine', wsUrl: 'wss://dev.example.com/ws', token: 'abc', lastConnectedAt: FAKE_NOW - 330_000 },
   { id: 'srv_2', name: 'Production', wsUrl: 'wss://prod.example.com/ws', token: 'def', lastConnectedAt: null },
 ]
 
