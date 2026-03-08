@@ -1437,3 +1437,46 @@ describe('permission_request dedup on reconnect', () => {
     expect(prompts[1].requestId).toBe('perm-b');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Permission response auto-switch (#1710) — app store
+// ---------------------------------------------------------------------------
+describe('permission response auto-switch (app)', () => {
+  const makeMsg = (id: string, reqId: string): ChatMessage => ({
+    id,
+    type: 'prompt',
+    content: 'Allow?',
+    timestamp: 1,
+    requestId: reqId,
+  });
+
+  it('switches to session that owns the permission when different from active', () => {
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [makeMsg('m1', 'req-a')] },
+        s2: { ...createEmptySessionState(), messages: [makeMsg('m2', 'req-b')] },
+      },
+      socket: { readyState: 1, send: () => {} } as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().sendPermissionResponse('req-b', 'allow');
+
+    expect(useConnectionStore.getState().activeSessionId).toBe('s2');
+  });
+
+  it('does not switch when permission belongs to the active session', () => {
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [makeMsg('m1', 'req-a')] },
+        s2: { ...createEmptySessionState(), messages: [] },
+      },
+      socket: { readyState: 1, send: () => {} } as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().sendPermissionResponse('req-a', 'deny');
+
+    expect(useConnectionStore.getState().activeSessionId).toBe('s1');
+  });
+});
