@@ -1537,4 +1537,26 @@ describe('markPromptAnsweredByRequestId', () => {
     expect(s1Msgs).toHaveLength(1);
     expect((s1Msgs[0] as any).answered).toBeUndefined();
   });
+
+  it('falls back to flat messages when sessionStates is empty', () => {
+    const permMsg = {
+      id: 'perm-flat',
+      type: 'prompt' as const,
+      content: 'Allow flat?',
+      requestId: 'req-flat',
+      timestamp: 1,
+    };
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {},
+      messages: [permMsg],
+    });
+
+    useConnectionStore.getState().markPromptAnsweredByRequestId('req-flat', 'allow');
+
+    const flatMsgs = useConnectionStore.getState().messages;
+    const marked = flatMsgs.find((m) => m.requestId === 'req-flat');
+    expect(marked?.answered).toBe('allow');
+  });
 });

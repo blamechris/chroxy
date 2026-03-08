@@ -889,16 +889,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Search all sessions — push-notification path may answer prompts in background sessions
     for (const [sid, ss] of Object.entries(sessionStates)) {
       if (ss.messages.some((m) => m.requestId === requestId)) {
-        set((state) => ({
-          sessionStates: {
-            ...state.sessionStates,
-            [sid]: {
-              ...state.sessionStates[sid]!,
-              messages: state.sessionStates[sid]!.messages.map((m) =>
-                m.requestId === requestId ? { ...m, answered: answer, answeredAt: now } : m
-              ),
-            },
-          },
+        updateSession(sid, (s) => ({
+          messages: s.messages.map((m) =>
+            m.requestId === requestId ? { ...m, answered: answer, answeredAt: now } : m
+          ),
         }));
         return;
       }
