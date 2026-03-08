@@ -56,12 +56,21 @@ describe('loadServerRegistry', () => {
 })
 
 describe('saveServerRegistry', () => {
-  it('persists entries to localStorage', () => {
+  it('persists entries to localStorage with obfuscated tokens', () => {
     const entries: ServerEntry[] = [
       { id: 'srv_1', name: 'Dev', wsUrl: 'wss://dev.example.com/ws', token: 'abc', lastConnectedAt: null },
     ]
     saveServerRegistry(entries)
-    expect(store['chroxy_server_registry']).toBe(JSON.stringify(entries))
+    const stored = JSON.parse(store['chroxy_server_registry']!)
+    expect(stored[0].id).toBe('srv_1')
+    expect(stored[0].name).toBe('Dev')
+    expect(stored[0].wsUrl).toBe('wss://dev.example.com/ws')
+    // Token should be obfuscated, not plaintext
+    expect(stored[0].token).not.toBe('abc')
+    expect(stored[0].token.startsWith('obf:v1:')).toBe(true)
+    // But loadServerRegistry should return the plaintext token
+    const loaded = loadServerRegistry()
+    expect(loaded[0]!.token).toBe('abc')
   })
 })
 
