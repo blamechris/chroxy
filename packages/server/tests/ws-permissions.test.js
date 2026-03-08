@@ -296,6 +296,7 @@ describe('createPermissionHandler', () => {
       assert.equal(res.statusCode, 200)
       assert.ok(res.body.includes('"ok":true'))
       assert.equal(respondToPermission.mock.calls.length, 1)
+      assert.equal(respondToPermission.mock.calls[0].arguments[0], 'sdk-req')
       assert.equal(respondToPermission.mock.calls[0].arguments[1], 'allowAlways')
     })
   })
