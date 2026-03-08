@@ -741,6 +741,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           set(patch);
         }
         set({ sessions: sessionList });
+        // Initialize session state for any new sessions not yet tracked
+        const currentStates = get().sessionStates;
+        const newStates = { ...currentStates };
+        let statesChanged = false;
+        for (const s of sessionList) {
+          if (!newStates[s.sessionId]) {
+            newStates[s.sessionId] = createEmptySessionState();
+            statesChanged = true;
+          }
+        }
+        if (statesChanged) {
+          set({ sessionStates: newStates });
+        }
         // Sync conversationId from session list into session states
         for (const s of sessionList) {
           if (s.conversationId && get().sessionStates[s.sessionId]) {

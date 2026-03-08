@@ -693,6 +693,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           set(patch);
         }
         set({ sessions: sessionList });
+        // Initialize session state for any new sessions not yet tracked
+        const currentStates = get().sessionStates;
+        const newInitStates = { ...currentStates };
+        let initStatesChanged = false;
+        for (const s of sessionList) {
+          if (!newInitStates[s.sessionId]) {
+            newInitStates[s.sessionId] = createEmptySessionState();
+            initStatesChanged = true;
+          }
+        }
+        if (initStatesChanged) {
+          set({ sessionStates: newInitStates });
+        }
         // Sync conversationId from session list into session states
         for (const s of sessionList) {
           if (s.conversationId && get().sessionStates[s.sessionId]) {
