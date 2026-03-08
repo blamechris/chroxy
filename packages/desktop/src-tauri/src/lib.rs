@@ -180,14 +180,14 @@ fn save_setup_config(
     // Update port in config.json
     if let Some(path) = config::config_path() {
         let contents = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read config: {}", e))?;
+            .map_err(|e| format!("Failed to read config {}: {}", path.display(), e))?;
         let mut cfg: serde_json::Value = serde_json::from_str(&contents)
-            .map_err(|e| format!("Failed to parse config: {}", e))?;
+            .map_err(|e| format!("Failed to parse config {}: {}", path.display(), e))?;
         cfg["port"] = serde_json::json!(port);
         let json_str = serde_json::to_string_pretty(&cfg)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
         std::fs::write(&path, json_str)
-            .map_err(|e| format!("Failed to write config: {}", e))?;
+            .map_err(|e| format!("Failed to write config {}: {}", path.display(), e))?;
     }
 
     // Apply tunnel mode to server manager
