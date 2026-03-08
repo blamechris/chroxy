@@ -918,6 +918,109 @@ describe('git result handlers', () => {
   });
 });
 
+describe('permission_request rich notification details', () => {
+  it('includes tool, description and inputPreview in session notification', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Active' } as any,
+        { sessionId: 's2', name: 'Background' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+      sessionNotifications: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's2',
+      requestId: 'req-1',
+      tool: 'Bash',
+      description: 'Run npm test',
+      input: { command: 'npm test' },
+    });
+
+    const state = store.getState();
+    expect(state.sessionNotifications).toHaveLength(1);
+    const notif = state.sessionNotifications[0];
+    expect(notif.tool).toBe('Bash');
+    expect(notif.description).toBe('Run npm test');
+    expect(notif.inputPreview).toBe('npm test');
+    expect(notif.requestId).toBe('req-1');
+  });
+
+  it('truncates long input previews to 120 chars', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Active' } as any,
+        { sessionId: 's2', name: 'Background' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+      sessionNotifications: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const longCommand = 'a'.repeat(200);
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's2',
+      requestId: 'req-2',
+      tool: 'Bash',
+      description: 'Run long command',
+      input: { command: longCommand },
+    });
+
+    const notif = store.getState().sessionNotifications[0];
+    expect(notif.inputPreview!.length).toBeLessThanOrEqual(120);
+    expect(notif.inputPreview).toMatch(/\.\.\.$/);
+  });
+
+  it('omits inputPreview when no input is provided', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Active' } as any,
+        { sessionId: 's2', name: 'Background' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+      sessionNotifications: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's2',
+      requestId: 'req-3',
+      tool: 'Read',
+      description: 'Read a file',
+    });
+
+    const notif = store.getState().sessionNotifications[0];
+    expect(notif.tool).toBe('Read');
+    expect(notif.description).toBe('Read a file');
+    expect(notif.inputPreview).toBeUndefined();
+  });
+});
+
 afterAll(() => {
   _testMessageHandler.clearContext();
 });

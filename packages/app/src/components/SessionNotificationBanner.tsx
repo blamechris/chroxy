@@ -59,7 +59,13 @@ function NotificationRow({ notification }: { notification: SessionNotification }
         </Text>
         <Text style={styles.eventLabel} numberOfLines={1}>
           {EVENT_LABELS[notification.eventType]}
+          {notification.tool ? `: ${notification.tool}` : ''}
         </Text>
+        {notification.inputPreview ? (
+          <Text style={styles.inputPreview} numberOfLines={1}>
+            {notification.inputPreview}
+          </Text>
+        ) : null}
       </TouchableOpacity>
       {isPermission ? (
         <View style={styles.actionButtons}>
@@ -146,7 +152,13 @@ const styles = StyleSheet.create({
   eventLabel: {
     color: COLORS.textSecondary,
     fontSize: 13,
+    flexShrink: 0,
+  },
+  inputPreview: {
+    color: COLORS.textMuted,
+    fontSize: 12,
     flex: 1,
+    fontFamily: 'monospace',
   },
   actionButtons: {
     flexDirection: 'row',

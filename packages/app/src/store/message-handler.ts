@@ -409,6 +409,24 @@ export function updateActiveSession(updater: (session: SessionState) => Partial<
 }
 
 // ---------------------------------------------------------------------------
+// Input preview helper
+// ---------------------------------------------------------------------------
+
+/** Build a short preview string from a tool input object (max 120 chars). */
+function truncateInput(input: Record<string, unknown>): string {
+  // For common tools, pick the most informative field
+  const preview =
+    (input.command as string) ||
+    (input.file_path as string) ||
+    (input.pattern as string) ||
+    (input.content as string) ||
+    (input.query as string) ||
+    '';
+  if (preview.length > 120) return preview.slice(0, 117) + '...';
+  return preview || JSON.stringify(input).slice(0, 120);
+}
+
+// ---------------------------------------------------------------------------
 // Session notification helper
 // ---------------------------------------------------------------------------
 
@@ -421,6 +439,7 @@ function pushSessionNotification(
   eventType: SessionNotification['eventType'],
   message: string,
   requestId?: string,
+  extra?: { tool?: string; description?: string; inputPreview?: string },
 ): void {
   const state = getStore().getState();
   if (sessionId === state.activeSessionId) return;
@@ -434,6 +453,9 @@ function pushSessionNotification(
     message,
     timestamp: Date.now(),
     ...(requestId ? { requestId } : {}),
+    ...(extra?.tool ? { tool: extra.tool } : {}),
+    ...(extra?.description ? { description: extra.description } : {}),
+    ...(extra?.inputPreview ? { inputPreview: extra.inputPreview } : {}),
   };
   getStore().setState((s) => {
     const filtered = s.sessionNotifications.filter(
@@ -1349,7 +1371,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       if (permTargetId) {
         const toolDesc = msg.tool ? `${msg.tool}` : 'Permission needed';
-        pushSessionNotification(permTargetId, 'permission', toolDesc, permRequestId);
+        const inputPreview = msg.input && typeof msg.input === 'object'
+          ? truncateInput(msg.input as Record<string, unknown>)
+          : undefined;
+        pushSessionNotification(permTargetId, 'permission', toolDesc, permRequestId, {
+          tool: msg.tool as string | undefined,
+          description: msg.description as string | undefined,
+          inputPreview,
+        });
       }
       break;
     }

@@ -297,6 +297,9 @@ export interface SessionNotification {
   message: string;
   timestamp: number;
   requestId?: string;
+  tool?: string;
+  description?: string;
+  inputPreview?: string;
 }
 
 export interface SlashCommand {
