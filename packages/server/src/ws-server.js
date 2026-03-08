@@ -529,13 +529,13 @@ export class WsServer {
             msg = decrypt(msg, client.encryptionState.sharedKey, client.encryptionState.recvNonce, DIRECTION_CLIENT)
             client.encryptionState.recvNonce++
           } catch (err) {
-            log.error(`Decryption failed from ${client.id}:`, err.message)
+            log.error(`Decryption failed from ${client.id}: ${err.message}`)
             ws.close()
             return
           }
         }
         this._handleMessage(ws, msg).catch((err) => {
-          log.error('Unhandled error in message handler:', err)
+          log.error(`Unhandled error in message handler: ${err.message}`)
         })
       })
 
@@ -551,7 +551,7 @@ export class WsServer {
       })
 
       ws.on('error', (err) => {
-        log.error(`Client error:`, err.message)
+        log.error(`Client error: ${err.message}`)
       })
     })
 
@@ -937,7 +937,7 @@ export class WsServer {
           try {
             ws.send(JSON.stringify({ type: 'error', code: 'INVALID_MESSAGE', details }))
           } catch (err) {
-            log.error('Failed to send key_exchange error:', err.message)
+            log.error(`Failed to send key_exchange error: ${err.message}`)
           }
           ws.close(1008, 'Invalid key_exchange message')
           return
@@ -950,7 +950,7 @@ export class WsServer {
         try {
           ws.send(JSON.stringify({ type: 'key_exchange_ok', publicKey: serverKp.publicKey }))
         } catch (err) {
-          log.error('Failed to send key_exchange_ok:', err.message)
+          log.error(`Failed to send key_exchange_ok: ${err.message}`)
         }
         log.info(`E2E encryption established with ${client.id}`)
         // Flush queued messages (now encrypted) — batched to yield event loop
@@ -1225,7 +1225,7 @@ export class WsServer {
         ws.send(JSON.stringify(message))
       }
     } catch (err) {
-      log.error('Send error:', err.message)
+      log.error(`Send error: ${err.message}`)
     }
   }
 

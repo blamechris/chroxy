@@ -21,7 +21,12 @@ function readSrc(filename) {
 
 /** Count direct console.log/warn/error/debug/info calls in source (ignores comments). */
 function countConsoleCalls(source) {
-  return (source.match(/\bconsole\.(log|warn|error|debug|info)\(/g) || []).length
+  // Strip single-line and block comments before matching to avoid false positives
+  // from documentation examples like: // do not use console.log(
+  const stripped = source
+    .replace(/\/\*[\s\S]*?\*\//g, '')  // block comments
+    .replace(/\/\/[^\n]*/g, '')          // single-line comments
+  return (stripped.match(/\bconsole\.(log|warn|error|debug|info)\(/g) || []).length
 }
 
 describe('logger usage', () => {
