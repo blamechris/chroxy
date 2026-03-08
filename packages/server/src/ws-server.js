@@ -1131,15 +1131,13 @@ export class WsServer {
    * @param {'tunnel'|'session'|'permission'|'general'} category
    * @param {string} message - Human-readable error description
    * @param {boolean} recoverable - true for warnings, false for fatal errors
+   * @param {string|null} [sessionId] - Optional session ID for scoped errors
    */
-  broadcastError(category, message, recoverable = true) {
+  broadcastError(category, message, recoverable = true, sessionId = null) {
     console.error(`[ws] Broadcasting server_error (${category}): ${message}`)
-    this._broadcast({
-      type: 'server_error',
-      category,
-      message,
-      recoverable,
-    })
+    const payload = { type: 'server_error', category, message, recoverable }
+    if (sessionId) payload.sessionId = sessionId
+    this._broadcast(payload)
   }
 
   /**
