@@ -216,4 +216,87 @@ describe('createPermissionHandler', () => {
       assert.equal(pushManager.send.mock.calls.length, 1)
     })
   })
+
+  describe('handlePermissionResponseHttp', () => {
+    it('rejects unauthenticated request', async () => {
+      const opts = makeHandlerOpts({ validateBearerAuth: mock.fn(() => false) })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'r1', decision: 'allow' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      // validateBearerAuth handles the response — no sendFn calls expected
+      assert.equal(opts.sendFn.mock.calls.length, 0)
+    })
+
+    it('returns 400 for missing requestId', async () => {
+      const opts = makeHandlerOpts()
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ decision: 'allow' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 400)
+      assert.ok(res.body.includes('requestId'))
+    })
+
+    it('returns 400 for invalid decision value', async () => {
+      const opts = makeHandlerOpts()
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'r1', decision: 'maybe' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 400)
+      assert.ok(res.body.includes('decision'))
+    })
+
+    it('returns 404 for unknown requestId', async () => {
+      const opts = makeHandlerOpts()
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'unknown-req', decision: 'allow' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 404)
+    })
+
+    it('resolves via legacy path and returns ok:true', async () => {
+      const pendingPermissions = new Map()
+      const permissionSessionMap = new Map()
+      const resolveCallback = mock.fn()
+      pendingPermissions.set('leg-req', { resolve: resolveCallback, timer: null })
+      const opts = makeHandlerOpts({ pendingPermissions, permissionSessionMap })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'leg-req', decision: 'deny' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.ok(res.body.includes('"ok":true'))
+      assert.equal(resolveCallback.mock.calls.length, 1)
+      assert.equal(resolveCallback.mock.calls[0].arguments[0], 'deny')
+    })
+
+    it('resolves via SDK path (respondToPermission) and returns ok:true', async () => {
+      const permissionSessionMap = new Map([['sdk-req', 'sess-sdk']])
+      const respondToPermission = mock.fn()
+      const sm = {
+        getSession: mock.fn(() => ({ session: { respondToPermission } })),
+      }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => sm),
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'sdk-req', decision: 'allowAlways' }))
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.ok(res.body.includes('"ok":true'))
+      assert.equal(respondToPermission.mock.calls.length, 1)
+      assert.equal(respondToPermission.mock.calls[0].arguments[1], 'allowAlways')
+    })
+  })
 })
