@@ -32,13 +32,17 @@ export function loadServerRegistry(): ServerEntry[] {
     if (!Array.isArray(parsed)) return []
     // Deobfuscate tokens on load (handles both plaintext and obfuscated)
     let needsMigration = false
-    const entries = parsed.map((entry: ServerEntry) => {
-      if (entry.token && isProtected(entry.token)) {
-        return { ...entry, token: deobfuscateToken(entry.token) }
-      }
-      if (entry.token) needsMigration = true
-      return entry
-    })
+    const entries = parsed
+      .filter((entry: unknown): entry is ServerEntry =>
+        entry != null && typeof entry === 'object' && typeof (entry as ServerEntry).id === 'string'
+      )
+      .map((entry: ServerEntry) => {
+        if (typeof entry.token === 'string' && isProtected(entry.token)) {
+          return { ...entry, token: deobfuscateToken(entry.token) }
+        }
+        if (typeof entry.token === 'string' && entry.token) needsMigration = true
+        return entry
+      })
     // If any tokens were plaintext, re-save with obfuscation
     if (needsMigration) {
       saveServerRegistry(entries)
@@ -54,7 +58,7 @@ export function saveServerRegistry(servers: ServerEntry[]): void {
   try {
     const protected_ = servers.map(s => ({
       ...s,
-      token: s.token ? obfuscateToken(s.token) : s.token,
+      token: s.token && !isProtected(s.token) ? obfuscateToken(s.token) : s.token,
     }))
     localStorage.setItem(STORAGE_KEY, JSON.stringify(protected_))
   } catch {

@@ -1,16 +1,18 @@
 /**
- * Token encryption for localStorage persistence.
+ * Token protection for localStorage persistence.
  *
- * Encrypts auth tokens before storing in localStorage using AES-GCM
- * with a key derived from a stable per-origin identifier. This is a
- * hardening measure — not a substitute for proper secret management —
- * to prevent casual plaintext exposure in dev tools or localStorage viewers.
+ * This module implements a lightweight synchronous XOR-based obfuscation
+ * scheme keyed by a stable per-origin identifier. The goal is to reduce
+ * casual plaintext exposure in dev tools or localStorage viewers; it is
+ * not a substitute for proper secret management or real at-rest encryption.
  *
- * The sync API uses a lightweight XOR obfuscation for compatibility with
- * synchronous store initialization. The async API uses Web Crypto AES-GCM
- * for stronger encryption and is used during background migration.
+ * Values starting with `obf:v1:` are XOR-obfuscated by this module.
+ * Values starting with `enc:v1:` are treated as opaque and returned as-is
+ * in the synchronous path; this prefix is reserved for a potential future
+ * async AES-GCM–based format.
  *
- * Both formats are supported on read (migration-safe).
+ * Plaintext, obfuscated, and reserved encrypted formats are all supported
+ * on read for migration safety.
  */
 
 const OBFUSCATED_PREFIX = 'obf:v1:'
@@ -39,7 +41,12 @@ export function obfuscateToken(plaintext: string): string {
   for (let i = 0; i < plaintext.length; i++) {
     bytes.push(plaintext.charCodeAt(i) ^ key[i % key.length]!)
   }
-  return OBFUSCATED_PREFIX + btoa(String.fromCharCode(...bytes))
+  // Build binary string in chunks to avoid argument-length limits
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]!)
+  }
+  return OBFUSCATED_PREFIX + btoa(binary)
 }
 
 /** De-obfuscate a token (sync) */
