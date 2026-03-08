@@ -145,7 +145,7 @@ Store files:
 | `list_checkpoints` | Request list of checkpoints for session |
 | `list_conversations` | Request scan of conversation history files |
 | `list_directory` | Request home directory listing for browsing |
-| `list_files` | Recursive file search within session CWD (supports fuzzy query) |
+| `list_files` | Recursive file search within session CWD (case-insensitive substring match, max depth 3) |
 | `list_repos` | Request list of configured repos |
 | `list_sessions` | Request list of all sessions |
 | `list_slash_commands` | Request available slash command definitions |
@@ -205,7 +205,8 @@ Store files:
 | `directory_listing` | Home directory listing response |
 | `encrypted` | Encrypted message envelope (E2E encryption) |
 | `file_content` | File content with syntax metadata |
-| `file_listing` | Project file/directory listing response |
+| `file_list` | Response to `list_files` — flat list of matching file paths |
+| `file_listing` | Project file/directory listing response (from `browse_files`) |
 | `git_branches_result` | Git branch list response |
 | `git_commit_result` | Result of a `git_commit` operation (hash, message, or error) |
 | `git_stage_result` | Result of a `git_stage` operation |
@@ -261,9 +262,9 @@ Store files:
 
 ### Protocol Details
 
-- `add_repo` takes `{ path, name? }` — `path` must be within the user's home directory; `name` defaults to the directory basename. `remove_repo` takes `{ path }`. Both respond with `repo_list`.
-- `list_files` takes `{ sessionId?, query? }` — performs a recursive walk of the session CWD with optional fuzzy filtering by `query`; responds with `file_listing`.
-- `list_repos`/`add_repo`/`remove_repo` all respond with a `repo_list` message: `{ type: 'repo_list', repos: [{ path, name, activeSessions }] }`.
+- `add_repo` takes `{ path, name? }` — `path` must be within the user's home directory; `name` defaults to the directory basename. `remove_repo` takes `{ path }`. On success both respond with `repo_list`; on failure they may respond with `session_error` (validation) or `server_error`.
+- `list_files` takes `{ sessionId?, query? }` — performs a recursive walk of the session CWD (max depth 3) with optional case-insensitive substring filtering by `query`; responds with `file_list`.
+- On success, `list_repos`/`add_repo`/`remove_repo` respond with: `{ type: 'repo_list', repos: [{ path, name, source: 'manual'|'auto', exists: boolean }] }`.
 - `list_directory` requests a directory listing; `directory_listing` returns sorted non-hidden subdirectories (or error)
 - `server_shutdown` sent before server goes down; `reason` is `'restart'` (coming back) or `'shutdown'` (not coming back); `restartEtaMs` is estimated ms until server is available (0 for permanent shutdown); supervisor standby health check also includes `restartEtaMs` for crash recovery
 - `server_status` for non-error updates; `server_error` for error conditions
