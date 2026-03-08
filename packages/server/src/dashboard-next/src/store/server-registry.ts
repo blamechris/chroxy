@@ -8,6 +8,7 @@
  */
 
 import type { ServerEntry } from './types'
+import { obfuscateToken, deobfuscateToken, isProtected } from './token-crypto'
 
 const STORAGE_KEY = 'chroxy_server_registry'
 
@@ -22,22 +23,40 @@ function generateId(): string {
 // Persistence
 // ---------------------------------------------------------------------------
 
-/** Load server list from localStorage */
+/** Load server list from localStorage, decrypting tokens */
 export function loadServerRegistry(): ServerEntry[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) return []
+    // Deobfuscate tokens on load (handles both plaintext and obfuscated)
+    let needsMigration = false
+    const entries = parsed.map((entry: ServerEntry) => {
+      if (entry.token && isProtected(entry.token)) {
+        return { ...entry, token: deobfuscateToken(entry.token) }
+      }
+      if (entry.token) needsMigration = true
+      return entry
+    })
+    // If any tokens were plaintext, re-save with obfuscation
+    if (needsMigration) {
+      saveServerRegistry(entries)
+    }
+    return entries
   } catch {
     return []
   }
 }
 
-/** Save server list to localStorage */
+/** Save server list to localStorage, obfuscating tokens */
 export function saveServerRegistry(servers: ServerEntry[]): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(servers))
+    const protected_ = servers.map(s => ({
+      ...s,
+      token: s.token ? obfuscateToken(s.token) : s.token,
+    }))
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(protected_))
   } catch {
     // Storage not available
   }
