@@ -293,10 +293,13 @@ export interface SessionNotification {
   id: string;
   sessionId: string;
   sessionName: string;
-  eventType: 'permission' | 'question' | 'completed' | 'error';
+  eventType: 'permission' | 'question' | 'completed' | 'error' | 'plan';
   message: string;
   timestamp: number;
   requestId?: string;
+  tool?: string;
+  description?: string;
+  inputPreview?: string;
 }
 
 export interface SlashCommand {
@@ -554,6 +557,7 @@ export interface ConnectionState {
 
   // Plan mode actions
   clearPlanState: () => void;
+  sendPlanResponse: (sessionId: string, approve: boolean) => void;
 
   // Server error actions
   dismissServerError: (id: string) => void;

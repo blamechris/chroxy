@@ -918,6 +918,168 @@ describe('git result handlers', () => {
   });
 });
 
+describe('permission_request rich notification details', () => {
+  it('includes tool, description and inputPreview in session notification', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Active' } as any,
+        { sessionId: 's2', name: 'Background' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+      sessionNotifications: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's2',
+      requestId: 'req-1',
+      tool: 'Bash',
+      description: 'Run npm test',
+      input: { command: 'npm test' },
+    });
+
+    const state = store.getState();
+    expect(state.sessionNotifications).toHaveLength(1);
+    const notif = state.sessionNotifications[0];
+    expect(notif.tool).toBe('Bash');
+    expect(notif.description).toBe('Run npm test');
+    expect(notif.inputPreview).toBe('npm test');
+    expect(notif.requestId).toBe('req-1');
+  });
+
+  it('truncates long input previews to 120 chars', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Active' } as any,
+        { sessionId: 's2', name: 'Background' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+      sessionNotifications: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const longCommand = 'a'.repeat(200);
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's2',
+      requestId: 'req-2',
+      tool: 'Bash',
+      description: 'Run long command',
+      input: { command: longCommand },
+    });
+
+    const notif = store.getState().sessionNotifications[0];
+    expect(notif.inputPreview!.length).toBeLessThanOrEqual(120);
+    expect(notif.inputPreview).toMatch(/\.\.\.$/);
+  });
+
+  it('omits inputPreview when no input is provided', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Active' } as any,
+        { sessionId: 's2', name: 'Background' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+      sessionNotifications: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's2',
+      requestId: 'req-3',
+      tool: 'Read',
+      description: 'Read a file',
+    });
+
+    const notif = store.getState().sessionNotifications[0];
+    expect(notif.tool).toBe('Read');
+    expect(notif.description).toBe('Read a file');
+    expect(notif.inputPreview).toBeUndefined();
+  });
+});
+
+describe('plan_ready notification', () => {
+  it('creates plan notification for non-active session', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Active' } as any,
+        { sessionId: 's2', name: 'Background' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+      messages: [],
+      sessionNotifications: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'plan_ready',
+      sessionId: 's2',
+      allowedPrompts: [{ tool: 'Bash', prompt: 'Run tests' }],
+    });
+
+    const state = store.getState();
+    expect(state.sessionNotifications).toHaveLength(1);
+    const notif = state.sessionNotifications[0];
+    expect(notif.eventType).toBe('plan');
+    expect(notif.sessionId).toBe('s2');
+    expect(notif.message).toBe('Plan ready for approval');
+  });
+
+  it('does not create notification for active session plan_ready', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'Active' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+      },
+      messages: [],
+      sessionNotifications: [],
+    });
+
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'plan_ready',
+      sessionId: 's1',
+      allowedPrompts: [],
+    });
+
+    expect(store.getState().sessionNotifications).toHaveLength(0);
+  });
+});
+
 describe('session subscription (#1692)', () => {
   it('sends subscribe_sessions after receiving session_list with multiple sessions', () => {
     const mockSend = jest.fn();
@@ -941,12 +1103,11 @@ describe('session subscription (#1692)', () => {
       ],
     });
 
-    // Should have sent subscribe_sessions for non-active sessions
     const calls = mockSend.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
     const subscribeCalls = calls.filter((c: Record<string, unknown>) => c.type === 'subscribe_sessions');
     expect(subscribeCalls).toHaveLength(1);
     expect(subscribeCalls[0].sessionIds).toEqual(expect.arrayContaining(['s2', 's3']));
-    expect(subscribeCalls[0].sessionIds).not.toContain('s1'); // active session excluded
+    expect(subscribeCalls[0].sessionIds).not.toContain('s1');
   });
 
   it('does not send subscribe_sessions for single-session list', () => {
@@ -983,7 +1144,6 @@ describe('session subscription (#1692)', () => {
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
 
-    // Should not throw
     _testMessageHandler.handle({
       type: 'subscriptions_updated',
       subscribedSessionIds: ['s2', 's3'],

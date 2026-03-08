@@ -4,6 +4,7 @@ import {
   Text,
   TouchableOpacity,
   StyleSheet,
+  Platform,
 } from 'react-native';
 import { useConnectionStore, SessionNotification } from '../store/connection';
 import { Icon } from './Icon';
@@ -14,6 +15,7 @@ const MAX_VISIBLE = 3;
 const EVENT_LABELS: Record<SessionNotification['eventType'], string> = {
   permission: 'needs permission',
   question: 'has a question',
+  plan: 'plan ready',
   completed: 'finished',
   error: 'error',
 };
@@ -22,6 +24,7 @@ function NotificationRow({ notification }: { notification: SessionNotification }
   const switchSession = useConnectionStore((s) => s.switchSession);
   const dismiss = useConnectionStore((s) => s.dismissSessionNotification);
   const sendPermissionResponse = useConnectionStore((s) => s.sendPermissionResponse);
+  const sendPlanResponse = useConnectionStore((s) => s.sendPlanResponse);
 
   const dotColor =
     notification.eventType === 'error' ? COLORS.accentRed :
@@ -29,6 +32,7 @@ function NotificationRow({ notification }: { notification: SessionNotification }
     COLORS.accentOrange;
 
   const isPermission = notification.eventType === 'permission' && !!notification.requestId;
+  const isPlan = notification.eventType === 'plan';
 
   const handleApprove = () => {
     if (notification.requestId) {
@@ -44,24 +48,19 @@ function NotificationRow({ notification }: { notification: SessionNotification }
     }
   };
 
-  return (
-    <View style={styles.row}>
-      <TouchableOpacity
-        style={styles.rowContent}
-        onPress={() => switchSession(notification.sessionId)}
-        activeOpacity={0.7}
-        accessibilityRole="button"
-        accessibilityLabel={`Switch to ${notification.sessionName}`}
-      >
-        <View style={[styles.dot, { backgroundColor: dotColor }]} />
-        <Text style={styles.sessionName} numberOfLines={1}>
-          {notification.sessionName}
-        </Text>
-        <Text style={styles.eventLabel} numberOfLines={1}>
-          {EVENT_LABELS[notification.eventType]}
-        </Text>
-      </TouchableOpacity>
-      {isPermission ? (
+  const handlePlanApprove = () => {
+    sendPlanResponse(notification.sessionId, true);
+    dismiss(notification.id);
+  };
+
+  const handlePlanSkip = () => {
+    sendPlanResponse(notification.sessionId, false);
+    dismiss(notification.id);
+  };
+
+  const renderActions = () => {
+    if (isPermission) {
+      return (
         <View style={styles.actionButtons}>
           <TouchableOpacity
             style={styles.approveButton}
@@ -80,16 +79,66 @@ function NotificationRow({ notification }: { notification: SessionNotification }
             <Text style={styles.denyText}>Deny</Text>
           </TouchableOpacity>
         </View>
-      ) : (
-        <TouchableOpacity
-          onPress={() => dismiss(notification.id)}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          accessibilityRole="button"
-          accessibilityLabel="Dismiss notification"
-        >
-          <Icon name="close" size={14} color={COLORS.textMuted} />
-        </TouchableOpacity>
-      )}
+      );
+    }
+    if (isPlan) {
+      return (
+        <View style={styles.actionButtons}>
+          <TouchableOpacity
+            style={styles.approveButton}
+            onPress={handlePlanApprove}
+            accessibilityRole="button"
+            accessibilityLabel="Approve plan"
+          >
+            <Text style={styles.approveText}>Go ahead</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.denyButton}
+            onPress={handlePlanSkip}
+            accessibilityRole="button"
+            accessibilityLabel="Skip plan"
+          >
+            <Text style={styles.denyText}>Skip</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    return (
+      <TouchableOpacity
+        onPress={() => dismiss(notification.id)}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        accessibilityRole="button"
+        accessibilityLabel="Dismiss notification"
+      >
+        <Icon name="close" size={14} color={COLORS.textMuted} />
+      </TouchableOpacity>
+    );
+  };
+
+  return (
+    <View style={styles.row}>
+      <TouchableOpacity
+        style={styles.rowContent}
+        onPress={() => switchSession(notification.sessionId)}
+        activeOpacity={0.7}
+        accessibilityRole="button"
+        accessibilityLabel={`Switch to ${notification.sessionName}`}
+      >
+        <View style={[styles.dot, { backgroundColor: dotColor }]} />
+        <Text style={styles.sessionName} numberOfLines={1}>
+          {notification.sessionName}
+        </Text>
+        <Text style={styles.eventLabel} numberOfLines={1}>
+          {EVENT_LABELS[notification.eventType]}
+          {notification.tool ? `: ${notification.tool}` : ''}
+        </Text>
+        {notification.inputPreview ? (
+          <Text style={styles.inputPreview} numberOfLines={1}>
+            {notification.inputPreview}
+          </Text>
+        ) : null}
+      </TouchableOpacity>
+      {renderActions()}
     </View>
   );
 }
@@ -146,7 +195,13 @@ const styles = StyleSheet.create({
   eventLabel: {
     color: COLORS.textSecondary,
     fontSize: 13,
+    flexShrink: 0,
+  },
+  inputPreview: {
+    color: COLORS.textMuted,
+    fontSize: 12,
     flex: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   actionButtons: {
     flexDirection: 'row',

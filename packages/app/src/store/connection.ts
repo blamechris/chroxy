@@ -1208,6 +1208,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }));
   },
 
+  sendPlanResponse: (sessionId: string, approve: boolean) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const data = approve ? 'Go ahead with the plan' : 'n';
+      wsSend(socket, { type: 'input', data, sessionId });
+    }
+    // Clear plan state for the target session
+    if (get().sessionStates[sessionId]) {
+      const store = get();
+      const sessionState = store.sessionStates[sessionId];
+      set({
+        sessionStates: {
+          ...store.sessionStates,
+          [sessionId]: { ...sessionState, isPlanPending: false, planAllowedPrompts: [] },
+        },
+      });
+    }
+  },
+
   dismissServerError: (id: string) => {
     set((state) => ({
       serverErrors: state.serverErrors.filter((e) => e.id !== id),
