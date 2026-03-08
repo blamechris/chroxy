@@ -410,33 +410,35 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           )}
         </>
       )}
-      <div className="provider-select">
-        <label htmlFor="provider-select">Provider</label>
-        <select
-          id="provider-select"
-          value={provider}
-          onChange={e => setProvider(e.target.value)}
-          aria-label="Select provider"
-        >
-          {availableProviders.length > 0
-            ? availableProviders.map(p => (
-                <option key={p.name} value={p.name}>
-                  {PROVIDER_LABELS[p.name] || p.name}
-                </option>
-              ))
-            : <>
-                <option value="claude-sdk">Claude Code (SDK)</option>
-                <option value="claude-cli">Claude Code (CLI)</option>
-              </>
-          }
-        </select>
+      <div className="provider-section">
+        <div className="provider-select">
+          <label htmlFor="provider-select">Provider</label>
+          <select
+            id="provider-select"
+            value={provider}
+            onChange={e => setProvider(e.target.value)}
+            aria-label="Select provider"
+          >
+            {availableProviders.length > 0
+              ? availableProviders.map(p => (
+                  <option key={p.name} value={p.name}>
+                    {PROVIDER_LABELS[p.name] || p.name}
+                  </option>
+                ))
+              : <>
+                  <option value="claude-sdk">Claude Code (SDK)</option>
+                  <option value="claude-cli">Claude Code (CLI)</option>
+                </>
+            }
+          </select>
+        </div>
         {availableProviders.length > 0 && (() => {
           const selected = availableProviders.find(p => p.name === provider)
           if (!selected?.capabilities) return null
           const badges = CAPABILITY_BADGES.filter(([key]) => selected.capabilities[key])
           if (badges.length === 0) return null
           return (
-            <div className="provider-capabilities">
+            <div className="provider-capabilities" data-testid="provider-capabilities">
               {badges.map(([, label]) => (
                 <span key={label} className="capability-badge">{label}</span>
               ))}
