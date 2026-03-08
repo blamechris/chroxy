@@ -113,6 +113,7 @@ import {
   persistActiveServer,
   loadPersistedActiveServer,
   clearPersistedState,
+  setServerScope,
 } from './persistence';
 
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
@@ -179,13 +180,17 @@ function getDeviceInfo(): { deviceName: string | null; deviceType: 'phone' | 'ta
   };
 }
 
+// Set server scope before store init so loadPersistedState reads scoped keys
+const _initialServerId = loadPersistedActiveServer();
+if (_initialServerId) setServerScope(_initialServerId);
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectionPhase: 'disconnected',
   wsUrl: null,
   apiToken: null,
   socket: null,
   serverRegistry: loadServerRegistry(),
-  activeServerId: loadPersistedActiveServer(),
+  activeServerId: _initialServerId,
   serverMode: null,
   sessionCwd: null,
   defaultCwd: null,
@@ -1327,9 +1332,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (get().connectionPhase !== 'disconnected') {
       get().disconnect();
     }
-    // Clear session state for clean switch
+    // Clear in-memory session state (persisted data stays scoped to old server)
     get().forgetSession();
+    // Switch persistence scope to new server before connecting
+    setServerScope(serverId);
     set({ activeServerId: serverId, userDisconnected: false });
+    // Restore persisted data for the new server
+    const persisted = loadPersistedState();
+    if (persisted.activeSessionId) {
+      set({ activeSessionId: persisted.activeSessionId });
+    }
     // Connect to the new server
     get().connect(server.wsUrl, server.token);
   },
@@ -1341,6 +1353,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectToServer: (serverId: string) => {
     const server = get().serverRegistry.find(s => s.id === serverId);
     if (!server) return;
+    setServerScope(serverId);
     set({ activeServerId: serverId });
     get().connect(server.wsUrl, server.token);
   },
