@@ -28,3 +28,12 @@ export {
   createStorageAdapter,
   createAsyncStorageAdapter,
 } from './storage'
+
+export type {
+  RawUserInputMessage,
+  ParsedUserInput,
+} from './user-input-handler'
+
+export {
+  parseUserInputMessage,
+} from './user-input-handler'
