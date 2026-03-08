@@ -1553,11 +1553,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         content: `${deviceLabel} connected`,
         timestamp: Date.now(),
       };
-      const joinActiveId = get().activeSessionId;
-      if (joinActiveId && get().sessionStates[joinActiveId]) {
-        updateActiveSession((ss) => ({
-          messages: [...ss.messages, joinMsg],
-        }));
+      // Global event — broadcast to all sessions so any tab shows it
+      const joinSessionIds = Object.keys(get().sessionStates);
+      if (joinSessionIds.length > 0) {
+        for (const sid of joinSessionIds) updateSession(sid, (ss) => ({ messages: [...ss.messages, joinMsg] }));
       } else {
         get().addMessage(joinMsg);
       }
@@ -1577,11 +1576,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         content: `${leftLabel} disconnected`,
         timestamp: Date.now(),
       };
-      const leftActiveId = get().activeSessionId;
-      if (leftActiveId && get().sessionStates[leftActiveId]) {
-        updateActiveSession((ss) => ({
-          messages: [...ss.messages, leftMsg],
-        }));
+      // Global event — broadcast to all sessions so any tab shows it
+      const leftSessionIds = Object.keys(get().sessionStates);
+      if (leftSessionIds.length > 0) {
+        for (const sid of leftSessionIds) updateSession(sid, (ss) => ({ messages: [...ss.messages, leftMsg] }));
       } else {
         get().addMessage(leftMsg);
       }
@@ -1953,15 +1951,24 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         content: serverError.message,
         timestamp: Date.now(),
       };
-      const activeErrId = get().activeSessionId;
-      if (activeErrId && get().sessionStates[activeErrId]) {
-        updateActiveSession((ss) => ({
+      const errSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      if (errSessionId && get().sessionStates[errSessionId]) {
+        // Scoped error — route to the specific session only
+        updateSession(errSessionId, (ss) => ({
           messages: filterThinking([...ss.messages, errorMsg]),
           streamingMessageId: null,
         }));
       } else {
-        set({ streamingMessageId: null });
-        get().addMessage(errorMsg);
+        const activeErrId = get().activeSessionId;
+        if (activeErrId && get().sessionStates[activeErrId]) {
+          updateActiveSession((ss) => ({
+            messages: filterThinking([...ss.messages, errorMsg]),
+            streamingMessageId: null,
+          }));
+        } else {
+          set({ streamingMessageId: null });
+          get().addMessage(errorMsg);
+        }
       }
       if (!serverError.recoverable) {
         _adapters.alert.alert('Server Error', serverError.message);
