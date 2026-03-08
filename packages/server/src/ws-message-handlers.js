@@ -970,12 +970,12 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         ctx.send(ws, { type: 'pty_error', sessionId: targetSessionId, message: 'node-pty is not installed — PTY mirroring unavailable' })
         break
       }
-      if (ctx.ptyMirrors.size >= MAX_CONCURRENT_PTY) {
-        ctx.send(ws, { type: 'pty_error', sessionId: targetSessionId, message: `Max concurrent PTY limit reached (${MAX_CONCURRENT_PTY})` })
-        break
-      }
       if (ctx.ptyMirrors.has(targetSessionId)) {
         ctx.send(ws, { type: 'pty_error', sessionId: targetSessionId, message: 'PTY already active for this session' })
+        break
+      }
+      if (ctx.ptyMirrors.size >= MAX_CONCURRENT_PTY) {
+        ctx.send(ws, { type: 'pty_error', sessionId: targetSessionId, message: `Max concurrent PTY limit reached (${MAX_CONCURRENT_PTY})` })
         break
       }
       const entry = ctx.sessionManager.getSession(targetSessionId)
