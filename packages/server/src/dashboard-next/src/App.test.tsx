@@ -192,7 +192,6 @@ describe('App', () => {
   })
 
   it('shows session loading skeleton briefly when switching sessions', async () => {
-    const { rerender } = render(<App />)
     const switchSessionFn = vi.fn()
     stateOverrides = {
       connectionPhase: 'connected',
@@ -203,14 +202,17 @@ describe('App', () => {
       activeSessionId: 's1',
       switchSession: switchSessionFn,
     }
-    rerender(<App />)
+    const { rerender } = render(<App />)
     // Skeleton not shown before switch
     expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
-    // Switch to s2
+    // Simulate clicking the s2 tab — triggers handleSwitchSession which sets isSwitchingSession=true
+    // The mock switchSession does NOT update activeSessionId, so the skeleton stays visible
+    fireEvent.click(screen.getByTestId('session-tab-s2'))
+    expect(screen.getByTestId('session-loading-skeleton')).toBeInTheDocument()
+    // Simulate activeSessionId changing (store confirms the switch)
     stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
     rerender(<App />)
-    // Skeleton should appear while switching then clear on activeSessionId change
-    // After rerender with new activeSessionId, skeleton is cleared
+    // Skeleton cleared once activeSessionId changes
     expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
   })
 })

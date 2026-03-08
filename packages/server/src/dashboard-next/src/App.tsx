@@ -206,9 +206,10 @@ export function App() {
   }, [activeSessionId])
 
   const handleSwitchSession = useCallback((sessionId: string) => {
+    if (sessionId === activeSessionId) return
     setIsSwitchingSession(true)
     switchSession(sessionId)
-  }, [switchSession])
+  }, [switchSession, activeSessionId])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -898,7 +899,7 @@ export function App() {
                     )}
                   </>
                 )}
-                {viewMode === 'files' && (
+                {viewMode === 'files' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <FileBrowserPanel />
                 )}
               </div>
@@ -907,7 +908,7 @@ export function App() {
                   <CheckpointTimeline />
                 </div>
               )}
-              {viewMode === 'diff' && <DiffViewerPanel />}
+              {viewMode === 'diff' && connectionPhase !== 'connecting' && !isSwitchingSession && <DiffViewerPanel />}
             </div>
 
             {/* Agent monitor — shows when agents are active */}
