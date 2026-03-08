@@ -10,6 +10,7 @@ import {
   updateServerEntry,
   markServerConnected,
   findServerByUrl,
+  validateWsUrl,
   type ServerEntry,
 } from './server-registry'
 
@@ -106,6 +107,40 @@ describe('addServerEntry', () => {
   })
 })
 
+describe('validateWsUrl', () => {
+  it('returns null for valid wss:// URL', () => {
+    expect(validateWsUrl('wss://example.com/ws')).toBeNull()
+  })
+
+  it('returns null for valid ws:// URL', () => {
+    expect(validateWsUrl('ws://localhost:3000/ws')).toBeNull()
+  })
+
+  it('rejects empty URL', () => {
+    expect(validateWsUrl('')).toBe('URL is required')
+    expect(validateWsUrl('   ')).toBe('URL is required')
+  })
+
+  it('rejects URL without ws:// or wss:// prefix', () => {
+    expect(validateWsUrl('https://example.com')).toBe('URL must start with ws:// or wss://')
+    expect(validateWsUrl('example.com/ws')).toBe('URL must start with ws:// or wss://')
+  })
+
+  it('rejects malformed URL', () => {
+    expect(validateWsUrl('wss://')).toBe('Invalid URL format')
+  })
+})
+
+describe('addServerEntry — validation', () => {
+  it('throws on invalid wsUrl', () => {
+    expect(() => addServerEntry([], 'Test', 'not-a-url', 'tok')).toThrow('URL must start with ws:// or wss://')
+  })
+
+  it('throws on empty wsUrl', () => {
+    expect(() => addServerEntry([], 'Test', '', 'tok')).toThrow('URL is required')
+  })
+})
+
 describe('removeServerEntry', () => {
   const servers: ServerEntry[] = [
     { id: 'srv_1', name: 'A', wsUrl: 'wss://a/ws', token: 'x', lastConnectedAt: null },
@@ -151,6 +186,10 @@ describe('updateServerEntry', () => {
   it('does not modify other entries', () => {
     const updated = updateServerEntry(servers, 'srv_1', { name: 'Changed' })
     expect(updated[1]).toEqual(servers[1])
+  })
+
+  it('throws on invalid wsUrl update', () => {
+    expect(() => updateServerEntry(servers, 'srv_1', { wsUrl: 'not-valid' })).toThrow('URL must start with ws:// or wss://')
   })
 })
 

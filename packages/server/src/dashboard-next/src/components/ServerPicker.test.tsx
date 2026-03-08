@@ -25,10 +25,13 @@ vi.mock('../store/connection', () => ({
   },
 }))
 
+const FAKE_NOW = 1_741_348_800_000 // 2025-03-07T12:00:00Z
+
 afterEach(() => cleanup())
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.spyOn(Date, 'now').mockReturnValue(FAKE_NOW)
   storeState = {
     serverRegistry: [],
     activeServerId: null,
@@ -37,7 +40,7 @@ beforeEach(() => {
 })
 
 const SERVERS: ServerEntry[] = [
-  { id: 'srv_1', name: 'Dev Machine', wsUrl: 'wss://dev.example.com/ws', token: 'abc', lastConnectedAt: Date.now() - 330_000 },
+  { id: 'srv_1', name: 'Dev Machine', wsUrl: 'wss://dev.example.com/ws', token: 'abc', lastConnectedAt: FAKE_NOW - 330_000 },
   { id: 'srv_2', name: 'Production', wsUrl: 'wss://prod.example.com/ws', token: 'def', lastConnectedAt: null },
 ]
 
@@ -86,6 +89,24 @@ describe('ServerPicker', () => {
     expect(screen.getByText('5m ago')).toBeTruthy()
     // srv_2 is active + connected → shows "Connected"
     expect(screen.getByText('Connected')).toBeTruthy()
+  })
+
+  it('adds aria-label to status dots', () => {
+    storeState.serverRegistry = SERVERS
+    storeState.activeServerId = 'srv_1'
+    storeState.connectionPhase = 'connected'
+    render(<ServerPicker />)
+    const dots = document.querySelectorAll('.server-dot')
+    expect(dots[0]!.getAttribute('aria-label')).toBe('Connected')
+    expect(dots[1]!.getAttribute('aria-label')).toBe('Idle')
+  })
+
+  it('links server button to status via aria-describedby', () => {
+    storeState.serverRegistry = SERVERS
+    render(<ServerPicker />)
+    const buttons = screen.getAllByTitle(/Connect to/)
+    expect(buttons[0]!.getAttribute('aria-describedby')).toBe('server-status-srv_1')
+    expect(buttons[1]!.getAttribute('aria-describedby')).toBe('server-status-srv_2')
   })
 
   it('highlights the active server', () => {
@@ -164,5 +185,21 @@ describe('ServerPicker', () => {
     fireEvent.click(screen.getByTestId('server-add-btn'))
     const submit = screen.getByTestId('server-add-submit') as HTMLButtonElement
     expect(submit.disabled).toBe(true)
+  })
+
+  it('submits form on Enter key in token input', () => {
+    render(<ServerPicker />)
+    fireEvent.click(screen.getByTestId('server-add-btn'))
+    fireEvent.change(screen.getByTestId('server-url-input'), { target: { value: 'wss://x/ws' } })
+    fireEvent.change(screen.getByTestId('server-token-input'), { target: { value: 'tok' } })
+    fireEvent.submit(screen.getByTestId('server-add-form'))
+    expect(mockAddServer).toHaveBeenCalledWith('wss://x/ws', 'wss://x/ws', 'tok')
+  })
+
+  it('does not submit form when required fields are empty', () => {
+    render(<ServerPicker />)
+    fireEvent.click(screen.getByTestId('server-add-btn'))
+    fireEvent.submit(screen.getByTestId('server-add-form'))
+    expect(mockAddServer).not.toHaveBeenCalled()
   })
 })

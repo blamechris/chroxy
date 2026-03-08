@@ -49,13 +49,14 @@ function AddServerForm({ onAdd, onCancel }: AddServerFormProps) {
   const [url, setUrl] = useState('')
   const [token, setToken] = useState('')
 
-  const handleSubmit = useCallback(() => {
+  const handleSubmit = useCallback((e?: React.FormEvent) => {
+    e?.preventDefault()
     if (!url.trim() || !token.trim()) return
     onAdd(name.trim() || url.trim(), url.trim(), token.trim())
   }, [name, url, token, onAdd])
 
   return (
-    <div className="server-add-form" data-testid="server-add-form">
+    <form className="server-add-form" data-testid="server-add-form" onSubmit={handleSubmit}>
       <input
         type="text"
         placeholder="Server name (optional)"
@@ -82,9 +83,8 @@ function AddServerForm({ onAdd, onCancel }: AddServerFormProps) {
       />
       <div className="server-add-actions">
         <button
-          type="button"
+          type="submit"
           className="server-btn server-btn-primary"
-          onClick={handleSubmit}
           disabled={!url.trim() || !token.trim()}
           data-testid="server-add-submit"
         >
@@ -99,7 +99,7 @@ function AddServerForm({ onAdd, onCancel }: AddServerFormProps) {
           Cancel
         </button>
       </div>
-    </div>
+    </form>
   )
 }
 
@@ -124,13 +124,14 @@ function ServerItem({ server, isActive, connectionPhase, onConnect, onRemove }: 
         className="server-item-main"
         onClick={onConnect}
         title={`Connect to ${server.name}`}
+        aria-describedby={`server-status-${server.id}`}
       >
-        <span className={statusDot(connectionPhase, isActive)} />
+        <span className={statusDot(connectionPhase, isActive)} aria-label={isActive ? statusLabel(connectionPhase, true) : 'Idle'} />
         <div className="server-item-info">
           <span className="server-item-name">{server.name}</span>
           <span className="server-item-url">{server.wsUrl.replace(/^wss?:\/\//, '').replace(/\/ws$/, '')}</span>
         </div>
-        <span className="server-item-status">
+        <span className="server-item-status" id={`server-status-${server.id}`}>
           {isActive ? statusLabel(connectionPhase, true) : formatLastConnected(server.lastConnectedAt)}
         </span>
       </button>
