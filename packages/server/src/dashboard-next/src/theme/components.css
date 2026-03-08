@@ -3879,6 +3879,8 @@
 .diff-line-empty {
   background: var(--bg-primary);
   opacity: 0.5;
+}
+
 /* ---- Agent Monitor Panel ---- */
 .agent-monitor-panel {
   border-top: 1px solid var(--border-primary);

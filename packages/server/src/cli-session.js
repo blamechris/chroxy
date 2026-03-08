@@ -142,11 +142,14 @@ export class CliSession extends EventEmitter {
     this._cleanupReadlines()
     this._processReady = false
 
+    // Strip ANTHROPIC_API_KEY so CLI uses OAuth/subscription auth instead of API credits
+    const { ANTHROPIC_API_KEY: _, ...parentEnv } = process.env
+
     const child = spawn('claude', args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
-        ...process.env,
+        ...parentEnv,
         CI: '1',
         CLAUDE_HEADLESS: '1',
         CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',

@@ -911,6 +911,25 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       });
       break;
 
+    // --- User input echoed from other clients ---
+
+    case 'user_input': {
+      const senderClientId = msg.clientId as string | undefined;
+      if (senderClientId && senderClientId === get().myClientId) break;
+      const uiTargetId = (msg.sessionId as string) || get().activeSessionId;
+      if (!uiTargetId) break;
+      const uiMsg: ChatMessage = {
+        id: nextMessageId('user_input'),
+        type: 'user_input',
+        content: (msg.text as string) || '',
+        timestamp: (msg.timestamp as number) || Date.now(),
+      };
+      updateSession(uiTargetId, (ss) => ({
+        messages: [...ss.messages, uiMsg],
+      }));
+      break;
+    }
+
     // --- Existing message handlers (now session-aware) ---
 
     case 'message': {

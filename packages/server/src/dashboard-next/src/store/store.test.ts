@@ -422,6 +422,77 @@ describe('message handler', () => {
 
     _testMessageHandler.clearContext();
   });
+
+  it('user_input from another client is added to session messages', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      myClientId: 'client-a',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+      },
+    });
+
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    _testMessageHandler.handle({
+      type: 'user_input',
+      sessionId: 's1',
+      clientId: 'client-b',
+      text: 'Hello from phone',
+      timestamp: 1000,
+    });
+
+    const { sessionStates } = useConnectionStore.getState();
+    const msgs = sessionStates.s1!.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.type).toBe('user_input');
+    expect(msgs[0]!.content).toBe('Hello from phone');
+
+    _testMessageHandler.clearContext();
+  });
+
+  it('user_input from self (same clientId) is skipped', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      myClientId: 'client-a',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+      },
+    });
+
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    _testMessageHandler.handle({
+      type: 'user_input',
+      sessionId: 's1',
+      clientId: 'client-a',
+      text: 'My own message',
+      timestamp: 1000,
+    });
+
+    const { sessionStates } = useConnectionStore.getState();
+    expect(sessionStates.s1!.messages).toHaveLength(0);
+
+    _testMessageHandler.clearContext();
+  });
 });
 
 // ---------------------------------------------------------------------------
