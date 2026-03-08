@@ -1314,6 +1314,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ serverRegistry: updated });
   },
 
+  /**
+   * Switch to a different server — disconnects current, clears session state,
+   * then connects fresh. Use for user-initiated server changes.
+   */
   switchServer: (serverId: string) => {
     const server = get().serverRegistry.find(s => s.id === serverId);
     if (!server) return;
@@ -1330,6 +1334,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     get().connect(server.wsUrl, server.token);
   },
 
+  /**
+   * Reconnect to a known server without clearing session state.
+   * Use for auto-reconnect on startup or after transient disconnects.
+   */
   connectToServer: (serverId: string) => {
     const server = get().serverRegistry.find(s => s.id === serverId);
     if (!server) return;
