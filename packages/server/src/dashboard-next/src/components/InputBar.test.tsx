@@ -51,6 +51,33 @@ describe('InputBar', () => {
     expect(onSend).not.toHaveBeenCalled()
   })
 
+  it('sends on plain Enter when sendOnEnter is true', () => {
+    const onSend = vi.fn()
+    render(<InputBar onSend={onSend} onInterrupt={vi.fn()} sendOnEnter />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'test' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(onSend).toHaveBeenCalledWith('test')
+  })
+
+  it('does not send on Shift+Enter when sendOnEnter is true (allows newline)', () => {
+    const onSend = vi.fn()
+    render(<InputBar onSend={onSend} onInterrupt={vi.fn()} sendOnEnter />)
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'test' } })
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true })
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('shows Enter hint in sr-only text when sendOnEnter is true', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} sendOnEnter />)
+    const textarea = screen.getByRole('textbox')
+    const describedBy = textarea.getAttribute('aria-describedby')
+    const hint = document.getElementById(describedBy!)
+    expect(hint!.textContent).toMatch(/Enter to send/i)
+    expect(hint!.textContent).toMatch(/Shift\+Enter/i)
+  })
+
   it('calls onInterrupt on Escape', () => {
     const onInterrupt = vi.fn()
     render(<InputBar onSend={vi.fn()} onInterrupt={onInterrupt} />)

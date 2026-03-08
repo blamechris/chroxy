@@ -64,6 +64,8 @@ vi.mock('./store/connection', () => {
     fetchFileList: vi.fn(),
     fetchSlashCommands: vi.fn(),
     defaultProvider: 'claude-sdk',
+    inputSettings: { chatEnterToSend: true, terminalEnterToSend: false },
+    updateInputSettings: vi.fn(),
     conversationHistory: [],
     fetchConversationHistory: vi.fn(),
     resumeConversation: vi.fn(),
