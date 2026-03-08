@@ -4,6 +4,7 @@ import {
   Text,
   TouchableOpacity,
   StyleSheet,
+  Platform,
 } from 'react-native';
 import { useConnectionStore, SessionNotification } from '../store/connection';
 import { Icon } from './Icon';
@@ -14,6 +15,7 @@ const MAX_VISIBLE = 3;
 const EVENT_LABELS: Record<SessionNotification['eventType'], string> = {
   permission: 'needs permission',
   question: 'has a question',
+  plan: 'plan ready',
   completed: 'finished',
   error: 'error',
 };
@@ -158,7 +160,7 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 12,
     flex: 1,
-    fontFamily: 'monospace',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   actionButtons: {
     flexDirection: 'row',
