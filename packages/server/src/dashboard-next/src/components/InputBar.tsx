@@ -42,9 +42,11 @@ export interface InputBarProps {
   imageAttachments?: ImageAttachment[]
   onRemoveImage?: (index: number) => void
   onFileAttach?: (path: string) => void
+  /** When true, bare Enter sends; when false (default), Cmd/Ctrl+Enter sends. */
+  sendOnEnter?: boolean
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, sendOnEnter }: InputBarProps) {
   const [value, setValue] = useState('')
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
@@ -199,14 +201,19 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       }
     }
 
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault()
-      send()
+    if (e.key === 'Enter') {
+      if (sendOnEnter && !e.shiftKey) {
+        e.preventDefault()
+        send()
+      } else if (!sendOnEnter && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        send()
+      }
     } else if (e.key === 'Escape') {
       e.preventDefault()
       onInterrupt()
     }
-  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex])
+  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter])
 
   const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value
@@ -361,7 +368,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         </div>
       )}
       <span id={shortcutsId} className="sr-only">
-        Press Cmd/Ctrl+Enter to send, Escape to interrupt
+        {sendOnEnter ? 'Press Enter to send, Shift+Enter for newline, Escape to interrupt' : 'Press Cmd/Ctrl+Enter to send, Escape to interrupt'}
       </span>
       {pickerOpen && slashCommands && (
         <SlashCommandPicker

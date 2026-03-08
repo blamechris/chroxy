@@ -38,6 +38,7 @@ vi.mock('../theme/theme-engine', () => ({
 }))
 
 const mockSetTheme = vi.fn()
+const mockUpdateInputSettings = vi.fn()
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => {
@@ -46,6 +47,8 @@ vi.mock('../store/connection', () => ({
       setTheme: mockSetTheme,
       defaultProvider: 'claude-sdk',
       setDefaultProvider: vi.fn(),
+      inputSettings: { chatEnterToSend: true, terminalEnterToSend: false },
+      updateInputSettings: mockUpdateInputSettings,
     }
     return selector(state)
   },
@@ -122,6 +125,18 @@ describe('SettingsPanel', () => {
   it('shows default provider selector', () => {
     render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
     expect(screen.getByLabelText('Default provider')).toBeInTheDocument()
+  })
+
+  it('shows send shortcut selector', () => {
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+    expect(screen.getByLabelText('Send shortcut')).toBeInTheDocument()
+  })
+
+  it('calls updateInputSettings when send shortcut changed', () => {
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+    const select = screen.getByLabelText('Send shortcut')
+    fireEvent.change(select, { target: { value: 'cmd-enter' } })
+    expect(mockUpdateInputSettings).toHaveBeenCalledWith({ chatEnterToSend: false })
   })
 
   it('closes on Escape key', () => {
