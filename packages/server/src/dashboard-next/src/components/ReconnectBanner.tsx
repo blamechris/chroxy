@@ -14,7 +14,7 @@ export function ReconnectBanner({ visible, attempt, maxAttempts, message, onRetr
   if (!visible) return null
 
   return (
-    <div className="reconnect-banner" data-testid="reconnect-banner" role="status">
+    <div className="reconnect-banner" data-testid="reconnect-banner" role="status" aria-live="polite">
       <span className="reconnect-message">
         {message || 'Connection lost. Reconnecting...'} (attempt {attempt}/{maxAttempts})
       </span>

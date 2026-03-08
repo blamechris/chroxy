@@ -291,4 +291,24 @@ describe('Sidebar', () => {
     rerender(<Sidebar {...props} filter="" />)
     expect(screen.queryByText('Backend')).not.toBeInTheDocument()
   })
+
+  it('hides client count when server is disconnected', () => {
+    renderSidebar({ serverStatus: 'disconnected', clientCount: 2 })
+    expect(screen.queryByTestId('sidebar-footer')).not.toHaveTextContent('client')
+  })
+
+  it('shows client count when server is connected', () => {
+    renderSidebar({ serverStatus: 'connected', clientCount: 2 })
+    expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('2 clients')
+  })
+
+  it('shows Stopped label when server is disconnected', () => {
+    renderSidebar({ serverStatus: 'disconnected' })
+    expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('Stopped')
+  })
+
+  it('shows Running label when server is connected', () => {
+    renderSidebar({ serverStatus: 'connected' })
+    expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('Running')
+  })
 })
