@@ -1,8 +1,6 @@
-import { describe, it } from 'vitest'
-import { expect } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
-import { join, dirname } from 'path'
-import { fileURLToPath } from 'url'
+import { resolve } from 'path'
 
 /**
  * CSS audit — verifies dead CSS rules were removed.
@@ -15,8 +13,7 @@ import { fileURLToPath } from 'url'
  * GREEN: after cleanup, duplicate and orphaned keyframe are gone.
  */
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const COMPONENTS_CSS = join(__dirname, '../theme/components.css')
+const COMPONENTS_CSS = resolve(__dirname, '../theme/components.css')
 
 function readCss() {
   return readFileSync(COMPONENTS_CSS, 'utf8')
