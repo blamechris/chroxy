@@ -131,6 +131,11 @@ Store files:
 | `destroy_session` | Delete session by ID |
 | `encrypted` | Encrypted message envelope (E2E encryption) |
 | `get_diff` | Request git diff for uncommitted changes |
+| `git_branches` | Request git branch list for session project |
+| `git_commit` | Commit staged changes with a message |
+| `git_stage` | Stage files for commit |
+| `git_status` | Request git status for session project |
+| `git_unstage` | Unstage files from commit |
 | `input` | Send text or voice message to session |
 | `interrupt` | Interrupt active Claude task |
 | `key_exchange` | Send client X25519 public key for encryption |
@@ -162,11 +167,6 @@ Store files:
 | `unsubscribe_sessions` | Unsubscribe from non-active session updates |
 | `user_question_response` | Respond to AskUserQuestion prompt |
 | `write_file` | Write content to a file within the project |
-| `git_status` | Request git status for session project |
-| `git_branches` | Request git branch list for session project |
-| `git_stage` | Stage files for commit |
-| `git_unstage` | Unstage files from commit |
-| `git_commit` | Commit staged changes with a message |
 
 ### Server → Client
 
@@ -193,6 +193,7 @@ Store files:
 | `confirm_permission_mode` | Challenge auto mode (needs confirmation) |
 | `conversation_id` | SDK conversation ID for session portability |
 | `conversations_list` | List of conversation metadata (id, project, preview, mtime, size) |
+| `cost_summary` | Per-session cost breakdown in response to `request_cost_summary` |
 | `cost_update` | Cost update for session (sessionCost, totalCost, budget) |
 | `dev_preview` | Dev server preview tunnel opened |
 | `dev_preview_stopped` | Dev server preview tunnel closed |
@@ -201,6 +202,11 @@ Store files:
 | `encrypted` | Encrypted message envelope (E2E encryption) |
 | `file_content` | File content with syntax metadata |
 | `file_listing` | Project file/directory listing response |
+| `git_branches_result` | Git branch list response |
+| `git_commit_result` | Result of a `git_commit` operation (hash, message, or error) |
+| `git_stage_result` | Result of a `git_stage` operation |
+| `git_status_result` | Git status response (branch, staged, unstaged, untracked) |
+| `git_unstage_result` | Result of a `git_unstage` operation |
 | `history_replay_end` | End of session history replay |
 | `history_replay_start` | Beginning of session history replay |
 | `key_exchange_ok` | Server X25519 public key for encryption |
@@ -228,14 +234,6 @@ Store files:
 | `session_error` | Session operation error |
 | `session_list` | All available sessions |
 | `session_switched` | Switched to active session |
-| `subscriptions_updated` | Confirmation that session subscriptions were updated |
-| `cost_summary` | Per-session cost breakdown in response to `request_cost_summary` |
-| `write_file_result` | Result of a `write_file` operation |
-| `git_status_result` | Git status response (branch, staged, unstaged, untracked) |
-| `git_branches_result` | Git branch list response |
-| `git_stage_result` | Result of a `git_stage` operation |
-| `git_unstage_result` | Result of a `git_unstage` operation |
-| `git_commit_result` | Result of a `git_commit` operation (hash, message, or error) |
 | `session_timeout` | Session destroyed due to idle timeout |
 | `session_updated` | Session metadata changed (e.g., rename) |
 | `session_warning` | Session about to timeout (with remainingMs) |
@@ -244,6 +242,7 @@ Store files:
 | `stream_delta` | Token-by-token streaming response text |
 | `stream_end` | Streaming response complete |
 | `stream_start` | Beginning of streaming response |
+| `subscriptions_updated` | Confirmation that session subscriptions were updated |
 | `token_rotated` | API token was rotated (client must re-authenticate) |
 | `tool_result` | Tool execution result output |
 | `tool_start` | Tool invocation started |
@@ -253,6 +252,7 @@ Store files:
 | `web_task_error` | Cloud task error |
 | `web_task_list` | Response to list_web_tasks |
 | `web_task_updated` | Cloud task status changed |
+| `write_file_result` | Result of a `write_file` operation |
 
 ### Protocol Details
 
@@ -286,10 +286,10 @@ Store files:
 - `permission_resolved` broadcast to all clients when another client approves or denies a `permission_request`; payload: `{ requestId, decision, sessionId }`; receiving clients should dismiss the corresponding prompt
 - `subscribe_sessions` / `unsubscribe_sessions`: clients send these to receive session-scoped messages for non-active sessions (background monitoring); `subscriptions_updated` confirms the current set of subscribed session IDs
 - `session_activity` global broadcast on stream start/end: `{ sessionId, isBusy: true/false, lastCost }` — allows clients to show busy state for any session
-- `search_conversations` accepts `{ query }` and responds with `search_results`: `{ query, results: [{ conversationId, project, projectName, preview, cwd, score }] }`
-- `request_cost_summary` responds with `cost_summary`: `{ sessions: [{ sessionId, name, sessionCost, contextTokens }], totalCost }`
-- `write_file` accepts `{ sessionId, path, content, encoding? }` and responds with `write_file_result`: `{ success, error }`
-- `git_status` / `git_branches` / `git_stage` / `git_unstage` / `git_commit` are project-scoped git operations; results dispatched via `_gitStatusCallback`, `_gitBranchesCallback`, `_gitStageCallback`, `_gitCommitCallback` in the app store
+- `search_conversations` accepts `{ query }` and responds with `search_results`: `{ query, results: [{ conversationId, project, projectName, preview, cwd, snippet, matchCount }] }`
+- `request_cost_summary` responds with `cost_summary`: `{ totalCost, budget, sessions: [{ sessionId, name, cost, model }] }`
+- `write_file` accepts `{ sessionId, path, content }` and responds with `write_file_result`: `{ path, error }` (`error: null` on success, `error: string` on failure)
+- `git_status` / `git_branches` / `git_stage` / `git_unstage` / `git_commit` are project-scoped git operations; results dispatched via `_gitStatusCallback`, `_gitBranchesCallback`, `_gitStageCallback` (handles both `git_stage_result` and `git_unstage_result`), and `_gitCommitCallback` in the app store
 
 ## Project Files
 
