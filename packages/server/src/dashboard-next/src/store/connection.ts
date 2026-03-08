@@ -937,11 +937,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   sendPermissionResponse: (requestId: string, decision: string) => {
     const { socket } = get();
     const payload = { type: 'permission_response', requestId, decision };
+    let result: 'sent' | 'queued' | false;
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);
-      return 'sent';
+      result = 'sent';
+    } else {
+      result = enqueueMessage('permission_response', payload);
     }
-    return enqueueMessage('permission_response', payload);
+    // Auto-switch to the session that owns this prompt (if different from active)
+    const { activeSessionId, sessionStates } = get();
+    for (const [sid, ss] of Object.entries(sessionStates)) {
+      if (ss.messages.some((m) => m.requestId === requestId)) {
+        if (sid !== activeSessionId) get().switchSession(sid);
+        break;
+      }
+    }
+    return result;
   },
 
   sendUserQuestionResponse: (answer: string, toolUseId?: string) => {
