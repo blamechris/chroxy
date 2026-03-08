@@ -666,6 +666,62 @@ describe('system message routing', () => {
     _testMessageHandler.clearContext();
     useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, serverErrors: [] });
   });
+
+  it('server_error with sessionId stores sessionId on ServerError object', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      serverErrors: [],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+        s2: { ...createEmptySessionState(), messages: [] },
+      },
+    });
+    _testMessageHandler.setContext(mockContext);
+
+    _testMessageHandler.handle({
+      type: 'server_error',
+      category: 'session',
+      message: 'Process exited',
+      recoverable: true,
+      sessionId: 's2',
+    });
+
+    const { serverErrors } = useConnectionStore.getState();
+    expect(serverErrors).toHaveLength(1);
+    expect((serverErrors[0] as any).sessionId).toBe('s2');
+
+    _testMessageHandler.clearContext();
+    useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, serverErrors: [] });
+  });
+
+  it('server_error without sessionId has no sessionId on ServerError object', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      serverErrors: [],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    _testMessageHandler.setContext(mockContext);
+
+    _testMessageHandler.handle({
+      type: 'server_error',
+      category: 'tunnel',
+      message: 'Tunnel lost',
+      recoverable: false,
+    });
+
+    const { serverErrors } = useConnectionStore.getState();
+    expect(serverErrors).toHaveLength(1);
+    expect((serverErrors[0] as any).sessionId).toBeUndefined();
+
+    _testMessageHandler.clearContext();
+    useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, serverErrors: [] });
+  });
 });
 
 // ---------------------------------------------------------------------------
