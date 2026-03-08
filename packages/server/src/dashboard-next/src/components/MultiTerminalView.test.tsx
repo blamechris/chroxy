@@ -38,12 +38,15 @@ vi.mock('./TerminalView', () => ({
 const mockSetTerminalWriteCallback = vi.fn()
 const mockGetState = vi.fn()
 
+let mockStoreState: Record<string, unknown> = {}
+
 vi.mock('../store/connection', () => ({
   useConnectionStore: Object.assign(
     (selector: (state: unknown) => unknown) => {
       const state = {
         setTerminalWriteCallback: mockSetTerminalWriteCallback,
-        sessionStates: {},
+        sessionStates: mockStoreState.sessionStates ?? {},
+        terminalRawBuffer: mockStoreState.terminalRawBuffer ?? '',
       }
       return selector(state)
     },
@@ -83,13 +86,18 @@ function renderMultiTerminal(props: Partial<MultiTerminalViewProps> = {}) {
 
 describe('MultiTerminalView', () => {
   beforeEach(() => {
-    mockGetState.mockReturnValue({
-      activeSessionId: 's1',
+    mockStoreState = {
       sessionStates: {
         s1: { terminalRawBuffer: 'session-1-data' },
         s2: { terminalRawBuffer: 'session-2-data' },
         s3: { terminalRawBuffer: 'session-3-data' },
       },
+      terminalRawBuffer: 'session-1-data',
+    }
+    mockGetState.mockReturnValue({
+      activeSessionId: 's1',
+      terminalRawBuffer: 'session-1-data',
+      sessionStates: mockStoreState.sessionStates,
     })
   })
 
@@ -179,5 +187,18 @@ describe('MultiTerminalView', () => {
       await new Promise(r => setTimeout(r, 10))
     })
     expect(mockSetTerminalWriteCallback).toHaveBeenCalled()
+  })
+
+  it('shows empty state when terminal buffer is empty', () => {
+    mockStoreState = { sessionStates: { s1: { terminalRawBuffer: '' } }, terminalRawBuffer: '' }
+    mockGetState.mockReturnValue({ activeSessionId: 's1', terminalRawBuffer: '', sessionStates: mockStoreState.sessionStates })
+    renderMultiTerminal()
+    expect(screen.getByTestId('terminal-empty-state')).toBeTruthy()
+    expect(screen.getByText('No terminal output yet.')).toBeTruthy()
+  })
+
+  it('hides empty state when terminal has data', () => {
+    renderMultiTerminal()
+    expect(screen.queryByTestId('terminal-empty-state')).toBeNull()
   })
 })

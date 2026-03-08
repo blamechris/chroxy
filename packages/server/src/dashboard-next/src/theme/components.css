@@ -2392,6 +2392,29 @@
   height: 100%;
 }
 
+.terminal-empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.terminal-empty-state p {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.terminal-empty-hint {
+  font-size: var(--text-sm);
+  margin-top: 4px !important;
+  opacity: 0.6;
+}
+
 /* ---- Command Palette ---- */
 .command-palette {
   position: fixed;
