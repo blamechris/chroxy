@@ -124,13 +124,14 @@ function ServerItem({ server, isActive, connectionPhase, onConnect, onRemove }: 
         className="server-item-main"
         onClick={onConnect}
         title={`Connect to ${server.name}`}
+        aria-describedby={`server-status-${server.id}`}
       >
-        <span className={statusDot(connectionPhase, isActive)} />
+        <span className={statusDot(connectionPhase, isActive)} aria-label={isActive ? statusLabel(connectionPhase, true) : 'Idle'} />
         <div className="server-item-info">
           <span className="server-item-name">{server.name}</span>
           <span className="server-item-url">{server.wsUrl.replace(/^wss?:\/\//, '').replace(/\/ws$/, '')}</span>
         </div>
-        <span className="server-item-status">
+        <span className="server-item-status" id={`server-status-${server.id}`}>
           {isActive ? statusLabel(connectionPhase, true) : formatLastConnected(server.lastConnectedAt)}
         </span>
       </button>
