@@ -903,6 +903,26 @@ describe('permission response auto-switch', () => {
 
     useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, socket: null });
   });
+
+  it('does not switch activeSessionId when requestId is not found in any session', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+        s2: { ...createEmptySessionState(), messages: [] },
+      },
+      socket: { readyState: 1, send: () => {} } as unknown as WebSocket,
+    });
+
+    // requestId 'req-ghost' does not exist in any session
+    useConnectionStore.getState().sendPermissionResponse('req-ghost', 'allow');
+
+    expect(useConnectionStore.getState().activeSessionId).toBe('s1');
+
+    useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, socket: null });
+  });
 });
 
 // ---------------------------------------------------------------------------
