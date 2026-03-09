@@ -1961,12 +1961,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const recoverable: boolean =
         typeof msg.recoverable === 'boolean' ? msg.recoverable : true;
 
+      const errSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : undefined;
       const serverError: ServerError = {
         id: nextMessageId('err'),
         category,
         message,
         recoverable,
         timestamp: Date.now(),
+        ...(errSessionId ? { sessionId: errSessionId } : {}),
       };
       set((state: ConnectionState) => ({
         serverErrors: [...state.serverErrors, serverError].slice(-10),
@@ -1977,7 +1979,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         content: serverError.message,
         timestamp: Date.now(),
       };
-      const errSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
       if (errSessionId && get().sessionStates[errSessionId]) {
         // Scoped error — route to the specific session only
         updateSession(errSessionId, (ss) => ({
