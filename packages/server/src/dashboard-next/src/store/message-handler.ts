@@ -1553,10 +1553,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         content: `${deviceLabel} connected`,
         timestamp: Date.now(),
       };
-      // Global event — broadcast to all sessions so any tab shows it
+      // Global event — broadcast to all sessions so any tab shows it (single setState)
       const joinSessionIds = Object.keys(get().sessionStates);
       if (joinSessionIds.length > 0) {
-        for (const sid of joinSessionIds) updateSession(sid, (ss) => ({ messages: [...ss.messages, joinMsg] }));
+        set((state: ConnectionState) => {
+          const newSessionStates = Object.fromEntries(
+            Object.entries(state.sessionStates).map(([sid, ss]) => [
+              sid,
+              { ...ss, messages: [...ss.messages, joinMsg] },
+            ])
+          ) as typeof state.sessionStates;
+          const activeId = state.activeSessionId;
+          const patch: Partial<ConnectionState> = { sessionStates: newSessionStates };
+          if (activeId && newSessionStates[activeId]) {
+            patch.messages = newSessionStates[activeId].messages;
+          }
+          return patch;
+        });
       } else {
         get().addMessage(joinMsg);
       }
@@ -1576,10 +1589,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         content: `${leftLabel} disconnected`,
         timestamp: Date.now(),
       };
-      // Global event — broadcast to all sessions so any tab shows it
+      // Global event — broadcast to all sessions so any tab shows it (single setState)
       const leftSessionIds = Object.keys(get().sessionStates);
       if (leftSessionIds.length > 0) {
-        for (const sid of leftSessionIds) updateSession(sid, (ss) => ({ messages: [...ss.messages, leftMsg] }));
+        set((state: ConnectionState) => {
+          const newSessionStates = Object.fromEntries(
+            Object.entries(state.sessionStates).map(([sid, ss]) => [
+              sid,
+              { ...ss, messages: [...ss.messages, leftMsg] },
+            ])
+          ) as typeof state.sessionStates;
+          const activeId = state.activeSessionId;
+          const patch: Partial<ConnectionState> = { sessionStates: newSessionStates };
+          if (activeId && newSessionStates[activeId]) {
+            patch.messages = newSessionStates[activeId].messages;
+          }
+          return patch;
+        });
       } else {
         get().addMessage(leftMsg);
       }

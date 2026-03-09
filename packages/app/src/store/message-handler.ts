@@ -1496,6 +1496,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         if (!found) {
           set({ messages: updater({ messages: get().messages }).messages });
         }
+        // Auto-dismiss matching notification banner
+        set((s) => ({
+          sessionNotifications: (s.sessionNotifications ?? []).filter(
+            (n) => n.requestId !== resolvedRequestId
+          ),
+        }));
       }
       break;
     }
@@ -1514,6 +1520,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             ),
           }));
         }
+        // Auto-dismiss matching notification banner
+        set((s) => ({
+          sessionNotifications: (s.sessionNotifications ?? []).filter(
+            (n) => n.requestId !== expiredRequestId
+          ),
+        }));
       }
       break;
     }

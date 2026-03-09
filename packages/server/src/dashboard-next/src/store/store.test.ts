@@ -609,6 +609,89 @@ describe('system message routing', () => {
     useConnectionStore.setState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
   });
 
+  it('client_joined updates all session states in a single setState call', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      connectedClients: [],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+        s2: { ...createEmptySessionState(), messages: [] },
+        s3: { ...createEmptySessionState(), messages: [] },
+      },
+    });
+    _testMessageHandler.setContext(mockContext);
+
+    let setStateCalls = 0;
+    const origSetState = useConnectionStore.setState;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const spy = (...args: any[]) => { setStateCalls++; return (origSetState as any)(...args); };
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      useConnectionStore.setState = spy as any;
+
+      _testMessageHandler.handle({
+        type: 'client_joined',
+        client: { clientId: 'phone-1', deviceName: 'iPhone', deviceType: 'phone', platform: 'ios' },
+      });
+
+      // Should use at most 2 setState calls: 1 for connectedClients, 1 for sessionStates+flat
+      expect(setStateCalls).toBeLessThanOrEqual(2);
+
+      // Behavior preserved: message appears in all sessions
+      const { sessionStates } = useConnectionStore.getState();
+      expect(sessionStates.s1!.messages.some((m) => m.content.includes('iPhone'))).toBe(true);
+      expect(sessionStates.s2!.messages.some((m) => m.content.includes('iPhone'))).toBe(true);
+      expect(sessionStates.s3!.messages.some((m) => m.content.includes('iPhone'))).toBe(true);
+    } finally {
+      useConnectionStore.setState = origSetState;
+      _testMessageHandler.clearContext();
+      origSetState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
+    }
+  });
+
+  it('client_left updates all session states in a single setState call', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      connectedClients: [{ clientId: 'phone-1', deviceName: 'My Phone', deviceType: 'phone', platform: 'ios', isSelf: false }],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+        s2: { ...createEmptySessionState(), messages: [] },
+        s3: { ...createEmptySessionState(), messages: [] },
+      },
+    });
+    _testMessageHandler.setContext(mockContext);
+
+    let setStateCalls = 0;
+    const origSetState = useConnectionStore.setState;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const spy = (...args: any[]) => { setStateCalls++; return (origSetState as any)(...args); };
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      useConnectionStore.setState = spy as any;
+
+      _testMessageHandler.handle({ type: 'client_left', clientId: 'phone-1' });
+
+      // Should use at most 2 setState calls: 1 for connectedClients, 1 for sessionStates+flat
+      expect(setStateCalls).toBeLessThanOrEqual(2);
+
+      // Behavior preserved
+      const { sessionStates } = useConnectionStore.getState();
+      expect(sessionStates.s1!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
+      expect(sessionStates.s2!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
+      expect(sessionStates.s3!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
+    } finally {
+      useConnectionStore.setState = origSetState;
+      _testMessageHandler.clearContext();
+      origSetState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
+    }
+  });
+
   it('server_error with sessionId routes only to that session', async () => {
     const { useConnectionStore } = await import('./connection');
     const { _testMessageHandler } = await import('./message-handler');
