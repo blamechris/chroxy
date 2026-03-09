@@ -196,7 +196,7 @@ function _isSecureRequest(req) {
  *   { type: 'plan_ready', allowedPrompts }           — plan complete, awaiting approval (transient)
  *   { type: 'server_shutdown', reason, restartEtaMs } — server shutting down (reason: 'restart'|'shutdown')
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
- *   { type: 'server_error', category, message, recoverable } — server-side error forwarded to app
+ *   { type: 'server_error', category, message, recoverable, sessionId? } — server-side error forwarded to app
  *   { type: 'directory_listing', path, parentPath, entries, error } — directory listing response for file browser
  *   { type: 'file_listing', path, parentPath, entries, error } — file browser listing response
  *   { type: 'file_content', path, content, language, size, truncated, error } — file content response
