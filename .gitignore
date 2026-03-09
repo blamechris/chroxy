@@ -54,6 +54,9 @@ coverage/
 .cache/
 tmp/
 
+# Repo-memory MCP cache (auto-generated)
+.repo-memory/
+
 # Local docs (never commit)
 ROADMAP.local.md
 tests/screenshots/
