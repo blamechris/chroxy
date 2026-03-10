@@ -155,6 +155,83 @@ describe('createPermissionHandler', () => {
       resendPendingPermissions({})
       assert.equal(opts.sendFn.mock.calls.length, 0)
     })
+
+    it('sends permission_request for valid SDK-mode pending permission', () => {
+      const permissionSessionMap = new Map()
+      const session = {
+        _pendingPermissions: new Map([['sdk-req-1', {}]]),
+        _lastPermissionData: new Map([
+          ['sdk-req-1', {
+            requestId: 'sdk-req-1',
+            tool: 'Write',
+            description: '/tmp/sdk',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: Date.now(),
+          }],
+        ]),
+      }
+      const sm = { _sessions: new Map([['sess-1', { session }]]) }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => sm),
+      })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      const ws = {}
+      resendPendingPermissions(ws)
+      assert.equal(opts.sendFn.mock.calls.length, 1)
+      const [sentWs, msg] = opts.sendFn.mock.calls[0].arguments
+      assert.equal(sentWs, ws)
+      assert.equal(msg.type, 'permission_request')
+      assert.equal(msg.sessionId, 'sess-1')
+    })
+
+    it('sets permissionSessionMap for SDK-mode session when sending', () => {
+      const permissionSessionMap = new Map()
+      const session = {
+        _pendingPermissions: new Map([['sdk-req-map', {}]]),
+        _lastPermissionData: new Map([
+          ['sdk-req-map', {
+            requestId: 'sdk-req-map',
+            tool: 'Read',
+            description: '/file',
+            input: {},
+            remainingMs: 60_000,
+            createdAt: Date.now(),
+          }],
+        ]),
+      }
+      const sm = { _sessions: new Map([['sess-map', { session }]]) }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => sm),
+      })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      resendPendingPermissions({})
+      assert.equal(opts.sendFn.mock.calls.length, 1)
+      assert.equal(permissionSessionMap.get('sdk-req-map'), 'sess-map')
+    })
+
+    it('skips expired SDK-mode permissions', () => {
+      const session = {
+        _pendingPermissions: new Map([['sdk-req-exp', {}]]),
+        _lastPermissionData: new Map([
+          ['sdk-req-exp', {
+            requestId: 'sdk-req-exp',
+            tool: 'Write',
+            description: '/tmp/expired',
+            input: {},
+            remainingMs: 1,        // 1ms TTL
+            createdAt: Date.now() - 60_000,  // 60s ago — expired
+          }],
+        ]),
+      }
+      const sm = { _sessions: new Map([['sess-exp', { session }]]) }
+      const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      resendPendingPermissions({})
+      assert.equal(opts.sendFn.mock.calls.length, 0)
+    })
   })
 
   describe('handlePermissionRequest', () => {

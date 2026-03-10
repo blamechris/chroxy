@@ -54,7 +54,6 @@ interface SessionPillProps {
 }
 
 function SessionPill({ session, isActive, health, notificationCount, onPress, onLongPress, onLayout }: SessionPillProps) {
-  const isCodex = session.provider === 'codex';
   const isCrashed = health === 'crashed';
   const hasNotification = notificationCount > 0 && !isActive;
   const showBusy = !isCrashed && session.isBusy;
@@ -64,8 +63,6 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
       style={[
         styles.pill,
         isActive && styles.pillActive,
-        isCodex && styles.pillCodex,
-        isActive && isCodex && styles.pillCodexActive,
         isCrashed && styles.pillCrashed,
         hasNotification && styles.pillAttention,
       ]}
@@ -81,8 +78,7 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
           {hasNotification && <NotificationBadge count={notificationCount} />}
         </View>
       )}
-      {isCodex && <Text style={[styles.codexBadge, isActive && styles.codexBadgeActive]}>CX </Text>}
-      <Text style={[styles.pillText, isActive && styles.pillTextActive, isActive && isCodex && styles.pillTextCodexActive, isCrashed && styles.pillTextCrashed]} numberOfLines={1}>
+      <Text style={[styles.pillText, isActive && styles.pillTextActive, isCrashed && styles.pillTextCrashed]} numberOfLines={1}>
         {session.name}
       </Text>
     </TouchableOpacity>
@@ -178,7 +174,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
       return;
     }
 
-    const providerLabel = session.provider === 'codex' ? ' (Codex)' : session.provider === 'claude-cli' ? ' (CLI)' : '';
+    const providerLabel = session.provider === 'claude-cli' ? ' (CLI)' : '';
     Alert.alert(
       session.name + providerLabel,
       `CWD: ${session.cwd}`,
@@ -354,24 +350,6 @@ const styles = StyleSheet.create({
   pillActive: {
     backgroundColor: COLORS.accentBlueLight,
     borderColor: COLORS.accentBlueBorderStrong,
-  },
-  pillCodex: {
-    borderColor: COLORS.accentPurpleSubtle,
-  },
-  pillCodexActive: {
-    backgroundColor: COLORS.accentPurpleLight,
-    borderColor: COLORS.accentPurpleBorderStrong,
-  },
-  codexBadge: {
-    color: COLORS.accentPurpleBorderStrong,
-    fontSize: 9,
-    fontWeight: '700' as const,
-  },
-  codexBadgeActive: {
-    color: COLORS.accentPurple,
-  },
-  pillTextCodexActive: {
-    color: COLORS.accentPurple,
   },
   pillText: {
     color: COLORS.textMuted,
