@@ -234,6 +234,7 @@ program
     const parsedTunnel = parseTunnelArg(config.tunnel || 'quick')
     const useSupervisor = !!parsedTunnel
       && !config.noAuth
+      && !config.externalUrl
       && options.supervisor !== false
       && process.env.CHROXY_SUPERVISED !== '1'
 
