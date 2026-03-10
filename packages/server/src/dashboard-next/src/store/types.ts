@@ -270,6 +270,14 @@ export interface SessionState {
   devPreviews: DevPreview[];
 }
 
+export interface LogEntry {
+  id: string;
+  component: string;
+  level: 'debug' | 'info' | 'warn' | 'error';
+  message: string;
+  timestamp: number;
+}
+
 export interface ServerError {
   id: string;
   category: 'tunnel' | 'session' | 'permission' | 'general';
@@ -417,6 +425,9 @@ export interface ConnectionState {
   // Connection error feedback
   connectionError: string | null;
   connectionRetryCount: number;
+
+  // Server log entries (ring buffer, last 500)
+  logEntries: LogEntry[];
 
   // Server errors forwarded over WebSocket (last 10)
   serverErrors: ServerError[];
@@ -569,6 +580,9 @@ export interface ConnectionState {
 
   // Plan mode actions
   clearPlanState: () => void;
+
+  // Log entry actions
+  clearLogEntries: () => void;
 
   // Server error actions
   addServerError: (message: string) => void;

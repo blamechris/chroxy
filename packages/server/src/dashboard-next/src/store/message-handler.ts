@@ -42,6 +42,7 @@ import type {
   SessionState,
   SlashCommand,
   FilePickerItem,
+  LogEntry,
   ConversationSummary,
   ProviderInfo,
   ToolResultImage,
@@ -1941,6 +1942,26 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         break; // Stale response for an older query — ignore
       }
       set({ searchResults: results, searchLoading: false });
+      break;
+    }
+
+    case 'log_entry': {
+      const component = typeof msg.component === 'string' ? msg.component : 'unknown';
+      const level = (['debug', 'info', 'warn', 'error'] as const).includes(msg.level as LogEntry['level'])
+        ? (msg.level as LogEntry['level'])
+        : 'info';
+      const logMessage = typeof msg.message === 'string' ? stripAnsi(msg.message as string) : '';
+      const timestamp = typeof msg.timestamp === 'number' ? msg.timestamp : Date.now();
+      const entry: LogEntry = {
+        id: nextMessageId('log'),
+        component,
+        level,
+        message: logMessage,
+        timestamp,
+      };
+      set((state: ConnectionState) => ({
+        logEntries: [...state.logEntries, entry].slice(-500),
+      }));
       break;
     }
 

@@ -18,7 +18,7 @@ import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
-import { createLogger } from './logger.js'
+import { createLogger, setLogListener } from './logger.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -554,6 +554,20 @@ export class WsServer {
     this._webTaskManager.on('task_updated', (task) => this._broadcast({ type: 'web_task_updated', task }))
     this._webTaskManager.on('task_error', ({ taskId, message }) => this._broadcast({ type: 'web_task_error', taskId, message }))
 
+    // Broadcast structured log entries to dashboard clients.
+    // Re-entrancy guard prevents infinite recursion when _broadcast() itself
+    // logs (e.g. backpressure debug messages) and log level is set to debug.
+    let inLogBroadcast = false
+    setLogListener((entry) => {
+      if (inLogBroadcast) return
+      inLogBroadcast = true
+      try {
+        this._broadcast({ type: 'log_entry', ...entry })
+      } finally {
+        inLogBroadcast = false
+      }
+    })
+
     // Wire up unified event forwarding via EventNormalizer
     setupForwarding({
       normalizer: this._normalizer,
@@ -752,7 +766,7 @@ export class WsServer {
       if (ws.readyState !== 1) return
       const end = Math.min(offset + CHUNK_SIZE, history.length)
       for (let i = offset; i < end; i++) {
-        this._send(ws, history[i])
+        this._send(ws, { ...history[i], sessionId })
       }
       if (end < history.length) {
         setImmediate(() => sendChunk(end))
@@ -1231,6 +1245,9 @@ export class WsServer {
 
     // Clean up web task manager
     this._webTaskManager.destroy()
+
+    // Clear log listener to prevent post-shutdown broadcasts and GC leak
+    setLogListener(null)
 
     for (const [ws] of this.clients) {
       ws.close()

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createLogger, initFileLogging, closeFileLogging } from '../src/logger.js'
+import { createLogger, initFileLogging, closeFileLogging, setLogListener } from '../src/logger.js'
 
 describe('createLogger backward compatibility', () => {
   it('returns object with info, warn, error methods', () => {
@@ -419,5 +419,75 @@ describe('logger file write error handling (#746)', () => {
     } finally {
       console.log = origLog
     }
+  })
+})
+
+describe('setLogListener (#1820)', () => {
+  afterEach(() => {
+    closeFileLogging()
+    setLogListener(null)
+  })
+
+  it('calls listener with structured log entry', () => {
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = createLogger('test-comp')
+    log.info('hello listener')
+
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].component, 'test-comp')
+    assert.equal(entries[0].level, 'info')
+    assert.equal(entries[0].message, 'hello listener')
+    assert.equal(typeof entries[0].timestamp, 'number')
+  })
+
+  it('calls listener for all log levels', () => {
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = createLogger('multi')
+    log.info('info msg')
+    log.warn('warn msg')
+    log.error('error msg')
+
+    assert.equal(entries.length, 3)
+    assert.equal(entries[0].level, 'info')
+    assert.equal(entries[1].level, 'warn')
+    assert.equal(entries[2].level, 'error')
+  })
+
+  it('does not call listener for filtered levels', () => {
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    // Default log level is info, debug should be filtered
+    const log = createLogger('filtered')
+    log.debug('should not appear')
+    log.info('should appear')
+
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].message, 'should appear')
+  })
+
+  it('clears listener on closeFileLogging', () => {
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = createLogger('comp')
+    log.info('before')
+    closeFileLogging()
+    log.info('after')
+
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].message, 'before')
+  })
+
+  it('listener errors do not break logging', () => {
+    setLogListener(() => { throw new Error('listener crash') })
+
+    const log = createLogger('resilient')
+    // Should not throw
+    assert.doesNotThrow(() => log.info('should not crash'))
   })
 })

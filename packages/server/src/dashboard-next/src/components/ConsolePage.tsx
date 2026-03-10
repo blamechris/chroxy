@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import DOMPurify from 'dompurify'
 import { getAuthToken } from '../utils/auth'
+import { LogPanel } from './LogPanel'
 
 interface ConnectionInfo {
   connectionUrl: string
@@ -200,6 +201,10 @@ export function ConsolePage() {
           <p className="console-qr-hint">Scan with the Chroxy app to pair your phone</p>
         </div>
       )}
+
+      {/* Server Logs */}
+      <h2>Server Logs</h2>
+      <LogPanel />
     </div>
   )
 }

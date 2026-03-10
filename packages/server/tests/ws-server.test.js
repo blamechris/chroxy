@@ -9,11 +9,18 @@ import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer, MIN_PROTOCOL_VERSION, SERVER_PROTOCOL_VERSION } from '../src/ws-server.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
 import { createMockSession, createMockSessionManager, waitFor, GIT } from './test-helpers.js'
+import { setLogListener } from '../src/logger.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
+// Also clears the log listener that WsServer.start() registers, so log_entry broadcasts
+// don't interfere with test message counting and sequence number assertions.
 class WsServer extends _WsServer {
   constructor(opts = {}) {
     super({ noEncrypt: true, ...opts })
+  }
+  start(...args) {
+    super.start(...args)
+    setLogListener(null)
   }
 }
 import WebSocket from 'ws'
@@ -5876,6 +5883,40 @@ describe('_replayHistory()', () => {
     ws.close()
   })
 
+  it('replayed history entries include sessionId (#1818)', async () => {
+    const history = [
+      { type: 'message', messageType: 'response', content: 'Hello!', messageId: 'msg-1' },
+      { type: 'tool_start', messageId: 'msg-1', toolUseId: 'tool-1', tool: 'Read', input: '/tmp/f' },
+      { type: 'result', cost: 0.01, duration: 100 },
+    ]
+
+    const mockManager = createHistoryMockManager({
+      history,
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    const replayEnd = await waitForMessage(messages, 'history_replay_end')
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const startIdx = messages.indexOf(replayStart)
+    const endIdx = messages.indexOf(replayEnd)
+    const replayed = messages.slice(startIdx + 1, endIdx)
+
+    assert.equal(replayed.length, 3, 'Should replay all 3 entries')
+    for (const entry of replayed) {
+      assert.equal(entry.sessionId, 'sess-1', `Replayed ${entry.type} should have sessionId`)
+    }
+
+    ws.close()
+  })
+
   it('replays all turns from ring buffer (not just last response)', async () => {
     const history = [
       // Earlier turn
@@ -9267,6 +9308,10 @@ describe('broadcast backpressure', () => {
       authRequired: false,
       backpressureThreshold: 100,
     })
+    // Clear log listener to prevent log_entry broadcasts from interfering
+    // with backpressure threshold measurements (#1820)
+    const { setLogListener } = await import('../src/logger.js')
+    setLogListener(null)
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, true)
