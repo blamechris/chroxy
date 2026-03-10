@@ -766,7 +766,7 @@ export class WsServer {
       if (ws.readyState !== 1) return
       const end = Math.min(offset + CHUNK_SIZE, history.length)
       for (let i = offset; i < end; i++) {
-        this._send(ws, history[i])
+        this._send(ws, { ...history[i], sessionId })
       }
       if (end < history.length) {
         setImmediate(() => sendChunk(end))
