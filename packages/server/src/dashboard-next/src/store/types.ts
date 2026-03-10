@@ -276,6 +276,7 @@ export interface ServerError {
   message: string;
   recoverable: boolean;
   timestamp: number;
+  sessionId?: string;
 }
 
 export interface SessionNotification {
