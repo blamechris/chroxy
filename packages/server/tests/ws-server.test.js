@@ -9,11 +9,18 @@ import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer, MIN_PROTOCOL_VERSION, SERVER_PROTOCOL_VERSION } from '../src/ws-server.js'
 import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../src/crypto.js'
 import { createMockSession, createMockSessionManager, waitFor, GIT } from './test-helpers.js'
+import { setLogListener } from '../src/logger.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
+// Also clears the log listener that WsServer.start() registers, so log_entry broadcasts
+// don't interfere with test message counting and sequence number assertions.
 class WsServer extends _WsServer {
   constructor(opts = {}) {
     super({ noEncrypt: true, ...opts })
+  }
+  start(...args) {
+    super.start(...args)
+    setLogListener(null)
   }
 }
 import WebSocket from 'ws'
@@ -9301,6 +9308,10 @@ describe('broadcast backpressure', () => {
       authRequired: false,
       backpressureThreshold: 100,
     })
+    // Clear log listener to prevent log_entry broadcasts from interfering
+    // with backpressure threshold measurements (#1820)
+    const { setLogListener } = await import('../src/logger.js')
+    setLogListener(null)
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, true)

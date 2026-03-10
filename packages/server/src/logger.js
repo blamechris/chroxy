@@ -32,6 +32,18 @@ let _logDir = DEFAULT_LOG_DIR
 let _logPath = null
 let _writeCount = 0
 
+/** Optional callback for broadcasting log entries (set by ws-server) */
+let _logListener = null
+
+/**
+ * Set a listener that receives every log entry as a structured object.
+ * Used by ws-server to broadcast log entries to dashboard clients.
+ * @param {((entry: {component: string, level: string, message: string, timestamp: number}) => void) | null} listener
+ */
+export function setLogListener(listener) {
+  _logListener = listener
+}
+
 /**
  * Initialize file logging. Called once on daemon startup.
  * @param {object} options
@@ -56,6 +68,7 @@ export function closeFileLogging() {
   _logDir = DEFAULT_LOG_DIR
   _logPath = null
   _writeCount = 0
+  _logListener = null
 }
 
 function _maybeRotate() {
@@ -107,6 +120,15 @@ export function createLogger(component) {
     if (level === 'error') console.error(line)
     else if (level === 'warn') console.warn(line)
     else console.log(line)
+
+    // Notify listener (for WS broadcast to dashboard)
+    if (_logListener) {
+      try {
+        _logListener({ component, level, message: msg, timestamp: Date.now() })
+      } catch {
+        // Never let listener errors break logging
+      }
+    }
 
     // Write to file in daemon mode
     if (_logToFile && _logPath) {
