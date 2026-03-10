@@ -34,7 +34,7 @@ function discoverLoggerFiles() {
   const files = readdirSync(SRC).filter(f => f.endsWith('.js') && f !== 'logger.js')
   return files.filter(f => {
     const src = readSrc(f)  // let errors propagate — a read failure is a test failure
-    return src.includes("from './logger.js'") && src.includes('createLogger')
+    return /import\s*\{[^}]*\bcreateLogger\b[^}]*\}\s*from\s*['"]\.\/logger\.js['"]/.test(src)
   })
 }
 
