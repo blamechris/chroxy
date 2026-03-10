@@ -18,6 +18,7 @@ import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { toWireAttachments } from './utils/attachment-utils'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
+import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData } from './components/SessionBar'
 import { StatusBar } from './components/StatusBar'
 import { PermissionPrompt } from './components/PermissionPrompt'
@@ -42,6 +43,7 @@ import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadP
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
+import { ConsolePage } from './components/ConsolePage'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -62,19 +64,6 @@ export function getChroxyConfig(): ChroxyConfig | undefined {
   }
 }
 
-/** Read auth token from URL query param (preferred) or cookie (fallback) */
-function getAuthToken(): string | null {
-  const params = new URLSearchParams(window.location.search)
-  const queryToken = params.get('token')
-  if (queryToken) return queryToken
-  const match = document.cookie.match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
-  if (!match || !match[1]) return null
-  try {
-    return decodeURIComponent(match[1])
-  } catch {
-    return null
-  }
-}
 
 /** Format context usage as a compact string */
 function formatContext(usage: { inputTokens: number; outputTokens: number } | null): string | undefined {
@@ -876,6 +865,13 @@ export function App() {
                   <span className="system-badge">{unreadSystemCount}</span>
                 )}
               </button>
+              <button
+                className={`view-tab${viewMode === 'console' ? ' active' : ''}`}
+                onClick={() => { setViewMode('console'); setSplitMode(null); persistSplitMode(null) }}
+                type="button"
+              >
+                Console
+              </button>
               <div className="view-switch-spacer" />
               <button
                 className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`}
@@ -952,6 +948,9 @@ export function App() {
                     isBusy={false}
                     renderMessage={renderMessage}
                   />
+                )}
+                {viewMode === 'console' && connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <ConsolePage />
                 )}
               </div>
               {checkpointsOpen && (
