@@ -1674,3 +1674,159 @@ describe('permission_expired handler', () => {
     expect(notifs[0].requestId).toBe('keep-me');
   });
 });
+
+describe('permission_request message handler', () => {
+  it('adds a prompt message to the session with options populated', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    clearPermissionSplits();
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's1',
+      requestId: 'perm-1',
+      tool: 'Write',
+      description: '/tmp/test.txt',
+      input: { path: '/tmp/test.txt' },
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].type).toBe('prompt');
+    expect(msgs[0].requestId).toBe('perm-1');
+    expect(msgs[0].options).toHaveLength(3);
+    expect(msgs[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny', 'allowAlways']);
+  });
+
+  it('sets expiresAt from remainingMs', () => {
+    const before = Date.now();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    clearPermissionSplits();
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's1',
+      requestId: 'perm-2',
+      tool: 'Bash',
+      description: 'ls',
+      remainingMs: 60_000,
+    });
+
+    const msg = store.getState().sessionStates.s1.messages[0];
+    expect(msg.expiresAt).toBeGreaterThanOrEqual(before + 60_000);
+  });
+});
+
+describe('session_context handler', () => {
+  it('updates sessionContext with git info from server snapshot', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'session_context',
+      sessionId: 's1',
+      gitBranch: 'feat/my-branch',
+      gitDirty: 2,
+      gitAhead: 1,
+      projectName: 'my-project',
+    });
+
+    const ctx = store.getState().sessionStates.s1.sessionContext;
+    expect(ctx).not.toBeNull();
+    expect(ctx!.gitBranch).toBe('feat/my-branch');
+    expect(ctx!.gitDirty).toBe(2);
+    expect(ctx!.gitAhead).toBe(1);
+    expect(ctx!.projectName).toBe('my-project');
+  });
+
+  it('does nothing when sessionId is not in sessionStates', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    expect(() => {
+      _testMessageHandler.handle({
+        type: 'session_context',
+        sessionId: 'unknown-session',
+        gitBranch: 'main',
+        gitDirty: 0,
+        gitAhead: 0,
+        projectName: 'proj',
+      });
+    }).not.toThrow();
+
+    // s1's sessionContext remains untouched
+    expect(store.getState().sessionStates.s1.sessionContext).toBeNull();
+  });
+});
+
+describe('user_question handler', () => {
+  it('adds a prompt message with question text and options', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'user_question',
+      sessionId: 's1',
+      toolUseId: 'q-use-1',
+      questions: [{ question: 'Which approach?', options: [{ label: 'Option A' }, { label: 'Option B' }] }],
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].type).toBe('prompt');
+    expect(msgs[0].content).toBe('Which approach?');
+    expect(msgs[0].options).toHaveLength(2);
+    expect(msgs[0].options![0].label).toBe('Option A');
+    expect(msgs[0].toolUseId).toBe('q-use-1');
+  });
+
+  it('skips when questions array is empty', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'user_question', sessionId: 's1', questions: [] });
+
+    expect(store.getState().sessionStates.s1.messages).toHaveLength(0);
+  });
+});
