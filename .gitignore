@@ -54,6 +54,10 @@ coverage/
 .cache/
 tmp/
 
+# Repo-memory MCP cache
+.repo-memory/cache.db-shm
+.repo-memory/cache.db-wal
+
 # Local docs (never commit)
 ROADMAP.local.md
 tests/screenshots/
