@@ -859,7 +859,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'user_input': {
       // Server broadcasts user_input to all OTHER clients when someone sends a message.
       // Skip if it came from this client (we already show it via optimistic UI).
-      const parsed = parseUserInputMessage(msg as Record<string, unknown>, get().myClientId, get().activeSessionId);
+      const parsed = parseUserInputMessage(msg, get().myClientId, get().activeSessionId);
       if (!parsed) break;
       const { sessionId: parsedSessionId, ...parsedMsg } = parsed;
       const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...parsedMsg };
@@ -1553,10 +1553,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         content: `${deviceLabel} connected`,
         timestamp: Date.now(),
       };
-      // Global event — broadcast to all sessions so any tab shows it
+      // Global event — broadcast to all sessions so any tab shows it (single setState)
       const joinSessionIds = Object.keys(get().sessionStates);
       if (joinSessionIds.length > 0) {
-        for (const sid of joinSessionIds) updateSession(sid, (ss) => ({ messages: [...ss.messages, joinMsg] }));
+        set((state: ConnectionState) => {
+          const newSessionStates = Object.fromEntries(
+            Object.entries(state.sessionStates).map(([sid, ss]) => [
+              sid,
+              { ...ss, messages: [...ss.messages, joinMsg] },
+            ])
+          ) as typeof state.sessionStates;
+          const activeId = state.activeSessionId;
+          const patch: Partial<ConnectionState> = { sessionStates: newSessionStates };
+          if (activeId && newSessionStates[activeId]) {
+            patch.messages = newSessionStates[activeId].messages;
+          }
+          return patch;
+        });
       } else {
         get().addMessage(joinMsg);
       }
@@ -1576,10 +1589,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         content: `${leftLabel} disconnected`,
         timestamp: Date.now(),
       };
-      // Global event — broadcast to all sessions so any tab shows it
+      // Global event — broadcast to all sessions so any tab shows it (single setState)
       const leftSessionIds = Object.keys(get().sessionStates);
       if (leftSessionIds.length > 0) {
-        for (const sid of leftSessionIds) updateSession(sid, (ss) => ({ messages: [...ss.messages, leftMsg] }));
+        set((state: ConnectionState) => {
+          const newSessionStates = Object.fromEntries(
+            Object.entries(state.sessionStates).map(([sid, ss]) => [
+              sid,
+              { ...ss, messages: [...ss.messages, leftMsg] },
+            ])
+          ) as typeof state.sessionStates;
+          const activeId = state.activeSessionId;
+          const patch: Partial<ConnectionState> = { sessionStates: newSessionStates };
+          if (activeId && newSessionStates[activeId]) {
+            patch.messages = newSessionStates[activeId].messages;
+          }
+          return patch;
+        });
       } else {
         get().addMessage(leftMsg);
       }
@@ -1935,12 +1961,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const recoverable: boolean =
         typeof msg.recoverable === 'boolean' ? msg.recoverable : true;
 
+      const errSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : undefined;
       const serverError: ServerError = {
         id: nextMessageId('err'),
         category,
         message,
         recoverable,
         timestamp: Date.now(),
+        ...(errSessionId ? { sessionId: errSessionId } : {}),
       };
       set((state: ConnectionState) => ({
         serverErrors: [...state.serverErrors, serverError].slice(-10),
@@ -1951,7 +1979,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         content: serverError.message,
         timestamp: Date.now(),
       };
-      const errSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
       if (errSessionId && get().sessionStates[errSessionId]) {
         // Scoped error — route to the specific session only
         updateSession(errSessionId, (ss) => ({
@@ -2061,38 +2088,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // Garbage-collect persisted messages for the deleted session (#797)
         void clearPersistedSession(timeoutSessionId);
       }
-      break;
-    }
-
-    case 'pty_spawned': {
-      const ptySpawnSessionId = (msg.sessionId as string) || get().activeSessionId;
-      if (ptySpawnSessionId && get().sessionStates[ptySpawnSessionId]) {
-        updateSession(ptySpawnSessionId, () => ({ ptyActive: true }));
-      }
-      break;
-    }
-
-    case 'pty_data': {
-      // Forward raw PTY bytes to the terminal — same path as appendTerminalData
-      // but from the dedicated PTY channel (true 1:1 terminal mirror)
-      const ptyData = msg.data as string;
-      if (ptyData) {
-        get().appendTerminalData(ptyData);
-      }
-      break;
-    }
-
-    case 'pty_exit': {
-      const ptySessionId = (msg.sessionId as string) || get().activeSessionId;
-      if (ptySessionId && get().sessionStates[ptySessionId]) {
-        updateSession(ptySessionId, () => ({ ptyActive: false }));
-      }
-      break;
-    }
-
-    case 'pty_error': {
-      const ptyErrMsg = msg.message as string;
-      console.warn(`[pty] Error: ${ptyErrMsg}`);
       break;
     }
 

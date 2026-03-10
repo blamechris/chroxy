@@ -218,5 +218,29 @@ describe('PushManager', () => {
       await manager.send('result', 'T', 'B')
       assert.equal(fetchMock.mock.calls.length, 2)
     })
+
+    it('unknown category defaults to 30s rate limit', async () => {
+      manager.registerToken(VALID_TOKEN)
+      const fetchMock = mockFetchOk()
+      globalThis.fetch = fetchMock
+
+      // First send with unknown category — should go through
+      await manager.send('custom', 'T', 'B')
+      assert.equal(fetchMock.mock.calls.length, 1)
+
+      // Rapid second send — blocked by 30s default limit
+      await manager.send('custom', 'T', 'B')
+      assert.equal(fetchMock.mock.calls.length, 1)
+
+      // Backdate to just under 30s — still within default rate limit window, so blocked
+      manager._lastSent.set('custom', Date.now() - 29_000)
+      await manager.send('custom', 'T', 'B')
+      assert.equal(fetchMock.mock.calls.length, 1)
+
+      // Backdate to just over 30s — outside default window, so allowed
+      manager._lastSent.set('custom', Date.now() - 31_000)
+      await manager.send('custom', 'T', 'B')
+      assert.equal(fetchMock.mock.calls.length, 2)
+    })
   })
 })

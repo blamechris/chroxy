@@ -1607,6 +1607,72 @@ describe('permission_resolved handler', () => {
     const msg = store.getState().messages.find((m: any) => m.requestId === 'req-3');
     expect((msg as any)?.answered).toBe('allowAlways');
   });
+
+  it('clears matching sessionNotification when permission is resolved', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      messages: [],
+      sessionNotifications: [
+        { requestId: 'req-notif', sessionId: 's1', message: 'Allow bash?' } as any,
+        { requestId: 'other-req', sessionId: 's1', message: 'Other' } as any,
+      ],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_resolved',
+      requestId: 'req-notif',
+      decision: 'allow',
+    });
+
+    const notifs = store.getState().sessionNotifications;
+    expect(notifs).toHaveLength(1);
+    expect(notifs[0].requestId).toBe('other-req');
+  });
+});
+
+describe('permission_expired handler', () => {
+  it('clears matching sessionNotification when permission expires', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: [
+            {
+              id: 'perm-exp',
+              type: 'prompt' as const,
+              content: 'Allow bash?',
+              requestId: 'req-exp',
+              timestamp: 1,
+            },
+          ],
+        },
+      },
+      messages: [],
+      sessionNotifications: [
+        { requestId: 'req-exp', sessionId: 's1', message: 'Allow bash?' } as any,
+        { requestId: 'keep-me', sessionId: 's1', message: 'Other' } as any,
+      ],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_expired',
+      requestId: 'req-exp',
+      sessionId: 's1',
+      message: 'timed out',
+    });
+
+    const notifs = store.getState().sessionNotifications;
+    expect(notifs).toHaveLength(1);
+    expect(notifs[0].requestId).toBe('keep-me');
+  });
 });
 
 describe('permission_request message handler', () => {

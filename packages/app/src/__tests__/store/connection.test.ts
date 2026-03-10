@@ -1480,3 +1480,83 @@ describe('permission response auto-switch (app)', () => {
     expect(useConnectionStore.getState().activeSessionId).toBe('s1');
   });
 });
+
+describe('markPromptAnsweredByRequestId', () => {
+  it('marks the correct message when prompt belongs to a non-active session', () => {
+    const permMsg = {
+      id: 'perm-bg',
+      type: 'prompt' as const,
+      content: 'Allow?',
+      requestId: 'req-bg',
+      timestamp: 1,
+    };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+        s2: { ...createEmptySessionState(), messages: [permMsg] },
+      },
+      messages: [],
+    });
+
+    useConnectionStore.getState().markPromptAnsweredByRequestId('req-bg', 'allow');
+
+    const s2Msgs = useConnectionStore.getState().sessionStates.s2!.messages;
+    const marked = s2Msgs.find((m) => m.requestId === 'req-bg');
+    expect(marked?.answered).toBe('allow');
+  });
+
+  it('leaves other session messages untouched', () => {
+    const permMsg = {
+      id: 'perm-bg2',
+      type: 'prompt' as const,
+      content: 'Allow write?',
+      requestId: 'req-bg2',
+      timestamp: 1,
+    };
+    const otherMsg = {
+      id: 'other-1',
+      type: 'response' as const,
+      content: 'Hello',
+      requestId: undefined,
+      timestamp: 2,
+    };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [otherMsg] },
+        s2: { ...createEmptySessionState(), messages: [permMsg] },
+      },
+      messages: [],
+    });
+
+    useConnectionStore.getState().markPromptAnsweredByRequestId('req-bg2', 'deny');
+
+    // s1 untouched
+    const s1Msgs = useConnectionStore.getState().sessionStates.s1!.messages;
+    expect(s1Msgs).toHaveLength(1);
+    expect((s1Msgs[0] as any).answered).toBeUndefined();
+  });
+
+  it('falls back to flat messages when sessionStates is empty', () => {
+    const permMsg = {
+      id: 'perm-flat',
+      type: 'prompt' as const,
+      content: 'Allow flat?',
+      requestId: 'req-flat',
+      timestamp: 1,
+    };
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {},
+      messages: [permMsg],
+    });
+
+    useConnectionStore.getState().markPromptAnsweredByRequestId('req-flat', 'allow');
+
+    const flatMsgs = useConnectionStore.getState().messages;
+    const marked = flatMsgs.find((m) => m.requestId === 'req-flat');
+    expect(marked?.answered).toBe('allow');
+  });
+});

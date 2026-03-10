@@ -167,24 +167,24 @@ describe('Supervisor', () => {
 
     it('prints full API token and full dashboard URL (not truncated)', async () => {
       const { supervisor } = setup({ apiToken: 'abcdef1234567890fulltoken' })
-      const logs = []
-      const origLog = console.log
-      console.log = (...args) => logs.push(args.join(' '))
+      const chunks = []
+      const origWrite = process.stdout.write.bind(process.stdout)
+      process.stdout.write = (chunk) => { chunks.push(String(chunk)); return true }
       try {
         await supervisor.start()
       } finally {
-        console.log = origLog
+        process.stdout.write = origWrite
       }
+      const output = chunks.join('')
 
-      const tokenLine = logs.find(l => l.includes('Token:'))
-      assert.ok(tokenLine, 'Should print a Token: line')
-      assert.ok(tokenLine.includes('abcdef1234567890fulltoken'), 'Token should NOT be truncated')
-      assert.ok(!tokenLine.includes('...'), 'Token line should not contain ...')
+      assert.ok(output.includes('Token:'), 'Should print a Token: line')
+      assert.ok(output.includes('abcdef1234567890fulltoken'), 'Token should NOT be truncated')
+      assert.ok(!output.includes('...'), 'Output should not contain ...')
 
-      const dashLine = logs.find(l => l.includes('Dashboard:'))
-      assert.ok(dashLine, 'Should print a Dashboard: line')
-      assert.ok(dashLine.includes('abcdef1234567890fulltoken'), 'Dashboard URL should contain full token')
-      assert.ok(!dashLine.includes('...'), 'Dashboard URL should not contain ...')
+      assert.ok(output.includes('Dashboard:'), 'Should print a Dashboard: line')
+      const dashboardLine = (output.split('\n').find((line) => line.includes('Dashboard:')) ?? '')
+      assert.ok(dashboardLine.includes('abcdef1234567890fulltoken'), 'Dashboard URL should contain the full API token')
+      assert.ok(!dashboardLine.includes('...'), 'Dashboard URL should not contain ellipsis')
 
       supervisor._shuttingDown = true
       clearInterval(supervisor._heartbeatInterval)
