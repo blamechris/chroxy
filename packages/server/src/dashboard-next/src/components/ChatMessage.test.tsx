@@ -166,6 +166,78 @@ describe('ChatMessage', () => {
     )
     expect(screen.getByTestId('chat-message-msg-thinking-ok')).toBeInTheDocument()
   })
+
+  it('does not render system bubble when content is empty', () => {
+    const { container } = render(
+      <ChatMessage
+        id="msg-system-empty"
+        type="system"
+        content=""
+        timestamp={Date.now()}
+      />
+    )
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('does not render system bubble when content is whitespace-only', () => {
+    const { container } = render(
+      <ChatMessage
+        id="msg-system-ws"
+        type="system"
+        content="   "
+        timestamp={Date.now()}
+      />
+    )
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('does not render error bubble when content is empty', () => {
+    const { container } = render(
+      <ChatMessage
+        id="msg-error-empty"
+        type="error"
+        content=""
+        timestamp={Date.now()}
+      />
+    )
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('does not render error bubble when content is whitespace-only', () => {
+    const { container } = render(
+      <ChatMessage
+        id="msg-error-ws"
+        type="error"
+        content="   "
+        timestamp={Date.now()}
+      />
+    )
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('renders system bubble when content is non-empty', () => {
+    render(
+      <ChatMessage
+        id="msg-system-ok"
+        type="system"
+        content="Client connected"
+        timestamp={Date.now()}
+      />
+    )
+    expect(screen.getByTestId('chat-message-msg-system-ok')).toBeInTheDocument()
+  })
+
+  it('renders error bubble when content is non-empty', () => {
+    render(
+      <ChatMessage
+        id="msg-error-ok"
+        type="error"
+        content="Something failed"
+        timestamp={Date.now()}
+      />
+    )
+    expect(screen.getByTestId('chat-message-msg-error-ok')).toBeInTheDocument()
+  })
 })
 
 describe('ToolBubble', () => {

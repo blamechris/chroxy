@@ -52,7 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Server**
 - Git operations: `git_stage`, `git_unstage`, `git_commit` WebSocket handlers
-- PTY mirror for true 1:1 terminal view with max concurrent limit
 - Cross-device input conflict resolution
 - Cross-client permission sync via `permission_resolved` broadcast
 - Unified `handleSessionMessage` (refactored from separate CLI handler)
