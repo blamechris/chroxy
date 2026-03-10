@@ -1557,12 +1557,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const joinSessionIds = Object.keys(get().sessionStates);
       if (joinSessionIds.length > 0) {
         set((state: ConnectionState) => {
-          const newSessionStates = Object.fromEntries(
-            Object.entries(state.sessionStates).map(([sid, ss]) => [
-              sid,
-              { ...ss, messages: [...ss.messages, joinMsg] },
-            ])
-          ) as typeof state.sessionStates;
+          const newSessionStates: typeof state.sessionStates = {};
+          for (const sid in state.sessionStates) {
+            const ss = state.sessionStates[sid]!;
+            newSessionStates[sid] = { ...ss, messages: [...ss.messages, joinMsg] };
+          }
           const activeId = state.activeSessionId;
           const patch: Partial<ConnectionState> = { sessionStates: newSessionStates };
           if (activeId && newSessionStates[activeId]) {
@@ -1593,12 +1592,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const leftSessionIds = Object.keys(get().sessionStates);
       if (leftSessionIds.length > 0) {
         set((state: ConnectionState) => {
-          const newSessionStates = Object.fromEntries(
-            Object.entries(state.sessionStates).map(([sid, ss]) => [
-              sid,
-              { ...ss, messages: [...ss.messages, leftMsg] },
-            ])
-          ) as typeof state.sessionStates;
+          const newSessionStates: typeof state.sessionStates = {};
+          for (const sid in state.sessionStates) {
+            const ss = state.sessionStates[sid]!;
+            newSessionStates[sid] = { ...ss, messages: [...ss.messages, leftMsg] };
+          }
           const activeId = state.activeSessionId;
           const patch: Partial<ConnectionState> = { sessionStates: newSessionStates };
           if (activeId && newSessionStates[activeId]) {
