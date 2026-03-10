@@ -443,10 +443,12 @@ export function App() {
     return '<p>Claude has prepared a plan for your review.</p>'
   }, [isPlanPending, storeMessages])
 
-  // Toast items from server errors
+  // Toast items from server errors — only global errors or errors for the active session
   const toastItems: ToastItem[] = useMemo(
-    () => serverErrors.map(e => ({ id: e.id, message: e.message })),
-    [serverErrors],
+    () => serverErrors
+      .filter(e => !e.sessionId || e.sessionId === activeSessionId)
+      .map(e => ({ id: e.id, message: e.message })),
+    [serverErrors, activeSessionId],
   )
 
   // Handlers

@@ -30,7 +30,6 @@ export {
 } from './storage'
 
 export type {
-  RawUserInputMessage,
   ParsedUserInput,
 } from './user-input-handler'
 
