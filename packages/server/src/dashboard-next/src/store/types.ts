@@ -474,7 +474,7 @@ export interface ConnectionState {
   viewingCachedSession: boolean;
 
   // View mode
-  viewMode: 'chat' | 'terminal' | 'files' | 'diff';
+  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system';
 
   // Input settings
   inputSettings: InputSettings;
@@ -493,7 +493,7 @@ export interface ConnectionState {
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;
-  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff') => void;
+  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system') => void;
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[]) => void;
   appendTerminalData: (data: string) => void;
