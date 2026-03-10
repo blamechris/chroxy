@@ -168,4 +168,28 @@ describe('SettingsPanel', () => {
       document.body.removeChild(topOverlay)
     }
   })
+
+  it('renders console tab toggle when onToggleConsoleTab is provided (#1821)', () => {
+    const onToggle = vi.fn()
+    render(
+      <SettingsPanel
+        isOpen={true}
+        onClose={vi.fn()}
+        showConsoleTab={false}
+        onToggleConsoleTab={onToggle}
+      />
+    )
+
+    const checkbox = screen.getByLabelText('Show Console tab') as HTMLInputElement
+    expect(checkbox).toBeTruthy()
+    expect(checkbox.checked).toBe(false)
+
+    fireEvent.click(checkbox)
+    expect(onToggle).toHaveBeenCalledWith(true)
+  })
+
+  it('does not render console toggle when onToggleConsoleTab is not provided', () => {
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+    expect(screen.queryByLabelText('Show Console tab')).toBeNull()
+  })
 })

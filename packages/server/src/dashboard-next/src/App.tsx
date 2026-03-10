@@ -39,7 +39,7 @@ import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
 import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode } from './store/persistence'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab } from './store/persistence'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
@@ -188,6 +188,9 @@ export function App() {
   const [sidebarFilter, setSidebarFilter] = useState('')
   const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
+  const [showConsoleTab, setShowConsoleTab] = useState(() => {
+    return loadPersistedShowConsoleTab()
+  })
   const [isSwitchingSession, setIsSwitchingSession] = useState(false)
 
   // Clear the switching flag once the active session actually changes
@@ -865,13 +868,15 @@ export function App() {
                   <span className="system-badge">{unreadSystemCount}</span>
                 )}
               </button>
-              <button
-                className={`view-tab${viewMode === 'console' ? ' active' : ''}`}
-                onClick={() => { setViewMode('console'); setSplitMode(null); persistSplitMode(null) }}
-                type="button"
-              >
-                Console
-              </button>
+              {showConsoleTab && (
+                <button
+                  className={`view-tab${viewMode === 'console' ? ' active' : ''}`}
+                  onClick={() => { setViewMode('console'); setSplitMode(null); persistSplitMode(null) }}
+                  type="button"
+                >
+                  Console
+                </button>
+              )}
               <div className="view-switch-spacer" />
               <button
                 className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`}
@@ -1012,7 +1017,15 @@ export function App() {
       />
 
       {/* Settings panel */}
-      <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsPanel
+        isOpen={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        showConsoleTab={showConsoleTab}
+        onToggleConsoleTab={(show) => {
+          setShowConsoleTab(show)
+          persistShowConsoleTab(show)
+        }}
+      />
 
       {/* Keyboard shortcut help */}
       <ShortcutHelp isOpen={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} shortcuts={SHORTCUTS} />

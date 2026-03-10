@@ -19,6 +19,7 @@ const KEY_SIDEBAR_WIDTH = `${KEY_PREFIX}sidebar_width`;
 const KEY_SPLIT_MODE = `${KEY_PREFIX}split_mode`;
 const KEY_ACTIVE_SERVER = `${KEY_PREFIX}active_server_id`;
 const KEY_THEME = `${KEY_PREFIX}theme`;
+const KEY_SHOW_CONSOLE_TAB = `${KEY_PREFIX}show_console_tab`;
 
 // ---------------------------------------------------------------------------
 // Server-scoped persistence — keys scoped by server ID to prevent data loss
@@ -268,6 +269,24 @@ export function loadPersistedActiveServer(): string | null {
     return localStorage.getItem(KEY_ACTIVE_SERVER) || null;
   } catch {
     return null;
+  }
+}
+
+/** Persist the show-console-tab preference */
+export function persistShowConsoleTab(show: boolean): void {
+  try {
+    localStorage.setItem(KEY_SHOW_CONSOLE_TAB, String(show));
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Load the persisted show-console-tab preference */
+export function loadPersistedShowConsoleTab(): boolean {
+  try {
+    return localStorage.getItem(KEY_SHOW_CONSOLE_TAB) === 'true';
+  } catch {
+    return false;
   }
 }
 
