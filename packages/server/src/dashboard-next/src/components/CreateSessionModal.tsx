@@ -64,7 +64,6 @@ const EMPTY_STRINGS: string[] = []
 const PROVIDER_LABELS: Record<string, string> = {
   'claude-sdk': 'Claude Code (SDK)',
   'claude-cli': 'Claude Code (CLI)',
-  'codex': 'OpenAI Codex',
   'gemini': 'Gemini CLI',
 }
 
@@ -72,7 +71,6 @@ const PROVIDER_LABELS: Record<string, string> = {
 const PROVIDER_BILLING: Record<string, string> = {
   'claude-sdk': 'Uses Anthropic API credits',
   'claude-cli': 'Uses your Claude subscription',
-  'codex': 'Uses OpenAI API credits',
   'gemini': 'Uses Google API credits',
 }
 

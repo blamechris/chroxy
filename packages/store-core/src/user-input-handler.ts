@@ -6,13 +6,6 @@
  * parsing logic so both handlers stay in sync.
  */
 
-export interface RawUserInputMessage {
-  clientId?: string
-  sessionId?: string
-  text?: string
-  timestamp?: number
-}
-
 export interface ParsedUserInput {
   /** Session that should receive the message */
   sessionId: string
@@ -29,18 +22,18 @@ export interface ParsedUserInput {
  * - No target session can be determined
  */
 export function parseUserInputMessage(
-  msg: RawUserInputMessage,
+  msg: Record<string, unknown>,
   myClientId: string | null,
   activeSessionId: string | null,
 ): ParsedUserInput | null {
-  const senderClientId = msg.clientId
+  const senderClientId = typeof msg.clientId === 'string' ? msg.clientId : undefined
   if (senderClientId && senderClientId === myClientId) return null
-  const targetSessionId = msg.sessionId || activeSessionId
+  const targetSessionId = (typeof msg.sessionId === 'string' ? msg.sessionId : null) || activeSessionId
   if (!targetSessionId) return null
   return {
     sessionId: targetSessionId,
     type: 'user_input',
-    content: msg.text || '',
-    timestamp: msg.timestamp ?? Date.now(),
+    content: typeof msg.text === 'string' ? msg.text : '',
+    timestamp: typeof msg.timestamp === 'number' ? msg.timestamp : Date.now(),
   }
 }
