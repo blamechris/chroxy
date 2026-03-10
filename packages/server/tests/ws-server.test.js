@@ -5857,24 +5857,26 @@ describe('_replayHistory()', () => {
     const endIdx = messages.indexOf(replayEnd)
     assert.ok(startIdx < endIdx, 'history_replay_start should come before history_replay_end')
 
-    // The replay starts from the last response message, so we expect:
-    // response, tool_start, tool_result, result (skipping user_input before the response)
+    // Full ring buffer is replayed — all 5 messages including user_input
     const replayed = messages.slice(startIdx + 1, endIdx)
-    assert.equal(replayed.length, 4, 'Should replay from last response onwards (4 entries)')
+    assert.equal(replayed.length, 5, 'Should replay full ring buffer (all 5 entries)')
     assert.equal(replayed[0].type, 'message')
-    assert.equal(replayed[0].messageType, 'response')
-    assert.equal(replayed[0].content, 'Hi there!')
-    assert.equal(replayed[1].type, 'tool_start')
-    assert.equal(replayed[1].tool, 'Read')
-    assert.equal(replayed[2].type, 'tool_result')
-    assert.equal(replayed[2].result, 'file contents')
-    assert.equal(replayed[3].type, 'result')
-    assert.equal(replayed[3].cost, 0.01)
+    assert.equal(replayed[0].messageType, 'user_input')
+    assert.equal(replayed[0].content, 'hello')
+    assert.equal(replayed[1].type, 'message')
+    assert.equal(replayed[1].messageType, 'response')
+    assert.equal(replayed[1].content, 'Hi there!')
+    assert.equal(replayed[2].type, 'tool_start')
+    assert.equal(replayed[2].tool, 'Read')
+    assert.equal(replayed[3].type, 'tool_result')
+    assert.equal(replayed[3].result, 'file contents')
+    assert.equal(replayed[4].type, 'result')
+    assert.equal(replayed[4].cost, 0.01)
 
     ws.close()
   })
 
-  it('only replays from last response message to end (trims earlier turns)', async () => {
+  it('replays all turns from ring buffer (not just last response)', async () => {
     const history = [
       // Earlier turn
       { type: 'message', messageType: 'response', content: 'first answer', messageId: 'msg-1' },
@@ -5904,10 +5906,13 @@ describe('_replayHistory()', () => {
     const endIdx = messages.indexOf(replayEnd)
     const replayed = messages.slice(startIdx + 1, endIdx)
 
-    // Should only include from the LAST response onwards (second answer + result)
-    assert.equal(replayed.length, 2, 'Should replay only last turn (response + result)')
-    assert.equal(replayed[0].content, 'second answer')
-    assert.equal(replayed[1].cost, 0.01)
+    // Full ring buffer replayed — all 5 messages across both turns
+    assert.equal(replayed.length, 5, 'Should replay all turns (5 entries)')
+    assert.equal(replayed[0].content, 'first answer')
+    assert.equal(replayed[1].cost, 0.005)
+    assert.equal(replayed[2].content, 'second question')
+    assert.equal(replayed[3].content, 'second answer')
+    assert.equal(replayed[4].cost, 0.01)
 
     ws.close()
   })

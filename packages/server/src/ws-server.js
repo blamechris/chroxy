@@ -733,25 +733,13 @@ export class WsServer {
   }
 
   /** Replay message history for a session to a single client.
-   *  Only replays the last conversation turn (last Claude response + result +
-   *  any in-progress work) to avoid flooding the app with old tool calls.
+   *  Sends the full ring buffer (capped at 500 messages by session-manager)
+   *  so new clients get complete conversation context.
    */
   _replayHistory(ws, sessionId) {
     if (!this.sessionManager) return
-    const fullHistory = this.sessionManager.getHistory(sessionId)
-    if (fullHistory.length === 0) return
-
-    // Find the last response message and replay from there to the end.
-    // This gives: last Claude response + result + any in-progress messages.
-    let startIdx = 0
-    for (let i = fullHistory.length - 1; i >= 0; i--) {
-      if (fullHistory[i].type === 'message' && fullHistory[i].messageType === 'response') {
-        startIdx = i
-        break
-      }
-    }
-
-    const history = fullHistory.slice(startIdx)
+    const history = this.sessionManager.getHistory(sessionId)
+    if (history.length === 0) return
 
     const truncated = this.sessionManager.isHistoryTruncated(sessionId)
     this._send(ws, { type: 'history_replay_start', sessionId, truncated })
