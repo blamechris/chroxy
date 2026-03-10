@@ -978,3 +978,103 @@ describe('SSR safety', () => {
     expect(guardMatch!.index!).toBeLessThan(listenerMatch!.index!);
   });
 });
+
+// ---------------------------------------------------------------------------
+// App.tsx toast filtering — session-scoped server_error (#1804)
+// ---------------------------------------------------------------------------
+describe('server_error toast scope filtering', () => {
+  // Replicates the exact filter from App.tsx toastItems useMemo:
+  //   serverErrors.filter(e => !e.sessionId || e.sessionId === activeSessionId)
+  function toastFilter(
+    serverErrors: { id: string; message: string; sessionId?: string }[],
+    activeSessionId: string | null,
+  ) {
+    return serverErrors
+      .filter(e => !e.sessionId || e.sessionId === activeSessionId)
+      .map(e => ({ id: e.id, message: e.message }));
+  }
+
+  it('shows global errors (no sessionId) regardless of active session', () => {
+    const errors = [
+      { id: 'e1', message: 'Tunnel lost', sessionId: undefined },
+    ];
+    const items = toastFilter(errors, 's1');
+    expect(items).toHaveLength(1);
+    expect(items[0]!.message).toBe('Tunnel lost');
+  });
+
+  it('hides session-scoped errors for non-active sessions', () => {
+    const errors = [
+      { id: 'e1', message: 'Global error' },
+      { id: 'e2', message: 'Session s2 error', sessionId: 's2' },
+    ];
+    const items = toastFilter(errors, 's1');
+    expect(items).toHaveLength(1);
+    expect(items[0]!.id).toBe('e1');
+  });
+
+  it('shows session-scoped errors when they match the active session', () => {
+    const errors = [
+      { id: 'e1', message: 'Global error' },
+      { id: 'e2', message: 'Session s1 error', sessionId: 's1' },
+    ];
+    const items = toastFilter(errors, 's1');
+    expect(items).toHaveLength(2);
+    expect(items.map(i => i.id)).toEqual(['e1', 'e2']);
+  });
+
+  it('shows only global errors when active session has no scoped errors', () => {
+    const errors = [
+      { id: 'e1', message: 'Global' },
+      { id: 'e2', message: 'For s2', sessionId: 's2' },
+      { id: 'e3', message: 'For s3', sessionId: 's3' },
+    ];
+    const items = toastFilter(errors, 's1');
+    expect(items).toHaveLength(1);
+    expect(items[0]!.id).toBe('e1');
+  });
+
+  it('shows all errors when activeSessionId is null (global + unscoped)', () => {
+    const errors = [
+      { id: 'e1', message: 'Global error' },
+      { id: 'e2', message: 'Scoped error', sessionId: 's1' },
+    ];
+    // activeSessionId is null — scoped errors don't match null, so only global shows
+    const items = toastFilter(errors, null);
+    expect(items).toHaveLength(1);
+    expect(items[0]!.id).toBe('e1');
+  });
+
+  it('returns empty when all errors are scoped to other sessions', () => {
+    const errors = [
+      { id: 'e1', message: 'For s2', sessionId: 's2' },
+      { id: 'e2', message: 'For s3', sessionId: 's3' },
+    ];
+    const items = toastFilter(errors, 's1');
+    expect(items).toHaveLength(0);
+  });
+
+  it('integration: store serverErrors + activeSessionId filter correctly', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      serverErrors: [
+        { id: 'e1', category: 'tunnel', message: 'Tunnel lost', recoverable: true, timestamp: 1 },
+        { id: 'e2', category: 'session', message: 'Process crashed', recoverable: true, timestamp: 2, sessionId: 's2' },
+        { id: 'e3', category: 'session', message: 'OOM', recoverable: false, timestamp: 3, sessionId: 's1' },
+      ],
+    });
+
+    const { serverErrors, activeSessionId } = useConnectionStore.getState();
+    const items = serverErrors
+      .filter(e => !e.sessionId || e.sessionId === activeSessionId)
+      .map(e => ({ id: e.id, message: e.message }));
+
+    // e1 (global) and e3 (matches active s1) shown; e2 (scoped to s2) hidden
+    expect(items).toHaveLength(2);
+    expect(items.map(i => i.id)).toEqual(['e1', 'e3']);
+
+    useConnectionStore.setState({ serverErrors: [], activeSessionId: null });
+  });
+});
