@@ -859,7 +859,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'user_input': {
       // Server broadcasts user_input to all OTHER clients when someone sends a message.
       // Skip if it came from this client (we already show it via optimistic UI).
-      const parsed = parseUserInputMessage(msg as Record<string, unknown>, get().myClientId, get().activeSessionId);
+      const parsed = parseUserInputMessage(msg, get().myClientId, get().activeSessionId);
       if (!parsed) break;
       const { sessionId: parsedSessionId, ...parsedMsg } = parsed;
       const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...parsedMsg };
