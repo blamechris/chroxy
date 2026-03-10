@@ -2,6 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vites
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
 import { ConsolePage } from './ConsolePage'
 
+// Mock LogPanel to avoid connection store dependency
+vi.mock('./LogPanel', () => ({
+  LogPanel: () => <div data-testid="log-panel-mock" />,
+}))
+
 // Mock fetch globally
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)

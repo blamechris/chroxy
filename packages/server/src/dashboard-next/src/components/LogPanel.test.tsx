@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import type { LogEntry } from '../store/types'
 
@@ -29,7 +29,8 @@ function makeEntry(overrides: Partial<LogEntry> & { id: string }): LogEntry {
   }
 }
 
-// Mock clipboard
+// Mock clipboard (save original for restore)
+const originalClipboard = navigator.clipboard
 const mockWriteText = vi.fn().mockResolvedValue(undefined)
 Object.assign(navigator, {
   clipboard: { writeText: mockWriteText },
@@ -43,6 +44,10 @@ describe('LogPanel', () => {
 
   afterEach(() => {
     cleanup()
+  })
+
+  afterAll(() => {
+    Object.assign(navigator, { clipboard: originalClipboard })
   })
 
   it('renders empty state', () => {

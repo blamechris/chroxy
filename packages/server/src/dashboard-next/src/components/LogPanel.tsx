@@ -17,13 +17,16 @@ export function LogPanel() {
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const filtered = logEntries.filter((e) => filter.has(e.level))
+  const lastFilteredId = filtered.length > 0 ? filtered[filtered.length - 1]!.id : null
 
-  // Auto-scroll to bottom on new entries
+  // Auto-scroll to bottom on new entries. Use last entry's id instead of
+  // filtered.length so scrolling still triggers when the ring buffer is full
+  // (length stays constant at 500 but the newest id changes).
   useEffect(() => {
     if (autoScroll && listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight
     }
-  }, [filtered.length, autoScroll])
+  }, [lastFilteredId, autoScroll])
 
   // Cleanup timer on unmount
   useEffect(() => {

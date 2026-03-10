@@ -554,9 +554,18 @@ export class WsServer {
     this._webTaskManager.on('task_updated', (task) => this._broadcast({ type: 'web_task_updated', task }))
     this._webTaskManager.on('task_error', ({ taskId, message }) => this._broadcast({ type: 'web_task_error', taskId, message }))
 
-    // Broadcast structured log entries to dashboard clients
+    // Broadcast structured log entries to dashboard clients.
+    // Re-entrancy guard prevents infinite recursion when _broadcast() itself
+    // logs (e.g. backpressure debug messages) and log level is set to debug.
+    let inLogBroadcast = false
     setLogListener((entry) => {
-      this._broadcast({ type: 'log_entry', ...entry })
+      if (inLogBroadcast) return
+      inLogBroadcast = true
+      try {
+        this._broadcast({ type: 'log_entry', ...entry })
+      } finally {
+        inLogBroadcast = false
+      }
     })
 
     // Wire up unified event forwarding via EventNormalizer
@@ -1236,6 +1245,9 @@ export class WsServer {
 
     // Clean up web task manager
     this._webTaskManager.destroy()
+
+    // Clear log listener to prevent post-shutdown broadcasts and GC leak
+    setLogListener(null)
 
     for (const [ws] of this.clients) {
       ws.close()
