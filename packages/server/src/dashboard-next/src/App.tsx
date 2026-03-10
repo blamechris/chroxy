@@ -387,18 +387,29 @@ export function App() {
     [storeMessages],
   )
 
-  // Track unread system events (count since last time user viewed System tab)
-  const lastSeenSystemCountRef = useRef(0)
-  const unreadSystemCount = viewMode === 'system'
+  // Track unread system events per session so switching sessions or message
+  // trimming does not leave a stale global count.
+  const lastSeenSystemCountRef = useRef<Map<string | null | undefined, number>>(new Map())
+  const lastSeenForSession = lastSeenSystemCountRef.current.get(activeSessionId) ?? 0
+  const rawUnreadSystemCount = viewMode === 'system'
     ? 0
-    : systemMessages.length - lastSeenSystemCountRef.current
+    : systemMessages.length - lastSeenForSession
+  const unreadSystemCount = rawUnreadSystemCount > 0 ? rawUnreadSystemCount : 0
 
-  // Update last-seen count when entering System tab
+  // Update last-seen count when entering System tab; clamp when messages are trimmed
   useEffect(() => {
-    if (viewMode === 'system') {
-      lastSeenSystemCountRef.current = systemMessages.length
+    const map = lastSeenSystemCountRef.current
+    const previous = map.get(activeSessionId) ?? 0
+
+    // Clamp if messages were trimmed below previously-seen count
+    if (previous > systemMessages.length) {
+      map.set(activeSessionId, systemMessages.length)
     }
-  }, [viewMode, systemMessages.length])
+
+    if (viewMode === 'system') {
+      map.set(activeSessionId, systemMessages.length)
+    }
+  }, [viewMode, systemMessages.length, activeSessionId])
 
   // Map sessions to SessionTabData[]
   const sessionTabs: SessionTabData[] = useMemo(
