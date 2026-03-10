@@ -216,4 +216,99 @@ describe('App', () => {
     // Skeleton cleared once activeSessionId changes
     expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
   })
+
+  describe('System events tab', () => {
+    const connectedState = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+
+    it('renders System tab button in view switcher', () => {
+      stateOverrides = connectedState
+      render(<App />)
+      expect(screen.getByRole('button', { name: /system/i })).toBeInTheDocument()
+    })
+
+    it('clicking System tab sets viewMode to system', () => {
+      const setViewModeFn = vi.fn()
+      stateOverrides = { ...connectedState, setViewMode: setViewModeFn }
+      render(<App />)
+      fireEvent.click(screen.getByRole('button', { name: /system/i }))
+      expect(setViewModeFn).toHaveBeenCalledWith('system')
+    })
+
+    it('filters system messages out of chat view', () => {
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: [
+            { id: 'msg-1', type: 'response', content: 'Hello from Claude', timestamp: 1 },
+            { id: 'sys-1', type: 'system', content: 'iPhone connected', timestamp: 2 },
+            { id: 'msg-2', type: 'user_input', content: 'Hi', timestamp: 3 },
+          ],
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        viewMode: 'chat',
+      }
+      render(<App />)
+      // System messages should NOT appear in chat
+      expect(screen.queryByText('iPhone connected')).not.toBeInTheDocument()
+      // Regular messages should appear
+      expect(screen.getByText('Hello from Claude')).toBeInTheDocument()
+    })
+
+    it('shows system messages in system view', () => {
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: [
+            { id: 'msg-1', type: 'response', content: 'Hello from Claude', timestamp: 1 },
+            { id: 'sys-1', type: 'system', content: 'iPhone connected', timestamp: 2 },
+          ],
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        viewMode: 'system',
+      }
+      render(<App />)
+      expect(screen.getByText('iPhone connected')).toBeInTheDocument()
+    })
+
+    it('shows unread badge when system events arrive while on another tab', () => {
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: [
+            { id: 'sys-1', type: 'system', content: 'iPhone connected', timestamp: 1 },
+          ],
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const systemTab = screen.getByRole('button', { name: /system/i })
+      expect(systemTab.querySelector('.system-badge')).toBeInTheDocument()
+    })
+  })
 })

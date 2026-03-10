@@ -4,7 +4,7 @@
  * Auto-connects to the server on mount using the injected config + auth cookie.
  * Layout: header → session bar → view switcher → main content → input bar.
  */
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useConnectionStore } from './store/connection'
 import type { ChatMessage } from './store/connection'
@@ -375,11 +375,41 @@ export function App() {
     }
   }, [serverErrors, isCreatingSession])
 
-  // Convert store messages to ChatViewMessage[]
+  // Convert store messages to ChatViewMessage[], filtering out system events from chat
   const chatMessages = useMemo(
-    () => storeMessages.map(toChatViewMessage),
+    () => storeMessages.filter(m => m.type !== 'system').map(toChatViewMessage),
     [storeMessages],
   )
+
+  // System events for the System tab
+  const systemMessages = useMemo(
+    () => storeMessages.filter(m => m.type === 'system').map(toChatViewMessage),
+    [storeMessages],
+  )
+
+  // Track unread system events per session so switching sessions or message
+  // trimming does not leave a stale global count.
+  const lastSeenSystemCountRef = useRef<Map<string | null | undefined, number>>(new Map())
+  const lastSeenForSession = lastSeenSystemCountRef.current.get(activeSessionId) ?? 0
+  const rawUnreadSystemCount = viewMode === 'system'
+    ? 0
+    : systemMessages.length - lastSeenForSession
+  const unreadSystemCount = rawUnreadSystemCount > 0 ? rawUnreadSystemCount : 0
+
+  // Update last-seen count when entering System tab; clamp when messages are trimmed
+  useEffect(() => {
+    const map = lastSeenSystemCountRef.current
+    const previous = map.get(activeSessionId) ?? 0
+
+    // Clamp if messages were trimmed below previously-seen count
+    if (previous > systemMessages.length) {
+      map.set(activeSessionId, systemMessages.length)
+    }
+
+    if (viewMode === 'system') {
+      map.set(activeSessionId, systemMessages.length)
+    }
+  }, [viewMode, systemMessages.length, activeSessionId])
 
   // Map sessions to SessionTabData[]
   const sessionTabs: SessionTabData[] = useMemo(
@@ -836,6 +866,16 @@ export function App() {
               >
                 Files
               </button>
+              <button
+                className={`view-tab${viewMode === 'system' ? ' active' : ''}`}
+                onClick={() => { setViewMode('system'); setSplitMode(null); persistSplitMode(null) }}
+                type="button"
+              >
+                System
+                {unreadSystemCount > 0 && (
+                  <span className="system-badge">{unreadSystemCount}</span>
+                )}
+              </button>
               <div className="view-switch-spacer" />
               <button
                 className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`}
@@ -904,6 +944,14 @@ export function App() {
                 )}
                 {viewMode === 'files' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <FileBrowserPanel />
+                )}
+                {viewMode === 'system' && connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <ChatView
+                    messages={systemMessages}
+                    isStreaming={false}
+                    isBusy={false}
+                    renderMessage={renderMessage}
+                  />
                 )}
               </div>
               {checkpointsOpen && (

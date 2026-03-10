@@ -95,6 +95,12 @@ describe('persistence', () => {
     expect(state.viewMode).toBe('terminal');
   });
 
+  it('persistViewMode round-trips system view mode', () => {
+    persistViewMode('system');
+    const state = loadPersistedState();
+    expect(state.viewMode).toBe('system');
+  });
+
   it('loadPersistedState returns null for invalid view mode', () => {
     localStorage.setItem('chroxy_persist_view_mode', 'invalid');
     const state = loadPersistedState();
