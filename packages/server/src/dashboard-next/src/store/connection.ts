@@ -219,6 +219,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectionRetryCount: 0,
   latencyMs: null,
   connectionQuality: null,
+  logEntries: [],
   serverErrors: [],
   sessionNotifications: [],
   shutdownReason: null,
@@ -672,6 +673,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       connectionRetryCount: 0,
       latencyMs: null,
       connectionQuality: null,
+      logEntries: [],
       serverErrors: [],
       sessionNotifications: [],
       shutdownReason: null,
@@ -1288,6 +1290,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       isPlanPending: false,
       planAllowedPrompts: [],
     }));
+  },
+
+  clearLogEntries: () => {
+    set({ logEntries: [] });
   },
 
   addServerError: (message: string) => {
