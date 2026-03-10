@@ -168,12 +168,11 @@ describe('Supervisor', () => {
     it('prints full API token and full dashboard URL (not truncated)', async () => {
       const { supervisor } = setup({ apiToken: 'abcdef1234567890fulltoken' })
       const chunks = []
-      const origWrite = process.stdout.write.bind(process.stdout)
-      process.stdout.write = (chunk) => { chunks.push(String(chunk)); return true }
+      mock.method(process.stdout, 'write', (chunk) => { chunks.push(String(chunk)); return true })
       try {
         await supervisor.start()
       } finally {
-        process.stdout.write = origWrite
+        mock.restoreAll()
       }
       const output = chunks.join('')
 
