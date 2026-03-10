@@ -578,4 +578,11 @@ describe('Supervisor', () => {
       assert.equal(supervisor._deployFailureCount, 1)
     })
   })
+
+  describe('quick tunnel supervisor activation (#1712)', () => {
+    it('supervisor constructor accepts quick tunnel config', () => {
+      const { supervisor } = setup({ tunnel: 'quick' })
+      assert.equal(supervisor._tunnelMode, 'quick')
+    })
+  })
 })
