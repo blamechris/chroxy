@@ -72,7 +72,7 @@ export function formatIdleDuration(ms) {
 }
 
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout, costBudget } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout, costBudget, maxHistory } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -89,7 +89,7 @@ export class SessionManager extends EventEmitter {
     this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
     this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
-    this._maxHistory = 500
+    this._maxHistory = maxHistory || 500
     this._historyTruncated = new Map() // sessionId -> boolean
     this._persistTimer = null
     this._sessionCosts = new Map() // sessionId -> cumulative cost in dollars

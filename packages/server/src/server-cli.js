@@ -61,7 +61,7 @@ export async function startCliServer(config) {
 
   // 1. Create session manager
   const sessionManager = new SessionManager({
-    maxSessions: 5,
+    maxSessions: config.maxSessions || 5,
     port: PORT,
     apiToken: API_TOKEN,
     defaultCwd: config.cwd || (isWithinHome(process.cwd()) ? process.cwd() : homedir()),
@@ -72,6 +72,7 @@ export async function startCliServer(config) {
     transforms: config.transforms || [],
     sessionTimeout: config.sessionTimeout || null,
     costBudget: config.costBudget || null,
+    maxHistory: config.maxHistory || null,
   })
 
   // 2. Try restoring session state from a previous instance
