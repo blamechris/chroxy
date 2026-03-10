@@ -13,6 +13,8 @@ import type { ThemeDefinition } from '../theme/themes'
 export interface SettingsPanelProps {
   isOpen: boolean
   onClose: () => void
+  showConsoleTab?: boolean
+  onToggleConsoleTab?: (show: boolean) => void
 }
 
 /** Preview swatches for a theme */
@@ -34,7 +36,7 @@ function ThemeSwatches({ theme }: { theme: ThemeDefinition }) {
   )
 }
 
-export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
+export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsoleTab }: SettingsPanelProps) {
   const backdropRef = useRef<HTMLDivElement>(null)
   const activeTheme = useConnectionStore(s => s.activeTheme)
   const setTheme = useConnectionStore(s => s.setTheme)
@@ -135,6 +137,21 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               </select>
             </div>
           </section>
+
+          {onToggleConsoleTab && (
+            <section className="settings-section">
+              <h3>Dashboard</h3>
+              <div className="settings-field">
+                <label htmlFor="show-console-tab">Show Console tab</label>
+                <input
+                  id="show-console-tab"
+                  type="checkbox"
+                  checked={showConsoleTab ?? false}
+                  onChange={(e) => onToggleConsoleTab(e.target.checked)}
+                />
+              </div>
+            </section>
+          )}
         </div>
       </div>
     </>

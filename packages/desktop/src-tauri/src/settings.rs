@@ -15,6 +15,8 @@ pub struct DesktopSettings {
     #[serde(default = "default_tunnel_mode")]
     pub tunnel_mode: String,
     #[serde(default)]
+    pub show_console_tab: bool,
+    #[serde(default)]
     pub last_window_x: Option<f64>,
     #[serde(default)]
     pub last_window_y: Option<f64>,
@@ -38,6 +40,7 @@ impl Default for DesktopSettings {
             auto_start_server: true,
             show_notifications: true,
             tunnel_mode: "none".to_string(),
+            show_console_tab: false,
             node_path: None,
             last_window_x: None,
             last_window_y: None,
@@ -109,6 +112,7 @@ mod tests {
         assert!(settings.auto_start_server);
         assert!(settings.show_notifications);
         assert_eq!(settings.tunnel_mode, "none");
+        assert!(!settings.show_console_tab);
         assert!(settings.node_path.is_none());
         assert!(settings.last_window_x.is_none());
     }
@@ -139,6 +143,14 @@ mod tests {
         assert!(settings.auto_start_server);
         assert!(settings.show_notifications);
         assert_eq!(settings.tunnel_mode, "none");
+        assert!(!settings.show_console_tab);
+    }
+
+    #[test]
+    fn parse_show_console_tab() {
+        let json = r#"{"showConsoleTab": true}"#;
+        let settings = DesktopSettings::from_json(json).unwrap();
+        assert!(settings.show_console_tab);
     }
 
     #[test]

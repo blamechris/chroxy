@@ -91,6 +91,13 @@ pub fn emit_server_restarting(app: &AppHandle, attempt: u32, max_attempts: u32, 
     show_window(app);
 }
 
+/// Emit `navigate_console` event.
+/// Dashboard listens and switches to console viewMode.
+pub fn emit_navigate_console(app: &AppHandle) {
+    let _ = app.emit("navigate_console", ());
+    show_window(app);
+}
+
 // -- Window management (no eval) --
 
 /// Show and focus the main window.

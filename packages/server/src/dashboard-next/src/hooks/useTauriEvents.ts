@@ -90,6 +90,13 @@ export function useTauriEvents() {
       })
     )
 
+    // Navigate to console — triggered by tray menu "Console" item
+    unlisteners.push(
+      tauriEvent.listen('navigate_console', () => {
+        useConnectionStore.getState().setViewMode('console')
+      })
+    )
+
     // Update available — show toast notification
     unlisteners.push(
       tauriEvent.listen<string>('update_available', (event) => {

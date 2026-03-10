@@ -36,6 +36,7 @@ struct TrayMenuItems {
     stop: MenuItem<tauri::Wry>,
     restart: MenuItem<tauri::Wry>,
     dashboard: MenuItem<tauri::Wry>,
+    console: MenuItem<tauri::Wry>,
     show_qr: MenuItem<tauri::Wry>,
     check_updates: MenuItem<tauri::Wry>,
     auto_start_login: CheckMenuItem<tauri::Wry>,
@@ -329,6 +330,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let dashboard = MenuItemBuilder::with_id("dashboard", "Open Dashboard")
         .enabled(false)
         .build(app)?;
+    let console = MenuItemBuilder::with_id("console", "Console")
+        .enabled(false)
+        .build(app)?;
     let show_qr = MenuItemBuilder::with_id("show_qr", "Show QR Code")
         .enabled(false)
         .build(app)?;
@@ -381,7 +385,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let menu = MenuBuilder::new(app)
         .items(&[&start, &stop, &restart])
         .separator()
-        .items(&[&dashboard, &show_qr])
+        .items(&[&dashboard, &console, &show_qr])
         .separator()
         .item(&auto_start_login)
         .item(&auto_start_server)
@@ -397,6 +401,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         stop: stop.clone(),
         restart: restart.clone(),
         dashboard: dashboard.clone(),
+        console: console.clone(),
         show_qr: show_qr.clone(),
         check_updates: check_updates.clone(),
         auto_start_login: auto_start_login.clone(),
@@ -425,6 +430,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 "stop" => handle_stop(app),
                 "restart" => handle_restart(app),
                 "dashboard" => handle_dashboard(app),
+                "console" => handle_console(app),
                 "show_qr" => handle_show_qr(app),
                 "auto_start_login" => handle_toggle_login(app),
                 "auto_start_server" => handle_toggle_auto_start(app),
@@ -468,6 +474,7 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
                 let _ = items.stop.set_enabled(true);
                 let _ = items.restart.set_enabled(true);
                 let _ = items.dashboard.set_enabled(true);
+                let _ = items.console.set_enabled(true);
                 let _ = items.show_qr.set_enabled(true);
             }
             MenuState::Stopped => {
@@ -475,6 +482,7 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
                 let _ = items.stop.set_enabled(false);
                 let _ = items.restart.set_enabled(false);
                 let _ = items.dashboard.set_enabled(false);
+                let _ = items.console.set_enabled(false);
                 let _ = items.show_qr.set_enabled(false);
             }
             MenuState::Restarting => {
@@ -482,6 +490,7 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
                 let _ = items.stop.set_enabled(false);
                 let _ = items.restart.set_enabled(false);
                 let _ = items.dashboard.set_enabled(false);
+                let _ = items.console.set_enabled(false);
                 let _ = items.show_qr.set_enabled(false);
             }
         }
@@ -723,6 +732,18 @@ fn handle_dashboard(app: &tauri::AppHandle) {
     drop(mgr);
 
     window::emit_server_ready(app, port, token.as_deref());
+}
+
+fn handle_console(app: &tauri::AppHandle) {
+    let state = app.state::<Mutex<ServerManager>>();
+    let mgr = lock_or_recover(&state);
+    if !mgr.is_running() {
+        window::emit_server_stopped(app);
+        return;
+    }
+    drop(mgr);
+
+    window::emit_navigate_console(app);
 }
 
 fn handle_show_qr(app: &tauri::AppHandle) {

@@ -55,6 +55,15 @@ describe('useTauriEvents', () => {
     expect(listeners.has('server_stopped')).toBe(true)
     expect(listeners.has('server_restarting')).toBe(true)
     expect(listeners.has('server_error')).toBe(true)
+    expect(listeners.has('navigate_console')).toBe(true)
+  })
+
+  it('navigate_console event switches viewMode to console (#1821)', () => {
+    renderHook(() => useTauriEvents())
+
+    useConnectionStore.setState({ viewMode: 'chat' as const })
+    emit('navigate_console')
+    expect(useConnectionStore.getState().viewMode).toBe('console')
   })
 
   it('does nothing when not in Tauri context', () => {
