@@ -5876,6 +5876,40 @@ describe('_replayHistory()', () => {
     ws.close()
   })
 
+  it('replayed history entries include sessionId (#1818)', async () => {
+    const history = [
+      { type: 'message', messageType: 'response', content: 'Hello!', messageId: 'msg-1' },
+      { type: 'tool_start', messageId: 'msg-1', toolUseId: 'tool-1', tool: 'Read', input: '/tmp/f' },
+      { type: 'result', cost: 0.01, duration: 100 },
+    ]
+
+    const mockManager = createHistoryMockManager({
+      history,
+      sessions: [{ id: 'sess-1', name: 'Test', cwd: '/tmp' }],
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: mockManager,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+    const replayEnd = await waitForMessage(messages, 'history_replay_end')
+    const replayStart = messages.find(m => m.type === 'history_replay_start')
+    const startIdx = messages.indexOf(replayStart)
+    const endIdx = messages.indexOf(replayEnd)
+    const replayed = messages.slice(startIdx + 1, endIdx)
+
+    assert.equal(replayed.length, 3, 'Should replay all 3 entries')
+    for (const entry of replayed) {
+      assert.equal(entry.sessionId, 'sess-1', `Replayed ${entry.type} should have sessionId`)
+    }
+
+    ws.close()
+  })
+
   it('replays all turns from ring buffer (not just last response)', async () => {
     const history = [
       // Earlier turn
