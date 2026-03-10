@@ -74,11 +74,11 @@ if [ -z "$CARGO_CURRENT" ]; then
   echo "Error: Failed to parse current version from $CARGO_TOML [package] section" >&2
   exit 1
 fi
-sed -i.bak "s/^version = \"$CARGO_CURRENT\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
+sed -i.bak "/^\[package\]/,/^\[/{s/^version = \"$CARGO_CURRENT\"/version = \"$NEW_VERSION\"/}" "$CARGO_TOML"
 rm -f "$CARGO_TOML.bak"
 # Verify the replacement succeeded — scope check to [package] section to avoid false-passing
 # on a dependency that happens to share the same version string
-CARGO_VERIFY=$(awk '/^\[package\]/{f=1; next} /^\[/{f=0} f' "$CARGO_TOML" | grep -c "^version = \"$NEW_VERSION\"")
+CARGO_VERIFY=$(awk '/^\[package\]/{f=1; next} /^\[/{f=0} f' "$CARGO_TOML" | grep -c "^version = \"$NEW_VERSION\"" || true)
 if [ "$CARGO_VERIFY" -ne 1 ]; then
   echo "Error: Failed to update version in $CARGO_TOML [package] section" >&2
   exit 1
