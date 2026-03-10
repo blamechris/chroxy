@@ -928,7 +928,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- User input echoed from other clients ---
 
     case 'user_input': {
-      const parsed = parseUserInputMessage(msg as Record<string, unknown>, get().myClientId, get().activeSessionId);
+      const parsed = parseUserInputMessage(msg, get().myClientId, get().activeSessionId);
       if (!parsed) break;
       const { sessionId: parsedSessionId, ...parsedMsg } = parsed;
       const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...parsedMsg };
@@ -1496,6 +1496,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         if (!found) {
           set({ messages: updater({ messages: get().messages }).messages });
         }
+        // Auto-dismiss matching notification banner
+        set((s) => ({
+          sessionNotifications: (s.sessionNotifications ?? []).filter(
+            (n) => n.requestId !== resolvedRequestId
+          ),
+        }));
       }
       break;
     }
@@ -1514,6 +1520,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             ),
           }));
         }
+        // Auto-dismiss matching notification banner
+        set((s) => ({
+          sessionNotifications: (s.sessionNotifications ?? []).filter(
+            (n) => n.requestId !== expiredRequestId
+          ),
+        }));
       }
       break;
     }
