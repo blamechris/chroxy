@@ -39,7 +39,7 @@ import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
 import { useTauriEvents, isTauri } from './hooks/useTauriEvents'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode } from './store/persistence'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab } from './store/persistence'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
@@ -189,7 +189,7 @@ export function App() {
   const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
   const [showConsoleTab, setShowConsoleTab] = useState(() => {
-    try { return localStorage.getItem('chroxy_persist_show_console_tab') === 'true' } catch { return false }
+    return loadPersistedShowConsoleTab()
   })
   const [isSwitchingSession, setIsSwitchingSession] = useState(false)
 
@@ -1023,7 +1023,7 @@ export function App() {
         showConsoleTab={showConsoleTab}
         onToggleConsoleTab={(show) => {
           setShowConsoleTab(show)
-          try { localStorage.setItem('chroxy_persist_show_console_tab', String(show)) } catch {}
+          persistShowConsoleTab(show)
         }}
       />
 

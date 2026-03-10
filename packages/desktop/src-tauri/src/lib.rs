@@ -738,7 +738,8 @@ fn handle_console(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let mgr = lock_or_recover(&state);
     if !mgr.is_running() {
-        window::emit_server_stopped(app);
+        // No-op when server isn't running — avoid emitting server_stopped
+        // which would incorrectly disconnect the dashboard during Starting/Restarting
         return;
     }
     drop(mgr);
