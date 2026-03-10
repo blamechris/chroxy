@@ -42,6 +42,7 @@ import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadP
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
+import { ConsolePage } from './components/ConsolePage'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -876,6 +877,13 @@ export function App() {
                   <span className="system-badge">{unreadSystemCount}</span>
                 )}
               </button>
+              <button
+                className={`view-tab${viewMode === 'console' ? ' active' : ''}`}
+                onClick={() => { setViewMode('console'); setSplitMode(null); persistSplitMode(null) }}
+                type="button"
+              >
+                Console
+              </button>
               <div className="view-switch-spacer" />
               <button
                 className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`}
@@ -952,6 +960,9 @@ export function App() {
                     isBusy={false}
                     renderMessage={renderMessage}
                   />
+                )}
+                {viewMode === 'console' && connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <ConsolePage />
                 )}
               </div>
               {checkpointsOpen && (
