@@ -85,6 +85,5 @@ export function createEmptySessionState(): SessionState {
     sessionContext: null,
     mcpServers: [],
     devPreviews: [],
-    ptyActive: false,
   };
 }

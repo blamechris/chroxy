@@ -716,4 +716,33 @@ describe('CliSession._buildChildEnv', () => {
     const env = session._buildChildEnv()
     assert.equal(env.CHROXY_PERMISSION_MODE, 'auto')
   })
+
+  it('includes CHROXY_TOKEN when apiToken is provided', () => {
+    const session = createSession({ apiToken: 'tok-abc123' })
+    const env = session._buildChildEnv()
+    assert.equal(env.CHROXY_TOKEN, 'tok-abc123')
+  })
+
+  it('omits CHROXY_TOKEN when apiToken is not set', () => {
+    const session = createSession()
+    const env = session._buildChildEnv()
+    assert.ok(!Object.prototype.hasOwnProperty.call(env, 'CHROXY_TOKEN'), 'CHROXY_TOKEN should not be present in child env when apiToken is not set')
+  })
+
+  it('forwards arbitrary process.env keys to child env', () => {
+    const savedVal = process.env.CHROXY_TEST_PASSTHROUGH
+    process.env.CHROXY_TEST_PASSTHROUGH = 'passthrough-value'
+    try {
+      const session = createSession()
+      const env = session._buildChildEnv()
+      assert.equal(env.CHROXY_TEST_PASSTHROUGH, 'passthrough-value',
+        'arbitrary env vars should pass through to child')
+    } finally {
+      if (savedVal === undefined) {
+        delete process.env.CHROXY_TEST_PASSTHROUGH
+      } else {
+        process.env.CHROXY_TEST_PASSTHROUGH = savedVal
+      }
+    }
+  })
 })
