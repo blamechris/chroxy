@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import DOMPurify from 'dompurify'
+import { getAuthToken } from '../utils/auth'
 
 interface ConnectionInfo {
   connectionUrl: string
@@ -7,20 +8,6 @@ interface ConnectionInfo {
   httpUrl: string
   apiToken: string
   tunnelMode: string
-}
-
-/** Read auth token from URL query param or cookie (same as App.tsx) */
-function getAuthToken(): string | null {
-  const params = new URLSearchParams(window.location.search)
-  const queryToken = params.get('token')
-  if (queryToken) return queryToken
-  const match = document.cookie.match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
-  if (!match || !match[1]) return null
-  try {
-    return decodeURIComponent(match[1])
-  } catch {
-    return null
-  }
 }
 
 export function ConsolePage() {
@@ -78,10 +65,23 @@ export function ConsolePage() {
     return () => { cancelled = true }
   }, [])
 
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Clear copy feedback timer on unmount
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    }
+  }, [])
+
   const copyToClipboard = useCallback((text: string, label: string) => {
+    if (!navigator.clipboard) return
     navigator.clipboard.writeText(text).then(() => {
       setCopied(label)
-      setTimeout(() => setCopied(null), 2000)
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+      copyTimerRef.current = setTimeout(() => setCopied(null), 2000)
+    }).catch(() => {
+      // Clipboard write failed (e.g. insecure context) — ignore silently
     })
   }, [])
 

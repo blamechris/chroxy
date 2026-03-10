@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
 import { ConsolePage } from './ConsolePage'
 
@@ -6,7 +6,8 @@ import { ConsolePage } from './ConsolePage'
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)
 
-// Mock clipboard API
+// Mock clipboard API (save original for restore)
+const originalClipboard = navigator.clipboard
 const mockWriteText = vi.fn().mockResolvedValue(undefined)
 Object.assign(navigator, {
   clipboard: { writeText: mockWriteText },
@@ -50,10 +51,22 @@ describe('ConsolePage', () => {
 
   afterEach(() => {
     cleanup()
+    vi.unstubAllGlobals()
+    vi.stubGlobal('fetch', mockFetch)
+    Object.assign(navigator, {
+      clipboard: { writeText: mockWriteText },
+    })
     Object.defineProperty(document, 'cookie', {
       writable: true,
       value: '',
     })
+  })
+
+  afterAll(() => {
+    vi.unstubAllGlobals()
+    if (originalClipboard) {
+      Object.assign(navigator, { clipboard: originalClipboard })
+    }
   })
 
   it('renders connection info heading', () => {

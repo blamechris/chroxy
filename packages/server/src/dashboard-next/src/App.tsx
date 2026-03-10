@@ -18,6 +18,7 @@ import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { toWireAttachments } from './utils/attachment-utils'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
+import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData } from './components/SessionBar'
 import { StatusBar } from './components/StatusBar'
 import { PermissionPrompt } from './components/PermissionPrompt'
@@ -63,19 +64,6 @@ export function getChroxyConfig(): ChroxyConfig | undefined {
   }
 }
 
-/** Read auth token from URL query param (preferred) or cookie (fallback) */
-function getAuthToken(): string | null {
-  const params = new URLSearchParams(window.location.search)
-  const queryToken = params.get('token')
-  if (queryToken) return queryToken
-  const match = document.cookie.match(/(?:^|;\s*)chroxy_auth=([^;]*)/)
-  if (!match || !match[1]) return null
-  try {
-    return decodeURIComponent(match[1])
-  } catch {
-    return null
-  }
-}
 
 /** Format context usage as a compact string */
 function formatContext(usage: { inputTokens: number; outputTokens: number } | null): string | undefined {
