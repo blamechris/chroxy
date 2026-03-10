@@ -6,6 +6,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { Readable } from 'stream'
 import { Supervisor } from '../src/supervisor.js'
+import { parseTunnelArg } from '../src/tunnel/registry.js'
 
 /**
  * Create a mock child process (EventEmitter with send/kill/stdout/stderr).
@@ -576,6 +577,32 @@ describe('Supervisor', () => {
 
       // Deploy failure count should still be 1 until timer fires
       assert.equal(supervisor._deployFailureCount, 1)
+    })
+  })
+
+  describe('quick tunnel supervisor activation (#1712)', () => {
+    it('parseTunnelArg returns truthy for quick tunnel (supervisor should activate)', () => {
+      const parsed = parseTunnelArg('quick')
+      assert.ok(parsed, 'parseTunnelArg("quick") should return truthy')
+      assert.equal(parsed.mode, 'quick')
+      assert.equal(parsed.provider, 'cloudflare')
+    })
+
+    it('parseTunnelArg returns truthy for named tunnel (backward compat)', () => {
+      const parsed = parseTunnelArg('named')
+      assert.ok(parsed, 'parseTunnelArg("named") should return truthy')
+      assert.equal(parsed.mode, 'named')
+    })
+
+    it('parseTunnelArg returns null for none (no supervisor)', () => {
+      const parsed = parseTunnelArg('none')
+      assert.equal(parsed, null, 'parseTunnelArg("none") should return null')
+    })
+
+    it('supervisor constructor accepts quick tunnel config without error', () => {
+      const { supervisor, tmpDir } = createTestSupervisor({ tunnel: 'quick' })
+      assert.equal(supervisor._tunnelMode, 'quick')
+      rmSync(tmpDir, { recursive: true, force: true })
     })
   })
 })

@@ -229,16 +229,17 @@ program
     const config = loadAndMergeConfig(options, extraOverrides)
 
     // Determine if supervisor should be used
+    // Supervisor keeps the tunnel alive across server restarts. Works with both
+    // quick tunnels (random URL preserved) and named tunnels (stable URL).
     const parsedTunnel = parseTunnelArg(config.tunnel || 'quick')
-    const isNamedTunnel = parsedTunnel && parsedTunnel.mode === 'named'
-    const useSupervisor = isNamedTunnel
+    const useSupervisor = !!parsedTunnel
       && !config.noAuth
       && options.supervisor !== false
       && process.env.CHROXY_SUPERVISED !== '1'
 
     // Launch appropriate server mode
     if (useSupervisor) {
-      // Named tunnel with supervisor: auto-restart server child on crash
+      // Tunnel with supervisor: auto-restart server child on crash
       const { startSupervisor } = await import('./supervisor.js')
       await startSupervisor(config)
     } else {
