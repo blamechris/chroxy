@@ -68,17 +68,19 @@ node -e "
 "
 
 # Update Cargo.toml (line-based replacement to preserve formatting)
-# Read the Cargo.toml version independently — it may differ from CURRENT if synced separately
-CARGO_CURRENT=$(grep -m1 '^version = ' "$CARGO_TOML" | sed -n 's/^version = "\([^"]*\)".*/\1/p')
+# Read the Cargo.toml version from [package] section only — avoid matching dependency version lines
+CARGO_CURRENT=$(awk '/^\[package\]/{f=1; next} /^\[/{f=0} f' "$CARGO_TOML" | sed -n 's/^version = "\([^"]*\)".*/\1/p')
 if [ -z "$CARGO_CURRENT" ]; then
-  echo "Error: Failed to parse current version from $CARGO_TOML" >&2
+  echo "Error: Failed to parse current version from $CARGO_TOML [package] section" >&2
   exit 1
 fi
 sed -i.bak "s/^version = \"$CARGO_CURRENT\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
 rm -f "$CARGO_TOML.bak"
-# Verify the replacement succeeded (catches future silent no-ops)
-if ! grep -q "^version = \"$NEW_VERSION\"" "$CARGO_TOML"; then
-  echo "Error: Failed to update version in $CARGO_TOML" >&2
+# Verify the replacement succeeded — scope check to [package] section to avoid false-passing
+# on a dependency that happens to share the same version string
+CARGO_VERIFY=$(awk '/^\[package\]/{f=1; next} /^\[/{f=0} f' "$CARGO_TOML" | grep -c "^version = \"$NEW_VERSION\"")
+if [ "$CARGO_VERIFY" -ne 1 ]; then
+  echo "Error: Failed to update version in $CARGO_TOML [package] section" >&2
   exit 1
 fi
 
