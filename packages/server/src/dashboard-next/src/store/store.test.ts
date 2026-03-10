@@ -611,7 +611,7 @@ describe('system message routing', () => {
 
   it('client_joined updates all session states in a single setState call', async () => {
     const { useConnectionStore } = await import('./connection');
-    const { _testMessageHandler } = await import('./message-handler');
+    const { _testMessageHandler, setStore } = await import('./message-handler');
 
     useConnectionStore.setState({
       activeSessionId: 's1',
@@ -624,13 +624,17 @@ describe('system message routing', () => {
     });
     _testMessageHandler.setContext(mockContext);
 
+    // Intercept via setStore so we count the same setState reference
+    // that handleMessage's set() closure calls through getStore().
     let setStateCalls = 0;
     const origSetState = useConnectionStore.setState;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const spy = (...args: any[]) => { setStateCalls++; return (origSetState as any)(...args); };
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      useConnectionStore.setState = spy as any;
+      setStore({
+        getState: useConnectionStore.getState,
+        setState: spy,
+      });
 
       _testMessageHandler.handle({
         type: 'client_joined',
@@ -646,7 +650,11 @@ describe('system message routing', () => {
       expect(sessionStates.s2!.messages.some((m) => m.content.includes('iPhone'))).toBe(true);
       expect(sessionStates.s3!.messages.some((m) => m.content.includes('iPhone'))).toBe(true);
     } finally {
-      useConnectionStore.setState = origSetState;
+      // Restore the original store binding
+      setStore({
+        getState: useConnectionStore.getState,
+        setState: origSetState,
+      });
       _testMessageHandler.clearContext();
       origSetState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
     }
@@ -654,7 +662,7 @@ describe('system message routing', () => {
 
   it('client_left updates all session states in a single setState call', async () => {
     const { useConnectionStore } = await import('./connection');
-    const { _testMessageHandler } = await import('./message-handler');
+    const { _testMessageHandler, setStore } = await import('./message-handler');
 
     useConnectionStore.setState({
       activeSessionId: 's1',
@@ -667,13 +675,17 @@ describe('system message routing', () => {
     });
     _testMessageHandler.setContext(mockContext);
 
+    // Intercept via setStore so we count the same setState reference
+    // that handleMessage's set() closure calls through getStore().
     let setStateCalls = 0;
     const origSetState = useConnectionStore.setState;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const spy = (...args: any[]) => { setStateCalls++; return (origSetState as any)(...args); };
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      useConnectionStore.setState = spy as any;
+      setStore({
+        getState: useConnectionStore.getState,
+        setState: spy,
+      });
 
       _testMessageHandler.handle({ type: 'client_left', clientId: 'phone-1' });
 
@@ -686,7 +698,11 @@ describe('system message routing', () => {
       expect(sessionStates.s2!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
       expect(sessionStates.s3!.messages.some((m) => m.content.includes('disconnected'))).toBe(true);
     } finally {
-      useConnectionStore.setState = origSetState;
+      // Restore the original store binding
+      setStore({
+        getState: useConnectionStore.getState,
+        setState: origSetState,
+      });
       _testMessageHandler.clearContext();
       origSetState({ sessionStates: {}, activeSessionId: null, connectedClients: [] });
     }
