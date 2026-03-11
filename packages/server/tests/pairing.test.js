@@ -91,6 +91,58 @@ describe('PairingManager (#1836)', () => {
     })
   })
 
+  describe('refresh boundary behavior (#1892)', () => {
+    it('old pairing ID is invalid after refresh (no grace period)', () => {
+      const pm = new PairingManager({})
+      const oldId = pm.currentPairingId
+      pm.refresh()
+      const result = pm.validatePairing(oldId)
+      assert.equal(result.valid, false, 'old pairing ID should be rejected after refresh')
+      assert.equal(result.reason, 'invalid_pairing_id')
+      pm.destroy()
+    })
+
+    it('new pairing ID is valid after refresh', () => {
+      const pm = new PairingManager({})
+      pm.refresh()
+      const newId = pm.currentPairingId
+      const result = pm.validatePairing(newId)
+      assert.equal(result.valid, true)
+      assert.ok(result.sessionToken)
+      pm.destroy()
+    })
+
+    it('session tokens from before refresh remain valid', () => {
+      const pm = new PairingManager({})
+      const id1 = pm.currentPairingId
+      const result1 = pm.validatePairing(id1)
+      assert.equal(result1.valid, true)
+
+      pm.refresh()
+      // Old session token should still work for reconnection
+      assert.equal(pm.isSessionTokenValid(result1.sessionToken), true)
+      pm.destroy()
+    })
+
+    it('multiple refreshes invalidate all previous IDs', () => {
+      const pm = new PairingManager({})
+      const ids = [pm.currentPairingId]
+      for (let i = 0; i < 3; i++) {
+        pm.refresh()
+        ids.push(pm.currentPairingId)
+      }
+      // All old IDs should be invalid
+      for (let i = 0; i < ids.length - 1; i++) {
+        const result = pm.validatePairing(ids[i])
+        assert.equal(result.valid, false, `ID from refresh ${i} should be invalid`)
+      }
+      // Current ID should be valid
+      const current = pm.validatePairing(ids[ids.length - 1])
+      assert.equal(current.valid, true)
+      pm.destroy()
+    })
+  })
+
   describe('auto-refresh', () => {
     it('refresh() emits pairing_refreshed event', () => {
       const pm = new PairingManager({})
