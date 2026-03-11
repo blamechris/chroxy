@@ -2043,7 +2043,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'conversations_list': {
       const conversations = Array.isArray(msg.conversations) ? (msg.conversations as ConversationSummary[]) : [];
-      set({ conversationHistory: conversations, conversationHistoryLoading: false });
+      set({ conversationHistory: conversations, conversationHistoryLoading: false, conversationHistoryError: null });
       break;
     }
 
