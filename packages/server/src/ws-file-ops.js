@@ -145,7 +145,7 @@ export function createFileOps(sendFn) {
       }
       absPath = normalize(absPath)
 
-      const { valid, realPath: realAbsPath } = await validatePathWithinCwd(absPath, sessionCwd)
+      const { valid, realPath: realAbsPath, cwdReal } = await validatePathWithinCwd(absPath, sessionCwd)
       if (!valid) {
         sendFn(ws, {
           type: 'file_listing',
@@ -235,7 +235,7 @@ export function createFileOps(sendFn) {
     try {
       absPath = normalize(resolve(sessionCwd, requestedPath.trim()))
 
-      const { valid } = await validatePathWithinCwd(absPath, sessionCwd)
+      const { valid, realPath: realAbsPath } = await validatePathWithinCwd(absPath, sessionCwd)
       if (!valid) {
         sendFn(ws, {
           type: 'file_content',
