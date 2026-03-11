@@ -1,49 +1,86 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'fs'
-import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
+import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { join } from 'path'
+import { tmpdir } from 'os'
+import { execFile as execFileCb } from 'child_process'
+import { promisify } from 'util'
+import { createFileOps } from '../src/ws-file-ops.js'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
+const execFileAsync = promisify(execFileCb)
 
 describe('gitStage/gitUnstage path validation (#1958)', () => {
-  let src
+  let tmpDir
+  let fileOps
+  let lastMessage
 
-  beforeEach(() => {
-    src = readFileSync(join(__dirname, '../src/ws-file-ops.js'), 'utf-8')
+  const mockSend = (_ws, msg) => { lastMessage = msg }
+  const ws = {} // dummy ws object
+
+  before(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'chroxy-git-paths-'))
+    await execFileAsync('git', ['init'], { cwd: tmpDir })
+    await execFileAsync('git', ['config', 'user.email', 'test@test.com'], { cwd: tmpDir })
+    await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: tmpDir })
+    // Create a file inside the repo so git has something to work with
+    await writeFile(join(tmpDir, 'valid.txt'), 'hello')
+    fileOps = createFileOps(mockSend)
   })
 
-  it('gitStage validates file paths before passing to git', () => {
-    const stageStart = src.indexOf('async function gitStage(')
-    const stageEnd = src.indexOf('\n  }', stageStart + 50)
-    const stageBody = src.slice(stageStart, stageEnd)
-
-    assert.ok(stageBody.includes('validatePathWithinCwd') || stageBody.includes('resolve('),
-      'gitStage should validate paths against CWD')
-    assert.ok(stageBody.includes('traversal') || stageBody.includes('Access denied') || stageBody.includes('outside'),
-      'gitStage should reject paths outside CWD with error message')
+  after(async () => {
+    if (tmpDir) await rm(tmpDir, { recursive: true, force: true })
   })
 
-  it('gitUnstage validates file paths before passing to git', () => {
-    const unstageStart = src.indexOf('async function gitUnstage(')
-    const unstageEnd = src.indexOf('\n  }', unstageStart + 50)
-    const unstageBody = src.slice(unstageStart, unstageEnd)
-
-    assert.ok(unstageBody.includes('validatePathWithinCwd') || unstageBody.includes('resolve('),
-      'gitUnstage should validate paths against CWD')
-    assert.ok(unstageBody.includes('traversal') || unstageBody.includes('Access denied') || unstageBody.includes('outside'),
-      'gitUnstage should reject paths outside CWD with error message')
+  it('gitStage rejects path traversal (../../etc/passwd)', async () => {
+    lastMessage = null
+    await fileOps.gitStage(ws, ['../../etc/passwd'], tmpDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.ok(lastMessage.error && lastMessage.error.includes('Access denied'),
+      `expected Access denied error, got: ${lastMessage.error}`)
   })
 
-  it('rejects absolute paths and traversal sequences', () => {
-    // Both functions should check each file path, not just pass raw paths
-    const stageStart = src.indexOf('async function gitStage(')
-    const stageEnd = src.indexOf('\n  }', stageStart + 50)
-    const stageBody = src.slice(stageStart, stageEnd)
+  it('gitUnstage rejects path traversal (../../etc/passwd)', async () => {
+    lastMessage = null
+    await fileOps.gitUnstage(ws, ['../../etc/passwd'], tmpDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_unstage_result')
+    assert.ok(lastMessage.error && lastMessage.error.includes('Access denied'),
+      `expected Access denied error, got: ${lastMessage.error}`)
+  })
 
-    // Should iterate over files and validate each
-    assert.ok(stageBody.includes('for') || stageBody.includes('.filter') || stageBody.includes('.every'),
-      'Should validate each file path individually')
+  it('gitStage rejects absolute paths outside CWD', async () => {
+    lastMessage = null
+    await fileOps.gitStage(ws, ['/etc/passwd'], tmpDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.ok(lastMessage.error && lastMessage.error.includes('Access denied'),
+      `expected Access denied error, got: ${lastMessage.error}`)
+  })
+
+  it('gitUnstage rejects absolute paths outside CWD', async () => {
+    lastMessage = null
+    await fileOps.gitUnstage(ws, ['/etc/passwd'], tmpDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_unstage_result')
+    assert.ok(lastMessage.error && lastMessage.error.includes('Access denied'),
+      `expected Access denied error, got: ${lastMessage.error}`)
+  })
+
+  it('gitStage accepts valid relative paths within CWD', async () => {
+    lastMessage = null
+    await fileOps.gitStage(ws, ['valid.txt'], tmpDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.equal(lastMessage.error, null, 'should succeed without error')
+  })
+
+  it('gitStage fails fast on first invalid file in a batch', async () => {
+    lastMessage = null
+    await fileOps.gitStage(ws, ['valid.txt', '../../etc/passwd', 'other.txt'], tmpDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.ok(lastMessage.error && lastMessage.error.includes('Access denied'),
+      'should reject the batch when any file is outside CWD')
   })
 })
