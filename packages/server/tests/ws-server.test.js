@@ -1496,7 +1496,32 @@ describe('user_question_response forwarding (single-session)', () => {
 
     // Spy records calls — no manual tracking needed
     assert.equal(mockSession.respondToQuestion.callCount, 1, 'respondToQuestion should be called once')
-    assert.deepStrictEqual(mockSession.respondToQuestion.lastCall, ['Option A'], 'Answer should be forwarded to cliSession')
+    assert.deepStrictEqual(mockSession.respondToQuestion.lastCall, ['Option A', undefined], 'Answer should be forwarded to cliSession')
+
+    ws.close()
+  })
+
+  it('forwards answers map alongside text answer', async () => {
+    const mockSession = createMockSession()
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(messages, 'auth_ok', 2000)
+
+    const answersMap = { 'Allow edit?': 'yes', 'Confirm?': 'no' }
+    send(ws, { type: 'user_question_response', answer: 'yes', answers: answersMap })
+    await waitFor(() => mockSession.respondToQuestion.callCount >= 1, { label: 'respondToQuestion called' })
+
+    assert.equal(mockSession.respondToQuestion.callCount, 1, 'respondToQuestion should be called once')
+    assert.deepStrictEqual(mockSession.respondToQuestion.lastCall, ['yes', answersMap], 'Both answer and answers map should be forwarded')
 
     ws.close()
   })
