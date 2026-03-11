@@ -32,6 +32,7 @@ import { ErrorBoundary } from '../components/ErrorBoundary';
 import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
 import { BackgroundSessionProgress } from '../components/BackgroundSessionProgress';
 import { DevPreviewBanner } from '../components/DevPreviewBanner';
+import { SessionTimeoutBanner } from '../components/SessionTimeoutBanner';
 import { SessionOverview } from '../components/SessionOverview';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -196,11 +197,14 @@ export function SessionScreen() {
   const closeDevPreview = useConnectionStore((s) => s.closeDevPreview);
   const webFeatures = useConnectionStore((s) => s.webFeatures);
   const isEncrypted = useConnectionStore((s) => s.isEncrypted);
+  const timeoutWarning = useConnectionStore((s) => s.timeoutWarning);
+  const dismissTimeoutWarning = useConnectionStore((s) => s.dismissTimeoutWarning);
   const wsUrl = useConnectionStore((s) => s.wsUrl);
   const webTasks = useConnectionStore((s) => s.webTasks);
   const launchWebTask = useConnectionStore((s) => s.launchWebTask);
   const teleportWebTask = useConnectionStore((s) => s.teleportWebTask);
   const destroySession = useConnectionStore((s) => s.destroySession);
+  const switchSession = useConnectionStore((s) => s.switchSession);
   const latencyMs = useConnectionStore((s) => s.latencyMs);
   const connectionQuality = useConnectionStore((s) => s.connectionQuality);
   const connectionError = useConnectionStore((s) => s.connectionError);
@@ -924,6 +928,22 @@ export function SessionScreen() {
 
       {/* Background session progress indicators */}
       <BackgroundSessionProgress />
+
+      {/* Session timeout warning banner */}
+      {timeoutWarning && (
+        <SessionTimeoutBanner
+          remainingMs={timeoutWarning.remainingMs}
+          sessionName={timeoutWarning.sessionName}
+          onKeepAlive={() => {
+            // Switch to the warned session to make it "active" (server exempts active-viewer sessions)
+            if (timeoutWarning.sessionId && timeoutWarning.sessionId !== activeSessionId) {
+              switchSession(timeoutWarning.sessionId, { serverNotify: true });
+            }
+            dismissTimeoutWarning();
+          }}
+          onDismiss={dismissTimeoutWarning}
+        />
+      )}
 
       {/* Dev server preview banner */}
       <DevPreviewBanner previews={devPreviews} onClose={closeDevPreview} />

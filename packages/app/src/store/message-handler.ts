@@ -2100,33 +2100,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'session_warning': {
-      const message = typeof msg.message === 'string' ? msg.message : 'Session will timeout soon';
-      const warningMsg: ChatMessage = {
-        id: nextMessageId('warn'),
-        type: 'system',
-        content: message,
-        timestamp: Date.now(),
-      };
       const warnSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
-      if (warnSessionId && get().sessionStates[warnSessionId]) {
-        const prevActiveId = get().activeSessionId;
-        // Add warning to the target session's messages
-        set((state: ConnectionState) => ({
-          sessionStates: {
-            ...state.sessionStates,
-            [warnSessionId]: {
-              ...state.sessionStates[warnSessionId],
-              messages: [...state.sessionStates[warnSessionId].messages, warningMsg],
-            },
-          },
-        }));
-        // Also show alert if the session isn't currently active
-        if (prevActiveId !== warnSessionId) {
-          Alert.alert('Session Warning', message);
-        }
-      } else {
-        get().addMessage(warningMsg);
-      }
+      const sessionName = typeof msg.name === 'string' ? msg.name : 'Session';
+      const remainingMs = typeof msg.remainingMs === 'number' ? msg.remainingMs : 120000;
+
+      // Set timeout warning state for the banner UI
+      set({
+        timeoutWarning: {
+          sessionId: warnSessionId || '',
+          sessionName,
+          remainingMs,
+          receivedAt: Date.now(),
+        },
+      });
       break;
     }
 

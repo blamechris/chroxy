@@ -205,6 +205,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   restartingSince: null,
   isEncrypted: false,
   pendingPermissionConfirm: null,
+  timeoutWarning: null,
   slashCommands: [],
   customAgents: [],
   checkpoints: [],
@@ -286,6 +287,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   exitCachedSession: () => {
     set({ viewingCachedSession: false });
+  },
+
+  dismissTimeoutWarning: () => {
+    set({ timeoutWarning: null });
   },
 
   setFollowMode: (enabled: boolean) => {
@@ -667,6 +672,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       restartingSince: null,
       isEncrypted: false,
       pendingPermissionConfirm: null,
+      timeoutWarning: null,
       slashCommands: [],
       customAgents: [],
       checkpoints: [],
