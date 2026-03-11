@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, symlink, rm, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -34,6 +34,11 @@ describe('#1931 — CWD real path cache TTL', () => {
 
     assert.ok(results.length > 0, 'should return a result')
     assert.equal(results[0].type, 'file_listing')
+    assert.equal(results[0].error, null, 'should not return an error')
+    const expectedRealPath = await realpath(linkDir)
+    assert.equal(results[0].path, expectedRealPath, 'path should resolve to real path')
+    const names = results[0].entries.map(e => e.name)
+    assert.ok(names.includes('test.txt'), 'entries should contain test.txt')
   })
 
   it('returns consistent results on repeated calls (cache hit)', async () => {
