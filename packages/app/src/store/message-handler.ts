@@ -2105,6 +2105,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'push_token_error': {
+      const errMessage = typeof msg.message === 'string' ? msg.message : 'Push token registration failed';
+      console.warn('[push] Push token error from server:', errMessage);
+      break;
+    }
+
     case 'token_rotated': {
       // Token was rotated on the server — the new token is NOT sent over the wire.
       // The client must re-authenticate (re-scan QR or re-enter token).
