@@ -16,6 +16,8 @@ import { maskToken } from './mask-token.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
+const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
+const SUPERVISOR_VERSION = packageJson.version
 const DEFAULT_PID_FILE = join(homedir(), '.chroxy', 'supervisor.pid')
 
 const DRAIN_TIMEOUT = 30000
@@ -150,9 +152,11 @@ export class Supervisor extends EventEmitter {
       return
     }
 
+    const bannerText = `Chroxy Supervisor v${SUPERVISOR_VERSION}`
+    const padded = bannerText.padEnd(36)
     process.stdout.write('\n')
     process.stdout.write('╔════════════════════════════════════════╗\n')
-    process.stdout.write('║   Chroxy Supervisor v0.1.0              ║\n')
+    process.stdout.write(`║   ${padded} ║\n`)
     process.stdout.write('╚════════════════════════════════════════╝\n')
     process.stdout.write('\n')
 

@@ -658,4 +658,25 @@ describe('Supervisor', () => {
       clearInterval(supervisor._heartbeatInterval)
     })
   })
+
+  describe('dynamic version in banner (#1915)', () => {
+    it('startup banner includes package.json version', async () => {
+      const { supervisor } = setup()
+      const chunks = []
+      mock.method(process.stdout, 'write', (chunk) => { chunks.push(String(chunk)); return true })
+      try {
+        await supervisor.start()
+      } finally {
+        mock.restoreAll()
+      }
+      const output = chunks.join('')
+      // Should NOT contain the old hardcoded version
+      assert.ok(!output.includes('v0.1.0'), 'Should not contain hardcoded v0.1.0')
+      // Should contain "Chroxy Supervisor v" followed by a semver-like version
+      assert.ok(output.match(/Chroxy Supervisor v\d+\.\d+/), 'Banner should contain dynamic version')
+
+      supervisor._shuttingDown = true
+      clearInterval(supervisor._heartbeatInterval)
+    })
+  })
 })
