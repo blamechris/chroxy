@@ -1,4 +1,4 @@
-import { describe, it, before } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
@@ -10,9 +10,10 @@ const srcDir = join(__dirname, '../src')
 // Top-level await import to avoid timing issues with before() hooks
 const keychain = await import(join(srcDir, 'keychain.js'))
 
-// Cache at load time — isKeychainAvailable() shells out to `security help`
-// which can intermittently fail under test runner concurrency pressure
-const keychainAvailable = keychain.isKeychainAvailable()
+// Use platform check instead of isKeychainAvailable() for skip guard —
+// the latter shells out to `security help` which intermittently fails
+// under test runner concurrency pressure
+const keychainAvailable = process.platform === 'darwin' || process.platform === 'linux'
 
 describe('Keychain token storage (#1838)', () => {
 
@@ -97,21 +98,15 @@ describe('Keychain token storage (#1838)', () => {
 
 describe('Keychain failure paths (#1887)', () => {
   it('migrateToken falls back when setToken throws', () => {
-    // migrateToken catches setToken errors and returns { migrated: false }
-    // We test this by using a config with apiToken but a service name that
-    // will cause the underlying command to fail if keychain isn't available.
-    // On systems WITH keychain, we test via the source-assertion approach.
     const source = readFileSync(join(srcDir, 'keychain.js'), 'utf-8')
 
-    // Verify migrateToken has try/catch around setToken
-    assert.ok(
-      source.includes('try') && source.includes('setToken') && source.includes('catch'),
-      'migrateToken should wrap setToken in try/catch'
-    )
-
-    // Verify the catch block returns { migrated: false }
+    // Extract migrateToken function body and verify it has try/catch around setToken
     const migrateBlock = source.match(/export function migrateToken[\s\S]*?^}/m)
     assert.ok(migrateBlock, 'migrateToken function should exist')
+    assert.ok(
+      migrateBlock[0].includes('try') && migrateBlock[0].includes('setToken') && migrateBlock[0].includes('catch'),
+      'migrateToken should wrap setToken in try/catch'
+    )
     assert.ok(
       migrateBlock[0].includes('migrated: false'),
       'migrateToken catch should return migrated: false'
