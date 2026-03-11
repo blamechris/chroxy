@@ -47,13 +47,13 @@ export interface ChatViewProps {
 
 // -- Display group types for message grouping --
 
-type DisplayGroup =
+export type DisplayGroup =
   | { type: 'single'; message: ChatMessage }
   | { type: 'activity'; messages: ChatMessage[]; isActive: boolean; key: string };
 
 /** Group consecutive tool_use and thinking messages into ActivityGroups.
  *  Pure structural grouping — does not depend on streaming state. */
-function groupMessages(messages: ChatMessage[]): DisplayGroup[] {
+export function groupMessages(messages: ChatMessage[]): DisplayGroup[] {
   const groups: DisplayGroup[] = [];
   let activityBuf: ChatMessage[] = [];
 
@@ -80,6 +80,23 @@ function groupMessages(messages: ChatMessage[]): DisplayGroup[] {
   flushActivity();
 
   return groups;
+}
+
+/** Apply streaming isActive overlay to display groups — O(1) operation.
+ *  Marks the last activity group as active if the streaming message is in it. */
+export function applyStreamingOverlay(
+  baseGroups: DisplayGroup[],
+  messages: ChatMessage[],
+  streamingMessageId: string | null,
+): DisplayGroup[] {
+  if (!streamingMessageId || baseGroups.length === 0) return baseGroups;
+  const last = baseGroups[baseGroups.length - 1];
+  if (last.type !== 'activity') return baseGroups;
+  const lastMsg = last.messages[last.messages.length - 1];
+  if (lastMsg !== messages[messages.length - 1]) return baseGroups;
+  const result = baseGroups.slice(0, -1);
+  result.push({ ...last, isActive: true });
+  return result;
 }
 
 // -- Plan Approval Card --
@@ -217,16 +234,10 @@ export function ChatView({
   const baseGroups = useMemo(() => groupMessages(messages), [messages]);
 
   // Overlay streaming isActive flag — O(1), cheap to recompute on every delta
-  const displayGroups = useMemo(() => {
-    if (!streamingMessageId || baseGroups.length === 0) return baseGroups;
-    const last = baseGroups[baseGroups.length - 1];
-    if (last.type !== 'activity') return baseGroups;
-    const lastMsg = last.messages[last.messages.length - 1];
-    if (lastMsg !== messages[messages.length - 1]) return baseGroups;
-    const result = baseGroups.slice(0, -1);
-    result.push({ ...last, isActive: true });
-    return result;
-  }, [baseGroups, streamingMessageId, messages]);
+  const displayGroups = useMemo(
+    () => applyStreamingOverlay(baseGroups, messages, streamingMessageId),
+    [baseGroups, streamingMessageId, messages],
+  );
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
