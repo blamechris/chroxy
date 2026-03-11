@@ -61,6 +61,14 @@ export const PermissionResponseSchema = z.object({
   decision: z.enum(['allow', 'allowAlways', 'deny']),
 })
 
+export const QueryPermissionAuditSchema = z.object({
+  type: z.literal('query_permission_audit'),
+  sessionId: z.string().optional(),
+  auditType: z.enum(['mode_change', 'decision']).optional(),
+  since: z.number().optional(),
+  limit: z.number().optional(),
+})
+
 export const ListSessionsSchema = z.object({
   type: z.literal('list_sessions'),
 })
@@ -590,4 +598,5 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ListReposSchema,
   AddRepoSchema,
   RemoveRepoSchema,
+  QueryPermissionAuditSchema,
 ])
