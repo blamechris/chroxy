@@ -38,6 +38,7 @@ export const iconMap = {
 
   // Directional
   chevronDown: 'chevron-down',
+  chevronLeft: 'chevron-back',
   chevronRight: 'chevron-forward',
   chevronUp: 'chevron-up',
   arrowUp: 'arrow-up',
