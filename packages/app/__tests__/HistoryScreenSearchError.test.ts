@@ -24,6 +24,7 @@ describe('searchConversations error handling', () => {
   });
 
   it('clears searchError on new search', () => {
+    jest.useFakeTimers();
     useConnectionStore.setState({ searchError: 'previous error' });
 
     // Create a mock socket
@@ -35,6 +36,8 @@ describe('searchConversations error handling', () => {
     const state = useConnectionStore.getState();
     expect(state.searchError).toBeNull();
     expect(state.searchLoading).toBe(true);
+
+    jest.useRealTimers();
   });
 
   it('clears searchError on clearSearchResults', () => {

@@ -1209,7 +1209,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }
       }, 15000);
     } else {
-      set({ searchError: 'Not connected to server.' });
+      // Not connected: clear any in-flight search state and surface error
+      clearTimeout(searchTimeoutId);
+      searchNonce++;
+      set({
+        searchLoading: false,
+        searchResults: [],
+        searchQuery: query,
+        searchError: 'Not connected to server.',
+      });
     }
   },
 

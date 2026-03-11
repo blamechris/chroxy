@@ -312,7 +312,7 @@ export function HistoryScreen() {
             <Text style={styles.errorText}>{searchError}</Text>
             <TouchableOpacity
               style={styles.retryButton}
-              onPress={() => searchConversations(searchQuery)}
+              onPress={() => searchConversations(searchQuery.trim())}
               accessibilityRole="button"
               accessibilityLabel="Retry search"
             >
@@ -389,7 +389,6 @@ const styles = StyleSheet.create({
     color: COLORS.textError,
     fontSize: 15,
     textAlign: 'center',
-<<<<<<< HEAD
     marginBottom: 16,
     paddingHorizontal: 24,
   },
@@ -404,20 +403,6 @@ const styles = StyleSheet.create({
   retryButtonText: {
     color: COLORS.accentBlue,
     fontSize: 14,
-=======
-    marginHorizontal: 24,
-  },
-  retryButton: {
-    marginTop: 16,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    backgroundColor: COLORS.accentBlue,
-    borderRadius: 8,
-  },
-  retryButtonText: {
-    color: '#fff',
-    fontSize: 15,
->>>>>>> 8119997e (fix(app): surface search error state in HistoryScreen (#2052))
     fontWeight: '600',
   },
   searchBar: {
