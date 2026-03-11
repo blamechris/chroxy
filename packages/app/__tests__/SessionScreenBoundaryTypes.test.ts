@@ -8,11 +8,11 @@ const src = fs.readFileSync(
 
 describe('SessionScreenWithBoundary typed props (#1914)', () => {
   test('does not use untyped any for props', () => {
-    expect(src).not.toMatch(/SessionScreenWithBoundary\(props:\s*any\)/);
+    expect(src).not.toMatch(/SessionScreenWithBoundary\(_?props:\s*any\)/);
   });
 
   test('uses NativeStackScreenProps type for props', () => {
     expect(src).toMatch(/NativeStackScreenProps/);
-    expect(src).toMatch(/SessionScreenWithBoundary\(props:/);
+    expect(src).toMatch(/SessionScreenWithBoundary\(_?props:/);
   });
 });
