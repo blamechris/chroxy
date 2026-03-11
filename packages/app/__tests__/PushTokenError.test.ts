@@ -32,13 +32,11 @@ function createMockStore(initialState: Partial<ConnectionState>) {
 
 function createMockContext() {
   return {
-    ws: null,
-    sendMessage: jest.fn(),
-    apiToken: 'test',
-    serverUrl: 'wss://test',
-    onSessionDestroyed: jest.fn(),
-    reconnect: jest.fn(),
-    disconnect: jest.fn(),
+    url: 'wss://test',
+    token: 'test-token',
+    isReconnect: false,
+    silent: false,
+    socket: { send: jest.fn(), close: jest.fn() } as unknown as WebSocket,
   };
 }
 
@@ -51,6 +49,10 @@ describe('push_token_error handler (#1987)', () => {
 
   afterEach(() => {
     warnSpy.mockRestore();
+  });
+
+  afterAll(() => {
+    _testMessageHandler.clearContext();
   });
 
   test('logs warning with error message from server', () => {
