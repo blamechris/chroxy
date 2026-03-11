@@ -239,8 +239,9 @@ export class WsServer {
     this._localhostBypass = localhostBypass ?? true
     this._maxPendingConnections = maxPendingConnections ?? 20
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024 // 1MB default
+    this._backpressureMaxDrops = 10 // close connection after this many consecutive drops
     this._rateLimiter = new RateLimiter()
-    this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
+    this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo, _backpressureDrops }
     this.httpServer = null
     this.wss = null
     this._pingInterval = null
@@ -595,6 +596,15 @@ export class WsServer {
       })
     })
 
+    this.httpServer.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        log.error(`Port ${this.port} is already in use — is another Chroxy instance running?`)
+        process.exit(1)
+        return
+      }
+      log.error(`HTTP server error: ${err.message}`)
+    })
+
     this.httpServer.listen(this.port, host)
 
     // Detect Claude Code Web features (non-blocking)
@@ -749,9 +759,15 @@ export class WsServer {
     for (const [ws, client] of this.clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
         if (ws.bufferedAmount > this._backpressureThreshold) {
-          log.debug(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount})`)
+          client._backpressureDrops = (client._backpressureDrops || 0) + 1
+          log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
+          if (client._backpressureDrops >= this._backpressureMaxDrops) {
+            log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
+            ws.close(4008, 'Backpressure: too many dropped messages')
+          }
           continue
         }
+        client._backpressureDrops = 0
         this._send(ws, message)
       }
     }
@@ -769,9 +785,15 @@ export class WsServer {
     for (const [ws, client] of this.clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
         if (ws.bufferedAmount > this._backpressureThreshold) {
-          log.debug(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount})`)
+          client._backpressureDrops = (client._backpressureDrops || 0) + 1
+          log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
+          if (client._backpressureDrops >= this._backpressureMaxDrops) {
+            log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
+            ws.close(4008, 'Backpressure: too many dropped messages')
+          }
           continue
         }
+        client._backpressureDrops = 0
         this._send(ws, tagged)
       }
     }
