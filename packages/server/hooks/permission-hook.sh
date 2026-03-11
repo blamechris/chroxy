@@ -20,6 +20,17 @@ PORT="$CHROXY_PORT"
 TOKEN="$CHROXY_TOKEN"
 PERM_MODE="${CHROXY_PERMISSION_MODE:-approve}"
 
+# Sanitize: PORT must be numeric
+case "$PORT" in
+  ''|*[!0-9]*) exit 0 ;;
+esac
+
+# Sanitize: PERM_MODE must be a known value
+case "$PERM_MODE" in
+  approve|auto|acceptEdits|plan) ;;
+  *) PERM_MODE="approve" ;;
+esac
+
 # ---- Shared: route a permission request to the phone via HTTP ----
 # Expects $REQUEST to contain the JSON body to POST.
 # Outputs the appropriate hookSpecificOutput JSON and exits.
