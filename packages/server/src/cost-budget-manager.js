@@ -16,6 +16,9 @@ export class CostBudgetManager {
     this._budgetWarned = new Set()     // sessionIds that received 80% warning
     this._budgetExceeded = new Set()   // sessionIds that received 100% exceeded
     this._budgetPaused = new Set()     // sessionIds paused due to budget exceeded
+    this._costByModel = new Map()      // model -> cumulative cost
+    this._costEvents = []              // recent events for spend rate: { cost, timestamp }
+    this._maxCostEvents = 500
   }
 
   /**
@@ -24,10 +27,22 @@ export class CostBudgetManager {
    * @param {number} cost - Cost of the latest query in dollars
    * @returns {{ event: string, data: object } | null} Budget event to emit, or null
    */
-  trackCost(sessionId, cost) {
+  trackCost(sessionId, cost, model = null) {
     const prev = this._sessionCosts.get(sessionId) || 0
     const cumulative = prev + cost
     this._sessionCosts.set(sessionId, cumulative)
+
+    // Track cost by model
+    if (model) {
+      const prevModel = this._costByModel.get(model) || 0
+      this._costByModel.set(model, prevModel + cost)
+    }
+
+    // Record event for spend rate
+    this._costEvents.push({ cost, timestamp: Date.now() })
+    if (this._costEvents.length > this._maxCostEvents) {
+      this._costEvents = this._costEvents.slice(-this._maxCostEvents)
+    }
 
     if (!this._budget) return null
 
@@ -80,6 +95,26 @@ export class CostBudgetManager {
     return this._budget
   }
 
+  /** Get cost breakdown by model. */
+  getCostByModel() {
+    const result = {}
+    for (const [model, cost] of this._costByModel) {
+      result[model] = cost
+    }
+    return result
+  }
+
+  /** Get spend rate (cost per hour) based on recent events. */
+  getSpendRate() {
+    if (this._costEvents.length < 2) return 0
+    const first = this._costEvents[0].timestamp
+    const last = this._costEvents[this._costEvents.length - 1].timestamp
+    const durationHours = (last - first) / (1000 * 60 * 60)
+    if (durationHours <= 0) return 0
+    const totalCost = this._costEvents.reduce((sum, e) => sum + e.cost, 0)
+    return totalCost / durationHours
+  }
+
   /** Check if session is paused due to budget. */
   isPaused(sessionId) {
     return this._budgetPaused.has(sessionId)
@@ -104,6 +139,8 @@ export class CostBudgetManager {
     this._budgetWarned.clear()
     this._budgetExceeded.clear()
     this._budgetPaused.clear()
+    this._costByModel.clear()
+    this._costEvents = []
   }
 
   /** Serialize state for persistence. */

@@ -761,6 +761,8 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         totalCost: ctx.sessionManager.getTotalCost(),
         budget: ctx.sessionManager.getCostBudget(),
         sessions: sessionCosts,
+        costByModel: ctx.sessionManager.getCostByModel(),
+        spendRate: ctx.sessionManager.getSpendRate(),
       })
       break
     }
