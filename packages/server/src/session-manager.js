@@ -739,9 +739,7 @@ export class SessionManager extends EventEmitter {
   _pushHistory(history, entry, sessionId) {
     history.push(entry)
     if (history.length > this._maxHistory) {
-      while (history.length > this._maxHistory) {
-        history.shift()
-      }
+      history.shift()
       this._historyTruncated.set(sessionId, true)
     }
   }
