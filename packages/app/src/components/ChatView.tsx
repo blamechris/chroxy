@@ -47,13 +47,13 @@ export interface ChatViewProps {
 
 // -- Display group types for message grouping --
 
-type DisplayGroup =
+export type DisplayGroup =
   | { type: 'single'; message: ChatMessage }
   | { type: 'activity'; messages: ChatMessage[]; isActive: boolean; key: string };
 
 /** Group consecutive tool_use and thinking messages into ActivityGroups.
  *  Pure structural grouping — does not depend on streaming state. */
-function groupMessages(messages: ChatMessage[]): DisplayGroup[] {
+export function groupMessages(messages: ChatMessage[]): DisplayGroup[] {
   const groups: DisplayGroup[] = [];
   let activityBuf: ChatMessage[] = [];
 
