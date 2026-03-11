@@ -1,5 +1,5 @@
-import { EventEmitter } from 'events'
 import { spawn } from 'child_process'
+import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
 import { existsSync } from 'fs'
 import { execFileSync } from 'child_process'
@@ -48,7 +48,7 @@ function resolveGemini() {
 
 const GEMINI = resolveGemini()
 
-export class GeminiSession extends EventEmitter {
+export class GeminiSession extends BaseSession {
   static get capabilities() {
     return {
       permissions: false,
@@ -62,29 +62,13 @@ export class GeminiSession extends EventEmitter {
   }
 
   constructor({ cwd, model, permissionMode } = {}) {
-    super()
-    this.cwd = cwd || process.cwd()
-    this.model = model || DEFAULT_MODEL
-    this.permissionMode = permissionMode || 'auto'
-    this._isReady = false
-    this._isBusy = false
+    super({ cwd, model: model || DEFAULT_MODEL, permissionMode: permissionMode || 'auto' })
     this.resumeSessionId = null
     this._process = null
-    this._messageCounter = 0
-    this._destroying = false
-    this._currentMessageId = null
-  }
-
-  get isRunning() {
-    return this._isBusy
-  }
-
-  get isReady() {
-    return this._isReady
   }
 
   start() {
-    this._isReady = true
+    this._processReady = true
     process.nextTick(() => {
       this.emit('ready', { sessionId: null, model: this.model, tools: [] })
     })
@@ -92,7 +76,7 @@ export class GeminiSession extends EventEmitter {
 
   destroy() {
     this._destroying = true
-    this._isReady = false
+    this._processReady = false
     this._isBusy = false
     if (this._process) {
       try {
@@ -103,8 +87,8 @@ export class GeminiSession extends EventEmitter {
     this.removeAllListeners()
   }
 
-  sendMessage(text, attachments, options) {
-    if (!this._isReady) {
+  async sendMessage(text, attachments, options) {
+    if (!this._processReady) {
       this.emit('error', { message: 'Session is not running' })
       return
     }

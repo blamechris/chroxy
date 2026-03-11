@@ -1,6 +1,6 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
-import { EventEmitter } from 'events'
-import { resolveModelId, updateModels } from './models.js'
+import { updateModels } from './models.js'
+import { BaseSession } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
@@ -40,7 +40,7 @@ const log = createLogger('sdk')
 // Default max accumulated size for tool_use input (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
 
-export class SdkSession extends EventEmitter {
+export class SdkSession extends BaseSession {
   static get capabilities() {
     return {
       permissions: true,
@@ -54,22 +54,14 @@ export class SdkSession extends EventEmitter {
   }
 
   constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput } = {}) {
-    super()
-    this.cwd = cwd || process.cwd()
-    this.model = model || null
-    this.permissionMode = permissionMode || 'approve'
+    super({ cwd, model, permissionMode })
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
 
     this._sdkSessionId = resumeSessionId || null
     this._sessionId = null
     this._query = null
-    this._isBusy = false
     this._waitingForAnswer = false
-    this._processReady = false
-    this._messageCounter = 0
-    this._currentMessageId = null
-    this._destroying = false
 
     // Permission handling
     this._pendingPermissions = new Map() // requestId -> { resolve, input }
@@ -80,12 +72,6 @@ export class SdkSession extends EventEmitter {
     // AskUserQuestion handling
     this._pendingUserAnswer = null // { resolve, input } when waiting for user answer
     this._questionTimer = null
-
-    // Agent tracking
-    this._activeAgents = new Map() // toolUseId -> { toolUseId, description, startedAt }
-
-    // Result timeout
-    this._resultTimeout = null
   }
 
   get sessionId() {
@@ -97,13 +83,6 @@ export class SdkSession extends EventEmitter {
     return this._sdkSessionId
   }
 
-  get isRunning() {
-    return this._isBusy
-  }
-
-  get isReady() {
-    return this._processReady && !this._isBusy
-  }
 
   /**
    * Start the SDK session. Creates the long-lived streaming input generator
@@ -575,42 +554,12 @@ export class SdkSession extends EventEmitter {
    * Change the model. In SDK mode this doesn't require process restart.
    */
   setModel(model) {
-    if (this._isBusy) {
-      log.warn('Ignoring model change while message is in-flight')
-      return
-    }
-
-    const newModel = model ? resolveModelId(model) : null
-    if (newModel === this.model) {
-      log.info(`Model unchanged: ${this.model || 'default'}`)
-      return
-    }
-
-    this.model = newModel
+    if (!super.setModel(model)) return
     log.info(`Model changed to ${this.model || 'default'}`)
   }
 
-  /**
-   * Change the permission mode. In SDK mode this doesn't require process restart.
-   */
   setPermissionMode(mode) {
-    const VALID_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
-    if (!VALID_MODES.includes(mode)) {
-      log.warn(`Ignoring invalid permission mode: ${mode}`)
-      return
-    }
-
-    if (this._isBusy) {
-      log.warn('Ignoring permission mode change while message is in-flight')
-      return
-    }
-
-    if (mode === this.permissionMode) {
-      log.info(`Permission mode unchanged: ${this.permissionMode}`)
-      return
-    }
-
-    this.permissionMode = mode
+    if (!super.setPermissionMode(mode)) return
     log.info(`Permission mode changed to ${mode}`)
   }
 
@@ -662,22 +611,8 @@ export class SdkSession extends EventEmitter {
    * Clear per-message state, marking us as ready for the next message.
    */
   _clearMessageState() {
-    this._isBusy = false
+    super._clearMessageState()
     this._waitingForAnswer = false
-    this._currentMessageId = null
-
-    // Emit completions for any tracked agents
-    if (this._activeAgents.size > 0) {
-      for (const agent of this._activeAgents.values()) {
-        this.emit('agent_completed', { toolUseId: agent.toolUseId })
-      }
-      this._activeAgents.clear()
-    }
-
-    if (this._resultTimeout) {
-      clearTimeout(this._resultTimeout)
-      this._resultTimeout = null
-    }
 
     // Auto-deny any pending permissions and clear their timers
     for (const [requestId, pending] of this._pendingPermissions) {
