@@ -54,6 +54,22 @@ describe('Toast', () => {
     expect(container.querySelector('.toast')).toBeNull()
   })
 
+  it('applies toast-info class for info-level items', () => {
+    const items: ToastItem[] = [{ id: 'i1', message: 'Update available', level: 'info' }]
+    const { container } = render(<Toast items={items} onDismiss={vi.fn()} />)
+    const toast = container.querySelector('.toast')
+    expect(toast?.classList.contains('toast-info')).toBe(true)
+    expect(toast?.classList.contains('toast-error')).toBe(false)
+  })
+
+  it('applies toast-error class for error-level items (default)', () => {
+    const items: ToastItem[] = [{ id: 'e1', message: 'Something broke' }]
+    const { container } = render(<Toast items={items} onDismiss={vi.fn()} />)
+    const toast = container.querySelector('.toast')
+    expect(toast?.classList.contains('toast-error')).toBe(true)
+    expect(toast?.classList.contains('toast-info')).toBe(false)
+  })
+
   describe('timer behaviour', () => {
     beforeEach(() => { vi.useFakeTimers() })
     afterEach(() => { vi.runOnlyPendingTimers(); vi.useRealTimers() })

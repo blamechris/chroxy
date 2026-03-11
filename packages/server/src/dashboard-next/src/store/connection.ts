@@ -221,6 +221,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectionQuality: null,
   logEntries: [],
   serverErrors: [],
+  infoNotifications: [],
   sessionNotifications: [],
   shutdownReason: null,
   restartEtaMs: null,
@@ -1313,6 +1314,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   dismissServerError: (id: string) => {
     set((state) => ({
       serverErrors: state.serverErrors.filter((e) => e.id !== id),
+    }));
+  },
+
+  addInfoNotification: (message: string) => {
+    const now = Date.now();
+    const notification = {
+      id: nextMessageId('info-notif'),
+      category: 'general' as const,
+      message,
+      recoverable: true,
+      timestamp: now,
+    };
+    set((state) => ({
+      infoNotifications: [...state.infoNotifications, notification].slice(-10),
+    }));
+  },
+
+  dismissInfoNotification: (id: string) => {
+    set((state) => ({
+      infoNotifications: state.infoNotifications.filter((e) => e.id !== id),
     }));
   },
 

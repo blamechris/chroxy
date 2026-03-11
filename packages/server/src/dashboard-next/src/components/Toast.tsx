@@ -8,6 +8,7 @@ import { useEffect, useRef } from 'react'
 export interface ToastItem {
   id: string
   message: string
+  level?: 'error' | 'info'
 }
 
 export interface ToastProps {
@@ -50,7 +51,7 @@ export function Toast({ items, onDismiss }: ToastProps) {
   return (
     <div className="toast-container" data-testid="toast-container" aria-live="assertive">
       {items.map(item => (
-        <div key={item.id} className="toast" role="alert">
+        <div key={item.id} className={`toast ${item.level === 'info' ? 'toast-info' : 'toast-error'}`} role="alert">
           <span className="toast-msg">{item.message}</span>
           <button
             className="toast-close"

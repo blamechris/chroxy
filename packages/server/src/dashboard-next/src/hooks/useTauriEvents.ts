@@ -97,19 +97,19 @@ export function useTauriEvents() {
       })
     )
 
-    // Update available — show toast notification
+    // Update available — show info toast notification (not error)
     unlisteners.push(
       tauriEvent.listen<string>('update_available', (event) => {
         const store = useConnectionStore.getState()
-        store.addServerError(`Chroxy ${event.payload} is available.`)
+        store.addInfoNotification(`Chroxy ${event.payload} is available.`)
       })
     )
 
-    // Update installed — show restart prompt
+    // Update installed — show info toast with restart prompt
     unlisteners.push(
       tauriEvent.listen<string>('update_installed', (event) => {
         const store = useConnectionStore.getState()
-        store.addServerError(`Chroxy ${event.payload} installed. Restart to apply.`)
+        store.addInfoNotification(`Chroxy ${event.payload} installed. Restart to apply.`)
       })
     )
 
