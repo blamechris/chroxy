@@ -8,6 +8,7 @@ import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.j
 import { isWindows, writeFileRestricted } from './platform.js'
 import { readSessionContext } from './session-context.js'
 import { parseDuration } from './duration.js'
+import { SessionLockManager } from './session-lock.js'
 
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
@@ -87,6 +88,7 @@ export class SessionManager extends EventEmitter {
     this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000 // 24 hours
     this._persistDebounceMs = persistDebounceMs
     this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
+    this._locks = new SessionLockManager()
     this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
     this._maxHistory = 500
@@ -271,6 +273,50 @@ export class SessionManager extends EventEmitter {
     const id = sessionId || this._sessions.keys().next().value
     const ctx = await readSessionContext(entry.cwd)
     return { sessionId: id, ...ctx }
+  }
+
+  /**
+   * Check if a session is currently locked for mutation.
+   * @param {string} sessionId
+   * @returns {boolean}
+   */
+  isSessionLocked(sessionId) {
+    return this._locks.isLocked(sessionId)
+  }
+
+  /**
+   * Acquire a mutation lock for a session. Returns a release function.
+   * @param {string} sessionId
+   * @returns {Promise<() => void>}
+   */
+  acquireSessionLock(sessionId) {
+    return this._locks.acquire(sessionId)
+  }
+
+  /**
+   * Rename a session with mutation lock.
+   * @returns {Promise<boolean>}
+   */
+  async renameSessionLocked(sessionId, name) {
+    const release = await this._locks.acquire(sessionId)
+    try {
+      return this.renameSession(sessionId, name)
+    } finally {
+      release()
+    }
+  }
+
+  /**
+   * Destroy a session with mutation lock.
+   * @returns {Promise<boolean>}
+   */
+  async destroySessionLocked(sessionId) {
+    const release = await this._locks.acquire(sessionId)
+    try {
+      return this.destroySession(sessionId)
+    } finally {
+      release()
+    }
   }
 
   /**
