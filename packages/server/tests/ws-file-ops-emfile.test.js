@@ -1,30 +1,47 @@
-import { describe, it } from 'node:test'
+import { describe, it, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'fs'
-import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
+import { readFile } from 'node:fs/promises'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
+describe('ws-file-ops EMFILE handling', () => {
+  let source
 
-describe('listFiles EMFILE handling (#1970)', () => {
-  const src = readFileSync(join(__dirname, '../src/ws-file-ops.js'), 'utf-8')
-
-  it('walk function handles EMFILE with retry', () => {
-    const walkStart = src.indexOf('async function walk(dir, depth)')
-    assert.ok(walkStart > 0, 'walk function should exist')
-
-    const walkBody = src.slice(walkStart, walkStart + 800)
-    assert.ok(walkBody.includes('EMFILE'),
-      'walk should check for EMFILE error code')
-    assert.ok(walkBody.includes('attempt') || walkBody.includes('retry'),
-      'walk should have retry logic for EMFILE')
+  before(async () => {
+    source = await readFile(
+      new URL('../src/ws-file-ops.js', import.meta.url),
+      'utf8'
+    )
+    assert.ok(source.length > 0)
   })
 
-  it('uses backoff delay between EMFILE retries', () => {
-    const walkStart = src.indexOf('async function walk(dir, depth)')
-    const walkBody = src.slice(walkStart, walkStart + 800)
-    assert.ok(walkBody.includes('setTimeout'),
-      'Should use setTimeout for backoff between retries')
+  it('walk function retries readdir on EMFILE errors', () => {
+    assert.ok(source.includes("err.code === 'EMFILE'"), 'should check for EMFILE error code')
+    assert.ok(source.includes('attempt < 3'), 'should retry up to 3 times')
+    assert.ok(source.includes('50 * (attempt + 1)'), 'should use increasing backoff delay')
+  })
+
+  it('EMFILE retry uses break on success to exit retry loop', () => {
+    // Extract the walk function region
+    const walkStart = source.indexOf('async function walk(dir, depth)')
+    assert.ok(walkStart > -1, 'walk function should exist')
+
+    const walkRegion = source.slice(walkStart, walkStart + 800)
+    assert.ok(walkRegion.includes('break'), 'should break out of retry loop on success')
+    assert.ok(walkRegion.includes("retryErr?.code !== 'EMFILE'"), 'should only retry EMFILE, not other errors')
+  })
+
+  it('EMFILE handling is only in walk, not in listDirectory or browseFiles', () => {
+    // listDirectory function region
+    const listDirStart = source.indexOf('async function listDirectory(')
+    assert.ok(listDirStart > -1, 'listDirectory function should exist')
+    const listDirEnd = source.indexOf('async function', listDirStart + 1)
+    const listDirRegion = source.slice(listDirStart, listDirEnd)
+    assert.ok(!listDirRegion.includes('EMFILE'), 'listDirectory should not have EMFILE handling')
+
+    // browseFiles function region
+    const browseStart = source.indexOf('async function browseFiles(')
+    assert.ok(browseStart > -1, 'browseFiles function should exist')
+    const browseEnd = source.indexOf('async function', browseStart + 1)
+    const browseRegion = source.slice(browseStart, browseEnd)
+    assert.ok(!browseRegion.includes('EMFILE'), 'browseFiles should not have EMFILE handling')
   })
 })
