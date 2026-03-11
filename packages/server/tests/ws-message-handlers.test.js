@@ -284,6 +284,26 @@ describe('handleSessionMessage', () => {
       }, ctx)
       assert.equal(ctx.sessionManager.renameSession.mock.calls.length, 1)
     })
+
+    it('catches rejection and sends session_error (#1918)', async () => {
+      const ctx = makeCtx({
+        sessionManager: {
+          renameSession: mock.fn(() => { throw new Error('session destroyed concurrently') }),
+        },
+      })
+      const client = makeClient({ activeSessionId: 'sess-1' })
+      addSession(ctx, 'sess-1')
+      await handleSessionMessage(WS, client, {
+        type: 'rename_session',
+        sessionId: 'sess-1',
+        name: 'New Name',
+      }, ctx)
+      // Should send session_error, not throw unhandled rejection
+      const sendCalls = ctx.send.mock.calls
+      const errorMsg = sendCalls.find(c => c.arguments[1]?.type === 'session_error')
+      assert.ok(errorMsg, 'should send session_error on rename failure')
+      assert.ok(errorMsg.arguments[1].message.includes('session destroyed concurrently'))
+    })
   })
 })
 
