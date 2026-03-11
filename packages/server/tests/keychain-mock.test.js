@@ -33,7 +33,9 @@ if (typeof mock.module !== 'function') {
 
   describe('Keychain mock-based runtime tests (#1899)', () => {
     beforeEach(() => {
+      // Reset both call history and implementation to avoid inter-test leakage
       cpMock.execFileSync.mock.resetCalls()
+      cpMock.execFileSync.mock.mockImplementation(() => '')
       // Default: simulate macOS
       platformMock.isMac = true
       platformMock.isLinux = false
@@ -49,9 +51,11 @@ if (typeof mock.module !== 'function') {
         assert.equal(result, null, 'getToken should return null on keychain error')
       })
 
-      it('returns null when execFileSync throws (Linux)', () => {
-        platformMock.isMac = false
-        platformMock.isLinux = true
+      // Note: named ES module imports (isMac/isLinux) are bound at import time;
+      // platformMock mutations don't re-route to the Linux code path. This test
+      // verifies the same null-return contract with a Linux-style error message.
+      // True Linux-path coverage requires a Linux CI environment.
+      it('returns null when execFileSync throws (Linux-style error)', () => {
         cpMock.execFileSync.mock.mockImplementation(() => {
           throw new Error('secret-tool: No matching items found')
         })
@@ -63,15 +67,8 @@ if (typeof mock.module !== 'function') {
 
     describe('setToken error propagation', () => {
       it('throws when execFileSync throws (macOS)', () => {
-        // isKeychainAvailable needs to work first
-        let callCount = 0
         cpMock.execFileSync.mock.mockImplementation(() => {
-          callCount++
-          // First call might be isKeychainAvailable check, subsequent is setToken
-          if (callCount > 0) {
-            throw new Error('security: permission denied')
-          }
-          return ''
+          throw new Error('security: permission denied')
         })
 
         assert.throws(
@@ -95,9 +92,9 @@ if (typeof mock.module !== 'function') {
         )
       })
 
-      it('does not throw when execFileSync throws (Linux)', () => {
-        platformMock.isMac = false
-        platformMock.isLinux = true
+      // Note: same binding limitation as getToken — this verifies the error-swallow
+      // contract with a Linux-style error message on the macOS code path.
+      it('does not throw when execFileSync throws (Linux-style error)', () => {
         cpMock.execFileSync.mock.mockImplementation(() => {
           throw new Error('secret-tool: item not found')
         })
@@ -111,9 +108,7 @@ if (typeof mock.module !== 'function') {
 
     describe('migrateToken fallback behavior', () => {
       it('returns migrated:false when setToken throws', () => {
-        let callCount = 0
         cpMock.execFileSync.mock.mockImplementation((cmd, args) => {
-          callCount++
           // isKeychainAvailable → success (security help)
           if (args && args[0] === 'help') return ''
           // getToken (find-generic-password) → not found (throw)
