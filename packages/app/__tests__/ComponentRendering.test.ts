@@ -147,10 +147,9 @@ describe('ChatView component', () => {
     expect(chatViewSrc).toMatch(/Starting Claude Code\.\.\./)
   })
 
-  test('groups messages using groupMessages helper', () => {
-    expect(chatViewSrc).toMatch(/function\s+groupMessages/)
-    expect(chatViewSrc).toMatch(/type:\s*'activity'/)
-    expect(chatViewSrc).toMatch(/type:\s*'single'/)
+  test('imports groupMessages from standalone module', () => {
+    expect(chatViewSrc).toMatch(/import\s*\{.*groupMessages.*\}\s*from\s*'\.\/chat\/groupMessages'/)
+    expect(chatViewSrc).toMatch(/import\s*\{.*applyStreamingOverlay.*\}\s*from\s*'\.\/chat\/groupMessages'/)
   })
 
   test('listens for reduce motion accessibility setting', () => {

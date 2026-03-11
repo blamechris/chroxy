@@ -2054,7 +2054,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (msgQuery !== null && currentQuery && msgQuery !== currentQuery) {
         break; // Stale response for an older query — ignore
       }
-      set({ searchResults: results, searchLoading: false });
+      set({ searchResults: results, searchLoading: false, searchError: null });
       break;
     }
 

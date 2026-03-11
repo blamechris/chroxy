@@ -4,7 +4,7 @@
  * when the streaming message is part of it.
  */
 import type { ChatMessage } from '../src/store/types';
-import { applyStreamingOverlay, groupMessages, DisplayGroup } from '../src/components/ChatView';
+import { applyStreamingOverlay, groupMessages, DisplayGroup } from '../src/components/chat/groupMessages';
 
 function msg(id: string, type: ChatMessage['type']): ChatMessage {
   return { id, type, content: '', timestamp: Date.now(), role: 'assistant' } as ChatMessage;
