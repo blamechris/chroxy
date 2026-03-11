@@ -711,8 +711,22 @@ export function createFileOps(sendFn) {
         let dirents
         try {
           dirents = await readdir(dir, { withFileTypes: true })
-        } catch {
-          return
+        } catch (err) {
+          // Retry on EMFILE (too many open files) with backoff
+          if (err && err.code === 'EMFILE') {
+            for (let attempt = 0; attempt < 3; attempt++) {
+              await new Promise(r => setTimeout(r, 50 * (attempt + 1)))
+              try {
+                dirents = await readdir(dir, { withFileTypes: true })
+                break
+              } catch (retryErr) {
+                if (retryErr?.code !== 'EMFILE' || attempt === 2) return
+              }
+            }
+            if (!dirents) return
+          } else {
+            return
+          }
         }
 
         for (const d of dirents) {

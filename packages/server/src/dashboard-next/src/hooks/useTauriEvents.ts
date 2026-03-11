@@ -7,11 +7,15 @@
  * - server_restarting: { attempt, max_attempts, backoff_secs } — auto-restart in progress
  * - server_error:      { message }            — server hit an error
  *
- * Only active when running inside Tauri (window.__TAURI__ exists).
+ * Only active when running inside Tauri (detected via shared isTauri utility).
  * In browser context, this hook is a no-op.
  */
 import { useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
+import { isTauri } from '../utils/tauri'
+
+// Re-export for consumers that imported isTauri from this module
+export { isTauri }
 
 interface TauriEvent<T> {
   payload: T
@@ -34,10 +38,6 @@ interface ServerErrorPayload {
 }
 
 type UnlistenFn = () => void
-
-export function isTauri(): boolean {
-  return typeof window !== 'undefined' && !!(window as unknown as Record<string, unknown>).__TAURI__
-}
 
 function getTauriEvent(): { listen: <T>(event: string, handler: (e: TauriEvent<T>) => void) => Promise<UnlistenFn> } | null {
   if (!isTauri()) return null
@@ -97,19 +97,19 @@ export function useTauriEvents() {
       })
     )
 
-    // Update available — show toast notification
+    // Update available — show info toast notification (not error)
     unlisteners.push(
       tauriEvent.listen<string>('update_available', (event) => {
         const store = useConnectionStore.getState()
-        store.addServerError(`Chroxy ${event.payload} is available.`)
+        store.addInfoNotification(`Chroxy ${event.payload} is available.`)
       })
     )
 
-    // Update installed — show restart prompt
+    // Update installed — show info toast with restart prompt
     unlisteners.push(
       tauriEvent.listen<string>('update_installed', (event) => {
         const store = useConnectionStore.getState()
-        store.addServerError(`Chroxy ${event.payload} installed. Restart to apply.`)
+        store.addInfoNotification(`Chroxy ${event.payload} installed. Restart to apply.`)
       })
     )
 

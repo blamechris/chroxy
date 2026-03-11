@@ -37,7 +37,6 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | ToolResult | `src/tool-result.js` | Tool result processing and formatting |
 | MessageTransform | `src/message-transform.js` | Message transformation pipeline |
 | PermissionHook | `src/permission-hook.js` | Permission hook management (CLI mode) |
-| Dashboard | `src/dashboard.js` | Web dashboard HTML generation |
 | TunnelRegistry | `src/tunnel/registry.js` | Tunnel adapter registry (`registerTunnel`/`getTunnel`/`parseTunnelArg`) |
 | BaseTunnelAdapter | `src/tunnel/base.js` | Base class with shared recovery logic (backoff, events) |
 | CloudflareTunnelAdapter | `src/tunnel/cloudflare.js` | Cloudflare adapter (quick/named modes) |
@@ -153,7 +152,7 @@ Store files:
 | `permission_response` | Respond to permission prompt (allow/deny) |
 | `ping` | Client heartbeat for connection keep-alive |
 | `read_file` | Request file content within project |
-| `register_push_token` | Register Expo push token for notifications |
+| `register_push_token` | Register push token for notifications |
 | `remove_repo` | Remove a repo from the server's configured repo list |
 | `rename_session` | Rename existing session by ID |
 | `request_cost_summary` | Request per-session cost breakdown |
@@ -314,7 +313,6 @@ Store files:
 | `content-blocks.js` | Content block builder for structured output |
 | `conversation-scanner.js` | Conversation history file scanning (parallel) |
 | `crypto.js` | ECDH key exchange + AES-GCM encryption |
-| `dashboard.js` | Web dashboard HTML generation |
 | `dev-preview.js` | Dev server preview tunnel management |
 | `diff-parser.js` | Unified diff parser for git output |
 | `doctor.js` | Diagnostic command for troubleshooting |
@@ -394,6 +392,109 @@ Store files:
 | `notifications.ts` | Push notification registration |
 | `constants/colors.ts` | Shared color palette |
 | `constants/icons.ts` | Shared icon constants |
+
+### Dashboard Frontend (`packages/server/src/dashboard-next/`)
+
+The web dashboard is a React + Vite SPA served by the Node.js server. It shares the same WebSocket protocol as the mobile app.
+
+| File | Purpose |
+|------|---------|
+| `src/App.tsx` | App root — routing, WebSocket setup, theme |
+| `src/main.tsx` | Vite entry point |
+| **Components** | |
+| `src/components/ChatView.tsx` | Message list with streaming, tool bubbles |
+| `src/components/ChatMessage.tsx` | Individual message bubble with markdown |
+| `src/components/InputBar.tsx` | Text input with slash commands, file attachments |
+| `src/components/TerminalView.tsx` | xterm.js terminal emulator |
+| `src/components/MultiTerminalView.tsx` | Multi-tab terminal container |
+| `src/components/Sidebar.tsx` | Session list, navigation, resize |
+| `src/components/SessionBar.tsx` | Session tab strip |
+| `src/components/StatusBar.tsx` | Connection status, cost, model info |
+| `src/components/FooterBar.tsx` | Bottom bar with actions |
+| `src/components/SettingsPanel.tsx` | Settings configuration panel |
+| `src/components/CommandPalette.tsx` | Keyboard-driven command palette |
+| `src/components/SlashCommandPicker.tsx` | Slash command autocomplete picker |
+| `src/components/FilePicker.tsx` | File attachment picker |
+| `src/components/FileBrowserPanel.tsx` | Project file browser with syntax highlighting |
+| `src/components/DiffViewerPanel.tsx` | Git diff viewer with file list |
+| `src/components/DirectoryBrowser.tsx` | Directory navigation for session cwd |
+| `src/components/CheckpointTimeline.tsx` | Checkpoint list with timeline UI |
+| `src/components/ConversationSearch.tsx` | Conversation history search |
+| `src/components/PermissionPrompt.tsx` | Permission request dialog |
+| `src/components/QuestionPrompt.tsx` | User question prompt dialog |
+| `src/components/PlanApproval.tsx` | Plan mode approval UI |
+| `src/components/ToolBubble.tsx` | Tool use/result display bubble |
+| `src/components/ImageThumbnail.tsx` | Image preview thumbnail |
+| `src/components/AttachmentChip.tsx` | File attachment chip display |
+| `src/components/AgentMonitorPanel.tsx` | Background agent status panel |
+| `src/components/CreateSessionModal.tsx` | New session creation dialog |
+| `src/components/CreateSessionPanel.tsx` | Session creation form panel |
+| `src/components/Modal.tsx` | Reusable modal component |
+| `src/components/Toast.tsx` | Toast notification component |
+| `src/components/NotificationBanners.tsx` | Session notification banners |
+| `src/components/ReconnectBanner.tsx` | Reconnection status banner |
+| `src/components/SplitPane.tsx` | Resizable split pane layout |
+| `src/components/ShortcutHelp.tsx` | Keyboard shortcut help overlay |
+| `src/components/ServerPicker.tsx` | Multi-server connection picker |
+| `src/components/QrModal.tsx` | QR code display modal |
+| `src/components/ConsolePage.tsx` | Console page with connection info |
+| `src/components/LogPanel.tsx` | Server log panel with filtering |
+| `src/components/LoadingScreen.tsx` | Loading state skeleton |
+| `src/components/SessionLoadingSkeleton.tsx` | Session loading skeleton |
+| `src/components/WelcomeScreen.tsx` | Initial welcome/connect screen |
+| `src/components/ErrorScreen.tsx` | Error state display |
+| `src/components/ThinkingDots.tsx` | Animated thinking indicator |
+| **Hooks** | |
+| `src/hooks/useGlobalShortcuts.ts` | Global keyboard shortcut handler |
+| `src/hooks/usePathAutocomplete.ts` | Path autocomplete for directory input |
+| `src/hooks/usePermissionNotification.ts` | Permission request notification hook |
+| `src/hooks/useTauriEvents.ts` | Tauri event listener bridge |
+| `src/hooks/useTauriIPC.ts` | Tauri IPC command bridge |
+| **Store** | |
+| `src/store/connection.ts` | Zustand WebSocket store (mirrors app store) |
+| `src/store/message-handler.ts` | WS message handling (shared protocol) |
+| `src/store/persistence.ts` | LocalStorage state persistence |
+| `src/store/server-registry.ts` | Multi-server connection registry |
+| `src/store/commands.ts` | Command palette command registry |
+| `src/store/mru.ts` | Most-recently-used tracking |
+| `src/store/crypto.ts` | Client-side encryption (ECDH/AES-GCM) |
+| `src/store/token-crypto.ts` | Token encryption for secure storage |
+| `src/store/types.ts` | TypeScript type definitions |
+| `src/store/utils.ts` | Store utility functions |
+| **Utils** | |
+| `src/utils/auth.ts` | Authentication utilities |
+| `src/utils/attachment-utils.ts` | File attachment processing |
+| `src/utils/image-utils.ts` | Image processing utilities |
+| **Theme** | |
+| `src/theme/tokens.ts` | Generated design tokens (colors, spacing) |
+
+### Store Core (`packages/store-core/`)
+
+Shared store logic extracted for reuse between mobile app and dashboard.
+
+| File | Purpose |
+|------|---------|
+| `src/index.ts` | Package entry point — re-exports |
+| `src/platform.ts` | Platform detection (web, mobile, desktop) |
+| `src/storage.ts` | Cross-platform storage abstraction |
+| `src/user-input-handler.ts` | User input processing and validation |
+
+### Desktop App (`packages/desktop/`)
+
+Tauri tray application wrapping the web dashboard with native integrations.
+
+| File | Purpose |
+|------|---------|
+| `src-tauri/src/main.rs` | Application entry point |
+| `src-tauri/src/lib.rs` | Module declarations, tray menu, app lifecycle |
+| `src-tauri/src/server.rs` | ServerManager — spawn/monitor Node.js server process |
+| `src-tauri/src/config.rs` | Read `~/.chroxy/config.json` subset for desktop |
+| `src-tauri/src/settings.rs` | DesktopSettings — persist to `~/.chroxy/desktop-settings.json` |
+| `src-tauri/src/node.rs` | Node.js discovery and version validation (≥22) |
+| `src-tauri/src/platform.rs` | Cross-platform path and environment utilities |
+| `src-tauri/src/qrcode.rs` | QR code generation from connection URL |
+| `src-tauri/src/setup.rs` | First-run setup and config initialization |
+| `src-tauri/src/window.rs` | Window management (show/hide/navigate) |
 
 ### Docs
 

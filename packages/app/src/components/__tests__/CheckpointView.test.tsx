@@ -99,9 +99,10 @@ describe('CheckpointView', () => {
     act(() => {
       root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
     });
-    // Advance past the 1500ms loading timeout
+    // Advance past the 8s safety-net timeout (store-reactive clearing
+    // won't fire in this mock since checkpoints never update)
     act(() => {
-      jest.advanceTimersByTime(1500);
+      jest.advanceTimersByTime(8000);
     });
     expect(findTextNodes(root!.root, 'No checkpoints yet').length).toBeGreaterThan(0);
   });

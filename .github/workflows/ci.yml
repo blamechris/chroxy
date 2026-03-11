@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
         run: npm ci
@@ -44,7 +44,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
         run: npm ci
@@ -74,7 +74,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
         run: npm ci
@@ -104,7 +104,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
         run: npm ci
@@ -126,7 +126,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
         run: npm ci
@@ -148,7 +148,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
         run: npm ci
@@ -170,7 +170,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: '**/package-lock.json'
 
       - name: Install dependencies
         run: npm ci
@@ -181,17 +181,12 @@ jobs:
 
   desktop-tests:
     name: Desktop Rust Tests
-    runs-on: ubuntu-24.04
+    runs-on: macos-latest
     defaults:
       run:
         working-directory: packages/desktop/src-tauri
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

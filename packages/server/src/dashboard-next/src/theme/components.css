@@ -2155,6 +2155,9 @@
 
 .toast-close:hover { color: #fff; }
 
+.toast-error { background: #dc2626; }
+.toast-info { background: #2563eb; }
+
 /* ---- Modal ---- */
 .modal-overlay {
   position: fixed;
