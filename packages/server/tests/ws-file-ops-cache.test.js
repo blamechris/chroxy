@@ -48,7 +48,7 @@ describe('#1931 — CWD real path cache TTL', () => {
     const sendFn = (_ws, msg) => results.push(msg)
     const ops = createFileOps(sendFn)
 
-    // Prepare two real directories with different contents
+    // Prepare two real directories — both contain a file so browseFiles succeeds
     const cacheDir1 = join(tmpDir, 'cache-real-1')
     const cacheDir2 = join(tmpDir, 'cache-real-2')
     const cacheLink = join(tmpDir, 'cache-link')
@@ -63,8 +63,11 @@ describe('#1931 — CWD real path cache TTL', () => {
     await symlink(cacheDir1, cacheLink)
     await ops.browseFiles({}, cacheLink, cacheLink)
 
-    // Repoint the symlink to a different real directory, but reuse the same path
-    // A correctly implemented cache should still use the original resolved real path
+    // Repoint the symlink to a different real directory, but reuse the same path.
+    // The CWD cache should still resolve to cacheDir1 (cached).
+    // browseFiles will resolve the requestedPath via realpath to cacheDir2, but
+    // the cached CWD is cacheDir1, so the path validation will reject it.
+    // We verify the cache is working by checking the resolved path in the response.
     await rm(cacheLink)
     await symlink(cacheDir2, cacheLink)
     await ops.browseFiles({}, cacheLink, cacheLink)
@@ -73,9 +76,16 @@ describe('#1931 — CWD real path cache TTL', () => {
     assert.equal(results[0].type, 'file_listing')
     assert.equal(results[1].type, 'file_listing')
 
-    // If resolveSessionCwd() does NOT cache, the entries would now reflect cacheDir2
-    // and differ from the first call. Equality here demonstrates a cache hit.
-    assert.deepEqual(results[0].entries, results[1].entries)
+    // First call succeeds — path resolves to cacheDir1
+    assert.equal(results[0].error, null, 'first call should succeed')
+    const realCacheDir1 = await realpath(cacheDir1)
+    assert.equal(results[0].path, realCacheDir1, 'first call path should be cacheDir1')
+
+    // Second call gets "Access denied" because the CWD cache still holds cacheDir1
+    // but realpath(cacheLink) now resolves to cacheDir2, which is outside cacheDir1.
+    // This proves the cache is active — without caching, CWD would re-resolve to
+    // cacheDir2 and the path validation would pass.
+    assert.equal(results[1].error, 'Access denied: browsing is restricted to the project directory')
   })
 
   it('cache implementation uses TTL-based expiry', async () => {
