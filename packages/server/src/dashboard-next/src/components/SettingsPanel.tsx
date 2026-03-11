@@ -4,11 +4,12 @@
  * Triggered via gear icon in header or Cmd+,. Changes apply instantly
  * and persist to localStorage.
  */
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
+import { PROVIDER_LABELS } from '../lib/provider-labels'
 
 export interface SettingsPanelProps {
   isOpen: boolean
@@ -42,9 +43,18 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const setTheme = useConnectionStore(s => s.setTheme)
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
   const setDefaultProvider = useConnectionStore(s => s.setDefaultProvider)
+  const availableProviders = useConnectionStore(s => s.availableProviders ?? [])
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const updateInputSettings = useConnectionStore(s => s.updateInputSettings)
   const themes = getAvailableThemes()
+
+  // Normalize: if persisted defaultProvider isn't in server's list, use first available
+  const effectiveProvider = useMemo(() => {
+    if (availableProviders.length > 0 && !availableProviders.some(p => p.name === defaultProvider)) {
+      return availableProviders[0]!.name
+    }
+    return defaultProvider
+  }, [availableProviders, defaultProvider])
 
   const handleSelectTheme = useCallback((themeId: string) => {
     setTheme(themeId)
@@ -117,11 +127,20 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               <select
                 id="default-provider"
                 aria-label="Default provider"
-                value={defaultProvider}
+                value={effectiveProvider}
                 onChange={handleProviderChange}
               >
-                <option value="claude-sdk">Claude Code (SDK)</option>
-                <option value="claude-cli">Claude Code (CLI)</option>
+                {availableProviders.length > 0
+                  ? availableProviders.map(p => (
+                      <option key={p.name} value={p.name}>
+                        {PROVIDER_LABELS[p.name] || p.name}
+                      </option>
+                    ))
+                  : <>
+                      <option value="claude-sdk">Claude Code (SDK)</option>
+                      <option value="claude-cli">Claude Code (CLI)</option>
+                    </>
+                }
               </select>
             </div>
             <div className="settings-field">
