@@ -15,6 +15,12 @@ import * as Device from 'expo-device';
 import { type EncryptedEnvelope } from '../utils/crypto';
 import { hapticLight, hapticMedium, hapticWarning } from '../utils/haptics';
 
+// Global augmentation for hot-reload cleanup sentinel
+declare global {
+  // eslint-disable-next-line no-var
+  var __chroxy_appStateSub: ReturnType<typeof AppState.addEventListener> | undefined;
+}
+
 // Re-export all types for backward compatibility
 export type {
   MessageAttachment,
@@ -1338,9 +1344,7 @@ useConnectionStore.subscribe((state) => {
 
 // Reconnect on app resume from background.
 // Clean up previous subscription on Metro hot-reload to prevent duplicate listeners.
-// @ts-expect-error — global used for hot-reload cleanup across module re-evaluations
 if (global.__chroxy_appStateSub) {
-  // @ts-expect-error — see above
   global.__chroxy_appStateSub.remove();
 }
 export const _appStateSub = AppState.addEventListener('change', (nextState) => {
@@ -1352,5 +1356,4 @@ export const _appStateSub = AppState.addEventListener('change', (nextState) => {
     }
   }
 });
-// @ts-expect-error — store handle on global for hot-reload cleanup
 global.__chroxy_appStateSub = _appStateSub;
