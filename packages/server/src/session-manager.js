@@ -804,7 +804,8 @@ export class SessionManager extends EventEmitter {
 
         // Track cumulative cost and check budget on result events
         if (event === 'result' && typeof data.cost === 'number') {
-          this._trackCost(sessionId, data.cost)
+          const model = entry.session.currentModel || entry.model || null
+          this._trackCost(sessionId, data.cost, model)
         }
       })
     }
@@ -862,8 +863,8 @@ export class SessionManager extends EventEmitter {
    * @param {string} sessionId
    * @param {number} cost - Cost of the latest query in dollars
    */
-  _trackCost(sessionId, cost) {
-    const budgetEvent = this._costBudget.trackCost(sessionId, cost)
+  _trackCost(sessionId, cost, model = null) {
+    const budgetEvent = this._costBudget.trackCost(sessionId, cost, model)
     const cumulative = this._costBudget.getSessionCost(sessionId)
 
     // Emit cost_update for every result so app can track cumulative cost
@@ -1001,5 +1002,13 @@ export class SessionManager extends EventEmitter {
     this._costBudget.resume(sessionId)
     this._schedulePersist()
     console.log(`[session-manager] Budget pause overridden for session ${sessionId}`)
+  }
+
+  getCostByModel() {
+    return this._costBudget.getCostByModel()
+  }
+
+  getSpendRate() {
+    return this._costBudget.getSpendRate()
   }
 }

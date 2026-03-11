@@ -95,4 +95,42 @@ describe('CostBudgetManager (#1834)', () => {
     assert.equal(mgr.getSessionCost('s1'), 0)
     assert.equal(mgr.getTotalCost(), 0)
   })
+
+  it('tracks cost by model', () => {
+    mgr.trackCost('s1', 2.0, 'claude-opus')
+    mgr.trackCost('s1', 1.5, 'claude-sonnet')
+    mgr.trackCost('s2', 3.0, 'claude-opus')
+    const byModel = mgr.getCostByModel()
+    assert.equal(byModel['claude-opus'], 5.0)
+    assert.equal(byModel['claude-sonnet'], 1.5)
+  })
+
+  it('getCostByModel returns empty object when no model tracked', () => {
+    mgr.trackCost('s1', 2.0) // no model
+    const byModel = mgr.getCostByModel()
+    assert.deepEqual(byModel, {})
+  })
+
+  it('getSpendRate returns 0 with fewer than 2 events', () => {
+    assert.equal(mgr.getSpendRate(), 0)
+    mgr.trackCost('s1', 1.0)
+    assert.equal(mgr.getSpendRate(), 0)
+  })
+
+  it('getSpendRate computes hourly rate', () => {
+    // Manually push events with controlled timestamps
+    mgr._costEvents = [
+      { cost: 1.0, timestamp: 1000 },
+      { cost: 2.0, timestamp: 1000 + 3600000 }, // 1 hour later
+    ]
+    const rate = mgr.getSpendRate()
+    assert.equal(rate, 3.0) // $3 total over 1 hour
+  })
+
+  it('clear resets model and event tracking', () => {
+    mgr.trackCost('s1', 2.0, 'claude-opus')
+    mgr.clear()
+    assert.deepEqual(mgr.getCostByModel(), {})
+    assert.equal(mgr.getSpendRate(), 0)
+  })
 })
