@@ -1,8 +1,7 @@
 import { spawn } from 'child_process'
-import { EventEmitter } from 'events'
 import { createInterface } from 'readline'
-import { resolveModelId } from './models.js'
 import { createPermissionHookManager } from './permission-hook.js'
+import { BaseSession } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { forceKill } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
@@ -37,7 +36,7 @@ const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
  *   tool_result      { toolUseId, result, truncated }
  */
 
-export class CliSession extends EventEmitter {
+export class CliSession extends BaseSession {
   static get capabilities() {
     return {
       permissions: true,
@@ -51,35 +50,25 @@ export class CliSession extends EventEmitter {
   }
 
   constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms } = {}) {
-    super()
-    this.cwd = cwd || process.cwd()
+    super({ cwd, model, permissionMode })
     this.allowedTools = allowedTools || []
-    this.model = model || null
-    this.permissionMode = permissionMode || 'approve'
     this._port = port || null
     this._apiToken = apiToken || null
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sessionId = null
     this._child = null
-    this._destroying = false
-    this._messageCounter = 0
     this._rl = null
     this._stderrRL = null
 
     // Persistent-process state
-    this._activeAgents = new Map() // toolUseId -> { toolUseId, description, startedAt }
     this._inPlanMode = false
     this._planAllowedPrompts = null
-    this._isBusy = false
     this._waitingForAnswer = false
-    this._processReady = false
-    this._currentMessageId = null
     this._currentCtx = null
     this._pendingMessage = null
     this._respawnCount = 0
     this._respawnTimer = null
-    this._resultTimeout = null
     this._interruptTimer = null
 
     // Hook manager (shared module)
@@ -88,16 +77,6 @@ export class CliSession extends EventEmitter {
 
   get sessionId() {
     return this._sessionId
-  }
-
-  /** Backward compat: returns true when processing a message */
-  get isRunning() {
-    return this._isBusy
-  }
-
-  /** True when process is alive and ready to accept a message */
-  get isReady() {
-    return this._processReady && !this._isBusy
   }
 
   /**
@@ -268,7 +247,7 @@ export class CliSession extends EventEmitter {
   /**
    * Send a message to Claude via stdin NDJSON.
    */
-  sendMessage(prompt, attachments, options = {}) {
+  async sendMessage(prompt, attachments, options = {}) {
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
       return
@@ -557,9 +536,8 @@ export class CliSession extends EventEmitter {
    * Clear per-message state, marking us as ready for the next message.
    */
   _clearMessageState() {
-    this._isBusy = false
+    super._clearMessageState()
     this._waitingForAnswer = false
-    this._currentMessageId = null
     this._currentCtx = null
     // If plan mode is active but ExitPlanMode never arrived (interrupt/crash),
     // the flag is stale — reset it. In normal flow, _planAllowedPrompts is
@@ -569,19 +547,6 @@ export class CliSession extends EventEmitter {
       this._inPlanMode = false
     }
     this._planAllowedPrompts = null
-    // Emit completions for any tracked agents so the app clears badges.
-    // Centralised here so every callsite (result, crash, timeout, interrupt,
-    // destroy) is safe by default.
-    if (this._activeAgents.size > 0) {
-      for (const agent of this._activeAgents.values()) {
-        this.emit('agent_completed', { toolUseId: agent.toolUseId })
-      }
-      this._activeAgents.clear()
-    }
-    if (this._resultTimeout) {
-      clearTimeout(this._resultTimeout)
-      this._resultTimeout = null
-    }
     if (this._interruptTimer) {
       clearTimeout(this._interruptTimer)
       this._interruptTimer = null
@@ -665,47 +630,14 @@ export class CliSession extends EventEmitter {
    * Kills the current process and respawns with the new model (new session).
    */
   setModel(model) {
-    if (this._isBusy) {
-      console.warn('[cli-session] Ignoring model change while message is in-flight')
-      return
-    }
-
-    const newModel = model ? resolveModelId(model) : null
-    const changed = newModel !== this.model
-    this.model = newModel
-
-    if (!changed) {
-      console.log(`[cli-session] Model unchanged: ${this.model || 'default'}`)
-      return
-    }
-
+    if (!super.setModel(model)) return
     console.log(`[cli-session] Model changed to ${this.model || 'default'}, restarting process`)
     this._killAndRespawn()
   }
 
-  /**
-   * Change the permission mode for subsequent messages.
-   * Kills the current process and respawns with the new mode (new session).
-   */
   setPermissionMode(mode) {
-    const VALID_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
-    if (!VALID_MODES.includes(mode)) {
-      console.warn(`[cli-session] Ignoring invalid permission mode: ${mode}`)
-      return
-    }
-
-    if (this._isBusy) {
-      console.warn('[cli-session] Ignoring permission mode change while message is in-flight')
-      return
-    }
-
-    if (mode === this.permissionMode) {
-      console.log(`[cli-session] Permission mode unchanged: ${this.permissionMode}`)
-      return
-    }
-
+    if (!super.setPermissionMode(mode)) return
     console.log(`[cli-session] Permission mode changed to ${mode}, restarting process`)
-    this.permissionMode = mode
     this._killAndRespawn()
   }
 
