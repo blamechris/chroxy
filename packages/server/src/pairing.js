@@ -11,15 +11,17 @@ import { EventEmitter } from 'events'
 import { randomBytes, timingSafeEqual } from 'crypto'
 
 const DEFAULT_TTL_MS = 60_000
+const DEFAULT_SESSION_TOKEN_TTL_MS = 24 * 60 * 60_000 // 24 hours
 const SESSION_TOKEN_BYTES = 32
 const MAX_SESSION_TOKENS = 100
 const MAX_ACTIVE_PAIRINGS = 10
 
 export class PairingManager extends EventEmitter {
-  constructor({ wsUrl = null, ttlMs = DEFAULT_TTL_MS, autoRefresh = false } = {}) {
+  constructor({ wsUrl = null, ttlMs = DEFAULT_TTL_MS, sessionTokenTtlMs = DEFAULT_SESSION_TOKEN_TTL_MS, autoRefresh = false } = {}) {
     super()
     this._wsUrl = wsUrl
     this._ttlMs = ttlMs
+    this._sessionTokenTtlMs = sessionTokenTtlMs
     this._autoRefresh = autoRefresh
     this._current = null
     this._activePairings = new Map() // id → { expiresAt, used }
@@ -83,8 +85,14 @@ export class PairingManager extends EventEmitter {
    */
   isSessionTokenValid(token) {
     if (!token) return false
+    const now = Date.now()
     const tokenBuf = Buffer.from(token)
-    for (const stored of this._sessionTokens.keys()) {
+    for (const [stored, meta] of this._sessionTokens.entries()) {
+      // Prune expired tokens on access
+      if (now - meta.createdAt > this._sessionTokenTtlMs) {
+        this._sessionTokens.delete(stored)
+        continue
+      }
       const storedBuf = Buffer.from(stored)
       if (tokenBuf.length === storedBuf.length && timingSafeEqual(tokenBuf, storedBuf)) {
         return true
