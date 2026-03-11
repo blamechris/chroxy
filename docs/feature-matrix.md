@@ -4,6 +4,11 @@ Cross-platform feature availability for Mobile App, Desktop Dashboard, and Serve
 
 **Legend:** Y = available, — = not available
 
+**Column definitions:**
+- **Mobile** — React Native/Expo app (iOS & Android)
+- **Desktop** — Tauri tray app with web dashboard
+- **Server** — Node.js daemon. "Y" means the server either implements the feature natively (e.g., supervisor, headless CLI) or exposes a WS/HTTP endpoint that clients consume (e.g., session management, push notifications)
+
 ## Connection & Auth
 
 | Feature | Mobile | Desktop | Server |
