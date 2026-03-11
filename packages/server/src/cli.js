@@ -3,7 +3,7 @@ import { Command } from 'commander'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
-import { randomUUID } from 'crypto'
+import { randomBytes } from 'crypto'
 import readline from 'readline'
 import { validateConfig, mergeConfig } from './config.js'
 import { isWindows, defaultShell, writeFileRestricted } from './platform.js'
@@ -69,7 +69,7 @@ program
     console.log('We need a few things to get started:\n')
 
     // Generate API token
-    const apiToken = randomUUID()
+    const apiToken = randomBytes(32).toString('base64url')
 
     // Port
     console.log('1. Local WebSocket port')
