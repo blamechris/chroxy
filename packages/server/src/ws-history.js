@@ -5,7 +5,7 @@
  * handshake and history replay concerns from core server orchestration.
  */
 import { toShortModelId, getModels } from './models.js'
-import { PERMISSION_MODES } from './ws-message-handlers.js'
+import { PERMISSION_MODES } from './handler-utils.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('ws')

@@ -33,11 +33,6 @@ const schemasSrc = fs.readFileSync(
   'utf-8',
 )
 
-const handlersSrc = fs.readFileSync(
-  path.resolve(__dirname, '../../../ws-message-handlers.js'),
-  'utf-8',
-)
-
 describe('Provider picker in session creation (#1366)', () => {
   test('CreateSessionData includes provider field', () => {
     expect(modalSrc).toMatch(/interface CreateSessionData[\s\S]*?provider\??\s*:\s*string/)
@@ -95,8 +90,12 @@ describe('Provider picker in session creation (#1366)', () => {
     expect(schemasSrc).toMatch(/list_providers/)
   })
 
-  test('list_providers handler exists in ws-message-handlers', () => {
-    expect(handlersSrc).toMatch(/case\s+['"]list_providers['"]/)
+  test('list_providers handler exists in settings-handlers', () => {
+    const settingsHandlersSrc = fs.readFileSync(
+      path.resolve(__dirname, '../../../../src/handlers/settings-handlers.js'),
+      'utf-8'
+    )
+    expect(settingsHandlersSrc).toMatch(/list_providers/)
   })
 
   test('CreateSessionModal uses availableProviders from store', () => {

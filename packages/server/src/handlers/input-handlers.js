@@ -1,0 +1,124 @@
+/**
+ * Input and user interaction message handlers.
+ *
+ * Handles: input, interrupt, resume_budget, register_push_token, user_question_response
+ */
+import { validateAttachments, resolveFileRefAttachments } from '../handler-utils.js'
+
+function handleInput(ws, client, msg, ctx) {
+  const text = msg.data
+  let attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
+  const targetSessionId = msg.sessionId || client.activeSessionId
+  const entry = ctx.sessionManager.getSession(targetSessionId)
+  if (!entry) {
+    const message = msg.sessionId
+      ? `Session not found: ${msg.sessionId}`
+      : 'No active session'
+    ctx.send(ws, { type: 'session_error', message })
+    return
+  }
+
+  if (attachments?.length) {
+    const err = validateAttachments(attachments)
+    if (err) {
+      ctx.send(ws, { type: 'session_error', message: `Invalid attachment: ${err}` })
+      return
+    }
+  }
+
+  // Resolve file_ref attachments to actual file content
+  if (attachments?.length) {
+    attachments = resolveFileRefAttachments(attachments, entry.cwd)
+  }
+
+  if ((!text || !text.trim()) && !attachments?.length) return
+  const trimmed = text?.trim() || ''
+  const attCount = attachments?.length || 0
+  console.log(`[ws] Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
+
+  if (ctx.sessionManager.isBudgetPaused(targetSessionId)) {
+    ctx.send(ws, { type: 'session_error', message: 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.' })
+    return
+  }
+
+  // Input conflict: reject if session is already processing input from a different client
+  if (entry.session.isRunning) {
+    const primaryClientId = ctx.primaryClients.get(targetSessionId)
+    if (primaryClientId && primaryClientId !== client.id) {
+      ctx.send(ws, {
+        type: 'session_error',
+        category: 'input_conflict',
+        message: 'Session is already processing input from another device. Wait for it to finish or interrupt first.',
+      })
+      return
+    }
+  }
+
+  if (entry.session.resumeSessionId) {
+    ctx.checkpointManager.createCheckpoint({
+      sessionId: targetSessionId,
+      resumeSessionId: entry.session.resumeSessionId,
+      cwd: entry.cwd,
+      description: trimmed.slice(0, 100),
+      messageCount: ctx.sessionManager.getHistoryCount(targetSessionId),
+    }).catch((err) => console.warn(`[ws] Auto-checkpoint failed: ${err.message}`))
+  }
+  const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
+  ctx.sessionManager.recordUserInput(targetSessionId, historyText)
+  ctx.sessionManager.touchActivity(targetSessionId)
+  entry.session.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
+
+  ctx.updatePrimary(targetSessionId, client.id)
+
+  // Echo user_input to other clients so they see what was sent (#1119)
+  ctx.broadcast(
+    { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, timestamp: Date.now() },
+    (c) => c.id !== client.id
+  )
+}
+
+function handleInterrupt(ws, client, msg, ctx) {
+  const interruptSessionId = msg.sessionId || client.activeSessionId
+  const entry = ctx.sessionManager.getSession(interruptSessionId)
+  if (entry) {
+    console.log(`[ws] Interrupt from ${client.id} to session ${interruptSessionId}`)
+    entry.session.interrupt()
+  }
+}
+
+function handleResumeBudget(ws, client, msg, ctx) {
+  const budgetSessionId = msg.sessionId || client.activeSessionId
+  if (!budgetSessionId || !ctx.sessionManager.getSession(budgetSessionId)) {
+    ctx.send(ws, { type: 'session_error', message: 'No valid session for budget resume' })
+    return
+  }
+  if (ctx.sessionManager.isBudgetPaused(budgetSessionId)) {
+    ctx.sessionManager.resumeBudget(budgetSessionId)
+    ctx.broadcastToSession(budgetSessionId, { type: 'budget_resumed', sessionId: budgetSessionId })
+    console.log(`[ws] Budget resumed for session ${budgetSessionId} by ${client.id}`)
+  }
+}
+
+function handleRegisterPushToken(ws, client, msg, ctx) {
+  if (ctx.pushManager && typeof msg.token === 'string') {
+    ctx.pushManager.registerToken(msg.token)
+  }
+}
+
+function handleUserQuestionResponse(ws, client, msg, ctx) {
+  const questionSessionId = (msg.toolUseId && ctx.questionSessionMap.get(msg.toolUseId))
+    || client.activeSessionId
+  if (msg.toolUseId) ctx.questionSessionMap.delete(msg.toolUseId)
+  const entry = ctx.sessionManager.getSession(questionSessionId)
+  if (entry && typeof entry.session.respondToQuestion === 'function' && typeof msg.answer === 'string') {
+    entry.session.respondToQuestion(msg.answer)
+  }
+}
+
+export const inputHandlers = {
+  input: handleInput,
+  interrupt: handleInterrupt,
+  resume_budget: handleResumeBudget,
+  register_push_token: handleRegisterPushToken,
+  user_question_response: handleUserQuestionResponse,
+}
