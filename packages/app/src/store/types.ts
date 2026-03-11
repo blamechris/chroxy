@@ -424,6 +424,9 @@ export interface ConnectionState {
   // Pending auto permission mode confirmation from server
   pendingPermissionConfirm: { mode: string; warning: string } | null;
 
+  // Session timeout warning (from server session_warning event)
+  timeoutWarning: { sessionId: string; sessionName: string; remainingMs: number; receivedAt: number } | null;
+
   // Slash commands from server
   slashCommands: SlashCommand[];
 
@@ -579,6 +582,9 @@ export interface ConnectionState {
   // Offline cached session viewing
   viewCachedSession: () => void;
   exitCachedSession: () => void;
+
+  // Session timeout warning
+  dismissTimeoutWarning: () => void;
 
   // Follow mode
   setFollowMode: (enabled: boolean) => void;
