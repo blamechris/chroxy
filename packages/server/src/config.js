@@ -12,6 +12,7 @@ import { readFileSync, existsSync, mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
+import { getToken, isKeychainAvailable } from './keychain.js'
 
 /**
  * Known configuration keys and their expected types.
@@ -285,4 +286,15 @@ export function writeReposToConfig(repos, configPath = DEFAULT_CONFIG_PATH) {
   const dir = dirname(configPath)
   mkdirSync(dir, { recursive: true })
   writeFileRestricted(configPath, JSON.stringify(existing, null, 2))
+}
+
+/**
+ * Try to load the API token from the OS keychain.
+ * Returns the token if found, null otherwise.
+ * @param {string} [service] - Keychain service name (default: 'chroxy')
+ * @returns {string|null}
+ */
+export function loadTokenFromKeychain(service = 'chroxy') {
+  if (!isKeychainAvailable()) return null
+  return getToken(service)
 }

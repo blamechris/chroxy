@@ -5,6 +5,7 @@ import { existsSync, mkdirSync } from 'fs'
 import { randomBytes } from 'crypto'
 import { CONFIG_DIR, CONFIG_FILE, prompt } from './shared.js'
 import { defaultShell, writeFileRestricted } from '../platform.js'
+import { setToken, isKeychainAvailable } from '../keychain.js'
 
 export function registerInitCommand(program) {
   program
@@ -36,14 +37,22 @@ export function registerInitCommand(program) {
       const port = parseInt(portInput, 10) || 8765
 
       const config = {
-        apiToken,
         port,
         shell: defaultShell(),
       }
 
+      // Store token in OS keychain if available, otherwise in config file
+      if (isKeychainAvailable()) {
+        setToken(apiToken)
+        console.log('\n🔐 API token stored in OS keychain')
+      } else {
+        config.apiToken = apiToken
+        console.log('\n⚠ OS keychain unavailable — token stored in config file (chmod 600)')
+      }
+
       writeFileRestricted(CONFIG_FILE, JSON.stringify(config, null, 2))
 
-      console.log('\n✅ Configuration saved to:', CONFIG_FILE)
+      console.log('✅ Configuration saved to:', CONFIG_FILE)
       console.log('\n📱 Your API token (keep this secret):')
       console.log(`   ${apiToken}`)
       console.log('\n🚀 Run \'npx chroxy start\' to launch the server')
