@@ -51,20 +51,18 @@ type DisplayGroup =
   | { type: 'single'; message: ChatMessage }
   | { type: 'activity'; messages: ChatMessage[]; isActive: boolean; key: string };
 
-/** Group consecutive tool_use and thinking messages into ActivityGroups */
-function groupMessages(messages: ChatMessage[], streamingMessageId: string | null): DisplayGroup[] {
+/** Group consecutive tool_use and thinking messages into ActivityGroups.
+ *  Pure structural grouping — does not depend on streaming state. */
+function groupMessages(messages: ChatMessage[]): DisplayGroup[] {
   const groups: DisplayGroup[] = [];
   let activityBuf: ChatMessage[] = [];
 
   const flushActivity = () => {
     if (activityBuf.length > 0) {
-      const lastMsg = activityBuf[activityBuf.length - 1];
-      const isLastMessage = lastMsg === messages[messages.length - 1];
-      const isActive = isLastMessage && streamingMessageId !== null;
       groups.push({
         type: 'activity',
         messages: [...activityBuf],
-        isActive,
+        isActive: false,
         key: `activity-${activityBuf[0].id}`,
       });
       activityBuf = [];
@@ -215,10 +213,20 @@ export function ChatView({
     setToolDetail({ toolName, content, toolResult, toolResultTruncated, toolResultImages, serverName });
   };
 
-  const displayGroups = useMemo(
-    () => groupMessages(messages, streamingMessageId),
-    [messages, streamingMessageId],
-  );
+  // Structural grouping — only re-runs when messages change (not on streaming deltas)
+  const baseGroups = useMemo(() => groupMessages(messages), [messages]);
+
+  // Overlay streaming isActive flag — O(1), cheap to recompute on every delta
+  const displayGroups = useMemo(() => {
+    if (!streamingMessageId || baseGroups.length === 0) return baseGroups;
+    const last = baseGroups[baseGroups.length - 1];
+    if (last.type !== 'activity') return baseGroups;
+    const lastMsg = last.messages[last.messages.length - 1];
+    if (lastMsg !== messages[messages.length - 1]) return baseGroups;
+    const result = baseGroups.slice(0, -1);
+    result.push({ ...last, isActive: true });
+    return result;
+  }, [baseGroups, streamingMessageId, messages]);
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;

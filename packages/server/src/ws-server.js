@@ -19,7 +19,7 @@ import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
 import { RateLimiter } from './rate-limiter.js'
-import { createLogger, setLogListener } from './logger.js'
+import { createLogger, addLogListener, removeLogListener } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -239,8 +239,9 @@ export class WsServer {
     this._localhostBypass = localhostBypass ?? true
     this._maxPendingConnections = maxPendingConnections ?? 20
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024 // 1MB default
+    this._backpressureMaxDrops = 10 // close connection after this many consecutive drops
     this._rateLimiter = new RateLimiter()
-    this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
+    this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo, _backpressureDrops }
     this.httpServer = null
     this.wss = null
     this._pingInterval = null
@@ -595,6 +596,15 @@ export class WsServer {
       })
     })
 
+    this.httpServer.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        log.error(`Port ${this.port} is already in use — is another Chroxy instance running?`)
+        process.exit(1)
+        return
+      }
+      log.error(`HTTP server error: ${err.message}`)
+    })
+
     this.httpServer.listen(this.port, host)
 
     // Detect Claude Code Web features (non-blocking)
@@ -613,7 +623,7 @@ export class WsServer {
     // Re-entrancy guard prevents infinite recursion when _broadcast() itself
     // logs (e.g. backpressure debug messages) and log level is set to debug.
     let inLogBroadcast = false
-    setLogListener((entry) => {
+    this._logListener = (entry) => {
       if (inLogBroadcast) return
       inLogBroadcast = true
       try {
@@ -621,7 +631,8 @@ export class WsServer {
       } finally {
         inLogBroadcast = false
       }
-    })
+    }
+    addLogListener(this._logListener)
 
     // Wire up unified event forwarding via EventNormalizer
     setupForwarding({
@@ -749,9 +760,15 @@ export class WsServer {
     for (const [ws, client] of this.clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
         if (ws.bufferedAmount > this._backpressureThreshold) {
-          log.debug(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount})`)
+          client._backpressureDrops = (client._backpressureDrops || 0) + 1
+          log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
+          if (client._backpressureDrops >= this._backpressureMaxDrops) {
+            log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
+            ws.close(4008, 'Backpressure: too many dropped messages')
+          }
           continue
         }
+        client._backpressureDrops = 0
         this._send(ws, message)
       }
     }
@@ -769,9 +786,15 @@ export class WsServer {
     for (const [ws, client] of this.clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
         if (ws.bufferedAmount > this._backpressureThreshold) {
-          log.debug(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount})`)
+          client._backpressureDrops = (client._backpressureDrops || 0) + 1
+          log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
+          if (client._backpressureDrops >= this._backpressureMaxDrops) {
+            log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
+            ws.close(4008, 'Backpressure: too many dropped messages')
+          }
           continue
         }
+        client._backpressureDrops = 0
         this._send(ws, tagged)
       }
     }
@@ -989,8 +1012,11 @@ export class WsServer {
     // Clean up web task manager
     this._webTaskManager.destroy()
 
-    // Clear log listener to prevent post-shutdown broadcasts and GC leak
-    setLogListener(null)
+    // Remove this instance's log listener to prevent post-shutdown broadcasts and GC leak
+    if (this._logListener) {
+      removeLogListener(this._logListener)
+      this._logListener = null
+    }
 
     for (const [ws] of this.clients) {
       ws.close()

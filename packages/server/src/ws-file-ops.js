@@ -1038,7 +1038,18 @@ export function createFileOps(sendFn) {
 
     try {
       const cwdReal = await resolveSessionCwd(sessionCwd)
-      await execFileAsync(GIT, ['add', '--', ...files], {
+      // Validate each file path is within session CWD (prevents path traversal)
+      const validatedFiles = []
+      for (const file of files) {
+        const absPath = normalize(resolve(cwdReal, file))
+        const { valid } = await validatePathWithinCwd(absPath, sessionCwd)
+        if (!valid) {
+          sendFn(ws, { type: 'git_stage_result', error: `Access denied: path outside project directory — ${file}` })
+          return
+        }
+        validatedFiles.push(file)
+      }
+      await execFileAsync(GIT, ['add', '--', ...validatedFiles], {
         cwd: cwdReal,
         timeout: 10000,
       })
@@ -1062,7 +1073,18 @@ export function createFileOps(sendFn) {
 
     try {
       const cwdReal = await resolveSessionCwd(sessionCwd)
-      await execFileAsync(GIT, ['reset', 'HEAD', '--', ...files], {
+      // Validate each file path is within session CWD (prevents path traversal)
+      const validatedFiles = []
+      for (const file of files) {
+        const absPath = normalize(resolve(cwdReal, file))
+        const { valid } = await validatePathWithinCwd(absPath, sessionCwd)
+        if (!valid) {
+          sendFn(ws, { type: 'git_unstage_result', error: `Access denied: path outside project directory — ${file}` })
+          return
+        }
+        validatedFiles.push(file)
+      }
+      await execFileAsync(GIT, ['reset', 'HEAD', '--', ...validatedFiles], {
         cwd: cwdReal,
         timeout: 10000,
       })
