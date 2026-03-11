@@ -148,6 +148,13 @@ export function setLastConnectedUrl(url: string | null): void {
   lastConnectedUrl = url;
 }
 
+// Pending pairing ID — set when connecting via QR pairing flow, cleared after auth_ok
+export let pendingPairingId: string | null = null;
+
+export function setPendingPairingId(id: string | null): void {
+  pendingPairingId = id;
+}
+
 // ---------------------------------------------------------------------------
 // History replay flags
 // ---------------------------------------------------------------------------
@@ -595,11 +602,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       } : { available: false, remote: false, teleport: false };
 
       // On reconnect, preserve messages and terminal buffer
+      // If server provided a sessionToken (via pairing), use it for future auth
+      const effectiveToken = typeof msg.sessionToken === 'string' ? msg.sessionToken : ctx.token;
       const connectedState = {
         connectionPhase: 'connected' as const,
         viewingCachedSession: false,
         wsUrl: ctx.url,
-        apiToken: ctx.token,
+        apiToken: effectiveToken,
         socket: ctx.socket,
         claudeReady: false,
         serverMode: authServerMode,
@@ -649,9 +658,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         wsSend(ctx.socket, { type: 'list_agents' });
         set({ isEncrypted: false });
       }
-      // Save for quick reconnect
-      saveConnection(ctx.url, ctx.token);
-      set({ savedConnection: { url: ctx.url, token: ctx.token } });
+      // Save for quick reconnect (use effectiveToken for pairing flow)
+      saveConnection(ctx.url, effectiveToken);
+      set({ savedConnection: { url: ctx.url, token: effectiveToken } });
       // Register push token (async, non-blocking)
       void registerPushToken(ctx.socket);
       break;
@@ -684,6 +693,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         Alert.alert('Auth Failed', (msg.reason as string) || 'Invalid token');
       }
       break;
+
+    case 'pair_fail': {
+      ctx.socket.close();
+      set({ connectionPhase: 'disconnected', socket: null });
+      if (!ctx.silent) {
+        const reason = (msg.reason as string) || 'pairing_failed';
+        const pairMessages: Record<string, string> = {
+          expired: 'This QR code has expired. Scan the latest QR code from your server.',
+          already_used: 'This QR code has already been used. Scan the latest QR code from your server.',
+          invalid_pairing_id: 'Invalid pairing code. Scan the latest QR code from your server.',
+          rate_limited: 'Too many attempts. Please wait a moment and try again.',
+        };
+        Alert.alert('Pairing Failed', pairMessages[reason] || `Pairing failed: ${reason}`);
+      }
+      break;
+    }
 
     case 'server_mode':
       set({ serverMode: msg.mode === 'cli' ? 'cli' : null });

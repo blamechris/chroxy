@@ -18,7 +18,7 @@ const log = createLogger('ws')
  * @param {object} ctx - Server context
  * @param {WebSocket} ws - The client WebSocket
  */
-export function sendPostAuthInfo(ctx, ws) {
+export function sendPostAuthInfo(ctx, ws, extra = {}) {
   const {
     clients, sessionManager, cliSession, defaultSessionId,
     serverMode, serverVersion, latestVersion, gitInfo,
@@ -66,6 +66,7 @@ export function sendPostAuthInfo(ctx, ws) {
     minProtocolVersion,
     maxProtocolVersion: protocolVersion,
     webFeatures: webTaskManager.getFeatureStatus(),
+    ...extra,
   })
 
   // If encryption required, queue all subsequent messages until key exchange completes

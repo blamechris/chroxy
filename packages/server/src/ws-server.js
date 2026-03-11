@@ -13,7 +13,7 @@ import { createFileOps } from './ws-file-ops.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
-import { handleAuthMessage, handleKeyExchange } from './ws-auth.js'
+import { handleAuthMessage, handlePairMessage, handleKeyExchange } from './ws-auth.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
 import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
@@ -228,10 +228,11 @@ function _isSecureRequest(req) {
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, maxPendingConnections, backpressureThreshold } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
+    this._pairingManager = pairingManager || null
     this._maxPayload = maxPayload || 10 * 1024 * 1024 // default 10MB (supports image/doc attachments)
     this.authRequired = authRequired
     this._encryptionEnabled = !noEncrypt
@@ -314,9 +315,16 @@ export class WsServer {
       get authRequired() { return self.authRequired },
       isTokenValid: (token) => self._isTokenValid(token),
       get authFailures() { return self._authFailures },
+      get pairingManager() { return self._pairingManager },
       send: sendFn,
       onAuthSuccess: (ws, client) => {
-        self._sendPostAuthInfo(ws)
+        // If paired, include sessionToken in auth_ok response
+        if (client._sessionToken) {
+          self._sendPostAuthInfo(ws, { sessionToken: client._sessionToken })
+          delete client._sessionToken
+        } else {
+          self._sendPostAuthInfo(ws)
+        }
         self._broadcastClientJoined(client, ws)
       },
       minProtocolVersion: MIN_PROTOCOL_VERSION,
@@ -396,6 +404,8 @@ export class WsServer {
    */
   _isTokenValid(token) {
     if (!token) return false
+    // Check session tokens issued via pairing
+    if (this._pairingManager && this._pairingManager.isSessionTokenValid(token)) return true
     if (this._tokenManager) return this._tokenManager.validate(token)
     return safeTokenCompare(token, this.apiToken)
   }
@@ -659,7 +669,7 @@ export class WsServer {
   }
 
   /** Delegates to ws-history.js */
-  _sendPostAuthInfo(ws) { sendPostAuthInfo(this._historyCtx, ws) }
+  _sendPostAuthInfo(ws, extra) { sendPostAuthInfo(this._historyCtx, ws, extra) }
   _replayHistory(ws, sessionId) { replayHistory(this._historyCtx, ws, sessionId) }
   _flushPostAuthQueue(ws, queue) { flushPostAuthQueue(this._historyCtx, ws, queue) }
   _sendSessionInfo(ws, sessionId) { sendSessionInfo(this._historyCtx, ws, sessionId) }
@@ -671,7 +681,11 @@ export class WsServer {
 
     // Auth handling (delegates to ws-auth.js)
     if (!client.authenticated) {
-      handleAuthMessage(this._authCtx, ws, msg)
+      if (msg.type === 'pair') {
+        handlePairMessage(this._authCtx, ws, msg)
+      } else {
+        handleAuthMessage(this._authCtx, ws, msg)
+      }
       return
     }
     if (msg.type === 'auth') return

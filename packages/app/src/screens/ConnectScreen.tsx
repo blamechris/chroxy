@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import * as Network from 'expo-network';
 import { useConnectionStore } from '../store/connection';
+import { setPendingPairingId } from '../store/message-handler';
 import { Icon } from '../components/Icon';
 import { ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
 import { COLORS } from '../constants/colors';
@@ -31,7 +32,8 @@ interface DiscoveredServer {
 
 
 type ParseResult =
-  | { ok: true; wsUrl: string; token: string }
+  | { ok: true; wsUrl: string; token: string; pairingId?: undefined }
+  | { ok: true; wsUrl: string; token?: undefined; pairingId: string }
   | { ok: false; reason: 'not_chroxy' | 'missing_token' | 'invalid_url' };
 
 export function parseChroxyUrl(raw: string): ParseResult {
@@ -40,8 +42,15 @@ export function parseChroxyUrl(raw: string): ParseResult {
     if (trimmed.startsWith('chroxy://')) {
       const parsed = new URL(trimmed.replace('chroxy://', 'https://'));
       const wsUrl = `wss://${parsed.host}`;
+
+      // New pairing flow: chroxy://host?pair=PAIRING_ID
+      const pairingId = parsed.searchParams.get('pair');
+      if (pairingId) return { ok: true, wsUrl, pairingId };
+
+      // Legacy flow: chroxy://host?token=TOKEN
       const token = parsed.searchParams.get('token');
-      if (wsUrl && token) return { ok: true, wsUrl, token };
+      if (token) return { ok: true, wsUrl, token };
+
       return { ok: false, reason: 'missing_token' };
     }
     if (trimmed.startsWith('wss://')) {
@@ -178,7 +187,14 @@ export function ConnectScreen() {
     const parsed = parseChroxyUrl(result.data);
     if (parsed.ok) {
       setShowScanner(false);
-      connect(parsed.wsUrl, parsed.token);
+      if ('pairingId' in parsed && parsed.pairingId) {
+        // New pairing flow: set pairing ID before connecting
+        setPendingPairingId(parsed.pairingId);
+        connect(parsed.wsUrl, '');
+      } else {
+        // Legacy flow: connect with permanent token
+        connect(parsed.wsUrl, parsed.token || '');
+      }
     } else {
       const errorInfo = QR_ERROR_MESSAGES[parsed.reason] || QR_ERROR_MESSAGES.invalid_url;
       Alert.alert(
