@@ -114,7 +114,7 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
   if (msg.toolUseId) ctx.questionSessionMap.delete(msg.toolUseId)
   const entry = ctx.sessionManager.getSession(questionSessionId)
   if (entry && typeof entry.session.respondToQuestion === 'function' && typeof msg.answer === 'string') {
-    entry.session.respondToQuestion(msg.answer)
+    entry.session.respondToQuestion(msg.answer, msg.answers)
   }
 }
 
