@@ -42,6 +42,7 @@ const CONFIG_SCHEMA = {
   repos: 'array',
   maxSessions: 'number',
   maxHistory: 'number',
+  showToken: 'boolean',
 }
 
 /**

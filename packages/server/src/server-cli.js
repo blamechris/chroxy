@@ -10,6 +10,7 @@ import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import qrcode from 'qrcode-terminal'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
+import { maskToken } from './mask-token.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
 import { getLanIp } from './lan-ip.js'
@@ -266,16 +267,24 @@ export async function startCliServer(config) {
   }
 
   // Helper: display QR code and connection info
+  const SHOW_TOKEN = !!config.showToken
   const displayQr = (wsUrlStr, httpUrlStr, modeLabel) => {
     const pairingUrl = buildPairingUrl(wsUrlStr)
     if (pairingUrl) {
       console.log(`\n[✓] Server ready! (CLI headless mode, ${modeLabel})\n`)
       console.log('📱 Scan this QR code with the Chroxy app:\n')
       qrcode.generate(pairingUrl, { small: true })
+      const displayToken = SHOW_TOKEN ? API_TOKEN : maskToken(API_TOKEN)
       console.log(`\nOr connect manually:`)
       console.log(`   URL:   ${wsUrlStr}`)
-      console.log(`   Token: ${API_TOKEN}`)
-      if (httpUrlStr) console.log(`   Dashboard: ${httpUrlStr}/dashboard?token=${API_TOKEN}`)
+      console.log(`   Token: ${displayToken}`)
+      if (httpUrlStr) {
+        if (SHOW_TOKEN) {
+          console.log(`   Dashboard: ${httpUrlStr}/dashboard?token=${API_TOKEN}`)
+        } else {
+          console.log(`   Dashboard: ${httpUrlStr}/dashboard (use --show-token to see full URL)`)
+        }
+      }
     }
 
     writeConnectionInfo({
