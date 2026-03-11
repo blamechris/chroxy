@@ -371,7 +371,11 @@ export class SessionManager extends EventEmitter {
     this.stopSessionTimeouts()
     clearTimeout(this._persistTimer)
     this._persistTimer = null
-    this.serializeState()
+    try {
+      this.serializeState()
+    } catch (err) {
+      console.error('[session-manager] Failed to serialize state during destroyAll:', err.message)
+    }
     for (const [sessionId, entry] of this._sessions) {
       entry.session.removeAllListeners()
       entry.session.on('error', () => {})
@@ -668,7 +672,7 @@ export class SessionManager extends EventEmitter {
             content,
             messageId: data.messageId,
             timestamp: Date.now(),
-          })
+          }, sessionId)
         }
         this._schedulePersist()
         break
@@ -682,7 +686,7 @@ export class SessionManager extends EventEmitter {
           tool: data.tool,
           options: data.options,
           timestamp: data.timestamp,
-        })
+        }, sessionId)
         this._schedulePersist()
         break
 
@@ -694,7 +698,7 @@ export class SessionManager extends EventEmitter {
           tool: data.tool,
           input: data.input,
           timestamp: Date.now(),
-        })
+        }, sessionId)
         break
 
       case 'tool_result':
@@ -704,7 +708,7 @@ export class SessionManager extends EventEmitter {
           result: data.result,
           truncated: data.truncated,
           timestamp: Date.now(),
-        })
+        }, sessionId)
         break
 
       case 'result':
@@ -714,7 +718,7 @@ export class SessionManager extends EventEmitter {
           duration: data.duration,
           usage: data.usage,
           timestamp: Date.now(),
-        })
+        }, sessionId)
         this._schedulePersist()
         break
 
@@ -724,7 +728,7 @@ export class SessionManager extends EventEmitter {
           toolUseId: data.toolUseId,
           questions: data.questions,
           timestamp: Date.now(),
-        })
+        }, sessionId)
         break
     }
   }
@@ -732,19 +736,13 @@ export class SessionManager extends EventEmitter {
   /**
    * Push an entry to the history array, trimming to max size.
    */
-  _pushHistory(history, entry) {
+  _pushHistory(history, entry, sessionId) {
     history.push(entry)
     if (history.length > this._maxHistory) {
       while (history.length > this._maxHistory) {
         history.shift()
       }
-      // Find the sessionId that owns this history array and mark it truncated
-      for (const [sessionId, h] of this._messageHistory) {
-        if (h === history) {
-          this._historyTruncated.set(sessionId, true)
-          break
-        }
-      }
+      this._historyTruncated.set(sessionId, true)
     }
   }
 

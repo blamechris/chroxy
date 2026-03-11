@@ -372,9 +372,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 4,
   },
-  attachmentDocIcon: {
-    fontSize: 20,
-  },
   attachmentDocName: {
     color: COLORS.textMuted,
     fontSize: 9,
@@ -402,11 +399,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accentRed,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  attachmentRemoveText: {
-    color: COLORS.textPrimary,
-    fontSize: 10,
-    fontWeight: 'bold',
   },
   inputRow: {
     flexDirection: 'row',
@@ -447,18 +439,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  cameraButtonText: {
-    fontSize: 20,
-  },
   attachButton: {
     width: 36,
     height: 36,
     borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  attachButtonText: {
-    fontSize: 20,
   },
   sendButtonDisabled: {
     opacity: 0.4,
@@ -471,11 +457,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sendButtonText: {
-    color: COLORS.textPrimary,
-    fontSize: 20,
-    fontWeight: 'bold',
-  },
   interruptButton: {
     backgroundColor: COLORS.accentRed,
     width: 40,
@@ -487,19 +468,11 @@ const styles = StyleSheet.create({
   interruptButtonDisabled: {
     opacity: 0.4,
   },
-  interruptButtonText: {
-    color: COLORS.textPrimary,
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
   micButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  micButtonText: {
-    fontSize: 18,
   },
 });

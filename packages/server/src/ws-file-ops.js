@@ -17,15 +17,20 @@ const execFileAsync = promisify(execFileCb)
  * @returns {Object} File operation methods
  */
 export function createFileOps(sendFn) {
-  // Cache resolved CWD real paths to avoid repeated syscalls
+  // Cache resolved CWD real paths with TTL to avoid repeated syscalls
+  // while allowing stale entries to be refreshed if symlinks change.
   const _cwdRealCache = new Map()
+  const CWD_CACHE_TTL = 60_000 // 60 seconds
 
-  /** Resolve a session CWD to its real path, caching the result */
+  /** Resolve a session CWD to its real path, caching with TTL */
   async function resolveSessionCwd(sessionCwd) {
     const key = resolve(sessionCwd)
-    if (_cwdRealCache.has(key)) return _cwdRealCache.get(key)
+    const cached = _cwdRealCache.get(key)
+    if (cached && Date.now() - cached.ts < CWD_CACHE_TTL) {
+      return cached.resolved
+    }
     const resolved = await realpath(key)
-    _cwdRealCache.set(key, resolved)
+    _cwdRealCache.set(key, { resolved, ts: Date.now() })
     return resolved
   }
 
