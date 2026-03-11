@@ -111,37 +111,38 @@ export function SessionScreen() {
   const keyboardHeight = useKeyboardHeight();
   const layout = useLayout();
 
-  const {
-    viewMode,
-    setViewMode,
-    messages,
-    sendInput,
-    sendInterrupt,
-    disconnect,
-    clearTerminalBuffer,
-    addUserMessage,
-    inputSettings,
-    updateInputSettings,
-    claudeReady,
-    serverMode,
-    sessionCwd,
-    streamingMessageId,
-    connectionPhase,
-    activeModel,
-    availableModels,
-    permissionMode,
-    availablePermissionModes,
-    contextUsage,
-    lastResultCost,
-    lastResultDuration,
-    setModel,
-    setPermissionMode,
-    confirmPermissionMode,
-    cancelPermissionConfirm,
-    sendPermissionResponse,
-    sendUserQuestionResponse,
-    markPromptAnswered,
-  } = useConnectionStore();
+  // Individual selectors for state values — avoids subscribing to every store change
+  const viewMode = useConnectionStore((s) => s.viewMode);
+  const messages = useConnectionStore((s) => s.messages);
+  const inputSettings = useConnectionStore((s) => s.inputSettings);
+  const claudeReady = useConnectionStore((s) => s.claudeReady);
+  const serverMode = useConnectionStore((s) => s.serverMode);
+  const sessionCwd = useConnectionStore((s) => s.sessionCwd);
+  const streamingMessageId = useConnectionStore((s) => s.streamingMessageId);
+  const connectionPhase = useConnectionStore((s) => s.connectionPhase);
+  const activeModel = useConnectionStore((s) => s.activeModel);
+  const availableModels = useConnectionStore((s) => s.availableModels);
+  const permissionMode = useConnectionStore((s) => s.permissionMode);
+  const availablePermissionModes = useConnectionStore((s) => s.availablePermissionModes);
+  const contextUsage = useConnectionStore((s) => s.contextUsage);
+  const lastResultCost = useConnectionStore((s) => s.lastResultCost);
+  const lastResultDuration = useConnectionStore((s) => s.lastResultDuration);
+
+  // Action functions — stable references, individual selectors to avoid omnibus subscription
+  const setViewMode = useConnectionStore((s) => s.setViewMode);
+  const sendInput = useConnectionStore((s) => s.sendInput);
+  const sendInterrupt = useConnectionStore((s) => s.sendInterrupt);
+  const disconnect = useConnectionStore((s) => s.disconnect);
+  const clearTerminalBuffer = useConnectionStore((s) => s.clearTerminalBuffer);
+  const addUserMessage = useConnectionStore((s) => s.addUserMessage);
+  const updateInputSettings = useConnectionStore((s) => s.updateInputSettings);
+  const setModel = useConnectionStore((s) => s.setModel);
+  const setPermissionMode = useConnectionStore((s) => s.setPermissionMode);
+  const confirmPermissionMode = useConnectionStore((s) => s.confirmPermissionMode);
+  const cancelPermissionConfirm = useConnectionStore((s) => s.cancelPermissionConfirm);
+  const sendPermissionResponse = useConnectionStore((s) => s.sendPermissionResponse);
+  const sendUserQuestionResponse = useConnectionStore((s) => s.sendUserQuestionResponse);
+  const markPromptAnswered = useConnectionStore((s) => s.markPromptAnswered);
 
   const sessions = useConnectionStore((s) => s.sessions);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
