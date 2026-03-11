@@ -520,7 +520,7 @@ export class SdkSession extends BaseSession {
    * In SDK mode, the canUseTool callback is holding a Promise open.
    * This method resolves it with the user's answer as structured updatedInput.
    */
-  respondToQuestion(text) {
+  respondToQuestion(text, answersMap) {
     if (!this._pendingUserAnswer) return
     this._clearQuestionTimer()
     const { resolve, input } = this._pendingUserAnswer
@@ -532,10 +532,16 @@ export class SdkSession extends BaseSession {
     // Build structured answers map: SDK expects { [questionText]: selectedLabel }
     const answers = {}
     const questions = input.questions || []
-    if (questions.length > 0) {
-      // Map the answer to each question. The app sends a single text
-      // response, which works for the common single-question case.
-      // For multi-question prompts the user's text applies to all.
+    const questionKeys = new Set(questions.map(q => q.question))
+    if (answersMap && typeof answersMap === 'object' && Object.keys(answersMap).length > 0) {
+      // Per-question answers provided by the client — only copy known question keys
+      for (const key of Object.keys(answersMap)) {
+        if (questionKeys.has(key)) {
+          answers[key] = answersMap[key]
+        }
+      }
+    } else if (questions.length > 0) {
+      // Fallback: single answer mapped to all questions
       for (const q of questions) {
         answers[q.question] = text
       }
