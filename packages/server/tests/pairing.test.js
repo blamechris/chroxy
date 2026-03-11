@@ -91,6 +91,71 @@ describe('PairingManager (#1836)', () => {
     })
   })
 
+  describe('grace period for refreshed IDs (#1895)', () => {
+    it('old pairing ID is still valid within TTL after refresh', () => {
+      const pm = new PairingManager({ ttlMs: 60_000 })
+      const oldId = pm.currentPairingId
+      pm.refresh()
+      const result = pm.validatePairing(oldId)
+      assert.equal(result.valid, true, 'old ID should be valid within TTL')
+      assert.ok(result.sessionToken)
+      pm.destroy()
+    })
+
+    it('old pairing ID is rejected after TTL expires', async () => {
+      const pm = new PairingManager({ ttlMs: 1 })
+      const oldId = pm.currentPairingId
+      pm.refresh()
+      await delay(10)
+      const result = pm.validatePairing(oldId)
+      assert.equal(result.valid, false)
+      assert.equal(result.reason, 'expired')
+      pm.destroy()
+    })
+
+    it('old pairing ID is one-time use even during grace period', () => {
+      const pm = new PairingManager({ ttlMs: 60_000 })
+      const oldId = pm.currentPairingId
+      pm.refresh()
+      const first = pm.validatePairing(oldId)
+      assert.equal(first.valid, true)
+      const second = pm.validatePairing(oldId)
+      assert.equal(second.valid, false)
+      assert.equal(second.reason, 'already_used')
+      pm.destroy()
+    })
+
+    it('multiple old IDs can be valid simultaneously', () => {
+      const pm = new PairingManager({ ttlMs: 60_000 })
+      const id1 = pm.currentPairingId
+      pm.refresh()
+      const id2 = pm.currentPairingId
+      pm.refresh()
+      const id3 = pm.currentPairingId
+
+      // All three should be valid
+      const r3 = pm.validatePairing(id3)
+      assert.equal(r3.valid, true, 'current should be valid')
+      const r1 = pm.validatePairing(id1)
+      assert.equal(r1.valid, true, 'oldest should still be valid within TTL')
+      const r2 = pm.validatePairing(id2)
+      assert.equal(r2.valid, true, 'middle should still be valid within TTL')
+      pm.destroy()
+    })
+
+    it('expired entries are pruned on refresh', async () => {
+      const pm = new PairingManager({ ttlMs: 1 })
+      const oldId = pm.currentPairingId
+      await delay(10)
+      pm.refresh()
+      // Old entry should have been pruned (must return invalid_pairing_id, not expired)
+      const result = pm.validatePairing(oldId)
+      assert.equal(result.valid, false)
+      assert.equal(result.reason, 'invalid_pairing_id')
+      pm.destroy()
+    })
+  })
+
   describe('auto-refresh', () => {
     it('refresh() emits pairing_refreshed event', () => {
       const pm = new PairingManager({})
