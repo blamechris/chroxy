@@ -1310,3 +1310,25 @@ describe('SessionManager.defaultCwd getter (#1475)', () => {
     assert.equal(mgr.defaultCwd, process.cwd())
   })
 })
+
+describe('Configurable magic numbers (#1848)', () => {
+  it('maxHistory defaults to 500', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    assert.equal(mgr._maxHistory, 500)
+  })
+
+  it('maxHistory can be configured', () => {
+    const mgr = new SessionManager({ maxSessions: 5, maxHistory: 1000 })
+    assert.equal(mgr._maxHistory, 1000)
+  })
+
+  it('maxSessions can be configured', () => {
+    const mgr = new SessionManager({ maxSessions: 10 })
+    assert.equal(mgr.maxSessions, 10)
+  })
+
+  it('maxSessions defaults to 5', () => {
+    const mgr = new SessionManager({})
+    assert.equal(mgr.maxSessions, 5)
+  })
+})
