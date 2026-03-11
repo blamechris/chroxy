@@ -122,7 +122,7 @@ describe('validateConfig', () => {
 
 describe('mergeConfig', () => {
   let originalEnv
-  const envKeys = ['API_TOKEN', 'PORT', 'SHELL_CMD', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_NO_AUTH', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME', 'CHROXY_LEGACY_CLI', 'CHROXY_PROVIDER']
+  const envKeys = ['API_TOKEN', 'PORT', 'SHELL_CMD', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_NO_AUTH', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME', 'CHROXY_LEGACY_CLI', 'CHROXY_PROVIDER', 'CHROXY_SHOW_TOKEN', 'CHROXY_REPOS']
 
   beforeEach(() => {
     originalEnv = {}
@@ -308,6 +308,19 @@ describe('mergeConfig', () => {
     const merged = mergeConfig({ fileConfig })
     assert.equal(merged.provider, 'custom')
     assert.equal(merged.legacyCli, true)
+  })
+
+  it('reads showToken from CHROXY_SHOW_TOKEN env var (#1924)', () => {
+    process.env.CHROXY_SHOW_TOKEN = '1'
+    const merged = mergeConfig({ defaults: { showToken: false } })
+    assert.equal(merged.showToken, true)
+  })
+
+  it('reads repos from CHROXY_REPOS env var as comma-separated (#1924)', () => {
+    process.env.CHROXY_REPOS = '/home/user/project1,/home/user/project2'
+    const merged = mergeConfig({ defaults: {} })
+    assert.ok(Array.isArray(merged.repos))
+    assert.deepEqual(merged.repos, ['/home/user/project1', '/home/user/project2'])
   })
 })
 

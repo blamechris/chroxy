@@ -1142,6 +1142,30 @@ describe('#1227 — guard destroyAll() session.destroy() with try-catch', () => 
   })
 })
 
+describe('#1942 — destroyAll() wraps serializeState in try-catch', () => {
+  it('continues destroying sessions when serializeState throws', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    // Make serializeState throw
+    mgr.serializeState = () => { throw new Error('disk full') }
+
+    // Add a session
+    const session1 = new EventEmitter()
+    session1.isRunning = false
+    let destroyed = false
+    session1.destroy = () => { destroyed = true }
+    session1.removeAllListeners = () => {}
+    mgr._sessions.set('s1', { session: session1, type: 'cli', name: 'S1', cwd: '/tmp' })
+    mgr._lastActivity.set('s1', Date.now())
+
+    // Should not throw despite serializeState failure
+    mgr.destroyAll()
+
+    assert.equal(mgr._sessions.size, 0, 'sessions should be cleared')
+    assert.equal(destroyed, true, 'session should still be destroyed')
+  })
+})
+
 describe('#1243 — destroyAll() clears all session-scoped maps', () => {
   it('clears messageHistory, historyTruncated, sessionCosts, budget maps, pendingStreams after destroyAll', () => {
     const mgr = new SessionManager({ maxSessions: 5 })

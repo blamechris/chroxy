@@ -371,7 +371,11 @@ export class SessionManager extends EventEmitter {
     this.stopSessionTimeouts()
     clearTimeout(this._persistTimer)
     this._persistTimer = null
-    this.serializeState()
+    try {
+      this.serializeState()
+    } catch (err) {
+      console.error('[session-manager] Failed to serialize state during destroyAll:', err.message)
+    }
     for (const [sessionId, entry] of this._sessions) {
       entry.session.removeAllListeners()
       entry.session.on('error', () => {})

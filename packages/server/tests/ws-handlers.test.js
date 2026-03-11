@@ -339,4 +339,38 @@ describe('WS handler: register_push_token', () => {
 
     ws.close()
   })
+
+  it('sends push_token_error when registration fails (#1926)', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Default', cwd: '/tmp' },
+    ])
+    const mockPushManager = { registerToken: () => false }
+
+    server = new WsServer({
+      port: 0, apiToken: 'test-token', authRequired: false,
+      sessionManager: manager,
+      pushManager: mockPushManager,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    send(ws, { type: 'register_push_token', token: '' })
+
+    const errorMsg = await withTimeout(
+      new Promise(resolve => {
+        const check = () => {
+          const found = messages.find(m => m.type === 'push_token_error')
+          if (found) return resolve(found)
+          setTimeout(check, 50)
+        }
+        check()
+      }),
+      2000,
+      'Expected push_token_error message'
+    )
+    assert.equal(errorMsg.type, 'push_token_error')
+    assert.ok(errorMsg.message.includes('rejected'))
+
+    ws.close()
+  })
 })

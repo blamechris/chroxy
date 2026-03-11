@@ -49,8 +49,21 @@ describe('PushManager', () => {
       assert.ok(manager.tokens.has(VALID_TOKEN))
     })
 
-    it('rejects token not starting with ExponentPushToken[', () => {
-      const result = manager.registerToken('invalid-token-string')
+    it('accepts FCM-style tokens (#1926)', () => {
+      const fcmToken = 'dGVzdC1mY20tdG9rZW4tZm9yLWFuZHJvaWQ6QVBBOTFiR3Q'
+      const result = manager.registerToken(fcmToken)
+      assert.equal(result, true)
+      assert.ok(manager.tokens.has(fcmToken))
+    })
+
+    it('accepts any non-empty string token (#1926)', () => {
+      const result = manager.registerToken('some-custom-token-format')
+      assert.equal(result, true)
+      assert.ok(manager.tokens.has('some-custom-token-format'))
+    })
+
+    it('rejects empty string (#1926)', () => {
+      const result = manager.registerToken('')
       assert.equal(result, false)
       assert.equal(manager.tokens.size, 0)
     })
