@@ -122,24 +122,43 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
   const [newCheckpointName, setNewCheckpointName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const [isLoadingList, setIsLoadingList] = useState(false);
+  const loadingTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const creatingTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const prevCheckpointCountRef = useRef(checkpoints.length);
 
-  // Clean up timer on unmount
-  useEffect(() => () => clearTimeout(creatingTimerRef.current), []);
+  // Clean up timers on unmount
+  useEffect(() => () => {
+    clearTimeout(loadingTimerRef.current);
+    clearTimeout(creatingTimerRef.current);
+  }, []);
+
+  // Clear loading/creating when checkpoints update from the store
+  useEffect(() => {
+    if (isLoadingList) {
+      setIsLoadingList(false);
+      clearTimeout(loadingTimerRef.current);
+    }
+    if (isCreating && checkpoints.length > prevCheckpointCountRef.current) {
+      setIsCreating(false);
+      clearTimeout(creatingTimerRef.current);
+    }
+    prevCheckpointCountRef.current = checkpoints.length;
+  }, [checkpoints]); // eslint-disable-line react-hooks/exhaustive-deps -- intentionally reactive to checkpoints only
 
   // Fetch checkpoints when modal opens; reset local state when it closes
   useEffect(() => {
     if (visible) {
       setIsLoadingList(true);
       listCheckpoints();
-      // Clear loading after short delay (server responds via store update)
-      const timer = setTimeout(() => setIsLoadingList(false), 1500);
-      return () => clearTimeout(timer);
+      // Safety-net timeout in case server never responds
+      clearTimeout(loadingTimerRef.current);
+      loadingTimerRef.current = setTimeout(() => setIsLoadingList(false), 8000);
     } else {
       setShowCreateInput(false);
       setNewCheckpointName('');
       setIsCreating(false);
       setIsLoadingList(false);
+      clearTimeout(loadingTimerRef.current);
       clearTimeout(creatingTimerRef.current);
     }
   }, [visible, listCheckpoints]);
@@ -152,14 +171,15 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
 
   const handleCreate = useCallback(() => {
     const name = newCheckpointName.trim() || undefined;
+    prevCheckpointCountRef.current = checkpoints.length;
     createCheckpoint(name);
     setNewCheckpointName('');
     setShowCreateInput(false);
     setIsCreating(true);
-    // Clear creating state after a short delay (server will update the list)
+    // Safety-net timeout in case server never responds
     clearTimeout(creatingTimerRef.current);
-    creatingTimerRef.current = setTimeout(() => setIsCreating(false), 2000);
-  }, [newCheckpointName, createCheckpoint]);
+    creatingTimerRef.current = setTimeout(() => setIsCreating(false), 8000);
+  }, [newCheckpointName, createCheckpoint, checkpoints.length]);
 
   const handleDelete = useCallback(
     (id: string) => {
