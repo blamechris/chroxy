@@ -146,6 +146,7 @@ export function HistoryScreen() {
   const resumeConversation = useConnectionStore((s) => s.resumeConversation);
   const searchResults = useConnectionStore((s) => s.searchResults);
   const searchLoading = useConnectionStore((s) => s.searchLoading);
+  const searchError = useConnectionStore((s) => s.searchError);
   const searchConversations = useConnectionStore((s) => s.searchConversations);
   const clearSearchResults = useConnectionStore((s) => s.clearSearchResults);
 
@@ -305,6 +306,18 @@ export function HistoryScreen() {
           <View style={[styles.centered, { flex: 1 }]}>
             <ActivityIndicator size="small" color={COLORS.accentBlue} />
             <Text style={styles.loadingText}>Searching...</Text>
+          </View>
+        ) : searchError ? (
+          <View style={[styles.centered, { flex: 1 }]}>
+            <Text style={styles.errorText}>{searchError}</Text>
+            <TouchableOpacity
+              style={styles.retryButton}
+              onPress={() => searchConversations(searchQuery.trim())}
+              accessibilityRole="button"
+              accessibilityLabel="Retry search"
+            >
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </TouchableOpacity>
           </View>
         ) : searchResults.length === 0 ? (
           <View style={[styles.centered, { flex: 1 }]}>
