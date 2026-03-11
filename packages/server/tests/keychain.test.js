@@ -103,13 +103,16 @@ describe('Keychain failure paths (#1887)', () => {
     // Extract migrateToken function body and verify it has try/catch around setToken
     const migrateBlock = source.match(/export function migrateToken[\s\S]*?^}/m)
     assert.ok(migrateBlock, 'migrateToken function should exist')
+    // Use word-boundary regex to avoid matching comments or unrelated identifiers
     assert.ok(
-      migrateBlock[0].includes('try') && migrateBlock[0].includes('setToken') && migrateBlock[0].includes('catch'),
+      /\btry\s*\{/.test(migrateBlock[0]) && migrateBlock[0].includes('setToken') && /\bcatch\b/.test(migrateBlock[0]),
       'migrateToken should wrap setToken in try/catch'
     )
+    // Verify the catch block returns migrated: false (not some other branch)
+    const catchBlock = migrateBlock[0].match(/\bcatch\b[\s\S]*?(?=\n  \}|\n\})/)?.[0] ?? ''
     assert.ok(
-      migrateBlock[0].includes('migrated: false'),
-      'migrateToken catch should return migrated: false'
+      catchBlock.includes('migrated: false'),
+      'migrateToken catch block should return migrated: false'
     )
   })
 
@@ -120,8 +123,9 @@ describe('Keychain failure paths (#1887)', () => {
     // so callers (like migrateToken) can handle the error
     const setTokenBlock = source.match(/export function setToken[\s\S]*?^}/m)
     assert.ok(setTokenBlock, 'setToken function should exist')
+    // Use regex with word boundary to avoid false matches from 'try{' (no space) or comments
     assert.ok(
-      !setTokenBlock[0].includes('try {'),
+      !/\btry\s*\{/.test(setTokenBlock[0]),
       'setToken should not catch errors — it should throw to caller'
     )
   })
@@ -132,16 +136,21 @@ describe('Keychain failure paths (#1887)', () => {
     // Both _macGetToken and _linuxGetToken should have try/catch returning null
     const macGet = source.match(/function _macGetToken[\s\S]*?^}/m)
     assert.ok(macGet, '_macGetToken should exist')
+    // Verify try block and that the catch block (not just any path) returns null
+    assert.ok(/\btry\s*\{/.test(macGet[0]), '_macGetToken should have a try block')
+    const macCatch = macGet[0].match(/\bcatch\b[\s\S]*$/)?.[0] ?? ''
     assert.ok(
-      macGet[0].includes('try') && macGet[0].includes('return null'),
-      '_macGetToken should catch errors and return null'
+      /\breturn null\b/.test(macCatch),
+      '_macGetToken catch block should return null'
     )
 
     const linuxGet = source.match(/function _linuxGetToken[\s\S]*?^}/m)
     assert.ok(linuxGet, '_linuxGetToken should exist')
+    assert.ok(/\btry\s*\{/.test(linuxGet[0]), '_linuxGetToken should have a try block')
+    const linuxCatch = linuxGet[0].match(/\bcatch\b[\s\S]*$/)?.[0] ?? ''
     assert.ok(
-      linuxGet[0].includes('try') && linuxGet[0].includes('return null'),
-      '_linuxGetToken should catch errors and return null'
+      /\breturn null\b/.test(linuxCatch),
+      '_linuxGetToken catch block should return null'
     )
   })
 
@@ -151,17 +160,14 @@ describe('Keychain failure paths (#1887)', () => {
     // Both _macDeleteToken and _linuxDeleteToken should have try/catch
     const macDel = source.match(/function _macDeleteToken[\s\S]*?^}/m)
     assert.ok(macDel, '_macDeleteToken should exist')
-    assert.ok(
-      macDel[0].includes('try') && macDel[0].includes('catch'),
-      '_macDeleteToken should catch errors silently'
-    )
+    // Verify try and catch as separate constructs (not just substring matches)
+    assert.ok(/\btry\s*\{/.test(macDel[0]), '_macDeleteToken should have a try block')
+    assert.ok(/\bcatch\b/.test(macDel[0]), '_macDeleteToken should have a catch block')
 
     const linuxDel = source.match(/function _linuxDeleteToken[\s\S]*?^}/m)
     assert.ok(linuxDel, '_linuxDeleteToken should exist')
-    assert.ok(
-      linuxDel[0].includes('try') && linuxDel[0].includes('catch'),
-      '_linuxDeleteToken should catch errors silently'
-    )
+    assert.ok(/\btry\s*\{/.test(linuxDel[0]), '_linuxDeleteToken should have a try block')
+    assert.ok(/\bcatch\b/.test(linuxDel[0]), '_linuxDeleteToken should have a catch block')
   })
 
   it('init-cmd.js falls back to config file when keychain is unavailable', () => {
