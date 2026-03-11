@@ -95,8 +95,12 @@ describe('Provider picker in session creation (#1366)', () => {
     expect(schemasSrc).toMatch(/list_providers/)
   })
 
-  test('list_providers handler exists in ws-message-handlers', () => {
-    expect(handlersSrc).toMatch(/case\s+['"]list_providers['"]/)
+  test('list_providers handler exists in settings-handlers', () => {
+    const settingsHandlersSrc = fs.readFileSync(
+      path.resolve(__dirname, '../../../../src/handlers/settings-handlers.js'),
+      'utf-8'
+    )
+    expect(settingsHandlersSrc).toMatch(/list_providers/)
   })
 
   test('CreateSessionModal uses availableProviders from store', () => {
