@@ -99,6 +99,7 @@ export function ConnectScreen() {
   const [scanProgress, setScanProgress] = useState(0);
   const [scanPort, setScanPort] = useState(String(DEFAULT_PORT));
   const scanAbortRef = useRef<AbortController | null>(null);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connect = useConnectionStore((state) => state.connect);
   const connectionPhase = useConnectionStore((state) => state.connectionPhase);
@@ -205,8 +206,15 @@ export function ConnectScreen() {
     }
   };
 
+  useEffect(() => {
+    return () => {
+      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    };
+  }, []);
+
   const scrollToInput = () => {
-    setTimeout(() => {
+    if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    scrollTimerRef.current = setTimeout(() => {
       scrollRef.current?.scrollToEnd({ animated: true });
     }, 300);
   };
