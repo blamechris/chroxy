@@ -19,6 +19,7 @@ import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
 import { createLogger, setLogListener } from './logger.js'
+import { PermissionAuditLog } from './permission-audit.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -277,12 +278,16 @@ export class WsServer {
       pendingPermissions: this._pendingPermissions,
       fileOps: this._fileOps,
       permissions: this._permissions,
+      get permissionAudit() { return self._permissionAudit },
       updatePrimary: (sid, cid) => self._updatePrimary(sid, cid),
       sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
       replayHistory: (ws, sid) => self._replayHistory(ws, sid),
       get draining() { return self._draining },
     }
     this.pushManager = pushManager
+
+    // Permission audit trail
+    this._permissionAudit = new PermissionAuditLog()
 
     // Auth rate limiting: track failed attempts per IP
     this._authFailures = new Map() // ip -> { count, firstFailure, blockedUntil }
