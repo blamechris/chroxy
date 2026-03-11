@@ -1265,6 +1265,40 @@ describe('#1091 — destroy-while-streaming event leak', () => {
   })
 })
 
+describe('Session ID generation (#1856)', () => {
+  it('generates 32-character hex session IDs (128-bit)', async () => {
+    const { randomBytes } = await import('crypto')
+    const { registerProvider } = await import('../src/providers.js')
+
+    class TestProvider extends EventEmitter {
+      constructor(opts) {
+        super()
+        this.cwd = opts.cwd
+        this.model = opts.model || null
+        this.permissionMode = opts.permissionMode || 'approve'
+        this.isRunning = false
+        this.resumeSessionId = null
+      }
+      static get capabilities() { return {} }
+      start() {}
+      destroy() {}
+      sendMessage() {}
+      setModel() {}
+      setPermissionMode() {}
+    }
+    registerProvider('test-session-id', TestProvider)
+
+    const mgr = new SessionManager({ maxSessions: 5 })
+    mgr.createSession({ cwd: '/tmp', provider: 'test-session-id' })
+
+    const [sessionId] = [...mgr._sessions.keys()]
+    assert.equal(sessionId.length, 32, 'Session ID should be 32 hex chars (128-bit)')
+    assert.match(sessionId, /^[0-9a-f]{32}$/, 'Session ID should be lowercase hex')
+
+    mgr.destroySession(sessionId)
+  })
+})
+
 describe('SessionManager.defaultCwd getter (#1475)', () => {
   it('exposes defaultCwd via public getter', () => {
     const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp/test-cwd' })

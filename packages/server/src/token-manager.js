@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto'
+import { randomBytes } from 'crypto'
 import { EventEmitter } from 'events'
 import { safeTokenCompare } from './crypto.js'
 import { parseDuration } from './duration.js'
@@ -97,7 +97,7 @@ export class TokenManager extends EventEmitter {
    */
   rotate() {
     const oldToken = this._currentToken
-    const newToken = randomUUID()
+    const newToken = randomBytes(32).toString('base64url')
 
     this._previousToken = oldToken
     this._currentToken = newToken
