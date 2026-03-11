@@ -136,11 +136,7 @@ export function handlePairMessage(ctx, ws, msg) {
 
   const result = pairingManager.validatePairing(msg.pairingId)
   if (result.valid) {
-    client.authenticated = true
-    client.authTime = Date.now()
-    client.pairedWith = msg.pairingId
-    authFailures.delete(ip)
-
+    // Check protocol version BEFORE marking authenticated
     const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)
     const clientVersion = hasVersion ? msg.protocolVersion : null
 
@@ -149,6 +145,11 @@ export function handlePairMessage(ctx, ws, msg) {
       ws.close()
       return true
     }
+
+    client.authenticated = true
+    client.authTime = Date.now()
+    client.pairedWith = msg.pairingId
+    authFailures.delete(ip)
 
     client.protocolVersion = clientVersion !== null
       ? Math.min(clientVersion, serverProtocolVersion)

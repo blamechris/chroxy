@@ -7,10 +7,12 @@
  * Pairing IDs expire after TTL (default 60s) and are single-use.
  */
 import { EventEmitter } from 'events'
-import { randomBytes } from 'crypto'
+import { randomBytes, timingSafeEqual } from 'crypto'
 
 const DEFAULT_TTL_MS = 60_000
 const SESSION_TOKEN_BYTES = 32
+const MAX_SESSION_TOKENS = 100
+const MAX_USED_PAIRINGS = 50
 
 export class PairingManager extends EventEmitter {
   constructor({ apiToken, wsUrl = null, ttlMs = DEFAULT_TTL_MS, autoRefresh = false }) {
@@ -63,8 +65,13 @@ export class PairingManager extends EventEmitter {
       this._current.used = true
       this._usedPairings.add(pairingId)
 
-      // Issue a session token
+      // Issue a session token (with FIFO eviction at cap)
       const sessionToken = randomBytes(SESSION_TOKEN_BYTES).toString('base64url')
+      if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
+        // Evict oldest
+        const oldest = this._sessionTokens.keys().next().value
+        this._sessionTokens.delete(oldest)
+      }
       this._sessionTokens.set(sessionToken, { createdAt: Date.now() })
 
       return { valid: true, sessionToken }
@@ -80,11 +87,17 @@ export class PairingManager extends EventEmitter {
 
   /**
    * Check if a session token (issued during pairing) is valid.
-   * Also accepts the permanent API token for backward compatibility.
+   * Uses constant-time comparison to prevent timing attacks.
    */
   isSessionTokenValid(token) {
     if (!token) return false
-    if (this._sessionTokens.has(token)) return true
+    const tokenBuf = Buffer.from(token)
+    for (const stored of this._sessionTokens.keys()) {
+      const storedBuf = Buffer.from(stored)
+      if (tokenBuf.length === storedBuf.length && timingSafeEqual(tokenBuf, storedBuf)) {
+        return true
+      }
+    }
     return false
   }
 
@@ -116,6 +129,10 @@ export class PairingManager extends EventEmitter {
   }
 
   _generatePairing() {
+    // Clear old used pairings — they can't match the new ID
+    if (this._usedPairings.size > MAX_USED_PAIRINGS) {
+      this._usedPairings.clear()
+    }
     this._current = {
       id: randomBytes(12).toString('base64url'),
       createdAt: Date.now(),
