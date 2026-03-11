@@ -11,6 +11,10 @@
  */
 
 describe('AppState hot-reload cleanup (#1995)', () => {
+  afterAll(() => {
+    delete (global as any).__chroxy_appStateSub;
+  });
+
   test('removes previous subscription when global exists', () => {
     const removeSpy = jest.fn();
 
