@@ -5,6 +5,7 @@
  * Flow: QR has pairing ID → app sends pair request → server validates → issues session token.
  *
  * Pairing IDs expire after TTL (default 60s) and are single-use.
+ * Recently-refreshed IDs remain valid until their TTL expires (grace period).
  */
 import { EventEmitter } from 'events'
 import { randomBytes, timingSafeEqual } from 'crypto'
@@ -12,7 +13,7 @@ import { randomBytes, timingSafeEqual } from 'crypto'
 const DEFAULT_TTL_MS = 60_000
 const SESSION_TOKEN_BYTES = 32
 const MAX_SESSION_TOKENS = 100
-const MAX_USED_PAIRINGS = 50
+const MAX_ACTIVE_PAIRINGS = 10
 
 export class PairingManager extends EventEmitter {
   constructor({ wsUrl = null, ttlMs = DEFAULT_TTL_MS, autoRefresh = false } = {}) {
@@ -21,8 +22,8 @@ export class PairingManager extends EventEmitter {
     this._ttlMs = ttlMs
     this._autoRefresh = autoRefresh
     this._current = null
+    this._activePairings = new Map() // id → { expiresAt, used }
     this._sessionTokens = new Map() // sessionToken → { createdAt }
-    this._usedPairings = new Set() // track used pairing IDs
     this._refreshTimer = null
     this._destroyed = false
 
@@ -43,45 +44,37 @@ export class PairingManager extends EventEmitter {
 
   /**
    * Validate a pairing ID and issue a session token if valid.
+   * Checks current ID first, then grace-period IDs.
    * @param {string} pairingId
    * @returns {{ valid: boolean, sessionToken?: string, reason?: string }}
    */
   validatePairing(pairingId) {
-    if (!this._current) {
+    // Look up in active pairings (includes current + grace period entries)
+    const entry = this._activePairings.get(pairingId)
+    if (!entry) {
       return { valid: false, reason: 'invalid_pairing_id' }
     }
 
-    // Check current pairing first
-    if (this._current.id === pairingId) {
-      if (this._current.used) {
-        return { valid: false, reason: 'already_used' }
-      }
-      if (Date.now() > this._current.expiresAt) {
-        return { valid: false, reason: 'expired' }
-      }
-
-      // Mark as used (one-time)
-      this._current.used = true
-      this._usedPairings.add(pairingId)
-
-      // Issue a session token (with FIFO eviction at cap)
-      const sessionToken = randomBytes(SESSION_TOKEN_BYTES).toString('base64url')
-      if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
-        // Evict oldest
-        const oldest = this._sessionTokens.keys().next().value
-        this._sessionTokens.delete(oldest)
-      }
-      this._sessionTokens.set(sessionToken, { createdAt: Date.now() })
-
-      return { valid: true, sessionToken }
-    }
-
-    // Check recently used pairings
-    if (this._usedPairings.has(pairingId)) {
+    if (entry.used) {
       return { valid: false, reason: 'already_used' }
     }
+    if (Date.now() > entry.expiresAt) {
+      this._activePairings.delete(pairingId)
+      return { valid: false, reason: 'expired' }
+    }
 
-    return { valid: false, reason: 'invalid_pairing_id' }
+    // Mark as used (one-time)
+    entry.used = true
+
+    // Issue a session token (with FIFO eviction at cap)
+    const sessionToken = randomBytes(SESSION_TOKEN_BYTES).toString('base64url')
+    if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
+      const oldest = this._sessionTokens.keys().next().value
+      this._sessionTokens.delete(oldest)
+    }
+    this._sessionTokens.set(sessionToken, { createdAt: Date.now() })
+
+    return { valid: true, sessionToken }
   }
 
   /**
@@ -118,8 +111,8 @@ export class PairingManager extends EventEmitter {
   destroy() {
     this._destroyed = true
     this._current = null
+    this._activePairings.clear()
     this._sessionTokens.clear()
-    this._usedPairings.clear()
     if (this._refreshTimer) {
       clearTimeout(this._refreshTimer)
       this._refreshTimer = null
@@ -128,16 +121,24 @@ export class PairingManager extends EventEmitter {
   }
 
   _generatePairing() {
-    // Clear old used pairings — they can't match the new ID
-    if (this._usedPairings.size > MAX_USED_PAIRINGS) {
-      this._usedPairings.clear()
+    // Prune expired entries
+    const now = Date.now()
+    for (const [id, entry] of this._activePairings) {
+      if (now > entry.expiresAt) {
+        this._activePairings.delete(id)
+      }
     }
-    this._current = {
-      id: randomBytes(12).toString('base64url'),
-      createdAt: Date.now(),
-      expiresAt: Date.now() + this._ttlMs,
-      used: false,
+
+    // Cap active pairings to prevent unbounded growth
+    if (this._activePairings.size >= MAX_ACTIVE_PAIRINGS) {
+      const oldest = this._activePairings.keys().next().value
+      this._activePairings.delete(oldest)
     }
+
+    const id = randomBytes(12).toString('base64url')
+    const expiresAt = now + this._ttlMs
+    this._current = { id, createdAt: now, expiresAt }
+    this._activePairings.set(id, { expiresAt, used: false })
   }
 
   _scheduleRefresh() {
