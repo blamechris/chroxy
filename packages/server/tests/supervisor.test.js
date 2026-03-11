@@ -55,12 +55,14 @@ class TestSupervisor extends Supervisor {
     super(config)
     this._mockTunnel = createMockTunnel()
     this._mockChildren = []
+    this._lastForkOpts = null
     this._exitCalled = null
     this._rollbackCalls = []
     this._rollbackResult = false
   }
 
-  _fork() {
+  _fork(script, args, opts) {
+    this._lastForkOpts = opts
     const child = createMockChild()
     this._mockChildren.push(child)
     return child
@@ -583,6 +585,22 @@ describe('Supervisor', () => {
     it('supervisor constructor accepts quick tunnel config', () => {
       const { supervisor } = setup({ tunnel: 'quick' })
       assert.equal(supervisor._tunnelMode, 'quick')
+    })
+  })
+
+  describe('showToken forwarding to child (#1903)', () => {
+    it('forwards CHROXY_SHOW_TOKEN=1 when config.showToken is true', () => {
+      const { supervisor } = setup({ showToken: true })
+      supervisor.startChild()
+      assert.ok(supervisor._lastForkOpts, 'should have fork opts')
+      assert.equal(supervisor._lastForkOpts.env.CHROXY_SHOW_TOKEN, '1')
+    })
+
+    it('does not set CHROXY_SHOW_TOKEN when config.showToken is falsy', () => {
+      const { supervisor } = setup({})
+      supervisor.startChild()
+      assert.ok(supervisor._lastForkOpts, 'should have fork opts')
+      assert.equal(supervisor._lastForkOpts.env.CHROXY_SHOW_TOKEN, undefined)
     })
   })
 })
