@@ -5,17 +5,14 @@
  * returns null for all queries and no-ops for commands.
  */
 
+import { isTauri } from '../utils/tauri'
+
 interface ServerInfo {
   port: number
   token: string | null
   status: string
   tunnelMode: string
   isRunning: boolean
-}
-
-/** Check if running inside Tauri webview */
-function isTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
 /** Invoke a Tauri command (returns null if not in Tauri context) */

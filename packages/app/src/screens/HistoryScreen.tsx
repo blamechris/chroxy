@@ -141,6 +141,7 @@ export function HistoryScreen() {
 
   const conversationHistory = useConnectionStore((s) => s.conversationHistory);
   const conversationHistoryLoading = useConnectionStore((s) => s.conversationHistoryLoading);
+  const conversationHistoryError = useConnectionStore((s) => s.conversationHistoryError);
   const fetchConversationHistory = useConnectionStore((s) => s.fetchConversationHistory);
   const resumeConversation = useConnectionStore((s) => s.resumeConversation);
   const searchResults = useConnectionStore((s) => s.searchResults);
@@ -275,6 +276,26 @@ export function HistoryScreen() {
     );
   }
 
+  // Error state
+  if (!isSearching && conversationHistoryError && !conversationHistoryLoading && conversationHistory.length === 0) {
+    return (
+      <View style={[styles.container, { paddingBottom: insets.bottom }]}>
+        {searchBar}
+        <View style={[styles.centered, { flex: 1 }]}>
+          <Text style={styles.errorText}>{conversationHistoryError}</Text>
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={fetchConversationHistory}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading conversation history"
+          >
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
   // Search mode
   if (isSearching) {
     return (
@@ -350,6 +371,26 @@ const styles = StyleSheet.create({
     color: COLORS.textDisabled,
     fontSize: 15,
     textAlign: 'center',
+  },
+  errorText: {
+    color: COLORS.textError,
+    fontSize: 15,
+    textAlign: 'center',
+    marginBottom: 16,
+    paddingHorizontal: 24,
+  },
+  retryButton: {
+    backgroundColor: COLORS.accentBlueLight,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.accentBlueBorder,
+  },
+  retryButtonText: {
+    color: COLORS.accentBlue,
+    fontSize: 14,
+    fontWeight: '600',
   },
   searchBar: {
     flexDirection: 'row',

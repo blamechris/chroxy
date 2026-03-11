@@ -82,6 +82,24 @@ export function groupMessages(messages: ChatMessage[]): DisplayGroup[] {
   return groups;
 }
 
+/** Apply streaming isActive overlay to display groups — O(1) operation.
+ *  Marks the last activity group as active when streaming is in progress and
+ *  the last activity group sits at the tail of the messages array. */
+export function applyStreamingOverlay(
+  baseGroups: DisplayGroup[],
+  messages: ChatMessage[],
+  streamingMessageId: string | null,
+): DisplayGroup[] {
+  if (!streamingMessageId || baseGroups.length === 0) return baseGroups;
+  const last = baseGroups[baseGroups.length - 1];
+  if (last.type !== 'activity') return baseGroups;
+  const lastMsg = last.messages[last.messages.length - 1];
+  if (lastMsg !== messages[messages.length - 1]) return baseGroups;
+  const result = baseGroups.slice(0, -1);
+  result.push({ ...last, isActive: true });
+  return result;
+}
+
 // -- Plan Approval Card --
 
 function PlanApprovalCard({
@@ -217,16 +235,10 @@ export function ChatView({
   const baseGroups = useMemo(() => groupMessages(messages), [messages]);
 
   // Overlay streaming isActive flag — O(1), cheap to recompute on every delta
-  const displayGroups = useMemo(() => {
-    if (!streamingMessageId || baseGroups.length === 0) return baseGroups;
-    const last = baseGroups[baseGroups.length - 1];
-    if (last.type !== 'activity') return baseGroups;
-    const lastMsg = last.messages[last.messages.length - 1];
-    if (lastMsg !== messages[messages.length - 1]) return baseGroups;
-    const result = baseGroups.slice(0, -1);
-    result.push({ ...last, isActive: true });
-    return result;
-  }, [baseGroups, streamingMessageId, messages]);
+  const displayGroups = useMemo(
+    () => applyStreamingOverlay(baseGroups, messages, streamingMessageId),
+    [baseGroups, streamingMessageId, messages],
+  );
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
