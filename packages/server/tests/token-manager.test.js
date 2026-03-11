@@ -177,4 +177,19 @@ describe('TokenManager', () => {
     manager = new TokenManager({ token: 'abc-123', tokenExpiry: '1s' })
     assert.equal(manager._expiryMs, 300_000)
   })
+
+  it('rotate generates 256-bit base64url tokens (#1855)', () => {
+    manager = new TokenManager({ token: 'legacy-uuid-token' })
+    const newToken = manager.rotate()
+    // base64url encoding of 32 bytes = 43 characters
+    assert.equal(newToken.length, 43, 'Rotated token should be 43-char base64url (256-bit)')
+    assert.match(newToken, /^[A-Za-z0-9_-]+$/, 'Token should be URL-safe base64')
+  })
+
+  it('still validates legacy UUID-format tokens (#1855)', () => {
+    // Existing tokens in old UUID format should still be accepted
+    const uuidToken = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+    manager = new TokenManager({ token: uuidToken })
+    assert.equal(manager.validate(uuidToken), true)
+  })
 })
