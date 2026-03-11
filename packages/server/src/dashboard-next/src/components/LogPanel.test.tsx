@@ -146,4 +146,36 @@ describe('LogPanel', () => {
     expect(screen.getByTestId('log-copy')).toBeTruthy()
     expect(screen.getByTestId('log-clear')).toBeTruthy()
   })
+
+  it('filter buttons have aria-pressed reflecting toggle state', () => {
+    render(<LogPanel />)
+
+    // info/warn/error are on by default, debug is off
+    expect(screen.getByTestId('log-filter-info')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('log-filter-warn')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('log-filter-error')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('log-filter-debug')).toHaveAttribute('aria-pressed', 'false')
+
+    // Toggle debug on
+    fireEvent.click(screen.getByTestId('log-filter-debug'))
+    expect(screen.getByTestId('log-filter-debug')).toHaveAttribute('aria-pressed', 'true')
+
+    // Toggle info off
+    fireEvent.click(screen.getByTestId('log-filter-info'))
+    expect(screen.getByTestId('log-filter-info')).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('filter buttons have aria-label', () => {
+    render(<LogPanel />)
+    expect(screen.getByTestId('log-filter-info')).toHaveAttribute('aria-label', 'Filter info messages')
+    expect(screen.getByTestId('log-filter-debug')).toHaveAttribute('aria-label', 'Filter debug messages')
+  })
+
+  it('log list container has role="log" and aria-live', () => {
+    render(<LogPanel />)
+    const logList = screen.getByTestId('log-list')
+    expect(logList).toHaveAttribute('role', 'log')
+    expect(logList).toHaveAttribute('aria-live', 'polite')
+    expect(logList).toHaveAttribute('aria-label', 'Log entries')
+  })
 })
