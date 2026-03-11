@@ -599,6 +599,7 @@ export class WsServer {
       if (err.code === 'EADDRINUSE') {
         log.error(`Port ${this.port} is already in use — is another Chroxy instance running?`)
         process.exit(1)
+        return
       }
       log.error(`HTTP server error: ${err.message}`)
     })
