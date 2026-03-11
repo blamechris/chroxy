@@ -200,7 +200,7 @@ export class SessionManager extends EventEmitter {
       if (result && typeof result.catch === 'function') {
         result.catch((err) => {
           const message = err?.message || String(err)
-          log.error(`Async start() rejected for session ${sessionId}: ${message}`, err)
+          log.error(`Async start() rejected for session ${sessionId}: ${message}${err?.stack ? '\n' + err.stack : ''}`)
           this.destroySession(sessionId)
         })
       }
@@ -212,7 +212,7 @@ export class SessionManager extends EventEmitter {
       try {
         session.destroy()
       } catch (destroyErr) {
-        log.error(`Failed to destroy session ${sessionId} during start() failure cleanup:`, destroyErr)
+        log.error(`Failed to destroy session ${sessionId} during start() failure cleanup: ${destroyErr?.stack || destroyErr}`)
       }
       this._cleanupSessionMaps(sessionId)
       throw err
@@ -357,7 +357,7 @@ export class SessionManager extends EventEmitter {
     try {
       entry.session.destroy()
     } catch (destroyErr) {
-      log.error(`Error destroying session ${sessionId} "${entry.name}":`, destroyErr)
+      log.error(`Error destroying session ${sessionId} "${entry.name}": ${destroyErr?.stack || destroyErr}`)
     }
     this._cleanupSessionMaps(sessionId)
     log.info(`Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
@@ -376,7 +376,7 @@ export class SessionManager extends EventEmitter {
     try {
       this.serializeState()
     } catch (err) {
-      log.error('Failed to serialize state during destroyAll:', err.message)
+      log.error(`Failed to serialize state during destroyAll: ${err?.stack || err}`)
     }
     for (const [sessionId, entry] of this._sessions) {
       entry.session.removeAllListeners()
@@ -384,7 +384,7 @@ export class SessionManager extends EventEmitter {
       try {
         entry.session.destroy()
       } catch (destroyErr) {
-        log.error(`Error destroying session ${sessionId} "${entry.name}" during destroyAll():`, destroyErr)
+        log.error(`Error destroying session ${sessionId} "${entry.name}" during destroyAll(): ${destroyErr?.stack || destroyErr}`)
       }
       this.emit('session_destroyed', { sessionId })
     }
@@ -756,7 +756,7 @@ export class SessionManager extends EventEmitter {
       try {
         this.serializeState()
       } catch (err) {
-        log.error('Failed to persist session state:', err)
+        log.error(`Failed to persist session state: ${err?.stack || err}`)
       }
     }, this._persistDebounceMs)
   }
