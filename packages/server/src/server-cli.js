@@ -362,6 +362,16 @@ export async function startCliServer(config) {
     console.log(`   Dashboard: http://localhost:${PORT}/dashboard`)
   }
 
+  // Re-render QR code when pairing auto-refreshes (keeps terminal QR scannable)
+  if (pairingManager) {
+    pairingManager.on('pairing_refreshed', () => {
+      if (!currentWsUrl) return
+      const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
+      displayQr(currentWsUrl, httpBase, currentTunnelMode)
+      console.log('[pairing] QR code refreshed with new pairing ID.\n')
+    })
+  }
+
   // Regenerate QR code and update connection info when token rotates
   const serverStartedAt = new Date().toISOString()
   if (tokenManager) {
