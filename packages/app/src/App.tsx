@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Platform, UIManager, TouchableOpacity, Text } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
-import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { createNativeStackNavigator, NativeStackScreenProps } from '@react-navigation/native-stack';
 import * as SecureStore from 'expo-secure-store';
 
 import { ConnectScreen } from './screens/ConnectScreen';
@@ -34,10 +34,10 @@ export type RootStackParamList = {
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
-function SessionScreenWithBoundary(props: any) {
+function SessionScreenWithBoundary(_props: NativeStackScreenProps<RootStackParamList, 'Session'>) {
   return (
     <ErrorBoundary fallbackTitle="Session crashed">
-      <SessionScreen {...props} />
+      <SessionScreen />
     </ErrorBoundary>
   );
 }
