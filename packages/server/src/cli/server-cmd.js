@@ -15,10 +15,12 @@ export function registerServerCommands(program) {
     .option('--no-auth', 'Skip API token requirement (local testing only, disables tunnel)')
     .option('--no-encrypt', 'Disable end-to-end encryption (dev/testing only)')
     .option('--no-supervisor', 'Disable supervisor mode (direct server, no auto-restart)')
+    .option('--show-token', 'Show full API token in terminal output (masked by default)')
     .action(async (options) => {
       const extraOverrides = parseExtraOverrides(options)
       if (options.auth === false) extraOverrides.noAuth = true
       if (options.encrypt === false) extraOverrides.noEncrypt = true
+      if (options.showToken) extraOverrides.showToken = true
 
       const config = loadAndMergeConfig(options, extraOverrides)
 
