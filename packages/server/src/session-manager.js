@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events'
-import { randomUUID } from 'crypto'
+import { randomUUID, randomBytes } from 'crypto'
 import { statSync, readFileSync, unlinkSync, renameSync, existsSync, mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
@@ -73,7 +73,7 @@ export function formatIdleDuration(ms) {
 }
 
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout, costBudget } = {}) {
+  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout, costBudget, maxHistory } = {}) {
     super()
     this.maxSessions = maxSessions
     this._port = port || null
@@ -91,7 +91,7 @@ export class SessionManager extends EventEmitter {
     this._locks = new SessionLockManager()
     this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
-    this._maxHistory = 500
+    this._maxHistory = maxHistory || 500
     this._historyTruncated = new Map() // sessionId -> boolean
     this._persistTimer = null
     this._sessionCosts = new Map() // sessionId -> cumulative cost in dollars
@@ -169,7 +169,7 @@ export class SessionManager extends EventEmitter {
       throw err
     }
 
-    const sessionId = randomUUID().slice(0, 8)
+    const sessionId = randomBytes(16).toString('hex')
     const sessionName = name || `Session ${this._sessions.size + 1}`
 
     const resolvedProvider = provider || this._providerType

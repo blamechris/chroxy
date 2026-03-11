@@ -338,12 +338,22 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
               warning: 'Auto mode bypasses all permission checks. Claude will execute tools without asking.',
             })
           } else {
+            const previousMode = entry.session.permissionMode || 'unknown'
             if (msg.mode === 'auto') {
-              console.log(`[ws] Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()}`)
+              console.log(`[ws] Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()} (was: ${previousMode})`)
             } else {
-              console.log(`[ws] Permission mode change from ${client.id} on session ${permModeSessionId}: ${msg.mode}`)
+              console.log(`[ws] Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
             }
+            const prevMode = entry.session._permissionMode || 'approve'
             entry.session.setPermissionMode(msg.mode)
+            if (ctx.permissionAudit) {
+              ctx.permissionAudit.logModeChange({
+                clientId: client.id,
+                sessionId: permModeSessionId,
+                previousMode: prevMode,
+                newMode: msg.mode,
+              })
+            }
             ctx.broadcastToSession(permModeSessionId, { type: 'permission_mode_changed', mode: msg.mode })
           }
         }
@@ -385,6 +395,16 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         ctx.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
       }
 
+      // Audit trail for permission decisions
+      if (resolved && ctx.permissionAudit) {
+        ctx.permissionAudit.logDecision({
+          clientId: client.id,
+          sessionId: originSessionId,
+          requestId,
+          decision,
+        })
+      }
+
       // Notify all OTHER clients that this permission was resolved so they dismiss their prompts
       if (resolved) {
         ctx.broadcast(
@@ -398,6 +418,21 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
     case 'list_sessions':
       ctx.send(ws, { type: 'session_list', sessions: ctx.sessionManager.listSessions() })
       break
+
+    case 'query_permission_audit': {
+      if (ctx.permissionAudit) {
+        const entries = ctx.permissionAudit.query({
+          sessionId: msg.sessionId,
+          type: msg.auditType,
+          since: msg.since,
+          limit: msg.limit,
+        })
+        ctx.send(ws, { type: 'permission_audit_result', entries })
+      } else {
+        ctx.send(ws, { type: 'permission_audit_result', entries: [] })
+      }
+      break
+    }
 
     case 'switch_session': {
       const targetId = msg.sessionId

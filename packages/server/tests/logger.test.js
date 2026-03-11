@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createLogger, initFileLogging, closeFileLogging, setLogListener } from '../src/logger.js'
+import { createLogger, initFileLogging, closeFileLogging, setLogListener, redactSensitive } from '../src/logger.js'
 
 describe('createLogger backward compatibility', () => {
   it('returns object with info, warn, error methods', () => {
@@ -489,5 +489,49 @@ describe('setLogListener (#1820)', () => {
     const log = createLogger('resilient')
     // Should not throw
     assert.doesNotThrow(() => log.info('should not crash'))
+  })
+})
+
+describe('redactSensitive (#1849)', () => {
+  it('redacts Bearer tokens', () => {
+    const result = redactSensitive('Authorization: Bearer abc123defghijklmnop')
+    assert.ok(!result.includes('abc123defghijklmnop'))
+    assert.ok(result.includes('Bearer [REDACTED]'))
+  })
+
+  it('redacts token values after key names', () => {
+    const result = redactSensitive('Connected with token: sk-abc123defghijk')
+    assert.ok(!result.includes('sk-abc123defghijk'))
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('redacts password values', () => {
+    const result = redactSensitive('password=mysecretpassword123')
+    assert.ok(!result.includes('mysecretpassword123'))
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('redacts apiKey values', () => {
+    const result = redactSensitive('apiKey: "key_abcdef1234567890"')
+    assert.ok(!result.includes('key_abcdef1234567890'))
+    assert.ok(result.includes('[REDACTED]'))
+  })
+
+  it('passes through normal messages unchanged', () => {
+    const msg = 'Session s1 ready: model claude-sonnet'
+    assert.equal(redactSensitive(msg), msg)
+  })
+
+  it('redaction is applied in logger output', () => {
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = createLogger('redact-test')
+    log.info('token: supersecrettoken123456')
+
+    assert.equal(entries.length, 1)
+    assert.ok(!entries[0].message.includes('supersecrettoken123456'))
+    assert.ok(entries[0].message.includes('[REDACTED]'))
+    setLogListener(null)
   })
 })
