@@ -15,9 +15,8 @@ const MAX_SESSION_TOKENS = 100
 const MAX_USED_PAIRINGS = 50
 
 export class PairingManager extends EventEmitter {
-  constructor({ apiToken, wsUrl = null, ttlMs = DEFAULT_TTL_MS, autoRefresh = false }) {
+  constructor({ wsUrl = null, ttlMs = DEFAULT_TTL_MS, autoRefresh = false } = {}) {
     super()
-    this._apiToken = apiToken
     this._wsUrl = wsUrl
     this._ttlMs = ttlMs
     this._autoRefresh = autoRefresh

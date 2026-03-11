@@ -172,7 +172,6 @@ export async function startCliServer(config) {
 
   // Create pairing manager for ephemeral QR-based pairing (replaces permanent token in QR)
   const pairingManager = NO_AUTH ? null : new PairingManager({
-    apiToken: API_TOKEN,
     ttlMs: 60_000,
     autoRefresh: true,
   })

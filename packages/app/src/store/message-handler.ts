@@ -658,9 +658,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         wsSend(ctx.socket, { type: 'list_agents' });
         set({ isEncrypted: false });
       }
-      // Save for quick reconnect
-      saveConnection(ctx.url, ctx.token);
-      set({ savedConnection: { url: ctx.url, token: ctx.token } });
+      // Save for quick reconnect (use effectiveToken for pairing flow)
+      saveConnection(ctx.url, effectiveToken);
+      set({ savedConnection: { url: ctx.url, token: effectiveToken } });
       // Register push token (async, non-blocking)
       void registerPushToken(ctx.socket);
       break;

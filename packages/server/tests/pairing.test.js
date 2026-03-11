@@ -1,5 +1,6 @@
 import { describe, it, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { setTimeout as delay } from 'node:timers/promises'
 
 describe('PairingManager (#1836)', () => {
   let PairingManager
@@ -15,7 +16,7 @@ describe('PairingManager (#1836)', () => {
 
   describe('pairing ID generation', () => {
     it('generates a pairing ID on creation', () => {
-      const pm = new PairingManager({ apiToken: 'test-token' })
+      const pm = new PairingManager({})
       const id = pm.currentPairingId
       assert.ok(id, 'should have a pairing ID')
       assert.ok(typeof id === 'string')
@@ -24,7 +25,7 @@ describe('PairingManager (#1836)', () => {
     })
 
     it('regenerates pairing ID via refresh()', () => {
-      const pm = new PairingManager({ apiToken: 'test-token' })
+      const pm = new PairingManager({})
       const first = pm.currentPairingId
       pm.refresh()
       const second = pm.currentPairingId
@@ -33,7 +34,7 @@ describe('PairingManager (#1836)', () => {
     })
 
     it('currentPairingUrl returns chroxy:// URL with pair= param', () => {
-      const pm = new PairingManager({ apiToken: 'test-token', wsUrl: 'wss://example.com' })
+      const pm = new PairingManager({ wsUrl: 'wss://example.com' })
       const url = pm.currentPairingUrl
       assert.ok(url.startsWith('chroxy://example.com?pair='))
       assert.ok(!url.includes('token='), 'URL must not contain the API token')
@@ -43,7 +44,7 @@ describe('PairingManager (#1836)', () => {
 
   describe('pairing validation', () => {
     it('validates a current pairing ID', () => {
-      const pm = new PairingManager({ apiToken: 'test-token' })
+      const pm = new PairingManager({})
       const id = pm.currentPairingId
       const result = pm.validatePairing(id)
       assert.equal(result.valid, true)
@@ -52,7 +53,7 @@ describe('PairingManager (#1836)', () => {
     })
 
     it('rejects an unknown pairing ID', () => {
-      const pm = new PairingManager({ apiToken: 'test-token' })
+      const pm = new PairingManager({})
       const result = pm.validatePairing('bogus-id-12345')
       assert.equal(result.valid, false)
       assert.equal(result.reason, 'invalid_pairing_id')
@@ -60,7 +61,7 @@ describe('PairingManager (#1836)', () => {
     })
 
     it('rejects a pairing ID after it has been used (one-time use)', () => {
-      const pm = new PairingManager({ apiToken: 'test-token' })
+      const pm = new PairingManager({})
       const id = pm.currentPairingId
       const first = pm.validatePairing(id)
       assert.equal(first.valid, true)
@@ -70,12 +71,11 @@ describe('PairingManager (#1836)', () => {
       pm.destroy()
     })
 
-    it('rejects an expired pairing ID', () => {
-      const pm = new PairingManager({ apiToken: 'test-token', ttlMs: 1 })
+    it('rejects an expired pairing ID', async () => {
+      const pm = new PairingManager({ ttlMs: 1 })
       const id = pm.currentPairingId
       // Wait for expiry
-      const start = Date.now()
-      while (Date.now() - start < 10) { /* spin */ }
+      await delay(10)
       const result = pm.validatePairing(id)
       assert.equal(result.valid, false)
       assert.equal(result.reason, 'expired')
@@ -83,7 +83,7 @@ describe('PairingManager (#1836)', () => {
     })
 
     it('session token from validation is accepted by isTokenValid', () => {
-      const pm = new PairingManager({ apiToken: 'test-token' })
+      const pm = new PairingManager({})
       const id = pm.currentPairingId
       const result = pm.validatePairing(id)
       assert.equal(pm.isSessionTokenValid(result.sessionToken), true)
@@ -93,7 +93,7 @@ describe('PairingManager (#1836)', () => {
 
   describe('auto-refresh', () => {
     it('refresh() emits pairing_refreshed event', () => {
-      const pm = new PairingManager({ apiToken: 'test-token' })
+      const pm = new PairingManager({})
       const firstId = pm.currentPairingId
       let emitted = null
       pm.on('pairing_refreshed', (event) => { emitted = event })
@@ -107,7 +107,7 @@ describe('PairingManager (#1836)', () => {
 
   describe('cleanup', () => {
     it('destroy() stops auto-refresh and clears state', () => {
-      const pm = new PairingManager({ apiToken: 'test-token', autoRefresh: true })
+      const pm = new PairingManager({ autoRefresh: true })
       pm.destroy()
       assert.equal(pm.currentPairingId, null)
     })

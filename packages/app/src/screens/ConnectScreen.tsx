@@ -34,7 +34,7 @@ interface DiscoveredServer {
 type ParseResult =
   | { ok: true; wsUrl: string; token: string; pairingId?: undefined }
   | { ok: true; wsUrl: string; token?: undefined; pairingId: string }
-  | { ok: false; reason: 'not_chroxy' | 'missing_token' | 'invalid_url' | 'expired_qr' };
+  | { ok: false; reason: 'not_chroxy' | 'missing_token' | 'invalid_url' };
 
 export function parseChroxyUrl(raw: string): ParseResult {
   try {
@@ -74,10 +74,6 @@ const QR_ERROR_MESSAGES: Record<string, { title: string; message: string }> = {
   invalid_url: {
     title: 'Invalid QR Code',
     message: 'Could not parse this QR code. Make sure you\'re scanning the full QR code clearly.',
-  },
-  expired_qr: {
-    title: 'QR Code Expired',
-    message: 'This QR code has expired. Scan the latest QR code shown on your server terminal or dashboard.',
   },
 };
 

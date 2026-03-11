@@ -164,8 +164,8 @@ export function handlePairMessage(ctx, ws, msg) {
       }
     }
 
-    // Send pair_ok with session token (client stores this for future reconnections)
-    // onAuthSuccess will send the full auth_ok payload — we intercept to add sessionToken
+    // Attach sessionToken so onAuthSuccess can include it in the auth_ok payload
+    // (client stores this for future reconnections)
     client._sessionToken = result.sessionToken
     onAuthSuccess(ws, client)
     log.info(`Client ${client.id} paired via pairing ID`)
