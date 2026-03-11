@@ -28,8 +28,9 @@ const PROBE_TIMEOUT_MS = 1500;
  * Validate a port string and return the numeric port, or null if invalid.
  */
 export function validatePort(portStr: string): number | null {
-  const parsed = parseInt(portStr, 10);
-  if (isNaN(parsed) || parsed < 1 || parsed > 65535) return null;
+  if (!/^\d+$/.test(portStr)) return null;
+  const parsed = Number(portStr);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) return null;
   return parsed;
 }
 
@@ -51,6 +52,7 @@ async function probeHost(
   outerSignal.addEventListener('abort', onOuterAbort);
   try {
     const res = await fetch(`http://${ip}:${port}/health`, { signal: ctrl.signal });
+    if (!res.ok) return null;
     const data = await res.json();
     if (data.status === 'ok') {
       return {

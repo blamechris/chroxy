@@ -33,8 +33,11 @@ describe('validatePort', () => {
   });
 
   it('returns null for float', () => {
-    // parseInt('8.5') returns 8 which is valid
-    expect(validatePort('8.5')).toBe(8);
+    expect(validatePort('8.5')).toBeNull();
+  });
+
+  it('returns null for trailing non-digits', () => {
+    expect(validatePort('123abc')).toBeNull();
   });
 });
 
@@ -43,6 +46,7 @@ describe('scanSubnet', () => {
     mockFetch.mockImplementation((url: string) => {
       if (url.includes('192.168.1.42')) {
         return Promise.resolve({
+          ok: true,
           json: () => Promise.resolve({ status: 'ok', hostname: 'mydev', mode: 'headless', version: '0.2.0' }),
         });
       }
@@ -108,6 +112,7 @@ describe('scanSubnet', () => {
     mockFetch.mockImplementation((url: string) => {
       if (url === 'http://192.168.1.1:8765/health') {
         return Promise.resolve({
+          ok: true,
           json: () => Promise.resolve({ status: 'ok' }),
         });
       }
@@ -129,7 +134,28 @@ describe('scanSubnet', () => {
     mockFetch.mockImplementation((url: string) => {
       if (url.includes('192.168.1.5')) {
         return Promise.resolve({
+          ok: true,
           json: () => Promise.resolve({ status: 'error', message: 'not chroxy' }),
+        });
+      }
+      return Promise.reject(new Error('ECONNREFUSED'));
+    });
+
+    const result = await scanSubnet('192.168.1', 8765, new AbortController().signal, {
+      onProgress: () => {},
+      onFound: () => {},
+    });
+
+    expect(result.servers).toHaveLength(0);
+  });
+
+  it('ignores non-2xx HTTP responses', async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url.includes('192.168.1.10')) {
+        return Promise.resolve({
+          ok: false,
+          status: 500,
+          json: () => Promise.resolve({ status: 'ok' }),
         });
       }
       return Promise.reject(new Error('ECONNREFUSED'));
