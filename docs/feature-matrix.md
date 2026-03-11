@@ -8,12 +8,13 @@ Cross-platform feature availability for Mobile App, Desktop Dashboard, and Serve
 
 | Feature | Mobile | Desktop | Server |
 |---------|--------|---------|--------|
-| QR Code Scanning | Y | — | — |
-| QR Code Display | — | Y (tray) | Y (endpoint) |
+| QR Code Scanning (camera) | Y | — | — |
+| QR Code Generation/Display | — | Y (tray) | Y (endpoint) |
 | Manual URL Entry | Y | Y | Y |
 | Token Authentication | Y | Y | Y |
-| LAN/mDNS Discovery | Y | — | Y |
-| Keychain/Secure Storage | Y | Y (localStorage) | Y (config.json) |
+| LAN Scan Discovery | Y | — | — |
+| mDNS/Bonjour Advertisement | — | — | Y |
+| Token Persistence | Y (OS keychain) | Y (localStorage) | Y (config.json) |
 | Biometric Lock | Y | — | — |
 | Auto-reconnect | Y | Y | Y |
 | Saved Connection | Y | Y | Y |
