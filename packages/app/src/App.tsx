@@ -8,6 +8,7 @@ import * as SecureStore from 'expo-secure-store';
 import { ConnectScreen } from './screens/ConnectScreen';
 import { OnboardingScreen } from './screens/OnboardingScreen';
 import { SessionScreen } from './screens/SessionScreen';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { PermissionHistoryScreen } from './screens/PermissionHistoryScreen';
 import { HistoryScreen } from './screens/HistoryScreen';
@@ -32,6 +33,14 @@ export type RootStackParamList = {
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
+
+function SessionScreenWithBoundary(props: any) {
+  return (
+    <ErrorBoundary fallbackTitle="Session crashed">
+      <SessionScreen {...props} />
+    </ErrorBoundary>
+  );
+}
 
 export default function App() {
   const showSession = useConnectionStore(selectShowSession);
@@ -90,7 +99,7 @@ export default function App() {
           <>
             <Stack.Screen
               name="Session"
-              component={SessionScreen}
+              component={SessionScreenWithBoundary}
               options={{
                 title: 'Session',
                 headerLeft: () => (
