@@ -152,7 +152,7 @@ Store files:
 | `permission_response` | Respond to permission prompt (allow/deny) |
 | `ping` | Client heartbeat for connection keep-alive |
 | `read_file` | Request file content within project |
-| `register_push_token` | Register Expo push token for notifications |
+| `register_push_token` | Register push token for notifications |
 | `remove_repo` | Remove a repo from the server's configured repo list |
 | `rename_session` | Rename existing session by ID |
 | `request_cost_summary` | Request per-session cost breakdown |

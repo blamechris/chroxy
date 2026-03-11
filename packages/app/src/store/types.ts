@@ -436,6 +436,7 @@ export interface ConnectionState {
   // Conversation history (for resuming past conversations)
   conversationHistory: ConversationSummary[];
   conversationHistoryLoading: boolean;
+  conversationHistoryError: string | null;
 
   // Cross-session search
   searchResults: SearchResult[];
