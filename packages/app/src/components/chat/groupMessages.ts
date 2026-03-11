@@ -39,8 +39,9 @@ export function groupMessages(messages: ChatMessage[]): DisplayGroup[] {
   return groups;
 }
 
-/** Apply streaming isActive overlay to display groups — O(1) operation.
- *  Marks the last activity group as active if the streaming message is in it. */
+/** Apply streaming isActive overlay — shallow-copies the groups array to mark
+ *  the last activity group as active when streaming is in progress.
+ *  `streamingMessageId` is used as a truthy flag (non-null = streaming). */
 export function applyStreamingOverlay(
   baseGroups: DisplayGroup[],
   messages: ChatMessage[],

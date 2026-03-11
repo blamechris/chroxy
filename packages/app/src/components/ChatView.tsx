@@ -180,7 +180,7 @@ export function ChatView({
   // Structural grouping — only re-runs when messages change (not on streaming deltas)
   const baseGroups = useMemo(() => groupMessages(messages), [messages]);
 
-  // Overlay streaming isActive flag — O(1), cheap to recompute on every delta
+  // Overlay streaming isActive flag — cheap to recompute on every delta
   const displayGroups = useMemo(
     () => applyStreamingOverlay(baseGroups, messages, streamingMessageId),
     [baseGroups, streamingMessageId, messages],
