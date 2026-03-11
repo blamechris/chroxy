@@ -156,6 +156,40 @@ describe('PairingManager (#1836)', () => {
     })
   })
 
+  describe('capacity limits (#1907)', () => {
+    it('evicts oldest entry when MAX_ACTIVE_PAIRINGS cap is reached', () => {
+      const pm = new PairingManager({ ttlMs: 60_000 })
+      const firstId = pm.currentPairingId
+
+      // Refresh 10 times → 11 total IDs, but cap is 10
+      for (let i = 0; i < 10; i++) pm.refresh()
+
+      // First ID should have been evicted
+      const result = pm.validatePairing(firstId)
+      assert.equal(result.valid, false)
+      assert.equal(result.reason, 'invalid_pairing_id')
+
+      // Current (newest) should still be valid
+      const current = pm.validatePairing(pm.currentPairingId)
+      assert.equal(current.valid, true)
+      pm.destroy()
+    })
+
+    it('second-oldest ID survives when only one is evicted', () => {
+      const pm = new PairingManager({ ttlMs: 60_000 })
+      pm.refresh() // after this, the constructor ID is oldest; secondId is second-oldest
+      const secondId = pm.currentPairingId
+
+      // 9 more refreshes → 11 total, evicts only the very first
+      for (let i = 0; i < 9; i++) pm.refresh()
+
+      // secondId should still be valid (it was second, only first evicted)
+      const result = pm.validatePairing(secondId)
+      assert.equal(result.valid, true)
+      pm.destroy()
+    })
+  })
+
   describe('auto-refresh', () => {
     it('refresh() emits pairing_refreshed event', () => {
       const pm = new PairingManager({})
