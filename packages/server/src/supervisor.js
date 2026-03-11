@@ -162,6 +162,10 @@ export class Supervisor extends EventEmitter {
     const { wsUrl, httpUrl } = await this._tunnel.start()
     this._currentWsUrl = wsUrl
 
+    // Compute modeLabel early so tunnel_recovered handler can reference it
+    const tunnelArg = parseTunnelArg(this._tunnelMode)
+    this._modeLabel = tunnelArg ? `${tunnelArg.provider}:${tunnelArg.mode}` : this._tunnelMode
+
     this._tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
       this._log.info(`Tunnel recovered after ${attempt} attempt(s)`)
       await this._waitForTunnel(newHttpUrl)
@@ -197,8 +201,6 @@ export class Supervisor extends EventEmitter {
 
     // 3. Display connection info
     const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${this._apiToken}`
-    const tunnelArg = parseTunnelArg(this._tunnelMode)
-    this._modeLabel = tunnelArg ? `${tunnelArg.provider}:${tunnelArg.mode}` : this._tunnelMode
 
     this._log.info(`${this._modeLabel} ready`)
     process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
@@ -207,7 +209,7 @@ export class Supervisor extends EventEmitter {
     process.stdout.write(`   URL:   ${wsUrl}\n`)
     process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
     const dashboardBase = httpUrl || `http://localhost:${this._port}`
-    process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard?token=${maskToken(this._apiToken)}\n`)
+    process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard\n`)
     process.stdout.write('\n')
 
     // 3b. Write connection info file for programmatic access
