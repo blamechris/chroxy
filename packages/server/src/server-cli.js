@@ -267,7 +267,7 @@ export async function startCliServer(config) {
   }
 
   // Helper: display QR code and connection info
-  const SHOW_TOKEN = !!config.showToken
+  const SHOW_TOKEN = !!config.showToken || process.env.CHROXY_SHOW_TOKEN === '1'
   const displayQr = (wsUrlStr, httpUrlStr, modeLabel) => {
     const pairingUrl = buildPairingUrl(wsUrlStr)
     if (pairingUrl) {
