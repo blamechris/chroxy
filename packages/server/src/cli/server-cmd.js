@@ -45,8 +45,10 @@ export function registerServerCommands(program) {
     .description('Start in development mode (supervisor + auto-restart)')
 
   addServerOptions(devCmd)
+    .option('--show-token', 'Show full API token in terminal output (masked by default)')
     .action(async (options) => {
       const extraOverrides = parseExtraOverrides(options)
+      if (options.showToken) extraOverrides.showToken = true
       const config = loadAndMergeConfig(options, extraOverrides)
 
       if (config.noAuth) {

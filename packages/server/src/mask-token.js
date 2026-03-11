@@ -1,6 +1,6 @@
 /**
  * Mask a token for terminal display, showing only prefix and suffix.
- * @param {string} token
+ * @param {string | null | undefined} token
  * @returns {string}
  */
 export function maskToken(token) {
