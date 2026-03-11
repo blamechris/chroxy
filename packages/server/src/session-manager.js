@@ -804,7 +804,8 @@ export class SessionManager extends EventEmitter {
 
         // Track cumulative cost and check budget on result events
         if (event === 'result' && typeof data.cost === 'number') {
-          const model = entry.session.currentModel || entry.model || null
+          const sessionEntry = this._sessions.get(sessionId)
+          const model = session.currentModel || sessionEntry?.model || null
           this._trackCost(sessionId, data.cost, model)
         }
       })
