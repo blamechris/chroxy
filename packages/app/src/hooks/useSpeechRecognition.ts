@@ -3,6 +3,11 @@ import { Alert } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { getLocales } from 'expo-localization';
 
+import type {
+  ExpoSpeechRecognitionResultEvent,
+  ExpoSpeechRecognitionErrorEvent,
+} from 'expo-speech-recognition';
+
 // Dynamically resolve the native module — returns null in Expo Go
 let SpeechModule: typeof import('expo-speech-recognition').ExpoSpeechRecognitionModule | null = null;
 let useSpeechEvent: typeof import('expo-speech-recognition').useSpeechRecognitionEvent = (() => {}) as any;
@@ -63,7 +68,7 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
     }
   }, []);
 
-  useSpeechEvent('result', (event: any) => {
+  useSpeechEvent('result', (event: ExpoSpeechRecognitionResultEvent) => {
     const text = event.results[0]?.transcript;
     if (text) {
       setTranscript(text);
@@ -74,7 +79,7 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
     setIsRecognizing(false);
   });
 
-  useSpeechEvent('error', (event: any) => {
+  useSpeechEvent('error', (event: ExpoSpeechRecognitionErrorEvent) => {
     // Don't treat abort as a user-visible error
     if (event.error !== 'aborted') {
       setError(event.message || event.error);

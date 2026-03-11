@@ -7,11 +7,15 @@
  * - server_restarting: { attempt, max_attempts, backoff_secs } — auto-restart in progress
  * - server_error:      { message }            — server hit an error
  *
- * Only active when running inside Tauri (window.__TAURI__ exists).
+ * Only active when running inside Tauri (detected via shared isTauri utility).
  * In browser context, this hook is a no-op.
  */
 import { useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
+import { isTauri } from '../utils/tauri'
+
+// Re-export for consumers that imported isTauri from this module
+export { isTauri }
 
 interface TauriEvent<T> {
   payload: T
@@ -34,10 +38,6 @@ interface ServerErrorPayload {
 }
 
 type UnlistenFn = () => void
-
-export function isTauri(): boolean {
-  return typeof window !== 'undefined' && !!(window as unknown as Record<string, unknown>).__TAURI__
-}
 
 function getTauriEvent(): { listen: <T>(event: string, handler: (e: TauriEvent<T>) => void) => Promise<UnlistenFn> } | null {
   if (!isTauri()) return null
