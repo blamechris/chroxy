@@ -1,15 +1,18 @@
-import { describe, it } from 'node:test'
+import { before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 describe('CI workflow cache configuration', () => {
   let ciYml
 
-  it('loads ci.yml', async () => {
+  before(async () => {
     ciYml = await readFile(
       new URL('../../../.github/workflows/ci.yml', import.meta.url),
       'utf8'
     )
+  })
+
+  it('loads ci.yml', () => {
     assert.ok(ciYml.length > 0)
   })
 
@@ -21,17 +24,29 @@ describe('CI workflow cache configuration', () => {
     assert.ok(cacheDependencyLines.length > 0, 'should have cache-dependency-path entries')
 
     for (const line of cacheDependencyLines) {
-      assert.ok(
-        !line.includes("cache-dependency-path: package-lock.json") ||
-        line.includes('**/package-lock.json'),
-        `cache key should use glob pattern, found: ${line.trim()}`
+      const parts = line.split('cache-dependency-path:')
+      if (parts.length < 2) continue
+
+      let value = parts[1].trim()
+      // Strip matching surrounding quotes if present
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1)
+      }
+
+      assert.equal(
+        value,
+        '**/package-lock.json',
+        `cache-dependency-path should use glob pattern '**/package-lock.json', found: ${line.trim()}`
       )
     }
   })
 
   it('does not use bare root-only lockfile path', () => {
     // Ensure no job uses just 'package-lock.json' without the glob
-    const matches = ciYml.match(/cache-dependency-path:\s+package-lock\.json\s*$/gm)
+    const matches = ciYml.match(/cache-dependency-path:\s+['"]?package-lock\.json['"]?(?:\s+#.*)?$/gm)
     assert.equal(matches, null, 'should not have bare package-lock.json cache paths')
   })
 })
