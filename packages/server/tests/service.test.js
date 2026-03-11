@@ -8,6 +8,7 @@ import {
   getServicePaths,
   generateLaunchdPlist,
   generateSystemdUnit,
+  getWindowsAlternatives,
   resolveNode22Path,
   resolveChroxyBin,
   loadServiceState,
@@ -48,8 +49,14 @@ describe('service', () => {
       assert.ok(paths.logDir.includes('.chroxy/logs'))
     })
 
+    it('returns windows info on win32', () => {
+      const paths = getServicePaths('win32')
+      assert.equal(paths.type, 'windows')
+      assert.ok(paths.logDir.includes('.chroxy'))
+    })
+
     it('throws on unsupported platform', () => {
-      assert.throws(() => getServicePaths('win32'), {
+      assert.throws(() => getServicePaths('freebsd'), {
         message: /not supported/i,
       })
     })
@@ -184,6 +191,44 @@ describe('service', () => {
     it('includes WantedBy=default.target', () => {
       const unit = generateSystemdUnit(config)
       assert.ok(unit.includes('WantedBy=default.target'))
+    })
+  })
+
+  describe('getWindowsAlternatives()', () => {
+    it('returns an array of alternatives', () => {
+      const alts = getWindowsAlternatives()
+      assert.ok(Array.isArray(alts))
+      assert.ok(alts.length >= 2)
+    })
+
+    it('each alternative has name, description, and command', () => {
+      const alts = getWindowsAlternatives()
+      for (const alt of alts) {
+        assert.ok(alt.name, 'should have name')
+        assert.ok(alt.description, 'should have description')
+        assert.ok(alt.command, 'should have command')
+      }
+    })
+
+    it('includes Task Scheduler as an alternative', () => {
+      const alts = getWindowsAlternatives()
+      assert.ok(alts.some(a => a.name.toLowerCase().includes('task scheduler')))
+    })
+  })
+
+  describe('installService() on Windows', () => {
+    it('returns guidance instead of throwing on win32', () => {
+      const stateDir = join(tmpDir, 'state')
+      const result = installService({
+        nodePath: 'C:\\Program Files\\nodejs\\node.exe',
+        chroxyBin: 'C:\\chroxy\\cli.js',
+        _skipRegister: true,
+        _platform: 'win32',
+        _stateDir: stateDir,
+      })
+      assert.equal(result.installed, false)
+      assert.ok(result.message.includes('Windows'))
+      assert.ok(result.alternatives)
     })
   })
 
@@ -396,10 +441,12 @@ describe('service', () => {
       assert.equal(typeof result.message, 'string')
     })
 
-    it('throws on unsupported platform', () => {
-      assert.throws(() => startService({ _skipExec: true, _platform: 'win32' }), {
-        message: /not supported/i,
-      })
+    it('returns helpful guidance on windows', () => {
+      const result = startService({ _skipExec: true, _platform: 'win32' })
+      assert.equal(result.started, false)
+      assert.ok(result.message.includes('Windows'))
+      assert.ok(result.alternatives)
+      assert.ok(result.alternatives.length > 0)
     })
   })
 
@@ -416,10 +463,10 @@ describe('service', () => {
       assert.equal(typeof result.message, 'string')
     })
 
-    it('throws on unsupported platform', () => {
-      assert.throws(() => stopService({ _skipExec: true, _platform: 'win32' }), {
-        message: /not supported/i,
-      })
+    it('returns guidance on windows', () => {
+      const result = stopService({ _skipExec: true, _platform: 'win32' })
+      assert.equal(result.stopped, false)
+      assert.ok(result.message.includes('Windows'))
     })
   })
 
