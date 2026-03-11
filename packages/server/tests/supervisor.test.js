@@ -55,12 +55,14 @@ class TestSupervisor extends Supervisor {
     super(config)
     this._mockTunnel = createMockTunnel()
     this._mockChildren = []
+    this._lastForkOpts = null
     this._exitCalled = null
     this._rollbackCalls = []
     this._rollbackResult = false
   }
 
-  _fork() {
+  _fork(script, args, opts) {
+    this._lastForkOpts = opts
     const child = createMockChild()
     this._mockChildren.push(child)
     return child
@@ -165,7 +167,7 @@ describe('Supervisor', () => {
       clearInterval(supervisor._heartbeatInterval)
     })
 
-    it('prints full API token and full dashboard URL (not truncated)', async () => {
+    it('masks API token in startup output (#1913)', async () => {
       const { supervisor } = setup({ apiToken: 'abcdef1234567890fulltoken' })
       const chunks = []
       mock.method(process.stdout, 'write', (chunk) => { chunks.push(String(chunk)); return true })
@@ -177,13 +179,15 @@ describe('Supervisor', () => {
       const output = chunks.join('')
 
       assert.ok(output.includes('Token:'), 'Should print a Token: line')
-      assert.ok(output.includes('abcdef1234567890fulltoken'), 'Token should NOT be truncated')
-      assert.ok(!output.includes('...'), 'Output should not contain ...')
+      const tokenLine = output.split('\n').find(l => l.includes('Token:'))
+      assert.ok(!tokenLine.includes('abcdef1234567890fulltoken'), 'Token should be masked')
+      assert.ok(tokenLine.includes('abcd'), 'Should show prefix')
+      assert.ok(tokenLine.includes('...'), 'Should contain ellipsis')
 
       assert.ok(output.includes('Dashboard:'), 'Should print a Dashboard: line')
       const dashboardLine = (output.split('\n').find((line) => line.includes('Dashboard:')) ?? '')
-      assert.ok(dashboardLine.includes('abcdef1234567890fulltoken'), 'Dashboard URL should contain the full API token')
-      assert.ok(!dashboardLine.includes('...'), 'Dashboard URL should not contain ellipsis')
+      assert.ok(!dashboardLine.includes('abcdef1234567890fulltoken'), 'Dashboard URL should not contain token')
+      assert.ok(dashboardLine.includes('/dashboard'), 'Dashboard URL should end at /dashboard path')
 
       supervisor._shuttingDown = true
       clearInterval(supervisor._heartbeatInterval)
@@ -583,6 +587,96 @@ describe('Supervisor', () => {
     it('supervisor constructor accepts quick tunnel config', () => {
       const { supervisor } = setup({ tunnel: 'quick' })
       assert.equal(supervisor._tunnelMode, 'quick')
+    })
+  })
+
+  describe('showToken forwarding to child (#1903)', () => {
+    it('forwards CHROXY_SHOW_TOKEN=1 when config.showToken is true', () => {
+      const { supervisor } = setup({ showToken: true })
+      supervisor.startChild()
+      assert.ok(supervisor._lastForkOpts, 'should have fork opts')
+      assert.equal(supervisor._lastForkOpts.env.CHROXY_SHOW_TOKEN, '1')
+    })
+
+    it('does not set CHROXY_SHOW_TOKEN when config.showToken is falsy', () => {
+      const originalShowToken = process.env.CHROXY_SHOW_TOKEN
+      try {
+        delete process.env.CHROXY_SHOW_TOKEN
+        const { supervisor } = setup({})
+        supervisor.startChild()
+        assert.ok(supervisor._lastForkOpts, 'should have fork opts')
+        assert.equal(supervisor._lastForkOpts.env.CHROXY_SHOW_TOKEN, undefined)
+      } finally {
+        if (originalShowToken === undefined) {
+          delete process.env.CHROXY_SHOW_TOKEN
+        } else {
+          process.env.CHROXY_SHOW_TOKEN = originalShowToken
+        }
+      }
+    })
+  })
+
+  describe('modeLabel instance storage (#1913)', () => {
+    it('stores modeLabel on this._modeLabel after start()', async () => {
+      const { supervisor } = setup({ tunnel: 'quick' })
+      await supervisor.start()
+
+      assert.ok(supervisor._modeLabel, 'should have _modeLabel set')
+      assert.ok(supervisor._modeLabel.includes(':'), 'should be provider:mode format')
+
+      supervisor._shuttingDown = true
+      clearInterval(supervisor._heartbeatInterval)
+    })
+
+    it('tunnel_recovered uses this._modeLabel without TDZ error', async () => {
+      const { supervisor } = setup({ apiToken: 'abcdef1234567890fulltoken', tunnel: 'quick' })
+      await supervisor.start()
+
+      const chunks = []
+      mock.method(process.stdout, 'write', (chunk) => { chunks.push(String(chunk)); return true })
+
+      try {
+        supervisor._mockTunnel.emit('tunnel_recovered', {
+          httpUrl: 'https://new-tunnel.example.com',
+          wsUrl: 'wss://new-tunnel.example.com',
+          attempt: 1,
+        })
+        await new Promise(r => setTimeout(r, 50))
+      } finally {
+        mock.restoreAll()
+      }
+
+      // Should not throw ReferenceError for modeLabel
+      assert.ok(supervisor._modeLabel, 'modeLabel should be on instance')
+      // Should have printed masked token in recovery output
+      const output = chunks.join('')
+      const tokenLine = output.split('\n').find(l => l.includes('Token:'))
+      assert.ok(tokenLine, 'Should have a Token: line in recovery output')
+      assert.ok(!tokenLine.includes('abcdef1234567890fulltoken'), 'Recovery token should be masked')
+
+      supervisor._shuttingDown = true
+      clearInterval(supervisor._heartbeatInterval)
+    })
+  })
+
+  describe('dynamic version in banner (#1915)', () => {
+    it('startup banner includes package.json version', async () => {
+      const { supervisor } = setup()
+      const chunks = []
+      mock.method(process.stdout, 'write', (chunk) => { chunks.push(String(chunk)); return true })
+      try {
+        await supervisor.start()
+      } finally {
+        mock.restoreAll()
+      }
+      const output = chunks.join('')
+      // Should contain the exact version from package.json
+      const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'))
+      const expectedBanner = `Chroxy Supervisor v${version}`
+      assert.ok(output.includes(expectedBanner), `Banner should contain "${expectedBanner}"`)
+
+      supervisor._shuttingDown = true
+      clearInterval(supervisor._heartbeatInterval)
     })
   })
 })
