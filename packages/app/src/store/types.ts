@@ -442,6 +442,7 @@ export interface ConnectionState {
   searchResults: SearchResult[];
   searchLoading: boolean;
   searchQuery: string;
+  searchError: string | null;
 
   // Checkpoints for session rewind
   checkpoints: Checkpoint[];
