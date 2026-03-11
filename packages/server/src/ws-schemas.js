@@ -116,6 +116,7 @@ export const RegisterPushTokenSchema = z.object({
 export const UserQuestionResponseSchema = z.object({
   type: z.literal('user_question_response'),
   answer: z.string(),
+  answers: z.record(z.string(), z.string()).optional(),
   toolUseId: z.string().optional(),
 })
 
