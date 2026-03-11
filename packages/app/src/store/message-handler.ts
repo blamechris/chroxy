@@ -2106,7 +2106,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'push_token_error': {
-      const errMessage = typeof msg.message === 'string' ? msg.message : 'Push token registration failed';
+      const rawPushError = typeof msg.message === 'string' ? stripAnsi(msg.message as string) : '';
+      const errMessage = rawPushError.trim().length > 0 ? rawPushError.trim() : 'Push token registration failed';
       console.warn('[push] Push token error from server:', errMessage);
       break;
     }

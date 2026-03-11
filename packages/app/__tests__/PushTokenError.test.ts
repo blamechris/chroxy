@@ -11,7 +11,7 @@ describe('push_token_error handler (#1987)', () => {
     expect(src).toMatch(/case 'push_token_error':/)
   })
 
-  test('logs warning with message from server', () => {
-    expect(src).toMatch(/console\.warn.*push.*token.*error/i)
+  test('logs warning with errMessage from server', () => {
+    expect(src).toMatch(/console\.warn\([^)]*(msg\.message|errMessage)[^)]*\)/i)
   })
 })
