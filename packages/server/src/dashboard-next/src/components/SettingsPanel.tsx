@@ -10,6 +10,12 @@ import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
 
+const PROVIDER_LABELS: Record<string, string> = {
+  'claude-sdk': 'Claude Code (SDK)',
+  'claude-cli': 'Claude Code (CLI)',
+  'gemini': 'Gemini CLI',
+}
+
 export interface SettingsPanelProps {
   isOpen: boolean
   onClose: () => void
@@ -42,6 +48,7 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const setTheme = useConnectionStore(s => s.setTheme)
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
   const setDefaultProvider = useConnectionStore(s => s.setDefaultProvider)
+  const availableProviders = useConnectionStore(s => s.availableProviders)
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const updateInputSettings = useConnectionStore(s => s.updateInputSettings)
   const themes = getAvailableThemes()
@@ -120,8 +127,17 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 value={defaultProvider}
                 onChange={handleProviderChange}
               >
-                <option value="claude-sdk">Claude Code (SDK)</option>
-                <option value="claude-cli">Claude Code (CLI)</option>
+                {availableProviders.length > 0
+                  ? availableProviders.map(p => (
+                      <option key={p.name} value={p.name}>
+                        {PROVIDER_LABELS[p.name] || p.name}
+                      </option>
+                    ))
+                  : <>
+                      <option value="claude-sdk">Claude Code (SDK)</option>
+                      <option value="claude-cli">Claude Code (CLI)</option>
+                    </>
+                }
               </select>
             </div>
             <div className="settings-field">
