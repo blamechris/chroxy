@@ -41,20 +41,40 @@ describe('#1931 — CWD real path cache TTL', () => {
     assert.ok(names.includes('test.txt'), 'entries should contain test.txt')
   })
 
-  it('returns consistent results on repeated calls (cache hit)', async () => {
+  it('returns cached CWD resolution when symlink target changes within TTL', async () => {
     const { createFileOps } = await import('../src/ws-file-ops.js')
 
     const results = []
     const sendFn = (_ws, msg) => results.push(msg)
     const ops = createFileOps(sendFn)
 
-    // Call browseFiles twice — second call should use cached CWD resolution
-    await ops.browseFiles({}, linkDir, linkDir)
-    await ops.browseFiles({}, linkDir, linkDir)
+    // Prepare two real directories with different contents
+    const cacheDir1 = join(tmpDir, 'cache-real-1')
+    const cacheDir2 = join(tmpDir, 'cache-real-2')
+    const cacheLink = join(tmpDir, 'cache-link')
+
+    await mkdir(cacheDir1, { recursive: true })
+    await mkdir(cacheDir2, { recursive: true })
+
+    await writeFile(join(cacheDir1, 'file1.txt'), 'one')
+    await writeFile(join(cacheDir2, 'file2.txt'), 'two')
+
+    // Point the symlink at the first real directory and populate the cache
+    await symlink(cacheDir1, cacheLink)
+    await ops.browseFiles({}, cacheLink, cacheLink)
+
+    // Repoint the symlink to a different real directory, but reuse the same path
+    // A correctly implemented cache should still use the original resolved real path
+    await rm(cacheLink)
+    await symlink(cacheDir2, cacheLink)
+    await ops.browseFiles({}, cacheLink, cacheLink)
 
     assert.equal(results.length, 2, 'should return two results')
     assert.equal(results[0].type, 'file_listing')
     assert.equal(results[1].type, 'file_listing')
+
+    // If resolveSessionCwd() does NOT cache, the entries would now reflect cacheDir2
+    // and differ from the first call. Equality here demonstrates a cache hit.
     assert.deepEqual(results[0].entries, results[1].entries)
   })
 
