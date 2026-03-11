@@ -530,11 +530,16 @@ export class SdkSession extends BaseSession {
     log.info(`Question response received: "${text.slice(0, 60)}"`)
 
     // Build structured answers map: SDK expects { [questionText]: selectedLabel }
-    const answers = {}
+    const answers = Object.create(null)
     const questions = input.questions || []
-    if (answersMap && Object.keys(answersMap).length > 0) {
-      // Per-question answers provided by the client
-      Object.assign(answers, answersMap)
+    const questionKeys = new Set(questions.map(q => q.question))
+    if (answersMap && typeof answersMap === 'object' && Object.keys(answersMap).length > 0) {
+      // Per-question answers provided by the client — only copy known question keys
+      for (const key of Object.keys(answersMap)) {
+        if (questionKeys.has(key)) {
+          answers[key] = answersMap[key]
+        }
+      }
     } else if (questions.length > 0) {
       // Fallback: single answer mapped to all questions
       for (const q of questions) {
