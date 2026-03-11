@@ -10,6 +10,7 @@ import {
   Alert,
   Platform,
   Animated,
+  type AlertButton,
 } from 'react-native';
 import { useConnectionStore } from '../store/connection';
 import type { SessionInfo, SessionHealth, SessionState, SessionNotification } from '../store/types';
@@ -270,7 +271,7 @@ export function SessionOverview({ onClose }: SessionOverviewProps) {
   });
 
   const handleLongPress = (session: SessionInfo) => {
-    const buttons: any[] = [];
+    const buttons: AlertButton[] = [];
     buttons.push({
       text: 'Rename',
       onPress: () => {
