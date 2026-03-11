@@ -122,6 +122,7 @@ export function GitView({ visible, onClose }: GitViewProps) {
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [commitMessage, setCommitMessage] = useState('');
   const [committing, setCommitting] = useState(false);
+  const [stagingInProgress, setStagingInProgress] = useState(false);
 
   const setGitStatusCallback = useConnectionStore((s) => s.setGitStatusCallback);
   const setGitBranchesCallback = useConnectionStore((s) => s.setGitBranchesCallback);
@@ -198,15 +199,18 @@ export function GitView({ visible, onClose }: GitViewProps) {
     );
     if (paths.length === 0) return;
 
+    setStagingInProgress(true);
     const cb = (result: GitStageResult) => {
       setGitStageCallback(null);
       stageCallbackRef.current = null;
       if (result.error) {
+        setStagingInProgress(false);
         Alert.alert('Stage Failed', result.error);
       } else {
         setSelectedPaths(new Set());
         // Re-fetch status
         setGitStatusCallback((r: GitStatusResult) => {
+          setStagingInProgress(false);
           if (!r.error) {
             setBranch(r.branch);
             setStaged(r.staged);
@@ -230,14 +234,17 @@ export function GitView({ visible, onClose }: GitViewProps) {
     const paths = Array.from(selectedPaths).filter((p) => stagedPaths.has(p));
     if (paths.length === 0) return;
 
+    setStagingInProgress(true);
     const cb = (result: GitStageResult) => {
       setGitStageCallback(null);
       stageCallbackRef.current = null;
       if (result.error) {
+        setStagingInProgress(false);
         Alert.alert('Unstage Failed', result.error);
       } else {
         setSelectedPaths(new Set());
         setGitStatusCallback((r: GitStatusResult) => {
+          setStagingInProgress(false);
           if (!r.error) {
             setBranch(r.branch);
             setStaged(r.staged);
@@ -363,15 +370,15 @@ export function GitView({ visible, onClose }: GitViewProps) {
       {selectedPaths.size > 0 && (
         <View style={styles.actionBar}>
           {hasUnstagedSelected && (
-            <TouchableOpacity style={styles.actionButton} onPress={handleStageSelected} accessibilityRole="button" accessibilityLabel="Stage selected files">
-              <Icon name="plus" size={14} color={COLORS.accentGreen} />
-              <Text style={styles.actionButtonText}>Stage</Text>
+            <TouchableOpacity style={styles.actionButton} onPress={handleStageSelected} disabled={stagingInProgress} accessibilityRole="button" accessibilityLabel="Stage selected files">
+              {stagingInProgress ? <ActivityIndicator size="small" color={COLORS.accentGreen} /> : <Icon name="plus" size={14} color={COLORS.accentGreen} />}
+              <Text style={styles.actionButtonText}>{stagingInProgress ? 'Staging...' : 'Stage'}</Text>
             </TouchableOpacity>
           )}
           {hasStagedSelected && (
-            <TouchableOpacity style={styles.actionButton} onPress={handleUnstageSelected} accessibilityRole="button" accessibilityLabel="Unstage selected files">
-              <Icon name="minus" size={14} color={COLORS.accentOrange} />
-              <Text style={[styles.actionButtonText, { color: COLORS.accentOrange }]}>Unstage</Text>
+            <TouchableOpacity style={styles.actionButton} onPress={handleUnstageSelected} disabled={stagingInProgress} accessibilityRole="button" accessibilityLabel="Unstage selected files">
+              {stagingInProgress ? <ActivityIndicator size="small" color={COLORS.accentOrange} /> : <Icon name="minus" size={14} color={COLORS.accentOrange} />}
+              <Text style={[styles.actionButtonText, { color: COLORS.accentOrange }]}>{stagingInProgress ? 'Unstaging...' : 'Unstage'}</Text>
             </TouchableOpacity>
           )}
         </View>
