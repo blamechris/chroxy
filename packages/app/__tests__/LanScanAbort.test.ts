@@ -86,9 +86,6 @@ describe('LAN scan AbortController fix (#1947)', () => {
 
   test('timeout does not double-abort after outer abort', () => {
     const outer = new AbortController();
-    const ctrl = new AbortController();
-    const abortSpy = jest.spyOn(ctrl.signal, 'addEventListener');
-
     const fetchFn = jest.fn(() => new Promise<Response>(() => {}));
     const { abortLog } = probeIp(outer.signal, fetchFn);
 
@@ -122,5 +119,7 @@ describe('LAN scan AbortController fix (#1947)', () => {
 
     // timeout-fired should NOT appear — cleared in finally
     expect(abortLog).not.toContain('timeout-fired');
+    // outer-abort should NOT appear — listener removed in finally
+    expect(abortLog).not.toContain('outer-abort');
   });
 });
