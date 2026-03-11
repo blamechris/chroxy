@@ -214,6 +214,8 @@ function envKeyForConfig(key) {
     externalUrl: 'CHROXY_EXTERNAL_URL',
     maxSessions: 'CHROXY_MAX_SESSIONS',
     maxHistory: 'CHROXY_MAX_HISTORY',
+    showToken: 'CHROXY_SHOW_TOKEN',
+    repos: 'CHROXY_REPOS',
   }
   return envMap[key] || key.toUpperCase()
 }
