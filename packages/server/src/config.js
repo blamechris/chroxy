@@ -286,3 +286,4 @@ export function writeReposToConfig(repos, configPath = DEFAULT_CONFIG_PATH) {
   mkdirSync(dir, { recursive: true })
   writeFileRestricted(configPath, JSON.stringify(existing, null, 2))
 }
+

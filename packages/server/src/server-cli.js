@@ -13,6 +13,7 @@ import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
 import { getLanIp } from './lan-ip.js'
 import { writeFileRestricted } from './platform.js'
+import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -30,7 +31,33 @@ function isWithinHome(dir) {
 export async function startCliServer(config) {
   const PORT = config.port || parseInt(process.env.PORT || '8765', 10)
   const NO_AUTH = !!config.noAuth
-  const API_TOKEN = NO_AUTH ? null : (config.apiToken || process.env.API_TOKEN)
+
+  // Token precedence: config (may be from keychain migration) > keychain > env var
+  let API_TOKEN = NO_AUTH ? null : (config.apiToken || getToken() || process.env.API_TOKEN)
+
+  // Migrate plaintext token to keychain and remove from config file
+  if (!NO_AUTH && config.apiToken && isKeychainAvailable()) {
+    const configFile = join(homedir(), '.chroxy', 'config.json')
+    const { migrated } = migrateToken(config)
+    // Remove plaintext token from config file (whether newly migrated or already in keychain)
+    const keychainToken = getToken()
+    if (keychainToken && (migrated || keychainToken === config.apiToken)) {
+      try {
+        const raw = existsSync(configFile) ? readFileSync(configFile, 'utf-8') : '{}'
+        const cfg = JSON.parse(raw)
+        if (cfg.apiToken) {
+          delete cfg.apiToken
+          writeFileRestricted(configFile, JSON.stringify(cfg, null, 2))
+          if (migrated) console.log('[keychain] API token migrated to OS keychain')
+          else console.log('[keychain] Removed redundant plaintext token from config')
+        }
+      } catch (err) {
+        console.warn(`[keychain] Migration warning: ${err.message}`)
+      }
+      // Use keychain token as authoritative source
+      API_TOKEN = keychainToken
+    }
+  }
 
   if (!NO_AUTH && !API_TOKEN) {
     console.error('[!] No API token configured. Run \'npx chroxy init\' first.')
@@ -157,11 +184,23 @@ export async function startCliServer(config) {
     token: API_TOKEN,
     tokenExpiry: config.tokenExpiry || null,
     onPersist: (newToken) => {
-      try {
+      const persistToFile = () => {
         const raw = existsSync(configFile) ? readFileSync(configFile, 'utf-8') : '{}'
         const cfg = JSON.parse(raw)
         cfg.apiToken = newToken
         writeFileRestricted(configFile, JSON.stringify(cfg, null, 2))
+      }
+      try {
+        if (isKeychainAvailable()) {
+          try {
+            setToken(newToken)
+          } catch {
+            // Keychain write failed — fall back to config file
+            persistToFile()
+          }
+        } else {
+          persistToFile()
+        }
       } catch (err) {
         console.error(`[token-manager] Failed to persist token: ${err.message}`)
       }
