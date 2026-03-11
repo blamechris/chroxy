@@ -101,7 +101,10 @@ function handleResumeBudget(ws, client, msg, ctx) {
 
 function handleRegisterPushToken(ws, client, msg, ctx) {
   if (ctx.pushManager && typeof msg.token === 'string') {
-    ctx.pushManager.registerToken(msg.token)
+    const ok = ctx.pushManager.registerToken(msg.token)
+    if (!ok) {
+      ctx.send(ws, { type: 'push_token_error', message: 'Push token rejected — must be a non-empty string' })
+    }
   }
 }
 
