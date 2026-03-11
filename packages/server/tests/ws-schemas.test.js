@@ -170,6 +170,16 @@ describe('InputSchema', () => {
     })
     assert.ok(!result.success)
   })
+
+  it('rejects data exceeding max length (#1920)', () => {
+    const result = InputSchema.safeParse({ type: 'input', data: 'x'.repeat(100_001) })
+    assert.ok(!result.success, 'Should reject data over 100KB')
+  })
+
+  it('accepts data at max length', () => {
+    const result = InputSchema.safeParse({ type: 'input', data: 'x'.repeat(100_000) })
+    assert.ok(result.success, 'Should accept data at exactly 100KB')
+  })
 })
 
 
@@ -317,6 +327,11 @@ describe('CreateSessionSchema', () => {
     assert.ok(result.success)
     assert.equal(result.data.provider, undefined)
   })
+
+  it('rejects name exceeding max length (#1920)', () => {
+    const result = CreateSessionSchema.safeParse({ type: 'create_session', name: 'x'.repeat(201) })
+    assert.ok(!result.success, 'Should reject name over 200 chars')
+  })
 })
 
 describe('DestroySessionSchema', () => {
@@ -340,6 +355,11 @@ describe('RenameSessionSchema', () => {
   it('rejects missing name', () => {
     const result = RenameSessionSchema.safeParse({ type: 'rename_session', sessionId: 'sess-1' })
     assert.ok(!result.success)
+  })
+
+  it('rejects name exceeding max length (#1920)', () => {
+    const result = RenameSessionSchema.safeParse({ type: 'rename_session', sessionId: 'sess-1', name: 'x'.repeat(201) })
+    assert.ok(!result.success, 'Should reject name over 200 chars')
   })
 })
 
