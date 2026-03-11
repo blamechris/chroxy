@@ -96,6 +96,7 @@ export function App() {
   const availableModels = useConnectionStore(s => s.availableModels)
   const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
   const serverErrors = useConnectionStore(s => s.serverErrors)
+  const infoNotifications = useConnectionStore(s => s.infoNotifications ?? [])
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
   const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
@@ -151,6 +152,7 @@ export function App() {
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
+  const dismissInfoNotification = useConnectionStore(s => s.dismissInfoNotification)
   const dismissSessionNotification = useConnectionStore(s => s.dismissSessionNotification)
   const markPromptAnsweredByRequestId = useConnectionStore(s => s.markPromptAnsweredByRequestId)
   const conversationHistory = useConnectionStore(s => s.conversationHistory)
@@ -465,12 +467,16 @@ export function App() {
     return '<p>Claude has prepared a plan for your review.</p>'
   }, [isPlanPending, storeMessages])
 
-  // Toast items from server errors — only global errors or errors for the active session
+  // Toast items from server errors + info notifications
   const toastItems: ToastItem[] = useMemo(
-    () => serverErrors
-      .filter(e => !e.sessionId || e.sessionId === activeSessionId)
-      .map(e => ({ id: e.id, message: e.message })),
-    [serverErrors, activeSessionId],
+    () => [
+      ...serverErrors
+        .filter(e => !e.sessionId || e.sessionId === activeSessionId)
+        .map(e => ({ id: e.id, message: e.message, level: 'error' as const })),
+      ...infoNotifications
+        .map(e => ({ id: e.id, message: e.message, level: 'info' as const })),
+    ],
+    [serverErrors, infoNotifications, activeSessionId],
   )
 
   // Handlers
@@ -1052,7 +1058,15 @@ export function App() {
       />
 
       {/* Toasts */}
-      <Toast items={toastItems} onDismiss={dismissServerError} />
+      <Toast items={toastItems} onDismiss={(id) => {
+        const item = toastItems.find(t => t.id === id)
+        if (!item) return
+        if (item.level === 'error') {
+          dismissServerError(id)
+        } else {
+          dismissInfoNotification(id)
+        }
+      }} />
 
       {/* Command palette */}
       <CommandPalette
