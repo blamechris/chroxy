@@ -33,11 +33,6 @@ const schemasSrc = fs.readFileSync(
   'utf-8',
 )
 
-const handlersSrc = fs.readFileSync(
-  path.resolve(__dirname, '../../../ws-message-handlers.js'),
-  'utf-8',
-)
-
 describe('Provider picker in session creation (#1366)', () => {
   test('CreateSessionData includes provider field', () => {
     expect(modalSrc).toMatch(/interface CreateSessionData[\s\S]*?provider\??\s*:\s*string/)
