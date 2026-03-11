@@ -595,6 +595,15 @@ export class WsServer {
       })
     })
 
+    this.httpServer.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        log.error(`Port ${this.port} is already in use — is another Chroxy instance running?`)
+        process.exit(1)
+        return
+      }
+      log.error(`HTTP server error: ${err.message}`)
+    })
+
     this.httpServer.listen(this.port, host)
 
     // Detect Claude Code Web features (non-blocking)
