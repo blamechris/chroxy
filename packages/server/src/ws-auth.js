@@ -86,7 +86,7 @@ export function handleAuthMessage(ctx, ws, msg) {
   const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
   existing.blockedUntil = now + backoff
   authFailures.set(ip, existing)
-  log.warn(`Auth failure from IP ${client.ip} (attempt ${existing.count}, blocked for ${backoff}ms)`)
+  log.warn(`Auth failure from IP ${ip} (attempt ${existing.count}, blocked for ${backoff}ms)`)
   send(ws, { type: 'auth_fail', reason: 'invalid_token' })
   ws.close()
   return true
