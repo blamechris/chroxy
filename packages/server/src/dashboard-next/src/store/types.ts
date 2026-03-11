@@ -432,6 +432,9 @@ export interface ConnectionState {
   // Server errors forwarded over WebSocket (last 10)
   serverErrors: ServerError[];
 
+  // Info-level notifications (update available, etc.) — last 10
+  infoNotifications: ServerError[];
+
   // Background session notifications (permission, question, completed, error)
   sessionNotifications: SessionNotification[];
 
@@ -587,6 +590,10 @@ export interface ConnectionState {
   // Server error actions
   addServerError: (message: string) => void;
   dismissServerError: (id: string) => void;
+
+  // Info notification actions
+  addInfoNotification: (message: string) => void;
+  dismissInfoNotification: (id: string) => void;
 
   // Session notification actions
   dismissSessionNotification: (id: string) => void;

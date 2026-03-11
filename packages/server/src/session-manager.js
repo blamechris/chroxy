@@ -10,7 +10,9 @@ import { readSessionContext } from './session-context.js'
 import { parseDuration } from './duration.js'
 import { SessionLockManager } from './session-lock.js'
 import { CostBudgetManager } from './cost-budget-manager.js'
+import { createLogger } from './logger.js'
 
+const log = createLogger('session-manager')
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
 /**
@@ -100,7 +102,7 @@ export class SessionManager extends EventEmitter {
     // Session idle timeout
     const parsedTimeout = sessionTimeout ? parseDuration(sessionTimeout) : null
     if (sessionTimeout != null && parsedTimeout == null) {
-      console.warn(`[session-manager] Invalid sessionTimeout value "${sessionTimeout}". Session timeouts are disabled.`)
+      log.warn(`Invalid sessionTimeout value "${sessionTimeout}". Session timeouts are disabled.`)
     }
     this._sessionTimeoutMs = parsedTimeout
     this._lastActivity = new Map() // sessionId -> timestamp
@@ -142,7 +144,7 @@ export class SessionManager extends EventEmitter {
    */
   createSession({ name, cwd, model, permissionMode, resumeSessionId, provider } = {}) {
     if (this._sessions.size >= this.maxSessions) {
-      console.error(`[session-manager] Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
+      log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
     }
 
@@ -198,7 +200,7 @@ export class SessionManager extends EventEmitter {
       if (result && typeof result.catch === 'function') {
         result.catch((err) => {
           const message = err?.message || String(err)
-          console.error(`[session-manager] Async start() rejected for session ${sessionId}: ${message}`, err)
+          log.error(`Async start() rejected for session ${sessionId}: ${message}${err?.stack ? '\n' + err.stack : ''}`)
           this.destroySession(sessionId)
         })
       }
@@ -210,13 +212,13 @@ export class SessionManager extends EventEmitter {
       try {
         session.destroy()
       } catch (destroyErr) {
-        console.error(`[session-manager] Failed to destroy session ${sessionId} during start() failure cleanup:`, destroyErr)
+        log.error(`Failed to destroy session ${sessionId} during start() failure cleanup: ${destroyErr?.stack || destroyErr}`)
       }
       this._cleanupSessionMaps(sessionId)
       throw err
     }
 
-    console.log(`[session-manager] Created session ${sessionId} "${sessionName}" (${this._sessions.size}/${this.maxSessions})`)
+    log.info(`Created session ${sessionId} "${sessionName}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_created', { sessionId, name: sessionName, cwd: resolvedCwd })
     this._schedulePersist()
     return sessionId
@@ -320,12 +322,12 @@ export class SessionManager extends EventEmitter {
   renameSession(sessionId, name) {
     const entry = this._sessions.get(sessionId)
     if (!entry) {
-      console.error(`[session-manager] Cannot rename: session ${sessionId} not found`)
+      log.error(`Cannot rename: session ${sessionId} not found`)
       return false
     }
     entry.name = name
     entry._autoLabeled = true // prevent auto-label from overwriting manual rename
-    console.log(`[session-manager] Renamed session ${sessionId} to "${name}"`)
+    log.info(`Renamed session ${sessionId} to "${name}"`)
     this.emit('session_updated', { sessionId, name })
     return true
   }
@@ -337,7 +339,7 @@ export class SessionManager extends EventEmitter {
   destroySession(sessionId) {
     const entry = this._sessions.get(sessionId)
     if (!entry) {
-      console.error(`[session-manager] Cannot destroy: session ${sessionId} not found`)
+      log.error(`Cannot destroy: session ${sessionId} not found`)
       return false
     }
     // Detach listeners BEFORE destroy to prevent orphaned events (FM-04)
@@ -355,10 +357,10 @@ export class SessionManager extends EventEmitter {
     try {
       entry.session.destroy()
     } catch (destroyErr) {
-      console.error(`[session-manager] Error destroying session ${sessionId} "${entry.name}":`, destroyErr)
+      log.error(`Error destroying session ${sessionId} "${entry.name}": ${destroyErr?.stack || destroyErr}`)
     }
     this._cleanupSessionMaps(sessionId)
-    console.log(`[session-manager] Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
+    log.info(`Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_destroyed', { sessionId })
     this._schedulePersist()
     return true
@@ -374,7 +376,7 @@ export class SessionManager extends EventEmitter {
     try {
       this.serializeState()
     } catch (err) {
-      console.error('[session-manager] Failed to serialize state during destroyAll:', err.message)
+      log.error(`Failed to serialize state during destroyAll: ${err?.stack || err}`)
     }
     for (const [sessionId, entry] of this._sessions) {
       entry.session.removeAllListeners()
@@ -382,7 +384,7 @@ export class SessionManager extends EventEmitter {
       try {
         entry.session.destroy()
       } catch (destroyErr) {
-        console.error(`[session-manager] Error destroying session ${sessionId} "${entry.name}" during destroyAll():`, destroyErr)
+        log.error(`Error destroying session ${sessionId} "${entry.name}" during destroyAll(): ${destroyErr?.stack || destroyErr}`)
       }
       this.emit('session_destroyed', { sessionId })
     }
@@ -444,12 +446,12 @@ export class SessionManager extends EventEmitter {
     if (isWindows) {
       try { unlinkSync(this._stateFilePath) } catch (err) {
         if (err && err.code !== 'ENOENT') {
-          console.error(`[session-manager] Failed to remove existing state file: ${err.message}`)
+          log.error(`Failed to remove existing state file: ${err.message}`)
         }
       }
     }
     renameSync(tmpPath, this._stateFilePath)
-    console.log(`[session-manager] Serialized ${state.sessions.length} session(s) to ${this._stateFilePath}`)
+    log.info(`Serialized ${state.sessions.length} session(s) to ${this._stateFilePath}`)
     return state
   }
 
@@ -466,19 +468,19 @@ export class SessionManager extends EventEmitter {
     try {
       state = JSON.parse(readFileSync(this._stateFilePath, 'utf-8'))
     } catch (err) {
-      console.error(`[session-manager] Failed to parse session state: ${err.message}`)
+      log.error(`Failed to parse session state: ${err.message}`)
       try { unlinkSync(this._stateFilePath) } catch {}
       return null
     }
 
     if (!Array.isArray(state.sessions) || state.sessions.length === 0) {
-      console.log('[session-manager] No sessions to restore')
+      log.info('No sessions to restore')
       return null
     }
 
     // Reject stale state (older than TTL, default 24h)
     if (state.timestamp && Date.now() - state.timestamp > this._stateTtlMs) {
-      console.log(`[session-manager] Session state is stale (>${Math.round(this._stateTtlMs / 60000)}min), starting fresh`)
+      log.info(`Session state is stale (>${Math.round(this._stateTtlMs / 60000)}min), starting fresh`)
       return null
     }
 
@@ -502,9 +504,9 @@ export class SessionManager extends EventEmitter {
           this._messageHistory.set(sessionId, saved.history)
         }
         if (!firstId) firstId = sessionId
-        console.log(`[session-manager] Restored session "${saved.name}" (SDK resume: ${saved.sdkSessionId || 'none'})`)
+        log.info(`Restored session "${saved.name}" (SDK resume: ${saved.sdkSessionId || 'none'})`)
       } catch (err) {
-        console.error(`[session-manager] Failed to restore session "${saved.name}": ${err.message}`)
+        log.error(`Failed to restore session "${saved.name}": ${err.message}`)
       }
     }
 
@@ -630,7 +632,7 @@ export class SessionManager extends EventEmitter {
     }
 
     entry.name = label
-    console.log(`[session-manager] Auto-labeled session ${sessionId} to "${label}"`)
+    log.info(`Auto-labeled session ${sessionId} to "${label}"`)
     this.emit('session_updated', { sessionId, name: label })
   }
 
@@ -735,6 +737,9 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Push an entry to the history array, trimming to max size.
+   * @param {Array} history - The session history array to push to
+   * @param {object} entry - The history entry to add
+   * @param {string} sessionId - The session ID (used for truncation tracking)
    */
   _pushHistory(history, entry, sessionId) {
     history.push(entry)
@@ -754,7 +759,7 @@ export class SessionManager extends EventEmitter {
       try {
         this.serializeState()
       } catch (err) {
-        console.error('[session-manager] Failed to persist session state:', err)
+        log.error(`Failed to persist session state: ${err?.stack || err}`)
       }
     }, this._persistDebounceMs)
   }
@@ -900,7 +905,7 @@ export class SessionManager extends EventEmitter {
     if (this._timeoutCheckTimer) return
 
     const checkIntervalMs = Math.min(60_000, Math.floor(this._sessionTimeoutMs / 4))
-    console.log(`[session-manager] Session timeout enabled: ${this._sessionTimeoutMs}ms (check every ${checkIntervalMs}ms)`)
+    log.info(`Session timeout enabled: ${this._sessionTimeoutMs}ms (check every ${checkIntervalMs}ms)`)
     this._timeoutCheckTimer = setInterval(() => {
       this._checkSessionTimeouts()
     }, checkIntervalMs)
@@ -958,7 +963,7 @@ export class SessionManager extends EventEmitter {
       if (!this._sessionWarned.has(sessionId) && idleMs >= this._sessionTimeoutMs - warningMs) {
         const remainingMs = Math.max(0, this._sessionTimeoutMs - idleMs)
         const friendly = formatIdleDuration(remainingMs)
-        console.log(`[session-manager] Session ${sessionId} idle warning (${friendly} remaining)`)
+        log.info(`Session ${sessionId} idle warning (${friendly} remaining)`)
         this._sessionWarned.add(sessionId)
         this.emit('session_warning', {
           sessionId,
@@ -973,7 +978,7 @@ export class SessionManager extends EventEmitter {
     // Destroy outside the iteration loop (#815)
     for (const { sessionId, name, idleMs } of toDestroy) {
       const friendly = formatIdleDuration(idleMs)
-      console.log(`[session-manager] Session ${sessionId} timed out after ${friendly} idle`)
+      log.info(`Session ${sessionId} timed out after ${friendly} idle`)
       this.emit('session_timeout', { sessionId, name, idleMs })
       this.destroySession(sessionId)
     }
@@ -998,7 +1003,7 @@ export class SessionManager extends EventEmitter {
   resumeBudget(sessionId) {
     this._costBudget.resume(sessionId)
     this._schedulePersist()
-    console.log(`[session-manager] Budget pause overridden for session ${sessionId}`)
+    log.info(`Budget pause overridden for session ${sessionId}`)
   }
 
   getCostByModel() {

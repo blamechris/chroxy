@@ -41,6 +41,8 @@ describe('useTauriEvents', () => {
     useConnectionStore.setState({
       connectionPhase: 'connected',
       connectionError: null,
+      infoNotifications: [],
+      serverErrors: [],
     })
   })
 
@@ -141,6 +143,30 @@ describe('useTauriEvents', () => {
     emit('server_stopped')
 
     expect(disconnectSpy).toHaveBeenCalled()
+  })
+
+  it('uses addInfoNotification for update_available event (#1946)', () => {
+    renderHook(() => useTauriEvents())
+
+    // Emit the event — the handler calls store.addInfoNotification at runtime
+    emit('update_available', 'v1.5.0')
+
+    // update_available should add to infoNotifications, not serverErrors
+    const state = useConnectionStore.getState()
+    expect(state.infoNotifications.length).toBe(1)
+    expect(state.infoNotifications[0]!.message).toContain('v1.5.0')
+    expect(state.serverErrors).toHaveLength(0)
+  })
+
+  it('uses addInfoNotification for update_installed event (#1946)', () => {
+    renderHook(() => useTauriEvents())
+
+    emit('update_installed', 'v1.5.0')
+
+    const state = useConnectionStore.getState()
+    expect(state.infoNotifications.length).toBe(1)
+    expect(state.infoNotifications[0]!.message).toContain('v1.5.0')
+    expect(state.infoNotifications[0]!.message).toContain('installed')
   })
 
   it('unlistens on unmount', async () => {
