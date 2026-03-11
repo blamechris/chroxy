@@ -15,7 +15,6 @@ describe('gitStage/gitUnstage path validation (#1958)', () => {
   })
 
   it('gitStage validates file paths before passing to git', () => {
-    // Find the gitStage function body
     const stageStart = src.indexOf('async function gitStage(')
     const stageEnd = src.indexOf('\n  }', stageStart + 50)
     const stageBody = src.slice(stageStart, stageEnd)
