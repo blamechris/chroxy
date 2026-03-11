@@ -566,13 +566,27 @@ describe('SessionManager ring buffer size', () => {
     const history = mgr._messageHistory.get('s1')
 
     for (let i = 0; i < 600; i++) {
-      mgr._pushHistory(history, { type: 'message', content: `msg-${i}`, timestamp: i })
+      mgr._pushHistory(history, { type: 'message', content: `msg-${i}`, timestamp: i }, 's1')
     }
 
     assert.equal(history.length, 500)
     // Oldest messages should have been dropped (0-99)
     assert.equal(history[0].content, 'msg-100')
     assert.equal(history[499].content, 'msg-599')
+  })
+
+  it('sets truncation flag via sessionId parameter without reverse lookup (#1928)', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    // Create history for s1 but do NOT register it in _messageHistory
+    // This proves _pushHistory uses the sessionId param directly,
+    // not a reverse-lookup scan of _messageHistory
+    const history = []
+
+    for (let i = 0; i < 501; i++) {
+      mgr._pushHistory(history, { type: 'message', content: `msg-${i}`, timestamp: i }, 's1')
+    }
+
+    assert.equal(mgr.isHistoryTruncated('s1'), true)
   })
 })
 
@@ -595,7 +609,7 @@ describe('SessionManager.isHistoryTruncated', () => {
     const history = mgr._messageHistory.get('s1')
 
     for (let i = 0; i < 10; i++) {
-      mgr._pushHistory(history, { type: 'message', content: `msg-${i}`, timestamp: i })
+      mgr._pushHistory(history, { type: 'message', content: `msg-${i}`, timestamp: i }, 's1')
     }
 
     assert.equal(mgr.isHistoryTruncated('s1'), false)
@@ -608,7 +622,7 @@ describe('SessionManager.isHistoryTruncated', () => {
 
     // Fill beyond capacity to trigger truncation
     for (let i = 0; i < 501; i++) {
-      mgr._pushHistory(history, { type: 'message', content: `msg-${i}`, timestamp: i })
+      mgr._pushHistory(history, { type: 'message', content: `msg-${i}`, timestamp: i }, 's1')
     }
 
     assert.equal(mgr.isHistoryTruncated('s1'), true)
@@ -1125,6 +1139,30 @@ describe('#1227 — guard destroyAll() session.destroy() with try-catch', () => 
     assert.equal(mgr._sessions.size, 0, 'all sessions should be cleared')
     assert.equal(mgr._lastActivity.size, 0, '_lastActivity should be cleared')
     assert.equal(session2Destroyed, true, 'session2 should still be destroyed')
+  })
+})
+
+describe('#1942 — destroyAll() wraps serializeState in try-catch', () => {
+  it('continues destroying sessions when serializeState throws', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+
+    // Make serializeState throw
+    mgr.serializeState = () => { throw new Error('disk full') }
+
+    // Add a session
+    const session1 = new EventEmitter()
+    session1.isRunning = false
+    let destroyed = false
+    session1.destroy = () => { destroyed = true }
+    session1.removeAllListeners = () => {}
+    mgr._sessions.set('s1', { session: session1, type: 'cli', name: 'S1', cwd: '/tmp' })
+    mgr._lastActivity.set('s1', Date.now())
+
+    // Should not throw despite serializeState failure
+    mgr.destroyAll()
+
+    assert.equal(mgr._sessions.size, 0, 'sessions should be cleared')
+    assert.equal(destroyed, true, 'session should still be destroyed')
   })
 })
 
