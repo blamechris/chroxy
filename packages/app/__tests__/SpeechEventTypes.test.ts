@@ -22,7 +22,7 @@ describe('useSpeechRecognition typed event handlers (#1912)', () => {
 
   test('imports the event types from expo-speech-recognition', () => {
     expect(src).toMatch(
-      /import type \{\s*ExpoSpeechRecognitionResultEvent,\s*ExpoSpeechRecognitionErrorEvent\s*\} from 'expo-speech-recognition'/,
+      /import type \{\s*ExpoSpeechRecognitionResultEvent,\s*ExpoSpeechRecognitionErrorEvent,?\s*\} from 'expo-speech-recognition'/,
     )
   })
 })
