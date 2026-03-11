@@ -96,8 +96,12 @@ export function migrateToken(config, service = DEFAULT_SERVICE) {
     return { migrated: false, config }
   }
 
-  // Store in keychain
-  setToken(config.apiToken, service)
+  // Store in keychain (if write fails, keep token in config)
+  try {
+    setToken(config.apiToken, service)
+  } catch {
+    return { migrated: false, config }
+  }
 
   // Return config without apiToken
   const { apiToken, ...rest } = config

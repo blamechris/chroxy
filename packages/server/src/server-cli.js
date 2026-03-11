@@ -35,20 +35,27 @@ export async function startCliServer(config) {
   // Token precedence: config (may be from keychain migration) > keychain > env var
   let API_TOKEN = NO_AUTH ? null : (config.apiToken || getToken() || process.env.API_TOKEN)
 
-  // Migrate plaintext token to keychain on first run
-  if (!NO_AUTH && API_TOKEN && config.apiToken && isKeychainAvailable()) {
+  // Migrate plaintext token to keychain and remove from config file
+  if (!NO_AUTH && config.apiToken && isKeychainAvailable()) {
+    const configFile = join(homedir(), '.chroxy', 'config.json')
     const { migrated } = migrateToken(config)
-    if (migrated) {
-      const configFile = join(homedir(), '.chroxy', 'config.json')
+    // Remove plaintext token from config file (whether newly migrated or already in keychain)
+    const keychainToken = getToken()
+    if (keychainToken && (migrated || keychainToken === config.apiToken)) {
       try {
         const raw = existsSync(configFile) ? readFileSync(configFile, 'utf-8') : '{}'
         const cfg = JSON.parse(raw)
-        delete cfg.apiToken
-        writeFileRestricted(configFile, JSON.stringify(cfg, null, 2))
-        console.log('[keychain] API token migrated to OS keychain')
+        if (cfg.apiToken) {
+          delete cfg.apiToken
+          writeFileRestricted(configFile, JSON.stringify(cfg, null, 2))
+          if (migrated) console.log('[keychain] API token migrated to OS keychain')
+          else console.log('[keychain] Removed redundant plaintext token from config')
+        }
       } catch (err) {
         console.warn(`[keychain] Migration warning: ${err.message}`)
       }
+      // Use keychain token as authoritative source
+      API_TOKEN = keychainToken
     }
   }
 
@@ -177,14 +184,22 @@ export async function startCliServer(config) {
     token: API_TOKEN,
     tokenExpiry: config.tokenExpiry || null,
     onPersist: (newToken) => {
+      const persistToFile = () => {
+        const raw = existsSync(configFile) ? readFileSync(configFile, 'utf-8') : '{}'
+        const cfg = JSON.parse(raw)
+        cfg.apiToken = newToken
+        writeFileRestricted(configFile, JSON.stringify(cfg, null, 2))
+      }
       try {
         if (isKeychainAvailable()) {
-          setToken(newToken)
+          try {
+            setToken(newToken)
+          } catch {
+            // Keychain write failed — fall back to config file
+            persistToFile()
+          }
         } else {
-          const raw = existsSync(configFile) ? readFileSync(configFile, 'utf-8') : '{}'
-          const cfg = JSON.parse(raw)
-          cfg.apiToken = newToken
-          writeFileRestricted(configFile, JSON.stringify(cfg, null, 2))
+          persistToFile()
         }
       } catch (err) {
         console.error(`[token-manager] Failed to persist token: ${err.message}`)
