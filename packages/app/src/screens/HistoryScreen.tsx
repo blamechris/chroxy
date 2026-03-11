@@ -245,6 +245,8 @@ export function HistoryScreen() {
         autoCapitalize="none"
         autoCorrect={false}
         accessibilityLabel="Search conversations"
+        accessibilityRole="search"
+        accessibilityHint="Type to filter by content across all conversation history"
       />
       {searchQuery.length > 0 && (
         <TouchableOpacity
@@ -252,6 +254,7 @@ export function HistoryScreen() {
           onPress={() => handleSearchChange('')}
           accessibilityRole="button"
           accessibilityLabel="Clear search"
+          accessibilityHint="Clears the search query"
         >
           <Text style={styles.clearButtonText}>{'\u2715'}</Text>
         </TouchableOpacity>
