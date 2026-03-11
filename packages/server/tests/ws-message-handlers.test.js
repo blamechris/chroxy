@@ -259,6 +259,22 @@ describe('handleSessionMessage', () => {
         answer: 'yes please',
       }, ctx)
       assert.equal(entry.session.respondToQuestion.callCount, 1)
+      assert.deepStrictEqual(entry.session.respondToQuestion.lastCall, ['yes please', undefined])
+    })
+
+    it('forwards answers map to respondToQuestion', async () => {
+      const ctx = makeCtx()
+      const client = makeClient({ activeSessionId: 'sess-1' })
+      const entry = addSession(ctx, 'sess-1')
+      const answersMap = { 'Allow?': 'yes' }
+      await handleSessionMessage(WS, client, {
+        type: 'user_question_response',
+        toolUseId: 'tool-abc',
+        answer: 'yes',
+        answers: answersMap,
+      }, ctx)
+      assert.equal(entry.session.respondToQuestion.callCount, 1)
+      assert.deepStrictEqual(entry.session.respondToQuestion.lastCall, ['yes', answersMap])
     })
   })
 
