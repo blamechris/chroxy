@@ -378,11 +378,15 @@ export async function startCliServer(config) {
     tokenManager.on('token_rotated', ({ newToken }) => {
       if (!currentWsUrl) return // no-auth or localhost-only — no QR to update
 
-      // Refresh pairing ID when token rotates (old session tokens remain valid)
-      if (pairingManager) pairingManager.refresh()
-
-      const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
-      displayQr(currentWsUrl, httpBase, currentTunnelMode)
+      // Refresh pairing ID when token rotates (old session tokens remain valid).
+      // The pairing_refreshed listener handles QR re-render; only call displayQr
+      // directly when pairingManager is absent (no pairing_refreshed will fire).
+      if (pairingManager) {
+        pairingManager.refresh()
+      } else {
+        const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
+        displayQr(currentWsUrl, httpBase, currentTunnelMode)
+      }
       console.log(`[token] API token rotated. QR code updated.\n`)
     })
   }

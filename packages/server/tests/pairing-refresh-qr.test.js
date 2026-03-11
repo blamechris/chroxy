@@ -14,9 +14,10 @@ describe('QR re-render on pairing refresh (#1894)', () => {
       source.includes('pairing_refreshed'),
       'server-cli.js should listen for pairing_refreshed event'
     )
+    const handlerPattern = /\.on\(\s*['"]pairing_refreshed['"]\s*,[\s\S]*?displayQr/
     assert.ok(
-      source.includes('displayQr') && source.includes('pairing_refreshed'),
-      'pairing_refreshed handler should re-render QR'
+      handlerPattern.test(source),
+      'pairing_refreshed handler should re-render QR (displayQr called in handler)'
     )
   })
 
