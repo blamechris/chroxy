@@ -11,8 +11,9 @@
  * Wired into server-cli.js via SessionManager event listeners.
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { writeFileRestricted } from './platform.js'
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send'
 
@@ -53,7 +54,7 @@ export class PushManager {
     if (!this._storagePath) return
     try {
       mkdirSync(dirname(this._storagePath), { recursive: true })
-      writeFileSync(this._storagePath, JSON.stringify([...this.tokens]))
+      writeFileRestricted(this._storagePath, JSON.stringify([...this.tokens]))
     } catch (err) {
       console.error(`[push] Failed to persist tokens: ${err.message}`)
     }
