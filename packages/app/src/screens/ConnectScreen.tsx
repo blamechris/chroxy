@@ -30,23 +30,43 @@ interface DiscoveredServer {
 }
 
 
-function parseChroxyUrl(raw: string): { wsUrl: string; token: string } | null {
+type ParseResult =
+  | { ok: true; wsUrl: string; token: string }
+  | { ok: false; reason: 'not_chroxy' | 'missing_token' | 'invalid_url' };
+
+export function parseChroxyUrl(raw: string): ParseResult {
   try {
-    let trimmed = raw.trim();
+    const trimmed = raw.trim();
     if (trimmed.startsWith('chroxy://')) {
       const parsed = new URL(trimmed.replace('chroxy://', 'https://'));
       const wsUrl = `wss://${parsed.host}`;
       const token = parsed.searchParams.get('token');
-      if (wsUrl && token) return { wsUrl, token };
+      if (wsUrl && token) return { ok: true, wsUrl, token };
+      return { ok: false, reason: 'missing_token' };
     }
     if (trimmed.startsWith('wss://')) {
-      return { wsUrl: trimmed, token: '' };
+      return { ok: true, wsUrl: trimmed, token: '' };
     }
   } catch {
-    // Invalid URL
+    return { ok: false, reason: 'invalid_url' };
   }
-  return null;
+  return { ok: false, reason: 'not_chroxy' };
 }
+
+const QR_ERROR_MESSAGES: Record<string, { title: string; message: string }> = {
+  not_chroxy: {
+    title: 'Not a Chroxy QR Code',
+    message: 'This QR code is not from Chroxy. Scan the QR code shown by "npx chroxy start" on your computer.',
+  },
+  missing_token: {
+    title: 'Missing Auth Token',
+    message: 'This Chroxy QR code is missing the authentication token. Try restarting the server with "npx chroxy start".',
+  },
+  invalid_url: {
+    title: 'Invalid QR Code',
+    message: 'Could not parse this QR code. Make sure you\'re scanning the full QR code clearly.',
+  },
+};
 
 function formatUrl(url: string): string {
   // Show a friendly version: "192.168.1.5:8765" or "abc.trycloudflare.com"
@@ -156,13 +176,14 @@ export function ConnectScreen() {
     scanLock.current = true;
 
     const parsed = parseChroxyUrl(result.data);
-    if (parsed && parsed.token) {
+    if (parsed.ok) {
       setShowScanner(false);
       connect(parsed.wsUrl, parsed.token);
     } else {
+      const errorInfo = QR_ERROR_MESSAGES[parsed.reason] || QR_ERROR_MESSAGES.invalid_url;
       Alert.alert(
-        'Invalid QR Code',
-        'This doesn\'t look like a Chroxy connection code. Make sure you\'re scanning the QR from "npx chroxy start".',
+        errorInfo.title,
+        errorInfo.message,
         [{ text: 'Try Again', onPress: () => { scanLock.current = false; } }],
       );
     }
@@ -252,7 +273,10 @@ export function ConnectScreen() {
         setScanProgress(Math.min(scanned / 254, 1));
       }
     } catch {
-      // Network error (e.g., no WiFi)
+      Alert.alert(
+        'Network Error',
+        'Could not scan the local network. Make sure you are connected to WiFi and your phone and computer are on the same network.',
+      );
     }
 
     if (!abort.signal.aborted) {
