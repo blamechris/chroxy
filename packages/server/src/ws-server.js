@@ -6,14 +6,15 @@ import { v4 as uuidv4 } from 'uuid'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
-import { toShortModelId, getModels } from './models.js'
-import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from './crypto.js'
-import { ClientMessageSchema, AuthSchema, KeyExchangeSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
+import { encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from './crypto.js'
+import { ClientMessageSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
 import { EventNormalizer } from './event-normalizer.js'
 import { createFileOps } from './ws-file-ops.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
-import { handleSessionMessage, handleCliMessage, PERMISSION_MODES } from './ws-message-handlers.js'
+import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
+import { handleAuthMessage, handleKeyExchange } from './ws-auth.js'
+import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
 import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
@@ -286,6 +287,43 @@ export class WsServer {
       replayHistory: (ws, sid) => self._replayHistory(ws, sid),
       get draining() { return self._draining },
     }
+
+    // Context objects for extracted modules (ws-auth.js, ws-history.js)
+    this._historyCtx = {
+      get clients() { return self.clients },
+      get sessionManager() { return self.sessionManager },
+      get cliSession() { return self.cliSession },
+      get defaultSessionId() { return self.defaultSessionId },
+      get serverMode() { return self.serverMode },
+      serverVersion: SERVER_VERSION,
+      get latestVersion() { return self._latestVersion },
+      get gitInfo() { return self._gitInfo },
+      get encryptionEnabled() { return self._encryptionEnabled },
+      get localhostBypass() { return self._localhostBypass },
+      get keyExchangeTimeoutMs() { return self._keyExchangeTimeoutMs },
+      protocolVersion: SERVER_PROTOCOL_VERSION,
+      minProtocolVersion: MIN_PROTOCOL_VERSION,
+      get webTaskManager() { return self._webTaskManager },
+      send: sendFn,
+      broadcast: broadcastFn,
+      getConnectedClientList: () => self._getConnectedClientList(),
+      get permissions() { return self._permissions },
+    }
+    this._authCtx = {
+      get clients() { return self.clients },
+      get authRequired() { return self.authRequired },
+      isTokenValid: (token) => self._isTokenValid(token),
+      get authFailures() { return self._authFailures },
+      send: sendFn,
+      onAuthSuccess: (ws, client) => {
+        self._sendPostAuthInfo(ws)
+        self._broadcastClientJoined(client, ws)
+      },
+      minProtocolVersion: MIN_PROTOCOL_VERSION,
+      serverProtocolVersion: SERVER_PROTOCOL_VERSION,
+      flushPostAuthQueue: (ws, queue) => self._flushPostAuthQueue(ws, queue),
+    }
+
     this.pushManager = pushManager
 
     // Permission audit trail
@@ -620,351 +658,26 @@ export class WsServer {
     log.info(`Server listening on ${host || '0.0.0.0'}:${this.port} (${this.serverMode} mode)`)
   }
 
-  /** Send post-auth info (server mode, readiness, models, sessions, etc.) */
-  _sendPostAuthInfo(ws) {
-    const client = this.clients.get(ws)
-
-    // Get initial session info for auth_ok payload
-    let sessionInfo = {}
-    if (this.sessionManager) {
-      // Multi-session mode: include first/default session's cwd
-      let activeId = this.defaultSessionId
-      let entry = activeId ? this.sessionManager.getSession(activeId) : null
-      if (!entry) {
-        activeId = this.sessionManager.firstSessionId
-        entry = activeId ? this.sessionManager.getSession(activeId) : null
-      }
-      if (entry) {
-        sessionInfo.cwd = entry.cwd
-      }
-    } else if (this.cliSession) {
-      // Legacy single CLI mode
-      sessionInfo.cwd = this.cliSession.cwd
-    }
-    if (!sessionInfo.cwd) {
-      sessionInfo.cwd = null
-    }
-
-    // Skip encryption for localhost connections
-    // ws://localhost traffic never leaves the machine — E2E encryption adds no security value
-    // SECURITY: Use socketIp (req.socket.remoteAddress) — NOT client.ip which may
-    // include proxy headers (x-forwarded-for, cf-connecting-ip) that can be spoofed.
-    const isLocalhost = this._localhostBypass && (client.socketIp === '127.0.0.1' || client.socketIp === '::1' || client.socketIp === '::ffff:127.0.0.1')
-    const requireEncryption = this._encryptionEnabled && !isLocalhost
-
-    this._send(ws, {
-      type: 'auth_ok',
-      clientId: client.id,
-      serverMode: this.serverMode,
-      serverVersion: SERVER_VERSION,
-      latestVersion: this._latestVersion,
-      serverCommit: this._gitInfo.commit,
-      cwd: sessionInfo.cwd,
-      defaultCwd: this.sessionManager?.defaultCwd || null,
-      connectedClients: this._getConnectedClientList(),
-      encryption: requireEncryption ? 'required' : 'disabled',
-      protocolVersion: SERVER_PROTOCOL_VERSION,
-      minProtocolVersion: MIN_PROTOCOL_VERSION,
-      maxProtocolVersion: SERVER_PROTOCOL_VERSION,
-      webFeatures: this._webTaskManager.getFeatureStatus(),
-    })
-
-    // If encryption required, queue all subsequent messages until key exchange completes
-    if (requireEncryption) {
-      client.encryptionPending = true
-      client.postAuthQueue = []
-      // Key exchange timeout: if no key_exchange arrives, disconnect (never downgrade to plaintext)
-      client._keyExchangeTimeout = setTimeout(() => {
-        if (client.encryptionPending) {
-          log.error(`Key exchange timeout for ${client.id} — disconnecting (encryption required)`)
-          client.encryptionPending = false
-          client.postAuthQueue = null
-          try {
-            ws.send(JSON.stringify({ type: 'server_error', message: 'Encryption required but key exchange timed out. Please reconnect.', recoverable: false }))
-          } catch (_) {}
-          ws.close(1008, 'Key exchange timeout')
-        }
-      }, this._keyExchangeTimeoutMs)
-    }
-
-    this._send(ws, { type: 'server_mode', mode: this.serverMode })
-    this._send(ws, { type: 'status', connected: true })
-
-    // Multi-session mode
-    if (this.sessionManager) {
-      // Send session list
-      this._send(ws, { type: 'session_list', sessions: this.sessionManager.listSessions() })
-
-      // Resolve active session: prefer defaultSessionId, fall back to first available
-      let activeId = this.defaultSessionId
-      let entry = activeId ? this.sessionManager.getSession(activeId) : null
-      if (!entry) {
-        activeId = this.sessionManager.firstSessionId
-        entry = activeId ? this.sessionManager.getSession(activeId) : null
-      }
-
-      client.activeSessionId = activeId
-
-      if (entry) {
-        this._send(ws, { type: 'session_switched', sessionId: activeId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
-        this._sendSessionInfo(ws, activeId)
-        this._replayHistory(ws, activeId)
-      }
-
-      // Notify other clients about this client's initial session focus
-      if (activeId) {
-        this._broadcast(
-          { type: 'client_focus_changed', clientId: client.id, sessionId: activeId, timestamp: Date.now() },
-          (c) => c.id !== client.id
-        )
-      }
-
-      this._send(ws, { type: 'available_models', models: getModels() })
-      this._send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
-
-      // Re-emit any pending permission requests across all sessions
-      this._permissions.resendPendingPermissions(ws)
-      return
-    }
-
-    // Legacy single-session mode
-    if (this.cliSession) {
-      if (this.cliSession.isReady) {
-        this._send(ws, { type: 'claude_ready' })
-      }
-      this._send(ws, {
-        type: 'model_changed',
-        model: this.cliSession.model ? toShortModelId(this.cliSession.model) : null,
-      })
-      this._send(ws, {
-        type: 'available_models',
-        models: getModels(),
-      })
-      this._send(ws, {
-        type: 'permission_mode_changed',
-        mode: this.cliSession.permissionMode || 'approve',
-      })
-      this._send(ws, {
-        type: 'available_permission_modes',
-        modes: PERMISSION_MODES,
-      })
-    }
-
-    // Re-emit any pending permission requests (CLI single-session mode)
-    this._permissions.resendPendingPermissions(ws)
-  }
-
-  /** Replay message history for a session to a single client.
-   *  Sends the full ring buffer (capped at 500 messages by session-manager)
-   *  so new clients get complete conversation context.
-   */
-  _replayHistory(ws, sessionId) {
-    if (!this.sessionManager) return
-    const history = this.sessionManager.getHistory(sessionId)
-    if (history.length === 0) return
-
-    const truncated = this.sessionManager.isHistoryTruncated(sessionId)
-    this._send(ws, { type: 'history_replay_start', sessionId, truncated })
-
-    // Batch replay: send chunks of 20 with setImmediate() between to yield
-    // the event loop. Prevents blocking other sessions during large replays
-    // (e.g. 500 messages with E2E encryption = 500 nacl.secretbox() calls).
-    const CHUNK_SIZE = 20
-    const sendChunk = (offset) => {
-      if (ws.readyState !== 1) return
-      const end = Math.min(offset + CHUNK_SIZE, history.length)
-      for (let i = offset; i < end; i++) {
-        this._send(ws, { ...history[i], sessionId })
-      }
-      if (end < history.length) {
-        setImmediate(() => sendChunk(end))
-      } else {
-        this._send(ws, { type: 'history_replay_end', sessionId })
-      }
-    }
-    sendChunk(0)
-  }
-
-  /** Flush queued post-auth messages in batches to yield the event loop (#1348).
-   *  Same chunking pattern as _replayHistory — prevents blocking when queue is
-   *  large (500+ messages with nacl.secretbox() encryption per send). */
-  _flushPostAuthQueue(ws, queue) {
-    const client = this.clients.get(ws)
-    if (client) client._flushing = true
-    const CHUNK_SIZE = 20
-    const drainChunk = (offset) => {
-      if (ws.readyState !== 1) {
-        if (client) {
-          client._flushing = false
-          client._flushOverflow = null
-        }
-        return
-      }
-      const end = Math.min(offset + CHUNK_SIZE, queue.length)
-      // Temporarily disable flushing guard so _send goes to wire
-      if (client) client._flushing = false
-      for (let i = offset; i < end; i++) {
-        this._send(ws, queue[i])
-      }
-      if (end < queue.length) {
-        if (client) client._flushing = true
-        setImmediate(() => drainChunk(end))
-      } else if (client) {
-        // Flush complete — drain any overflow that accumulated
-        if (client._flushOverflow?.length) {
-          const overflow = client._flushOverflow
-          client._flushOverflow = null
-          this._flushPostAuthQueue(ws, overflow)
-        }
-      }
-    }
-    drainChunk(0)
-  }
-
-  /** Send session-specific info (model, permission, ready status) to a client */
-  _sendSessionInfo(ws, sessionId) {
-    const entry = this.sessionManager?.getSession(sessionId)
-    if (!entry) return
-    const session = entry.session
-
-    if (session.isReady) {
-      this._send(ws, { type: 'claude_ready', sessionId })
-    }
-    this._send(ws, {
-      type: 'model_changed',
-      model: session.model ? toShortModelId(session.model) : null,
-      sessionId,
-    })
-    this._send(ws, {
-      type: 'permission_mode_changed',
-      mode: session.permissionMode || 'approve',
-      sessionId,
-    })
-  }
+  /** Delegates to ws-history.js */
+  _sendPostAuthInfo(ws) { sendPostAuthInfo(this._historyCtx, ws) }
+  _replayHistory(ws, sessionId) { replayHistory(this._historyCtx, ws, sessionId) }
+  _flushPostAuthQueue(ws, queue) { flushPostAuthQueue(this._historyCtx, ws, queue) }
+  _sendSessionInfo(ws, sessionId) { sendSessionInfo(this._historyCtx, ws, sessionId) }
 
   /** Route incoming client messages */
   async _handleMessage(ws, msg) {
     const client = this.clients.get(ws)
     if (!client) return
 
-    // Auth must come first
+    // Auth handling (delegates to ws-auth.js)
     if (!client.authenticated) {
-      if (msg.type !== 'auth') return
-
-      // Validate auth message shape
-      const authParsed = AuthSchema.safeParse(msg)
-      if (!authParsed.success) {
-        this._send(ws, { type: 'auth_fail', reason: 'invalid_message' })
-        ws.close()
-        return
-      }
-
-      // Check rate limit before processing auth
-      const ip = client.socketIp
-      const failure = this._authFailures.get(ip)
-      if (failure && failure.blockedUntil > Date.now()) {
-        log.warn(`Auth rate-limited for IP ${ip} (${failure.count} failures)`)
-        this._send(ws, { type: 'auth_fail', reason: 'rate_limited' })
-        ws.close()
-        return
-      }
-
-      if (!this.authRequired || this._isTokenValid(msg.token)) {
-        client.authenticated = true
-        client.authTime = Date.now()
-        // Clear rate limit on successful auth
-        this._authFailures.delete(ip)
-        // Extract and validate client protocol version
-        const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)
-        const clientVersion = hasVersion ? msg.protocolVersion : null
-
-        // Reject clients below minimum supported version
-        if (clientVersion !== null && clientVersion < MIN_PROTOCOL_VERSION) {
-          this._send(ws, { type: 'auth_fail', reason: `unsupported protocol version ${clientVersion} (minimum: ${MIN_PROTOCOL_VERSION})` })
-          ws.close()
-          return
-        }
-
-        // Clamp to server version and default old clients to MIN_PROTOCOL_VERSION
-        client.protocolVersion = clientVersion !== null
-          ? Math.min(clientVersion, SERVER_PROTOCOL_VERSION)
-          : MIN_PROTOCOL_VERSION
-        // Extract optional device info from auth message
-        if (msg.deviceInfo && typeof msg.deviceInfo === 'object') {
-          client.deviceInfo = {
-            deviceId: typeof msg.deviceInfo.deviceId === 'string' ? msg.deviceInfo.deviceId : null,
-            deviceName: typeof msg.deviceInfo.deviceName === 'string' ? msg.deviceInfo.deviceName : null,
-            deviceType: ['phone', 'tablet', 'desktop', 'unknown'].includes(msg.deviceInfo.deviceType) ? msg.deviceInfo.deviceType : 'unknown',
-            platform: typeof msg.deviceInfo.platform === 'string' ? msg.deviceInfo.platform : 'unknown',
-          }
-        }
-        this._sendPostAuthInfo(ws)
-        // Broadcast client_joined to other authenticated clients
-        this._broadcastClientJoined(client, ws)
-        log.info(`Client ${client.id} authenticated`)
-      } else {
-        // Track auth failure for rate limiting
-        const now = Date.now()
-        const existing = this._authFailures.get(ip) || { count: 0, firstFailure: now, blockedUntil: 0 }
-        existing.count++
-        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 60s
-        const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
-        existing.blockedUntil = now + backoff
-        this._authFailures.set(ip, existing)
-        log.warn(`Auth failure from IP ${client.ip} (attempt ${existing.count}, blocked for ${backoff}ms)`)
-        this._send(ws, { type: 'auth_fail', reason: 'invalid_token' })
-        ws.close()
-      }
+      handleAuthMessage(this._authCtx, ws, msg)
       return
     }
-
-    // Ignore duplicate auth messages from already-authenticated clients (e.g. auto-auth mode)
     if (msg.type === 'auth') return
 
-    // Handle key exchange for E2E encryption
-    if (client.encryptionPending) {
-      if (msg.type === 'key_exchange') {
-        clearTimeout(client._keyExchangeTimeout)
-        const keParsed = KeyExchangeSchema.safeParse(msg)
-        if (!keParsed.success) {
-          const details = keParsed.error.issues.map(i => i.message).join(', ')
-          log.warn(`Invalid key_exchange message from ${client.id}: ${details}`)
-          try {
-            ws.send(JSON.stringify({ type: 'error', code: 'INVALID_MESSAGE', details }))
-          } catch (err) {
-            log.error(`Failed to send key_exchange error: ${err.message}`)
-          }
-          ws.close(1008, 'Invalid key_exchange message')
-          return
-        }
-        const serverKp = createKeyPair()
-        const sharedKey = deriveSharedKey(msg.publicKey, serverKp.secretKey)
-        client.encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 }
-        client.encryptionPending = false
-        // Send key_exchange_ok unencrypted (client needs our public key to derive shared key)
-        try {
-          ws.send(JSON.stringify({ type: 'key_exchange_ok', publicKey: serverKp.publicKey }))
-        } catch (err) {
-          log.error(`Failed to send key_exchange_ok: ${err.message}`)
-        }
-        log.info(`E2E encryption established with ${client.id}`)
-        // Flush queued messages (now encrypted) — batched to yield event loop
-        const queue = client.postAuthQueue
-        client.postAuthQueue = null
-        this._flushPostAuthQueue(ws, queue)
-        return
-      }
-      // Non-key_exchange message while pending — disconnect (never downgrade to plaintext)
-      clearTimeout(client._keyExchangeTimeout)
-      log.error(`Client ${client.id} sent ${msg.type} instead of key_exchange — disconnecting (encryption required)`)
-      client.encryptionPending = false
-      client.postAuthQueue = null
-      try {
-        ws.send(JSON.stringify({ type: 'server_error', message: 'Encryption required but client did not initiate key exchange.', recoverable: false }))
-      } catch (_) {}
-      ws.close(1008, 'Key exchange required')
-      return
-    }
+    // Key exchange for E2E encryption (delegates to ws-auth.js)
+    if (handleKeyExchange(this._authCtx, ws, msg)) return
 
     // Respond to client-side heartbeat pings immediately (even during drain)
     if (msg.type === 'ping') {
