@@ -19,16 +19,10 @@ import { setPendingPairingId } from '../store/message-handler';
 import { Icon } from '../components/Icon';
 import { ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
 import { COLORS } from '../constants/colors';
+import { validatePort, scanSubnet } from '../utils/lan-scanner';
+import type { DiscoveredServer } from '../utils/lan-scanner';
 
 const DEFAULT_PORT = 8765;
-
-interface DiscoveredServer {
-  ip: string;
-  port: number;
-  hostname: string;
-  mode: string;
-  version: string;
-}
 
 
 type ParseResult =
@@ -247,58 +241,18 @@ export function ConnectScreen() {
       }
 
       const subnet = deviceIp.split('.').slice(0, 3).join('.');
-      const parsed = parseInt(scanPort, 10);
-      if (isNaN(parsed) || parsed < 1 || parsed > 65535) {
+      const port = validatePort(scanPort);
+      if (port === null) {
         Alert.alert('Invalid Port', `Port must be between 1 and 65535. Using default (${DEFAULT_PORT}).`);
         setScanPort(String(DEFAULT_PORT));
         setScanning(false);
         return;
       }
-      const port = parsed;
-      const batchSize = 30;
-      let scanned = 0;
 
-      for (let start = 1; start <= 254 && !abort.signal.aborted; start += batchSize) {
-        const batch: Promise<DiscoveredServer | null>[] = [];
-        for (let i = start; i < Math.min(start + batchSize, 255); i++) {
-          const targetIp = `${subnet}.${i}`;
-          batch.push(
-            (async (): Promise<DiscoveredServer | null> => {
-              const ctrl = new AbortController();
-              const timeout = setTimeout(() => ctrl.abort(), 1500);
-              // Propagate outer abort signal to cancel in-flight requests immediately
-              const onOuterAbort = () => {
-                clearTimeout(timeout);
-                ctrl.abort();
-              };
-              abort.signal.addEventListener('abort', onOuterAbort);
-              try {
-                const res = await fetch(`http://${targetIp}:${port}/health`, { signal: ctrl.signal });
-                const data = await res.json();
-                if (data.status === 'ok') {
-                  return { ip: targetIp, port, hostname: data.hostname || targetIp, mode: data.mode || 'unknown', version: data.version || '' };
-                }
-              } catch {
-                // Expected for most IPs
-              } finally {
-                clearTimeout(timeout);
-                abort.signal.removeEventListener('abort', onOuterAbort);
-              }
-              return null;
-            })()
-          );
-        }
-
-        const results = await Promise.all(batch);
-        if (abort.signal.aborted) break;
-
-        const found = results.filter((r): r is DiscoveredServer => r !== null);
-        if (found.length > 0) {
-          setDiscoveredServers((prev) => [...prev, ...found]);
-        }
-        scanned += batch.length;
-        setScanProgress(Math.min(scanned / 254, 1));
-      }
+      await scanSubnet(subnet, port, abort.signal, {
+        onProgress: (p) => setScanProgress(p),
+        onFound: (found) => setDiscoveredServers((prev) => [...prev, ...found]),
+      });
     } catch {
       Alert.alert(
         'Network Error',
