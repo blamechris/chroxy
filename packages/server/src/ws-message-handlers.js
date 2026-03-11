@@ -338,10 +338,11 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
               warning: 'Auto mode bypasses all permission checks. Claude will execute tools without asking.',
             })
           } else {
+            const previousMode = entry.session.permissionMode || 'unknown'
             if (msg.mode === 'auto') {
-              console.log(`[ws] Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()}`)
+              console.log(`[ws] Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()} (was: ${previousMode})`)
             } else {
-              console.log(`[ws] Permission mode change from ${client.id} on session ${permModeSessionId}: ${msg.mode}`)
+              console.log(`[ws] Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
             }
             const prevMode = entry.session._permissionMode || 'approve'
             entry.session.setPermissionMode(msg.mode)

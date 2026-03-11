@@ -1,6 +1,35 @@
 // -- Permission TTL --
 const PERMISSION_TTL_MS = 300_000 // 5 minutes
 
+// -- Broadcast safety --
+const MAX_INPUT_BYTES = 10_240 // 10KB max for broadcast
+const SENSITIVE_KEYS = new Set(['token', 'password', 'apikey', 'secret', 'authorization', 'credential', 'private_key', 'api_key'])
+
+/**
+ * Sanitize tool input for broadcast: redact sensitive fields and truncate large values.
+ */
+function sanitizeToolInput(input) {
+  if (!input || typeof input !== 'object') return input
+
+  const result = {}
+  for (const [key, value] of Object.entries(input)) {
+    if (SENSITIVE_KEYS.has(key.toLowerCase())) {
+      result[key] = '[REDACTED]'
+    } else if (typeof value === 'string' && value.length > MAX_INPUT_BYTES) {
+      result[key] = value.slice(0, MAX_INPUT_BYTES) + '... [truncated]'
+    } else {
+      result[key] = value
+    }
+  }
+
+  // Final size check on the whole object
+  const serialized = JSON.stringify(result)
+  if (serialized.length > MAX_INPUT_BYTES) {
+    return { _truncated: true, summary: serialized.slice(0, MAX_INPUT_BYTES) + '... [truncated]' }
+  }
+  return result
+}
+
 /**
  * Create a permission handler for the WsServer.
  * Manages HTTP permission lifecycle (hook requests, responses, resend, resolve).
@@ -57,6 +86,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
 
       const tool = hookData.tool_name || 'Unknown tool'
       const toolInput = hookData.tool_input || {}
+      const sanitizedInput = sanitizeToolInput(toolInput)
       const description = toolInput.description
         || toolInput.command
         || toolInput.file_path
@@ -69,7 +99,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         requestId,
         tool,
         description,
-        input: toolInput,
+        input: sanitizedInput,
         remainingMs: 300_000,
       })
 
@@ -114,7 +144,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           res.end(JSON.stringify({ decision }))
         },
         timer,
-        data: { requestId, tool, description, input: toolInput, remainingMs: 300_000, createdAt: Date.now() },
+        data: { requestId, tool, description, input: sanitizedInput, remainingMs: 300_000, createdAt: Date.now() },
       })
     })
   }
@@ -266,3 +296,6 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     destroy,
   }
 }
+
+// Exported for testing
+export { sanitizeToolInput }
