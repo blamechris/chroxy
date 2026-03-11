@@ -491,7 +491,16 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         break
       }
 
-      ctx.sessionManager.destroySession(targetId)
+      if (ctx.sessionManager.isSessionLocked?.(targetId)) {
+        ctx.send(ws, { type: 'session_error', message: 'Session is being modified by another operation' })
+        break
+      }
+
+      if (typeof ctx.sessionManager.destroySessionLocked === 'function') {
+        ctx.sessionManager.destroySessionLocked(targetId)
+      } else {
+        ctx.sessionManager.destroySession(targetId)
+      }
       ctx.primaryClients.delete(targetId)
 
       const firstId = ctx.sessionManager.firstSessionId
@@ -520,11 +529,22 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
         ctx.send(ws, { type: 'session_error', message: 'Name is required' })
         break
       }
-      if (ctx.sessionManager.renameSession(targetId, newName)) {
-        ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
-      } else {
-        ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+      if (ctx.sessionManager.isSessionLocked?.(targetId)) {
+        ctx.send(ws, { type: 'session_error', message: 'Session is being modified by another operation' })
+        break
       }
+
+      const doRename = typeof ctx.sessionManager.renameSessionLocked === 'function'
+        ? () => ctx.sessionManager.renameSessionLocked(targetId, newName)
+        : () => Promise.resolve(ctx.sessionManager.renameSession(targetId, newName))
+
+      doRename().then(success => {
+        if (success) {
+          ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+        } else {
+          ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+        }
+      })
       break
     }
 
