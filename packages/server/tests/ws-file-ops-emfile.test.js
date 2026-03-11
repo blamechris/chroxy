@@ -1,11 +1,11 @@
-import { describe, it } from 'node:test'
+import { describe, it, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 describe('ws-file-ops EMFILE handling', () => {
   let source
 
-  it('loads source for inspection', async () => {
+  before(async () => {
     source = await readFile(
       new URL('../src/ws-file-ops.js', import.meta.url),
       'utf8'
@@ -29,15 +29,17 @@ describe('ws-file-ops EMFILE handling', () => {
     assert.ok(walkRegion.includes("retryErr?.code !== 'EMFILE'"), 'should only retry EMFILE, not other errors')
   })
 
-  it('EMFILE handling is only in walk, not in listDir or browseFiles', () => {
-    // listDir function region
-    const listDirStart = source.indexOf('async function listDir(')
+  it('EMFILE handling is only in walk, not in listDirectory or browseFiles', () => {
+    // listDirectory function region
+    const listDirStart = source.indexOf('async function listDirectory(')
+    assert.ok(listDirStart > -1, 'listDirectory function should exist')
     const listDirEnd = source.indexOf('async function', listDirStart + 1)
     const listDirRegion = source.slice(listDirStart, listDirEnd)
-    assert.ok(!listDirRegion.includes('EMFILE'), 'listDir should not have EMFILE handling')
+    assert.ok(!listDirRegion.includes('EMFILE'), 'listDirectory should not have EMFILE handling')
 
     // browseFiles function region
     const browseStart = source.indexOf('async function browseFiles(')
+    assert.ok(browseStart > -1, 'browseFiles function should exist')
     const browseEnd = source.indexOf('async function', browseStart + 1)
     const browseRegion = source.slice(browseStart, browseEnd)
     assert.ok(!browseRegion.includes('EMFILE'), 'browseFiles should not have EMFILE handling')
