@@ -361,11 +361,14 @@ export function SessionOverview({ onClose }: SessionOverviewProps) {
               selectTextOnFocus
               placeholder="Session name"
               placeholderTextColor={COLORS.textDim}
+              accessibilityLabel="Session name"
             />
             <View style={styles.renameButtons}>
               <TouchableOpacity
                 style={styles.renameCancelBtn}
                 onPress={() => setRenameTarget(null)}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel rename"
               >
                 <Text style={styles.renameCancelText}>Cancel</Text>
               </TouchableOpacity>
@@ -377,6 +380,8 @@ export function SessionOverview({ onClose }: SessionOverviewProps) {
                   }
                   setRenameTarget(null);
                 }}
+                accessibilityRole="button"
+                accessibilityLabel="Save session name"
               >
                 <Text style={styles.renameSaveText}>Save</Text>
               </TouchableOpacity>
