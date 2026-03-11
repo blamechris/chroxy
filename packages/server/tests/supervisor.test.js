@@ -658,4 +658,25 @@ describe('Supervisor', () => {
       clearInterval(supervisor._heartbeatInterval)
     })
   })
+
+  describe('dynamic version in banner (#1915)', () => {
+    it('startup banner includes package.json version', async () => {
+      const { supervisor } = setup()
+      const chunks = []
+      mock.method(process.stdout, 'write', (chunk) => { chunks.push(String(chunk)); return true })
+      try {
+        await supervisor.start()
+      } finally {
+        mock.restoreAll()
+      }
+      const output = chunks.join('')
+      // Should contain the exact version from package.json
+      const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'))
+      const expectedBanner = `Chroxy Supervisor v${version}`
+      assert.ok(output.includes(expectedBanner), `Banner should contain "${expectedBanner}"`)
+
+      supervisor._shuttingDown = true
+      clearInterval(supervisor._heartbeatInterval)
+    })
+  })
 })
