@@ -44,7 +44,7 @@ export class PairingManager extends EventEmitter {
 
   /**
    * Validate a pairing ID and issue a session token if valid.
-   * Checks current ID first, then grace-period IDs.
+   * Accepts any active pairing ID (current or recently-refreshed within TTL).
    * @param {string} pairingId
    * @returns {{ valid: boolean, sessionToken?: string, reason?: string }}
    */

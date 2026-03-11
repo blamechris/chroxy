@@ -148,7 +148,7 @@ describe('PairingManager (#1836)', () => {
       const oldId = pm.currentPairingId
       await delay(10)
       pm.refresh()
-      // Old entry should have been pruned
+      // Old entry should have been pruned (must return invalid_pairing_id, not expired)
       const result = pm.validatePairing(oldId)
       assert.equal(result.valid, false)
       assert.equal(result.reason, 'invalid_pairing_id')
