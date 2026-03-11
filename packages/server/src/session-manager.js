@@ -735,6 +735,9 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Push an entry to the history array, trimming to max size.
+   * @param {Array} history - The session history array to push to
+   * @param {object} entry - The history entry to add
+   * @param {string} sessionId - The session ID (used for truncation tracking)
    */
   _pushHistory(history, entry, sessionId) {
     history.push(entry)
