@@ -484,6 +484,11 @@ export const ServerErrorSchema = z.object({
   recoverable: z.boolean(),
 })
 
+export const ServerPushTokenErrorSchema = z.object({
+  type: z.literal('push_token_error'),
+  message: z.string(),
+})
+
 export const ServerShutdownSchema = z.object({
   type: z.literal('server_shutdown'),
   reason: z.enum(['restart', 'shutdown']),
