@@ -167,7 +167,7 @@ describe('Supervisor', () => {
       clearInterval(supervisor._heartbeatInterval)
     })
 
-    it('prints full API token and full dashboard URL (not truncated)', async () => {
+    it('masks API token in startup output (#1913)', async () => {
       const { supervisor } = setup({ apiToken: 'abcdef1234567890fulltoken' })
       const chunks = []
       mock.method(process.stdout, 'write', (chunk) => { chunks.push(String(chunk)); return true })
@@ -179,13 +179,15 @@ describe('Supervisor', () => {
       const output = chunks.join('')
 
       assert.ok(output.includes('Token:'), 'Should print a Token: line')
-      assert.ok(output.includes('abcdef1234567890fulltoken'), 'Token should NOT be truncated')
-      assert.ok(!output.includes('...'), 'Output should not contain ...')
+      const tokenLine = output.split('\n').find(l => l.includes('Token:'))
+      assert.ok(!tokenLine.includes('abcdef1234567890fulltoken'), 'Token should be masked')
+      assert.ok(tokenLine.includes('abcd'), 'Should show prefix')
+      assert.ok(tokenLine.includes('...'), 'Should contain ellipsis')
 
       assert.ok(output.includes('Dashboard:'), 'Should print a Dashboard: line')
       const dashboardLine = (output.split('\n').find((line) => line.includes('Dashboard:')) ?? '')
-      assert.ok(dashboardLine.includes('abcdef1234567890fulltoken'), 'Dashboard URL should contain the full API token')
-      assert.ok(!dashboardLine.includes('...'), 'Dashboard URL should not contain ellipsis')
+      assert.ok(!dashboardLine.includes('abcdef1234567890fulltoken'), 'Dashboard URL token should be masked')
+      assert.ok(dashboardLine.includes('...'), 'Dashboard URL should contain ellipsis')
 
       supervisor._shuttingDown = true
       clearInterval(supervisor._heartbeatInterval)
@@ -611,6 +613,49 @@ describe('Supervisor', () => {
           process.env.CHROXY_SHOW_TOKEN = originalShowToken
         }
       }
+    })
+  })
+
+  describe('modeLabel instance storage (#1913)', () => {
+    it('stores modeLabel on this._modeLabel after start()', async () => {
+      const { supervisor } = setup({ tunnel: 'quick' })
+      await supervisor.start()
+
+      assert.ok(supervisor._modeLabel, 'should have _modeLabel set')
+      assert.ok(supervisor._modeLabel.includes(':'), 'should be provider:mode format')
+
+      supervisor._shuttingDown = true
+      clearInterval(supervisor._heartbeatInterval)
+    })
+
+    it('tunnel_recovered uses this._modeLabel without TDZ error', async () => {
+      const { supervisor } = setup({ apiToken: 'abcdef1234567890fulltoken', tunnel: 'quick' })
+      await supervisor.start()
+
+      const chunks = []
+      mock.method(process.stdout, 'write', (chunk) => { chunks.push(String(chunk)); return true })
+
+      try {
+        supervisor._mockTunnel.emit('tunnel_recovered', {
+          httpUrl: 'https://new-tunnel.example.com',
+          wsUrl: 'wss://new-tunnel.example.com',
+          attempt: 1,
+        })
+        await new Promise(r => setTimeout(r, 50))
+      } finally {
+        mock.restoreAll()
+      }
+
+      // Should not throw ReferenceError for modeLabel
+      assert.ok(supervisor._modeLabel, 'modeLabel should be on instance')
+      // Should have printed masked token in recovery output
+      const output = chunks.join('')
+      const tokenLine = output.split('\n').find(l => l.includes('Token:'))
+      assert.ok(tokenLine, 'Should have a Token: line in recovery output')
+      assert.ok(!tokenLine.includes('abcdef1234567890fulltoken'), 'Recovery token should be masked')
+
+      supervisor._shuttingDown = true
+      clearInterval(supervisor._heartbeatInterval)
     })
   })
 })
