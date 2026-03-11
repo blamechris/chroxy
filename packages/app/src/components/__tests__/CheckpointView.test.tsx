@@ -76,10 +76,12 @@ describe('CheckpointView', () => {
   const onClose = jest.fn();
 
   beforeEach(() => {
+    jest.useFakeTimers();
     jest.clearAllMocks();
   });
 
   afterEach(() => {
+    jest.useRealTimers();
     jest.restoreAllMocks();
   });
 
@@ -91,11 +93,15 @@ describe('CheckpointView', () => {
     expect(mockListCheckpoints).toHaveBeenCalledTimes(1);
   });
 
-  it('shows empty state when no checkpoints', () => {
+  it('shows empty state after loading when no checkpoints', () => {
     setupStore([]);
     let root: renderer.ReactTestRenderer;
     act(() => {
       root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
+    });
+    // Advance past the 1500ms loading timeout
+    act(() => {
+      jest.advanceTimersByTime(1500);
     });
     expect(findTextNodes(root!.root, 'No checkpoints yet').length).toBeGreaterThan(0);
   });
