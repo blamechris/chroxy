@@ -228,6 +228,7 @@ export function SessionScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
   const searchInputRef = useRef<TextInput>(null);
+  const searchFocusTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Speech recognition
   const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition();
@@ -278,6 +279,7 @@ export function SessionScreen() {
   }, [searchMatchArray.length]);
 
   const handleSearchClose = useCallback(() => {
+    clearTimeout(searchFocusTimerRef.current);
     setSearchVisible(false);
     setSearchQuery('');
     setCurrentMatchIndex(0);
@@ -285,8 +287,12 @@ export function SessionScreen() {
 
   const handleSearchOpen = useCallback(() => {
     setSearchVisible(true);
-    setTimeout(() => searchInputRef.current?.focus(), 100);
+    clearTimeout(searchFocusTimerRef.current);
+    searchFocusTimerRef.current = setTimeout(() => searchInputRef.current?.focus(), 100);
   }, []);
+
+  // Clean up search focus timer on unmount
+  useEffect(() => () => clearTimeout(searchFocusTimerRef.current), []);
 
   // Terminal scrollback export
   const handleExportTerminal = useCallback(async () => {
