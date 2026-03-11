@@ -597,10 +597,20 @@ describe('Supervisor', () => {
     })
 
     it('does not set CHROXY_SHOW_TOKEN when config.showToken is falsy', () => {
-      const { supervisor } = setup({})
-      supervisor.startChild()
-      assert.ok(supervisor._lastForkOpts, 'should have fork opts')
-      assert.equal(supervisor._lastForkOpts.env.CHROXY_SHOW_TOKEN, undefined)
+      const originalShowToken = process.env.CHROXY_SHOW_TOKEN
+      try {
+        delete process.env.CHROXY_SHOW_TOKEN
+        const { supervisor } = setup({})
+        supervisor.startChild()
+        assert.ok(supervisor._lastForkOpts, 'should have fork opts')
+        assert.equal(supervisor._lastForkOpts.env.CHROXY_SHOW_TOKEN, undefined)
+      } finally {
+        if (originalShowToken === undefined) {
+          delete process.env.CHROXY_SHOW_TOKEN
+        } else {
+          process.env.CHROXY_SHOW_TOKEN = originalShowToken
+        }
+      }
     })
   })
 })
