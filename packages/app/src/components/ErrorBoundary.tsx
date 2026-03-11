@@ -1,5 +1,6 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Platform } from 'react-native';
+import { COLORS } from '../constants/colors';
 
 interface Props {
   children: ReactNode;
@@ -56,7 +57,7 @@ export class ErrorBoundary extends Component<Props, State> {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: COLORS.backgroundSecondary,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
@@ -64,7 +65,7 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 18,
     fontWeight: '600',
-    color: '#e0e0e0',
+    color: COLORS.textChatMessage,
     marginBottom: 12,
   },
   errorScroll: {
@@ -76,19 +77,19 @@ const styles = StyleSheet.create({
   },
   errorText: {
     fontSize: 13,
-    color: '#888',
+    color: COLORS.textMuted,
     textAlign: 'center',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   retryButton: {
     marginTop: 20,
-    backgroundColor: '#6C63FF',
+    backgroundColor: COLORS.accentBlue,
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 8,
   },
   retryText: {
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 15,
     fontWeight: '600',
   },
