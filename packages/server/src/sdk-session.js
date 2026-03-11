@@ -530,7 +530,7 @@ export class SdkSession extends BaseSession {
     log.info(`Question response received: "${text.slice(0, 60)}"`)
 
     // Build structured answers map: SDK expects { [questionText]: selectedLabel }
-    const answers = Object.create(null)
+    const answers = {}
     const questions = input.questions || []
     const questionKeys = new Set(questions.map(q => q.question))
     if (answersMap && typeof answersMap === 'object' && Object.keys(answersMap).length > 0) {
