@@ -225,9 +225,10 @@ export function SessionScreen() {
 
   // Search state
   const [searchVisible, setSearchVisible] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [inSessionSearchQuery, setInSessionSearchQuery] = useState('');
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
   const searchInputRef = useRef<TextInput>(null);
+  const searchFocusTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Speech recognition
   const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition();
@@ -243,8 +244,8 @@ export function SessionScreen() {
 
   // Search: compute matching message IDs
   const searchMatchIds = useMemo(() => {
-    if (!searchQuery.trim()) return new Set<string>();
-    const q = searchQuery.toLowerCase();
+    if (!inSessionSearchQuery.trim()) return new Set<string>();
+    const q = inSessionSearchQuery.toLowerCase();
     const ids = new Set<string>();
     for (const m of messages) {
       if (m.type === 'thinking') continue;
@@ -253,7 +254,7 @@ export function SessionScreen() {
       }
     }
     return ids;
-  }, [messages, searchQuery]);
+  }, [messages, inSessionSearchQuery]);
 
   const searchMatchArray = useMemo(
     () => messages.filter((m) => searchMatchIds.has(m.id)).map((m) => m.id),
@@ -263,7 +264,7 @@ export function SessionScreen() {
   // Reset match index when the query changes (more reliable than .length which misses same-count changes)
   useEffect(() => {
     setCurrentMatchIndex(0);
-  }, [searchQuery]);
+  }, [inSessionSearchQuery]);
 
   const currentMatchId = searchMatchArray.length > 0 ? searchMatchArray[currentMatchIndex] ?? null : null;
 
@@ -278,15 +279,20 @@ export function SessionScreen() {
   }, [searchMatchArray.length]);
 
   const handleSearchClose = useCallback(() => {
+    clearTimeout(searchFocusTimerRef.current);
     setSearchVisible(false);
-    setSearchQuery('');
+    setInSessionSearchQuery('');
     setCurrentMatchIndex(0);
   }, []);
 
   const handleSearchOpen = useCallback(() => {
     setSearchVisible(true);
-    setTimeout(() => searchInputRef.current?.focus(), 100);
+    clearTimeout(searchFocusTimerRef.current);
+    searchFocusTimerRef.current = setTimeout(() => searchInputRef.current?.focus(), 100);
   }, []);
+
+  // Clean up search focus timer on unmount
+  useEffect(() => () => clearTimeout(searchFocusTimerRef.current), []);
 
   // Terminal scrollback export
   const handleExportTerminal = useCallback(async () => {
@@ -724,8 +730,8 @@ export function SessionScreen() {
             style={styles.searchInput}
             placeholder="Search messages..."
             placeholderTextColor={COLORS.textDim}
-            value={searchQuery}
-            onChangeText={setSearchQuery}
+            value={inSessionSearchQuery}
+            onChangeText={setInSessionSearchQuery}
             returnKeyType="search"
             autoCapitalize="none"
             autoCorrect={false}
@@ -974,7 +980,7 @@ export function SessionScreen() {
                   planAllowedPrompts={planAllowedPrompts}
                   onApprovePlan={handleApprovePlan}
                   onFocusInput={handleFocusInput}
-                  searchQuery={searchVisible ? searchQuery : undefined}
+                  searchQuery={searchVisible ? inSessionSearchQuery : undefined}
                   searchMatchIds={searchVisible ? searchMatchIds : undefined}
                   currentMatchId={searchVisible ? currentMatchId : undefined}
                 />
@@ -1004,7 +1010,7 @@ export function SessionScreen() {
               planAllowedPrompts={planAllowedPrompts}
               onApprovePlan={handleApprovePlan}
               onFocusInput={handleFocusInput}
-              searchQuery={searchVisible ? searchQuery : undefined}
+              searchQuery={searchVisible ? inSessionSearchQuery : undefined}
               searchMatchIds={searchVisible ? searchMatchIds : undefined}
               currentMatchId={searchVisible ? currentMatchId : undefined}
             />

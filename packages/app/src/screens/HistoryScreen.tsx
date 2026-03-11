@@ -244,6 +244,7 @@ export function HistoryScreen() {
         returnKeyType="search"
         autoCapitalize="none"
         autoCorrect={false}
+        accessibilityLabel="Search conversations"
       />
       {searchQuery.length > 0 && (
         <TouchableOpacity

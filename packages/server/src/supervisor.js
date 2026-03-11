@@ -65,6 +65,7 @@ export class Supervisor extends EventEmitter {
     this._signalsRegistered = false
     this._restartScheduledAt = null
     this._restartDelayMs = null
+    this._restartTimer = null
     this._log = createLogger('supervisor')
 
     // Deploy rollback tracking
@@ -354,7 +355,7 @@ export class Supervisor extends EventEmitter {
             this._startStandbyServer()
             this._restartScheduledAt = Date.now()
             this._restartDelayMs = 2000
-            setTimeout(() => this.startChild(), 2000)
+            this._restartTimer = setTimeout(() => this.startChild(), 2000)
             return
           }
           this._log.error('Rollback failed, continuing with normal restart')
@@ -376,7 +377,7 @@ export class Supervisor extends EventEmitter {
       this._restartScheduledAt = Date.now()
       this._restartDelayMs = delay
       this._log.info(`Child ran for ${Math.round(childUptimeMs / 1000)}s | total restarts: ${this._metrics.totalRestarts} | next backoff: ${delay}ms`)
-      setTimeout(() => this.startChild(), delay)
+      this._restartTimer = setTimeout(() => this.startChild(), delay)
     })
 
     this._child.on('error', (err) => {
@@ -539,6 +540,7 @@ export class Supervisor extends EventEmitter {
     if (this._shuttingDown) return
     this._shuttingDown = true
     if (this._heartbeatInterval) clearInterval(this._heartbeatInterval)
+    if (this._restartTimer) clearTimeout(this._restartTimer)
     this._log.info(`${signal} received, shutting down...`)
 
     // Remove PID file
