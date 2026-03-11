@@ -12,11 +12,11 @@ describe('session-manager JSDoc completeness (#1989)', () => {
 
   it('_pushHistory has @param for sessionId', () => {
     const methodIndex = src.indexOf('_pushHistory(history, entry, sessionId)')
-    assert.ok(methodIndex > 0, '_pushHistory method should exist')
+    assert.ok(methodIndex >= 0, '_pushHistory method should exist')
 
     // Find the JSDoc comment above the method
     const before = src.slice(Math.max(0, methodIndex - 300), methodIndex)
-    assert.ok(before.includes('@param') && before.includes('sessionId'),
+    assert.ok(/@param\s.*sessionId/.test(before),
       '_pushHistory JSDoc should have @param for sessionId')
   })
 })
