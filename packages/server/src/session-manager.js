@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events'
-import { randomUUID } from 'crypto'
+import { randomUUID, randomBytes } from 'crypto'
 import { statSync, readFileSync, unlinkSync, renameSync, existsSync, mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
@@ -167,7 +167,7 @@ export class SessionManager extends EventEmitter {
       throw err
     }
 
-    const sessionId = randomUUID().slice(0, 8)
+    const sessionId = randomBytes(16).toString('hex')
     const sessionName = name || `Session ${this._sessions.size + 1}`
 
     const resolvedProvider = provider || this._providerType
