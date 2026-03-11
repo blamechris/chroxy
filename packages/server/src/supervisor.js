@@ -259,6 +259,7 @@ export class Supervisor extends EventEmitter {
     if (this.config.port) childEnv.PORT = String(this.config.port)
     if (this.config.cwd) childEnv.CHROXY_CWD = this.config.cwd
     if (this.config.model) childEnv.CHROXY_MODEL = this.config.model
+    if (this.config.showToken) childEnv.CHROXY_SHOW_TOKEN = '1'
     this._log.info(`Starting server child (attempt ${this._restartCount + 1})`)
     this._metrics.childStartedAt = Date.now()
 
