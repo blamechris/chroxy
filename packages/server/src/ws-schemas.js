@@ -110,7 +110,7 @@ export const RenameSessionSchema = z.object({
 
 export const RegisterPushTokenSchema = z.object({
   type: z.literal('register_push_token'),
-  token: z.string(),
+  token: z.string().min(1),
 })
 
 export const UserQuestionResponseSchema = z.object({
