@@ -371,17 +371,31 @@ export async function startCliServer(config) {
     console.log(`   Dashboard: http://localhost:${PORT}/dashboard`)
   }
 
+  // Re-render QR code when pairing auto-refreshes (keeps terminal QR scannable)
+  if (pairingManager) {
+    pairingManager.on('pairing_refreshed', () => {
+      if (!currentWsUrl) return
+      const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
+      displayQr(currentWsUrl, httpBase, currentTunnelMode)
+      console.log('[pairing] QR code refreshed with new pairing ID.\n')
+    })
+  }
+
   // Regenerate QR code and update connection info when token rotates
   const serverStartedAt = new Date().toISOString()
   if (tokenManager) {
     tokenManager.on('token_rotated', ({ newToken }) => {
       if (!currentWsUrl) return // no-auth or localhost-only — no QR to update
 
-      // Refresh pairing ID when token rotates (old session tokens remain valid)
-      if (pairingManager) pairingManager.refresh()
-
-      const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
-      displayQr(currentWsUrl, httpBase, currentTunnelMode)
+      // Refresh pairing ID when token rotates (old session tokens remain valid).
+      // The pairing_refreshed listener handles QR re-render; only call displayQr
+      // directly when pairingManager is absent (no pairing_refreshed will fire).
+      if (pairingManager) {
+        pairingManager.refresh()
+      } else {
+        const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
+        displayQr(currentWsUrl, httpBase, currentTunnelMode)
+      }
       console.log(`[token] API token rotated. QR code updated.\n`)
     })
   }
