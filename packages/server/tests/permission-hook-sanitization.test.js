@@ -45,9 +45,9 @@ describe('Permission hook environment sanitization (#1831)', () => {
 })
 
 describe('Permission mode audit logging (#1831)', () => {
-  it('ws-message-handlers logs previous mode on permission change', () => {
+  it('settings-handlers logs previous mode on permission change', () => {
     const source = readFileSync(
-      join(__dirname, '../src/ws-message-handlers.js'),
+      join(__dirname, '../src/handlers/settings-handlers.js'),
       'utf-8'
     )
     assert.ok(
