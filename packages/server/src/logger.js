@@ -26,7 +26,39 @@ const ROTATION_CHECK_INTERVAL = 100  // check every N writes
 
 const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 }
 
-let _logLevel = LOG_LEVELS.info
+// Sensitive patterns to redact from log messages
+const SENSITIVE_PATTERNS = [
+  // Bearer tokens in headers
+  /Bearer\s+[A-Za-z0-9_\-./+=]{8,}/gi,
+  // API tokens (base64url, UUID, hex) after common key names
+  /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key)\s*[:=]\s*["']?[A-Za-z0-9_\-./+=]{8,}["']?/gi,
+]
+
+/**
+ * Redact sensitive data from a log message.
+ * @param {string} msg
+ * @returns {string}
+ */
+export function redactSensitive(msg) {
+  let result = msg
+  for (const pattern of SENSITIVE_PATTERNS) {
+    result = result.replace(pattern, (match) => {
+      // Keep the key name, redact the value
+      const colonIdx = match.indexOf(':')
+      const eqIdx = match.indexOf('=')
+      const sepIdx = colonIdx >= 0 ? (eqIdx >= 0 ? Math.min(colonIdx, eqIdx) : colonIdx) : eqIdx
+      if (sepIdx >= 0) {
+        return match.slice(0, sepIdx + 1) + ' [REDACTED]'
+      }
+      // For Bearer tokens
+      if (match.startsWith('Bearer')) return 'Bearer [REDACTED]'
+      return '[REDACTED]'
+    })
+  }
+  return result
+}
+
+let _logLevel = LOG_LEVELS[process.env.LOG_LEVEL] ?? LOG_LEVELS.info
 let _logToFile = false
 let _logDir = DEFAULT_LOG_DIR
 let _logPath = null
@@ -113,8 +145,9 @@ export function createLogger(component) {
   const write = (level, msg) => {
     if (LOG_LEVELS[level] < _logLevel) return
 
+    const safeMsg = redactSensitive(msg)
     const timestamp = new Date().toISOString()
-    const line = `${timestamp} [${level.toUpperCase()}] [${component}] ${msg}`
+    const line = `${timestamp} [${level.toUpperCase()}] [${component}] ${safeMsg}`
 
     // Always write to console (for foreground mode)
     if (level === 'error') console.error(line)
@@ -124,7 +157,7 @@ export function createLogger(component) {
     // Notify listener (for WS broadcast to dashboard)
     if (_logListener) {
       try {
-        _logListener({ component, level, message: msg, timestamp: Date.now() })
+        _logListener({ component, level, message: safeMsg, timestamp: Date.now() })
       } catch {
         // Never let listener errors break logging
       }

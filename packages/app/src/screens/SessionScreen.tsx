@@ -28,6 +28,7 @@ import { FileBrowser } from '../components/FileBrowser';
 import { DiffViewer } from '../components/DiffViewer';
 import { CheckpointView } from '../components/CheckpointView';
 import { GitView } from '../components/GitView';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
 import { BackgroundSessionProgress } from '../components/BackgroundSessionProgress';
 import { DevPreviewBanner } from '../components/DevPreviewBanner';
@@ -194,6 +195,8 @@ export function SessionScreen() {
   });
   const closeDevPreview = useConnectionStore((s) => s.closeDevPreview);
   const webFeatures = useConnectionStore((s) => s.webFeatures);
+  const isEncrypted = useConnectionStore((s) => s.isEncrypted);
+  const wsUrl = useConnectionStore((s) => s.wsUrl);
   const webTasks = useConnectionStore((s) => s.webTasks);
   const launchWebTask = useConnectionStore((s) => s.launchWebTask);
   const teleportWebTask = useConnectionStore((s) => s.teleportWebTask);
@@ -907,6 +910,15 @@ export function SessionScreen() {
         </View>
       ))}
 
+      {/* Unencrypted LAN warning */}
+      {!isEncrypted && connectionPhase === 'connected' && wsUrl?.startsWith('ws://') && (
+        <View style={styles.lanWarningBanner}>
+          <Text style={styles.lanWarningText}>
+            Unencrypted LAN connection — auth token sent in plaintext. Use a tunnel for secure remote access.
+          </Text>
+        </View>
+      )}
+
       {/* Background session notifications */}
       <SessionNotificationBanner />
 
@@ -926,55 +938,63 @@ export function SessionScreen() {
         layout.isSplitView && hasTerminal && viewMode !== 'files' ? (
           <View style={styles.splitContainer}>
             <View style={styles.splitPane}>
-              <ChatView
-                messages={messages}
-                scrollViewRef={scrollViewRef}
-                claudeReady={claudeReady}
-                onSelectOption={handleSelectOption}
-                isCliMode={isCliMode}
-                selectedIds={selectedIds}
-                isSelecting={isSelecting}
-                isSelectingRef={isSelectingRef}
-                onToggleSelection={toggleSelection}
-                streamingMessageId={streamingMessageId}
-                isPlanPending={isPlanPending}
-                planAllowedPrompts={planAllowedPrompts}
-                onApprovePlan={handleApprovePlan}
-                onFocusInput={handleFocusInput}
-                searchQuery={searchVisible ? searchQuery : undefined}
-                searchMatchIds={searchVisible ? searchMatchIds : undefined}
-                currentMatchId={searchVisible ? currentMatchId : undefined}
-              />
+              <ErrorBoundary fallbackTitle="Chat view error">
+                <ChatView
+                  messages={messages}
+                  scrollViewRef={scrollViewRef}
+                  claudeReady={claudeReady}
+                  onSelectOption={handleSelectOption}
+                  isCliMode={isCliMode}
+                  selectedIds={selectedIds}
+                  isSelecting={isSelecting}
+                  isSelectingRef={isSelectingRef}
+                  onToggleSelection={toggleSelection}
+                  streamingMessageId={streamingMessageId}
+                  isPlanPending={isPlanPending}
+                  planAllowedPrompts={planAllowedPrompts}
+                  onApprovePlan={handleApprovePlan}
+                  onFocusInput={handleFocusInput}
+                  searchQuery={searchVisible ? searchQuery : undefined}
+                  searchMatchIds={searchVisible ? searchMatchIds : undefined}
+                  currentMatchId={searchVisible ? currentMatchId : undefined}
+                />
+              </ErrorBoundary>
             </View>
             <View style={styles.splitDivider} />
             <View style={styles.splitPane}>
-              <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+              <ErrorBoundary fallbackTitle="Terminal error">
+                <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+              </ErrorBoundary>
             </View>
           </View>
         ) : viewMode === 'chat' ? (
-          <ChatView
-            messages={messages}
-            scrollViewRef={scrollViewRef}
-            claudeReady={claudeReady}
-            onSelectOption={handleSelectOption}
-            isCliMode={isCliMode}
-            selectedIds={selectedIds}
-            isSelecting={isSelecting}
-            isSelectingRef={isSelectingRef}
-            onToggleSelection={toggleSelection}
-            streamingMessageId={streamingMessageId}
-            isPlanPending={isPlanPending}
-            planAllowedPrompts={planAllowedPrompts}
-            onApprovePlan={handleApprovePlan}
-            onFocusInput={handleFocusInput}
-            searchQuery={searchVisible ? searchQuery : undefined}
-            searchMatchIds={searchVisible ? searchMatchIds : undefined}
-            currentMatchId={searchVisible ? currentMatchId : undefined}
-          />
+          <ErrorBoundary fallbackTitle="Chat view error">
+            <ChatView
+              messages={messages}
+              scrollViewRef={scrollViewRef}
+              claudeReady={claudeReady}
+              onSelectOption={handleSelectOption}
+              isCliMode={isCliMode}
+              selectedIds={selectedIds}
+              isSelecting={isSelecting}
+              isSelectingRef={isSelectingRef}
+              onToggleSelection={toggleSelection}
+              streamingMessageId={streamingMessageId}
+              isPlanPending={isPlanPending}
+              planAllowedPrompts={planAllowedPrompts}
+              onApprovePlan={handleApprovePlan}
+              onFocusInput={handleFocusInput}
+              searchQuery={searchVisible ? searchQuery : undefined}
+              searchMatchIds={searchVisible ? searchMatchIds : undefined}
+              currentMatchId={searchVisible ? currentMatchId : undefined}
+            />
+          </ErrorBoundary>
         ) : viewMode === 'files' ? (
           <FileBrowser />
         ) : (
-          <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+          <ErrorBoundary fallbackTitle="Terminal error">
+            <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+          </ErrorBoundary>
         )
       )}
 
@@ -1060,6 +1080,16 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.backgroundPrimary,
+  },
+  lanWarningBanner: {
+    backgroundColor: '#7a4a00',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  lanWarningText: {
+    color: '#ffcc80',
+    fontSize: 12,
+    textAlign: 'center' as const,
   },
   searchBar: {
     flexDirection: 'row' as const,

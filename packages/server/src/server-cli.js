@@ -59,9 +59,17 @@ export async function startCliServer(config) {
     console.log('')
   }
 
+  // Prevent unencrypted traffic over public tunnels
+  if (config.noEncrypt && config.tunnel && config.tunnel !== 'none') {
+    console.error('[!] Cannot use --no-encrypt with a tunnel. Unencrypted WebSocket')
+    console.error('    traffic over a public tunnel exposes all session data in transit.')
+    console.error('    Remove --no-encrypt or disable the tunnel (--tunnel none).')
+    process.exit(1)
+  }
+
   // 1. Create session manager
   const sessionManager = new SessionManager({
-    maxSessions: 5,
+    maxSessions: config.maxSessions || 5,
     port: PORT,
     apiToken: API_TOKEN,
     defaultCwd: config.cwd || (isWithinHome(process.cwd()) ? process.cwd() : homedir()),
@@ -72,6 +80,7 @@ export async function startCliServer(config) {
     transforms: config.transforms || [],
     sessionTimeout: config.sessionTimeout || null,
     costBudget: config.costBudget || null,
+    maxHistory: config.maxHistory || null,
   })
 
   // 2. Try restoring session state from a previous instance

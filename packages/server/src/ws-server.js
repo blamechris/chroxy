@@ -18,7 +18,9 @@ import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
+import { RateLimiter } from './rate-limiter.js'
 import { createLogger, setLogListener } from './logger.js'
+import { PermissionAuditLog } from './permission-audit.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -236,6 +238,7 @@ export class WsServer {
     this._localhostBypass = localhostBypass ?? true
     this._maxPendingConnections = maxPendingConnections ?? 20
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024 // 1MB default
+    this._rateLimiter = new RateLimiter()
     this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo }
     this.httpServer = null
     this.wss = null
@@ -277,12 +280,16 @@ export class WsServer {
       pendingPermissions: this._pendingPermissions,
       fileOps: this._fileOps,
       permissions: this._permissions,
+      get permissionAudit() { return self._permissionAudit },
       updatePrimary: (sid, cid) => self._updatePrimary(sid, cid),
       sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
       replayHistory: (ws, sid) => self._replayHistory(ws, sid),
       get draining() { return self._draining },
     }
     this.pushManager = pushManager
+
+    // Permission audit trail
+    this._permissionAudit = new PermissionAuditLog()
 
     // Auth rate limiting: track failed attempts per IP
     this._authFailures = new Map() // ip -> { count, firstFailure, blockedUntil }
@@ -532,6 +539,7 @@ export class WsServer {
         if (client?.authenticated) {
           this._handleClientDeparture(client)
         }
+        if (client?.id) this._rateLimiter.remove(client.id)
         this.clients.delete(ws)
       })
 
@@ -962,6 +970,15 @@ export class WsServer {
     if (msg.type === 'ping') {
       this._send(ws, { type: 'pong' })
       return
+    }
+
+    // Rate limiting (skip for permission responses and pings)
+    if (msg.type !== 'permission_response' && msg.type !== 'user_question_response') {
+      const { allowed, retryAfterMs } = this._rateLimiter.check(client.id)
+      if (!allowed) {
+        this._send(ws, { type: 'rate_limited', retryAfterMs, message: 'Too many messages. Please slow down.' })
+        return
+      }
     }
 
     // During drain, only allow permission_response and user_question_response

@@ -285,3 +285,14 @@ describe('#990 — crash handler cleanup', () => {
     })
   })
 })
+
+describe('--no-encrypt + tunnel guard (#1850)', () => {
+  it('server-cli.js rejects --no-encrypt with tunnel enabled', async () => {
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync(join(__dirname, '../src/server-cli.js'), 'utf-8')
+    assert.ok(
+      source.includes('noEncrypt') && source.includes('tunnel') && source.includes('process.exit'),
+      'server-cli.js should guard against --no-encrypt + tunnel combination'
+    )
+  })
+})
