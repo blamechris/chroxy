@@ -179,7 +179,9 @@ export async function startCliServer(config) {
   })
 
   // 3. Create push notification manager, token manager, and WebSocket server
-  const pushManager = new PushManager()
+  const pushManager = new PushManager({
+    storagePath: join(homedir(), '.chroxy', 'push-tokens.json'),
+  })
 
   const configFile = join(homedir(), '.chroxy', 'config.json')
   const tokenManager = NO_AUTH ? null : new TokenManager({

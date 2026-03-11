@@ -228,6 +228,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _diffCallback: null,
   conversationHistory: [],
   conversationHistoryLoading: false,
+  conversationHistoryError: null,
   searchResults: [],
   searchLoading: false,
   searchQuery: '',
@@ -710,6 +711,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       viewingCachedSession: false,
       conversationHistory: [],
       conversationHistoryLoading: false,
+      conversationHistoryError: null,
       searchResults: [],
       searchLoading: false,
       searchQuery: '',
@@ -735,6 +737,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverCommit: null,
       serverProtocolVersion: null,
       viewingCachedSession: false,
+      conversationHistory: [],
+      conversationHistoryLoading: false,
+      conversationHistoryError: null,
     });
   },
 
@@ -1165,17 +1170,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   fetchConversationHistory: () => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      set({ conversationHistoryLoading: true });
+      set({ conversationHistoryLoading: true, conversationHistoryError: null });
       wsSend(socket, { type: 'list_conversations' });
       // Safety timeout — clear loading state if server never responds
       setTimeout(() => {
         if (get().conversationHistoryLoading) {
-          set({ conversationHistoryLoading: false });
+          set({ conversationHistoryLoading: false, conversationHistoryError: 'Request timed out. Check your connection and try again.' });
         }
       }, 10_000);
     } else {
-      // Ensure loading state is cleared when not connected
-      set({ conversationHistoryLoading: false });
+      // Not connected — set error
+      set({ conversationHistoryLoading: false, conversationHistoryError: 'Not connected to server.' });
     }
   },
 
