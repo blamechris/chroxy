@@ -258,7 +258,7 @@ export const ResumeConversationSchema = z.object({
   type: z.literal('resume_conversation'),
   conversationId: z.string(),
   cwd: z.string().optional(),
-  name: z.string().optional(),
+  name: z.string().max(200).optional(),
 })
 
 export const SearchConversationsSchema = z.object({
