@@ -70,6 +70,9 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
       onLongPress={onLongPress}
       onLayout={onLayout}
       activeOpacity={0.7}
+      accessibilityRole="tab"
+      accessibilityLabel={`Session ${session.name}${isCrashed ? ', crashed' : ''}`}
+      accessibilityState={{ selected: isActive }}
     >
       {hasIndicators && (
         <View style={styles.indicators}>
@@ -292,11 +295,14 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
               selectTextOnFocus
               placeholder="Session name"
               placeholderTextColor={COLORS.textDim}
+              accessibilityLabel="Session name"
             />
             <View style={styles.renameButtons}>
               <TouchableOpacity
                 style={styles.renameCancelBtn}
                 onPress={() => setRenameTarget(null)}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel rename"
               >
                 <Text style={styles.renameCancelText}>Cancel</Text>
               </TouchableOpacity>
@@ -308,6 +314,8 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
                   }
                   setRenameTarget(null);
                 }}
+                accessibilityRole="button"
+                accessibilityLabel="Save session name"
               >
                 <Text style={styles.renameSaveText}>Save</Text>
               </TouchableOpacity>
