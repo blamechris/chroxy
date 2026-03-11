@@ -1,8 +1,7 @@
 import { createServer } from 'http'
-import { randomBytes } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 import { execFileSync } from 'child_process'
 import { WebSocketServer } from 'ws'
-import { v4 as uuidv4 } from 'uuid'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
@@ -488,7 +487,7 @@ export class WsServer {
     })
 
     this.wss.on('connection', (ws, req) => {
-      const clientId = uuidv4().slice(0, 8)
+      const clientId = randomUUID().slice(0, 8)
       // Best-effort client IP for logging and rate limiting.
       // Prefers Cloudflare's cf-connecting-ip (set by the tunnel proxy),
       // then x-forwarded-for, then the raw socket address.
