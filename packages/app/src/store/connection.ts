@@ -1337,7 +1337,12 @@ useConnectionStore.subscribe((state) => {
 });
 
 // Reconnect on app resume from background.
-// Store the subscription handle so it can be removed in tests or on hot-reload.
+// Clean up previous subscription on Metro hot-reload to prevent duplicate listeners.
+// @ts-expect-error — global used for hot-reload cleanup across module re-evaluations
+if (global.__chroxy_appStateSub) {
+  // @ts-expect-error — see above
+  global.__chroxy_appStateSub.remove();
+}
 export const _appStateSub = AppState.addEventListener('change', (nextState) => {
   if (nextState === 'active') {
     const { socket, connectionPhase, wsUrl, apiToken } = useConnectionStore.getState();
@@ -1347,3 +1352,5 @@ export const _appStateSub = AppState.addEventListener('change', (nextState) => {
     }
   }
 });
+// @ts-expect-error — store handle on global for hot-reload cleanup
+global.__chroxy_appStateSub = _appStateSub;
