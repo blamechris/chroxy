@@ -68,8 +68,10 @@ export class PushManager {
    */
   registerToken(token) {
     if (typeof token === 'string' && token.length > 0) {
-      this.tokens.add(token)
-      this._persistToDisk()
+      if (!this.tokens.has(token)) {
+        this.tokens.add(token)
+        this._persistToDisk()
+      }
       console.log(`[push] Registered token: ${token.slice(0, 30)}...`)
       return true
     }
@@ -79,8 +81,9 @@ export class PushManager {
 
   /** Remove a push token */
   removeToken(token) {
-    this.tokens.delete(token)
-    this._persistToDisk()
+    if (this.tokens.delete(token)) {
+      this._persistToDisk()
+    }
   }
 
   /** Check if we have any registered tokens */

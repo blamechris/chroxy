@@ -64,7 +64,7 @@ describe('PushManager persistence (#1982)', () => {
     manager.registerToken(VALID_TOKEN)
     manager.registerToken(VALID_TOKEN_2)
 
-    globalThis.fetch = mock.fn(async () => ({
+    mock.method(globalThis, 'fetch', async () => ({
       ok: true,
       json: async () => ({
         data: [
