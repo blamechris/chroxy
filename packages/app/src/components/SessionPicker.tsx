@@ -73,9 +73,10 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
       accessibilityRole="tab"
       accessibilityLabel={`Session ${session.name}${isCrashed ? ', crashed' : ''}`}
       accessibilityState={{ selected: isActive }}
+      accessibilityHint={isCrashed ? 'Session has crashed and needs attention' : showBusy ? 'Session is currently processing' : undefined}
     >
       {hasIndicators && (
-        <View style={styles.indicators}>
+        <View style={styles.indicators} importantForAccessibility="no" accessibilityElementsHidden>
           {isCrashed && <View style={styles.crashDot} />}
           {showBusy && <PulsingDot />}
           {hasNotification && <NotificationBadge count={notificationCount} />}
