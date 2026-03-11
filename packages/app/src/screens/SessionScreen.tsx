@@ -194,6 +194,8 @@ export function SessionScreen() {
   });
   const closeDevPreview = useConnectionStore((s) => s.closeDevPreview);
   const webFeatures = useConnectionStore((s) => s.webFeatures);
+  const isEncrypted = useConnectionStore((s) => s.isEncrypted);
+  const wsUrl = useConnectionStore((s) => s.wsUrl);
   const webTasks = useConnectionStore((s) => s.webTasks);
   const launchWebTask = useConnectionStore((s) => s.launchWebTask);
   const teleportWebTask = useConnectionStore((s) => s.teleportWebTask);
@@ -907,6 +909,15 @@ export function SessionScreen() {
         </View>
       ))}
 
+      {/* Unencrypted LAN warning */}
+      {!isEncrypted && connectionPhase === 'connected' && wsUrl?.startsWith('ws://') && (
+        <View style={styles.lanWarningBanner}>
+          <Text style={styles.lanWarningText}>
+            Unencrypted LAN connection — auth token sent in plaintext. Use a tunnel for secure remote access.
+          </Text>
+        </View>
+      )}
+
       {/* Background session notifications */}
       <SessionNotificationBanner />
 
@@ -1060,6 +1071,16 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.backgroundPrimary,
+  },
+  lanWarningBanner: {
+    backgroundColor: '#7a4a00',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  lanWarningText: {
+    color: '#ffcc80',
+    fontSize: 12,
+    textAlign: 'center' as const,
   },
   searchBar: {
     flexDirection: 'row' as const,

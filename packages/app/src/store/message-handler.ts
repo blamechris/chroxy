@@ -642,10 +642,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // Send key_exchange plaintext (before encryption is active)
         ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _pendingKeyPair.publicKey }));
         // Post-auth messages will be sent after key_exchange_ok arrives
+        set({ isEncrypted: true });
       } else {
         // No encryption — send post-auth messages immediately
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
+        set({ isEncrypted: false });
       }
       // Save for quick reconnect
       saveConnection(ctx.url, ctx.token);

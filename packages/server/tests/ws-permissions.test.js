@@ -1,7 +1,7 @@
 import { describe, it, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { createPermissionHandler } from '../src/ws-permissions.js'
+import { createPermissionHandler, sanitizeToolInput } from '../src/ws-permissions.js'
 
 /**
  * ws-permissions.js unit tests (#1730)
@@ -376,5 +376,51 @@ describe('createPermissionHandler', () => {
       assert.equal(respondToPermission.mock.calls[0].arguments[0], 'sdk-req')
       assert.equal(respondToPermission.mock.calls[0].arguments[1], 'allowAlways')
     })
+  })
+})
+
+describe('sanitizeToolInput (#1845)', () => {
+  it('redacts sensitive fields', () => {
+    const result = sanitizeToolInput({
+      command: 'echo hello',
+      token: 'secret-value',
+      password: 'hunter2',
+      apiKey: 'sk-123',
+    })
+    assert.equal(result.command, 'echo hello')
+    assert.equal(result.token, '[REDACTED]')
+    assert.equal(result.password, '[REDACTED]')
+    assert.equal(result.apiKey, '[REDACTED]')
+  })
+
+  it('truncates large string values to 10KB', () => {
+    const bigValue = 'x'.repeat(20_000)
+    const result = sanitizeToolInput({ content: bigValue })
+    // Result may be field-level truncated or object-level truncated
+    const serialized = JSON.stringify(result)
+    assert.ok(serialized.length <= 11_000, 'Sanitized result should be under ~10KB')
+    assert.ok(serialized.includes('truncated'), 'Should indicate truncation')
+  })
+
+  it('truncates overall object when serialized exceeds 10KB', () => {
+    const input = {}
+    for (let i = 0; i < 200; i++) {
+      input[`field_${i}`] = 'a'.repeat(100)
+    }
+    const result = sanitizeToolInput(input)
+    const serialized = JSON.stringify(result)
+    assert.ok(serialized.length <= 11_000) // 10KB + truncation suffix
+  })
+
+  it('passes through normal input unchanged', () => {
+    const input = { command: 'ls', file_path: '/tmp/test' }
+    const result = sanitizeToolInput(input)
+    assert.deepEqual(result, input)
+  })
+
+  it('handles null/undefined/non-object gracefully', () => {
+    assert.equal(sanitizeToolInput(null), null)
+    assert.equal(sanitizeToolInput(undefined), undefined)
+    assert.equal(sanitizeToolInput('string'), 'string')
   })
 })
