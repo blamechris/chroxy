@@ -27,12 +27,12 @@ describe('HistoryScreen error state (#1933)', () => {
 
   test('fetchConversationHistory sets error on timeout', () => {
     // The timeout branch should set an error message
-    expect(connectionSrc).toMatch(/conversationHistoryError.*timeout|timed?\s*out/i);
+    expect(connectionSrc).toMatch(/conversationHistoryError.*(?:timeout|timed?\s*out)/i);
   });
 
   test('fetchConversationHistory sets error when not connected', () => {
     // The not-connected branch should set an error
-    expect(connectionSrc).toMatch(/conversationHistoryError.*connect|not connected/i);
+    expect(connectionSrc).toMatch(/conversationHistoryError.*(?:connect|not connected)/i);
   });
 
   test('HistoryScreen reads conversationHistoryError from store', () => {

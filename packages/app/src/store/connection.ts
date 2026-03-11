@@ -737,6 +737,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       serverCommit: null,
       serverProtocolVersion: null,
       viewingCachedSession: false,
+      conversationHistory: [],
+      conversationHistoryLoading: false,
+      conversationHistoryError: null,
     });
   },
 
