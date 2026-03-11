@@ -146,6 +146,7 @@ export function HistoryScreen() {
   const resumeConversation = useConnectionStore((s) => s.resumeConversation);
   const searchResults = useConnectionStore((s) => s.searchResults);
   const searchLoading = useConnectionStore((s) => s.searchLoading);
+  const searchError = useConnectionStore((s) => s.searchError);
   const searchConversations = useConnectionStore((s) => s.searchConversations);
   const clearSearchResults = useConnectionStore((s) => s.clearSearchResults);
 
@@ -306,6 +307,18 @@ export function HistoryScreen() {
             <ActivityIndicator size="small" color={COLORS.accentBlue} />
             <Text style={styles.loadingText}>Searching...</Text>
           </View>
+        ) : searchError ? (
+          <View style={[styles.centered, { flex: 1 }]}>
+            <Text style={styles.errorText}>{searchError}</Text>
+            <TouchableOpacity
+              style={styles.retryButton}
+              onPress={() => searchConversations(searchQuery)}
+              accessibilityRole="button"
+              accessibilityLabel="Retry search"
+            >
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
         ) : searchResults.length === 0 ? (
           <View style={[styles.centered, { flex: 1 }]}>
             <Text style={styles.emptyText}>No results found</Text>
@@ -376,6 +389,7 @@ const styles = StyleSheet.create({
     color: COLORS.textError,
     fontSize: 15,
     textAlign: 'center',
+<<<<<<< HEAD
     marginBottom: 16,
     paddingHorizontal: 24,
   },
@@ -390,6 +404,20 @@ const styles = StyleSheet.create({
   retryButtonText: {
     color: COLORS.accentBlue,
     fontSize: 14,
+=======
+    marginHorizontal: 24,
+  },
+  retryButton: {
+    marginTop: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    backgroundColor: COLORS.accentBlue,
+    borderRadius: 8,
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontSize: 15,
+>>>>>>> 8119997e (fix(app): surface search error state in HistoryScreen (#2052))
     fontWeight: '600',
   },
   searchBar: {

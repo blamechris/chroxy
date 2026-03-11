@@ -232,6 +232,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   searchResults: [],
   searchLoading: false,
   searchQuery: '',
+  searchError: null,
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
@@ -715,6 +716,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       searchResults: [],
       searchLoading: false,
       searchQuery: '',
+      searchError: null,
     });
   },
 
@@ -1197,18 +1199,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const nonce = ++searchNonce;
-      set({ searchLoading: true, searchResults: [], searchQuery: query });
+      set({ searchLoading: true, searchResults: [], searchQuery: query, searchError: null });
       wsSend(socket, { type: 'search_conversations', query });
-      // Timeout to clear loading if no response in 15s
+      // Timeout to surface error if no response in 15s
       clearTimeout(searchTimeoutId);
       searchTimeoutId = setTimeout(() => {
-        if (searchNonce === nonce && get().searchLoading) set({ searchLoading: false });
+        if (searchNonce === nonce && get().searchLoading) {
+          set({ searchLoading: false, searchError: 'Search timed out. Check your connection and try again.' });
+        }
       }, 15000);
+    } else {
+      set({ searchError: 'Not connected to server.' });
     }
   },
 
   clearSearchResults: () => {
-    set({ searchResults: [], searchLoading: false, searchQuery: '' });
+    set({ searchResults: [], searchLoading: false, searchQuery: '', searchError: null });
   },
 
   requestFullHistory: (sessionId?: string) => {
