@@ -354,7 +354,7 @@ describe('WS handler: register_push_token', () => {
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port)
 
-    send(ws, { type: 'register_push_token', token: '' })
+    send(ws, { type: 'register_push_token', token: 'invalid-token' })
 
     const errorMsg = await withTimeout(
       new Promise(resolve => {
