@@ -267,7 +267,10 @@ export function ConnectScreen() {
               const ctrl = new AbortController();
               const timeout = setTimeout(() => ctrl.abort(), 1500);
               // Propagate outer abort signal to cancel in-flight requests immediately
-              const onOuterAbort = () => ctrl.abort();
+              const onOuterAbort = () => {
+                clearTimeout(timeout);
+                ctrl.abort();
+              };
               abort.signal.addEventListener('abort', onOuterAbort);
               try {
                 const res = await fetch(`http://${targetIp}:${port}/health`, { signal: ctrl.signal });
