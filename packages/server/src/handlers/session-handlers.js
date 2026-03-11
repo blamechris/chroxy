@@ -109,7 +109,7 @@ function handleRenameSession(ws, client, msg, ctx) {
 
   const doRename = typeof ctx.sessionManager.renameSessionLocked === 'function'
     ? () => ctx.sessionManager.renameSessionLocked(targetId, newName)
-    : () => Promise.resolve(ctx.sessionManager.renameSession(targetId, newName))
+    : async () => ctx.sessionManager.renameSession(targetId, newName)
 
   doRename().then(success => {
     if (success) {
@@ -117,6 +117,8 @@ function handleRenameSession(ws, client, msg, ctx) {
     } else {
       ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
     }
+  }).catch(err => {
+    ctx.send(ws, { type: 'session_error', message: err.message })
   })
 }
 

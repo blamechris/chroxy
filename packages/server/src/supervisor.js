@@ -12,6 +12,7 @@ import { waitForTunnel } from './tunnel-check.js'
 import { createLogger } from './logger.js'
 import qrcode from 'qrcode-terminal'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
+import { maskToken } from './mask-token.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -161,6 +162,10 @@ export class Supervisor extends EventEmitter {
     const { wsUrl, httpUrl } = await this._tunnel.start()
     this._currentWsUrl = wsUrl
 
+    // Compute modeLabel early so tunnel_recovered handler can reference it
+    const tunnelArg = parseTunnelArg(this._tunnelMode)
+    this._modeLabel = tunnelArg ? `${tunnelArg.provider}:${tunnelArg.mode}` : this._tunnelMode
+
     this._tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
       this._log.info(`Tunnel recovered after ${attempt} attempt(s)`)
       await this._waitForTunnel(newHttpUrl)
@@ -171,7 +176,7 @@ export class Supervisor extends EventEmitter {
         process.stdout.write('\nNew tunnel URL:\n\n')
         this._displayQr(connectionUrl)
         process.stdout.write(`\n   URL:   ${newWsUrl}\n`)
-        process.stdout.write(`   Token: ${this._apiToken}\n`)
+        process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
         process.stdout.write('\n')
 
         // Update connection info file with new tunnel URL
@@ -180,7 +185,7 @@ export class Supervisor extends EventEmitter {
           httpUrl: newHttpUrl,
           apiToken: this._apiToken,
           connectionUrl,
-          tunnelMode: modeLabel,
+          tunnelMode: this._modeLabel,
           startedAt: new Date().toISOString(),
           pid: process.pid,
         })
@@ -196,17 +201,15 @@ export class Supervisor extends EventEmitter {
 
     // 3. Display connection info
     const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${this._apiToken}`
-    const tunnelArg = parseTunnelArg(this._tunnelMode)
-    const modeLabel = tunnelArg ? `${tunnelArg.provider}:${tunnelArg.mode}` : this._tunnelMode
 
-    this._log.info(`${modeLabel} ready`)
+    this._log.info(`${this._modeLabel} ready`)
     process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
     this._displayQr(connectionUrl)
     process.stdout.write('\nOr connect manually:\n')
     process.stdout.write(`   URL:   ${wsUrl}\n`)
-    process.stdout.write(`   Token: ${this._apiToken}\n`)
+    process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
     const dashboardBase = httpUrl || `http://localhost:${this._port}`
-    process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard?token=${this._apiToken}\n`)
+    process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard\n`)
     process.stdout.write('\n')
 
     // 3b. Write connection info file for programmatic access
@@ -215,7 +218,7 @@ export class Supervisor extends EventEmitter {
       httpUrl,
       apiToken: this._apiToken,
       connectionUrl,
-      tunnelMode: modeLabel,
+      tunnelMode: this._modeLabel,
       startedAt: new Date().toISOString(),
       pid: process.pid,
     })
@@ -259,6 +262,7 @@ export class Supervisor extends EventEmitter {
     if (this.config.port) childEnv.PORT = String(this.config.port)
     if (this.config.cwd) childEnv.CHROXY_CWD = this.config.cwd
     if (this.config.model) childEnv.CHROXY_MODEL = this.config.model
+    if (this.config.showToken) childEnv.CHROXY_SHOW_TOKEN = '1'
     this._log.info(`Starting server child (attempt ${this._restartCount + 1})`)
     this._metrics.childStartedAt = Date.now()
 
