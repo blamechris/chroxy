@@ -8,6 +8,7 @@ import {
   StyleSheet,
 } from 'react-native';
 import { useConnectionStore, DirectoryListing } from '../store/connection';
+import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 
 interface FolderBrowserProps {
@@ -125,9 +126,12 @@ export function FolderBrowser({ visible, initialPath, onSelectPath, onClose }: F
           style={[styles.backButton, !parentPath && styles.backButtonDisabled]}
           onPress={navigateUp}
           disabled={!parentPath}
+          accessibilityRole="button"
+          accessibilityLabel="Go up to parent directory"
         >
+          <Icon name="chevronLeft" size={16} color={!parentPath ? COLORS.textDim : COLORS.textPrimary} />
           <Text style={[styles.backButtonText, !parentPath && styles.backButtonTextDisabled]}>
-            {'< Back'}
+            Back
           </Text>
         </TouchableOpacity>
         <Text style={styles.pathText} numberOfLines={1}>{truncatedPath}</Text>
@@ -198,9 +202,11 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
     minHeight: 44,
     minWidth: 44,
-    justifyContent: 'center',
     paddingRight: 8,
   },
   backButtonDisabled: {

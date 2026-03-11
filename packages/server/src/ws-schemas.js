@@ -116,6 +116,7 @@ export const RegisterPushTokenSchema = z.object({
 export const UserQuestionResponseSchema = z.object({
   type: z.literal('user_question_response'),
   answer: z.string(),
+  answers: z.record(z.string(), z.string()).optional(),
   toolUseId: z.string().optional(),
 })
 
@@ -257,7 +258,7 @@ export const ResumeConversationSchema = z.object({
   type: z.literal('resume_conversation'),
   conversationId: z.string(),
   cwd: z.string().optional(),
-  name: z.string().optional(),
+  name: z.string().max(200).optional(),
 })
 
 export const SearchConversationsSchema = z.object({
@@ -482,6 +483,11 @@ export const ServerErrorSchema = z.object({
   category: z.string().optional(),
   message: z.string(),
   recoverable: z.boolean(),
+})
+
+export const ServerPushTokenErrorSchema = z.object({
+  type: z.literal('push_token_error'),
+  message: z.string(),
 })
 
 export const ServerShutdownSchema = z.object({
