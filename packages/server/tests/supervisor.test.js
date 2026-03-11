@@ -670,10 +670,10 @@ describe('Supervisor', () => {
         mock.restoreAll()
       }
       const output = chunks.join('')
-      // Should NOT contain the old hardcoded version
-      assert.ok(!output.includes('v0.1.0'), 'Should not contain hardcoded v0.1.0')
-      // Should contain "Chroxy Supervisor v" followed by a semver-like version
-      assert.ok(output.match(/Chroxy Supervisor v\d+\.\d+/), 'Banner should contain dynamic version')
+      // Should contain the exact version from package.json
+      const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'))
+      const expectedBanner = `Chroxy Supervisor v${version}`
+      assert.ok(output.includes(expectedBanner), `Banner should contain "${expectedBanner}"`)
 
       supervisor._shuttingDown = true
       clearInterval(supervisor._heartbeatInterval)
