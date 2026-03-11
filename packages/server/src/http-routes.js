@@ -129,12 +129,19 @@ export function createHttpHandler(server) {
       return
     }
 
-    // QR code endpoint
+    // QR code endpoint — uses live pairing URL (not stale file) when available
     if (req.method === 'GET' && req.url?.startsWith('/qr')) {
       if (!server._validateBearerAuth(req, res)) return
       const qrCors = matchAllowedOrigin(req.headers['origin'])
-      const connInfo = readConnectionInfo()
-      if (!connInfo || !connInfo.connectionUrl) {
+
+      // Prefer live pairing URL from PairingManager (always current)
+      let qrData = server._pairingManager?.currentPairingUrl
+      if (!qrData) {
+        // Fall back to connection info file
+        const connInfo = readConnectionInfo()
+        qrData = connInfo?.connectionUrl
+      }
+      if (!qrData) {
         const errHeaders = { 'Content-Type': 'application/json' }
         if (qrCors) {
           errHeaders['Access-Control-Allow-Origin'] = qrCors
@@ -145,7 +152,7 @@ export function createHttpHandler(server) {
         return
       }
       try {
-        const svg = await QRCode.toString(connInfo.connectionUrl, {
+        const svg = await QRCode.toString(qrData, {
           type: 'svg',
           color: { dark: '#e0e0e0', light: '#00000000' },
           margin: 1,

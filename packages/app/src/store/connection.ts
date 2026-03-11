@@ -87,6 +87,8 @@ import {
   setDisconnectedAttemptId,
   lastConnectedUrl,
   setLastConnectedUrl,
+  pendingPairingId,
+  setPendingPairingId,
   setPendingSwitchSessionId,
   resetReplayFlags,
   clearPermissionSplits,
@@ -522,12 +524,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const info = getDeviceInfo();
       void getDeviceId().then((deviceId) => {
         if (socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({
-            type: 'auth',
-            token,
-            protocolVersion: CLIENT_PROTOCOL_VERSION,
-            deviceInfo: { deviceId, ...info },
-          }));
+          // Use pairing flow when pendingPairingId is set (from QR scan)
+          const pairId = pendingPairingId;
+          if (pairId) {
+            setPendingPairingId(null); // Clear after use (one-time)
+            socket.send(JSON.stringify({
+              type: 'pair',
+              pairingId: pairId,
+              protocolVersion: CLIENT_PROTOCOL_VERSION,
+              deviceInfo: { deviceId, ...info },
+            }));
+          } else {
+            socket.send(JSON.stringify({
+              type: 'auth',
+              token,
+              protocolVersion: CLIENT_PROTOCOL_VERSION,
+              deviceInfo: { deviceId, ...info },
+            }));
+          }
         }
       });
     };

@@ -5,7 +5,7 @@
  * concerns from message routing.
  */
 import { createKeyPair, deriveSharedKey } from './crypto.js'
-import { AuthSchema, KeyExchangeSchema } from './ws-schemas.js'
+import { AuthSchema, KeyExchangeSchema, PairSchema } from './ws-schemas.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('ws')
@@ -88,6 +88,99 @@ export function handleAuthMessage(ctx, ws, msg) {
   authFailures.set(ip, existing)
   log.warn(`Auth failure from IP ${ip} (attempt ${existing.count}, blocked for ${backoff}ms)`)
   send(ws, { type: 'auth_fail', reason: 'invalid_token' })
+  ws.close()
+  return true
+}
+
+/**
+ * Handle a pair message from an unauthenticated client.
+ * Validates the pairing ID and issues a session token.
+ * Returns true if the message was consumed (caller should return).
+ *
+ * @param {object} ctx - Server context (includes pairingManager)
+ * @param {WebSocket} ws
+ * @param {object} msg - The parsed message
+ * @returns {boolean}
+ */
+export function handlePairMessage(ctx, ws, msg) {
+  const {
+    clients, pairingManager, send, onAuthSuccess,
+    authFailures, minProtocolVersion, serverProtocolVersion,
+  } = ctx
+  const client = clients.get(ws)
+  if (!client || client.authenticated) return false
+  if (msg.type !== 'pair') return false
+  if (!pairingManager) {
+    send(ws, { type: 'pair_fail', reason: 'pairing_not_enabled' })
+    ws.close()
+    return true
+  }
+
+  // Validate pair message shape
+  const pairParsed = PairSchema.safeParse(msg)
+  if (!pairParsed.success) {
+    send(ws, { type: 'pair_fail', reason: 'invalid_message' })
+    ws.close()
+    return true
+  }
+
+  // Check rate limit
+  const ip = client.socketIp
+  const failure = authFailures.get(ip)
+  if (failure && failure.blockedUntil > Date.now()) {
+    log.warn(`Pair rate-limited for IP ${ip} (${failure.count} failures)`)
+    send(ws, { type: 'pair_fail', reason: 'rate_limited' })
+    ws.close()
+    return true
+  }
+
+  const result = pairingManager.validatePairing(msg.pairingId)
+  if (result.valid) {
+    // Check protocol version BEFORE marking authenticated
+    const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)
+    const clientVersion = hasVersion ? msg.protocolVersion : null
+
+    if (clientVersion !== null && clientVersion < minProtocolVersion) {
+      send(ws, { type: 'pair_fail', reason: `unsupported protocol version ${clientVersion} (minimum: ${minProtocolVersion})` })
+      ws.close()
+      return true
+    }
+
+    client.authenticated = true
+    client.authTime = Date.now()
+    client.pairedWith = msg.pairingId
+    authFailures.delete(ip)
+
+    client.protocolVersion = clientVersion !== null
+      ? Math.min(clientVersion, serverProtocolVersion)
+      : minProtocolVersion
+
+    if (msg.deviceInfo && typeof msg.deviceInfo === 'object') {
+      client.deviceInfo = {
+        deviceId: typeof msg.deviceInfo.deviceId === 'string' ? msg.deviceInfo.deviceId : null,
+        deviceName: typeof msg.deviceInfo.deviceName === 'string' ? msg.deviceInfo.deviceName : null,
+        deviceType: ['phone', 'tablet', 'desktop', 'unknown'].includes(msg.deviceInfo.deviceType) ? msg.deviceInfo.deviceType : 'unknown',
+        platform: typeof msg.deviceInfo.platform === 'string' ? msg.deviceInfo.platform : 'unknown',
+      }
+    }
+
+    // Attach sessionToken so onAuthSuccess can include it in the auth_ok payload
+    // (client stores this for future reconnections)
+    client._sessionToken = result.sessionToken
+    onAuthSuccess(ws, client)
+    log.info(`Client ${client.id} paired via pairing ID`)
+    return true
+  }
+
+  // Pairing failure — track for rate limiting
+  const now = Date.now()
+  const existing = authFailures.get(ip) || { count: 0, firstFailure: now, blockedUntil: 0 }
+  existing.count++
+  const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
+  existing.blockedUntil = now + backoff
+  authFailures.set(ip, existing)
+  log.warn(`Pair failure from IP ${ip}: ${result.reason} (attempt ${existing.count})`)
+  send(ws, { type: 'pair_fail', reason: result.reason })
   ws.close()
   return true
 }

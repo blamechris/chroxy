@@ -11,6 +11,7 @@ import { dirname, join, relative, sep } from 'path'
 import qrcode from 'qrcode-terminal'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
+import { PairingManager } from './pairing.js'
 import { getLanIp } from './lan-ip.js'
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
@@ -208,6 +209,12 @@ export async function startCliServer(config) {
   })
   if (tokenManager) tokenManager.start()
 
+  // Create pairing manager for ephemeral QR-based pairing (replaces permanent token in QR)
+  const pairingManager = NO_AUTH ? null : new PairingManager({
+    ttlMs: 60_000,
+    autoRefresh: true,
+  })
+
   wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
@@ -218,6 +225,7 @@ export async function startCliServer(config) {
     maxPayload: config.maxPayload,
     noEncrypt: config.noEncrypt,
     tokenManager,
+    pairingManager,
   })
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
@@ -250,6 +258,37 @@ export async function startCliServer(config) {
   let currentWsUrl = null
   let currentTunnelMode = 'none'
 
+  // Helper: build QR connection URL using ephemeral pairing ID (never the permanent token)
+  const buildPairingUrl = (wsUrlStr) => {
+    if (!pairingManager) return null
+    pairingManager.setWsUrl(wsUrlStr)
+    return pairingManager.currentPairingUrl
+  }
+
+  // Helper: display QR code and connection info
+  const displayQr = (wsUrlStr, httpUrlStr, modeLabel) => {
+    const pairingUrl = buildPairingUrl(wsUrlStr)
+    if (pairingUrl) {
+      console.log(`\n[✓] Server ready! (CLI headless mode, ${modeLabel})\n`)
+      console.log('📱 Scan this QR code with the Chroxy app:\n')
+      qrcode.generate(pairingUrl, { small: true })
+      console.log(`\nOr connect manually:`)
+      console.log(`   URL:   ${wsUrlStr}`)
+      console.log(`   Token: ${API_TOKEN}`)
+      if (httpUrlStr) console.log(`   Dashboard: ${httpUrlStr}/dashboard?token=${API_TOKEN}`)
+    }
+
+    writeConnectionInfo({
+      wsUrl: wsUrlStr,
+      httpUrl: httpUrlStr,
+      apiToken: API_TOKEN,
+      connectionUrl: pairingUrl || `chroxy://${wsUrlStr.replace(/^wss?:\/\//, '')}?token=${API_TOKEN}`,
+      tunnelMode: modeLabel,
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    })
+  }
+
   // External URL mode: reverse proxy / custom domain (skip tunnel entirely)
   const externalUrl = config.externalUrl || null
   if (externalUrl) {
@@ -257,25 +296,7 @@ export async function startCliServer(config) {
     currentWsUrl = wsUrl
     currentTunnelMode = 'external'
     const httpUrl = externalUrl.replace(/^wss?:\/\//, 'https://')
-    const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
-
-    console.log(`\n[✓] Server ready! (CLI headless mode, external URL)\n`)
-    console.log('📱 Scan this QR code with the Chroxy app:\n')
-    qrcode.generate(connectionUrl, { small: true })
-    console.log(`\nOr connect manually:`)
-    console.log(`   URL:   ${wsUrl}`)
-    console.log(`   Token: ${API_TOKEN}`)
-    console.log(`   Dashboard: ${httpUrl}/dashboard?token=${API_TOKEN}`)
-
-    writeConnectionInfo({
-      wsUrl,
-      httpUrl,
-      apiToken: API_TOKEN,
-      connectionUrl,
-      tunnelMode: 'external',
-      startedAt: new Date().toISOString(),
-      pid: process.pid,
-    })
+    displayQr(wsUrl, httpUrl, 'external')
   }
 
   // Determine tunnel mode
@@ -309,28 +330,9 @@ export async function startCliServer(config) {
       // Only display new QR code if URL actually changed
       if (newWsUrl !== currentWsUrl) {
         currentWsUrl = newWsUrl
-        // Use tokenManager.currentToken to get the latest (possibly rotated) token
-        const currentApiToken = tokenManager ? tokenManager.currentToken : API_TOKEN
-        const newConnectionUrl = `chroxy://${newWsUrl.replace('wss://', '')}?token=${currentApiToken}`
-        console.log('\n[✓] New tunnel URL established:\n')
-        console.log('📱 Scan this QR code with the Chroxy app:\n')
-        qrcode.generate(newConnectionUrl, { small: true })
-        console.log(`\nOr connect manually:`)
-        console.log(`   URL:   ${newWsUrl}`)
-        console.log(`   Token: ${currentApiToken}`)
-        console.log('')
+        if (pairingManager) pairingManager.refresh()
+        displayQr(newWsUrl, newHttpUrl, modeLabel)
         wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
-
-        // Update connection info file with new tunnel URL
-        writeConnectionInfo({
-          wsUrl: newWsUrl,
-          httpUrl: newHttpUrl,
-          apiToken: currentApiToken,
-          connectionUrl: newConnectionUrl,
-          tunnelMode: modeLabel,
-          startedAt: new Date().toISOString(),
-          pid: process.pid,
-        })
       } else {
         console.log(`[✓] Tunnel URL unchanged: ${newWsUrl}`)
         wsServer.broadcastStatus('Tunnel connection recovered')
@@ -341,28 +343,9 @@ export async function startCliServer(config) {
     await waitForTunnel(httpUrl)
 
     // 7. Generate connection info
-    const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${API_TOKEN}`
     const modeLabel = `${tunnelArg.provider}:${tunnelArg.mode}`
     currentTunnelMode = modeLabel
-
-    console.log(`\n[✓] Server ready! (CLI headless mode, ${modeLabel})\n`)
-    console.log('📱 Scan this QR code with the Chroxy app:\n')
-    qrcode.generate(connectionUrl, { small: true })
-    console.log(`\nOr connect manually:`)
-    console.log(`   URL:   ${wsUrl}`)
-    console.log(`   Token: ${API_TOKEN}`)
-    console.log(`   Dashboard: ${httpUrl}/dashboard?token=${API_TOKEN}`)
-
-    // 7b. Write connection info file for programmatic access
-    writeConnectionInfo({
-      wsUrl,
-      httpUrl,
-      apiToken: API_TOKEN,
-      connectionUrl,
-      tunnelMode: modeLabel,
-      startedAt: new Date().toISOString(),
-      pid: process.pid,
-    })
+    displayQr(wsUrl, httpUrl, modeLabel)
 
   } else if (externalUrl) {
     // Ready message already printed above
@@ -370,22 +353,7 @@ export async function startCliServer(config) {
     const lanIp = getLanIp()
     const host = lanIp || 'localhost'
     currentWsUrl = `ws://${host}:${PORT}`
-    const connectionUrl = `chroxy://${host}:${PORT}?token=${API_TOKEN}`
-
-    console.log(`[✓] Server ready! (CLI headless mode, no tunnel)\n`)
-    console.log(`   Connect: ws://${host}:${PORT}`)
-    console.log(`   Token: ${API_TOKEN}`)
-    console.log(`   Dashboard: http://localhost:${PORT}/dashboard?token=${API_TOKEN}`)
-
-    writeConnectionInfo({
-      wsUrl: `ws://${host}:${PORT}`,
-      httpUrl: `http://${host}:${PORT}`,
-      apiToken: API_TOKEN,
-      connectionUrl,
-      tunnelMode: 'none',
-      startedAt: new Date().toISOString(),
-      pid: process.pid,
-    })
+    displayQr(`ws://${host}:${PORT}`, `http://${host}:${PORT}`, 'none')
   } else if (!NO_AUTH) {
     // tunnelArg is set but SKIP_TUNNEL is true due to externalUrl — already handled above
   } else {
@@ -400,24 +368,12 @@ export async function startCliServer(config) {
     tokenManager.on('token_rotated', ({ newToken }) => {
       if (!currentWsUrl) return // no-auth or localhost-only — no QR to update
 
-      const newConnectionUrl = `chroxy://${currentWsUrl.replace(/^wss?:\/\//, '')}?token=${newToken}`
-      console.log('\n[token] API token rotated. Updated QR code:\n')
-      qrcode.generate(newConnectionUrl, { small: true })
-      console.log(`\n   Token: ${newToken.slice(0, 8)}...`)
-      console.log('')
+      // Refresh pairing ID when token rotates (old session tokens remain valid)
+      if (pairingManager) pairingManager.refresh()
 
-      // Determine httpUrl from wsUrl
       const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
-
-      writeConnectionInfo({
-        wsUrl: currentWsUrl,
-        httpUrl: httpBase,
-        apiToken: newToken,
-        connectionUrl: newConnectionUrl,
-        tunnelMode: currentTunnelMode,
-        startedAt: serverStartedAt,
-        pid: process.pid,
-      })
+      displayQr(currentWsUrl, httpBase, currentTunnelMode)
+      console.log(`[token] API token rotated. QR code updated.\n`)
     })
   }
 
@@ -435,6 +391,7 @@ export async function startCliServer(config) {
       try { bonjourInstance.destroy?.() } catch {}
     }
     if (tokenManager) tokenManager.destroy()
+    if (pairingManager) pairingManager.destroy()
     sessionManager.destroyAll()
     wsServer.close()
     if (tunnel) await tunnel.stop()

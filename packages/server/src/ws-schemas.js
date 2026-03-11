@@ -33,6 +33,18 @@ export const AuthSchema = z.object({
   deviceInfo: DeviceInfoSchema.optional(),
 }).passthrough()
 
+export const PairSchema = z.object({
+  type: z.literal('pair'),
+  pairingId: z.string().min(1),
+  protocolVersion: z.number().int().min(0).optional(),
+  deviceInfo: DeviceInfoSchema.optional(),
+}).passthrough()
+
+export const ServerPairFailSchema = z.object({
+  type: z.literal('pair_fail'),
+  reason: z.string(),
+})
+
 export const InputSchema = z.object({
   type: z.literal('input'),
   data: z.string().optional(),
