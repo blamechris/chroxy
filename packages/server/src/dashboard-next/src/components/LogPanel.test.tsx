@@ -151,30 +151,31 @@ describe('LogPanel', () => {
     render(<LogPanel />)
 
     // info/warn/error are on by default, debug is off
-    expect(screen.getByTestId('log-filter-info').getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getByTestId('log-filter-warn').getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getByTestId('log-filter-error').getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getByTestId('log-filter-debug').getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByTestId('log-filter-info')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('log-filter-warn')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('log-filter-error')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('log-filter-debug')).toHaveAttribute('aria-pressed', 'false')
 
     // Toggle debug on
     fireEvent.click(screen.getByTestId('log-filter-debug'))
-    expect(screen.getByTestId('log-filter-debug').getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByTestId('log-filter-debug')).toHaveAttribute('aria-pressed', 'true')
 
     // Toggle info off
     fireEvent.click(screen.getByTestId('log-filter-info'))
-    expect(screen.getByTestId('log-filter-info').getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByTestId('log-filter-info')).toHaveAttribute('aria-pressed', 'false')
   })
 
   it('filter buttons have aria-label', () => {
     render(<LogPanel />)
-    expect(screen.getByTestId('log-filter-info').getAttribute('aria-label')).toBe('Filter info messages')
-    expect(screen.getByTestId('log-filter-debug').getAttribute('aria-label')).toBe('Filter debug messages')
+    expect(screen.getByTestId('log-filter-info')).toHaveAttribute('aria-label', 'Filter info messages')
+    expect(screen.getByTestId('log-filter-debug')).toHaveAttribute('aria-label', 'Filter debug messages')
   })
 
   it('log list container has role="log" and aria-live', () => {
     render(<LogPanel />)
     const logList = screen.getByTestId('log-list')
-    expect(logList.getAttribute('role')).toBe('log')
-    expect(logList.getAttribute('aria-live')).toBe('polite')
+    expect(logList).toHaveAttribute('role', 'log')
+    expect(logList).toHaveAttribute('aria-live', 'polite')
+    expect(logList).toHaveAttribute('aria-label', 'Log entries')
   })
 })

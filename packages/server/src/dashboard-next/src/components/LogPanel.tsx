@@ -105,7 +105,7 @@ export function LogPanel() {
         </div>
       </div>
 
-      <div className="log-list" ref={listRef} data-testid="log-list" role="log" aria-live="polite">
+      <div className="log-list" ref={listRef} data-testid="log-list" role="log" aria-live="polite" aria-label="Log entries">
         {filtered.length === 0 ? (
           <div className="log-empty" data-testid="log-empty">No log entries</div>
         ) : (
