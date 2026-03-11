@@ -1,35 +1,102 @@
-import fs from 'fs'
-import path from 'path'
+import { groupMessages } from '../src/components/ChatView';
+import type { ChatMessage } from '../src/store/types';
 
-const src = fs.readFileSync(
-  path.resolve(__dirname, '../src/components/ChatView.tsx'),
-  'utf-8',
-)
+function msg(overrides: Partial<ChatMessage> & { id: string; type: ChatMessage['type'] }): ChatMessage {
+  return { content: '', timestamp: Date.now(), ...overrides };
+}
 
-describe('groupMessages memoization (#1937)', () => {
-  test('groupMessages does not accept streamingMessageId parameter', () => {
-    // Function signature should only take messages, not streaming state
-    expect(src).toMatch(/function groupMessages\(messages: ChatMessage\[\]\): DisplayGroup\[\]/)
-  })
+describe('groupMessages (#1937)', () => {
+  it('returns empty array for empty input', () => {
+    expect(groupMessages([])).toEqual([]);
+  });
 
-  test('groupMessages sets isActive to false (structural only)', () => {
-    // isActive should always be false in the pure grouping function
-    expect(src).toMatch(/isActive: false,/)
-  })
+  it('wraps a single response in a single group', () => {
+    const messages = [msg({ id: 'm1', type: 'response' })];
+    const groups = groupMessages(messages);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].type).toBe('single');
+    if (groups[0].type === 'single') {
+      expect(groups[0].message.id).toBe('m1');
+    }
+  });
 
-  test('baseGroups memo depends only on messages', () => {
-    // Structural grouping should not include streamingMessageId in dependencies
-    expect(src).toMatch(/useMemo\(\(\) => groupMessages\(messages\), \[messages\]\)/)
-  })
+  it('groups consecutive tool_use messages into an activity group', () => {
+    const messages = [
+      msg({ id: 't1', type: 'tool_use' }),
+      msg({ id: 't2', type: 'tool_use' }),
+      msg({ id: 't3', type: 'tool_use' }),
+    ];
+    const groups = groupMessages(messages);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].type).toBe('activity');
+    if (groups[0].type === 'activity') {
+      expect(groups[0].messages).toHaveLength(3);
+      expect(groups[0].isActive).toBe(false);
+      expect(groups[0].key).toBe('activity-t1');
+    }
+  });
 
-  test('displayGroups overlays isActive separately', () => {
-    // The streaming overlay should be a separate memo that depends on baseGroups
-    expect(src).toMatch(/\[baseGroups, streamingMessageId, messages\]/)
-  })
+  it('groups thinking messages into activity groups', () => {
+    const messages = [
+      msg({ id: 'th1', type: 'thinking' }),
+      msg({ id: 't1', type: 'tool_use' }),
+    ];
+    const groups = groupMessages(messages);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].type).toBe('activity');
+    if (groups[0].type === 'activity') {
+      expect(groups[0].messages).toHaveLength(2);
+    }
+  });
 
-  test('streaming overlay is O(1) — only touches last group', () => {
-    // Should slice off last element and push a new one, not re-create all groups
-    expect(src).toMatch(/baseGroups\.slice\(0, -1\)/)
-    expect(src).toMatch(/result\.push\(\{ \.\.\.last, isActive: true \}\)/)
-  })
-})
+  it('splits groups at non-tool/non-thinking messages', () => {
+    const messages = [
+      msg({ id: 't1', type: 'tool_use' }),
+      msg({ id: 'r1', type: 'response' }),
+      msg({ id: 't2', type: 'tool_use' }),
+    ];
+    const groups = groupMessages(messages);
+    expect(groups).toHaveLength(3);
+    expect(groups[0].type).toBe('activity');
+    expect(groups[1].type).toBe('single');
+    expect(groups[2].type).toBe('activity');
+  });
+
+  it('always sets isActive to false (pure structural grouping)', () => {
+    const messages = [
+      msg({ id: 't1', type: 'tool_use' }),
+      msg({ id: 't2', type: 'tool_use' }),
+      msg({ id: 'r1', type: 'response' }),
+      msg({ id: 't3', type: 'tool_use' }),
+    ];
+    const groups = groupMessages(messages);
+    for (const group of groups) {
+      if (group.type === 'activity') {
+        expect(group.isActive).toBe(false);
+      }
+    }
+  });
+
+  it('uses first message id as activity group key', () => {
+    const messages = [
+      msg({ id: 'tool-abc', type: 'tool_use' }),
+      msg({ id: 'tool-def', type: 'tool_use' }),
+    ];
+    const groups = groupMessages(messages);
+    expect(groups[0].type).toBe('activity');
+    if (groups[0].type === 'activity') {
+      expect(groups[0].key).toBe('activity-tool-abc');
+    }
+  });
+
+  it('handles user messages as single groups', () => {
+    const messages = [
+      msg({ id: 'u1', type: 'user_input' }),
+      msg({ id: 'r1', type: 'response' }),
+    ];
+    const groups = groupMessages(messages);
+    expect(groups).toHaveLength(2);
+    expect(groups[0].type).toBe('single');
+    expect(groups[1].type).toBe('single');
+  });
+});
