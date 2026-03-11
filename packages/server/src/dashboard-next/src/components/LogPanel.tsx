@@ -69,6 +69,8 @@ export function LogPanel() {
               type="button"
               className={`log-filter-btn log-filter-${level}${filter.has(level) ? ' active' : ''}`}
               data-testid={`log-filter-${level}`}
+              aria-pressed={filter.has(level)}
+              aria-label={`Filter ${level} messages`}
               onClick={() => toggleLevel(level)}
             >
               {level}
@@ -103,7 +105,7 @@ export function LogPanel() {
         </div>
       </div>
 
-      <div className="log-list" ref={listRef} data-testid="log-list">
+      <div className="log-list" ref={listRef} data-testid="log-list" role="log" aria-live="polite">
         {filtered.length === 0 ? (
           <div className="log-empty" data-testid="log-empty">No log entries</div>
         ) : (
