@@ -10,12 +10,12 @@ const srcDir = join(__dirname, '../src')
 // Top-level await import to avoid timing issues with before() hooks
 const keychain = await import(join(srcDir, 'keychain.js'))
 
-// Helper: run a keychain integration test, skipping gracefully if the
-// `security` binary is transiently unavailable (ENOENT under test runner load)
+// Helper: run a keychain integration test, skipping when keychain is
+// unavailable (CI without secret-tool, or transient ENOENT under load)
 function keychainTest(name, fn) {
   it(name, (t) => {
-    if (process.platform !== 'darwin' && process.platform !== 'linux') {
-      return t.skip('no keychain on this platform')
+    if (!keychain.isKeychainAvailable()) {
+      return t.skip('no keychain available')
     }
     try {
       fn(t)
