@@ -13,7 +13,7 @@ describe('SessionPicker accessibility (#2014)', () => {
   });
 
   it('indicators view is hidden from accessibility tree', () => {
-    expect(source).toContain('importantForAccessibility="no"');
+    expect(source).toContain('importantForAccessibility="no-hide-descendants"');
     expect(source).toContain('accessibilityElementsHidden');
   });
 });

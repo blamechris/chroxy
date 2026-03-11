@@ -71,12 +71,12 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
       onLayout={onLayout}
       activeOpacity={0.7}
       accessibilityRole="tab"
-      accessibilityLabel={`Session ${session.name}${isCrashed ? ', crashed' : ''}`}
+      accessibilityLabel={`Session ${session.name}`}
       accessibilityState={{ selected: isActive }}
       accessibilityHint={isCrashed ? 'Session has crashed and needs attention' : showBusy ? 'Session is currently processing' : undefined}
     >
       {hasIndicators && (
-        <View style={styles.indicators} importantForAccessibility="no" accessibilityElementsHidden>
+        <View style={styles.indicators} importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
           {isCrashed && <View style={styles.crashDot} />}
           {showBusy && <PulsingDot />}
           {hasNotification && <NotificationBadge count={notificationCount} />}
