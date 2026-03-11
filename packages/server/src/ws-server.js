@@ -141,7 +141,7 @@ function _isSecureRequest(req) {
  *   { type: 'create_session', name?, cwd?, provider? } — create a new session
  *   { type: 'destroy_session', sessionId }            — destroy a session
  *   { type: 'rename_session', sessionId, name }       — rename a session
- *   { type: 'register_push_token', token }             — register Expo push token for notifications
+ *   { type: 'register_push_token', token }             — register push token for notifications
  *   { type: 'user_question_response', answer }         — respond to AskUserQuestion prompt
  *   { type: 'list_directory', path? }                  — request directory listing for file browser
  *   { type: 'browse_files', path? }                   — request file/directory listing for file browser
