@@ -1,13 +1,10 @@
-/**
- * Behavioral tests for the LAN scan abort pattern (#1947).
- *
- * The pattern: each IP probe creates an inner AbortController + timeout.
- * An outer abort listener clears the timeout before calling ctrl.abort()
- * to prevent "abort called on already-aborted controller" errors.
- * A finally block also clears the timeout as a safety net.
- *
- * These tests verify the pattern works correctly without reading source code.
- */
+import fs from 'fs'
+import path from 'path'
+
+const src = fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/lan-scanner.ts'),
+  'utf-8',
+)
 
 describe('LAN scan AbortController fix (#1947)', () => {
   beforeEach(() => {
