@@ -8,7 +8,8 @@ Cross-platform feature availability for Mobile App, Desktop Dashboard, and Serve
 
 | Feature | Mobile | Desktop | Server |
 |---------|--------|---------|--------|
-| QR Code Scanning | Y | Y (tray) | Y (endpoint) |
+| QR Code Scanning | Y | — | — |
+| QR Code Display | — | Y (tray) | Y (endpoint) |
 | Manual URL Entry | Y | Y | Y |
 | Token Authentication | Y | Y | Y |
 | LAN/mDNS Discovery | Y | — | Y |
@@ -23,13 +24,13 @@ Cross-platform feature availability for Mobile App, Desktop Dashboard, and Serve
 |---------|--------|---------|--------|
 | Chat View | Y | Y | Y |
 | Markdown Rendering | Y | Y | — |
-| Syntax Highlighting | Y (50+ langs) | Y (15 langs) | — |
+| Syntax Highlighting | Y (15 langs) | Y (15 langs) | — |
 | Message Streaming | Y | Y | Y |
 | Plan Mode Approval | Y | Y | Y |
 | Agent Monitoring | Y | Y | Y |
 | Activity Groups | Y | Y | Y |
 | Conversation Search | Y | Y | Y |
-| Search Highlighting | Y | Y | — |
+| Search Highlighting | Y | — | — |
 
 ## Terminal
 
@@ -103,7 +104,6 @@ Cross-platform feature availability for Mobile App, Desktop Dashboard, and Serve
 | Theme/Appearance | Y | Y | — |
 | Keyboard Shortcuts | — | Y | — |
 | Biometric Lock Toggle | Y | — | — |
-| Auto-update | — | Y | — |
 | Version Display | Y | Y | Y |
 
 ## System
@@ -117,7 +117,7 @@ Cross-platform feature availability for Mobile App, Desktop Dashboard, and Serve
 | Supervisor (auto-restart) | — | — | Y |
 | Headless CLI Mode | — | — | Y |
 | Health Check | Y | Y | Y |
-| Graceful Shutdown | Y | Y | Y |
+| Graceful Shutdown | — | Y | Y |
 
 ## Onboarding
 
