@@ -1332,9 +1332,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   dismissInfoNotification: (id: string) => {
-    set((state) => ({
-      infoNotifications: state.infoNotifications.filter((e) => e.id !== id),
-    }));
+    const { infoNotifications } = get();
+    if (!infoNotifications.some((e) => e.id === id)) {
+      return;
+    }
+    set({
+      infoNotifications: infoNotifications.filter((e) => e.id !== id),
+    });
   },
 
   dismissSessionNotification: (id: string) => {

@@ -1058,7 +1058,15 @@ export function App() {
       />
 
       {/* Toasts */}
-      <Toast items={toastItems} onDismiss={(id) => { dismissServerError(id); dismissInfoNotification(id); }} />
+      <Toast items={toastItems} onDismiss={(id) => {
+        const item = toastItems.find(t => t.id === id)
+        if (!item) return
+        if (item.level === 'error') {
+          dismissServerError(id)
+        } else {
+          dismissInfoNotification(id)
+        }
+      }} />
 
       {/* Command palette */}
       <CommandPalette

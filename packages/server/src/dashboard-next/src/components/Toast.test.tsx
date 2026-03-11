@@ -16,9 +16,9 @@ describe('Toast', () => {
     expect(screen.getByTestId('toast-container')).toBeInTheDocument()
   })
 
-  it('has aria-live="assertive" for urgent announcements', () => {
+  it('container has no aria-live (each item carries its own)', () => {
     render(<Toast items={[]} onDismiss={vi.fn()} />)
-    expect(screen.getByTestId('toast-container')).toHaveAttribute('aria-live', 'assertive')
+    expect(screen.getByTestId('toast-container')).not.toHaveAttribute('aria-live')
   })
 
   it('container has no role (items carry role="alert")', () => {
@@ -60,6 +60,22 @@ describe('Toast', () => {
     const toast = container.querySelector('.toast')
     expect(toast?.classList.contains('toast-info')).toBe(true)
     expect(toast?.classList.contains('toast-error')).toBe(false)
+  })
+
+  it('info-level items use role="status" and aria-live="polite"', () => {
+    const items: ToastItem[] = [{ id: 'i2', message: 'Info msg', level: 'info' }]
+    const { container } = render(<Toast items={items} onDismiss={vi.fn()} />)
+    const toast = container.querySelector('.toast')
+    expect(toast).toHaveAttribute('role', 'status')
+    expect(toast).toHaveAttribute('aria-live', 'polite')
+  })
+
+  it('error-level items use role="alert" and aria-live="assertive"', () => {
+    const items: ToastItem[] = [{ id: 'e2', message: 'Error msg', level: 'error' }]
+    const { container } = render(<Toast items={items} onDismiss={vi.fn()} />)
+    const toast = container.querySelector('.toast')
+    expect(toast).toHaveAttribute('role', 'alert')
+    expect(toast).toHaveAttribute('aria-live', 'assertive')
   })
 
   it('applies toast-error class for error-level items (default)', () => {

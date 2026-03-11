@@ -1,5 +1,5 @@
 /**
- * Toast — error notification stack with auto-dismiss.
+ * Toast — notification stack with auto-dismiss (errors + info).
  *
  * Fixed bottom-right, max visible controlled by parent, 5s auto-dismiss.
  */
@@ -49,9 +49,9 @@ export function Toast({ items, onDismiss }: ToastProps) {
   }, [])
 
   return (
-    <div className="toast-container" data-testid="toast-container" aria-live="assertive">
+    <div className="toast-container" data-testid="toast-container">
       {items.map(item => (
-        <div key={item.id} className={`toast ${item.level === 'info' ? 'toast-info' : 'toast-error'}`} role="alert">
+        <div key={item.id} className={`toast ${item.level === 'info' ? 'toast-info' : 'toast-error'}`} role={item.level === 'info' ? 'status' : 'alert'} aria-live={item.level === 'info' ? 'polite' : 'assertive'}>
           <span className="toast-msg">{item.message}</span>
           <button
             className="toast-close"
