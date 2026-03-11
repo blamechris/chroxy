@@ -29,6 +29,30 @@ export function createFileOps(sendFn) {
     return resolved
   }
 
+  /**
+   * Validate that a resolved path is within the session CWD.
+   * Follows symlinks to prevent symlink escape.
+   *
+   * @param {string} absPath - Absolute path to validate
+   * @param {string} sessionCwd - Session working directory
+   * @returns {Promise<{ valid: boolean, realPath: string, cwdReal: string }>}
+   */
+  async function validatePathWithinCwd(absPath, sessionCwd) {
+    const cwdReal = await resolveSessionCwd(sessionCwd)
+    let realAbsPath
+    try {
+      realAbsPath = await realpath(absPath)
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        realAbsPath = absPath
+      } else {
+        throw err
+      }
+    }
+    const valid = realAbsPath.startsWith(cwdReal + '/') || realAbsPath === cwdReal
+    return { valid, realPath: realAbsPath, cwdReal }
+  }
+
   /** List directories at a given path, sending a directory_listing response */
   async function listDirectory(ws, requestedPath) {
     let absPath = null
@@ -121,18 +145,8 @@ export function createFileOps(sendFn) {
       }
       absPath = normalize(absPath)
 
-      const cwdReal = await resolveSessionCwd(sessionCwd)
-      let realAbsPath
-      try {
-        realAbsPath = await realpath(absPath)
-      } catch (err) {
-        if (err.code === 'ENOENT') {
-          realAbsPath = absPath
-        } else {
-          throw err
-        }
-      }
-      if (!realAbsPath.startsWith(cwdReal + '/') && realAbsPath !== cwdReal) {
+      const { valid, realPath: realAbsPath, cwdReal } = await validatePathWithinCwd(absPath, sessionCwd)
+      if (!valid) {
         sendFn(ws, {
           type: 'file_listing',
           path: absPath,
@@ -221,18 +235,8 @@ export function createFileOps(sendFn) {
     try {
       absPath = normalize(resolve(sessionCwd, requestedPath.trim()))
 
-      const cwdReal = await resolveSessionCwd(sessionCwd)
-      let realAbsPath
-      try {
-        realAbsPath = await realpath(absPath)
-      } catch (err) {
-        if (err.code === 'ENOENT') {
-          realAbsPath = absPath
-        } else {
-          throw err
-        }
-      }
-      if (!realAbsPath.startsWith(cwdReal + '/') && realAbsPath !== cwdReal) {
+      const { valid, realPath: realAbsPath } = await validatePathWithinCwd(absPath, sessionCwd)
+      if (!valid) {
         sendFn(ws, {
           type: 'file_content',
           path: absPath,
@@ -426,14 +430,9 @@ export function createFileOps(sendFn) {
           for (const filePath of untrackedPaths) {
             try {
               const absPath = resolve(cwdReal, filePath)
-              let realAbsPath
-              try {
-                realAbsPath = await realpath(absPath)
-              } catch {
-                continue
-              }
-              if (!realAbsPath.startsWith(cwdReal + '/') && realAbsPath !== cwdReal) continue
-              const fileStat = await stat(realAbsPath)
+              const validation = await validatePathWithinCwd(absPath, sessionCwd)
+              if (!validation.valid) continue
+              const fileStat = await stat(validation.realPath)
               if (!fileStat.isFile()) continue
 
               let lines, additions
@@ -441,7 +440,7 @@ export function createFileOps(sendFn) {
                 lines = [{ type: 'context', content: `File too large to preview (${(fileStat.size / 1024).toFixed(1)} KB)` }]
                 additions = 0
               } else {
-                const buf = await readFile(realAbsPath)
+                const buf = await readFile(validation.realPath)
                 const checkLen = Math.min(buf.length, 8192)
                 let isBinary = false
                 for (let i = 0; i < checkLen; i++) {
@@ -722,8 +721,8 @@ export function createFileOps(sendFn) {
           // Validate symlinks stay within CWD boundary
           if (d.isSymbolicLink()) {
             try {
-              const realTarget = await realpath(absPath)
-              if (!realTarget.startsWith(cwdReal + '/') && realTarget !== cwdReal) continue
+              const { valid: symValid } = await validatePathWithinCwd(absPath, sessionCwd)
+              if (!symValid) continue
             } catch {
               continue // Skip broken symlinks
             }
@@ -828,7 +827,8 @@ export function createFileOps(sendFn) {
       const absInCwd = normalize(resolve(cwdReal, requestedPath.trim()))
 
       // Path traversal check: target must be within session CWD
-      if (!absInCwd.startsWith(cwdReal + '/') && absInCwd !== cwdReal) {
+      const { valid: writeValid } = await validatePathWithinCwd(absInCwd, sessionCwd)
+      if (!writeValid) {
         sendFn(ws, {
           type: 'write_file_result',
           path: requestedPath,
