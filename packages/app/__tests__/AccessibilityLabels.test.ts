@@ -29,7 +29,7 @@ describe('SessionPicker accessibility (#1927)', () => {
   })
 
   test('session pill has accessibilityState for selected', () => {
-    expect(sessionPicker).toMatch(/accessibilityState=\{\{ selected: isActive \}\}/)
+    expect(sessionPicker).toMatch(/accessibilityState\s*=\s*\{\s*\{\s*selected\s*:\s*isActive\s*\}\s*\}/)
   })
 
   test('rename modal TextInput has accessibilityLabel', () => {

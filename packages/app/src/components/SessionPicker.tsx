@@ -71,7 +71,7 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
       onLayout={onLayout}
       activeOpacity={0.7}
       accessibilityRole="tab"
-      accessibilityLabel={`Session ${session.name}${isActive ? ', active' : ''}${isCrashed ? ', crashed' : ''}`}
+      accessibilityLabel={`Session ${session.name}${isCrashed ? ', crashed' : ''}`}
       accessibilityState={{ selected: isActive }}
     >
       {hasIndicators && (
