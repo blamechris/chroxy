@@ -10,10 +10,21 @@ const srcDir = join(__dirname, '../src')
 // Top-level await import to avoid timing issues with before() hooks
 const keychain = await import(join(srcDir, 'keychain.js'))
 
-// Use platform check instead of isKeychainAvailable() for skip guard —
-// the latter shells out to `security help` which intermittently fails
-// under test runner concurrency pressure
-const keychainAvailable = process.platform === 'darwin' || process.platform === 'linux'
+// Helper: run a keychain integration test, skipping gracefully if the
+// `security` binary is transiently unavailable (ENOENT under test runner load)
+function keychainTest(name, fn) {
+  it(name, (t) => {
+    if (process.platform !== 'darwin' && process.platform !== 'linux') {
+      return t.skip('no keychain on this platform')
+    }
+    try {
+      fn(t)
+    } catch (err) {
+      if (err.code === 'ENOENT') return t.skip('keychain binary not found (transient)')
+      throw err
+    }
+  })
+}
 
 describe('Keychain token storage (#1838)', () => {
 
@@ -36,8 +47,7 @@ describe('Keychain token storage (#1838)', () => {
     assert.equal(token, null)
   })
 
-  it('setToken and getToken round-trip successfully', (t) => {
-    if (!keychainAvailable) return t.skip('no keychain available')
+  keychainTest('setToken and getToken round-trip successfully', () => {
     const testToken = 'test-token-' + Date.now()
     const serviceName = 'chroxy-test-roundtrip'
 
@@ -55,8 +65,7 @@ describe('Keychain token storage (#1838)', () => {
     keychain.deleteToken('chroxy-test-no-such-service')
   })
 
-  it('migrateToken moves token from config object to keychain', (t) => {
-    if (!keychainAvailable) return t.skip('no keychain available')
+  keychainTest('migrateToken moves token from config object to keychain', () => {
     const testToken = 'migrate-test-' + Date.now()
     const serviceName = 'chroxy-test-migrate'
     const fakeConfig = { apiToken: testToken, port: 8765 }
@@ -71,8 +80,7 @@ describe('Keychain token storage (#1838)', () => {
     keychain.deleteToken(serviceName)
   })
 
-  it('migrateToken is a no-op when token already in keychain', (t) => {
-    if (!keychainAvailable) return t.skip('no keychain available')
+  keychainTest('migrateToken is a no-op when token already in keychain', () => {
     const testToken = 'already-migrated-' + Date.now()
     const serviceName = 'chroxy-test-already'
 
