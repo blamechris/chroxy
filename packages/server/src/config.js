@@ -40,6 +40,8 @@ const CONFIG_SCHEMA = {
   costBudget: 'number',
   externalUrl: 'string',
   repos: 'array',
+  maxSessions: 'number',
+  maxHistory: 'number',
 }
 
 /**
@@ -209,6 +211,8 @@ function envKeyForConfig(key) {
     sessionTimeout: 'CHROXY_SESSION_TIMEOUT',
     costBudget: 'CHROXY_COST_BUDGET',
     externalUrl: 'CHROXY_EXTERNAL_URL',
+    maxSessions: 'CHROXY_MAX_SESSIONS',
+    maxHistory: 'CHROXY_MAX_HISTORY',
   }
   return envMap[key] || key.toUpperCase()
 }

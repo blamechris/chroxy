@@ -418,6 +418,9 @@ export interface ConnectionState {
   restartEtaMs: number | null;
   restartingSince: number | null;
 
+  // E2E encryption status (false when connecting over unencrypted LAN)
+  isEncrypted: boolean;
+
   // Pending auto permission mode confirmation from server
   pendingPermissionConfirm: { mode: string; warning: string } | null;
 

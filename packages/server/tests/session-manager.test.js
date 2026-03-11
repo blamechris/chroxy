@@ -1265,6 +1265,40 @@ describe('#1091 — destroy-while-streaming event leak', () => {
   })
 })
 
+describe('Session ID generation (#1856)', () => {
+  it('generates 32-character hex session IDs (128-bit)', async () => {
+    const { randomBytes } = await import('crypto')
+    const { registerProvider } = await import('../src/providers.js')
+
+    class TestProvider extends EventEmitter {
+      constructor(opts) {
+        super()
+        this.cwd = opts.cwd
+        this.model = opts.model || null
+        this.permissionMode = opts.permissionMode || 'approve'
+        this.isRunning = false
+        this.resumeSessionId = null
+      }
+      static get capabilities() { return {} }
+      start() {}
+      destroy() {}
+      sendMessage() {}
+      setModel() {}
+      setPermissionMode() {}
+    }
+    registerProvider('test-session-id', TestProvider)
+
+    const mgr = new SessionManager({ maxSessions: 5 })
+    mgr.createSession({ cwd: '/tmp', provider: 'test-session-id' })
+
+    const [sessionId] = [...mgr._sessions.keys()]
+    assert.equal(sessionId.length, 32, 'Session ID should be 32 hex chars (128-bit)')
+    assert.match(sessionId, /^[0-9a-f]{32}$/, 'Session ID should be lowercase hex')
+
+    mgr.destroySession(sessionId)
+  })
+})
+
 describe('SessionManager.defaultCwd getter (#1475)', () => {
   it('exposes defaultCwd via public getter', () => {
     const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp/test-cwd' })
@@ -1274,5 +1308,27 @@ describe('SessionManager.defaultCwd getter (#1475)', () => {
   it('defaults to process.cwd() when no defaultCwd provided', () => {
     const mgr = new SessionManager({ maxSessions: 5 })
     assert.equal(mgr.defaultCwd, process.cwd())
+  })
+})
+
+describe('Configurable magic numbers (#1848)', () => {
+  it('maxHistory defaults to 500', () => {
+    const mgr = new SessionManager({ maxSessions: 5 })
+    assert.equal(mgr._maxHistory, 500)
+  })
+
+  it('maxHistory can be configured', () => {
+    const mgr = new SessionManager({ maxSessions: 5, maxHistory: 1000 })
+    assert.equal(mgr._maxHistory, 1000)
+  })
+
+  it('maxSessions can be configured', () => {
+    const mgr = new SessionManager({ maxSessions: 10 })
+    assert.equal(mgr.maxSessions, 10)
+  })
+
+  it('maxSessions defaults to 5', () => {
+    const mgr = new SessionManager({})
+    assert.equal(mgr.maxSessions, 5)
   })
 })
