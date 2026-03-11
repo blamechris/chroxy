@@ -13,14 +13,21 @@ describe('SettingsPanel dynamic provider dropdown (#1966)', () => {
     'utf-8'
   )
 
+  const labelsSrc = readFileSync(
+    join(__dirname, '../src/dashboard-next/src/lib/provider-labels.ts'),
+    'utf-8'
+  )
+
   it('reads availableProviders from the store', () => {
     assert.ok(src.includes('availableProviders'),
       'Should use availableProviders from connection store')
   })
 
-  it('includes Gemini in provider labels', () => {
-    assert.ok(src.includes("'gemini'") && src.includes('Gemini CLI'),
-      'Should have Gemini CLI in provider labels')
+  it('imports shared PROVIDER_LABELS with Gemini entry', () => {
+    assert.ok(src.includes('PROVIDER_LABELS'),
+      'Should import PROVIDER_LABELS from shared module')
+    assert.ok(labelsSrc.includes("'gemini'") && labelsSrc.includes('Gemini CLI'),
+      'Shared module should have Gemini CLI in provider labels')
   })
 
   it('renders dynamic options when availableProviders is non-empty', () => {
@@ -31,5 +38,10 @@ describe('SettingsPanel dynamic provider dropdown (#1966)', () => {
   it('falls back to static options when no providers available', () => {
     assert.ok(src.includes('Claude Code (SDK)') && src.includes('Claude Code (CLI)'),
       'Should have static fallback options')
+  })
+
+  it('normalizes defaultProvider against available list', () => {
+    assert.ok(src.includes('effectiveProvider'),
+      'Should compute effectiveProvider for defaultProvider validation')
   })
 })

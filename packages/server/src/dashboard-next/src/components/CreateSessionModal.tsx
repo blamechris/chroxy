@@ -11,6 +11,7 @@ import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
 import { useConnectionStore } from '../store/connection'
 import type { DirectoryListing, DirectoryEntry } from '../store/types'
+import { PROVIDER_LABELS } from '../lib/provider-labels'
 
 export interface CreateSessionData {
   name: string
@@ -59,13 +60,6 @@ function generateDefaultName(cwdPath: string, existingNames: string[]): string {
 }
 
 const EMPTY_STRINGS: string[] = []
-
-/** Human-readable labels for known providers. */
-const PROVIDER_LABELS: Record<string, string> = {
-  'claude-sdk': 'Claude Code (SDK)',
-  'claude-cli': 'Claude Code (CLI)',
-  'gemini': 'Gemini CLI',
-}
 
 /** Billing context per provider — helps users understand cost implications. */
 const PROVIDER_BILLING: Record<string, string> = {
