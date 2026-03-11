@@ -5,6 +5,8 @@
  * returns null for all queries and no-ops for commands.
  */
 
+import { isTauri } from '../utils/tauri'
+
 interface ServerInfo {
   port: number
   token: string | null
@@ -12,8 +14,6 @@ interface ServerInfo {
   tunnelMode: string
   isRunning: boolean
 }
-
-import { isTauri } from '../utils/tauri'
 
 /** Invoke a Tauri command (returns null if not in Tauri context) */
 async function tauriInvoke<T>(cmd: string): Promise<T | null> {
