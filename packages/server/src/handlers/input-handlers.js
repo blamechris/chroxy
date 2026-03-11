@@ -1,9 +1,9 @@
 /**
  * Input and user interaction message handlers.
  *
- * Handles: input, interrupt, resume_budget, user_question_response
+ * Handles: input, interrupt, resume_budget, register_push_token, user_question_response
  */
-import { validateAttachments, resolveFileRefAttachments } from '../ws-message-handlers.js'
+import { validateAttachments, resolveFileRefAttachments } from '../handler-utils.js'
 
 function handleInput(ws, client, msg, ctx) {
   const text = msg.data

@@ -5,7 +5,7 @@
  *          query_permission_audit, list_providers
  */
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
-import { ALLOWED_PERMISSION_MODE_IDS } from '../ws-message-handlers.js'
+import { ALLOWED_PERMISSION_MODE_IDS } from '../handler-utils.js'
 import { listProviders } from '../providers.js'
 
 function handleSetModel(ws, client, msg, ctx) {
