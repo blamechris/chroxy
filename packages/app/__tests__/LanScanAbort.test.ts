@@ -107,7 +107,9 @@ describe('LAN scan AbortController fix (#1947)', () => {
 
     const { abortLog } = probeIp(outer.signal, fetchFn);
 
-    // Let the microtask queue flush
+    // Flush microtask queue: fetchFn resolves → .then → .catch (skip) → .finally
+    await Promise.resolve();
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
 
