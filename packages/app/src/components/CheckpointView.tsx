@@ -121,6 +121,7 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
   const [showCreateInput, setShowCreateInput] = useState(false);
   const [newCheckpointName, setNewCheckpointName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  const [isLoadingList, setIsLoadingList] = useState(false);
   const creatingTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // Clean up timer on unmount
@@ -129,11 +130,16 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
   // Fetch checkpoints when modal opens; reset local state when it closes
   useEffect(() => {
     if (visible) {
+      setIsLoadingList(true);
       listCheckpoints();
+      // Clear loading after short delay (server responds via store update)
+      const timer = setTimeout(() => setIsLoadingList(false), 1500);
+      return () => clearTimeout(timer);
     } else {
       setShowCreateInput(false);
       setNewCheckpointName('');
       setIsCreating(false);
+      setIsLoadingList(false);
       clearTimeout(creatingTimerRef.current);
     }
   }, [visible, listCheckpoints]);
@@ -279,7 +285,12 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
           </View>
 
           {/* Checkpoint list */}
-          {sortedCheckpoints.length === 0 ? (
+          {isLoadingList && sortedCheckpoints.length === 0 ? (
+            <View style={styles.emptyState}>
+              <ActivityIndicator size="large" color={COLORS.accentBlue} />
+              <Text style={styles.emptyText}>Loading checkpoints...</Text>
+            </View>
+          ) : sortedCheckpoints.length === 0 ? (
             <View style={styles.emptyState}>
               <Icon name="clock" size={32} color={COLORS.textDim} />
               <Text style={styles.emptyText}>No checkpoints yet</Text>
