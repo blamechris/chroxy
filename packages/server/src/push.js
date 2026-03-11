@@ -11,6 +11,9 @@
  * Wired into server-cli.js via SessionManager event listeners.
  */
 
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
+
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send'
 
 // Rate limits per category (ms) — prevents notification spam
@@ -21,9 +24,39 @@ const RATE_LIMITS = {
 }
 
 export class PushManager {
-  constructor() {
+  constructor({ storagePath } = {}) {
+    this._storagePath = storagePath || null
     this.tokens = new Set()
     this._lastSent = new Map() // category -> timestamp
+    this._loadFromDisk()
+  }
+
+  /** Load tokens from disk if storagePath is set */
+  _loadFromDisk() {
+    if (!this._storagePath) return
+    try {
+      const data = JSON.parse(readFileSync(this._storagePath, 'utf-8'))
+      if (Array.isArray(data)) {
+        for (const token of data) {
+          if (typeof token === 'string' && token.length > 0) {
+            this.tokens.add(token)
+          }
+        }
+      }
+    } catch {
+      // File missing or corrupt — start with empty set
+    }
+  }
+
+  /** Persist current tokens to disk if storagePath is set */
+  _persistToDisk() {
+    if (!this._storagePath) return
+    try {
+      mkdirSync(dirname(this._storagePath), { recursive: true })
+      writeFileSync(this._storagePath, JSON.stringify([...this.tokens]))
+    } catch (err) {
+      console.error(`[push] Failed to persist tokens: ${err.message}`)
+    }
   }
 
   /**
@@ -35,6 +68,7 @@ export class PushManager {
   registerToken(token) {
     if (typeof token === 'string' && token.length > 0) {
       this.tokens.add(token)
+      this._persistToDisk()
       console.log(`[push] Registered token: ${token.slice(0, 30)}...`)
       return true
     }
@@ -45,6 +79,7 @@ export class PushManager {
   /** Remove a push token */
   removeToken(token) {
     this.tokens.delete(token)
+    this._persistToDisk()
   }
 
   /** Check if we have any registered tokens */
@@ -95,6 +130,7 @@ export class PushManager {
       const result = await res.json()
 
       // Prune tokens that returned errors (invalid/expired)
+      let pruned = false
       if (result.data) {
         for (let i = 0; i < result.data.length; i++) {
           const ticket = result.data[i]
@@ -102,9 +138,11 @@ export class PushManager {
             const token = messages[i].to
             console.warn(`[push] Removing invalid token: ${token.slice(0, 30)}... (${ticket.message})`)
             this.tokens.delete(token)
+            pruned = true
           }
         }
       }
+      if (pruned) this._persistToDisk()
 
       console.log(`[push] Sent ${category} notification to ${messages.length} device(s)`)
     } catch (err) {
