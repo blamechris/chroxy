@@ -9,6 +9,7 @@ import { isWindows, writeFileRestricted } from './platform.js'
 import { readSessionContext } from './session-context.js'
 import { parseDuration } from './duration.js'
 import { SessionLockManager } from './session-lock.js'
+import { CostBudgetManager } from './cost-budget-manager.js'
 
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
 
@@ -94,11 +95,7 @@ export class SessionManager extends EventEmitter {
     this._maxHistory = maxHistory || 500
     this._historyTruncated = new Map() // sessionId -> boolean
     this._persistTimer = null
-    this._sessionCosts = new Map() // sessionId -> cumulative cost in dollars
-    this._budgetWarned = new Set() // sessionIds that have already received 80% warning
-    this._budgetExceeded = new Set() // sessionIds that have already received 100% exceeded
-    this._costBudget = typeof costBudget === 'number' && costBudget > 0 ? costBudget : null
-    this._budgetPaused = new Set() // sessionIds paused due to budget exceeded
+    this._costBudget = new CostBudgetManager({ budget: costBudget })
 
     // Session idle timeout
     const parsedTimeout = sessionTimeout ? parseDuration(sessionTimeout) : null
@@ -126,10 +123,7 @@ export class SessionManager extends EventEmitter {
     this._sessionWarned.delete(sessionId)
     this._messageHistory.delete(sessionId)
     this._historyTruncated.delete(sessionId)
-    this._sessionCosts.delete(sessionId)
-    this._budgetWarned.delete(sessionId)
-    this._budgetExceeded.delete(sessionId)
-    this._budgetPaused.delete(sessionId)
+    this._costBudget.removeSession(sessionId)
 
     // Clean up pending stream state (composite keys: `${sessionId}:messageId`).
     // destroySession() emits synthetic stream_end before calling this helper,
@@ -393,10 +387,7 @@ export class SessionManager extends EventEmitter {
     this._sessionWarned.clear()
     this._messageHistory.clear()
     this._historyTruncated.clear()
-    this._sessionCosts.clear()
-    this._budgetWarned.clear()
-    this._budgetExceeded.clear()
-    this._budgetPaused.clear()
+    this._costBudget.clear()
     this._pendingStreams.clear()
   }
 
@@ -436,13 +427,11 @@ export class SessionManager extends EventEmitter {
     }
 
     // Persist cost tracking so budget survives restarts
-    state.costs = {}
-    for (const [sessionId, cost] of this._sessionCosts) {
-      state.costs[sessionId] = cost
-    }
-    state.budgetWarned = [...this._budgetWarned]
-    state.budgetExceeded = [...this._budgetExceeded]
-    state.budgetPaused = [...this._budgetPaused]
+    const budgetState = this._costBudget.serialize()
+    state.costs = budgetState.costs
+    state.budgetWarned = budgetState.budgetWarned
+    state.budgetExceeded = budgetState.budgetExceeded
+    state.budgetPaused = budgetState.budgetPaused
 
     const dir = dirname(this._stateFilePath)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
@@ -516,52 +505,7 @@ export class SessionManager extends EventEmitter {
     }
 
     // Restore cost tracking data (v1+), remapping old IDs to new IDs.
-    // Only restore budget state for sessions that were successfully created;
-    // if a session failed to restore, its old ID won't be in oldToNew and
-    // we skip it to avoid orphaned budget tracking entries.
-    if (state.costs && typeof state.costs === 'object') {
-      for (const [oldId, cost] of Object.entries(state.costs)) {
-        if (typeof cost === 'number' && cost > 0) {
-          const newId = oldToNew.get(oldId)
-          if (newId) {
-            this._sessionCosts.set(newId, cost)
-          } else if (oldToNew.size === 0) {
-            // Backwards compat: old state files without id field have no mappings
-            this._sessionCosts.set(oldId, cost)
-          }
-        }
-      }
-    }
-    if (Array.isArray(state.budgetWarned)) {
-      for (const id of state.budgetWarned) {
-        const newId = oldToNew.get(id)
-        if (newId) {
-          this._budgetWarned.add(newId)
-        } else if (oldToNew.size === 0) {
-          this._budgetWarned.add(id)
-        }
-      }
-    }
-    if (Array.isArray(state.budgetExceeded)) {
-      for (const id of state.budgetExceeded) {
-        const newId = oldToNew.get(id)
-        if (newId) {
-          this._budgetExceeded.add(newId)
-        } else if (oldToNew.size === 0) {
-          this._budgetExceeded.add(id)
-        }
-      }
-    }
-    if (Array.isArray(state.budgetPaused)) {
-      for (const id of state.budgetPaused) {
-        const newId = oldToNew.get(id)
-        if (newId) {
-          this._budgetPaused.add(newId)
-        } else if (oldToNew.size === 0) {
-          this._budgetPaused.add(id)
-        }
-      }
-    }
+    this._costBudget.restore(state, oldToNew.size > 0 ? oldToNew : null)
 
     return firstId
   }
@@ -919,9 +863,8 @@ export class SessionManager extends EventEmitter {
    * @param {number} cost - Cost of the latest query in dollars
    */
   _trackCost(sessionId, cost) {
-    const prev = this._sessionCosts.get(sessionId) || 0
-    const cumulative = prev + cost
-    this._sessionCosts.set(sessionId, cumulative)
+    const budgetEvent = this._costBudget.trackCost(sessionId, cost)
+    const cumulative = this._costBudget.getSessionCost(sessionId)
 
     // Emit cost_update for every result so app can track cumulative cost
     const entry = this._sessions.get(sessionId)
@@ -930,43 +873,21 @@ export class SessionManager extends EventEmitter {
       event: 'cost_update',
       data: {
         sessionCost: cumulative,
-        totalCost: this.getTotalCost(),
-        budget: this._costBudget,
+        totalCost: this._costBudget.getTotalCost(),
+        budget: this._costBudget.getBudget(),
       },
     })
 
-    if (!this._costBudget) return
-
-    const percent = cumulative / this._costBudget
-
-    // Hard limit at 100% (checked first to avoid dual-emit with warning)
-    if (percent >= 1.0 && !this._budgetExceeded.has(sessionId)) {
-      this._budgetExceeded.add(sessionId)
-      this._budgetPaused.add(sessionId)
+    if (budgetEvent) {
+      const budget = this._costBudget.getBudget()
       this.emit('session_event', {
         sessionId,
-        event: 'budget_exceeded',
+        event: budgetEvent.event,
         data: {
-          sessionCost: cumulative,
-          budget: this._costBudget,
-          percent: Math.round(percent * 100),
-          message: `Session "${entry?.name || sessionId}" has exceeded the $${this._costBudget.toFixed(2)} budget ($${cumulative.toFixed(4)})`,
-        },
-      })
-      return
-    }
-
-    // Warning at 80% (skipped if already at/past 100%)
-    if (percent >= 0.8 && !this._budgetWarned.has(sessionId)) {
-      this._budgetWarned.add(sessionId)
-      this.emit('session_event', {
-        sessionId,
-        event: 'budget_warning',
-        data: {
-          sessionCost: cumulative,
-          budget: this._costBudget,
-          percent: Math.round(percent * 100),
-          message: `Session "${entry?.name || sessionId}" has used ${Math.round(percent * 100)}% of the $${this._costBudget.toFixed(2)} budget ($${cumulative.toFixed(4)})`,
+          ...budgetEvent.data,
+          message: budgetEvent.event === 'budget_exceeded'
+            ? `Session "${entry?.name || sessionId}" has exceeded the $${budget.toFixed(2)} budget ($${cumulative.toFixed(4)})`
+            : `Session "${entry?.name || sessionId}" has used ${budgetEvent.data.percent}% of the $${budget.toFixed(2)} budget ($${cumulative.toFixed(4)})`,
         },
       })
     }
@@ -1060,48 +981,24 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  /**
-   * Get cumulative cost for a specific session.
-   * @param {string} sessionId
-   * @returns {number} Cost in dollars
-   */
   getSessionCost(sessionId) {
-    return this._sessionCosts.get(sessionId) || 0
+    return this._costBudget.getSessionCost(sessionId)
   }
 
-  /**
-   * Get total cumulative cost across all sessions.
-   * @returns {number} Cost in dollars
-   */
   getTotalCost() {
-    let total = 0
-    for (const cost of this._sessionCosts.values()) total += cost
-    return total
+    return this._costBudget.getTotalCost()
   }
 
-  /**
-   * Get the configured cost budget, or null if none set.
-   * @returns {number|null}
-   */
   getCostBudget() {
-    return this._costBudget
+    return this._costBudget.getBudget()
   }
 
-  /**
-   * Check if a session is paused due to exceeding the cost budget.
-   * @param {string} sessionId
-   * @returns {boolean}
-   */
   isBudgetPaused(sessionId) {
-    return this._budgetPaused.has(sessionId)
+    return this._costBudget.isPaused(sessionId)
   }
 
-  /**
-   * Resume a budget-paused session (user override).
-   * @param {string} sessionId
-   */
   resumeBudget(sessionId) {
-    this._budgetPaused.delete(sessionId)
+    this._costBudget.resume(sessionId)
     this._schedulePersist()
     console.log(`[session-manager] Budget pause overridden for session ${sessionId}`)
   }

@@ -692,13 +692,13 @@ describe('SessionManager budget pause lifecycle', () => {
 
   it('isBudgetPaused returns true after adding to _budgetPaused', () => {
     const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
-    mgr._budgetPaused.add('s1')
+    mgr._costBudget._budgetPaused.add('s1')
     assert.equal(mgr.isBudgetPaused('s1'), true)
   })
 
   it('resumeBudget removes session from _budgetPaused', () => {
     const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
-    mgr._budgetPaused.add('s1')
+    mgr._costBudget._budgetPaused.add('s1')
     assert.equal(mgr.isBudgetPaused('s1'), true)
     mgr.resumeBudget('s1')
     assert.equal(mgr.isBudgetPaused('s1'), false)
@@ -716,17 +716,17 @@ describe('SessionManager budget pause lifecycle', () => {
     session.isRunning = false
     session.destroy = () => {}
     mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
-    mgr._budgetPaused.add('s1')
-    mgr._budgetWarned.add('s1')
-    mgr._budgetExceeded.add('s1')
-    mgr._sessionCosts.set('s1', 1.50)
+    mgr._costBudget._budgetPaused.add('s1')
+    mgr._costBudget._budgetWarned.add('s1')
+    mgr._costBudget._budgetExceeded.add('s1')
+    mgr._costBudget._sessionCosts.set('s1', 1.50)
 
     mgr.destroySession('s1')
 
     assert.equal(mgr.isBudgetPaused('s1'), false)
-    assert.equal(mgr._budgetWarned.has('s1'), false)
-    assert.equal(mgr._budgetExceeded.has('s1'), false)
-    assert.equal(mgr._sessionCosts.has('s1'), false)
+    assert.equal(mgr._costBudget._budgetWarned.has('s1'), false)
+    assert.equal(mgr._costBudget._budgetExceeded.has('s1'), false)
+    assert.equal(mgr._costBudget._sessionCosts.has('s1'), false)
 
     // destroySession schedules a debounced persist; clear it to avoid writes after cleanup
     if (mgr._persistTimer) {
@@ -737,11 +737,11 @@ describe('SessionManager budget pause lifecycle', () => {
 
   it('serializes cost and budget state', () => {
     const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
-    mgr._sessionCosts.set('s1', 2.50)
-    mgr._sessionCosts.set('s2', 0.75)
-    mgr._budgetWarned.add('s1')
-    mgr._budgetExceeded.add('s1')
-    mgr._budgetPaused.add('s1')
+    mgr._costBudget._sessionCosts.set('s1', 2.50)
+    mgr._costBudget._sessionCosts.set('s2', 0.75)
+    mgr._costBudget._budgetWarned.add('s1')
+    mgr._costBudget._budgetExceeded.add('s1')
+    mgr._costBudget._budgetPaused.add('s1')
 
     const state = mgr.serializeState()
 
@@ -780,14 +780,14 @@ describe('SessionManager budget pause lifecycle', () => {
     assert.notEqual(newId1, 'old-s1')
     assert.notEqual(newId2, 'old-s2')
 
-    assert.equal(mgr._sessionCosts.get(newId1), 3.00)
-    assert.equal(mgr._sessionCosts.get(newId2), 0.50)
-    assert.equal(mgr._budgetWarned.has(newId1), true)
-    assert.equal(mgr._budgetExceeded.has(newId1), true)
-    assert.equal(mgr._budgetPaused.has(newId1), true)
+    assert.equal(mgr._costBudget._sessionCosts.get(newId1), 3.00)
+    assert.equal(mgr._costBudget._sessionCosts.get(newId2), 0.50)
+    assert.equal(mgr._costBudget._budgetWarned.has(newId1), true)
+    assert.equal(mgr._costBudget._budgetExceeded.has(newId1), true)
+    assert.equal(mgr._costBudget._budgetPaused.has(newId1), true)
     // Old IDs should NOT be present
-    assert.equal(mgr._sessionCosts.has('old-s1'), false)
-    assert.equal(mgr._budgetWarned.has('old-s1'), false)
+    assert.equal(mgr._costBudget._sessionCosts.has('old-s1'), false)
+    assert.equal(mgr._costBudget._budgetWarned.has('old-s1'), false)
 
     mgr.destroyAll()
   })
@@ -808,8 +808,8 @@ describe('SessionManager budget pause lifecycle', () => {
     // This means the cost tracking data is preserved but remains associated with the legacy
     // key (e.g. "s1") rather than any new session ID, so session-specific cost features may
     // not work correctly for sessions restored from these old state files.
-    assert.equal(mgr._sessionCosts.get('s1'), 3.00)
-    assert.equal(mgr._budgetWarned.has('s1'), true)
+    assert.equal(mgr._costBudget._sessionCosts.get('s1'), 3.00)
+    assert.equal(mgr._costBudget._budgetWarned.has('s1'), true)
 
     mgr.destroyAll()
   })
@@ -825,10 +825,10 @@ describe('SessionManager budget pause lifecycle', () => {
     const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
     mgr.restoreState()
 
-    assert.equal(mgr._sessionCosts.has('s1'), false)
-    assert.equal(mgr._sessionCosts.has('s2'), false)
-    assert.equal(mgr._sessionCosts.has('s3'), false)
-    assert.equal(mgr._sessionCosts.get('s4'), 1.25)
+    assert.equal(mgr._costBudget._sessionCosts.has('s1'), false)
+    assert.equal(mgr._costBudget._sessionCosts.has('s2'), false)
+    assert.equal(mgr._costBudget._sessionCosts.has('s3'), false)
+    assert.equal(mgr._costBudget._sessionCosts.get('s4'), 1.25)
 
     mgr.destroyAll()
   })
@@ -998,10 +998,10 @@ describe('#1204 — _cleanupSessionMaps helper cleans all maps', () => {
           sessionIdCapture = sid
           mgr._messageHistory.set(sid, [{ type: 'test' }])
           mgr._historyTruncated.set(sid, true)
-          mgr._sessionCosts.set(sid, 0.5)
-          mgr._budgetWarned.add(sid)
-          mgr._budgetExceeded.add(sid)
-          mgr._budgetPaused.add(sid)
+          mgr._costBudget._sessionCosts.set(sid, 0.5)
+          mgr._costBudget._budgetWarned.add(sid)
+          mgr._costBudget._budgetExceeded.add(sid)
+          mgr._costBudget._budgetPaused.add(sid)
           mgr._pendingStreams.set(`${sid}:msg-1`, 'partial delta')
         }
         throw new Error('polluted start')
@@ -1023,10 +1023,10 @@ describe('#1204 — _cleanupSessionMaps helper cleans all maps', () => {
     assert.equal(mgr._lastActivity.size, 0, '_lastActivity should be empty')
     assert.equal(mgr._messageHistory.has(sessionIdCapture), false, '_messageHistory should be cleaned')
     assert.equal(mgr._historyTruncated.has(sessionIdCapture), false, '_historyTruncated should be cleaned')
-    assert.equal(mgr._sessionCosts.has(sessionIdCapture), false, '_sessionCosts should be cleaned')
-    assert.equal(mgr._budgetWarned.has(sessionIdCapture), false, '_budgetWarned should be cleaned')
-    assert.equal(mgr._budgetExceeded.has(sessionIdCapture), false, '_budgetExceeded should be cleaned')
-    assert.equal(mgr._budgetPaused.has(sessionIdCapture), false, '_budgetPaused should be cleaned')
+    assert.equal(mgr._costBudget._sessionCosts.has(sessionIdCapture), false, '_sessionCosts should be cleaned')
+    assert.equal(mgr._costBudget._budgetWarned.has(sessionIdCapture), false, '_budgetWarned should be cleaned')
+    assert.equal(mgr._costBudget._budgetExceeded.has(sessionIdCapture), false, '_budgetExceeded should be cleaned')
+    assert.equal(mgr._costBudget._budgetPaused.has(sessionIdCapture), false, '_budgetPaused should be cleaned')
     assert.equal(mgr._pendingStreams.has(`${sessionIdCapture}:msg-1`), false, '_pendingStreams should be cleaned')
   })
 })
@@ -1142,10 +1142,10 @@ describe('#1243 — destroyAll() clears all session-scoped maps', () => {
     // Populate all session-scoped maps that destroyAll should clear
     mgr._messageHistory.set('s1', [{ type: 'response', content: 'hello' }])
     mgr._historyTruncated.set('s1', true)
-    mgr._sessionCosts.set('s1', 0.05)
-    mgr._budgetWarned.add('s1')
-    mgr._budgetExceeded.add('s1')
-    mgr._budgetPaused.add('s1')
+    mgr._costBudget._sessionCosts.set('s1', 0.05)
+    mgr._costBudget._budgetWarned.add('s1')
+    mgr._costBudget._budgetExceeded.add('s1')
+    mgr._costBudget._budgetPaused.add('s1')
     mgr._pendingStreams.set('s1:msg-1', 'partial text')
 
     mgr.destroyAll()
@@ -1155,10 +1155,10 @@ describe('#1243 — destroyAll() clears all session-scoped maps', () => {
     assert.equal(mgr._sessionWarned.size, 0, '_sessionWarned should be cleared')
     assert.equal(mgr._messageHistory.size, 0, '_messageHistory should be cleared')
     assert.equal(mgr._historyTruncated.size, 0, '_historyTruncated should be cleared')
-    assert.equal(mgr._sessionCosts.size, 0, '_sessionCosts should be cleared')
-    assert.equal(mgr._budgetWarned.size, 0, '_budgetWarned should be cleared')
-    assert.equal(mgr._budgetExceeded.size, 0, '_budgetExceeded should be cleared')
-    assert.equal(mgr._budgetPaused.size, 0, '_budgetPaused should be cleared')
+    assert.equal(mgr._costBudget._sessionCosts.size, 0, '_sessionCosts should be cleared')
+    assert.equal(mgr._costBudget._budgetWarned.size, 0, '_budgetWarned should be cleared')
+    assert.equal(mgr._costBudget._budgetExceeded.size, 0, '_budgetExceeded should be cleared')
+    assert.equal(mgr._costBudget._budgetPaused.size, 0, '_budgetPaused should be cleared')
     assert.equal(mgr._pendingStreams.size, 0, '_pendingStreams should be cleared')
   })
 })
