@@ -13,10 +13,7 @@ interface ServerInfo {
   isRunning: boolean
 }
 
-/** Check if running inside Tauri webview */
-function isTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-}
+import { isTauri } from '../utils/tauri'
 
 /** Invoke a Tauri command (returns null if not in Tauri context) */
 async function tauriInvoke<T>(cmd: string): Promise<T | null> {
