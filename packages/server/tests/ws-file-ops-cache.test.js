@@ -1,35 +1,70 @@
-import { describe, it, mock, afterEach } from 'node:test'
+import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const wsFileOpsSrc = readFileSync(join(__dirname, '../src/ws-file-ops.js'), 'utf-8')
+import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 describe('#1931 — CWD real path cache TTL', () => {
-  it('cache entries store a timestamp', () => {
-    // The cache should store { resolved, ts } instead of just the resolved path
-    assert.ok(
-      wsFileOpsSrc.includes('Date.now()') && wsFileOpsSrc.includes('_cwdRealCache'),
-      'resolveSessionCwd should store timestamps in cache entries'
-    )
+  let tmpDir
+  let realDir
+  let linkDir
+
+  before(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'cache-test-'))
+    realDir = join(tmpDir, 'real')
+    linkDir = join(tmpDir, 'link')
+    await mkdir(realDir)
+    await writeFile(join(realDir, 'test.txt'), 'hello')
+    await symlink(realDir, linkDir)
   })
 
-  it('cache entries are evicted after TTL', () => {
-    // The source should check if an entry has expired
-    assert.ok(
-      wsFileOpsSrc.includes('CWD_CACHE_TTL') || wsFileOpsSrc.includes('_cwdCacheTtl'),
-      'resolveSessionCwd should have a TTL constant for cache expiry'
-    )
+  after(async () => {
+    await rm(tmpDir, { recursive: true, force: true })
   })
 
-  it('re-resolves realpath after TTL expires', () => {
-    // The check should compare Date.now() against the stored timestamp
-    assert.match(
-      wsFileOpsSrc,
-      /Date\.now\(\)\s*-\s*\w+\.ts/,
-      'resolveSessionCwd should compare current time against cached timestamp'
+  it('resolves symlinked session CWD to real path via browseFiles', async () => {
+    const { createFileOps } = await import('../src/ws-file-ops.js')
+
+    const results = []
+    const sendFn = (_ws, msg) => results.push(msg)
+    const ops = createFileOps(sendFn)
+
+    // Call browseFiles through the symlink path
+    await ops.browseFiles({}, linkDir, linkDir)
+
+    assert.ok(results.length > 0, 'should return a result')
+    assert.equal(results[0].type, 'file_listing')
+  })
+
+  it('returns consistent results on repeated calls (cache hit)', async () => {
+    const { createFileOps } = await import('../src/ws-file-ops.js')
+
+    const results = []
+    const sendFn = (_ws, msg) => results.push(msg)
+    const ops = createFileOps(sendFn)
+
+    // Call browseFiles twice — second call should use cached CWD resolution
+    await ops.browseFiles({}, linkDir, linkDir)
+    await ops.browseFiles({}, linkDir, linkDir)
+
+    assert.equal(results.length, 2, 'should return two results')
+    assert.equal(results[0].type, 'file_listing')
+    assert.equal(results[1].type, 'file_listing')
+    assert.deepEqual(results[0].entries, results[1].entries)
+  })
+
+  it('cache implementation uses TTL-based expiry', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const source = await readFile(
+      new URL('../src/ws-file-ops.js', import.meta.url),
+      'utf8'
     )
+
+    // Verify structural requirements
+    assert.ok(source.includes('_cwdRealCache'), 'should have CWD real path cache')
+    assert.ok(source.includes('CWD_CACHE_TTL'), 'should have TTL constant')
+    assert.ok(source.includes('60_000'), 'TTL should be 60 seconds')
+    assert.match(source, /cached\.ts/, 'should check cached timestamp for expiry')
+    assert.match(source, /Date\.now\(\)\s*-\s*cached\.ts/, 'should compare current time against cached timestamp')
   })
 })
