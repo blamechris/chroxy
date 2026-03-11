@@ -1336,8 +1336,9 @@ useConnectionStore.subscribe((state) => {
   }
 });
 
-// Reconnect on app resume from background
-AppState.addEventListener('change', (nextState) => {
+// Reconnect on app resume from background.
+// Store the subscription handle so it can be removed in tests or on hot-reload.
+export const _appStateSub = AppState.addEventListener('change', (nextState) => {
   if (nextState === 'active') {
     const { socket, connectionPhase, wsUrl, apiToken } = useConnectionStore.getState();
     if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {

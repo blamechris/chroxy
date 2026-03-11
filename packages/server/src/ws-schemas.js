@@ -47,7 +47,7 @@ export const ServerPairFailSchema = z.object({
 
 export const InputSchema = z.object({
   type: z.literal('input'),
-  data: z.string().optional(),
+  data: z.string().max(100_000).optional(),
   attachments: z.array(AttachmentSchema).optional(),
   isVoice: z.boolean().optional(),
 }).passthrough()
@@ -92,7 +92,7 @@ export const SwitchSessionSchema = z.object({
 
 export const CreateSessionSchema = z.object({
   type: z.literal('create_session'),
-  name: z.string().optional(),
+  name: z.string().max(200).optional(),
   cwd: z.string().optional(),
   provider: z.string().optional(),
 })
@@ -105,7 +105,7 @@ export const DestroySessionSchema = z.object({
 export const RenameSessionSchema = z.object({
   type: z.literal('rename_session'),
   sessionId: z.string(),
-  name: z.string(),
+  name: z.string().max(200),
 })
 
 export const RegisterPushTokenSchema = z.object({

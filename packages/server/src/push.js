@@ -26,9 +26,14 @@ export class PushManager {
     this._lastSent = new Map() // category -> timestamp
   }
 
-  /** Register a push token from a client */
+  /**
+   * Register a push token from a client.
+   * Accepts any non-empty string — Expo push tokens (ExponentPushToken[...])
+   * and FCM tokens (Firebase Cloud Messaging for Android) both work with
+   * the Expo Push API.
+   */
   registerToken(token) {
-    if (typeof token === 'string' && token.startsWith('ExponentPushToken[')) {
+    if (typeof token === 'string' && token.length > 0) {
       this.tokens.add(token)
       console.log(`[push] Registered token: ${token.slice(0, 30)}...`)
       return true
