@@ -368,7 +368,9 @@ export function PermissionCountdown({
   onExpireRef.current = onExpire;
 
   useEffect(() => {
-    if (remaining <= 0) return;
+    const initial = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+    setRemaining(initial);
+    if (initial <= 0) return;
     const id = setInterval(() => {
       const left = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
       setRemaining(left);
@@ -378,7 +380,7 @@ export function PermissionCountdown({
       }
     }, 1000);
     return () => clearInterval(id);
-  }, [expiresAt, remaining <= 0]);
+  }, [expiresAt]);
 
   if (remaining <= 0) {
     return <Text style={styles.countdownExpired} accessibilityRole="timer">Timed out</Text>;
