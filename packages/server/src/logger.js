@@ -64,16 +64,33 @@ let _logDir = DEFAULT_LOG_DIR
 let _logPath = null
 let _writeCount = 0
 
-/** Optional callback for broadcasting log entries (set by ws-server) */
-let _logListener = null
+/** Set of callbacks for broadcasting log entries (supports multiple WsServer instances) */
+const _logListeners = new Set()
 
 /**
  * Set a listener that receives every log entry as a structured object.
- * Used by ws-server to broadcast log entries to dashboard clients.
+ * @deprecated Use addLogListener/removeLogListener instead
  * @param {((entry: {component: string, level: string, message: string, timestamp: number}) => void) | null} listener
  */
 export function setLogListener(listener) {
-  _logListener = listener
+  _logListeners.clear()
+  if (listener) _logListeners.add(listener)
+}
+
+/**
+ * Add a log listener. Each WsServer instance registers its own.
+ * @param {(entry: {component: string, level: string, message: string, timestamp: number}) => void} listener
+ */
+export function addLogListener(listener) {
+  _logListeners.add(listener)
+}
+
+/**
+ * Remove a previously added log listener.
+ * @param {(entry: {component: string, level: string, message: string, timestamp: number}) => void} listener
+ */
+export function removeLogListener(listener) {
+  _logListeners.delete(listener)
 }
 
 /**
@@ -100,7 +117,7 @@ export function closeFileLogging() {
   _logDir = DEFAULT_LOG_DIR
   _logPath = null
   _writeCount = 0
-  _logListener = null
+  _logListeners.clear()
 }
 
 function _maybeRotate() {
@@ -154,12 +171,15 @@ export function createLogger(component) {
     else if (level === 'warn') console.warn(line)
     else console.log(line)
 
-    // Notify listener (for WS broadcast to dashboard)
-    if (_logListener) {
-      try {
-        _logListener({ component, level, message: safeMsg, timestamp: Date.now() })
-      } catch {
-        // Never let listener errors break logging
+    // Notify listeners (for WS broadcast to dashboard)
+    if (_logListeners.size > 0) {
+      const entry = { component, level, message: safeMsg, timestamp: Date.now() }
+      for (const listener of _logListeners) {
+        try {
+          listener(entry)
+        } catch {
+          // Never let listener errors break logging
+        }
       }
     }
 

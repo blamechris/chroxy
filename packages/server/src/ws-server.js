@@ -19,7 +19,7 @@ import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
 import { RateLimiter } from './rate-limiter.js'
-import { createLogger, setLogListener } from './logger.js'
+import { createLogger, addLogListener, removeLogListener } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -613,7 +613,7 @@ export class WsServer {
     // Re-entrancy guard prevents infinite recursion when _broadcast() itself
     // logs (e.g. backpressure debug messages) and log level is set to debug.
     let inLogBroadcast = false
-    setLogListener((entry) => {
+    this._logListener = (entry) => {
       if (inLogBroadcast) return
       inLogBroadcast = true
       try {
@@ -621,7 +621,8 @@ export class WsServer {
       } finally {
         inLogBroadcast = false
       }
-    })
+    }
+    addLogListener(this._logListener)
 
     // Wire up unified event forwarding via EventNormalizer
     setupForwarding({
@@ -989,8 +990,11 @@ export class WsServer {
     // Clean up web task manager
     this._webTaskManager.destroy()
 
-    // Clear log listener to prevent post-shutdown broadcasts and GC leak
-    setLogListener(null)
+    // Remove this instance's log listener to prevent post-shutdown broadcasts and GC leak
+    if (this._logListener) {
+      removeLogListener(this._logListener)
+      this._logListener = null
+    }
 
     for (const [ws] of this.clients) {
       ws.close()
