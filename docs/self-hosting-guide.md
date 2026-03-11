@@ -6,7 +6,7 @@ Run Chroxy on your own server or dev machine for persistent remote access to Cla
 
 | Dependency | Version | Install |
 |---|---|---|
-| Node.js | **22.x** (node-pty fails on 25+) | `brew install node@22` or [nvm](https://github.com/nvm-sh/nvm) |
+| Node.js | **22.x** | `brew install node@22` or [nvm](https://github.com/nvm-sh/nvm) |
 | cloudflared | latest | `brew install cloudflared` |
 | git | any | `brew install git` (macOS) / `apt install git` (Linux) |
 | Claude Code | latest | `npm install -g @anthropic-ai/claude-code` |
@@ -142,16 +142,16 @@ No firewall rules or port forwarding needed. The tunnel handles NAT traversal au
 
 ## Troubleshooting
 
-### "node-pty fails to compile"
+### Wrong Node.js version
 
-You're on the wrong Node version. Verify: `node -v` should show `v22.x`.
+Chroxy requires Node 22.x. Verify: `node -v` should show `v22.x`.
 
 ```bash
 # macOS
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm install
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
 # nvm
-nvm use 22 && npm install
+nvm use 22
 ```
 
 ### "cloudflared not found"
