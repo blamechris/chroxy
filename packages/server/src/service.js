@@ -43,7 +43,14 @@ export function getServicePaths(plat = platform()) {
     }
   }
 
-  throw new Error(`Platform "${plat}" is not supported. Only macOS (launchd) and Linux (systemd) are supported.`)
+  if (plat === 'win32') {
+    return {
+      type: 'windows',
+      logDir,
+    }
+  }
+
+  throw new Error(`Platform "${plat}" is not supported. Only macOS (launchd), Linux (systemd), and Windows are supported.`)
 }
 
 /**
@@ -127,6 +134,31 @@ StandardError=file:${join(logDir, 'chroxy-stderr.log')}
 [Install]
 WantedBy=default.target
 `
+}
+
+/**
+ * Returns alternative methods for running Chroxy as a service on Windows.
+ * Since Windows doesn't have a native equivalent to launchd/systemd user agents,
+ * we provide guidance on third-party tools and built-in alternatives.
+ */
+export function getWindowsAlternatives() {
+  return [
+    {
+      name: 'Task Scheduler',
+      description: 'Built-in Windows tool. Create a task that runs at logon with "Run whether user is logged on or not".',
+      command: 'schtasks /create /tn "Chroxy" /tr "node <chroxy-path> start" /sc onlogon /rl highest',
+    },
+    {
+      name: 'NSSM (Non-Sucking Service Manager)',
+      description: 'Lightweight tool that wraps any executable as a Windows service. Install from nssm.cc.',
+      command: 'nssm install Chroxy node <chroxy-path> start',
+    },
+    {
+      name: 'PM2',
+      description: 'Node.js process manager with Windows service support via pm2-windows-service.',
+      command: 'pm2 start <chroxy-path> -- start && pm2 save && pm2-service-install',
+    },
+  ]
 }
 
 /**
@@ -269,6 +301,15 @@ export function installService(config) {
   const plat = config._platform || platform()
   const paths = getServicePaths(plat)
 
+  if (plat === 'win32') {
+    const alternatives = getWindowsAlternatives()
+    return {
+      installed: false,
+      message: 'Windows does not support native service installation via chroxy. Use one of the alternatives below to run Chroxy at startup.',
+      alternatives,
+    }
+  }
+
   const servicePath = config._servicePath || (plat === 'darwin' ? paths.plistPath : paths.unitPath)
   const logDir = config._logDir || paths.logDir
   const stateDir = config._stateDir || DEFAULT_CONFIG_DIR
@@ -378,6 +419,14 @@ export function startService(options = {}) {
   const paths = getServicePaths(plat)
   const stateDir = options._stateDir || DEFAULT_CONFIG_DIR
 
+  if (plat === 'win32') {
+    return {
+      started: false,
+      message: 'Windows does not support native service management via chroxy. Use Task Scheduler, NSSM, or PM2 to manage the Chroxy process.',
+      alternatives: getWindowsAlternatives(),
+    }
+  }
+
   if (!options._skipExec) {
     if (paths.type === 'launchd') {
       const state = loadServiceState(stateDir)
@@ -418,6 +467,13 @@ export function startService(options = {}) {
 export function stopService(options = {}) {
   const plat = options._platform || platform()
   const paths = getServicePaths(plat)
+
+  if (plat === 'win32') {
+    return {
+      stopped: false,
+      message: 'Windows does not support native service management via chroxy. Stop the Chroxy process through Task Scheduler, NSSM, or your process manager.',
+    }
+  }
 
   if (!options._skipExec) {
     if (paths.type === 'launchd') {
