@@ -121,8 +121,7 @@ function _macGetToken(service) {
 }
 
 function _macSetToken(service, token) {
-  // Delete existing first (add-generic-password fails if it exists)
-  _macDeleteToken(service)
+  // -U flag updates existing entry or creates new one (atomic)
   execFileSync('security', [
     'add-generic-password',
     '-s', service,

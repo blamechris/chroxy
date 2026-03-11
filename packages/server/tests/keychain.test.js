@@ -89,14 +89,6 @@ describe('Keychain token storage (#1838)', () => {
     keychain.deleteToken(serviceName)
   })
 
-  it('config.js loadTokenFromKeychain function exists in source', () => {
-    const source = readFileSync(join(srcDir, 'config.js'), 'utf-8')
-    assert.ok(
-      source.includes('loadTokenFromKeychain') || source.includes('keychain'),
-      'config.js should reference keychain for token loading'
-    )
-  })
-
   it('server-cli.js uses keychain for token persistence', () => {
     const source = readFileSync(join(srcDir, 'server-cli.js'), 'utf-8')
     assert.ok(

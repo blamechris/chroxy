@@ -37,9 +37,9 @@ export async function startCliServer(config) {
 
   // Migrate plaintext token to keychain on first run
   if (!NO_AUTH && API_TOKEN && config.apiToken && isKeychainAvailable()) {
-    const configFile = join(homedir(), '.chroxy', 'config.json')
-    const { migrated, config: cleanConfig } = migrateToken(config)
+    const { migrated } = migrateToken(config)
     if (migrated) {
+      const configFile = join(homedir(), '.chroxy', 'config.json')
       try {
         const raw = existsSync(configFile) ? readFileSync(configFile, 'utf-8') : '{}'
         const cfg = JSON.parse(raw)
