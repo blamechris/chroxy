@@ -177,7 +177,7 @@ describe('PairingManager (#1836)', () => {
 
     it('second-oldest ID survives when only one is evicted', () => {
       const pm = new PairingManager({ ttlMs: 60_000 })
-      pm.refresh() // id at index 0 is now the oldest
+      pm.refresh() // after this, the constructor ID is oldest; secondId is second-oldest
       const secondId = pm.currentPairingId
 
       // 9 more refreshes → 11 total, evicts only the very first
