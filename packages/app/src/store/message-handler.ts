@@ -50,6 +50,7 @@ import type {
 } from './types';
 import { createEmptySessionState } from './utils';
 import { clearPersistedSession } from './persistence';
+import { getCallback } from './imperative-callbacks';
 
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
@@ -194,7 +195,7 @@ export function flushTerminalWrites(): void {
   if (_pendingTerminalWrites.length === 0) return;
   const data = _pendingTerminalWrites;
   _pendingTerminalWrites = '';
-  const cb = getStore().getState()._terminalWriteCallback;
+  const cb = getCallback('terminalWrite');
   if (cb) cb(data);
 }
 
@@ -1708,7 +1709,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'directory_listing': {
-      const cb = get()._directoryListingCallback;
+      const cb = getCallback('directoryListing');
       if (cb) {
         cb({
           path: typeof msg.path === 'string' ? msg.path : null,
@@ -1721,7 +1722,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'file_listing': {
-      const fileBrowserCb = get()._fileBrowserCallback;
+      const fileBrowserCb = getCallback('fileBrowser');
       if (fileBrowserCb) {
         fileBrowserCb({
           path: typeof msg.path === 'string' ? msg.path : null,
@@ -1734,7 +1735,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'file_content': {
-      const fileContentCb = get()._fileContentCallback;
+      const fileContentCb = getCallback('fileContent');
       if (fileContentCb) {
         fileContentCb({
           path: typeof msg.path === 'string' ? msg.path : null,
@@ -1749,7 +1750,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'write_file_result': {
-      const fileWriteCb = get()._fileWriteCallback;
+      const fileWriteCb = getCallback('fileWrite');
       if (fileWriteCb) {
         fileWriteCb({
           path: typeof msg.path === 'string' ? msg.path : null,
@@ -1760,7 +1761,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'diff_result': {
-      const diffCb = get()._diffCallback;
+      const diffCb = getCallback('diff');
       if (diffCb) {
         diffCb({
           files: Array.isArray(msg.files) ? msg.files as DiffFile[] : [],
@@ -1771,7 +1772,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'git_status_result': {
-      const cb = get()._gitStatusCallback;
+      const cb = getCallback('gitStatus');
       if (cb) {
         cb({
           branch: typeof msg.branch === 'string' ? msg.branch : null,
@@ -1785,7 +1786,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'git_branches_result': {
-      const cb = get()._gitBranchesCallback;
+      const cb = getCallback('gitBranches');
       if (cb) {
         cb({
           branches: Array.isArray(msg.branches) ? msg.branches as GitBranch[] : [],
@@ -1798,7 +1799,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'git_stage_result':
     case 'git_unstage_result': {
-      const cb = get()._gitStageCallback;
+      const cb = getCallback('gitStage');
       if (cb) {
         cb({ error: typeof msg.error === 'string' ? msg.error : null });
       }
@@ -1806,7 +1807,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'git_commit_result': {
-      const cb = get()._gitCommitCallback;
+      const cb = getCallback('gitCommit');
       if (cb) {
         cb({
           hash: typeof msg.hash === 'string' ? msg.hash : null,
