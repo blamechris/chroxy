@@ -219,6 +219,10 @@ impl ServerManager {
 
     /// Internal: spawn the server process and start health polling.
     fn start_server_process(&mut self) -> Result<(), String> {
+        // Clear stale logs from any previous run so the buffer only
+        // contains output from the current server process.
+        lock_or_recover(&self.log_buffer).clear();
+
         // Reload config each start
         self.config = config::load_config();
 

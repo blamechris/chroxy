@@ -24,9 +24,11 @@ describe('get_server_logs IPC command (#1971)', () => {
 
   it('get_server_logs is registered in invoke_handler', () => {
     const src = readFileSync(resolve(DESKTOP_SRC, 'lib.rs'), 'utf-8')
+    const handlerBlock = src.match(/generate_handler!\[([^\]]+)\]/)
+    assert.ok(handlerBlock, 'lib.rs should have a generate_handler! invocation')
     assert.ok(
-      src.includes('get_server_logs'),
-      'get_server_logs should be registered in the invoke_handler',
+      handlerBlock[1].includes('get_server_logs'),
+      'get_server_logs should be listed inside generate_handler![...]',
     )
   })
 })
