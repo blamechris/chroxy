@@ -259,7 +259,8 @@ export interface WebFeatureStatus {
   teleport: boolean;
 }
 
-export type { SessionActivity, ActivityState } from './session-activity';
+import type { SessionActivity, ActivityState } from './session-activity';
+export type { SessionActivity, ActivityState };
 
 export interface SessionState {
   messages: ChatMessage[];
