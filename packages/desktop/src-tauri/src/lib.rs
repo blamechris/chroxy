@@ -836,24 +836,26 @@ fn handle_show_qr(app: &tauri::AppHandle) {
 
     let html = qrcode::build_qr_popup_html(&svg, &url);
 
-    match tauri::WebviewWindowBuilder::new(app, "qr_popup", tauri::WebviewUrl::default())
+    // Build a data URI to avoid document.write() (CSP-safe)
+    let encoded_html = window::percent_encode_html(&html);
+    let data_uri = format!("data:text/html;charset=utf-8,{}", encoded_html);
+    let webview_url = match data_uri.parse::<tauri::Url>() {
+        Ok(parsed) => tauri::WebviewUrl::External(parsed),
+        Err(e) => {
+            send_notification(app, "QR Code Error", &format!("Failed to encode popup HTML: {}", e));
+            return;
+        }
+    };
+
+    if let Err(e) = tauri::WebviewWindowBuilder::new(app, "qr_popup", webview_url)
         .title("Chroxy — QR Code")
         .inner_size(320.0, 400.0)
         .resizable(false)
         .center()
         .build()
     {
-        Ok(win) => {
-            // Navigate to the HTML content via data URL
-            let _ = win.eval(&format!(
-                "document.open(); document.write({}); document.close();",
-                serde_json::to_string(&html).unwrap_or_default()
-            ));
-        }
-        Err(e) => {
-            eprintln!("[tray] Failed to create QR popup: {}", e);
-            send_notification(app, "QR Code Error", &format!("Failed to open popup: {}", e));
-        }
+        eprintln!("[tray] Failed to create QR popup: {}", e);
+        send_notification(app, "QR Code Error", &format!("Failed to open popup: {}", e));
     }
 }
 
