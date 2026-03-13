@@ -55,6 +55,7 @@ import { getCallback } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
 import { useCostStore } from './cost';
+import { useTerminalStore } from './terminal';
 
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
@@ -1331,6 +1332,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'raw':
       get().appendTerminalData(msg.data as string);
+      useTerminalStore.getState().appendTerminalData(msg.data as string);
       break;
 
     case 'claude_ready': {
@@ -1423,6 +1425,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'raw_background':
       get().appendTerminalData(msg.data as string);
+      useTerminalStore.getState().appendTerminalData(msg.data as string);
       break;
 
     case 'permission_request': {

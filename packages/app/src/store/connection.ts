@@ -116,6 +116,7 @@ import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } 
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
 import { useCostStore } from './cost';
+import { useTerminalStore, TERMINAL_BUFFER_CAP, TERMINAL_RAW_BUFFER_CAP } from './terminal';
 import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto';
 import {
   loadPersistedState,
@@ -716,6 +717,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       searchError: null,
     });
     clearAllCallbacks();
+    useTerminalStore.getState().reset();
   },
 
   forgetSession: () => {
@@ -741,6 +743,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       conversationHistoryLoading: false,
       conversationHistoryError: null,
     });
+    useTerminalStore.getState().reset();
   },
 
   setViewMode: (mode) => {
@@ -806,8 +809,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   appendTerminalData: (data) => {
     set((state) => ({
-      terminalBuffer: (state.terminalBuffer + stripAnsi(data)).slice(-50000),
-      terminalRawBuffer: (state.terminalRawBuffer + data).slice(-100000),
+      terminalBuffer: (state.terminalBuffer + stripAnsi(data)).slice(-TERMINAL_BUFFER_CAP),
+      terminalRawBuffer: (state.terminalRawBuffer + data).slice(-TERMINAL_RAW_BUFFER_CAP),
     }));
     // Forward raw data to xterm.js via batched write callback
     if (getCallback('terminalWrite')) {
