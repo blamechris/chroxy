@@ -504,6 +504,62 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
     }
 }
 
+/// Poll `ServerStatus` every 1s for up to 60 seconds after a start or restart.
+///
+/// On `Running`: emits `server_ready`, updates menu to Running.
+/// On `Error`: emits `server_error`, sends a notification, updates menu to Stopped.
+/// On timeout (60 seconds): emits `server_error`, sends a timeout notification.
+///
+/// Returns `true` if the server reached `Running`, `false` otherwise.
+fn monitor_startup(app: &tauri::AppHandle, context: &str) -> bool {
+    let error_title = if context == "start" {
+        "Server Error"
+    } else {
+        "Restart Failed"
+    };
+    let timeout_title = if context == "start" {
+        "Server Timeout"
+    } else {
+        "Restart Timeout"
+    };
+    let timeout_msg = format!(
+        "Server failed to {} within 60 seconds.",
+        context
+    );
+
+    for _ in 0..60 {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let state = app.state::<Mutex<ServerManager>>();
+        let status = lock_or_recover(&state).status();
+        match status {
+            ServerStatus::Running => {
+                update_menu_state(app, MenuState::Running);
+                let state = app.state::<Mutex<ServerManager>>();
+                let mgr = lock_or_recover(&state);
+                let p = mgr.port();
+                let t = mgr.token();
+                drop(mgr);
+                window::emit_server_ready(app, p, t.as_deref());
+                return true;
+            }
+            ServerStatus::Error(ref msg) => {
+                update_menu_state(app, MenuState::Stopped);
+                window::emit_server_error(app, msg);
+                send_notification(app, error_title, msg);
+                return false;
+            }
+            ServerStatus::Stopped => return false,
+            _ => {}
+        }
+    }
+
+    // Timeout
+    update_menu_state(app, MenuState::Stopped);
+    window::emit_server_error(app, &timeout_msg);
+    send_notification(app, timeout_title, &timeout_msg);
+    false
+}
+
 fn handle_start(app: &tauri::AppHandle) {
     // Read settings and apply to server manager
     let (tunnel_mode, node_path) = app
@@ -548,38 +604,9 @@ fn handle_start(app: &tauri::AppHandle) {
             let app_handle = app.clone();
             std::thread::spawn(move || {
                 // Phase 1: Wait for initial startup (up to 60s)
-                let mut reached_running = false;
-                for _ in 0..60 {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    let state = app_handle.state::<Mutex<ServerManager>>();
-                    let status = lock_or_recover(&state).status();
-                    match status {
-                        ServerStatus::Running => {
-                            update_menu_state(&app_handle, MenuState::Running);
-                            // Emit server_ready — loading page navigates to dashboard
-                            let state = app_handle.state::<Mutex<ServerManager>>();
-                            let mgr = lock_or_recover(&state);
-                            let p = mgr.port();
-                            let t = mgr.token();
-                            drop(mgr);
-                            window::emit_server_ready(&app_handle, p, t.as_deref());
-                            reached_running = true;
-                            break;
-                        }
-                        ServerStatus::Error(ref msg) => {
-                            update_menu_state(&app_handle, MenuState::Stopped);
-                            window::emit_server_error(&app_handle, msg);
-                            send_notification(&app_handle, "Server Error", msg);
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
+                let reached_running = monitor_startup(&app_handle, "start");
 
                 if !reached_running {
-                    update_menu_state(&app_handle, MenuState::Stopped);
-                    window::emit_server_error(&app_handle, "Server failed to start within 60 seconds.");
-                    send_notification(&app_handle, "Server Timeout", "Server failed to start within 60 seconds.");
                     return;
                 }
 
@@ -629,43 +656,19 @@ fn handle_start(app: &tauri::AppHandle) {
                                 Ok(()) => {
                                     drop(mgr);
                                     // Wait for server to reach Running again
-                                    let mut recovered = false;
-                                    for _ in 0..60 {
-                                        std::thread::sleep(
-                                            std::time::Duration::from_secs(1),
+                                    let recovered = monitor_startup(&app_handle, "restart");
+                                    if recovered {
+                                        send_notification(
+                                            &app_handle,
+                                            "Server Recovered",
+                                            "Auto-restart successful",
                                         );
-                                        let state =
-                                            app_handle.state::<Mutex<ServerManager>>();
-                                        let status = lock_or_recover(&state).status();
-                                        match status {
-                                            ServerStatus::Running => {
-                                                update_menu_state(&app_handle, MenuState::Running);
-                                                // Emit server_ready — dashboard reconnects
-                                                let state = app_handle.state::<Mutex<ServerManager>>();
-                                                let mgr = lock_or_recover(&state);
-                                                let p = mgr.port();
-                                                let t = mgr.token();
-                                                drop(mgr);
-                                                window::emit_server_ready(&app_handle, p, t.as_deref());
-                                                send_notification(
-                                                    &app_handle,
-                                                    "Server Recovered",
-                                                    "Auto-restart successful",
-                                                );
-                                                // Reset restart count after recovery notification
-                                                let state = app_handle.state::<Mutex<ServerManager>>();
-                                                lock_or_recover(&state).reset_restart_count();
-                                                recovered = true;
-                                                break;
-                                            }
-                                            ServerStatus::Error(_) => break,
-                                            _ => {}
-                                        }
-                                    }
-                                    // If recovery failed but we haven't hit max
-                                    // attempts, re-signal pending so the outer loop
-                                    // retries instead of exiting at Error(_).
-                                    if !recovered {
+                                        let state = app_handle.state::<Mutex<ServerManager>>();
+                                        lock_or_recover(&state).reset_restart_count();
+                                    } else {
+                                        // If recovery failed but we haven't hit max
+                                        // attempts, re-signal pending so the outer loop
+                                        // retries instead of exiting at Error(_).
                                         let state =
                                             app_handle.state::<Mutex<ServerManager>>();
                                         let mgr = lock_or_recover(&state);
@@ -731,35 +734,7 @@ fn handle_restart(app: &tauri::AppHandle) {
             // Spawn monitoring thread to verify server reaches Running
             let app_handle = app.clone();
             std::thread::spawn(move || {
-                for _ in 0..60 {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    let state = app_handle.state::<Mutex<ServerManager>>();
-                    let status = lock_or_recover(&state).status();
-                    match status {
-                        ServerStatus::Running => {
-                            update_menu_state(&app_handle, MenuState::Running);
-                            let state = app_handle.state::<Mutex<ServerManager>>();
-                            let mgr = lock_or_recover(&state);
-                            let p = mgr.port();
-                            let t = mgr.token();
-                            drop(mgr);
-                            window::emit_server_ready(&app_handle, p, t.as_deref());
-                            return;
-                        }
-                        ServerStatus::Error(ref msg) => {
-                            update_menu_state(&app_handle, MenuState::Stopped);
-                            window::emit_server_error(&app_handle, msg);
-                            send_notification(&app_handle, "Restart Failed", msg);
-                            return;
-                        }
-                        ServerStatus::Stopped => return, // User stopped during restart
-                        _ => {}
-                    }
-                }
-                // Timeout
-                update_menu_state(&app_handle, MenuState::Stopped);
-                window::emit_server_error(&app_handle, "Server failed to restart within 60 seconds.");
-                send_notification(&app_handle, "Restart Timeout", "Server failed to restart within 60 seconds.");
+                monitor_startup(&app_handle, "restart");
             });
         }
         Err(e) => {
