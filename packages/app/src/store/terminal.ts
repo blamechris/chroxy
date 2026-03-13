@@ -10,8 +10,8 @@ interface TerminalState {
   reset: () => void
 }
 
-const TERMINAL_BUFFER_CAP = 50000
-const TERMINAL_RAW_BUFFER_CAP = 100000
+export const TERMINAL_BUFFER_CAP = 50000
+export const TERMINAL_RAW_BUFFER_CAP = 100000
 
 const initialState = {
   terminalBuffer: '',
