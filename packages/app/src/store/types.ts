@@ -259,11 +259,7 @@ export interface WebFeatureStatus {
   teleport: boolean;
 }
 
-export interface SessionActivity {
-  state: 'idle' | 'thinking' | 'busy' | 'waiting' | 'error';
-  detail?: string;
-  startedAt: number;
-}
+export type { SessionActivity, ActivityState } from './session-activity';
 
 export interface SessionState {
   messages: ChatMessage[];
