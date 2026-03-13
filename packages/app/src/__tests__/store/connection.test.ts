@@ -11,14 +11,15 @@ import {
   _testQueueInternals,
   _testMessageHandler,
 } from '../../store/connection';
+import { clearAllCallbacks, getCallback } from '../../store/imperative-callbacks';
 
 // Reset store between tests
 beforeEach(() => {
+  clearAllCallbacks();
   useConnectionStore.setState({
     messages: [],
     terminalBuffer: '',
     terminalRawBuffer: '',
-    _terminalWriteCallback: null,
     connectionError: null,
     connectionRetryCount: 0,
     serverErrors: [],
@@ -29,7 +30,6 @@ beforeEach(() => {
     sessionStates: {},
     activeSessionId: null,
     viewingCachedSession: false,
-    _directoryListingCallback: null,
   });
 });
 
@@ -237,9 +237,9 @@ describe('store actions', () => {
   describe('terminalWriteCallback', () => {
     it('is cleared on disconnect', () => {
       useConnectionStore.getState().setTerminalWriteCallback(() => {});
-      expect(useConnectionStore.getState()._terminalWriteCallback).not.toBeNull();
+      expect(getCallback('terminalWrite')).not.toBeNull();
       useConnectionStore.getState().disconnect();
-      expect(useConnectionStore.getState()._terminalWriteCallback).toBeNull();
+      expect(getCallback('terminalWrite')).toBeNull();
     });
   });
 

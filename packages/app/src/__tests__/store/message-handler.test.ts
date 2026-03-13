@@ -8,6 +8,7 @@ import { Alert } from 'react-native';
 import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION, SUBSCRIBE_SESSIONS_CHUNK_SIZE, clearPermissionSplits, clearDeltaBuffers } from '../../store/message-handler';
 import { createEmptySessionState } from '../../store/utils';
 import { clearPersistedSession } from '../../store/persistence';
+import { setCallback, clearAllCallbacks } from '../../store/imperative-callbacks';
 import type { ConnectionState } from '../../store/types';
 
 // Mock persistence to track calls
@@ -59,6 +60,7 @@ function createMockContext() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  clearAllCallbacks();
 });
 
 describe('session_timeout handler', () => {
@@ -740,10 +742,10 @@ describe('server_mode handler (PTY removal)', () => {
 });
 
 describe('git result handlers', () => {
-  it('dispatches git_status_result to _gitStatusCallback', () => {
+  it('dispatches git_status_result to gitStatus callback', () => {
     const cb = jest.fn();
+    setCallback('gitStatus', cb);
     const store = createMockStore({
-      _gitStatusCallback: cb,
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
@@ -770,9 +772,8 @@ describe('git result handlers', () => {
     });
   });
 
-  it('does not crash when _gitStatusCallback is null', () => {
+  it('does not crash when gitStatus callback is null', () => {
     const store = createMockStore({
-      _gitStatusCallback: null,
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
@@ -792,10 +793,10 @@ describe('git result handlers', () => {
     }).not.toThrow();
   });
 
-  it('dispatches git_branches_result to _gitBranchesCallback', () => {
+  it('dispatches git_branches_result to gitBranches callback', () => {
     const cb = jest.fn();
+    setCallback('gitBranches', cb);
     const store = createMockStore({
-      _gitBranchesCallback: cb,
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
@@ -817,10 +818,10 @@ describe('git result handlers', () => {
     });
   });
 
-  it('dispatches git_stage_result to _gitStageCallback', () => {
+  it('dispatches git_stage_result to gitStage callback', () => {
     const cb = jest.fn();
+    setCallback('gitStage', cb);
     const store = createMockStore({
-      _gitStageCallback: cb,
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
@@ -834,10 +835,10 @@ describe('git result handlers', () => {
     expect(cb).toHaveBeenCalledWith({ error: null });
   });
 
-  it('dispatches git_unstage_result to _gitStageCallback', () => {
+  it('dispatches git_unstage_result to gitStage callback', () => {
     const cb = jest.fn();
+    setCallback('gitStage', cb);
     const store = createMockStore({
-      _gitStageCallback: cb,
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
@@ -853,8 +854,8 @@ describe('git result handlers', () => {
 
   it('dispatches git_stage_result with error', () => {
     const cb = jest.fn();
+    setCallback('gitStage', cb);
     const store = createMockStore({
-      _gitStageCallback: cb,
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
@@ -868,10 +869,10 @@ describe('git result handlers', () => {
     expect(cb).toHaveBeenCalledWith({ error: 'failed to stage' });
   });
 
-  it('dispatches git_commit_result to _gitCommitCallback', () => {
+  it('dispatches git_commit_result to gitCommit callback', () => {
     const cb = jest.fn();
+    setCallback('gitCommit', cb);
     const store = createMockStore({
-      _gitCommitCallback: cb,
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
@@ -895,8 +896,8 @@ describe('git result handlers', () => {
 
   it('dispatches git_commit_result with error', () => {
     const cb = jest.fn();
+    setCallback('gitCommit', cb);
     const store = createMockStore({
-      _gitCommitCallback: cb,
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},

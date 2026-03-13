@@ -451,23 +451,6 @@ export interface ConnectionState {
   // Checkpoints for session rewind
   checkpoints: Checkpoint[];
 
-  // Directory listing callback for file browser
-  _directoryListingCallback: ((listing: DirectoryListing) => void) | null;
-
-  // File browser callbacks
-  _fileBrowserCallback: ((listing: FileListing) => void) | null;
-  _fileContentCallback: ((content: FileContent) => void) | null;
-  _fileWriteCallback: ((result: FileWriteResult) => void) | null;
-
-  // Git callbacks
-  _gitStatusCallback: ((result: GitStatusResult) => void) | null;
-  _gitBranchesCallback: ((result: GitBranchesResult) => void) | null;
-  _gitStageCallback: ((result: GitStageResult) => void) | null;
-  _gitCommitCallback: ((result: GitCommitResult) => void) | null;
-
-  // Diff viewer callback
-  _diffCallback: ((result: DiffResult) => void) | null;
-
   // Offline cached session viewing (shows session screen when disconnected)
   viewingCachedSession: boolean;
 
@@ -482,9 +465,6 @@ export interface ConnectionState {
 
   // Raw terminal buffer with ANSI codes intact (for xterm.js replay on view switch)
   terminalRawBuffer: string;
-
-  // Imperative write callback for xterm.js (bypasses React state for performance)
-  _terminalWriteCallback: ((data: string) => void) | null;
 
   // Actions
   connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => void;

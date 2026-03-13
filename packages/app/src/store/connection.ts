@@ -112,6 +112,7 @@ import {
   drainMessageQueue,
   CLIENT_PROTOCOL_VERSION,
 } from './message-handler';
+import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
 import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto';
 import {
   loadPersistedState,
@@ -217,15 +218,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   slashCommands: [],
   customAgents: [],
   checkpoints: [],
-  _directoryListingCallback: null,
-  _fileBrowserCallback: null,
-  _fileContentCallback: null,
-  _fileWriteCallback: null,
-  _gitStatusCallback: null,
-  _gitBranchesCallback: null,
-  _gitStageCallback: null,
-  _gitCommitCallback: null,
-  _diffCallback: null,
   conversationHistory: [],
   conversationHistoryLoading: false,
   conversationHistoryError: null,
@@ -250,7 +242,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   messages: [],
   terminalBuffer: '',
   terminalRawBuffer: '',
-  _terminalWriteCallback: null,
 
   closeDevPreview: (port: number) => {
     const { socket, activeSessionId } = get();
@@ -699,8 +690,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       slashCommands: [],
       customAgents: [],
       checkpoints: [],
-      _directoryListingCallback: null,
-      _terminalWriteCallback: null,
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,
@@ -719,6 +708,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       searchQuery: '',
       searchError: null,
     });
+    clearAllCallbacks();
   },
 
   forgetSession: () => {
@@ -813,8 +803,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       terminalRawBuffer: (state.terminalRawBuffer + data).slice(-100000),
     }));
     // Forward raw data to xterm.js via batched write callback
-    const cb = get()._terminalWriteCallback;
-    if (cb) {
+    if (getCallback('terminalWrite')) {
       appendPendingTerminalWrite(data);
     }
   },
@@ -825,7 +814,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   setTerminalWriteCallback: (cb) => {
-    set({ _terminalWriteCallback: cb });
+    setImperativeCallback('terminalWrite', cb);
   },
 
   updateInputSettings: (settings) => {
@@ -986,7 +975,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // Directory listing
 
   setDirectoryListingCallback: (cb) => {
-    set({ _directoryListingCallback: cb });
+    setImperativeCallback('directoryListing', cb);
   },
 
   requestDirectoryListing: (path?: string) => {
@@ -1001,11 +990,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // File browser
 
   setFileBrowserCallback: (cb) => {
-    set({ _fileBrowserCallback: cb });
+    setImperativeCallback('fileBrowser', cb);
   },
 
   setFileContentCallback: (cb) => {
-    set({ _fileContentCallback: cb });
+    setImperativeCallback('fileContent', cb);
   },
 
   requestFileListing: (path?: string) => {
@@ -1025,7 +1014,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   setFileWriteCallback: (cb) => {
-    set({ _fileWriteCallback: cb });
+    setImperativeCallback('fileWrite', cb);
   },
 
   requestFileWrite: (path: string, content: string) => {
@@ -1038,7 +1027,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // Diff viewer
 
   setDiffCallback: (cb) => {
-    set({ _diffCallback: cb });
+    setImperativeCallback('diff', cb);
   },
 
   requestDiff: (base?: string) => {
@@ -1052,10 +1041,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   // Git operations
 
-  setGitStatusCallback: (cb) => { set({ _gitStatusCallback: cb }); },
-  setGitBranchesCallback: (cb) => { set({ _gitBranchesCallback: cb }); },
-  setGitStageCallback: (cb) => { set({ _gitStageCallback: cb }); },
-  setGitCommitCallback: (cb) => { set({ _gitCommitCallback: cb }); },
+  setGitStatusCallback: (cb) => { setImperativeCallback('gitStatus', cb); },
+  setGitBranchesCallback: (cb) => { setImperativeCallback('gitBranches', cb); },
+  setGitStageCallback: (cb) => { setImperativeCallback('gitStage', cb); },
+  setGitCommitCallback: (cb) => { setImperativeCallback('gitCommit', cb); },
 
   requestGitStatus: () => {
     const { socket } = get();

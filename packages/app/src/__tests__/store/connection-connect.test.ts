@@ -6,6 +6,7 @@
  */
 import { Alert } from 'react-native';
 import { useConnectionStore } from '../../store/connection';
+import { clearAllCallbacks } from '../../store/imperative-callbacks';
 
 // Spy on Alert.alert — avoids jest.mock('react-native') which triggers native modules
 const mockAlert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
@@ -45,11 +46,11 @@ const originalFetch = global.fetch;
 beforeEach(() => {
   jest.useFakeTimers();
   mockAlert.mockClear();
+  clearAllCallbacks();
   useConnectionStore.setState({
     messages: [],
     terminalBuffer: '',
     terminalRawBuffer: '',
-    _terminalWriteCallback: null,
     connectionError: null,
     connectionRetryCount: 0,
     serverErrors: [],
@@ -59,7 +60,6 @@ beforeEach(() => {
     connectionPhase: 'disconnected',
     sessionStates: {},
     activeSessionId: null,
-    _directoryListingCallback: null,
     socket: null,
     wsUrl: null,
     shutdownReason: null,
