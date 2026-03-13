@@ -718,7 +718,43 @@ fn handle_restart(app: &tauri::AppHandle) {
     };
 
     match result {
-        Ok(()) => update_menu_state(app, MenuState::Running),
+        Ok(()) => {
+            update_menu_state(app, MenuState::Restarting);
+
+            // Spawn monitoring thread to verify server reaches Running
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                for _ in 0..60 {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let state = app_handle.state::<Mutex<ServerManager>>();
+                    let status = lock_or_recover(&state).status();
+                    match status {
+                        ServerStatus::Running => {
+                            update_menu_state(&app_handle, MenuState::Running);
+                            let state = app_handle.state::<Mutex<ServerManager>>();
+                            let mgr = lock_or_recover(&state);
+                            let p = mgr.port();
+                            let t = mgr.token();
+                            drop(mgr);
+                            window::emit_server_ready(&app_handle, p, t.as_deref());
+                            return;
+                        }
+                        ServerStatus::Error(ref msg) => {
+                            update_menu_state(&app_handle, MenuState::Stopped);
+                            window::emit_server_error(&app_handle, msg);
+                            send_notification(&app_handle, "Restart Failed", msg);
+                            return;
+                        }
+                        ServerStatus::Stopped => return, // User stopped during restart
+                        _ => {}
+                    }
+                }
+                // Timeout
+                update_menu_state(&app_handle, MenuState::Stopped);
+                window::emit_server_error(&app_handle, "Server failed to restart within 60 seconds.");
+                send_notification(&app_handle, "Restart Timeout", "Server failed to restart within 60 seconds.");
+            });
+        }
         Err(e) => {
             eprintln!("[tray] Failed to restart server: {}", e);
             update_menu_state(app, MenuState::Stopped);
