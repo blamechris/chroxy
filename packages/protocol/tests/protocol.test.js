@@ -62,10 +62,12 @@ describe('ClientMessageType enum', () => {
     }
   })
 
-  it('ClientMessageType values match their keys (snake_case)', async () => {
+  it('ClientMessageType values are snake_case strings', async () => {
     const { ClientMessageType } = await import('../src/index.ts')
+    const snakeCase = /^[a-z][a-z0-9]*(_[a-z0-9]+)*$/
     for (const [key, value] of Object.entries(ClientMessageType)) {
       assert.equal(typeof value, 'string', `${key} should be a string`)
+      assert.ok(snakeCase.test(value), `${key} value '${value}' should be snake_case`)
     }
   })
 })
@@ -105,16 +107,18 @@ describe('ServerMessageType enum', () => {
     }
   })
 
-  it('ServerMessageType values match their keys (snake_case)', async () => {
+  it('ServerMessageType values are snake_case strings', async () => {
     const { ServerMessageType } = await import('../src/index.ts')
+    const snakeCase = /^[a-z][a-z0-9]*(_[a-z0-9]+)*$/
     for (const [key, value] of Object.entries(ServerMessageType)) {
       assert.equal(typeof value, 'string', `${key} should be a string`)
+      assert.ok(snakeCase.test(value), `${key} value '${value}' should be snake_case`)
     }
   })
 })
 
 describe('message type enums match ws-server.js protocol docs', () => {
-  it('all client->server types from ws-server.js are in ClientMessageType', async () => {
+  it('client enum and ws-server.js docs have matching types (bidirectional)', async () => {
     const { readFileSync } = await import('node:fs')
     const { resolve } = await import('node:path')
     const { ClientMessageType } = await import('../src/index.ts')
@@ -126,17 +130,29 @@ describe('message type enums match ws-server.js protocol docs', () => {
     const clientSection = src.match(/\* Client -> Server:\n([\s\S]*?)\n \*\n \* Server -> Client:/)?.[1]
     assert.ok(clientSection, 'Should find Client -> Server section')
 
-    const typeMatches = [...clientSection.matchAll(/type: '(\w+)'/g)]
-    assert.ok(typeMatches.length > 0, 'Should find client message types')
+    const docTypes = new Set([...clientSection.matchAll(/type: '(\w+)'/g)].map(m => m[1]))
+    assert.ok(docTypes.size > 0, 'Should find client message types')
 
-    const values = Object.values(ClientMessageType)
-    for (const match of typeMatches) {
-      assert.ok(values.includes(match[1]),
-        `ClientMessageType should contain '${match[1]}' from ws-server.js`)
+    // 'encrypted' is documented in the Encrypted envelope section (bidirectional)
+    // — not in Client -> Server, so add it to the expected set
+    docTypes.add('encrypted')
+
+    const enumValues = new Set(Object.values(ClientMessageType))
+
+    // docs ⊆ enum
+    for (const type of docTypes) {
+      assert.ok(enumValues.has(type),
+        `ClientMessageType should contain '${type}' from ws-server.js`)
+    }
+
+    // enum ⊆ docs (no extra values in enum without documentation)
+    for (const value of enumValues) {
+      assert.ok(docTypes.has(value),
+        `ClientMessageType value '${value}' should be documented in ws-server.js`)
     }
   })
 
-  it('all server->client types from ws-server.js are in ServerMessageType', async () => {
+  it('server enum and ws-server.js docs have matching types (bidirectional)', async () => {
     const { readFileSync } = await import('node:fs')
     const { resolve } = await import('node:path')
     const { ServerMessageType } = await import('../src/index.ts')
@@ -148,13 +164,25 @@ describe('message type enums match ws-server.js protocol docs', () => {
     const serverSection = src.match(/\* Server -> Client:\n([\s\S]*?)\n \*\n \* Encrypted envelope/)?.[1]
     assert.ok(serverSection, 'Should find Server -> Client section')
 
-    const typeMatches = [...serverSection.matchAll(/type: '(\w+)'/g)]
-    assert.ok(typeMatches.length > 0, 'Should find server message types')
+    const docTypes = new Set([...serverSection.matchAll(/type: '(\w+)'/g)].map(m => m[1]))
+    assert.ok(docTypes.size > 0, 'Should find server message types')
 
-    const values = Object.values(ServerMessageType)
-    for (const match of typeMatches) {
-      assert.ok(values.includes(match[1]),
-        `ServerMessageType should contain '${match[1]}' from ws-server.js`)
+    // 'encrypted' is documented in the Encrypted envelope section (bidirectional)
+    // — not in Server -> Client, so add it to the expected set
+    docTypes.add('encrypted')
+
+    const enumValues = new Set(Object.values(ServerMessageType))
+
+    // docs ⊆ enum
+    for (const type of docTypes) {
+      assert.ok(enumValues.has(type),
+        `ServerMessageType should contain '${type}' from ws-server.js`)
+    }
+
+    // enum ⊆ docs (no extra values in enum without documentation)
+    for (const value of enumValues) {
+      assert.ok(docTypes.has(value),
+        `ServerMessageType value '${value}' should be documented in ws-server.js`)
     }
   })
 })
