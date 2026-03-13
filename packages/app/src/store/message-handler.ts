@@ -59,6 +59,7 @@ import { useCostStore } from './cost';
 import { useTerminalStore } from './terminal';
 import { useNotificationStore } from './notifications';
 import { useConversationStore } from './conversations';
+import { useConnectionLifecycleStore } from './connection-lifecycle';
 
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
@@ -269,6 +270,7 @@ function _onPong(): void {
     const smoothed = Math.round(_ewmaRtt);
     const quality: 'good' | 'fair' | 'poor' = smoothed < 200 ? 'good' : smoothed < 500 ? 'fair' : 'poor';
     getStore().setState({ latencyMs: smoothed, connectionQuality: quality });
+    useConnectionLifecycleStore.getState().setConnectionQuality(smoothed, quality);
   }
 }
 
@@ -668,6 +670,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Sync multi-client store (canonical source for multi-client state)
       useMultiClientStore.getState().setMyClientId(myClientId);
       useMultiClientStore.getState().setConnectedClients(clients);
+      // Sync connection lifecycle store
+      useConnectionLifecycleStore.getState().setConnectionPhase('connected');
+      useConnectionLifecycleStore.getState().setConnectionDetails(ctx.url, effectiveToken);
+      useConnectionLifecycleStore.getState().setServerInfo({
+        serverMode: authServerMode,
+        serverVersion: authServerVersion,
+        latestVersion: authLatestVersion,
+        serverCommit: authServerCommit,
+        serverProtocolVersion: authProtocolVersion,
+        sessionCwd: authSessionCwd,
+      });
+      useConnectionLifecycleStore.getState().setConnectionError(null, 0);
+      useConnectionLifecycleStore.getState().setUserDisconnected(false);
 
       // Start client-side heartbeat for dead connection detection
       startHeartbeat(ctx.socket);
@@ -679,15 +694,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _pendingKeyPair.publicKey }));
         // Post-auth messages will be sent after key_exchange_ok arrives
         set({ isEncrypted: true });
+        useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: true });
       } else {
         // No encryption — send post-auth messages immediately
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
         set({ isEncrypted: false });
+        useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: false });
       }
       // Save for quick reconnect (use effectiveToken for pairing flow)
       saveConnection(ctx.url, effectiveToken);
       set({ savedConnection: { url: ctx.url, token: effectiveToken } });
+      useConnectionLifecycleStore.getState().setSavedConnection({ url: ctx.url, token: effectiveToken });
       // Register push token (async, non-blocking)
       void registerPushToken(ctx.socket);
       break;

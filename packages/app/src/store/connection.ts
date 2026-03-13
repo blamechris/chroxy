@@ -119,6 +119,7 @@ import { useCostStore } from './cost';
 import { useTerminalStore, TERMINAL_BUFFER_CAP, TERMINAL_RAW_BUFFER_CAP } from './terminal';
 import { useNotificationStore } from './notifications';
 import { useConversationStore } from './conversations';
+import { useConnectionLifecycleStore } from './connection-lifecycle';
 import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto';
 import {
   loadPersistedState,
@@ -339,6 +340,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const saved = await loadConnection();
     if (saved) {
       set({ savedConnection: saved });
+      useConnectionLifecycleStore.getState().setSavedConnection(saved);
     }
     // Load persisted input settings
     try {
@@ -392,6 +394,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   clearSavedConnection: async () => {
     await clearConnection();
     set({ savedConnection: null });
+    useConnectionLifecycleStore.getState().setSavedConnection(null);
   },
 
   // Initial connection uses bounded retries (MAX_RETRIES) with exponential backoff.
@@ -433,6 +436,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Only clear connectionError on fresh user-initiated connections (not retries/reconnects)
     const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
     set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, userDisconnected: false, ...errorPatch });
+    useConnectionLifecycleStore.getState().setConnectionPhase(phase);
+    useConnectionLifecycleStore.getState().setConnectionError(errorPatch.connectionError ?? null, _retryCount);
+    useConnectionLifecycleStore.getState().setUserDisconnected(false);
 
     if (_retryCount > 0) {
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
@@ -462,6 +468,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               restartEtaMs: healthEta,
               restartingSince: currentState.restartingSince || Date.now(),
             });
+            useConnectionLifecycleStore.getState().setConnectionPhase('server_restarting');
             if (_retryCount < MAX_RETRIES) {
               const delay = withJitter(RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)]);
               setTimeout(() => {
@@ -470,6 +477,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               }, delay);
             } else {
               set({ connectionPhase: 'disconnected', connectionError: 'Server restart timed out' });
+              useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+              useConnectionLifecycleStore.getState().setConnectionError('Server restart timed out', _retryCount);
               if (!silent) {
                 Alert.alert(
                   'Connection Failed',
@@ -497,6 +506,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           : err.message?.startsWith('HTTP ') ? err.message
           : 'Network error';
         set({ connectionError: reason });
+        useConnectionLifecycleStore.getState().setConnectionError(reason, _retryCount);
         if (_retryCount < MAX_RETRIES) {
           const delay = withJitter(RETRY_DELAYS[_retryCount]);
           console.log(`[ws] Retrying in ${delay}ms...`);
@@ -506,6 +516,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           }, delay);
         } else {
           set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });
+          useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+          useConnectionLifecycleStore.getState().setConnectionError('Could not reach server', _retryCount);
           if (!silent) {
             Alert.alert(
               'Connection Failed',
@@ -607,14 +619,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] Connection lost, auto-reconnecting...');
         set({ connectionPhase: 'reconnecting', connectionError: 'Connection lost', connectionRetryCount: 0 });
+        useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
+        useConnectionLifecycleStore.getState().setConnectionError('Connection lost', 0);
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
         }, AUTO_RECONNECT_DELAY);
       } else if (disconnectedAttemptId === myAttemptId) {
         set({ connectionPhase: 'disconnected' });
+        useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       } else {
         set({ connectionPhase: 'disconnected' });
+        useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       }
     };
 
@@ -628,6 +644,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] WebSocket error, reconnecting...');
         set({ connectionPhase: 'reconnecting', connectionError: 'Connection error', connectionRetryCount: 0 });
+        useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
+        useConnectionLifecycleStore.getState().setConnectionError('Connection error', 0);
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
@@ -722,6 +740,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     useTerminalStore.getState().reset();
     useNotificationStore.getState().reset();
     useConversationStore.getState().reset();
+    useConnectionLifecycleStore.getState().reset();
+    useConnectionLifecycleStore.getState().setUserDisconnected(true);
+    useConnectionLifecycleStore.getState().setSavedConnection(null);
   },
 
   forgetSession: () => {
