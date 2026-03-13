@@ -1,9 +1,9 @@
 /**
  * WebSocket message validation schemas.
  *
- * Re-exports from @chroxy/protocol/schemas — the shared package is now
- * the single source of truth. This file exists for backward compatibility
- * so existing server imports don't need to change.
+ * Re-exports from @chroxy/protocol — the shared package is now the single
+ * source of truth. This file exists for backward compatibility so existing
+ * server imports don't need to change.
  */
 export {
   // Client schemas

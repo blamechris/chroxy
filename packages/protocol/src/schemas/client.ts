@@ -314,8 +314,8 @@ export const EncryptedEnvelopeSchema = z.object({
 })
 
 // -- Discriminated union of all client->server message types --
-// Note: auth, key_exchange, and encrypted are handled before the main
-// switch and are not included in this union.
+// Note: auth, key_exchange, pair, ping, and encrypted are handled before
+// the main switch in ws-server.js and are not included in this union.
 export const ClientMessageSchema = z.discriminatedUnion('type', [
   InputSchema,
   InterruptSchema,
