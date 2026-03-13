@@ -57,6 +57,7 @@ import { useWebStore } from './web';
 import { useCostStore } from './cost';
 import { useTerminalStore } from './terminal';
 import { useNotificationStore } from './notifications';
+import { useConversationStore } from './conversations';
 
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
@@ -1854,6 +1855,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (msg.sessionId && slashSid && msg.sessionId !== slashSid) break;
       if (Array.isArray(msg.commands)) {
         set({ slashCommands: msg.commands as SlashCommand[] });
+        useConversationStore.getState().setSlashCommands(msg.commands as SlashCommand[]);
       }
       break;
     }
@@ -1863,6 +1865,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (msg.sessionId && agentSid && msg.sessionId !== agentSid) break;
       if (Array.isArray(msg.agents)) {
         set({ customAgents: msg.agents as CustomAgent[] });
+        useConversationStore.getState().setCustomAgents(msg.agents as CustomAgent[]);
       }
       break;
     }
@@ -1873,6 +1876,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (msg.checkpoint && typeof msg.checkpoint === 'object') {
         const cp = msg.checkpoint as Checkpoint;
         set({ checkpoints: [...get().checkpoints, cp] });
+        useConversationStore.getState().addCheckpoint(cp);
       }
       break;
     }
@@ -1882,6 +1886,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (listSid !== get().activeSessionId) break;
       if (Array.isArray(msg.checkpoints)) {
         set({ checkpoints: msg.checkpoints as Checkpoint[] });
+        useConversationStore.getState().setCheckpoints(msg.checkpoints as Checkpoint[]);
       }
       break;
     }
@@ -2078,6 +2083,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'conversations_list': {
       const conversations = Array.isArray(msg.conversations) ? (msg.conversations as ConversationSummary[]) : [];
       set({ conversationHistory: conversations, conversationHistoryLoading: false, conversationHistoryError: null });
+      useConversationStore.getState().setConversationHistory(conversations);
       break;
     }
 
@@ -2089,6 +2095,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         break; // Stale response for an older query — ignore
       }
       set({ searchResults: results, searchLoading: false, searchError: null });
+      useConversationStore.getState().setSearchResults(results as SearchResult[], currentQuery);
       break;
     }
 

@@ -118,6 +118,7 @@ import { useWebStore } from './web';
 import { useCostStore } from './cost';
 import { useTerminalStore, TERMINAL_BUFFER_CAP, TERMINAL_RAW_BUFFER_CAP } from './terminal';
 import { useNotificationStore } from './notifications';
+import { useConversationStore } from './conversations';
 import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto';
 import {
   loadPersistedState,
@@ -720,6 +721,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     clearAllCallbacks();
     useTerminalStore.getState().reset();
     useNotificationStore.getState().reset();
+    useConversationStore.getState().reset();
   },
 
   forgetSession: () => {
