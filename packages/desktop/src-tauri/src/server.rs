@@ -93,6 +93,12 @@ impl ServerManager {
         self.tunnel_mode = mode.to_string();
     }
 
+    /// Set a custom Node binary path from settings.
+    /// When set, this path is preferred over auto-discovery via resolve_node22().
+    pub fn set_node_path(&mut self, path: Option<&str>) {
+        self.node_path = path.map(PathBuf::from);
+    }
+
     /// Whether auto-restart has been requested by the health poll.
     pub fn is_auto_restart_pending(&self) -> bool {
         self.auto_restart_pending.load(Ordering::Relaxed)
@@ -740,5 +746,22 @@ mod tests {
 
         mgr.reset_restart_count();
         assert_eq!(mgr.restart_count(), 0);
+    }
+
+    #[test]
+    fn set_node_path_stores_custom_path() {
+        let mut mgr = ServerManager::new();
+        assert!(mgr.node_path.is_none());
+
+        mgr.set_node_path(Some("/usr/local/bin/node"));
+        assert_eq!(mgr.node_path, Some(PathBuf::from("/usr/local/bin/node")));
+    }
+
+    #[test]
+    fn set_node_path_none_clears_path() {
+        let mut mgr = ServerManager::new();
+        mgr.set_node_path(Some("/usr/local/bin/node"));
+        mgr.set_node_path(None);
+        assert!(mgr.node_path.is_none());
     }
 }

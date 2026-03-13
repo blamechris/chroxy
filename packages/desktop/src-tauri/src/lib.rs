@@ -498,11 +498,14 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
 }
 
 fn handle_start(app: &tauri::AppHandle) {
-    // Read tunnel mode from settings and apply to server manager
-    let tunnel_mode = app
+    // Read settings and apply to server manager
+    let (tunnel_mode, node_path) = app
         .try_state::<Mutex<DesktopSettings>>()
-        .map(|s| lock_or_recover(&s).tunnel_mode.clone())
-        .unwrap_or_else(|| "quick".to_string());
+        .map(|s| {
+            let settings = lock_or_recover(&s);
+            (settings.tunnel_mode.clone(), settings.node_path.clone())
+        })
+        .unwrap_or_else(|| ("quick".to_string(), None));
 
     // Validate cloudflared for tunnel modes
     if tunnel_mode != "none" && !ServerManager::check_cloudflared() {
@@ -524,6 +527,7 @@ fn handle_start(app: &tauri::AppHandle) {
             &tunnel_mode
         };
         mgr.set_tunnel_mode(effective_mode);
+        mgr.set_node_path(node_path.as_deref());
         mgr.start()
     };
 
