@@ -510,13 +510,29 @@
   pointer-events: none;
 }
 
-.tab-busy-dot {
+.tab-busy-dot,
+.tab-status-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--status-connected);
   animation: pulse 1.5s infinite;
   flex-shrink: 0;
+}
+
+.tab-status-dot.status-idle {
+  background: var(--status-connected);
+  animation: none;
+}
+
+.tab-status-dot.status-busy {
+  background: var(--status-warning, #f59e0b);
+  animation: pulse 1.5s infinite;
+}
+
+.tab-status-dot.status-needs-attention {
+  background: var(--status-error, #ef4444);
+  animation: pulse 0.8s infinite;
 }
 
 .tab-cwd {
@@ -3262,6 +3278,7 @@
   .sidebar-busy-dot,
   .sidebar-idle-dot,
   .tab-busy-dot,
+  .tab-status-dot,
   .busy-indicator,
   .thinking-dot,
   .loading-spinner,
@@ -3273,6 +3290,7 @@
   .sidebar-busy-dot,
   .sidebar-idle-dot,
   .tab-busy-dot,
+  .tab-status-dot,
   .busy-indicator {
     opacity: 1;
   }

@@ -5,6 +5,8 @@
  */
 import { useState, useCallback, useRef, useEffect } from 'react'
 
+export type SessionStatus = 'idle' | 'busy' | 'needs-attention'
+
 export interface SessionTabData {
   sessionId: string
   name: string
@@ -13,6 +15,7 @@ export interface SessionTabData {
   cwd?: string
   model?: string
   provider?: string
+  status?: SessionStatus
 }
 
 export interface SessionBarProps {
@@ -102,9 +105,22 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               }
             }}
           >
-            {session.isBusy && (
-              <span className="tab-busy-dot" data-testid="busy-dot" title="Session busy — processing..." />
-            )}
+            {(() => {
+              const effectiveStatus = session.status ?? (session.isBusy ? 'busy' : undefined)
+              if (!effectiveStatus || (effectiveStatus === 'idle' && !session.status)) return null
+              const statusLabels: Record<SessionStatus, string> = {
+                idle: 'Session idle',
+                busy: 'Session busy — processing...',
+                'needs-attention': 'Needs attention — action required',
+              }
+              return (
+                <span
+                  className={`tab-status-dot status-${effectiveStatus}`}
+                  data-testid="status-dot"
+                  title={statusLabels[effectiveStatus]}
+                />
+              )
+            })()}
 
             {renamingId === session.sessionId ? (
               <input

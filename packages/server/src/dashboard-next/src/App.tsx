@@ -19,7 +19,7 @@ import { InputBar, type FileAttachment, type ImageAttachment } from './component
 import { toWireAttachments } from './utils/attachment-utils'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
-import { SessionBar, type SessionTabData } from './components/SessionBar'
+import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
 import { StatusBar } from './components/StatusBar'
 import { PermissionPrompt } from './components/PermissionPrompt'
 import { QuestionPrompt } from './components/QuestionPrompt'
@@ -406,18 +406,30 @@ export function App() {
     }
   }, [viewMode, systemMessages.length, activeSessionId])
 
-  // Map sessions to SessionTabData[]
+  // Map sessions to SessionTabData[] with status indicators (#2091)
   const sessionTabs: SessionTabData[] = useMemo(
-    () => sessions.map(s => ({
-      sessionId: s.sessionId,
-      name: s.name,
-      isBusy: s.isBusy,
-      isActive: s.sessionId === activeSessionId,
-      cwd: s.cwd,
-      model: s.model ?? undefined,
-      provider: s.provider,
-    })),
-    [sessions, activeSessionId],
+    () => sessions.map(s => {
+      let status: SessionStatus = 'idle'
+      const hasNotification = sessionNotifications.some(
+        n => n.sessionId === s.sessionId && (n.eventType === 'permission' || n.eventType === 'question' || n.eventType === 'error'),
+      )
+      if (hasNotification) {
+        status = 'needs-attention'
+      } else if (s.isBusy) {
+        status = 'busy'
+      }
+      return {
+        sessionId: s.sessionId,
+        name: s.name,
+        isBusy: s.isBusy,
+        isActive: s.sessionId === activeSessionId,
+        cwd: s.cwd,
+        model: s.model ?? undefined,
+        provider: s.provider,
+        status,
+      }
+    }),
+    [sessions, activeSessionId, sessionNotifications],
   )
 
   // Derive sidebar repo tree from sessions
