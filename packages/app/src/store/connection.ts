@@ -748,6 +748,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       conversationHistoryError: null,
     });
     useTerminalStore.getState().reset();
+    useConversationStore.getState().reset();
   },
 
   setViewMode: (mode) => {
