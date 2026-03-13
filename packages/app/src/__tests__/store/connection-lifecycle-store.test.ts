@@ -40,7 +40,11 @@ jest.mock('expo-device', () => ({
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 
 beforeEach(() => {
+  // Hard reset: reset() preserves savedConnection/userDisconnected,
+  // so explicitly clear them to prevent cross-test leakage
   useConnectionLifecycleStore.getState().reset();
+  useConnectionLifecycleStore.getState().setSavedConnection(null);
+  useConnectionLifecycleStore.getState().setUserDisconnected(false);
   wsSendCalls.length = 0;
 });
 

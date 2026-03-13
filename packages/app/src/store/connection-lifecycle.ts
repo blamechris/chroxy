@@ -82,7 +82,7 @@ export const useConnectionLifecycleStore = create<ConnectionLifecycleState>((set
 
   setConnectionDetails: (url, token) => set({ wsUrl: url, apiToken: token }),
 
-  setServerInfo: (info) => set((state) => ({ ...state, ...info })),
+  setServerInfo: (info) => set(info),
 
   setConnectionQuality: (latencyMs, quality) => set({ latencyMs, connectionQuality: quality }),
 
@@ -94,7 +94,8 @@ export const useConnectionLifecycleStore = create<ConnectionLifecycleState>((set
 
   reset: () => set((state) => ({
     ...initialState,
-    // Preserve saved connection across resets (survives disconnect)
+    // Preserve saved connection and user disconnect flag across resets
+    // (both survive disconnect/reconnect cycles — cleared explicitly when needed)
     savedConnection: state.savedConnection,
     userDisconnected: state.userDisconnected,
   })),

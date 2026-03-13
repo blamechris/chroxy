@@ -437,7 +437,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
     set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, userDisconnected: false, ...errorPatch });
     useConnectionLifecycleStore.getState().setConnectionPhase(phase);
-    useConnectionLifecycleStore.getState().setConnectionError(errorPatch.connectionError ?? null, _retryCount);
+    // Only clear error in lifecycle store when main store clears it (fresh connections, not retries)
+    if ('connectionError' in errorPatch) {
+      useConnectionLifecycleStore.getState().setConnectionError(null, _retryCount);
+    }
     useConnectionLifecycleStore.getState().setUserDisconnected(false);
 
     if (_retryCount > 0) {
