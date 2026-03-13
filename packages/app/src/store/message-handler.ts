@@ -53,6 +53,7 @@ import { deriveActivityState } from './session-activity';
 import { clearPersistedSession } from './persistence';
 import { getCallback } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
+import { useWebStore } from './web';
 
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
@@ -615,6 +616,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         remote: !!webFeaturesRaw.remote,
         teleport: !!webFeaturesRaw.teleport,
       } : { available: false, remote: false, teleport: false };
+      useWebStore.getState().setWebFeatures(webFeatures);
 
       // On reconnect, preserve messages and terminal buffer
       // If server provided a sessionToken (via pairing), use it for future auth
@@ -2006,13 +2008,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // -- Web tasks (Claude Code Web) --
 
     case 'web_feature_status': {
-      set({
-        webFeatures: {
-          available: !!msg.available,
-          remote: !!msg.remote,
-          teleport: !!msg.teleport,
-        },
-      });
+      const wf = {
+        available: !!msg.available,
+        remote: !!msg.remote,
+        teleport: !!msg.teleport,
+      };
+      useWebStore.getState().setWebFeatures(wf);
+      set({ webFeatures: wf });
       break;
     }
 
@@ -2020,6 +2022,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'web_task_updated': {
       const task = msg.task as WebTask;
       if (!task || !task.taskId) break;
+      useWebStore.getState().upsertTask(task);
       set((state: ConnectionState) => {
         const existing = state.webTasks.filter((t) => t.taskId !== task.taskId);
         return { webTasks: [...existing, task] };
@@ -2030,11 +2033,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'web_task_error': {
       const errTaskId = msg.taskId as string | null;
       if (errTaskId) {
+        const errMessage = (msg.message as string) || 'Unknown error';
+        useWebStore.getState().updateTaskError(errTaskId, errMessage);
         // Update task status to failed
         set((state: ConnectionState) => ({
           webTasks: state.webTasks.map((t) =>
             t.taskId === errTaskId
-              ? { ...t, status: 'failed' as const, error: (msg.message as string) || 'Unknown error', updatedAt: Date.now() }
+              ? { ...t, status: 'failed' as const, error: errMessage, updatedAt: Date.now() }
               : t,
           ),
         }));
@@ -2059,6 +2064,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'web_task_list': {
       const tasks = Array.isArray(msg.tasks) ? (msg.tasks as WebTask[]) : [];
+      useWebStore.getState().setTasks(tasks);
       set({ webTasks: tasks });
       break;
     }

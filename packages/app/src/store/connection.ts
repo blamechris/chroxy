@@ -114,6 +114,7 @@ import {
 } from './message-handler';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
+import { useWebStore } from './web';
 import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto';
 import {
   loadPersistedState,
@@ -659,6 +660,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Clear message queue on explicit disconnect
     clearMessageQueue();
     useMultiClientStore.getState().resetPresence();
+    useWebStore.getState().reset();
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
     set({
       connectionPhase: 'disconnected',
@@ -698,8 +700,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       lastResultDuration: null,
       totalCost: null,
       costBudget: null,
-      webFeatures: { available: false, remote: false, teleport: false },
-      webTasks: [],
+      webFeatures: { available: false, remote: false, teleport: false }, // kept for backward compat
+      webTasks: [], // kept for backward compat
       savedConnection: null,
       userDisconnected: true,
       viewingCachedSession: false,
