@@ -113,6 +113,7 @@ import {
   CLIENT_PROTOCOL_VERSION,
 } from './message-handler';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
+import { useMultiClientStore } from './multi-client';
 import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto';
 import {
   loadPersistedState,
@@ -295,6 +296,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   setFollowMode: (enabled: boolean) => {
+    useMultiClientStore.getState().setFollowMode(enabled);
     set({ followMode: enabled });
   },
 
@@ -656,6 +658,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setPendingKeyPair(null);
     // Clear message queue on explicit disconnect
     clearMessageQueue();
+    useMultiClientStore.getState().reset();
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
     set({
       connectionPhase: 'disconnected',
