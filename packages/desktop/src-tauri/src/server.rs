@@ -105,6 +105,11 @@ impl ServerManager {
             .filter(|p| p.exists());
     }
 
+    /// Return buffered server log lines (stdout + stderr).
+    pub fn get_logs(&self) -> Vec<String> {
+        lock_or_recover(&self.log_buffer).iter().cloned().collect()
+    }
+
     /// Whether auto-restart has been requested by the health poll.
     pub fn is_auto_restart_pending(&self) -> bool {
         self.auto_restart_pending.load(Ordering::Relaxed)
@@ -751,6 +756,24 @@ mod tests {
     #[test]
     fn max_restart_attempts_is_three() {
         assert_eq!(ServerManager::MAX_RESTART_ATTEMPTS, 3);
+    }
+
+    #[test]
+    fn get_logs_returns_buffered_lines() {
+        let mgr = ServerManager::new();
+        {
+            let mut buf = lock_or_recover(&mgr.log_buffer);
+            buf.push_back("line 1".to_string());
+            buf.push_back("line 2".to_string());
+        }
+        let logs = mgr.get_logs();
+        assert_eq!(logs, vec!["line 1", "line 2"]);
+    }
+
+    #[test]
+    fn get_logs_returns_empty_vec_when_no_logs() {
+        let mgr = ServerManager::new();
+        assert!(mgr.get_logs().is_empty());
     }
 
     #[test]
