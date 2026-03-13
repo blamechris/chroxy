@@ -4448,3 +4448,75 @@
   color: var(--text-secondary, #888);
   font-style: italic;
 }
+
+/* ---- Startup Error Screen (#2094) ---- */
+
+.startup-error-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+  padding: 32px 24px;
+}
+
+.startup-error-content {
+  max-width: 640px;
+  width: 100%;
+  text-align: center;
+}
+
+.startup-error-title {
+  color: var(--error, #e74c3c);
+  font-size: 1.4rem;
+  margin: 0 0 12px;
+}
+
+.startup-error-message {
+  color: var(--text-primary, #e0e0e0);
+  font-size: 1rem;
+  margin: 0 0 24px;
+}
+
+.startup-error-logs {
+  text-align: left;
+  margin: 0 0 24px;
+}
+
+.startup-error-logs-title {
+  color: var(--text-muted, #888);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 8px;
+}
+
+.startup-error-logs-content {
+  background: var(--bg-secondary, #1a1a2e);
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  padding: 12px 16px;
+  max-height: 300px;
+  overflow-y: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text-secondary, #ccc);
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.startup-error-retry-btn {
+  background: var(--accent, #4a9eff);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 24px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.startup-error-retry-btn:hover {
+  opacity: 0.85;
+}

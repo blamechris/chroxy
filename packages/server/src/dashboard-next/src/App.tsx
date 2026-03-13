@@ -44,6 +44,7 @@ import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadP
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
+import { StartupErrorScreen } from './components/StartupErrorScreen'
 import { ConsolePage } from './components/ConsolePage'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
@@ -98,6 +99,8 @@ export function App() {
   const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
   const serverErrors = useConnectionStore(s => s.serverErrors)
   const infoNotifications = useConnectionStore(s => s.infoNotifications ?? [])
+  const connectionError = useConnectionStore(s => s.connectionError)
+  const serverStartupLogs = useConnectionStore(s => s.serverStartupLogs)
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
   const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
@@ -687,6 +690,7 @@ export function App() {
 
   const isConnected = connectionPhase === 'connected'
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
+  const isStartupError = connectionPhase === 'disconnected' && !!connectionError && sessions.length === 0
   const showWelcome = isConnected && sessions.length === 0
 
   // Fetch conversation history when welcome screen is shown
@@ -815,6 +819,15 @@ export function App() {
             onClose={destroySession}
             onRename={renameSession}
             onNewSession={handleNewSession}
+          />
+        )}
+
+        {/* Startup error screen — shown when server failed to start (Tauri) */}
+        {isStartupError && (
+          <StartupErrorScreen
+            error={connectionError}
+            logs={serverStartupLogs}
+            onRetry={handleRetry}
           />
         )}
 

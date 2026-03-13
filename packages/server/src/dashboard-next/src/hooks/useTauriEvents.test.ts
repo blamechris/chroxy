@@ -169,6 +169,55 @@ describe('useTauriEvents', () => {
     expect(state.infoNotifications[0]!.message).toContain('installed')
   })
 
+  it('clears serverStartupLogs on server_ready (#2094)', () => {
+    useConnectionStore.setState({ serverStartupLogs: ['old log line'] })
+
+    // Put location on dashboard so server_ready reconnects
+    Object.defineProperty(window, 'location', {
+      value: { href: 'http://localhost:9222/dashboard?token=abc', protocol: 'http:', host: 'localhost:9222' },
+      writable: true,
+      configurable: true,
+    })
+    const connectSpy = vi.fn()
+    useConnectionStore.setState({ connect: connectSpy } as unknown as Record<string, unknown>)
+
+    renderHook(() => useTauriEvents())
+    emit('server_ready', { port: 9222, token: 'abc', url: 'http://localhost:9222/dashboard?token=abc' })
+
+    expect(useConnectionStore.getState().serverStartupLogs).toBeNull()
+
+    Object.defineProperty(window, 'location', {
+      value: new URL('http://localhost'),
+      writable: true,
+      configurable: true,
+    })
+  })
+
+  it('fetches server logs on server_error via Tauri IPC (#2094)', async () => {
+    const mockInvoke = vi.fn().mockResolvedValue(['[ERROR] EADDRINUSE', '[INFO] Exit 1'])
+    Object.defineProperty(window, '__TAURI__', {
+      value: {
+        event: { listen: vi.fn(async (event: string, handler: Handler) => {
+          if (!listeners.has(event)) listeners.set(event, [])
+          listeners.get(event)!.push(handler)
+          return unlisten
+        })},
+        core: { invoke: mockInvoke },
+      },
+      writable: true,
+      configurable: true,
+    })
+
+    renderHook(() => useTauriEvents())
+    emit('server_error', { message: 'Node not found' })
+
+    // Wait for async invoke
+    await new Promise(r => setTimeout(r, 10))
+
+    expect(mockInvoke).toHaveBeenCalledWith('get_server_logs')
+    expect(useConnectionStore.getState().serverStartupLogs).toEqual(['[ERROR] EADDRINUSE', '[INFO] Exit 1'])
+  })
+
   it('unlistens on unmount', async () => {
     const { unmount } = renderHook(() => useTauriEvents())
     unmount()
