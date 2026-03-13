@@ -35,7 +35,7 @@ describe('UserQuestionResponseSchema (#1945)', () => {
   let schemaSrc
 
   beforeEach(() => {
-    schemaSrc = readFileSync(join(__dirname, '../src/ws-schemas.js'), 'utf-8')
+    schemaSrc = readFileSync(join(__dirname, '../../protocol/src/schemas/client.ts'), 'utf-8')
   })
 
   it('includes optional answers field for per-question responses', () => {
