@@ -53,6 +53,8 @@ import { deriveActivityState } from './session-activity';
 import { clearPersistedSession } from './persistence';
 import { getCallback } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
+import { useWebStore } from './web';
+import { useCostStore } from './cost';
 
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
@@ -615,6 +617,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         remote: !!webFeaturesRaw.remote,
         teleport: !!webFeaturesRaw.teleport,
       } : { available: false, remote: false, teleport: false };
+
 
       // On reconnect, preserve messages and terminal buffer
       // If server provided a sessionToken (via pairing), use it for future auth
@@ -1906,6 +1909,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         updateSession(costTargetId, () => ({ sessionCost }));
       }
       set({ totalCost, costBudget: budget });
+      useCostStore.getState().setCostUpdate(totalCost, budget);
       break;
     }
 
@@ -2006,13 +2010,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // -- Web tasks (Claude Code Web) --
 
     case 'web_feature_status': {
-      set({
-        webFeatures: {
-          available: !!msg.available,
-          remote: !!msg.remote,
-          teleport: !!msg.teleport,
-        },
-      });
+      const wf = {
+        available: !!msg.available,
+        remote: !!msg.remote,
+        teleport: !!msg.teleport,
+      };
+      set({ webFeatures: wf });
       break;
     }
 
@@ -2030,11 +2033,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'web_task_error': {
       const errTaskId = msg.taskId as string | null;
       if (errTaskId) {
+        const errMessage = (msg.message as string) || 'Unknown error';
         // Update task status to failed
         set((state: ConnectionState) => ({
           webTasks: state.webTasks.map((t) =>
             t.taskId === errTaskId
-              ? { ...t, status: 'failed' as const, error: (msg.message as string) || 'Unknown error', updatedAt: Date.now() }
+              ? { ...t, status: 'failed' as const, error: errMessage, updatedAt: Date.now() }
               : t,
           ),
         }));
