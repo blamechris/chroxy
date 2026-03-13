@@ -9,6 +9,18 @@
  * message handler calls getCallback() to invoke them.
  */
 
+import type {
+  DirectoryListing,
+  FileListing,
+  FileContent,
+  FileWriteResult,
+  DiffResult,
+  GitStatusResult,
+  GitBranchesResult,
+  GitStageResult,
+  GitCommitResult,
+} from './types';
+
 const CALLBACK_NAMES = [
   'terminalWrite',
   'directoryListing',
@@ -24,10 +36,22 @@ const CALLBACK_NAMES = [
 
 export type CallbackName = (typeof CALLBACK_NAMES)[number];
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type CallbackFn = ((...args: any[]) => void) | null;
+export interface CallbackSignatures {
+  terminalWrite: (data: string) => void;
+  directoryListing: (listing: DirectoryListing) => void;
+  fileBrowser: (listing: FileListing) => void;
+  fileContent: (content: FileContent) => void;
+  fileWrite: (result: FileWriteResult) => void;
+  diff: (result: DiffResult) => void;
+  gitStatus: (result: GitStatusResult) => void;
+  gitBranches: (result: GitBranchesResult) => void;
+  gitStage: (result: GitStageResult) => void;
+  gitCommit: (result: GitCommitResult) => void;
+}
 
-const callbacks: Record<CallbackName, CallbackFn> = {
+type CallbackStore = { [K in CallbackName]: CallbackSignatures[K] | null };
+
+const callbacks: CallbackStore = {
   terminalWrite: null,
   directoryListing: null,
   fileBrowser: null,
@@ -40,11 +64,11 @@ const callbacks: Record<CallbackName, CallbackFn> = {
   gitCommit: null,
 };
 
-export function getCallback(name: CallbackName): CallbackFn {
+export function getCallback<K extends CallbackName>(name: K): CallbackSignatures[K] | null {
   return callbacks[name];
 }
 
-export function setCallback(name: CallbackName, fn: CallbackFn): void {
+export function setCallback<K extends CallbackName>(name: K, fn: CallbackSignatures[K] | null): void {
   callbacks[name] = fn;
 }
 
