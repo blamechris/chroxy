@@ -1909,6 +1909,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         updateSession(costTargetId, () => ({ sessionCost }));
       }
       set({ totalCost, costBudget: budget });
+      // dual-write: remove after consumers migrate to CostStore
       useCostStore.getState().setCostUpdate(totalCost, budget);
       break;
     }
