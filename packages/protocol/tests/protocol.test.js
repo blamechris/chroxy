@@ -13,6 +13,7 @@ describe('@chroxy/protocol', () => {
     const { MIN_PROTOCOL_VERSION } = await import('../src/index.ts')
     assert.equal(typeof MIN_PROTOCOL_VERSION, 'number')
     assert.ok(MIN_PROTOCOL_VERSION >= 1, 'MIN_PROTOCOL_VERSION should be >= 1')
+    assert.equal(MIN_PROTOCOL_VERSION, Math.floor(MIN_PROTOCOL_VERSION), 'Should be an integer')
   })
 
   it('MIN_PROTOCOL_VERSION <= PROTOCOL_VERSION', async () => {
