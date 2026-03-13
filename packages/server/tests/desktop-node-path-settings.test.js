@@ -16,9 +16,14 @@ describe('settings.node_path is applied (#1938)', () => {
 
   it('handle_start reads settings.node_path and passes it to ServerManager', () => {
     const src = readFileSync(resolve(DESKTOP_SRC, 'lib.rs'), 'utf-8')
+    // Extract the handle_start function body and verify it reads node_path
+    // from settings and passes it to set_node_path
+    const handleStartMatch = src.match(/fn\s+handle_start\b[\s\S]*?^}/m)
+    assert.ok(handleStartMatch, 'lib.rs should contain a handle_start function')
+    const body = handleStartMatch[0]
     assert.ok(
-      src.includes('set_node_path'),
-      'lib.rs handle_start should call mgr.set_node_path with the settings value',
+      body.includes('node_path') && body.includes('set_node_path'),
+      'handle_start should read node_path from settings and call mgr.set_node_path',
     )
   })
 })
