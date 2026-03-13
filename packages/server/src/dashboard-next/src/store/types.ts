@@ -426,6 +426,9 @@ export interface ConnectionState {
   connectionError: string | null;
   connectionRetryCount: number;
 
+  // Server startup logs (fetched via Tauri IPC on startup failure)
+  serverStartupLogs: string[] | null;
+
   // Server log entries (ring buffer, last 500)
   logEntries: LogEntry[];
 
