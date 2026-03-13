@@ -52,6 +52,13 @@ describe('ClientMessageType enum', () => {
       'key_exchange', 'create_checkpoint', 'list_checkpoints', 'restore_checkpoint',
       'delete_checkpoint', 'close_dev_preview', 'launch_web_task', 'list_web_tasks',
       'teleport_web_task', 'ping', 'encrypted',
+      // Added in #2106:
+      'add_repo', 'cli', 'get_diff', 'git_branches', 'git_commit', 'git_stage',
+      'git_status', 'git_unstage', 'list_conversations', 'list_files',
+      'list_providers', 'list_repos', 'pair', 'query_permission_audit',
+      'remove_repo', 'request_cost_summary', 'request_session_context',
+      'resume_budget', 'resume_conversation', 'search_conversations',
+      'subscribe_sessions', 'unsubscribe_sessions',
     ]
 
     for (const type of expectedTypes) {
@@ -97,6 +104,15 @@ describe('ServerMessageType enum', () => {
       'dev_preview', 'dev_preview_stopped',
       'web_task_created', 'web_task_updated', 'web_task_error', 'web_task_list',
       'encrypted',
+      // Added in #2106:
+      'diff_result', 'error', 'file_list', 'git_branches_result',
+      'git_commit_result', 'git_stage_result', 'git_status_result',
+      'git_unstage_result', 'log_entry', 'pair_fail', 'rate_limited',
+      'session_activity', 'session_context', 'session_updated',
+      'write_file_result', 'agent_spawned', 'agent_completed',
+      'provider_list', 'push_token_error', 'cost_update',
+      'budget_warning', 'budget_exceeded', 'web_feature_status',
+      'discovered_sessions',
     ]
 
     for (const type of expectedTypes) {
@@ -183,6 +199,45 @@ describe('message type enums match ws-server.js protocol docs', () => {
     for (const value of enumValues) {
       assert.ok(docTypes.has(value),
         `ServerMessageType value '${value}' should be documented in ws-server.js`)
+    }
+  })
+})
+
+describe('message type enums cover ws-schemas.js', () => {
+  it('ClientMessageType covers all client schemas in ws-schemas.js', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { resolve } = await import('node:path')
+    const { ClientMessageType } = await import('../src/index.ts')
+
+    const schemasPath = resolve(import.meta.dirname, '../../server/src/ws-schemas.js')
+    const src = readFileSync(schemasPath, 'utf-8')
+
+    // Extract the ClientMessageSchema union — find all z.literal types in its discriminatedUnion
+    const clientSection = src.match(/export const ClientMessageSchema[\s\S]*?z\.discriminatedUnion\('type',\s*\[([\s\S]*?)\]\s*\)/)?.[1]
+    assert.ok(clientSection, 'Should find ClientMessageSchema discriminatedUnion')
+
+    // Extract all type literals from the schema references
+    // The schemas are defined above and referenced by name — extract types from all schema definitions
+    const allLiterals = [...src.matchAll(/z\.literal\('([a-z_]+)'\)/g)].map(m => m[1])
+    // Filter to client-only types: those that appear in schema objects referenced by ClientMessageSchema
+    // We use a simpler approach: get types from the ClientMessageSchema union members
+    const clientSchemaNames = [...clientSection.matchAll(/(\w+Schema)/g)].map(m => m[1])
+
+    const clientTypes = new Set()
+    for (const schemaName of clientSchemaNames) {
+      const schemaDef = src.match(new RegExp(`export const ${schemaName}[\\s\\S]*?type: z\\.literal\\('([a-z_]+)'\\)`))?.[1]
+      if (schemaDef) clientTypes.add(schemaDef)
+    }
+
+    assert.ok(clientTypes.size > 0, 'Should find client types in ws-schemas.js')
+
+    const enumValues = new Set(Object.values(ClientMessageType))
+
+    // Every client schema type should be in the enum
+    // Skip 'encrypted' — it's in the envelope wrapper, not a client-specific schema
+    for (const type of clientTypes) {
+      assert.ok(enumValues.has(type),
+        `ClientMessageType should contain '${type}' from ws-schemas.js`)
     }
   })
 })
