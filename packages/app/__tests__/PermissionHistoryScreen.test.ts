@@ -32,11 +32,6 @@ describe('PermissionHistoryScreen component structure', () => {
     expect(src).toMatch(/requestId/)
   })
 
-  test('falls back to legacy flat messages when no sessions', () => {
-    expect(src).toMatch(/legacyMessages/)
-    expect(src).toMatch(/result\.length === 0/)
-  })
-
   test('shows session filter when multiple sessions exist', () => {
     expect(src).toMatch(/showSessionFilter/)
     expect(src).toMatch(/sessions\.length > 1/)

@@ -17,7 +17,6 @@ import { clearAllCallbacks, getCallback } from '../../store/imperative-callbacks
 beforeEach(() => {
   clearAllCallbacks();
   useConnectionStore.setState({
-    messages: [],
     terminalBuffer: '',
     terminalRawBuffer: '',
     connectionError: null,
@@ -27,8 +26,8 @@ beforeEach(() => {
     myClientId: null,
     primaryClientId: null,
     connectionPhase: 'disconnected',
-    sessionStates: {},
-    activeSessionId: null,
+    sessionStates: { default: createEmptySessionState() },
+    activeSessionId: 'default',
     viewingCachedSession: false,
   });
 });
@@ -166,10 +165,10 @@ describe('selectShowSession', () => {
 
 describe('store actions', () => {
   describe('addMessage', () => {
-    it('appends a message to the list', () => {
+    it('appends a message to the active session', () => {
       const msg: ChatMessage = { id: 'test-1', type: 'response', content: 'hi', timestamp: 1 };
       useConnectionStore.getState().addMessage(msg);
-      expect(useConnectionStore.getState().messages).toEqual([msg]);
+      expect(useConnectionStore.getState().sessionStates['default'].messages).toEqual([msg]);
     });
 
     it('removes thinking placeholder when a real message arrives', () => {
@@ -177,7 +176,7 @@ describe('store actions', () => {
       const real: ChatMessage = { id: 'r1', type: 'response', content: 'done', timestamp: 2 };
       useConnectionStore.getState().addMessage(thinking);
       useConnectionStore.getState().addMessage(real);
-      const messages = useConnectionStore.getState().messages;
+      const messages = useConnectionStore.getState().sessionStates['default'].messages;
       expect(messages).toEqual([real]);
     });
 
@@ -186,7 +185,7 @@ describe('store actions', () => {
       useConnectionStore.getState().addMessage(thinking);
       useConnectionStore.getState().addMessage(thinking);
       // addMessage keeps existing thinking when the new message IS thinking (filter passes all)
-      expect(useConnectionStore.getState().messages.length).toBe(2);
+      expect(useConnectionStore.getState().sessionStates['default'].messages.length).toBe(2);
     });
   });
 
@@ -732,11 +731,11 @@ describe('multi-client message handling', () => {
   });
 
   describe('primary_changed in legacy mode', () => {
-    it('stores primaryClientId at flat state level for default session', () => {
+    it('stores primaryClientId in session state for default session', () => {
       _testMessageHandler.handle({
         type: 'primary_changed', sessionId: 'default', clientId: 'client-1',
       });
-      expect(useConnectionStore.getState().primaryClientId).toBe('client-1');
+      expect(useConnectionStore.getState().sessionStates.default!.primaryClientId).toBe('client-1');
     });
 
     it('stores primaryClientId at flat state level when no sessionId', () => {
@@ -825,7 +824,7 @@ describe('WS message handler (direct)', () => {
       });
       expect(useConnectionStore.getState().connectedClients).toHaveLength(1);
       // System message generated
-      const msgs = useConnectionStore.getState().messages;
+      const msgs = useConnectionStore.getState().getActiveSessionState().messages;
       expect(msgs).toHaveLength(1);
       expect(msgs[0].type).toBe('system');
       expect(msgs[0].content).toBe('Phone connected');
@@ -840,7 +839,7 @@ describe('WS message handler (direct)', () => {
       expect(client.deviceName).toBeNull();
       expect(client.deviceType).toBe('unknown');
       // System message uses fallback label
-      expect(useConnectionStore.getState().messages[0].content).toBe('A device connected');
+      expect(useConnectionStore.getState().getActiveSessionState().messages[0].content).toBe('A device connected');
     });
 
     it('skips if msg.client.clientId is not a string', () => {
@@ -849,7 +848,7 @@ describe('WS message handler (direct)', () => {
         client: { clientId: 123 },
       });
       expect(useConnectionStore.getState().connectedClients).toHaveLength(0);
-      expect(useConnectionStore.getState().messages).toHaveLength(0);
+      expect(useConnectionStore.getState().getActiveSessionState().messages).toHaveLength(0);
     });
   });
 
@@ -862,7 +861,7 @@ describe('WS message handler (direct)', () => {
       });
       _testMessageHandler.handle({ type: 'client_left', clientId: 'c1' });
       expect(useConnectionStore.getState().connectedClients).toHaveLength(0);
-      const msgs = useConnectionStore.getState().messages;
+      const msgs = useConnectionStore.getState().getActiveSessionState().messages;
       expect(msgs).toHaveLength(1);
       expect(msgs[0].content).toBe('Phone disconnected');
     });
@@ -871,7 +870,7 @@ describe('WS message handler (direct)', () => {
       _testMessageHandler.handle({ type: 'client_left', clientId: 'nonexistent' });
       expect(useConnectionStore.getState().connectedClients).toHaveLength(0);
       // Still generates a system message with fallback label
-      expect(useConnectionStore.getState().messages[0].content).toBe('A device disconnected');
+      expect(useConnectionStore.getState().getActiveSessionState().messages[0].content).toBe('A device disconnected');
     });
   });
 
@@ -888,11 +887,11 @@ describe('WS message handler (direct)', () => {
       expect(useConnectionStore.getState().sessionStates[sessionId].primaryClientId).toBe('c1');
     });
 
-    it('falls back to flat state for default session', () => {
+    it('stores in session state for default session', () => {
       _testMessageHandler.handle({
         type: 'primary_changed', sessionId: 'default', clientId: 'c1',
       });
-      expect(useConnectionStore.getState().primaryClientId).toBe('c1');
+      expect(useConnectionStore.getState().sessionStates.default!.primaryClientId).toBe('c1');
     });
 
     it('ignores unknown session IDs in multi-session mode', () => {
@@ -912,12 +911,12 @@ describe('WS message handler (direct)', () => {
     it('silently skips messages with missing type field', () => {
       // Should not throw
       _testMessageHandler.handle({ content: 'no type' });
-      expect(useConnectionStore.getState().messages).toHaveLength(0);
+      expect(useConnectionStore.getState().getActiveSessionState().messages).toHaveLength(0);
     });
 
     it('silently skips messages with unknown type', () => {
       _testMessageHandler.handle({ type: 'totally_unknown_msg_type' });
-      expect(useConnectionStore.getState().messages).toHaveLength(0);
+      expect(useConnectionStore.getState().getActiveSessionState().messages).toHaveLength(0);
     });
 
     it('skips client_joined with no client object', () => {
@@ -928,7 +927,7 @@ describe('WS message handler (direct)', () => {
     it('skips client_left with non-string clientId', () => {
       _testMessageHandler.handle({ type: 'client_left', clientId: 42 });
       expect(useConnectionStore.getState().connectedClients).toHaveLength(0);
-      expect(useConnectionStore.getState().messages).toHaveLength(0);
+      expect(useConnectionStore.getState().getActiveSessionState().messages).toHaveLength(0);
     });
   });
 
@@ -1123,7 +1122,7 @@ describe('resize store action', () => {
     useConnectionStore.getState().resize(120, 40);
 
     expect(sent).toHaveLength(1);
-    expect(JSON.parse(sent[0])).toEqual({ type: 'resize', cols: 120, rows: 40 });
+    expect(JSON.parse(sent[0])).toEqual({ type: 'resize', cols: 120, rows: 40, sessionId: 'default' });
   });
 
   it('no-ops when socket is not connected', () => {
@@ -1144,8 +1143,8 @@ describe('permission boundary splitting', () => {
     // _deltaIdRemaps, pendingDeltas, deltaFlushTimer)
     useConnectionStore.getState().disconnect();
     useConnectionStore.setState({
-      messages: [],
-      streamingMessageId: null,
+      activeSessionId: 'default',
+      sessionStates: { default: createEmptySessionState() },
       connectionPhase: 'disconnected',
     });
     (mockSocket.send as jest.Mock).mockClear();
@@ -1164,7 +1163,7 @@ describe('permission boundary splitting', () => {
   it('flushes pending deltas and splits on permission_request mid-stream', () => {
     // Start a stream
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'srv-1' });
-    expect(useConnectionStore.getState().streamingMessageId).toBe('srv-1');
+    expect(useConnectionStore.getState().getActiveSessionState().streamingMessageId).toBe('srv-1');
 
     // Send a delta (buffered, not yet flushed)
     _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'Hello ' });
@@ -1176,10 +1175,10 @@ describe('permission boundary splitting', () => {
     });
 
     // streamingMessageId should be cleared
-    expect(useConnectionStore.getState().streamingMessageId).toBeNull();
+    expect(useConnectionStore.getState().getActiveSessionState().streamingMessageId).toBeNull();
 
     // The buffered delta should have been flushed (the response message has content)
-    const msgs = useConnectionStore.getState().messages;
+    const msgs = useConnectionStore.getState().getActiveSessionState().messages;
     const response = msgs.find((m) => m.id === 'srv-1');
     expect(response).toBeDefined();
     expect(response!.content).toBe('Hello ');
@@ -1205,7 +1204,7 @@ describe('permission boundary splitting', () => {
     _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'After' });
     jest.advanceTimersByTime(200); // flush
 
-    const msgs = useConnectionStore.getState().messages;
+    const msgs = useConnectionStore.getState().getActiveSessionState().messages;
 
     // Should have: original response, permission prompt, new response
     const responses = msgs.filter((m) => m.type === 'response');
@@ -1216,7 +1215,7 @@ describe('permission boundary splitting', () => {
     expect(responses[1].content).toBe('After');
 
     // streamingMessageId should point to the new message
-    expect(useConnectionStore.getState().streamingMessageId).toBe(responses[1].id);
+    expect(useConnectionStore.getState().getActiveSessionState().streamingMessageId).toBe(responses[1].id);
   });
 
   it('remaps subsequent deltas to the new post-permission message', () => {
@@ -1237,7 +1236,7 @@ describe('permission boundary splitting', () => {
     _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'B' });
     jest.advanceTimersByTime(200);
 
-    const msgs = useConnectionStore.getState().messages;
+    const msgs = useConnectionStore.getState().getActiveSessionState().messages;
     const postPermResponse = msgs.filter((m) => m.type === 'response')[1];
     expect(postPermResponse.content).toBe('AB');
   });
@@ -1263,7 +1262,7 @@ describe('permission boundary splitting', () => {
     _testMessageHandler.handle({ type: 'stream_delta', messageId: 'srv-1', delta: 'Part3' });
     jest.advanceTimersByTime(200);
 
-    const msgs = useConnectionStore.getState().messages;
+    const msgs = useConnectionStore.getState().getActiveSessionState().messages;
     const responses = msgs.filter((m) => m.type === 'response');
     expect(responses).toHaveLength(3);
     expect(responses[0].content).toBe('Part1');
@@ -1288,7 +1287,7 @@ describe('permission boundary splitting', () => {
 
     // stream_end should clean up
     _testMessageHandler.handle({ type: 'stream_end', messageId: 'srv-1' });
-    expect(useConnectionStore.getState().streamingMessageId).toBeNull();
+    expect(useConnectionStore.getState().getActiveSessionState().streamingMessageId).toBeNull();
 
     // Starting a new stream with the same messageId should not trigger a split
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'srv-1' });
@@ -1296,7 +1295,7 @@ describe('permission boundary splitting', () => {
     jest.advanceTimersByTime(200);
 
     // The original srv-1 message should be updated (not split)
-    const responses = useConnectionStore.getState().messages.filter((m) => m.type === 'response');
+    const responses = useConnectionStore.getState().getActiveSessionState().messages.filter((m) => m.type === 'response');
     // Last response should have content appended (fresh is appended to existing)
     const srv1 = responses.find((m) => m.id === 'srv-1');
     expect(srv1).toBeDefined();
@@ -1315,7 +1314,7 @@ describe('permission boundary splitting', () => {
 
     // Result arrives without stream_end (missed stream_end scenario)
     _testMessageHandler.handle({ type: 'result', cost: 0.01, duration: 100 });
-    expect(useConnectionStore.getState().streamingMessageId).toBeNull();
+    expect(useConnectionStore.getState().getActiveSessionState().streamingMessageId).toBeNull();
   });
 });
 
@@ -1328,8 +1327,8 @@ describe('permission_request dedup on reconnect', () => {
     jest.useFakeTimers();
     useConnectionStore.getState().disconnect();
     useConnectionStore.setState({
-      messages: [],
-      streamingMessageId: null,
+      activeSessionId: 'default',
+      sessionStates: { default: createEmptySessionState() },
       connectionPhase: 'disconnected',
     });
     (mockSocket.send as jest.Mock).mockClear();
@@ -1353,7 +1352,7 @@ describe('permission_request dedup on reconnect', () => {
       remainingMs: 300_000,
     });
 
-    const msgsAfterFirst = useConnectionStore.getState().messages;
+    const msgsAfterFirst = useConnectionStore.getState().getActiveSessionState().messages;
     expect(msgsAfterFirst.filter((m) => m.type === 'prompt')).toHaveLength(1);
     const firstCard = msgsAfterFirst.find((m) => m.requestId === 'perm-dup-1');
     expect(firstCard).toBeDefined();
@@ -1368,7 +1367,7 @@ describe('permission_request dedup on reconnect', () => {
       remainingMs: 240_000,
     });
 
-    const msgsAfterSecond = useConnectionStore.getState().messages;
+    const msgsAfterSecond = useConnectionStore.getState().getActiveSessionState().messages;
 
     // Should still have exactly one prompt — no duplicate
     const prompts = msgsAfterSecond.filter((m) => m.type === 'prompt');
@@ -1391,17 +1390,25 @@ describe('permission_request dedup on reconnect', () => {
     });
 
     // Simulate the card being answered (mark it manually)
-    const msgs = useConnectionStore.getState().messages;
+    const state = useConnectionStore.getState();
+    const ss = state.sessionStates[state.activeSessionId!]!;
+    const msgs = ss.messages;
     const card = msgs.find((m) => m.requestId === 'perm-dup-2');
     expect(card).toBeDefined();
     useConnectionStore.setState({
-      messages: msgs.map((m) =>
-        m.requestId === 'perm-dup-2' ? { ...m, answered: 'allow' } : m
-      ),
+      sessionStates: {
+        ...state.sessionStates,
+        [state.activeSessionId!]: {
+          ...ss,
+          messages: msgs.map((m) =>
+            m.requestId === 'perm-dup-2' ? { ...m, answered: 'allow' as const } : m
+          ),
+        },
+      },
     });
 
     // Verify it was marked as answered
-    const answeredMsgs = useConnectionStore.getState().messages;
+    const answeredMsgs = useConnectionStore.getState().getActiveSessionState().messages;
     const answeredCard = answeredMsgs.find((m) => m.requestId === 'perm-dup-2');
     expect(answeredCard!.answered).toBe('allow');
 
@@ -1412,7 +1419,7 @@ describe('permission_request dedup on reconnect', () => {
       remainingMs: 200_000,
     });
 
-    const finalMsgs = useConnectionStore.getState().messages;
+    const finalMsgs = useConnectionStore.getState().getActiveSessionState().messages;
     const finalCard = finalMsgs.find((m) => m.requestId === 'perm-dup-2');
     expect(finalCard!.answered).toBeUndefined();
     expect(finalCard!.expiresAt).toBeDefined();
@@ -1431,7 +1438,7 @@ describe('permission_request dedup on reconnect', () => {
       remainingMs: 300_000,
     });
 
-    const prompts = useConnectionStore.getState().messages.filter((m) => m.type === 'prompt');
+    const prompts = useConnectionStore.getState().getActiveSessionState().messages.filter((m) => m.type === 'prompt');
     expect(prompts).toHaveLength(2);
     expect(prompts[0].requestId).toBe('perm-a');
     expect(prompts[1].requestId).toBe('perm-b');
@@ -1496,7 +1503,6 @@ describe('markPromptAnsweredByRequestId', () => {
         s1: { ...createEmptySessionState(), messages: [] },
         s2: { ...createEmptySessionState(), messages: [permMsg] },
       },
-      messages: [],
     });
 
     useConnectionStore.getState().markPromptAnsweredByRequestId('req-bg', 'allow');
@@ -1527,7 +1533,6 @@ describe('markPromptAnsweredByRequestId', () => {
         s1: { ...createEmptySessionState(), messages: [otherMsg] },
         s2: { ...createEmptySessionState(), messages: [permMsg] },
       },
-      messages: [],
     });
 
     useConnectionStore.getState().markPromptAnsweredByRequestId('req-bg2', 'deny');
@@ -1538,25 +1543,16 @@ describe('markPromptAnsweredByRequestId', () => {
     expect((s1Msgs[0] as any).answered).toBeUndefined();
   });
 
-  it('falls back to flat messages when sessionStates is empty', () => {
-    const permMsg = {
-      id: 'perm-flat',
-      type: 'prompt' as const,
-      content: 'Allow flat?',
-      requestId: 'req-flat',
-      timestamp: 1,
-    };
-
+  it('is a no-op when sessionStates has no matching requestId', () => {
     useConnectionStore.setState({
       activeSessionId: 's1',
-      sessionStates: {},
-      messages: [permMsg],
+      sessionStates: { s1: createEmptySessionState() },
     });
 
-    useConnectionStore.getState().markPromptAnsweredByRequestId('req-flat', 'allow');
+    // Should not throw
+    useConnectionStore.getState().markPromptAnsweredByRequestId('req-nonexistent', 'allow');
 
-    const flatMsgs = useConnectionStore.getState().messages;
-    const marked = flatMsgs.find((m) => m.requestId === 'req-flat');
-    expect(marked?.answered).toBe('allow');
+    const msgs = useConnectionStore.getState().getActiveSessionState().messages;
+    expect(msgs).toHaveLength(0);
   });
 });

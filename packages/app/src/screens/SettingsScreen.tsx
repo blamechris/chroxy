@@ -105,7 +105,6 @@ export function SettingsScreen() {
   // Permission history summary counts
   const sessions = useConnectionStore((s) => s.sessions);
   const sessionStates = useConnectionStore((s) => s.sessionStates);
-  const legacyMessages = useConnectionStore((s) => s.messages);
 
   const permissionSummary = useMemo(() => {
     let allowed = 0;
@@ -123,10 +122,9 @@ export function SettingsScreen() {
       const ss = sessionStates[s.sessionId];
       if (ss) ss.messages.forEach(countMsg);
     }
-    if (total === 0) legacyMessages.forEach(countMsg);
 
     return { allowed, denied, total };
-  }, [sessions, sessionStates, legacyMessages]);
+  }, [sessions, sessionStates]);
 
   // Simple semver comparison: check if latest > current (not just different)
   const updateAvailable = (() => {

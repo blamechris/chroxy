@@ -370,17 +370,6 @@ export interface ConnectionState {
   activeSessionId: string | null;
   sessionStates: Record<string, SessionState>;
 
-  // Legacy flat state (used when server doesn't send session_list)
-  claudeReady: boolean;
-  streamingMessageId: string | null;
-  activeModel: string | null;
-  permissionMode: string | null;
-  contextUsage: ContextUsage | null;
-  lastResultCost: number | null;
-  lastResultDuration: number | null;
-  isIdle: boolean;
-  messages: ChatMessage[];
-
   // Cost tracking
   totalCost: number | null;
   costBudget: number | null;

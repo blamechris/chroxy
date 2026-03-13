@@ -152,13 +152,11 @@ export function PermissionHistoryScreen() {
 
   const sessions = useConnectionStore((s) => s.sessions);
   const sessionStates = useConnectionStore((s) => s.sessionStates);
-  const legacyMessages = useConnectionStore((s) => s.messages);
 
   // Aggregate permission entries from all sessions
   const entries = useMemo(() => {
     const result: PermissionEntry[] = [];
 
-    // Multi-session messages
     for (const session of sessions) {
       const ss = sessionStates[session.sessionId];
       if (!ss) continue;
@@ -174,24 +172,10 @@ export function PermissionHistoryScreen() {
       }
     }
 
-    // Legacy flat messages (PTY mode or no session list)
-    if (result.length === 0) {
-      for (const msg of legacyMessages) {
-        if (msg.type === 'prompt' && msg.requestId) {
-          result.push({
-            message: msg,
-            sessionId: null,
-            sessionName: null,
-            status: deriveStatus(msg),
-          });
-        }
-      }
-    }
-
     // Sort newest first
     result.sort((a, b) => b.message.timestamp - a.message.timestamp);
     return result;
-  }, [sessions, sessionStates, legacyMessages]);
+  }, [sessions, sessionStates]);
 
   // Counts for summary bar
   const counts = useMemo(() => {

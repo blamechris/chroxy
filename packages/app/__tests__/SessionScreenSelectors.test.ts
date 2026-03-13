@@ -15,25 +15,35 @@ describe('SessionScreen selective store usage (#1923)', () => {
   });
 
   test('all store values use individual selectors', () => {
-    // Key state values that were in the omnibus destructure should each have their own selector
-    const requiredSelectors = [
+    // Fields that still use inline selectors
+    const inlineSelectors = [
       'viewMode',
-      'messages',
-      'claudeReady',
       'serverMode',
       'sessionCwd',
-      'streamingMessageId',
       'connectionPhase',
-      'activeModel',
       'availableModels',
-      'permissionMode',
       'availablePermissionModes',
       'inputSettings',
     ];
 
-    for (const field of requiredSelectors) {
+    for (const field of inlineSelectors) {
       // Match pattern: useConnectionStore((s) => s.field) or useConnectionStore(s => s.field)
       const pattern = new RegExp(`useConnectionStore\\(\\(?s\\)?\\s*=>\\s*s\\.${field}\\b`);
+      expect(src).toMatch(pattern);
+    }
+
+    // Fields that now use session-aware selector functions
+    const selectorFunctions = [
+      'selectMessages',
+      'selectClaudeReady',
+      'selectStreamingMessageId',
+      'selectActiveModel',
+      'selectPermissionMode',
+      'selectIsIdle',
+    ];
+
+    for (const fn of selectorFunctions) {
+      const pattern = new RegExp(`useConnectionStore\\(${fn}\\)`);
       expect(src).toMatch(pattern);
     }
   });

@@ -55,11 +55,14 @@ export type {
   ServerError,
   SessionNotification,
   SlashCommand,
+  ChatMessage,
+  ContextUsage,
   CustomAgent,
   ConnectionPhase,
   ConnectionContext,
   ConversationSummary,
   SearchResult,
+  SessionState,
   ConnectionState,
 } from './types';
 
@@ -143,6 +146,33 @@ const ERROR_RECONNECT_DELAY = 2000;
 export const selectShowSession = (s: ConnectionState): boolean =>
   s.connectionPhase !== 'disconnected' || s.viewingCachedSession;
 
+// Session-aware selectors — read from sessionStates[activeSessionId]
+const EMPTY_MESSAGES: ChatMessage[] = [];
+
+function activeSession(s: ConnectionState): SessionState | null {
+  const id = s.activeSessionId;
+  return id ? s.sessionStates[id] ?? null : null;
+}
+
+export const selectMessages = (s: ConnectionState): ChatMessage[] =>
+  activeSession(s)?.messages ?? EMPTY_MESSAGES;
+export const selectClaudeReady = (s: ConnectionState): boolean =>
+  activeSession(s)?.claudeReady ?? false;
+export const selectStreamingMessageId = (s: ConnectionState): string | null =>
+  activeSession(s)?.streamingMessageId ?? null;
+export const selectActiveModel = (s: ConnectionState): string | null =>
+  activeSession(s)?.activeModel ?? null;
+export const selectPermissionMode = (s: ConnectionState): string | null =>
+  activeSession(s)?.permissionMode ?? null;
+export const selectContextUsage = (s: ConnectionState): ContextUsage | null =>
+  activeSession(s)?.contextUsage ?? null;
+export const selectLastResultCost = (s: ConnectionState): number | null =>
+  activeSession(s)?.lastResultCost ?? null;
+export const selectLastResultDuration = (s: ConnectionState): number | null =>
+  activeSession(s)?.lastResultDuration ?? null;
+export const selectIsIdle = (s: ConnectionState): boolean =>
+  activeSession(s)?.isIdle ?? true;
+
 // Search request tracking — prevents stale timeout/response races
 let searchNonce = 0;
 let searchTimeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -199,11 +229,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   sessionStates: {},
-  claudeReady: false,
-  streamingMessageId: null,
-  activeModel: null,
   availableModels: [],
-  permissionMode: null,
   availablePermissionModes: [],
   myClientId: null,
   connectedClients: [],
@@ -231,12 +257,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   searchLoading: false,
   searchQuery: '',
   searchError: null,
-  contextUsage: null,
-  lastResultCost: null,
-  lastResultDuration: null,
   totalCost: null,
   costBudget: null,
-  isIdle: true,
   inputSettings: {
     chatEnterToSend: true,
     terminalEnterToSend: false,
@@ -245,7 +267,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   userDisconnected: false,
   viewingCachedSession: false,
   viewMode: 'chat',
-  messages: [],
   terminalBuffer: '',
   terminalRawBuffer: '',
 
@@ -310,29 +331,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (activeSessionId && sessionStates[activeSessionId]) {
       return sessionStates[activeSessionId];
     }
-    // Fallback: construct from flat state
-    return {
-      messages: get().messages,
-      streamingMessageId: get().streamingMessageId,
-      claudeReady: get().claudeReady,
-      activeModel: get().activeModel,
-      permissionMode: get().permissionMode,
-      contextUsage: get().contextUsage,
-      lastResultCost: get().lastResultCost,
-      lastResultDuration: get().lastResultDuration,
-      sessionCost: null,
-      isIdle: true,
-      health: 'healthy' as const,
-      activeAgents: [],
-      isPlanPending: false,
-      planAllowedPrompts: [],
-      primaryClientId: null,
-      conversationId: null,
-      sessionContext: null,
-      mcpServers: [],
-      devPreviews: [],
-      activityState: { state: 'idle' as const, startedAt: Date.now() },
-    };
+    return createEmptySessionState();
   },
 
   loadSavedConnection: async () => {
@@ -666,7 +665,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     useMultiClientStore.getState().resetPresence();
     useWebStore.getState().reset();
     useCostStore.getState().reset();
-    // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
+    // Preserve sessions, activeSessionId, sessionStates (messages live there now)
     set({
       connectionPhase: 'disconnected',
       socket: null,
@@ -676,11 +675,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       latestVersion: null,
       serverCommit: null,
       serverProtocolVersion: null,
-      claudeReady: false,
-      streamingMessageId: null,
-      activeModel: null,
       availableModels: [],
-      permissionMode: null,
       availablePermissionModes: [],
       myClientId: null,
       connectedClients: [],
@@ -700,9 +695,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       slashCommands: [],
       customAgents: [],
       checkpoints: [],
-      contextUsage: null,
-      lastResultCost: null,
-      lastResultDuration: null,
       totalCost: null,
       costBudget: null,
       webFeatures: { available: false, remote: false, teleport: false }, // kept for backward compat
@@ -728,7 +720,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setLastConnectedUrl(null);
     clearPersistedState().catch(() => {});
     set({
-      messages: [],
       terminalBuffer: '',
       terminalRawBuffer: '',
       sessions: [],
@@ -757,9 +748,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   addMessage: (message) => {
-    set((state) => ({
+    updateActiveSession((ss) => ({
       messages: [
-        ...state.messages.filter((m) => m.id !== 'thinking' || message.id === 'thinking'),
+        ...ss.messages.filter((m) => m.id !== 'thinking' || message.id === 'thinking'),
         message,
       ],
     }));
@@ -781,34 +772,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       timestamp: Date.now(),
     };
 
-    const activeId = get().activeSessionId;
-    if (activeId && get().sessionStates[activeId]) {
-      updateActiveSession((ss) => ({
-        messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
-        streamingMessageId: 'pending',
-      }));
-    } else {
-      set((state) => ({
-        messages: [...filterThinking(state.messages), userMsg, thinkingMsg],
-        streamingMessageId: 'pending',
-      }));
-    }
+    updateActiveSession((ss) => ({
+      messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
+      streamingMessageId: 'pending',
+    }));
 
     // Safety net: if no stream_start arrives, clear pending state after 5 seconds.
     setTimeout(() => {
-      if (get().streamingMessageId !== 'pending') return;
       const sid = get().activeSessionId;
-      if (sid && get().sessionStates[sid]) {
-        updateActiveSession((ss) => ({
-          messages: filterThinking(ss.messages),
-          streamingMessageId: null,
-        }));
-      } else {
-        set((s) => ({
-          messages: filterThinking(s.messages),
-          streamingMessageId: null,
-        }));
-      }
+      const ss = sid ? get().sessionStates[sid] : null;
+      if (!ss || ss.streamingMessageId !== 'pending') return;
+      updateActiveSession((ss) => ({
+        messages: filterThinking(ss.messages),
+        streamingMessageId: null,
+      }));
     }, 5000);
   },
 
@@ -904,22 +881,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   markPromptAnswered: (messageId: string, answer: string) => {
-    const { activeSessionId, sessionStates } = get();
     const now = Date.now();
-
-    if (activeSessionId && sessionStates[activeSessionId]) {
-      updateActiveSession((ss) => ({
-        messages: ss.messages.map((m) =>
-          m.id === messageId ? { ...m, answered: answer, answeredAt: now } : m
-        ),
-      }));
-    } else {
-      set((state) => ({
-        messages: state.messages.map((m) =>
-          m.id === messageId ? { ...m, answered: answer, answeredAt: now } : m
-        ),
-      }));
-    }
+    updateActiveSession((ss) => ({
+      messages: ss.messages.map((m) =>
+        m.id === messageId ? { ...m, answered: answer, answeredAt: now } : m
+      ),
+    }));
   },
 
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => {
@@ -938,12 +905,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }
     }
 
-    // Fallback: check legacy flat messages
-    set((state) => ({
-      messages: state.messages.map((m) =>
-        m.requestId === requestId ? { ...m, answered: answer, answeredAt: now } : m
-      ),
-    }));
   },
 
   setModel: (model: string) => {
@@ -1123,27 +1084,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Mark as user-initiated switch so session_switched handler uses session-switch dedup
     if (serverNotify) setPendingSwitchSessionId(sessionId);
 
-    // Optimistically switch to cached state + dismiss notifications for target session
-    const cached = sessionStates[sessionId];
+    // Optimistically switch active session + dismiss notifications for target session
     const filteredNotifications = get().sessionNotifications.filter(
       (n) => n.sessionId !== sessionId,
     );
-    if (cached) {
-      set({
-        activeSessionId: sessionId,
-        messages: cached.messages,
-        streamingMessageId: cached.streamingMessageId,
-        claudeReady: cached.claudeReady,
-        activeModel: cached.activeModel,
-        permissionMode: cached.permissionMode,
-        contextUsage: cached.contextUsage,
-        lastResultCost: cached.lastResultCost,
-        lastResultDuration: cached.lastResultDuration,
-        sessionNotifications: filteredNotifications,
-      });
-    } else {
-      set({ activeSessionId: sessionId, sessionNotifications: filteredNotifications });
-    }
+    set({ activeSessionId: sessionId, sessionNotifications: filteredNotifications });
 
     if (serverNotify && socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'switch_session', sessionId });
