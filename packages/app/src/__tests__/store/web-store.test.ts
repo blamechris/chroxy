@@ -61,6 +61,7 @@ describe('WebStore', () => {
     const updated = useWebStore.getState().webTasks[0];
     expect(updated.status).toBe('failed');
     expect(updated.error).toBe('something failed');
+    expect(updated.updatedAt).toBeGreaterThan(1000);
   });
 
   it('updateTaskError does not crash on unknown task', () => {

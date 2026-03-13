@@ -30,7 +30,7 @@ export const useWebStore = create<WebState>((set) => ({
   updateTaskError: (taskId, error) =>
     set((state) => ({
       webTasks: state.webTasks.map((t) =>
-        t.taskId === taskId ? { ...t, status: 'failed' as const, error } : t,
+        t.taskId === taskId ? { ...t, status: 'failed' as const, error, updatedAt: Date.now() } : t,
       ),
     })),
 
