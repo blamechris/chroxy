@@ -108,7 +108,7 @@ pub fn percent_encode_html(html: &str) -> String {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
             | b'-' | b'_' | b'.' | b'~' | b'!' | b'*' | b'\'' | b'(' | b')'
-            | b';' | b':' | b'@' | b',' | b'/' | b'?' | b'#' | b'[' | b']'
+            | b';' | b':' | b'@' | b',' | b'/'
             | b'=' | b'&' => {
                 encoded.push(byte as char);
             }
@@ -213,7 +213,8 @@ mod tests {
     #[test]
     fn percent_encode_html_preserves_safe_chars() {
         assert_eq!(percent_encode_html("hello"), "hello");
-        assert_eq!(percent_encode_html("/path?key=val"), "/path?key=val");
+        assert_eq!(percent_encode_html("/path=val&k=v"), "/path=val&k=v");
+        assert_eq!(percent_encode_html("a-b_c.d~e"), "a-b_c.d~e");
     }
 
     #[test]
@@ -224,5 +225,22 @@ mod tests {
         assert!(encoded.contains("%20"));  // space
         assert!(!encoded.contains('<'));
         assert!(!encoded.contains('>'));
+    }
+
+    #[test]
+    fn percent_encode_html_encodes_hash_and_question_mark() {
+        // # and ? are URI-reserved and must be encoded in data URI bodies
+        let encoded = percent_encode_html("color: #ff0000; url?token=abc");
+        assert!(encoded.contains("%23"), "# must be percent-encoded");
+        assert!(encoded.contains("%3F"), "? must be percent-encoded");
+        assert!(!encoded.contains('#'), "literal # must not appear");
+        assert!(!encoded.contains('?'), "literal ? must not appear");
+    }
+
+    #[test]
+    fn percent_encode_html_encodes_brackets() {
+        let encoded = percent_encode_html("arr[0]");
+        assert!(encoded.contains("%5B"), "[ must be percent-encoded");
+        assert!(encoded.contains("%5D"), "] must be percent-encoded");
     }
 }
