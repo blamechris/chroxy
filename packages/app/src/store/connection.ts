@@ -115,6 +115,7 @@ import {
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
+import { useCostStore } from './cost';
 import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto';
 import {
   loadPersistedState,
@@ -661,6 +662,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     clearMessageQueue();
     useMultiClientStore.getState().resetPresence();
     useWebStore.getState().reset();
+    useCostStore.getState().reset();
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
     set({
       connectionPhase: 'disconnected',
