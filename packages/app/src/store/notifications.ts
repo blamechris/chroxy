@@ -1,29 +1,29 @@
-import { create } from 'zustand'
-import type { ServerError, SessionNotification } from './types'
+import { create } from 'zustand';
+import type { ServerError, SessionNotification } from './types';
 
 interface TimeoutWarning {
-  sessionId: string
-  sessionName: string
-  remainingMs: number
-  receivedAt: number
+  sessionId: string;
+  sessionName: string;
+  remainingMs: number;
+  receivedAt: number;
 }
 
 interface NotificationState {
-  serverErrors: ServerError[]
-  sessionNotifications: SessionNotification[]
-  shutdownReason: 'restart' | 'shutdown' | 'crash' | null
-  restartEtaMs: number | null
-  restartingSince: number | null
-  timeoutWarning: TimeoutWarning | null
+  serverErrors: ServerError[];
+  sessionNotifications: SessionNotification[];
+  shutdownReason: 'restart' | 'shutdown' | 'crash' | null;
+  restartEtaMs: number | null;
+  restartingSince: number | null;
+  timeoutWarning: TimeoutWarning | null;
 
-  addServerError: (error: ServerError) => void
-  dismissServerError: (id: string) => void
-  addSessionNotification: (notification: SessionNotification) => void
-  dismissSessionNotification: (id: string) => void
-  setShutdown: (reason: 'restart' | 'shutdown' | 'crash', etaMs: number, since: number) => void
-  setTimeoutWarning: (warning: TimeoutWarning | null) => void
-  dismissTimeoutWarning: () => void
-  reset: () => void
+  addServerError: (error: ServerError) => void;
+  dismissServerError: (id: string) => void;
+  addSessionNotification: (notification: SessionNotification) => void;
+  dismissSessionNotification: (id: string) => void;
+  setShutdown: (reason: 'restart' | 'shutdown' | 'crash', etaMs: number, since: number) => void;
+  setTimeoutWarning: (warning: TimeoutWarning | null) => void;
+  dismissTimeoutWarning: () => void;
+  reset: () => void;
 }
 
 const initialState = {
@@ -33,7 +33,7 @@ const initialState = {
   restartEtaMs: null as number | null,
   restartingSince: null as number | null,
   timeoutWarning: null as TimeoutWarning | null,
-}
+};
 
 export const useNotificationStore = create<NotificationState>((set) => ({
   ...initialState,
@@ -52,8 +52,8 @@ export const useNotificationStore = create<NotificationState>((set) => ({
     set((state) => {
       const filtered = state.sessionNotifications.filter(
         (n) => !(n.sessionId === notification.sessionId && n.eventType === notification.eventType),
-      )
-      return { sessionNotifications: [...filtered, notification] }
+      );
+      return { sessionNotifications: [...filtered, notification] };
     }),
 
   dismissSessionNotification: (id) =>
@@ -71,4 +71,4 @@ export const useNotificationStore = create<NotificationState>((set) => ({
     set({ timeoutWarning: null }),
 
   reset: () => set(initialState),
-}))
+}));
