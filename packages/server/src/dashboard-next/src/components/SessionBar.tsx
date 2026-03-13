@@ -7,6 +7,12 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 
 export type SessionStatus = 'idle' | 'busy' | 'needs-attention'
 
+const STATUS_LABELS: Record<SessionStatus, string> = {
+  idle: 'Session idle',
+  busy: 'Session busy — processing...',
+  'needs-attention': 'Needs attention — action required',
+}
+
 export interface SessionTabData {
   sessionId: string
   name: string
@@ -108,16 +114,11 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             {(() => {
               const effectiveStatus = session.status ?? (session.isBusy ? 'busy' : undefined)
               if (!effectiveStatus || (effectiveStatus === 'idle' && !session.status)) return null
-              const statusLabels: Record<SessionStatus, string> = {
-                idle: 'Session idle',
-                busy: 'Session busy — processing...',
-                'needs-attention': 'Needs attention — action required',
-              }
               return (
                 <span
                   className={`tab-status-dot status-${effectiveStatus}`}
                   data-testid="status-dot"
-                  title={statusLabels[effectiveStatus]}
+                  title={STATUS_LABELS[effectiveStatus]}
                 />
               )
             })()}

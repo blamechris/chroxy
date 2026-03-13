@@ -22,6 +22,9 @@ const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
 const SERVER_VERSION = packageJson.version
 
+// Tools that indicate a "writing" activity state for push notifications (#2085)
+const ACTIVITY_WRITE_TOOLS = ['Write', 'Edit', 'NotebookEdit']
+
 function isWithinHome(dir) {
   const rel = relative(homedir(), dir)
   return !rel.startsWith('..') && !rel.startsWith(sep)
@@ -159,15 +162,10 @@ export async function startCliServer(config) {
           pushManager.send('idle', 'Claude is waiting', body, { sessionId })
         }
       }
-      // Activity update: idle (throttled)
-      if (pushManager.hasTokens) {
-        const sessionName = sessionManager.getSession(sessionId)?.name
-        pushManager.send('activity_update', 'Session idle', 'Claude finished responding', {
-          sessionId,
-          sessionName,
-          state: 'idle',
-          elapsed: data.duration,
-        })
+    } else if (event === 'result') {
+      // result without cost (e.g. Gemini providers) — log duration if available
+      if (data.duration != null) {
+        console.log(`[cli] Session ${sessionId} query completed in ${data.duration}ms`)
       }
     } else if (event === 'budget_warning') {
       console.warn(`[cli] Budget warning: ${data.message}`)
@@ -177,7 +175,16 @@ export async function startCliServer(config) {
 
     // Activity update pushes for state transitions (#2085)
     if (pushManager.hasTokens) {
-      if (event === 'stream_start') {
+      if (event === 'result') {
+        // Activity update: idle — fires for all result events regardless of cost
+        const sessionName = sessionManager.getSession(sessionId)?.name
+        pushManager.send('activity_update', 'Session idle', 'Claude finished responding', {
+          sessionId,
+          sessionName,
+          state: 'idle',
+          ...(data.duration != null && { elapsed: data.duration }),
+        })
+      } else if (event === 'stream_start') {
         const sessionName = sessionManager.getSession(sessionId)?.name
         pushManager.send('activity_update', 'Session active', 'Claude is thinking', {
           sessionId,
@@ -185,8 +192,7 @@ export async function startCliServer(config) {
           state: 'thinking',
         })
       } else if (event === 'tool_start' && data.tool) {
-        const WRITE_TOOLS = ['Write', 'Edit', 'NotebookEdit']
-        if (WRITE_TOOLS.includes(data.tool)) {
+        if (ACTIVITY_WRITE_TOOLS.includes(data.tool)) {
           const sessionName = sessionManager.getSession(sessionId)?.name
           const detail = data.input?.file_path || data.tool
           pushManager.send('activity_update', 'Session active', `Claude is writing: ${detail}`, {

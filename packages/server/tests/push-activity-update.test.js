@@ -24,6 +24,7 @@ function mockFetchOk() {
 describe('PushManager — activity_update category (#2085)', () => {
   let manager
   let fetchMock
+  const originalFetch = globalThis.fetch
 
   beforeEach(() => {
     manager = new PushManager()
@@ -35,6 +36,7 @@ describe('PushManager — activity_update category (#2085)', () => {
   afterEach(() => {
     manager.tokens.clear()
     manager._lastSent.clear()
+    globalThis.fetch = originalFetch
     mock.restoreAll()
   })
 
