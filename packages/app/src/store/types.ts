@@ -259,6 +259,9 @@ export interface WebFeatureStatus {
   teleport: boolean;
 }
 
+import type { SessionActivity, ActivityState } from './session-activity';
+export type { SessionActivity, ActivityState };
+
 export interface SessionState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
@@ -279,6 +282,7 @@ export interface SessionState {
   sessionContext: SessionContext | null;
   mcpServers: McpServer[];
   devPreviews: DevPreview[];
+  activityState: SessionActivity;
 }
 
 export interface ServerError {
