@@ -42,6 +42,16 @@ function getTauriEvent(): { listen: <T>(event: string, handler: (e: TauriEvent<T
   return tauri.event as { listen: <T>(event: string, handler: (e: TauriEvent<T>) => void) => Promise<UnlistenFn> }
 }
 
+/** Get the Tauri invoke function for IPC commands, or null if not in Tauri. */
+function getTauriInvoke(): ((cmd: string) => Promise<unknown>) | null {
+  if (!isTauri()) return null
+  const tauri = (window as unknown as Record<string, unknown>).__TAURI__ as Record<string, unknown>
+  const core = tauri.core as Record<string, unknown> | undefined
+  if (core?.invoke) return core.invoke as (cmd: string) => Promise<unknown>
+  // Fallback for older Tauri JS API shapes
+  return (tauri.invoke as (cmd: string) => Promise<unknown>) ?? null
+}
+
 export function useTauriEvents() {
   useEffect(() => {
     const tauriEvent = getTauriEvent()
@@ -53,6 +63,8 @@ export function useTauriEvents() {
     unlisteners.push(
       tauriEvent.listen<ServerReadyPayload>('server_ready', (event) => {
         const { url, token, port } = event.payload
+        // Clear any previous startup failure logs
+        useConnectionStore.setState({ serverStartupLogs: null })
         // If we're already on the dashboard, reconnect via the store
         if (window.location.href.includes('/dashboard')) {
           // Derive WS URL from the event payload so reconnect works even if the port changed
@@ -79,11 +91,25 @@ export function useTauriEvents() {
       })
     )
 
-    // Server error — disconnect and set error
+    // Server error — disconnect, set error, and fetch server logs for diagnostics
     unlisteners.push(
       tauriEvent.listen<ServerErrorPayload>('server_error', (event) => {
         useConnectionStore.getState().disconnect()
         useConnectionStore.setState({ connectionError: event.payload.message })
+
+        // Fetch server stdout/stderr logs via IPC for startup failure diagnostics
+        const invoke = getTauriInvoke()
+        if (invoke) {
+          invoke('get_server_logs')
+            .then((logs) => {
+              if (Array.isArray(logs)) {
+                useConnectionStore.setState({ serverStartupLogs: logs as string[] })
+              }
+            })
+            .catch(() => {
+              // IPC may fail if the backend is in a bad state — ignore silently
+            })
+        }
       })
     )
 
