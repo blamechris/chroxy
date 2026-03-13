@@ -47,6 +47,33 @@ export const ClientMessageType = {
   TeleportWebTask: 'teleport_web_task',
   Ping: 'ping',
   Encrypted: 'encrypted',
+  // File & git operations
+  AddRepo: 'add_repo',
+  Cli: 'cli',
+  GetDiff: 'get_diff',
+  GitBranches: 'git_branches',
+  GitCommit: 'git_commit',
+  GitStage: 'git_stage',
+  GitStatus: 'git_status',
+  GitUnstage: 'git_unstage',
+  ListFiles: 'list_files',
+  ListRepos: 'list_repos',
+  RemoveRepo: 'remove_repo',
+  // Conversations
+  ListConversations: 'list_conversations',
+  ResumeConversation: 'resume_conversation',
+  SearchConversations: 'search_conversations',
+  // Providers & budgets
+  ListProviders: 'list_providers',
+  RequestCostSummary: 'request_cost_summary',
+  ResumeBudget: 'resume_budget',
+  // Pairing & session context
+  Pair: 'pair',
+  QueryPermissionAudit: 'query_permission_audit',
+  RequestSessionContext: 'request_session_context',
+  // Session subscriptions
+  SubscribeSessions: 'subscribe_sessions',
+  UnsubscribeSessions: 'unsubscribe_sessions',
 } as const
 
 export type ClientMessageTypeValue = typeof ClientMessageType[keyof typeof ClientMessageType]
@@ -113,6 +140,35 @@ export const ServerMessageType = {
   WebTaskError: 'web_task_error',
   WebTaskList: 'web_task_list',
   Encrypted: 'encrypted',
+  // File & git results
+  DiffResult: 'diff_result',
+  Error: 'error',
+  FileList: 'file_list',
+  GitBranchesResult: 'git_branches_result',
+  GitCommitResult: 'git_commit_result',
+  GitStageResult: 'git_stage_result',
+  GitStatusResult: 'git_status_result',
+  GitUnstageResult: 'git_unstage_result',
+  WriteFileResult: 'write_file_result',
+  // Session activity & context
+  LogEntry: 'log_entry',
+  SessionActivity: 'session_activity',
+  SessionContext: 'session_context',
+  SessionUpdated: 'session_updated',
+  DiscoveredSessions: 'discovered_sessions',
+  // Pairing
+  PairFail: 'pair_fail',
+  RateLimited: 'rate_limited',
+  // Agent lifecycle
+  AgentSpawned: 'agent_spawned',
+  AgentCompleted: 'agent_completed',
+  // Providers & costs
+  ProviderList: 'provider_list',
+  PushTokenError: 'push_token_error',
+  CostUpdate: 'cost_update',
+  BudgetWarning: 'budget_warning',
+  BudgetExceeded: 'budget_exceeded',
+  WebFeatureStatus: 'web_feature_status',
 } as const
 
 export type ServerMessageTypeValue = typeof ServerMessageType[keyof typeof ServerMessageType]
