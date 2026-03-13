@@ -324,6 +324,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionContext: null,
       mcpServers: [],
       devPreviews: [],
+      activityState: { state: 'idle' as const, startedAt: Date.now() },
     };
   },
 

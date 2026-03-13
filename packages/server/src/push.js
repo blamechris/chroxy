@@ -2,7 +2,7 @@
  * PushManager — sends push notifications via Expo Push API.
  *
  * Stores push tokens registered by connected clients and sends
- * notifications for permission prompts and idle alerts.
+ * notifications for permission prompts, idle alerts, and activity updates.
  * Rate-limited per category to avoid notification spam.
  *
  * No Expo account or additional infrastructure required — uses the
@@ -22,6 +22,9 @@ const RATE_LIMITS = {
   permission: 0,       // Always send permission prompts immediately
   idle: 60_000,        // At most once per minute for idle alerts
   result: 30_000,      // At most once per 30s for task completion
+  activity_update: 10_000,  // Throttled: thinking/writing state changes
+  activity_waiting: 0,      // Immediate: permission/input waiting
+  activity_error: 0,        // Immediate: session errors
 }
 
 export class PushManager {
@@ -93,7 +96,7 @@ export class PushManager {
 
   /**
    * Send a push notification to all registered tokens.
-   * @param {string} category - 'permission' | 'idle' | 'result'
+   * @param {string} category - 'permission' | 'idle' | 'result' | 'activity_update' | 'activity_waiting' | 'activity_error'
    * @param {string} title - Notification title
    * @param {string} body - Notification body text
    * @param {object} [data] - Extra data payload

@@ -49,6 +49,7 @@ import type {
   GitBranch,
 } from './types';
 import { createEmptySessionState } from './utils';
+import { deriveActivityState } from './session-activity';
 import { clearPersistedSession } from './persistence';
 import { getCallback } from './imperative-callbacks';
 
@@ -393,6 +394,18 @@ export function updateSession(sessionId: string, updater: (session: SessionState
   const patch = updater(current);
   if (Object.keys(patch).length === 0) return;
   const updated = { ...current, ...patch };
+  // Auto-derive activity state from session state changes
+  const newActivity = deriveActivityState(
+    {
+      isIdle: updated.isIdle,
+      streamingMessageId: updated.streamingMessageId,
+      isPlanPending: updated.isPlanPending,
+    },
+    current.activityState,
+  );
+  if (newActivity.state !== updated.activityState?.state || newActivity.startedAt !== updated.activityState?.startedAt) {
+    updated.activityState = newActivity;
+  }
   const newSessionStates = { ...state.sessionStates, [sessionId]: updated };
 
   if (sessionId === state.activeSessionId) {

@@ -84,5 +84,6 @@ export function createEmptySessionState(): SessionState {
     sessionContext: null,
     mcpServers: [],
     devPreviews: [],
+    activityState: { state: 'idle', startedAt: Date.now() },
   };
 }
