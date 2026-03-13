@@ -160,6 +160,28 @@ function _isSecureRequest(req) {
  *   { type: 'list_web_tasks' }                          — request list of web tasks
  *   { type: 'teleport_web_task', taskId }               — pull cloud task into local session
  *   { type: 'ping' }                                    — client heartbeat (server responds with pong)
+ *   { type: 'add_repo', path }                          — add a repository path to workspace
+ *   { type: 'cli', command }                            — send raw CLI command to active session
+ *   { type: 'get_diff', path? }                         — request git diff for working directory
+ *   { type: 'git_branches' }                            — request git branch list
+ *   { type: 'git_commit', message, files? }             — commit staged/specified files
+ *   { type: 'git_stage', files }                        — stage files for commit
+ *   { type: 'git_status' }                              — request git status
+ *   { type: 'git_unstage', files }                      — unstage files
+ *   { type: 'list_conversations' }                      — request saved conversation list
+ *   { type: 'list_files', path? }                       — request file listing for a path
+ *   { type: 'list_providers' }                          — request available provider list
+ *   { type: 'list_repos' }                              — request workspace repository list
+ *   { type: 'pair', pairingCode }                       — pair with another device via pairing code
+ *   { type: 'query_permission_audit', last? }           — query permission audit log
+ *   { type: 'remove_repo', path }                       — remove a repository path from workspace
+ *   { type: 'request_cost_summary' }                    — request cost summary for current session
+ *   { type: 'request_session_context', sessionId? }     — request session context (cwd, conversation, etc.)
+ *   { type: 'resume_budget' }                           — resume after budget exceeded
+ *   { type: 'resume_conversation', conversationId }     — resume a saved conversation
+ *   { type: 'search_conversations', query }             — search saved conversations
+ *   { type: 'subscribe_sessions' }                      — subscribe to session discovery events
+ *   { type: 'unsubscribe_sessions' }                    — unsubscribe from session discovery
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
@@ -222,6 +244,30 @@ function _isSecureRequest(req) {
  *   { type: 'web_task_updated', task }                  — cloud task status changed
  *   { type: 'web_task_error', taskId?, message }        — cloud task error
  *   { type: 'web_task_list', tasks }                    — response to list_web_tasks
+ *   { type: 'diff_result', diff, error? }              — git diff result
+ *   { type: 'error', message }                          — general error message
+ *   { type: 'file_list', path, files, error? }          — file listing response
+ *   { type: 'git_branches_result', branches, current, error? } — git branches result
+ *   { type: 'git_commit_result', success, hash?, error? }     — git commit result
+ *   { type: 'git_stage_result', success, error? }       — git stage result
+ *   { type: 'git_status_result', status, error? }       — git status result
+ *   { type: 'git_unstage_result', success, error? }     — git unstage result
+ *   { type: 'write_file_result', success, error? }      — write file result
+ *   { type: 'log_entry', level, message, timestamp }    — server log entry for dashboard
+ *   { type: 'session_activity', sessionId, isBusy, lastCost } — session busy/idle state change
+ *   { type: 'session_context', sessionId, cwd, conversationId?, ... } — session context data
+ *   { type: 'session_updated', sessionId, name }        — session metadata updated
+ *   { type: 'discovered_sessions', sessions }           — discovered local Claude sessions
+ *   { type: 'pair_fail', reason }                       — pairing failed
+ *   { type: 'rate_limited', message }                   — client rate-limited
+ *   { type: 'agent_spawned', sessionId, agentId, parentToolId, model } — background agent spawned
+ *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed
+ *   { type: 'provider_list', providers }                — available providers
+ *   { type: 'push_token_error', message }               — push token registration error
+ *   { type: 'cost_update', sessionId, cost }            — session cost update
+ *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit
+ *   { type: 'budget_exceeded', sessionId, message, ... } — budget exceeded
+ *   { type: 'web_feature_status', features }            — web feature availability
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
