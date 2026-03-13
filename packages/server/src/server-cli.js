@@ -135,6 +135,16 @@ export async function startCliServer(config) {
       // Forward session errors as server_error (in addition to the in-chat error message)
       const isFatal = /failed to stay alive|max respawn/i.test(data.message)
       if (wsServer) wsServer.broadcastError('session', data.message, !isFatal, sessionId)
+      // Activity update: error (immediate)
+      if (pushManager.hasTokens) {
+        const sessionName = sessionManager.getSession(sessionId)?.name
+        pushManager.send('activity_error', 'Session error', data.message, {
+          sessionId,
+          sessionName,
+          state: 'error',
+          detail: data.message,
+        })
+      }
     } else if (event === 'result' && data.cost != null) {
       console.log(`[cli] Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
       // Push notification for idle: fire when no clients connected OR when clients are
@@ -149,10 +159,52 @@ export async function startCliServer(config) {
           pushManager.send('idle', 'Claude is waiting', body, { sessionId })
         }
       }
+      // Activity update: idle (throttled)
+      if (pushManager.hasTokens) {
+        const sessionName = sessionManager.getSession(sessionId)?.name
+        pushManager.send('activity_update', 'Session idle', 'Claude finished responding', {
+          sessionId,
+          sessionName,
+          state: 'idle',
+          elapsed: data.duration,
+        })
+      }
     } else if (event === 'budget_warning') {
       console.warn(`[cli] Budget warning: ${data.message}`)
     } else if (event === 'budget_exceeded') {
       console.warn(`[cli] Budget exceeded: ${data.message}`)
+    }
+
+    // Activity update pushes for state transitions (#2085)
+    if (pushManager.hasTokens) {
+      if (event === 'stream_start') {
+        const sessionName = sessionManager.getSession(sessionId)?.name
+        pushManager.send('activity_update', 'Session active', 'Claude is thinking', {
+          sessionId,
+          sessionName,
+          state: 'thinking',
+        })
+      } else if (event === 'tool_start' && data.tool) {
+        const WRITE_TOOLS = ['Write', 'Edit', 'NotebookEdit']
+        if (WRITE_TOOLS.includes(data.tool)) {
+          const sessionName = sessionManager.getSession(sessionId)?.name
+          const detail = data.input?.file_path || data.tool
+          pushManager.send('activity_update', 'Session active', `Claude is writing: ${detail}`, {
+            sessionId,
+            sessionName,
+            state: 'writing',
+            detail,
+          })
+        }
+      } else if (event === 'permission_request') {
+        const sessionName = sessionManager.getSession(sessionId)?.name
+        pushManager.send('activity_waiting', 'Waiting for approval', `Permission needed: ${data.tool}`, {
+          sessionId,
+          sessionName,
+          state: 'waiting',
+          detail: data.tool,
+        })
+      }
     }
   })
 
