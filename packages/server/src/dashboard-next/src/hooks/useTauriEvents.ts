@@ -14,9 +14,6 @@ import { useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { isTauri } from '../utils/tauri'
 
-// Re-export for consumers that imported isTauri from this module
-export { isTauri }
-
 interface TauriEvent<T> {
   payload: T
 }
