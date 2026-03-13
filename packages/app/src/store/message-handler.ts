@@ -43,6 +43,7 @@ import type {
   SessionState,
   SlashCommand,
   ConversationSummary,
+  SearchResult,
   ToolResultImage,
   WebTask,
   GitFileStatus,

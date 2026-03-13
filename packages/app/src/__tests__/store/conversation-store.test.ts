@@ -88,13 +88,13 @@ describe('ConversationStore', () => {
   })
 
   it('sets slash commands', () => {
-    const commands = [{ name: '/test', description: 'Test command', source: 'project' }]
+    const commands = [{ name: '/test', description: 'Test command', source: 'project' as const }]
     useConversationStore.getState().setSlashCommands(commands)
     expect(useConversationStore.getState().slashCommands).toEqual(commands)
   })
 
   it('sets custom agents', () => {
-    const agents = [{ name: 'my-agent', description: 'Custom agent', source: 'user' }]
+    const agents = [{ name: 'my-agent', description: 'Custom agent', source: 'user' as const }]
     useConversationStore.getState().setCustomAgents(agents)
     expect(useConversationStore.getState().customAgents).toEqual(agents)
   })
@@ -105,7 +105,7 @@ describe('ConversationStore', () => {
       { conversationId: 'c1', project: null, projectName: 'proj1', modifiedAt: '2026-01-01', modifiedAtMs: 1000, sizeBytes: 100, preview: null, cwd: null },
     ])
     store.addCheckpoint({ id: 'cp1', name: 'Save', description: '', messageCount: 5, createdAt: 1000, hasGitSnapshot: false })
-    store.setSlashCommands([{ name: '/test', description: 'Test', source: 'project' }])
+    store.setSlashCommands([{ name: '/test', description: 'Test', source: 'project' as const }])
     store.reset()
     const state = useConversationStore.getState()
     expect(state.conversationHistory).toEqual([])
