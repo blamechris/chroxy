@@ -108,18 +108,6 @@ pub fn show_window(app: &AppHandle) {
     }
 }
 
-/// Toggle main window visibility (for tray left-click).
-pub fn toggle_window(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
-        if win.is_visible().unwrap_or(false) {
-            let _ = win.hide();
-        } else {
-            let _ = win.show();
-            let _ = win.set_focus();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
