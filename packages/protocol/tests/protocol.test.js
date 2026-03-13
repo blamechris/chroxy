@@ -203,24 +203,21 @@ describe('message type enums match ws-server.js protocol docs', () => {
   })
 })
 
-describe('message type enums cover ws-schemas.js', () => {
-  it('ClientMessageType covers all client schemas in ws-schemas.js', async () => {
+describe('message type enums cover protocol schemas', () => {
+  it('ClientMessageType covers all client schemas in @chroxy/protocol', async () => {
     const { readFileSync } = await import('node:fs')
     const { resolve } = await import('node:path')
     const { ClientMessageType } = await import('../src/index.ts')
 
-    const schemasPath = resolve(import.meta.dirname, '../../server/src/ws-schemas.js')
+    // Read the protocol schemas source (now the single source of truth)
+    const schemasPath = resolve(import.meta.dirname, '../src/schemas/client.ts')
     const src = readFileSync(schemasPath, 'utf-8')
 
     // Extract the ClientMessageSchema union — find all z.literal types in its discriminatedUnion
     const clientSection = src.match(/export const ClientMessageSchema[\s\S]*?z\.discriminatedUnion\('type',\s*\[([\s\S]*?)\]\s*\)/)?.[1]
     assert.ok(clientSection, 'Should find ClientMessageSchema discriminatedUnion')
 
-    // Extract all type literals from the schema references
-    // The schemas are defined above and referenced by name — extract types from all schema definitions
-    const allLiterals = [...src.matchAll(/z\.literal\('([a-z_]+)'\)/g)].map(m => m[1])
-    // Filter to client-only types: those that appear in schema objects referenced by ClientMessageSchema
-    // We use a simpler approach: get types from the ClientMessageSchema union members
+    // Extract schema names referenced in the union
     const clientSchemaNames = [...clientSection.matchAll(/(\w+Schema)/g)].map(m => m[1])
 
     const clientTypes = new Set()
@@ -229,15 +226,14 @@ describe('message type enums cover ws-schemas.js', () => {
       if (schemaDef) clientTypes.add(schemaDef)
     }
 
-    assert.ok(clientTypes.size > 0, 'Should find client types in ws-schemas.js')
+    assert.ok(clientTypes.size > 0, 'Should find client types in protocol schemas')
 
     const enumValues = new Set(Object.values(ClientMessageType))
 
     // Every client schema type should be in the enum
-    // Skip 'encrypted' — it's in the envelope wrapper, not a client-specific schema
     for (const type of clientTypes) {
       assert.ok(enumValues.has(type),
-        `ClientMessageType should contain '${type}' from ws-schemas.js`)
+        `ClientMessageType should contain '${type}' from protocol schemas`)
     }
   })
 })

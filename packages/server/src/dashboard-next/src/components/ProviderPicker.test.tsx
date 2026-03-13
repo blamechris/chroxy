@@ -87,7 +87,6 @@ describe('Provider picker in session creation (#1366)', () => {
 
   test('ListProvidersSchema exists in ws-schemas', () => {
     expect(schemasSrc).toMatch(/ListProvidersSchema/)
-    expect(schemasSrc).toMatch(/list_providers/)
   })
 
   test('list_providers handler exists in settings-handlers', () => {

@@ -172,3 +172,6 @@ export const ServerMessageType = {
 } as const
 
 export type ServerMessageTypeValue = typeof ServerMessageType[keyof typeof ServerMessageType]
+
+// Re-export schemas for convenience (also available via '@chroxy/protocol/schemas')
+export * from './schemas/index.ts'
