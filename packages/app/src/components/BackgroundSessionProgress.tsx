@@ -1,13 +1,62 @@
-import React from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { useConnectionStore } from '../store/connection';
 import { COLORS } from '../constants/colors';
+import type { ActivityState } from '../store/session-activity';
 
-function getSessionStatus(state: { isIdle: boolean; streamingMessageId: string | null; isPlanPending: boolean }): string | null {
-  if (state.isPlanPending) return 'Waiting for approval';
-  if (state.streamingMessageId) return 'Writing...';
-  if (!state.isIdle) return 'Thinking...';
-  return null;
+export function getActivityLabel(state: ActivityState, detail?: string): string | null {
+  switch (state) {
+    case 'thinking':
+      return 'Thinking...';
+    case 'busy':
+      return detail || 'Working...';
+    case 'waiting':
+      return detail ? `Waiting: ${detail}` : 'Waiting for approval';
+    case 'error':
+      return 'Error';
+    case 'idle':
+      return null;
+  }
+}
+
+export function getActivityColor(state: ActivityState): string {
+  switch (state) {
+    case 'thinking':
+      return COLORS.accentBlue;
+    case 'busy':
+      return COLORS.accentOrange;
+    case 'waiting':
+      return COLORS.accentOrange;
+    case 'error':
+      return COLORS.accentRed;
+    case 'idle':
+      return COLORS.textMuted;
+  }
+}
+
+function formatElapsed(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return `${minutes}m ${remainingSeconds}s`;
+}
+
+function ElapsedTimer({ startedAt }: { startedAt: number }) {
+  const [elapsed, setElapsed] = useState(Date.now() - startedAt);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    setElapsed(Date.now() - startedAt);
+    intervalRef.current = setInterval(() => {
+      setElapsed(Date.now() - startedAt);
+    }, 1000);
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [startedAt]);
+
+  return <Text style={styles.elapsed}>{formatElapsed(elapsed)}</Text>;
 }
 
 export function BackgroundSessionProgress() {
@@ -21,11 +70,14 @@ export function BackgroundSessionProgress() {
     .map((s) => {
       const state = sessionStates[s.sessionId];
       if (!state) return null;
-      const status = getSessionStatus(state);
-      if (!status) return null;
-      return { sessionId: s.sessionId, name: s.name, status };
+      const activity = state.activityState;
+      if (!activity || activity.state === 'idle') return null;
+      const label = getActivityLabel(activity.state, activity.detail);
+      if (!label) return null;
+      const color = getActivityColor(activity.state);
+      return { sessionId: s.sessionId, name: s.name, label, color, startedAt: activity.startedAt };
     })
-    .filter(Boolean) as { sessionId: string; name: string; status: string }[];
+    .filter(Boolean) as { sessionId: string; name: string; label: string; color: string; startedAt: number }[];
 
   if (busySessions.length === 0) return null;
 
@@ -38,11 +90,12 @@ export function BackgroundSessionProgress() {
           onPress={() => switchSession(s.sessionId)}
           activeOpacity={0.7}
           accessibilityRole="button"
-          accessibilityLabel={`${s.name}: ${s.status}. Tap to switch.`}
+          accessibilityLabel={`${s.name}: ${s.label}. Tap to switch.`}
         >
-          <View style={styles.dot} />
+          <View style={[styles.dot, { backgroundColor: s.color }]} />
           <Text style={styles.name} numberOfLines={1}>{s.name}</Text>
-          <Text style={styles.status} numberOfLines={1}>{s.status}</Text>
+          <Text style={[styles.status, { color: s.color }]} numberOfLines={1}>{s.label}</Text>
+          <ElapsedTimer startedAt={s.startedAt} />
         </TouchableOpacity>
       ))}
     </View>
@@ -66,7 +119,6 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: COLORS.accentOrange,
   },
   name: {
     color: COLORS.textSecondary,
@@ -75,8 +127,12 @@ const styles = StyleSheet.create({
     maxWidth: 120,
   },
   status: {
-    color: COLORS.textMuted,
     fontSize: 12,
     flex: 1,
+  },
+  elapsed: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontVariant: ['tabular-nums'],
   },
 });
