@@ -22,6 +22,7 @@ const RATE_LIMITS = {
   permission: 0,       // Always send permission prompts immediately
   idle: 60_000,        // At most once per minute for idle alerts
   result: 30_000,      // At most once per 30s for task completion
+  activity_update: 60_000, // At most once per minute for session progress
 }
 
 export class PushManager {
@@ -93,7 +94,7 @@ export class PushManager {
 
   /**
    * Send a push notification to all registered tokens.
-   * @param {string} category - 'permission' | 'idle' | 'result'
+   * @param {string} category - 'permission' | 'idle' | 'result' | 'activity_update'
    * @param {string} title - Notification title
    * @param {string} body - Notification body text
    * @param {object} [data] - Extra data payload
