@@ -60,7 +60,6 @@ describe('push_token_error handler (#1987)', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
-      messages: [],
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -81,7 +80,6 @@ describe('push_token_error handler (#1987)', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
-      messages: [],
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);

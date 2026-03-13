@@ -48,7 +48,6 @@ beforeEach(() => {
   mockAlert.mockClear();
   clearAllCallbacks();
   useConnectionStore.setState({
-    messages: [],
     terminalBuffer: '',
     terminalRawBuffer: '',
     connectionError: null,

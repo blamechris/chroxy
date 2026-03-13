@@ -55,14 +55,11 @@ export type {
   ServerError,
   SessionNotification,
   SlashCommand,
-  ChatMessage,
-  ContextUsage,
   CustomAgent,
   ConnectionPhase,
   ConnectionContext,
   ConversationSummary,
   SearchResult,
-  SessionState,
   ConnectionState,
 } from './types';
 
@@ -77,8 +74,10 @@ import type {
   ChatMessage,
   ConnectionContext,
   ConnectionState,
+  ContextUsage,
   MessageAttachment,
   SessionInfo,
+  SessionState,
 } from './types';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
 import {

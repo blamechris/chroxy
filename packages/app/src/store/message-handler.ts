@@ -307,17 +307,25 @@ function flushPendingDeltas(): void {
         [sessionId]: { ...sessionState, messages: updatedMessages },
       };
       if (sessionId === state.activeSessionId) {
-        getStore().setState({ sessionStates: newSessionStates, messages: updatedMessages });
+        getStore().setState({ sessionStates: newSessionStates });
         flatUpdated = true;
       }
     } else {
-      getStore().setState((s) => ({
-        messages: s.messages.map((m) => {
+      // No session context — apply to active session
+      const activeId = state.activeSessionId;
+      if (activeId && newSessionStates[activeId]) {
+        const ss = newSessionStates[activeId];
+        const updatedMessages = ss.messages.map((m) => {
           const d = deltas.get(m.id);
           return d ? { ...m, content: m.content + d } : m;
-        }),
-      }));
-      flatUpdated = true;
+        });
+        newSessionStates = {
+          ...newSessionStates,
+          [activeId]: { ...ss, messages: updatedMessages },
+        };
+        getStore().setState({ sessionStates: newSessionStates });
+        flatUpdated = true;
+      }
     }
   }
 
@@ -648,7 +656,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       } else {
         set({
           ...connectedState,
-          messages: [],
           terminalBuffer: '',
           terminalRawBuffer: '',
           sessions: [],
@@ -1025,24 +1032,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             ],
           };
         });
-      } else {
-        set((state: ConnectionState) => {
-          const existing = state.messages.find((m) => m.id === streamId);
-          if (existing && existing.type === 'response') {
-            return { streamingMessageId: streamId };
-          }
-          const responseId = existing ? `${streamId}-response` : streamId;
-          if (existing) {
-            _deltaIdRemaps.set(streamId, responseId);
-          }
-          return {
-            streamingMessageId: responseId,
-            messages: [
-              ...filterThinking(state.messages),
-              { id: responseId, type: 'response' as const, content: '', timestamp: Date.now() },
-            ],
-          };
-        });
       }
       break;
     }
@@ -1063,15 +1052,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           timestamp: Date.now(),
         };
         const targetId = capturedSessionId;
-        if (targetId && get().sessionStates[targetId]) {
-          updateSession(targetId, (ss) => ({
+        const effectiveSplitId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
+        if (effectiveSplitId && get().sessionStates[effectiveSplitId]) {
+          updateSession(effectiveSplitId, (ss) => ({
             streamingMessageId: newId,
             messages: [...ss.messages, newMsg],
-          }));
-        } else {
-          set((state: ConnectionState) => ({
-            streamingMessageId: newId,
-            messages: [...state.messages, newMsg],
           }));
         }
         deltaId = newId;
