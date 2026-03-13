@@ -14,11 +14,12 @@ describe('desktop dead code removal (#1936)', () => {
     )
   })
 
-  it('lib.rs calls emit_server_error in error paths', () => {
+  it('lib.rs calls window::emit_server_error in error paths', () => {
     const src = readFileSync(resolve(DESKTOP_SRC, 'lib.rs'), 'utf-8')
+    const callSites = src.match(/window::emit_server_error\(/g) || []
     assert.ok(
-      src.includes('emit_server_error'),
-      'lib.rs should call window::emit_server_error to notify dashboard of errors',
+      callSites.length >= 2,
+      `lib.rs should have multiple window::emit_server_error() call sites in error paths, found ${callSites.length}`,
     )
   })
 })
