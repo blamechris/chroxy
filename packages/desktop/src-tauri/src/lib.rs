@@ -77,6 +77,12 @@ fn restart_server(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+fn get_server_logs(state: tauri::State<'_, Mutex<ServerManager>>) -> Vec<String> {
+    let mgr = lock_or_recover(&state);
+    mgr.get_logs()
+}
+
+#[tauri::command]
 fn get_qr_code_svg(state: tauri::State<'_, Mutex<ServerManager>>) -> Result<serde_json::Value, String> {
     let mgr = lock_or_recover(&state);
     if !mgr.is_running() {
@@ -242,6 +248,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             get_server_info,
+            get_server_logs,
             start_server,
             stop_server,
             restart_server,
