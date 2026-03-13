@@ -217,6 +217,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   defaultProvider: loadPersistedSetting('chroxy_default_provider', 'claude-sdk'),
   connectionError: null,
   connectionRetryCount: 0,
+  serverStartupLogs: null,
   latencyMs: null,
   connectionQuality: null,
   logEntries: [],
