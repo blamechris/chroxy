@@ -498,11 +498,14 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
 }
 
 fn handle_start(app: &tauri::AppHandle) {
-    // Read tunnel mode from settings and apply to server manager
-    let tunnel_mode = app
+    // Read settings and apply to server manager
+    let (tunnel_mode, node_path) = app
         .try_state::<Mutex<DesktopSettings>>()
-        .map(|s| lock_or_recover(&s).tunnel_mode.clone())
-        .unwrap_or_else(|| "quick".to_string());
+        .map(|s| {
+            let settings = lock_or_recover(&s);
+            (settings.tunnel_mode.clone(), settings.node_path.clone())
+        })
+        .unwrap_or_else(|| ("quick".to_string(), None));
 
     // Validate cloudflared for tunnel modes
     if tunnel_mode != "none" && !ServerManager::check_cloudflared() {
@@ -524,6 +527,7 @@ fn handle_start(app: &tauri::AppHandle) {
             &tunnel_mode
         };
         mgr.set_tunnel_mode(effective_mode);
+        mgr.set_node_path(node_path.as_deref());
         mgr.start()
     };
 
@@ -557,6 +561,7 @@ fn handle_start(app: &tauri::AppHandle) {
                         }
                         ServerStatus::Error(ref msg) => {
                             update_menu_state(&app_handle, MenuState::Stopped);
+                            window::emit_server_error(&app_handle, msg);
                             send_notification(&app_handle, "Server Error", msg);
                             return;
                         }
@@ -668,6 +673,7 @@ fn handle_start(app: &tauri::AppHandle) {
                                 Err(_) => {
                                     drop(mgr);
                                     update_menu_state(&app_handle, MenuState::Stopped);
+                                    window::emit_server_error(&app_handle, "Auto-restart failed. Use tray menu to restart manually.");
                                     send_notification(
                                         &app_handle,
                                         "Server Unrecoverable",
@@ -689,6 +695,7 @@ fn handle_start(app: &tauri::AppHandle) {
         Err(e) => {
             eprintln!("[tray] Failed to start server: {}", e);
             update_menu_state(app, MenuState::Stopped);
+            window::emit_server_error(app, &e);
             send_notification(app, "Server Error", &e);
         }
     }
@@ -715,6 +722,7 @@ fn handle_restart(app: &tauri::AppHandle) {
         Err(e) => {
             eprintln!("[tray] Failed to restart server: {}", e);
             update_menu_state(app, MenuState::Stopped);
+            window::emit_server_error(app, &e);
             send_notification(app, "Restart Failed", &e);
         }
     }
