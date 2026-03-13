@@ -77,6 +77,12 @@ fn restart_server(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+fn get_server_logs(state: tauri::State<'_, Mutex<ServerManager>>) -> Vec<String> {
+    let mgr = lock_or_recover(&state);
+    mgr.get_logs()
+}
+
+#[tauri::command]
 fn get_qr_code_svg(state: tauri::State<'_, Mutex<ServerManager>>) -> Result<serde_json::Value, String> {
     let mgr = lock_or_recover(&state);
     if !mgr.is_running() {
@@ -242,6 +248,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             get_server_info,
+            get_server_logs,
             start_server,
             stop_server,
             restart_server,
@@ -498,11 +505,14 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
 }
 
 fn handle_start(app: &tauri::AppHandle) {
-    // Read tunnel mode from settings and apply to server manager
-    let tunnel_mode = app
+    // Read settings and apply to server manager
+    let (tunnel_mode, node_path) = app
         .try_state::<Mutex<DesktopSettings>>()
-        .map(|s| lock_or_recover(&s).tunnel_mode.clone())
-        .unwrap_or_else(|| "quick".to_string());
+        .map(|s| {
+            let settings = lock_or_recover(&s);
+            (settings.tunnel_mode.clone(), settings.node_path.clone())
+        })
+        .unwrap_or_else(|| ("quick".to_string(), None));
 
     // Validate cloudflared for tunnel modes
     if tunnel_mode != "none" && !ServerManager::check_cloudflared() {
@@ -524,6 +534,7 @@ fn handle_start(app: &tauri::AppHandle) {
             &tunnel_mode
         };
         mgr.set_tunnel_mode(effective_mode);
+        mgr.set_node_path(node_path.as_deref());
         mgr.start()
     };
 
@@ -566,7 +577,10 @@ fn handle_start(app: &tauri::AppHandle) {
                 }
 
                 if !reached_running {
-                    return; // Startup timeout
+                    update_menu_state(&app_handle, MenuState::Stopped);
+                    window::emit_server_error(&app_handle, "Server failed to start within 60 seconds.");
+                    send_notification(&app_handle, "Server Timeout", "Server failed to start within 60 seconds.");
+                    return;
                 }
 
                 // Phase 2: Monitor for crashes and auto-restart
@@ -666,6 +680,7 @@ fn handle_start(app: &tauri::AppHandle) {
                                 Err(_) => {
                                     drop(mgr);
                                     update_menu_state(&app_handle, MenuState::Stopped);
+                                    window::emit_server_error(&app_handle, "Auto-restart failed. Use tray menu to restart manually.");
                                     send_notification(
                                         &app_handle,
                                         "Server Unrecoverable",
@@ -687,6 +702,7 @@ fn handle_start(app: &tauri::AppHandle) {
         Err(e) => {
             eprintln!("[tray] Failed to start server: {}", e);
             update_menu_state(app, MenuState::Stopped);
+            window::emit_server_error(app, &e);
             send_notification(app, "Server Error", &e);
         }
     }
@@ -709,10 +725,47 @@ fn handle_restart(app: &tauri::AppHandle) {
     };
 
     match result {
-        Ok(()) => update_menu_state(app, MenuState::Running),
+        Ok(()) => {
+            update_menu_state(app, MenuState::Restarting);
+
+            // Spawn monitoring thread to verify server reaches Running
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                for _ in 0..60 {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let state = app_handle.state::<Mutex<ServerManager>>();
+                    let status = lock_or_recover(&state).status();
+                    match status {
+                        ServerStatus::Running => {
+                            update_menu_state(&app_handle, MenuState::Running);
+                            let state = app_handle.state::<Mutex<ServerManager>>();
+                            let mgr = lock_or_recover(&state);
+                            let p = mgr.port();
+                            let t = mgr.token();
+                            drop(mgr);
+                            window::emit_server_ready(&app_handle, p, t.as_deref());
+                            return;
+                        }
+                        ServerStatus::Error(ref msg) => {
+                            update_menu_state(&app_handle, MenuState::Stopped);
+                            window::emit_server_error(&app_handle, msg);
+                            send_notification(&app_handle, "Restart Failed", msg);
+                            return;
+                        }
+                        ServerStatus::Stopped => return, // User stopped during restart
+                        _ => {}
+                    }
+                }
+                // Timeout
+                update_menu_state(&app_handle, MenuState::Stopped);
+                window::emit_server_error(&app_handle, "Server failed to restart within 60 seconds.");
+                send_notification(&app_handle, "Restart Timeout", "Server failed to restart within 60 seconds.");
+            });
+        }
         Err(e) => {
             eprintln!("[tray] Failed to restart server: {}", e);
             update_menu_state(app, MenuState::Stopped);
+            window::emit_server_error(app, &e);
             send_notification(app, "Restart Failed", &e);
         }
     }
@@ -783,24 +836,26 @@ fn handle_show_qr(app: &tauri::AppHandle) {
 
     let html = qrcode::build_qr_popup_html(&svg, &url);
 
-    match tauri::WebviewWindowBuilder::new(app, "qr_popup", tauri::WebviewUrl::default())
+    // Build a data URI to avoid document.write() (CSP-safe)
+    let encoded_html = window::percent_encode_html(&html);
+    let data_uri = format!("data:text/html;charset=utf-8,{}", encoded_html);
+    let webview_url = match data_uri.parse::<tauri::Url>() {
+        Ok(parsed) => tauri::WebviewUrl::External(parsed),
+        Err(e) => {
+            send_notification(app, "QR Code Error", &format!("Failed to encode popup HTML: {}", e));
+            return;
+        }
+    };
+
+    if let Err(e) = tauri::WebviewWindowBuilder::new(app, "qr_popup", webview_url)
         .title("Chroxy — QR Code")
         .inner_size(320.0, 400.0)
         .resizable(false)
         .center()
         .build()
     {
-        Ok(win) => {
-            // Navigate to the HTML content via data URL
-            let _ = win.eval(&format!(
-                "document.open(); document.write({}); document.close();",
-                serde_json::to_string(&html).unwrap_or_default()
-            ));
-        }
-        Err(e) => {
-            eprintln!("[tray] Failed to create QR popup: {}", e);
-            send_notification(app, "QR Code Error", &format!("Failed to open popup: {}", e));
-        }
+        eprintln!("[tray] Failed to create QR popup: {}", e);
+        send_notification(app, "QR Code Error", &format!("Failed to open popup: {}", e));
     }
 }
 
