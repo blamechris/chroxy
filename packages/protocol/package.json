@@ -1,0 +1,22 @@
+{
+  "name": "@chroxy/protocol",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Shared WebSocket protocol constants and types for Chroxy",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test tests/"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
