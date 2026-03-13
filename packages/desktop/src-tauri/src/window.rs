@@ -100,6 +100,26 @@ pub fn emit_navigate_console(app: &AppHandle) {
 
 // -- Window management (no eval) --
 
+/// Percent-encode HTML for use in a data URI.
+/// Encodes characters that are not safe in URIs (spaces, angle brackets, etc.).
+pub fn percent_encode_html(html: &str) -> String {
+    let mut encoded = String::with_capacity(html.len() * 2);
+    for byte in html.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'~' | b'!' | b'*' | b'\'' | b'(' | b')'
+            | b';' | b':' | b'@' | b',' | b'/' | b'?' | b'#' | b'[' | b']'
+            | b'=' | b'&' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
+}
+
 /// Show and focus the main window.
 pub fn show_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window(MAIN_LABEL) {
@@ -188,5 +208,21 @@ mod tests {
         assert_eq!(json["attempt"], 2);
         assert_eq!(json["max_attempts"], 3);
         assert_eq!(json["backoff_secs"], 6);
+    }
+
+    #[test]
+    fn percent_encode_html_preserves_safe_chars() {
+        assert_eq!(percent_encode_html("hello"), "hello");
+        assert_eq!(percent_encode_html("/path?key=val"), "/path?key=val");
+    }
+
+    #[test]
+    fn percent_encode_html_encodes_angle_brackets_and_spaces() {
+        let encoded = percent_encode_html("<div>hello world</div>");
+        assert!(encoded.contains("%3C"));  // <
+        assert!(encoded.contains("%3E"));  // >
+        assert!(encoded.contains("%20"));  // space
+        assert!(!encoded.contains('<'));
+        assert!(!encoded.contains('>'));
     }
 }
