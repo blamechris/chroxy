@@ -570,7 +570,10 @@ fn handle_start(app: &tauri::AppHandle) {
                 }
 
                 if !reached_running {
-                    return; // Startup timeout
+                    update_menu_state(&app_handle, MenuState::Stopped);
+                    window::emit_server_error(&app_handle, "Server failed to start within 60 seconds.");
+                    send_notification(&app_handle, "Server Timeout", "Server failed to start within 60 seconds.");
+                    return;
                 }
 
                 // Phase 2: Monitor for crashes and auto-restart
