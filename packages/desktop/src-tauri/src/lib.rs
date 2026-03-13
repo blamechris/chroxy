@@ -504,6 +504,12 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
     }
 }
 
+/// Whether `monitor_startup` is watching an initial start or a restart.
+enum StartupContext {
+    Start,
+    Restart,
+}
+
 /// Poll `ServerStatus` every 1s for up to 60 seconds after a start or restart.
 ///
 /// On `Running`: emits `server_ready`, updates menu to Running.
@@ -511,20 +517,14 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
 /// On timeout (60 seconds): emits `server_error`, sends a timeout notification.
 ///
 /// Returns `true` if the server reached `Running`, `false` otherwise.
-fn monitor_startup(app: &tauri::AppHandle, context: &str) -> bool {
-    let error_title = if context == "start" {
-        "Server Error"
-    } else {
-        "Restart Failed"
-    };
-    let timeout_title = if context == "start" {
-        "Server Timeout"
-    } else {
-        "Restart Timeout"
+fn monitor_startup(app: &tauri::AppHandle, context: StartupContext) -> bool {
+    let (error_title, timeout_title, action) = match context {
+        StartupContext::Start => ("Server Error", "Server Timeout", "start"),
+        StartupContext::Restart => ("Restart Failed", "Restart Timeout", "restart"),
     };
     let timeout_msg = format!(
         "Server failed to {} within 60 seconds.",
-        context
+        action
     );
 
     for _ in 0..60 {
@@ -604,7 +604,7 @@ fn handle_start(app: &tauri::AppHandle) {
             let app_handle = app.clone();
             std::thread::spawn(move || {
                 // Phase 1: Wait for initial startup (up to 60s)
-                let reached_running = monitor_startup(&app_handle, "start");
+                let reached_running = monitor_startup(&app_handle, StartupContext::Start);
 
                 if !reached_running {
                     return;
@@ -656,7 +656,7 @@ fn handle_start(app: &tauri::AppHandle) {
                                 Ok(()) => {
                                     drop(mgr);
                                     // Wait for server to reach Running again
-                                    let recovered = monitor_startup(&app_handle, "restart");
+                                    let recovered = monitor_startup(&app_handle, StartupContext::Restart);
                                     if recovered {
                                         send_notification(
                                             &app_handle,
@@ -734,7 +734,7 @@ fn handle_restart(app: &tauri::AppHandle) {
             // Spawn monitoring thread to verify server reaches Running
             let app_handle = app.clone();
             std::thread::spawn(move || {
-                monitor_startup(&app_handle, "restart");
+                monitor_startup(&app_handle, StartupContext::Restart);
             });
         }
         Err(e) => {
