@@ -60,13 +60,17 @@ describe('imperative callbacks module (#2088)', () => {
     expect(getCallback('fileContent')).toBeNull();
   });
 
-  it('callbacks are not stored in Zustand state', () => {
-    // This test verifies the architectural intent: callbacks are module-level,
-    // not in the store, so setting them doesn't trigger re-renders
-    const fn = jest.fn();
-    setCallback('terminalWrite', fn);
-    // If this were in Zustand, we'd expect store subscribers to fire.
-    // Since it's module-level, no state change event happens.
-    expect(getCallback('terminalWrite')).toBe(fn);
+  it('module does not depend on Zustand', () => {
+    // Verify the imperative-callbacks module has no Zustand dependency —
+    // this ensures setting callbacks can never trigger store re-renders.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(
+      path.resolve(__dirname, '../store/imperative-callbacks.ts'),
+      'utf8',
+    );
+    expect(source).not.toMatch(/from\s+['"]zustand['"]/);
+    expect(source).not.toMatch(/require\(['"]zustand['"]\)/);
   });
 });
