@@ -9,6 +9,7 @@ import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION, SUBSCRIBE_SESSI
 import { createEmptySessionState } from '../../store/utils';
 import { clearPersistedSession } from '../../store/persistence';
 import { setCallback, clearAllCallbacks } from '../../store/imperative-callbacks';
+import { useMultiClientStore } from '../../store/multi-client';
 import type { ConnectionState } from '../../store/types';
 
 // Mock persistence to track calls
@@ -594,7 +595,13 @@ describe('unknown message type (default case)', () => {
 });
 
 describe('client_focus_changed follow mode', () => {
+  afterEach(() => {
+    useMultiClientStore.getState().reset();
+  });
+
   it('auto-switches session when followMode is true and event is from another client', () => {
+    useMultiClientStore.getState().setFollowMode(true);
+    useMultiClientStore.getState().setMyClientId('client-a');
     const store = createMockStore({
       followMode: true,
       myClientId: 'client-a',
@@ -655,6 +662,8 @@ describe('client_focus_changed follow mode', () => {
   });
 
   it('does NOT auto-switch when the focus change is from self', () => {
+    useMultiClientStore.getState().setFollowMode(true);
+    useMultiClientStore.getState().setMyClientId('client-a');
     const store = createMockStore({
       followMode: true,
       myClientId: 'client-a',
@@ -685,6 +694,8 @@ describe('client_focus_changed follow mode', () => {
   });
 
   it('does NOT auto-switch when already on the target session', () => {
+    useMultiClientStore.getState().setFollowMode(true);
+    useMultiClientStore.getState().setMyClientId('client-a');
     const store = createMockStore({
       followMode: true,
       myClientId: 'client-a',

@@ -52,6 +52,7 @@ import { createEmptySessionState } from './utils';
 import { deriveActivityState } from './session-activity';
 import { clearPersistedSession } from './persistence';
 import { getCallback } from './imperative-callbacks';
+import { useMultiClientStore } from './multi-client';
 
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
@@ -632,8 +633,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         serverCommit: authServerCommit,
         serverProtocolVersion: authProtocolVersion,
         streamingMessageId: null,
-        myClientId: myClientId,
-        connectedClients: clients,
+        myClientId: myClientId, // kept for backward compat; canonical source is useMultiClientStore
+        connectedClients: clients, // kept for backward compat; canonical source is useMultiClientStore
         connectionError: null as string | null,
         connectionRetryCount: 0,
         // Clear shutdown state on successful connect
@@ -656,6 +657,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           customAgents: [],
         });
       }
+      // Sync multi-client store (canonical source for multi-client state)
+      useMultiClientStore.getState().setMyClientId(myClientId);
+      useMultiClientStore.getState().setConnectedClients(clients);
+
       // Start client-side heartbeat for dead connection detection
       startHeartbeat(ctx.socket);
 
@@ -1651,6 +1656,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         platform: typeof client.platform === 'string' ? client.platform : 'unknown',
         isSelf: false,
       };
+      useMultiClientStore.getState().addClient(newClient);
       set((state: ConnectionState) => ({
         connectedClients: [...state.connectedClients.filter((c) => c.clientId !== newClient.clientId), newClient],
       }));
@@ -1674,7 +1680,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'client_left': {
       if (typeof msg.clientId !== 'string') break;
-      const departingClient = get().connectedClients.find((c) => c.clientId === msg.clientId);
+      const departingClient = useMultiClientStore.getState().removeClient(msg.clientId as string);
       set((state: ConnectionState) => ({
         connectedClients: state.connectedClients.filter((c) => c.clientId !== msg.clientId),
       }));
@@ -1699,6 +1705,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'primary_changed': {
       const primarySessionId = msg.sessionId as string;
       const primaryClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
+      useMultiClientStore.getState().setPrimaryClientId(primaryClientId);
       if (typeof primarySessionId === 'string' && get().sessionStates[primarySessionId]) {
         updateSession(primarySessionId, () => ({
           primaryClientId,
@@ -1714,8 +1721,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const focusSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
       if (!focusClientId || !focusSessionId) break;
       // Auto-switch if follow mode is on, event is from another client, target session exists locally, and not already on it
-      const { followMode, myClientId, activeSessionId, sessionStates } = get();
-      if (followMode && focusClientId !== myClientId && focusSessionId !== activeSessionId && sessionStates[focusSessionId]) {
+      const mcState = useMultiClientStore.getState();
+      const { activeSessionId, sessionStates } = get();
+      if (mcState.followMode && focusClientId !== mcState.myClientId && focusSessionId !== activeSessionId && sessionStates[focusSessionId]) {
         get().switchSession(focusSessionId);
       }
       break;
