@@ -56,6 +56,7 @@ import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
 import { useCostStore } from './cost';
 import { useTerminalStore } from './terminal';
+import { useNotificationStore } from './notifications';
 
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
@@ -493,6 +494,7 @@ function pushSessionNotification(
     );
     return { sessionNotifications: [...filtered, notification] };
   });
+  useNotificationStore.getState().addSessionNotification(notification);
 }
 
 // ---------------------------------------------------------------------------
@@ -1642,11 +1644,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'server_shutdown': {
       const reason = msg.reason === 'restart' || msg.reason === 'shutdown' || msg.reason === 'crash' ? msg.reason : 'shutdown';
       const eta = typeof msg.restartEtaMs === 'number' ? msg.restartEtaMs : 0;
+      const shutdownSince = Date.now();
       set({
         shutdownReason: reason,
         restartEtaMs: eta,
-        restartingSince: Date.now(),
+        restartingSince: shutdownSince,
       });
+      useNotificationStore.getState().setShutdown(reason, eta, shutdownSince);
       break;
     }
 
@@ -2113,6 +2117,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       set((state: ConnectionState) => ({
         serverErrors: [...state.serverErrors, serverError].slice(-10),
       }));
+      useNotificationStore.getState().addServerError(serverError);
       const errorMsg: ChatMessage = {
         id: nextMessageId('err'),
         type: 'error',
@@ -2167,14 +2172,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const remainingMs = typeof msg.remainingMs === 'number' ? msg.remainingMs : 120000;
 
       // Set timeout warning state for the banner UI
-      set({
-        timeoutWarning: {
-          sessionId: warnSessionId || '',
-          sessionName,
-          remainingMs,
-          receivedAt: Date.now(),
-        },
-      });
+      const warningData = {
+        sessionId: warnSessionId || '',
+        sessionName,
+        remainingMs,
+        receivedAt: Date.now(),
+      };
+      set({ timeoutWarning: warningData });
+      useNotificationStore.getState().setTimeoutWarning(warningData);
       break;
     }
 
