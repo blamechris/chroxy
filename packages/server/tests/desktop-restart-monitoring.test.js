@@ -10,8 +10,9 @@ describe('handle_restart monitoring (#1965)', () => {
     const src = readFileSync(resolve(DESKTOP_SRC, 'lib.rs'), 'utf-8')
     // Extract the handle_restart function body
     const startIdx = src.indexOf('fn handle_restart(')
+    assert.ok(startIdx !== -1, 'fn handle_restart( not found in lib.rs')
     const nextFn = src.indexOf('\nfn ', startIdx + 1)
-    const restartFn = src.slice(startIdx, nextFn)
+    const restartFn = src.slice(startIdx, nextFn !== -1 ? nextFn : src.length)
     // Should NOT have a direct Ok(()) => MenuState::Running pattern
     assert.ok(
       !restartFn.match(/Ok\(\(\)\)\s*=>\s*update_menu_state\([^,]+,\s*MenuState::Running\)/),
@@ -22,8 +23,9 @@ describe('handle_restart monitoring (#1965)', () => {
   it('spawns a monitoring thread after restart', () => {
     const src = readFileSync(resolve(DESKTOP_SRC, 'lib.rs'), 'utf-8')
     const startIdx = src.indexOf('fn handle_restart(')
+    assert.ok(startIdx !== -1, 'fn handle_restart( not found in lib.rs')
     const nextFn = src.indexOf('\nfn ', startIdx + 1)
-    const restartFn = src.slice(startIdx, nextFn)
+    const restartFn = src.slice(startIdx, nextFn !== -1 ? nextFn : src.length)
     assert.ok(
       restartFn.includes('thread::spawn') || restartFn.includes('std::thread::spawn'),
       'handle_restart should spawn a monitoring thread to verify server status',

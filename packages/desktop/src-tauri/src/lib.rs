@@ -735,6 +735,7 @@ fn handle_restart(app: &tauri::AppHandle) {
                             send_notification(&app_handle, "Restart Failed", msg);
                             return;
                         }
+                        ServerStatus::Stopped => return, // User stopped during restart
                         _ => {}
                     }
                 }
