@@ -116,6 +116,7 @@ import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } 
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
 import { useCostStore } from './cost';
+import { useTerminalStore } from './terminal';
 import { decrypt, DIRECTION_SERVER, type EncryptionState } from '../utils/crypto';
 import {
   loadPersistedState,
@@ -716,6 +717,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       searchError: null,
     });
     clearAllCallbacks();
+    useTerminalStore.getState().reset();
   },
 
   forgetSession: () => {
