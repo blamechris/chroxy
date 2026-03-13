@@ -39,6 +39,6 @@ jobs:
           NEXT=$(node -p "require('./packages/server/package.json').version")
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json packages/server/package.json packages/app/package.json packages/desktop/src-tauri/tauri.conf.json packages/desktop/src-tauri/Cargo.toml packages/desktop/src-tauri/Cargo.lock
+          git add package.json packages/server/package.json packages/app/package.json packages/desktop/package.json packages/desktop/src-tauri/tauri.conf.json packages/desktop/src-tauri/Cargo.toml packages/desktop/src-tauri/Cargo.lock
           git commit -m "chore: bump version to v${NEXT}"
           git push
