@@ -557,6 +557,7 @@ fn handle_start(app: &tauri::AppHandle) {
                         }
                         ServerStatus::Error(ref msg) => {
                             update_menu_state(&app_handle, MenuState::Stopped);
+                            window::emit_server_error(&app_handle, msg);
                             send_notification(&app_handle, "Server Error", msg);
                             return;
                         }
