@@ -9,7 +9,7 @@ describe('isTauri import hygiene (#2058)', () => {
   it('App.tsx imports isTauri from utils/tauri, not from useTauriEvents', () => {
     const src = readFileSync(resolve(DASHBOARD_SRC, 'App.tsx'), 'utf-8')
     assert.ok(
-      src.includes("from './utils/tauri'") || src.includes('from "./utils/tauri"'),
+      src.match(/import\s*\{[^}]*isTauri[^}]*\}\s*from\s*['"]\.\/utils\/tauri['"]/),
       'App.tsx should import isTauri from utils/tauri',
     )
     assert.ok(
@@ -21,7 +21,7 @@ describe('isTauri import hygiene (#2058)', () => {
   it('useTauriEvents.ts does not re-export isTauri', () => {
     const src = readFileSync(resolve(DASHBOARD_SRC, 'hooks/useTauriEvents.ts'), 'utf-8')
     assert.ok(
-      !src.includes('export { isTauri }'),
+      !src.match(/export\s*\{[^}]*isTauri[^}]*\}/),
       'useTauriEvents.ts should not re-export isTauri',
     )
   })
