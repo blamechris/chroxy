@@ -93,6 +93,18 @@ impl ServerManager {
         self.tunnel_mode = mode.to_string();
     }
 
+    /// Set a custom Node binary path from settings.
+    /// When set, this path is preferred over auto-discovery via resolve_node22().
+    /// Empty/whitespace-only strings are treated as None.
+    /// Non-existent paths are ignored (fall back to auto-discovery).
+    pub fn set_node_path(&mut self, path: Option<&str>) {
+        self.node_path = path
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .filter(|p| p.exists());
+    }
+
     /// Whether auto-restart has been requested by the health poll.
     pub fn is_auto_restart_pending(&self) -> bool {
         self.auto_restart_pending.load(Ordering::Relaxed)
@@ -208,9 +220,18 @@ impl ServerManager {
         // Kill any orphaned server on the port (e.g. from a previous crash)
         Self::kill_port_holder(self.config.port);
 
-        // Resolve Node 22 path
+        // Resolve Node 22 path.
+        // If a custom path was set but no longer exists on disk, clear it
+        // and fall back to auto-discovery so startup isn't blocked.
         let node_path = match &self.node_path {
-            Some(p) => p.clone(),
+            Some(p) if p.exists() => p.clone(),
+            Some(_) => {
+                // Custom path is stale — clear and auto-discover
+                self.node_path = None;
+                let p = node::resolve_node22()?;
+                self.node_path = Some(p.clone());
+                p
+            }
             None => {
                 let p = node::resolve_node22()?;
                 self.node_path = Some(p.clone());
@@ -740,5 +761,44 @@ mod tests {
 
         mgr.reset_restart_count();
         assert_eq!(mgr.restart_count(), 0);
+    }
+
+    #[test]
+    fn set_node_path_stores_existing_path() {
+        let mut mgr = ServerManager::new();
+        assert!(mgr.node_path.is_none());
+
+        // Use a path that exists on all systems
+        mgr.set_node_path(Some("/usr"));
+        assert_eq!(mgr.node_path, Some(PathBuf::from("/usr")));
+    }
+
+    #[test]
+    fn set_node_path_none_clears_path() {
+        let mut mgr = ServerManager::new();
+        mgr.set_node_path(Some("/usr"));
+        mgr.set_node_path(None);
+        assert!(mgr.node_path.is_none());
+    }
+
+    #[test]
+    fn set_node_path_empty_string_treated_as_none() {
+        let mut mgr = ServerManager::new();
+        mgr.set_node_path(Some(""));
+        assert!(mgr.node_path.is_none());
+    }
+
+    #[test]
+    fn set_node_path_whitespace_treated_as_none() {
+        let mut mgr = ServerManager::new();
+        mgr.set_node_path(Some("   "));
+        assert!(mgr.node_path.is_none());
+    }
+
+    #[test]
+    fn set_node_path_nonexistent_path_treated_as_none() {
+        let mut mgr = ServerManager::new();
+        mgr.set_node_path(Some("/this/path/does/not/exist/node"));
+        assert!(mgr.node_path.is_none());
     }
 }
