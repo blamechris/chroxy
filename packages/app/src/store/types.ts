@@ -259,6 +259,12 @@ export interface WebFeatureStatus {
   teleport: boolean;
 }
 
+export interface SessionActivity {
+  state: 'idle' | 'thinking' | 'busy' | 'waiting' | 'error';
+  detail?: string;
+  startedAt: number;
+}
+
 export interface SessionState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
@@ -279,6 +285,7 @@ export interface SessionState {
   sessionContext: SessionContext | null;
   mcpServers: McpServer[];
   devPreviews: DevPreview[];
+  activityState: SessionActivity;
 }
 
 export interface ServerError {
