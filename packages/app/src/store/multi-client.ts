@@ -13,6 +13,9 @@ interface MultiClientState {
   removeClient: (clientId: string) => ConnectedClient | undefined;
   setPrimaryClientId: (id: string | null) => void;
   setFollowMode: (enabled: boolean) => void;
+  /** Reset presence fields only (preserves followMode user preference) */
+  resetPresence: () => void;
+  /** Full reset including followMode */
   reset: () => void;
 }
 
@@ -49,6 +52,13 @@ export const useMultiClientStore = create<MultiClientState>((set, get) => ({
   setPrimaryClientId: (id) => set({ primaryClientId: id }),
 
   setFollowMode: (enabled) => set({ followMode: enabled }),
+
+  resetPresence: () =>
+    set({
+      myClientId: null,
+      connectedClients: [],
+      primaryClientId: null,
+    }),
 
   reset: () => set({ ...initialState }),
 }));

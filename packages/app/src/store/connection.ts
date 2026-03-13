@@ -658,7 +658,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setPendingKeyPair(null);
     // Clear message queue on explicit disconnect
     clearMessageQueue();
-    useMultiClientStore.getState().reset();
+    useMultiClientStore.getState().resetPresence();
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
     set({
       connectionPhase: 'disconnected',

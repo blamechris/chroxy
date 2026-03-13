@@ -104,7 +104,26 @@ describe('MultiClientStore', () => {
     expect(useMultiClientStore.getState().connectedClients).toEqual(clients);
   });
 
-  it('reset clears all state', () => {
+  it('resetPresence clears presence but preserves followMode', () => {
+    useMultiClientStore.getState().setMyClientId('c1');
+    useMultiClientStore.getState().setFollowMode(true);
+    useMultiClientStore.getState().setPrimaryClientId('c2');
+    useMultiClientStore.getState().addClient({
+      clientId: 'c1',
+      deviceName: 'Test',
+      deviceType: 'phone',
+      platform: 'ios',
+      isSelf: true,
+    });
+    useMultiClientStore.getState().resetPresence();
+    const state = useMultiClientStore.getState();
+    expect(state.myClientId).toBeNull();
+    expect(state.connectedClients).toEqual([]);
+    expect(state.primaryClientId).toBeNull();
+    expect(state.followMode).toBe(true); // preserved
+  });
+
+  it('reset clears all state including followMode', () => {
     useMultiClientStore.getState().setMyClientId('c1');
     useMultiClientStore.getState().setFollowMode(true);
     useMultiClientStore.getState().addClient({
