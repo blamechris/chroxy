@@ -41,6 +41,7 @@ import { Icon } from '../components/Icon';
 import { COLORS } from '../constants/colors';
 import { useLayout } from '../hooks/useLayout';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
+import { useAndroidSessionNotification } from '../hooks/useAndroidSessionNotification';
 import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
 import type { Attachment } from '../utils/attachments';
 
@@ -110,6 +111,7 @@ export function SessionScreen() {
   const insets = useSafeAreaInsets();
   const keyboardHeight = useKeyboardHeight();
   const layout = useLayout();
+  useAndroidSessionNotification();
 
   // Individual selectors for state values — avoids subscribing to every store change
   const viewMode = useConnectionStore((s) => s.viewMode);
