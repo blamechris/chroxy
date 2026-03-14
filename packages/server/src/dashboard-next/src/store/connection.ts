@@ -783,6 +783,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       timestamp: Date.now(),
     };
 
+    // Write user message to terminal buffer for Output view
+    if (text) {
+      get().appendTerminalData(`\r\n\x1b[33m> ${text}\x1b[0m\r\n\r\n`);
+    }
+
     const activeId = get().activeSessionId;
     if (activeId && get().sessionStates[activeId]) {
       updateActiveSession((ss) => ({
