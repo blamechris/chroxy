@@ -59,6 +59,7 @@ export function redactSensitive(msg) {
 }
 
 let _logLevel = LOG_LEVELS[process.env.LOG_LEVEL] ?? LOG_LEVELS.info
+let _jsonMode = false
 let _logToFile = false
 let _logDir = DEFAULT_LOG_DIR
 let _logPath = null
@@ -66,6 +67,15 @@ let _writeCount = 0
 
 /** Set of callbacks for broadcasting log entries (supports multiple WsServer instances) */
 const _logListeners = new Set()
+
+/**
+ * Enable or disable JSON log output format.
+ * When enabled, log lines are emitted as JSON objects instead of human-readable strings.
+ * @param {boolean} enabled
+ */
+export function setJsonMode(enabled) {
+  _jsonMode = !!enabled
+}
 
 /**
  * Set a listener that receives every log entry as a structured object.
@@ -113,6 +123,7 @@ export function initFileLogging({ level = 'info', logDir } = {}) {
  */
 export function closeFileLogging() {
   _logToFile = false
+  _jsonMode = false
   _logLevel = LOG_LEVELS.info
   _logDir = DEFAULT_LOG_DIR
   _logPath = null
@@ -164,7 +175,9 @@ export function createLogger(component) {
 
     const safeMsg = redactSensitive(msg)
     const timestamp = new Date().toISOString()
-    const line = `${timestamp} [${level.toUpperCase()}] [${component}] ${safeMsg}`
+    const line = _jsonMode
+      ? JSON.stringify({ ts: timestamp, level, component, msg: safeMsg })
+      : `${timestamp} [${level.toUpperCase()}] [${component}] ${safeMsg}`
 
     // Always write to console (for foreground mode)
     if (level === 'error') console.error(line)
