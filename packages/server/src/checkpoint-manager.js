@@ -7,6 +7,9 @@ import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { writeFileRestricted } from './platform.js'
 import { GIT } from './git.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('checkpoint')
 
 const execFileAsync = promisify(execFileCb)
 
@@ -56,7 +59,9 @@ export class CheckpointManager extends EventEmitter {
     if (checkpoints.length >= MAX_CHECKPOINTS_PER_SESSION) {
       const evicted = checkpoints.shift()
       if (evicted?.gitRef) {
-        this._deleteGitRef(evicted.cwd, evicted.gitRef).catch(() => {})
+        this._deleteGitRef(evicted.cwd, evicted.gitRef).catch((err) => {
+          log.warn(`Failed to delete evicted git ref ${evicted.gitRef}: ${err.message} (non-critical, orphaned ref)`)
+        })
       }
     }
 
@@ -150,7 +155,9 @@ export class CheckpointManager extends EventEmitter {
 
     // Clean up git ref if present
     if (checkpoint.gitRef) {
-      this._deleteGitRef(checkpoint.cwd, checkpoint.gitRef).catch(() => {})
+      this._deleteGitRef(checkpoint.cwd, checkpoint.gitRef).catch((err) => {
+        log.warn(`Failed to delete git ref ${checkpoint.gitRef}: ${err.message} (non-critical, orphaned ref)`)
+      })
     }
 
     checkpoints.splice(idx, 1)
@@ -166,7 +173,9 @@ export class CheckpointManager extends EventEmitter {
     const checkpoints = this._getCheckpoints(sessionId)
     for (const cp of checkpoints) {
       if (cp.gitRef) {
-        this._deleteGitRef(cp.cwd, cp.gitRef).catch(() => {})
+        this._deleteGitRef(cp.cwd, cp.gitRef).catch((err) => {
+          log.warn(`Failed to delete git ref ${cp.gitRef}: ${err.message} (non-critical, orphaned ref)`)
+        })
       }
     }
     this._checkpoints.delete(sessionId)
@@ -222,7 +231,7 @@ export class CheckpointManager extends EventEmitter {
     } catch (err) {
       // If stash push succeeded but tag/pop failed, try to recover
       try { await execFileAsync(GIT, ['stash', 'pop'], { cwd }) } catch { /* best effort */ }
-      console.warn(`[checkpoint] Failed to create git snapshot: ${err.message}`)
+      log.warn(`Failed to create git snapshot: ${err.message}`)
       return null
     }
   }
@@ -264,7 +273,7 @@ export class CheckpointManager extends EventEmitter {
         await execFileAsync(GIT, ['checkout', gitRef, '--', '.'], { cwd })
       }
     } catch (err) {
-      console.warn(`[checkpoint] Failed to restore git snapshot: ${err.message}`)
+      log.warn(`Failed to restore git snapshot: ${err.message}`)
       throw new Error(`Git restore failed: ${err.message}`)
     }
   }
@@ -304,7 +313,7 @@ export class CheckpointManager extends EventEmitter {
     try {
       writeFileRestricted(file, JSON.stringify(data, null, 2))
     } catch (err) {
-      console.warn(`[checkpoint] Failed to persist: ${err.message}`)
+      log.warn(`Failed to persist checkpoint: ${err.message}`)
     }
   }
 }
