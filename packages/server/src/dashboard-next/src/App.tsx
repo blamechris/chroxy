@@ -759,9 +759,15 @@ export function App() {
           {availableModels.length > 0 && (
             <select
               value={activeModel || ''}
-              onChange={e => setModel(e.target.value)}
+              onChange={e => {
+                const v = e.target.value;
+                if (v) setModel(v);
+              }}
               aria-label="Select model"
             >
+              <option value="">
+                Default ({availableModels[0]?.label ?? 'recommended'})
+              </option>
               {availableModels.map(m => (
                 <option key={m.id} value={m.id}>{m.label}</option>
               ))}
