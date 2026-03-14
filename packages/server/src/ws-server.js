@@ -436,7 +436,9 @@ export class WsServer {
 
     // Background version check (non-blocking, skipped in test/CI)
     if (process.env.NODE_ENV !== 'test') {
-      checkLatestVersion(packageJson.name).then((v) => { this._latestVersion = v }).catch(() => {})
+      checkLatestVersion(packageJson.name).then((v) => { this._latestVersion = v }).catch((err) => {
+        log.warn(`Failed to check latest npm version: ${err.message} (non-critical, update check skipped)`)
+      })
     }
 
     // Wire TokenManager rotation events — broadcast new token to all clients
@@ -658,6 +660,10 @@ export class WsServer {
       })
     })
 
+    this.wss.on('error', (err) => {
+      log.error(`WebSocket server error: ${err.message}`)
+    })
+
     this.httpServer.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
         log.error(`Port ${this.port} is already in use — is another Chroxy instance running?`)
@@ -674,7 +680,9 @@ export class WsServer {
       if (remote || teleport) {
         log.info(`Claude Code Web features detected: remote=${remote}, teleport=${teleport}`)
       }
-    }).catch(() => {})
+    }).catch((err) => {
+      log.warn(`Failed to detect Claude Code Web features: ${err.message} (non-critical, web features disabled)`)
+    })
 
     // Forward web task events to all authenticated clients
     this._webTaskManager.on('task_created', (task) => this._broadcast({ type: 'web_task_created', task }))

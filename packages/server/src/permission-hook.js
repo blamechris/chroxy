@@ -3,6 +3,9 @@ import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('permission-hook')
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -18,14 +21,14 @@ let _settingsLockHeld = 0
 
 export function withSettingsLock(fn) {
   if (_settingsLockHeld > 0) {
-    console.log('[config] Settings write queued (lock contended)')
+    log.info('Settings write queued (lock contended)')
   }
 
   _settingsLockHeld++
 
   const wrapped = () => {
     if (_settingsLockHeld > 1) {
-      console.log('[config] Settings write proceeding (lock acquired)')
+      log.info('Settings write proceeding (lock acquired)')
     }
     return Promise.resolve(fn()).finally(() => {
       _settingsLockHeld--
@@ -33,7 +36,9 @@ export function withSettingsLock(fn) {
   }
 
   const next = _settingsLock.then(wrapped, wrapped)
-  _settingsLock = next.catch(() => {})
+  _settingsLock = next.catch((err) => {
+    log.warn(`Settings lock release failed: ${err.message} (non-critical, lock will reset)`)
+  })
   return next
 }
 
@@ -81,7 +86,7 @@ function registerPermissionHookSync(settingsPath) {
   })
 
   writeFileRestricted(settingsPath, JSON.stringify(settings, null, 2) + '\n')
-  console.log(`[permission-hook] Registered hook in ${settingsPath}`)
+  log.info(`Registered hook in ${settingsPath}`)
 }
 
 /**
@@ -95,7 +100,7 @@ function unregisterPermissionHookSync(settingsPath) {
     settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
   } catch (err) {
     if (err instanceof SyntaxError) {
-      console.warn(`[permission-hook] Cannot unregister: ${settingsPath} contains invalid JSON. Skipping cleanup.`)
+      log.warn(`Cannot unregister: ${settingsPath} contains invalid JSON. Skipping cleanup.`)
       return
     }
     throw err
@@ -112,7 +117,7 @@ function unregisterPermissionHookSync(settingsPath) {
       delete settings.hooks
     }
     writeFileRestricted(settingsPath, JSON.stringify(settings, null, 2) + '\n')
-    console.log(`[permission-hook] Unregistered hook from ${settingsPath}`)
+    log.info(`Unregistered hook from ${settingsPath}`)
   }
 }
 
@@ -137,14 +142,14 @@ export function createPermissionHookManager(emitter, { settingsPath } = {}) {
     if (retryCount > 3) {
       const effectivePath = settingsPath || DEFAULT_SETTINGS_PATH
       const errMsg = `Hook registration failed after 3 attempts. Please check ${effectivePath} and restart the server. Permissions will not work until this is fixed.`
-      console.error(`[permission-hook] ${errMsg}`)
+      log.error(errMsg)
       emitter.emit('error', { message: errMsg })
       return
     }
 
     const delays = [2000, 5000, 10000]
     const delay = delays[retryCount - 1]
-    console.log(`[permission-hook] Registration failed, retrying in ${delay / 1000}s (attempt ${retryCount}/3)`)
+    log.info(`Registration failed, retrying in ${delay / 1000}s (attempt ${retryCount}/3)`)
 
     retryTimer = setTimeout(() => {
       retryTimer = null
@@ -167,12 +172,12 @@ export function createPermissionHookManager(emitter, { settingsPath } = {}) {
       } catch (err) {
         // Corrupt JSON is non-retryable — retrying won't fix the file
         if (err.message.includes('invalid JSON')) {
-          console.error(`[permission-hook] ${err.message}`)
+          log.error(err.message)
           emitter.emit('error', { message: err.message })
           return
         }
         const errMsg = `Failed to register permission hook: ${err.message}. Will retry hook registration.`
-        console.error(`[permission-hook] ${errMsg}`)
+        log.error(errMsg)
         emitter.emit('error', { message: errMsg })
         scheduleRetry()
       }
@@ -184,7 +189,7 @@ export function createPermissionHookManager(emitter, { settingsPath } = {}) {
       try {
         unregisterPermissionHookSync(settingsPath)
       } catch (err) {
-        console.error(`[permission-hook] Failed to unregister: ${err.message}`)
+        log.error(`Failed to unregister: ${err.message}`)
       }
     })
   }
