@@ -10,6 +10,7 @@ import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import qrcode from 'qrcode-terminal'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
+import { checkNoAuthWarnings } from './no-auth-warnings.js'
 import { maskToken } from './mask-token.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
@@ -86,8 +87,8 @@ export async function startCliServer(config) {
   console.log('')
 
   if (NO_AUTH) {
-    console.log('⚠  WARNING: Running without authentication (--no-auth)')
-    console.log('⚠  Server bound to localhost only. Do NOT expose to network.')
+    const tunnelMode = config.tunnel || 'none'
+    checkNoAuthWarnings({ authRequired: false, tunnel: tunnelMode })
     console.log('')
   }
 
