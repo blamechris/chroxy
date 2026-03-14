@@ -631,8 +631,18 @@ fn handle_start(app: &tauri::AppHandle) {
         Ok(()) => {
             update_menu_state(app, MenuState::Running);
 
-            // Show window immediately (loading page listens for server_ready event)
+            // Show window immediately (loading page shows spinner)
             window::show_window(app);
+
+            // Inject settings button handler on the loading page
+            {
+                let state = app.state::<Mutex<ServerManager>>();
+                let mgr = lock_or_recover(&state);
+                let p = mgr.port();
+                let t = mgr.token();
+                drop(mgr);
+                window::inject_settings_button_handler(app, p, t.as_deref());
+            }
 
             let app_handle = app.clone();
             std::thread::spawn(move || {

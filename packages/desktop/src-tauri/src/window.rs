@@ -51,9 +51,9 @@ pub struct ServerRestartingPayload {
 
 // -- Event emission (replaces eval-based injection) --
 
-/// Navigate the main webview to the dashboard URL and emit `server_ready` event.
-/// Uses direct Rust-side navigation instead of relying on JS in the loading page,
-/// because Tauri v2's CSP nonce system blocks inline scripts.
+/// Update the loading page status text, then navigate to the dashboard after a brief delay.
+/// Tauri v2's CSP nonce blocks both inline and external scripts in the embedded frontend,
+/// so we inject status updates via eval() (which is nonce-aware) and navigate from Rust.
 pub fn emit_server_ready(app: &AppHandle, port: u16, token: Option<&str>) {
     let url = dashboard_url(port, token);
     let payload = ServerReadyPayload {
@@ -61,29 +61,68 @@ pub fn emit_server_ready(app: &AppHandle, port: u16, token: Option<&str>) {
         token: token.unwrap_or("").to_string(),
         url: url.clone(),
     };
-    // Navigate the webview directly to the dashboard
-    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
-        if let Ok(parsed) = url.parse::<tauri::Url>() {
-            let _ = window.navigate(parsed);
-        }
-    }
     let _ = app.emit("server_ready", payload);
     show_window(app);
+
+    // Update loading page status to "Connected!" then navigate after 800ms
+    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+        let _ = window.eval(
+            "try { \
+                var s = document.getElementById('status'); \
+                if (s) { s.textContent = 'Connected!'; s.className = 'status'; } \
+                var sp = document.getElementById('spinner'); \
+                if (sp) sp.style.display = 'none'; \
+            } catch(e) {}"
+        );
+    }
+
+    // Navigate to dashboard after a brief pause so user sees "Connected!"
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        if let Some(window) = app_handle.get_webview_window(MAIN_LABEL) {
+            // Use eval to navigate — window.navigate() from tauri:// to http://
+            // may be blocked by same-origin policy in the embedded webview.
+            let escaped = url.replace('\\', "\\\\").replace('\'', "\\'");
+            let _ = window.eval(&format!("window.location.href = '{}'", escaped));
+        }
+    });
 }
 
-/// Emit `server_stopped` event.
-/// React dashboard listens and shows disconnected state.
+/// Emit `server_stopped` event and update loading page if visible.
 pub fn emit_server_stopped(app: &AppHandle) {
     let _ = app.emit("server_stopped", ());
+    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+        let _ = window.eval(
+            "try { \
+                var s = document.getElementById('status'); \
+                if (s) { s.textContent = 'Server stopped'; s.className = 'status'; } \
+                var sp = document.getElementById('spinner'); \
+                if (sp) sp.style.display = 'none'; \
+            } catch(e) {}"
+        );
+    }
     show_window(app);
 }
 
-/// Emit `server_error` event with error message.
+/// Emit `server_error` event and update loading page if visible.
 pub fn emit_server_error(app: &AppHandle, message: &str) {
     let payload = ServerErrorPayload {
         message: message.to_string(),
     };
     let _ = app.emit("server_error", payload);
+    let escaped = message.replace('\\', "\\\\").replace('\'', "\\'");
+    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+        let _ = window.eval(&format!(
+            "try {{ \
+                var s = document.getElementById('status'); \
+                if (s) {{ s.textContent = '{}'; s.className = 'status error'; }} \
+                var sp = document.getElementById('spinner'); \
+                if (sp) sp.style.display = 'none'; \
+            }} catch(e) {{}}",
+            escaped
+        ));
+    }
     show_window(app);
 }
 
@@ -103,6 +142,30 @@ pub fn emit_server_restarting(app: &AppHandle, attempt: u32, max_attempts: u32, 
 pub fn emit_navigate_console(app: &AppHandle) {
     let _ = app.emit("navigate_console", ());
     show_window(app);
+}
+
+/// Inject click handler for the settings button on the loading page.
+/// Navigates directly to the dashboard settings panel when clicked.
+pub fn inject_settings_button_handler(app: &AppHandle, port: u16, token: Option<&str>) {
+    let url = dashboard_url(port, token);
+    // Append settings query param so dashboard auto-opens settings panel
+    let settings_url = if url.contains('?') {
+        format!("{}&settings=1", url)
+    } else {
+        format!("{}?settings=1", url)
+    };
+    let escaped = settings_url.replace('\\', "\\\\").replace('\'', "\\'");
+    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+        let _ = window.eval(&format!(
+            "try {{ \
+                var btn = document.getElementById('settings-btn'); \
+                if (btn) btn.addEventListener('click', function() {{ \
+                    window.location.href = '{}'; \
+                }}); \
+            }} catch(e) {{}}",
+            escaped
+        ));
+    }
 }
 
 // -- Window management (no eval) --
