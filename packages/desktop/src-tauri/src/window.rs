@@ -63,7 +63,6 @@ pub fn emit_server_ready(app: &AppHandle, port: u16, token: Option<&str>) {
     };
     // Navigate the webview directly to the dashboard
     if let Some(window) = app.get_webview_window(MAIN_LABEL) {
-        use tauri::WebviewUrl;
         if let Ok(parsed) = url.parse::<tauri::Url>() {
             let _ = window.navigate(parsed);
         }
