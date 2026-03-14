@@ -29,7 +29,9 @@ function getNativeModule() {
 
 /** Whether the current device supports Live Activities (iOS 16.1+). */
 export function isLiveActivitySupported(): boolean {
-  return Platform.OS === 'ios' && parseInt(Platform.Version as string, 10) >= 16;
+  if (Platform.OS !== 'ios') return false;
+  const version = parseFloat(Platform.Version as string);
+  return version >= 16.1;
 }
 
 /** Map state enum to human-readable subtitle text. */

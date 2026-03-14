@@ -66,8 +66,14 @@ describe('ios-live-activity', () => {
       expect(isLiveActivitySupported()).toBe(false)
     })
 
-    it('returns false on iOS < 16', () => {
+    it('returns false on iOS < 16.1', () => {
       mockPlatform('ios', '15.7')
+      const { isLiveActivitySupported } = requireBridge()
+      expect(isLiveActivitySupported()).toBe(false)
+    })
+
+    it('returns false on iOS 16.0 (ActivityKit requires 16.1)', () => {
+      mockPlatform('ios', '16.0')
       const { isLiveActivitySupported } = requireBridge()
       expect(isLiveActivitySupported()).toBe(false)
     })
