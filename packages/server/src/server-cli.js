@@ -9,6 +9,7 @@ import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import qrcode from 'qrcode-terminal'
+import { setJsonMode } from './logger.js'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 import { maskToken } from './mask-token.js'
 import { TokenManager } from './token-manager.js'
@@ -34,6 +35,11 @@ function isWithinHome(dir) {
  * Start the Chroxy server in CLI headless mode.
  */
 export async function startCliServer(config) {
+  // Enable JSON log format if configured
+  if (config.logFormat === 'json') {
+    setJsonMode(true)
+  }
+
   const PORT = config.port || parseInt(process.env.PORT || '8765', 10)
   const NO_AUTH = !!config.noAuth
 

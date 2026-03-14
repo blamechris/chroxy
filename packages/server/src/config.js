@@ -43,6 +43,7 @@ const CONFIG_SCHEMA = {
   maxSessions: 'number',
   maxHistory: 'number',
   showToken: 'boolean',
+  logFormat: 'string',
 }
 
 /**
@@ -216,6 +217,7 @@ function envKeyForConfig(key) {
     maxHistory: 'CHROXY_MAX_HISTORY',
     showToken: 'CHROXY_SHOW_TOKEN',
     repos: 'CHROXY_REPOS',
+    logFormat: 'CHROXY_LOG_FORMAT',
   }
   return envMap[key] || key.toUpperCase()
 }

@@ -50,6 +50,7 @@ export function addServerOptions(cmd) {
     .option('--max-tool-input <bytes>', 'Maximum tool input size in bytes (default: 262144)')
     .option('--session-timeout <duration>', 'Idle session timeout (e.g. 2h, 30m). Disabled by default')
     .option('--cost-budget <dollars>', 'Per-session cost budget in dollars (e.g., 5.00)')
+    .option('--log-format <format>', 'Log output format: text (default) or json')
     .option('-v, --verbose', 'Show detailed config sources and validation info')
 }
 
@@ -119,6 +120,7 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
   if (options.tunnelHostname !== undefined) cliOverrides.tunnelHostname = options.tunnelHostname
   if (options.legacyCli) cliOverrides.legacyCli = true
   if (options.provider !== undefined) cliOverrides.provider = options.provider
+  if (options.logFormat !== undefined) cliOverrides.logFormat = options.logFormat
 
   const defaults = {
     port: 8765,
