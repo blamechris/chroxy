@@ -592,14 +592,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       });
 
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
-      if (wasConnected && disconnectedAttemptId !== myAttemptId) {
+      if (wasConnected && !get().userDisconnected && disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] Connection lost, auto-reconnecting...');
         set({ connectionPhase: 'reconnecting', connectionError: 'Connection lost', connectionRetryCount: 0 });
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
         }, AUTO_RECONNECT_DELAY);
-      } else if (disconnectedAttemptId === myAttemptId) {
+      } else if (disconnectedAttemptId === myAttemptId || get().userDisconnected) {
         set({ connectionPhase: 'disconnected' });
       } else {
         set({ connectionPhase: 'disconnected' });
@@ -612,8 +612,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       set({ socket: null });
 
-      // Auto-reconnect on unexpected WS error
-      if (disconnectedAttemptId !== myAttemptId) {
+      // Auto-reconnect on unexpected WS error (skip if user explicitly disconnected)
+      if (!get().userDisconnected && disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] WebSocket error, reconnecting...');
         set({ connectionPhase: 'reconnecting', connectionError: 'Connection error', connectionRetryCount: 0 });
         setTimeout(() => {

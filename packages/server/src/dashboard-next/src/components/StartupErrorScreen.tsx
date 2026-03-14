@@ -9,9 +9,10 @@ export interface StartupErrorScreenProps {
   error: string
   logs: string[] | null
   onRetry: () => void
+  onStartServer?: () => void
 }
 
-export function StartupErrorScreen({ error, logs, onRetry }: StartupErrorScreenProps) {
+export function StartupErrorScreen({ error, logs, onRetry, onStartServer }: StartupErrorScreenProps) {
   const hasLogs = logs && logs.length > 0
 
   return (
@@ -31,14 +32,27 @@ export function StartupErrorScreen({ error, logs, onRetry }: StartupErrorScreenP
           </div>
         )}
 
-        <button
-          className="startup-error-retry-btn"
-          onClick={onRetry}
-          type="button"
-          aria-label="Retry"
-        >
-          Retry
-        </button>
+        <div className="startup-error-actions">
+          {onStartServer && (
+            <button
+              className="startup-error-retry-btn startup-error-start-btn"
+              onClick={onStartServer}
+              type="button"
+              aria-label="Start Server"
+              data-testid="start-server-button"
+            >
+              Start Server
+            </button>
+          )}
+          <button
+            className="startup-error-retry-btn"
+            onClick={onRetry}
+            type="button"
+            aria-label="Retry"
+          >
+            Reconnect
+          </button>
+        </div>
       </div>
     </div>
   )
