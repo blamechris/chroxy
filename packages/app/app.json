@@ -55,7 +55,8 @@
         }
       ],
       "expo-secure-store",
-      "expo-localization"
+      "expo-localization",
+      "expo-live-activity"
     ],
     "extra": {
       "eas": {
