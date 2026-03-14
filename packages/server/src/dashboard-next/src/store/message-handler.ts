@@ -694,6 +694,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           set(patch);
         }
         set({ sessions: sessionList });
+        // Sync activeModel from session list to prevent dropdown reset
+        const activeSessionId = get().activeSessionId;
+        if (activeSessionId) {
+          const activeSessionInfo = sessionList.find((s) => s.sessionId === activeSessionId);
+          if (activeSessionInfo?.model) {
+            set({ activeModel: activeSessionInfo.model });
+          }
+        }
         // Initialize session state for any new sessions not yet tracked
         const currentStates = get().sessionStates;
         const newInitStates = { ...currentStates };
