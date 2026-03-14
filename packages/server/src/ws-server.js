@@ -6,6 +6,7 @@ import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import { encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from './crypto.js'
+import { createClientSender } from './ws-client-sender.js'
 import { ClientMessageSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
 import { EventNormalizer } from './event-normalizer.js'
 import { createFileOps } from './ws-file-ops/index.js'
@@ -287,6 +288,7 @@ export class WsServer {
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024 // 1MB default
     this._backpressureMaxDrops = 10 // close connection after this many consecutive drops
     this._rateLimiter = new RateLimiter()
+    this._clientSend = createClientSender(log)
     this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo, _backpressureDrops }
     this.httpServer = null
     this.wss = null
@@ -1000,37 +1002,10 @@ export class WsServer {
     return false
   }
 
-  /** Send JSON to a single client */
+  /** Send JSON to a single client (delegates to extracted ws-client-sender) */
   _send(ws, message) {
     const client = this.clients.get(ws)
-    // Queue messages while key exchange is pending
-    if (client?.encryptionPending && client.postAuthQueue) {
-      client.postAuthQueue.push(message)
-      return
-    }
-    // Buffer messages while post-auth queue is still flushing
-    if (client?._flushing) {
-      client._flushOverflow = client._flushOverflow || []
-      client._flushOverflow.push(message)
-      return
-    }
-    // Assign per-client monotonic sequence number
-    if (client) {
-      client._seq++
-      message = { ...message, seq: client._seq }
-    }
-    try {
-      // Encrypt if encryption is active for this client
-      if (client?.encryptionState) {
-        const envelope = encrypt(JSON.stringify(message), client.encryptionState.sharedKey, client.encryptionState.sendNonce, DIRECTION_SERVER)
-        client.encryptionState.sendNonce++
-        ws.send(JSON.stringify(envelope))
-      } else {
-        ws.send(JSON.stringify(message))
-      }
-    } catch (err) {
-      log.error(`Send error: ${err.message}`)
-    }
+    this._clientSend(ws, client, message)
   }
 
   /** Graceful shutdown */
