@@ -20,10 +20,8 @@ echo "[bundle-server] Staging server to $STAGING"
 rm -rf "$STAGING"
 mkdir -p "$STAGING/src/dashboard-next" "$STAGING/hooks"
 
-# package.json + lockfile — reproducible installs via npm ci
-# If dependencies change in package.json, regenerate the lockfile:
-#   cd packages/server && npm install --package-lock-only
-# Must be run from packages/server/ (not repo root) to avoid workspace protocol refs.
+# package.json + lockfile for dependency installation.
+# Workspace deps (@chroxy/*) are stripped before install and copied manually after.
 cp "$SERVER_DIR/package.json" "$STAGING/package.json"
 cp "$SERVER_DIR/package-lock.json" "$STAGING/package-lock.json"
 
