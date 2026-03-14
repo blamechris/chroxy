@@ -13,19 +13,33 @@ let fileBrowserCallback: ((listing: any) => void) | null = null
 let fileContentCallback: ((content: any) => void) | null = null
 let gitStatusCallback: ((result: any) => void) | null = null
 
-vi.mock('../store/connection', () => ({
-  useConnectionStore: (selector: any) => {
-    const store = {
-      requestFileListing: mockRequestFileListing,
-      requestFileContent: mockRequestFileContent,
-      requestGitStatus: mockRequestGitStatus,
-      setFileBrowserCallback: (cb: any) => { fileBrowserCallback = cb },
-      setFileContentCallback: (cb: any) => { fileContentCallback = cb },
-      setGitStatusCallback: (cb: any) => { gitStatusCallback = cb },
-    }
-    return selector(store)
-  },
-}))
+let mockSessionStates: Record<string, any> = {}
+let mockActiveSessionId: string | null = 's1'
+
+vi.mock('../store/connection', () => {
+  const storeState = () => ({
+    requestFileListing: mockRequestFileListing,
+    requestFileContent: mockRequestFileContent,
+    requestGitStatus: mockRequestGitStatus,
+    setFileBrowserCallback: (cb: any) => { fileBrowserCallback = cb },
+    setFileContentCallback: (cb: any) => { fileContentCallback = cb },
+    setGitStatusCallback: (cb: any) => { gitStatusCallback = cb },
+    activeSessionId: mockActiveSessionId,
+    sessionStates: mockSessionStates,
+  })
+
+  const useConnectionStore = Object.assign(
+    (selector: any) => selector(storeState()),
+    {
+      getState: () => storeState(),
+      setState: (partial: any) => {
+        if (partial.sessionStates) mockSessionStates = partial.sessionStates
+      },
+    },
+  )
+
+  return { useConnectionStore }
+})
 
 // Mock syntax tokenizer
 vi.mock('../lib/syntax', () => ({
@@ -43,6 +57,8 @@ beforeEach(() => {
   fileBrowserCallback = null
   fileContentCallback = null
   gitStatusCallback = null
+  mockSessionStates = {}
+  mockActiveSessionId = 's1'
 })
 
 describe('FileBrowserPanel', () => {
@@ -233,5 +249,38 @@ describe('FileBrowserPanel', () => {
 
     // File viewer should be gone
     expect(screen.queryByLabelText('Close file')).toBeNull()
+  })
+
+  it('persists selected file path to session state', async () => {
+    mockActiveSessionId = 's1'
+    mockSessionStates = { s1: { selectedFilePath: null } }
+
+    render(<FileBrowserPanel />)
+
+    act(() => {
+      fileBrowserCallback!({
+        path: '/home/user/project',
+        parentPath: null,
+        entries: [{ name: 'readme.md', isDirectory: false, size: 50 }],
+        error: null,
+      })
+    })
+
+    act(() => {
+      fireEvent.click(screen.getByText('readme.md'))
+    })
+
+    // Session state should have the selected file path
+    expect(mockSessionStates.s1.selectedFilePath).toBe('/home/user/project/readme.md')
+  })
+
+  it('restores selected file on remount from session state', () => {
+    mockActiveSessionId = 's1'
+    mockSessionStates = { s1: { selectedFilePath: '/home/user/project/index.ts' } }
+
+    render(<FileBrowserPanel />)
+
+    // Should request file content for the saved path on mount
+    expect(mockRequestFileContent).toHaveBeenCalledWith('/home/user/project/index.ts')
   })
 })
