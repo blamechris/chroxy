@@ -17,6 +17,53 @@ import { writeFileRestricted } from './platform.js'
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send'
 
+// Fetch timeout and retry configuration
+const FETCH_TIMEOUT_MS = 10_000
+const MAX_RETRIES = 3
+const BACKOFF_BASE_MS = 1_000
+
+/**
+ * Fetch with timeout and exponential backoff retry.
+ * Retries on 5xx responses and timeout/network errors.
+ * Does NOT retry on 4xx client errors.
+ */
+async function fetchWithRetry(url, options) {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal })
+      clearTimeout(timer)
+
+      if (res.ok || (res.status >= 400 && res.status < 500)) {
+        return res
+      }
+
+      // 5xx — retry if attempts remain
+      if (attempt < MAX_RETRIES) {
+        const delay = BACKOFF_BASE_MS * Math.pow(2, attempt - 1)
+        console.warn(`[push] Expo API returned ${res.status}, retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`)
+        await new Promise(r => setTimeout(r, delay))
+        continue
+      }
+
+      return res
+    } catch (err) {
+      clearTimeout(timer)
+
+      if (attempt < MAX_RETRIES) {
+        const delay = BACKOFF_BASE_MS * Math.pow(2, attempt - 1)
+        console.warn(`[push] Fetch failed (${err.name}: ${err.message}), retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`)
+        await new Promise(r => setTimeout(r, delay))
+        continue
+      }
+
+      throw err
+    }
+  }
+}
+
 // Rate limits per category (ms) — prevents notification spam
 const RATE_LIMITS = {
   permission: 0,       // Always send permission prompts immediately
@@ -27,6 +74,9 @@ const RATE_LIMITS = {
   activity_error: 0,        // Immediate: session errors
   live_activity: 5_000,     // Live Activity updates: 5s throttle
 }
+
+// Exported for testing
+export { fetchWithRetry, FETCH_TIMEOUT_MS, MAX_RETRIES, BACKOFF_BASE_MS }
 
 export class PushManager {
   constructor({ storagePath } = {}) {
@@ -158,7 +208,7 @@ export class PushManager {
     }))
 
     try {
-      const res = await fetch(EXPO_PUSH_URL, {
+      const res = await fetchWithRetry(EXPO_PUSH_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(messages),
@@ -218,7 +268,7 @@ export class PushManager {
     }))
 
     try {
-      const res = await fetch(EXPO_PUSH_URL, {
+      const res = await fetchWithRetry(EXPO_PUSH_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(messages),
