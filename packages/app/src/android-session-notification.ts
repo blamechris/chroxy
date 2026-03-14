@@ -5,9 +5,14 @@ import type { ActivityState } from './store/session-activity';
 const CHANNEL_ID = 'session-progress';
 const THROTTLE_MS = 1000;
 
+const ELAPSED_INTERVAL_MS = 30_000;
+
 let currentNotifId: string | null = null;
 let lastUpdateTime = 0;
 let channelReady = false;
+let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+let currentTitle: string | null = null;
+let currentStartedAt: number | null = null;
 
 function formatElapsed(seconds: number): string {
   if (seconds <= 0) return '';
@@ -82,6 +87,7 @@ export async function updateSessionNotification(
 
 export async function dismissSessionNotification(): Promise<void> {
   if (Platform.OS !== 'android') return;
+  stopElapsedTimer();
   if (!currentNotifId) return;
 
   try {
@@ -93,10 +99,49 @@ export async function dismissSessionNotification(): Promise<void> {
   lastUpdateTime = 0;
 }
 
+/**
+ * Starts a periodic timer that updates the notification with current elapsed
+ * time every ELAPSED_INTERVAL_MS (30s). Call when session becomes active.
+ * Automatically stops any existing timer before starting a new one.
+ */
+export function startElapsedTimer(title: string, startedAt: number): void {
+  if (Platform.OS !== 'android') return;
+  stopElapsedTimer();
+  currentTitle = title;
+  currentStartedAt = startedAt;
+
+  elapsedTimer = setInterval(() => {
+    if (currentStartedAt == null) return;
+    const elapsed = Math.floor((Date.now() - currentStartedAt) / 1000);
+    // Reset lastUpdateTime so the throttle doesn't block periodic updates
+    lastUpdateTime = 0;
+    void updateSessionNotification(
+      'busy', // state doesn't matter for display, just needs to be non-idle
+      currentTitle ?? 'Session active',
+      elapsed,
+    );
+  }, ELAPSED_INTERVAL_MS);
+}
+
+/**
+ * Stops the periodic elapsed-time update timer.
+ */
+export function stopElapsedTimer(): void {
+  if (elapsedTimer != null) {
+    clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+  currentTitle = null;
+  currentStartedAt = null;
+}
+
 /** Exposed for testing only */
 export const _testInternals = {
   formatElapsed,
+  ELAPSED_INTERVAL_MS,
+  get elapsedTimer() { return elapsedTimer; },
   reset() {
+    stopElapsedTimer();
     currentNotifId = null;
     lastUpdateTime = 0;
     channelReady = false;

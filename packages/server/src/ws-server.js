@@ -6,6 +6,7 @@ import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import { encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from './crypto.js'
+import { createClientSender } from './ws-client-sender.js'
 import { ClientMessageSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
 import { EventNormalizer } from './event-normalizer.js'
 import { createFileOps } from './ws-file-ops/index.js'
@@ -21,6 +22,7 @@ import { WebTaskManager } from './web-task-manager.js'
 import { RateLimiter } from './rate-limiter.js'
 import { createLogger, addLogListener, removeLogListener } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
+import { WsBroadcaster } from './ws-broadcaster.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -287,6 +289,7 @@ export class WsServer {
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024 // 1MB default
     this._backpressureMaxDrops = 10 // close connection after this many consecutive drops
     this._rateLimiter = new RateLimiter()
+    this._clientSend = createClientSender(log)
     this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo, _backpressureDrops }
     this.httpServer = null
     this.wss = null
@@ -298,6 +301,12 @@ export class WsServer {
     // Late-binding wrappers: allows tests to monkey-patch _send/_broadcast
     const self = this
     const sendFn = (ws, msg) => self._send(ws, msg)
+    this._broadcaster = new WsBroadcaster({
+      clients: this.clients,
+      sendFn,
+      backpressureThreshold: this._backpressureThreshold,
+      backpressureMaxDrops: this._backpressureMaxDrops,
+    })
     const broadcastFn = (msg, filter) => self._broadcast(msg, filter)
     this._fileOps = createFileOps(sendFn)
     this._permissions = createPermissionHandler({
@@ -802,27 +811,12 @@ export class WsServer {
 
   /** Public broadcast: send a message to all authenticated clients */
   broadcast(message) {
-    log.info(`Broadcasting ${message.type || 'unknown'} to all clients`)
-    this._broadcast(message)
+    this._broadcaster.broadcast(message)
   }
 
   /** Broadcast a message to all authenticated clients matching a filter */
-  _broadcast(message, filter = () => true) {
-    for (const [ws, client] of this.clients) {
-      if (client.authenticated && filter(client) && ws.readyState === 1) {
-        if (ws.bufferedAmount > this._backpressureThreshold) {
-          client._backpressureDrops = (client._backpressureDrops || 0) + 1
-          log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
-          if (client._backpressureDrops >= this._backpressureMaxDrops) {
-            log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
-            ws.close(4008, 'Backpressure: too many dropped messages')
-          }
-          continue
-        }
-        client._backpressureDrops = 0
-        this._send(ws, message)
-      }
-    }
+  _broadcast(message, filter) {
+    this._broadcaster._broadcast(message, filter)
   }
 
   /**
@@ -832,23 +826,8 @@ export class WsServer {
    * matches — prevents cross-session info leakage and bandwidth waste.
    * Pass a custom filter to override the default recipient selection when needed.
    */
-  _broadcastToSession(sessionId, message, filter = (client) => client.activeSessionId === sessionId || client.subscribedSessionIds.has(sessionId)) {
-    const tagged = { ...message, sessionId }
-    for (const [ws, client] of this.clients) {
-      if (client.authenticated && filter(client) && ws.readyState === 1) {
-        if (ws.bufferedAmount > this._backpressureThreshold) {
-          client._backpressureDrops = (client._backpressureDrops || 0) + 1
-          log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
-          if (client._backpressureDrops >= this._backpressureMaxDrops) {
-            log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
-            ws.close(4008, 'Backpressure: too many dropped messages')
-          }
-          continue
-        }
-        client._backpressureDrops = 0
-        this._send(ws, tagged)
-      }
-    }
+  _broadcastToSession(sessionId, message, filter) {
+    this._broadcaster._broadcastToSession(sessionId, message, filter)
   }
 
   /** Count unauthenticated connections for pre-auth limit enforcement */
@@ -879,21 +858,7 @@ export class WsServer {
 
   /** Broadcast client_joined to all OTHER authenticated clients */
   _broadcastClientJoined(newClient, excludeWs) {
-    const info = newClient.deviceInfo || {}
-    const message = {
-      type: 'client_joined',
-      client: {
-        clientId: newClient.id,
-        deviceName: info.deviceName || null,
-        deviceType: info.deviceType || 'unknown',
-        platform: info.platform || 'unknown',
-      },
-    }
-    for (const [ws, client] of this.clients) {
-      if (ws !== excludeWs && client.authenticated && ws.readyState === 1) {
-        this._send(ws, message)
-      }
-    }
+    this._broadcaster._broadcastClientJoined(newClient, excludeWs)
   }
 
   /** Handle cleanup when an authenticated client disconnects or is terminated */
@@ -940,10 +905,7 @@ export class WsServer {
    * @param {string|null} [sessionId] - Optional session ID for scoped errors
    */
   broadcastError(category, message, recoverable = true, sessionId = null) {
-    log.error(`Broadcasting server_error (${category}): ${message}`)
-    const payload = { type: 'server_error', category, message, recoverable }
-    if (sessionId) payload.sessionId = sessionId
-    this._broadcast(payload)
+    this._broadcaster.broadcastError(category, message, recoverable, sessionId)
   }
 
   /**
@@ -952,11 +914,7 @@ export class WsServer {
    * @param {string} message - Human-readable status message
    */
   broadcastStatus(message) {
-    log.info(`Broadcasting server_status: ${message}`)
-    this._broadcast({
-      type: 'server_status',
-      message,
-    })
+    this._broadcaster.broadcastStatus(message)
   }
 
   /**
@@ -970,12 +928,7 @@ export class WsServer {
    * @param {number} restartEtaMs - Estimated ms until server is back (0 = not coming back)
    */
   broadcastShutdown(reason, restartEtaMs) {
-    log.info(`Broadcasting server_shutdown: ${reason} (ETA: ${restartEtaMs}ms)`)
-    this._broadcast({
-      type: 'server_shutdown',
-      reason,
-      restartEtaMs,
-    })
+    this._broadcaster.broadcastShutdown(reason, restartEtaMs)
   }
 
   /** Set the draining state. When draining, new input is rejected. */
@@ -1000,37 +953,10 @@ export class WsServer {
     return false
   }
 
-  /** Send JSON to a single client */
+  /** Send JSON to a single client (delegates to extracted ws-client-sender) */
   _send(ws, message) {
     const client = this.clients.get(ws)
-    // Queue messages while key exchange is pending
-    if (client?.encryptionPending && client.postAuthQueue) {
-      client.postAuthQueue.push(message)
-      return
-    }
-    // Buffer messages while post-auth queue is still flushing
-    if (client?._flushing) {
-      client._flushOverflow = client._flushOverflow || []
-      client._flushOverflow.push(message)
-      return
-    }
-    // Assign per-client monotonic sequence number
-    if (client) {
-      client._seq++
-      message = { ...message, seq: client._seq }
-    }
-    try {
-      // Encrypt if encryption is active for this client
-      if (client?.encryptionState) {
-        const envelope = encrypt(JSON.stringify(message), client.encryptionState.sharedKey, client.encryptionState.sendNonce, DIRECTION_SERVER)
-        client.encryptionState.sendNonce++
-        ws.send(JSON.stringify(envelope))
-      } else {
-        ws.send(JSON.stringify(message))
-      }
-    } catch (err) {
-      log.error(`Send error: ${err.message}`)
-    }
+    this._clientSend(ws, client, message)
   }
 
   /** Graceful shutdown */
