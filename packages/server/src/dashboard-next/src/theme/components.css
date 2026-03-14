@@ -3693,6 +3693,14 @@
   overflow: auto;
 }
 
+.file-viewer-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--bg-secondary, #1a1a2e);
+}
+
 .file-viewer-loading,
 .file-viewer-error {
   padding: 16px;
