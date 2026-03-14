@@ -19,8 +19,17 @@ interface ServerInfo {
 async function tauriInvoke<T>(cmd: string): Promise<T | null> {
   if (!isTauri()) return null
   try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    return await invoke<T>(cmd)
+    // Access Tauri invoke via window globals instead of importing @tauri-apps/api/core
+    // to avoid bare module specifier resolution issues in non-Tauri browser contexts.
+    // Matches the pattern used in useTauriEvents.ts — try __TAURI__.core.invoke first,
+    // then __TAURI__.invoke as fallback.
+    const w = window as unknown as Record<string, unknown>
+    const tauri = w.__TAURI__ as Record<string, unknown> | undefined
+    if (!tauri) return null
+    const core = tauri.core as Record<string, unknown> | undefined
+    const invokeFn = (core?.invoke ?? tauri.invoke) as ((cmd: string) => Promise<T>) | undefined
+    if (!invokeFn) return null
+    return await invokeFn(cmd)
   } catch {
     return null
   }
