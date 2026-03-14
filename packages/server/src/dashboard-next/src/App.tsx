@@ -307,6 +307,8 @@ export function App() {
       }
       // Shift+Tab: toggle plan mode
       if (e.shiftKey && e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const tag = (e.target as HTMLElement).tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return  // Allow native reverse-tab
         e.preventDefault()
         const state = useConnectionStore.getState()
         const currentMode = state.permissionMode
