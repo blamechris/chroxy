@@ -25,12 +25,14 @@ const RATE_LIMITS = {
   activity_update: 10_000,  // Throttled: thinking/writing state changes
   activity_waiting: 0,      // Immediate: permission/input waiting
   activity_error: 0,        // Immediate: session errors
+  live_activity: 5_000,     // Live Activity updates: 5s throttle
 }
 
 export class PushManager {
   constructor({ storagePath } = {}) {
     this._storagePath = storagePath || null
     this.tokens = new Set()
+    this._liveActivityTokens = new Set()
     this._lastSent = new Map() // category -> timestamp
     this._loadFromDisk()
   }
@@ -40,11 +42,17 @@ export class PushManager {
     if (!this._storagePath) return
     try {
       const data = JSON.parse(readFileSync(this._storagePath, 'utf-8'))
-      if (Array.isArray(data)) {
-        for (const token of data) {
-          if (typeof token === 'string' && token.length > 0) {
-            this.tokens.add(token)
-          }
+      // Support legacy format (plain array) and new format (object with keys)
+      const pushTokens = Array.isArray(data) ? data : (data.tokens || [])
+      const laTokens = Array.isArray(data) ? [] : (data.liveActivityTokens || [])
+      for (const token of pushTokens) {
+        if (typeof token === 'string' && token.length > 0) {
+          this.tokens.add(token)
+        }
+      }
+      for (const token of laTokens) {
+        if (typeof token === 'string' && token.length > 0) {
+          this._liveActivityTokens.add(token)
         }
       }
     } catch {
@@ -57,7 +65,10 @@ export class PushManager {
     if (!this._storagePath) return
     try {
       mkdirSync(dirname(this._storagePath), { recursive: true })
-      writeFileRestricted(this._storagePath, JSON.stringify([...this.tokens]))
+      writeFileRestricted(this._storagePath, JSON.stringify({
+        tokens: [...this.tokens],
+        liveActivityTokens: [...this._liveActivityTokens],
+      }))
     } catch (err) {
       console.error(`[push] Failed to persist tokens: ${err.message}`)
     }
@@ -85,6 +96,30 @@ export class PushManager {
   /** Remove a push token */
   removeToken(token) {
     if (this.tokens.delete(token)) {
+      this._persistToDisk()
+    }
+  }
+
+  /**
+   * Register a Live Activity push token (iOS).
+   * Stored separately from regular push tokens.
+   */
+  registerLiveActivityToken(token) {
+    if (typeof token === 'string' && token.length > 0) {
+      if (!this._liveActivityTokens.has(token)) {
+        this._liveActivityTokens.add(token)
+        this._persistToDisk()
+      }
+      console.log(`[push] Registered Live Activity token: ${token.slice(0, 30)}...`)
+      return true
+    }
+    console.warn(`[push] Rejected invalid Live Activity token: ${String(token).slice(0, 40)}`)
+    return false
+  }
+
+  /** Remove a Live Activity push token */
+  unregisterLiveActivityToken(token) {
+    if (this._liveActivityTokens.delete(token)) {
       this._persistToDisk()
     }
   }
@@ -154,6 +189,66 @@ export class PushManager {
       console.log(`[push] Sent ${category} notification to ${messages.length} device(s)`)
     } catch (err) {
       console.error(`[push] Failed to send notification:`, err.message)
+    }
+  }
+
+  /**
+   * Send a Live Activity update to all registered Live Activity tokens.
+   * @param {string} state - Current activity state (e.g. 'thinking', 'writing', 'idle')
+   * @param {string} detail - Human-readable detail text
+   */
+  async sendLiveActivityUpdate(state, detail) {
+    if (this._liveActivityTokens.size === 0) return
+
+    // Rate limit check (live_activity category: 5s)
+    const category = 'live_activity'
+    const limit = RATE_LIMITS[category]
+    const lastSent = this._lastSent.get(category) || 0
+    if (Date.now() - lastSent < limit) {
+      return
+    }
+    this._lastSent.set(category, Date.now())
+
+    const messages = [...this._liveActivityTokens].map((token) => ({
+      to: token,
+      sound: 'default',
+      title: 'Live Activity',
+      body: detail,
+      data: { state, detail, category },
+    }))
+
+    try {
+      const res = await fetch(EXPO_PUSH_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(messages),
+      })
+
+      if (!res.ok) {
+        console.error(`[push] Expo Push API returned ${res.status}`)
+        return
+      }
+
+      const result = await res.json()
+
+      // Prune Live Activity tokens that returned errors (invalid/expired)
+      let pruned = false
+      if (result.data) {
+        for (let i = 0; i < result.data.length; i++) {
+          const ticket = result.data[i]
+          if (ticket.status === 'error') {
+            const token = messages[i].to
+            console.warn(`[push] Removing invalid Live Activity token: ${token.slice(0, 30)}... (${ticket.message})`)
+            this._liveActivityTokens.delete(token)
+            pruned = true
+          }
+        }
+      }
+      if (pruned) this._persistToDisk()
+
+      console.log(`[push] Sent live_activity update to ${messages.length} device(s)`)
+    } catch (err) {
+      console.error(`[push] Failed to send Live Activity update:`, err.message)
     }
   }
 }

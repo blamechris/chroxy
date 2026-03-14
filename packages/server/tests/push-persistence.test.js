@@ -28,7 +28,8 @@ describe('PushManager persistence (#1982)', () => {
 
     assert.ok(existsSync(storagePath))
     const saved = JSON.parse(readFileSync(storagePath, 'utf-8'))
-    assert.deepEqual(saved, [VALID_TOKEN])
+    assert.deepEqual(saved.tokens, [VALID_TOKEN])
+    assert.deepEqual(saved.liveActivityTokens, [])
   })
 
   it('loads tokens from disk on construction', () => {
@@ -46,17 +47,18 @@ describe('PushManager persistence (#1982)', () => {
     manager.removeToken(VALID_TOKEN)
 
     const saved = JSON.parse(readFileSync(storagePath, 'utf-8'))
-    assert.deepEqual(saved, [VALID_TOKEN_2])
+    assert.deepEqual(saved.tokens, [VALID_TOKEN_2])
   })
 
   it('deduplicates on load when client reconnects with same token', () => {
-    writeFileSync(storagePath, JSON.stringify([VALID_TOKEN]))
+    // Write in new format so file stays consistent after no-op registerToken
+    writeFileSync(storagePath, JSON.stringify({ tokens: [VALID_TOKEN], liveActivityTokens: [] }))
     const manager = new PushManager({ storagePath })
     manager.registerToken(VALID_TOKEN)
 
     assert.equal(manager.tokens.size, 1)
     const saved = JSON.parse(readFileSync(storagePath, 'utf-8'))
-    assert.deepEqual(saved, [VALID_TOKEN])
+    assert.deepEqual(saved.tokens, [VALID_TOKEN])
   })
 
   it('persists after token pruning from Expo API errors', async () => {
@@ -77,7 +79,7 @@ describe('PushManager persistence (#1982)', () => {
     await manager.send('permission', 'Test', 'Body')
 
     const saved = JSON.parse(readFileSync(storagePath, 'utf-8'))
-    assert.deepEqual(saved, [VALID_TOKEN_2])
+    assert.deepEqual(saved.tokens, [VALID_TOKEN_2])
   })
 
   it('handles missing storage file gracefully', () => {
