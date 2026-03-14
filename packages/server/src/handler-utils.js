@@ -13,7 +13,7 @@ import { resolve, relative } from 'path'
 export const PERMISSION_MODES = [
   { id: 'approve', label: 'Approve' },
   { id: 'acceptEdits', label: 'Accept Edits' },
-  { id: 'auto', label: 'Auto' },
+  { id: 'auto', label: 'Auto (bypass)' },
   { id: 'plan', label: 'Plan' },
 ]
 export const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))

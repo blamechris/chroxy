@@ -208,6 +208,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   availableProviders: [],
   availableModels: [],
   permissionMode: null,
+  previousPermissionMode: null,
   availablePermissionModes: [],
   myClientId: null,
   connectedClients: [],
@@ -667,6 +668,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       availableProviders: [],
       availableModels: [],
       permissionMode: null,
+      previousPermissionMode: null,
       availablePermissionModes: [],
       myClientId: null,
       connectedClients: [],
@@ -996,7 +998,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   setPermissionMode: (mode: string) => {
-    const { socket, activeSessionId } = get();
+    const { socket, activeSessionId, permissionMode } = get();
+    // Save current mode before switching (for Shift+Tab toggle)
+    if (permissionMode && permissionMode !== mode) {
+      set({ previousPermissionMode: permissionMode });
+    }
     if (socket && socket.readyState === WebSocket.OPEN) {
       const payload: Record<string, unknown> = { type: 'set_permission_mode', mode };
       if (activeSessionId) payload.sessionId = activeSessionId;
