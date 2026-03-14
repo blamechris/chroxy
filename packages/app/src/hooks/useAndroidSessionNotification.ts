@@ -21,18 +21,18 @@ export function useAndroidSessionNotification(): void {
       prevStateRef.current = activityState;
 
       if (activityState === 'idle') {
-        dismissSessionNotification();
+        void dismissSessionNotification();
         return;
       }
 
       const label = getActivityLabel(activityState, activity?.detail) ?? 'Session active';
       const elapsed = activity ? Math.floor((Date.now() - activity.startedAt) / 1000) : 0;
-      updateSessionNotification(activityState, label, elapsed);
+      void updateSessionNotification(activityState, label, elapsed);
     });
 
     return () => {
       unsubscribe();
-      dismissSessionNotification();
+      void dismissSessionNotification();
     };
   }, []);
 }

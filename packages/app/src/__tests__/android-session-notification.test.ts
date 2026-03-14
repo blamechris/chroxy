@@ -5,8 +5,6 @@ import {
   dismissSessionNotification,
   _testInternals,
 } from '../android-session-notification';
-import type { ActivityState } from '../store/session-activity';
-
 // Mock expo-notifications
 jest.mock('expo-notifications', () => ({
   setNotificationChannelAsync: jest.fn().mockResolvedValue(undefined),
@@ -16,6 +14,7 @@ jest.mock('expo-notifications', () => ({
 }));
 
 // Helper to set Platform.OS for testing
+const originalOS = Platform.OS;
 function setPlatform(os: 'android' | 'ios') {
   Object.defineProperty(Platform, 'OS', { get: () => os, configurable: true });
 }
@@ -24,6 +23,10 @@ beforeEach(() => {
   jest.clearAllMocks();
   _testInternals.reset();
   setPlatform('android'); // default
+});
+
+afterAll(() => {
+  Object.defineProperty(Platform, 'OS', { get: () => originalOS, configurable: true });
 });
 
 describe('updateSessionNotification', () => {

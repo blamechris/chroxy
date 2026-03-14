@@ -21,21 +21,25 @@ function formatElapsed(seconds: number): string {
 
 async function ensureChannel(): Promise<void> {
   if (channelReady) return;
-  await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
-    name: 'Session Progress',
-    importance: Notifications.AndroidImportance.LOW,
-  });
-  channelReady = true;
+  try {
+    await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
+      name: 'Session Progress',
+      importance: Notifications.AndroidImportance.LOW,
+    });
+    channelReady = true;
+  } catch {
+    // Best-effort — degrade to no-op if notifications unavailable
+  }
 }
 
 export async function updateSessionNotification(
   state: ActivityState,
-  detail: string | undefined,
+  title: string | undefined,
   elapsedSeconds: number,
 ): Promise<void> {
   if (Platform.OS !== 'android') return;
 
-  // Dismiss on idle
+  // Dismiss on idle and reset throttle so next active state fires immediately
   if (state === 'idle') {
     await dismissSessionNotification();
     return;
@@ -48,7 +52,11 @@ export async function updateSessionNotification(
 
   // Dismiss previous notification
   if (currentNotifId) {
-    await Notifications.dismissNotificationAsync(currentNotifId);
+    try {
+      await Notifications.dismissNotificationAsync(currentNotifId);
+    } catch {
+      // Best-effort
+    }
     currentNotifId = null;
   }
 
@@ -56,22 +64,31 @@ export async function updateSessionNotification(
 
   const body = formatElapsed(elapsedSeconds);
 
-  currentNotifId = await Notifications.scheduleNotificationAsync({
-    content: {
-      title: detail ?? 'Session active',
-      body: body || undefined,
-      ongoing: true,
-    },
-    trigger: null,
-  });
+  try {
+    currentNotifId = await Notifications.scheduleNotificationAsync({
+      content: {
+        title: title ?? 'Session active',
+        body: body || undefined,
+        ongoing: true,
+      },
+      trigger: null,
+    });
+  } catch {
+    // Best-effort — degrade to no-op if permissions denied or API unavailable
+  }
 }
 
 export async function dismissSessionNotification(): Promise<void> {
   if (Platform.OS !== 'android') return;
   if (!currentNotifId) return;
 
-  await Notifications.dismissNotificationAsync(currentNotifId);
+  try {
+    await Notifications.dismissNotificationAsync(currentNotifId);
+  } catch {
+    // Best-effort
+  }
   currentNotifId = null;
+  lastUpdateTime = 0;
 }
 
 /** Exposed for testing only */
