@@ -28,13 +28,13 @@ cp "$SERVER_DIR/package-lock.json" "$STAGING/package-lock.json"
 # Server source (flat .js files)
 cp "$SERVER_DIR/src/"*.js "$STAGING/src/"
 
-# tunnel/ subdirectory
-cp -r "$SERVER_DIR/src/tunnel" "$STAGING/src/tunnel"
-
-# utils/ subdirectory
-if [ -d "$SERVER_DIR/src/utils" ]; then
-  cp -r "$SERVER_DIR/src/utils" "$STAGING/src/utils"
-fi
+# All JS subdirectories (cli/, tunnel/, utils/, handlers/, ws-file-ops/, etc.)
+# Exclude dashboard-next/ — handled separately below with only the built dist/.
+for subdir in "$SERVER_DIR/src"/*/; do
+  dirname="$(basename "$subdir")"
+  [ "$dirname" = "dashboard-next" ] && continue
+  cp -r "$subdir" "$STAGING/src/$dirname"
+done
 
 # Built dashboard (served over HTTP by ws-server.js)
 if [ -d "$SERVER_DIR/src/dashboard-next/dist" ]; then
