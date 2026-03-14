@@ -40,6 +40,13 @@ describe('StatusBar', () => {
     expect(el!.textContent).toBe('\u00A0')
   })
 
+  it('renders context placeholder when not provided (prevents layout shift)', () => {
+    const { container } = render(<StatusBar />)
+    const el = container.querySelector('.status-context')
+    expect(el).not.toBeNull()
+    expect(el!.textContent).toBe('\u00A0')
+  })
+
   it('shows context when provided', () => {
     render(<StatusBar context="12k/200k" />)
     expect(screen.getByText('12k/200k')).toBeInTheDocument()
