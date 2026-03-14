@@ -97,6 +97,15 @@
 
     .btn-row { display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1.5rem; }
 
+    .settings-btn {
+      position: absolute; top: 16px; right: 16px;
+      background: none; border: 1px solid #252540; border-radius: 8px;
+      color: #888; font-size: 1.1rem; width: 36px; height: 36px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .settings-btn:hover { border-color: #4a9eff; color: #4a9eff; }
+
     .ready-summary { text-align: center; margin-bottom: 1.5rem; }
     .ready-summary .token-display {
       font-family: 'SF Mono', Monaco, monospace; font-size: 0.8rem;
@@ -107,6 +116,7 @@
   </style>
 </head>
 <body>
+  <button id="settings-btn" class="settings-btn" title="Settings">&#9881;</button>
   <div class="container">
     <div class="logo">Chroxy</div>
 

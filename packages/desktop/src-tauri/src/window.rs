@@ -144,6 +144,30 @@ pub fn emit_navigate_console(app: &AppHandle) {
     show_window(app);
 }
 
+/// Inject click handler for the settings button on the loading page.
+/// Navigates directly to the dashboard settings panel when clicked.
+pub fn inject_settings_button_handler(app: &AppHandle, port: u16, token: Option<&str>) {
+    let url = dashboard_url(port, token);
+    // Append settings query param so dashboard auto-opens settings panel
+    let settings_url = if url.contains('?') {
+        format!("{}&settings=1", url)
+    } else {
+        format!("{}?settings=1", url)
+    };
+    let escaped = settings_url.replace('\\', "\\\\").replace('\'', "\\'");
+    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+        let _ = window.eval(&format!(
+            "try {{ \
+                var btn = document.getElementById('settings-btn'); \
+                if (btn) btn.addEventListener('click', function() {{ \
+                    window.location.href = '{}'; \
+                }}); \
+            }} catch(e) {{}}",
+            escaped
+        ));
+    }
+}
+
 // -- Window management (no eval) --
 
 /// Percent-encode HTML for use in a data URI.
