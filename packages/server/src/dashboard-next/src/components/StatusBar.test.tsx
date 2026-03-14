@@ -33,9 +33,11 @@ describe('StatusBar', () => {
     expect(screen.getByText('$0.0000')).toBeInTheDocument()
   })
 
-  it('does not show cost element when not provided', () => {
+  it('renders cost placeholder when not provided (prevents layout shift)', () => {
     const { container } = render(<StatusBar />)
-    expect(container.querySelector('.status-cost')).toBeNull()
+    const el = container.querySelector('.status-cost')
+    expect(el).not.toBeNull()
+    expect(el!.textContent).toBe('\u00A0')
   })
 
   it('shows context when provided', () => {
