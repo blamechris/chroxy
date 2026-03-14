@@ -108,7 +108,10 @@ async function sendPermissionResponseHttp(
 ): Promise<boolean> {
   // Lazy import to break require cycle: connection → message-handler → notifications → connection
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { useConnectionStore, loadConnection } = require('./store/connection');
+  const { useConnectionStore, loadConnection }: {
+    useConnectionStore: typeof import('./store/connection')['useConnectionStore'];
+    loadConnection: typeof import('./store/connection')['loadConnection'];
+  } = require('./store/connection');
 
   // Try Zustand store first, fall back to SecureStore for cold start
   let wsUrl = useConnectionStore.getState().wsUrl;
@@ -182,7 +185,9 @@ async function sendPermissionResponseHttp(
 export function setupNotificationResponseListener(): Notifications.EventSubscription {
   // Lazy import to break require cycle: connection → message-handler → notifications → connection
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { useConnectionStore } = require('./store/connection');
+  const { useConnectionStore }: {
+    useConnectionStore: typeof import('./store/connection')['useConnectionStore'];
+  } = require('./store/connection');
 
   return Notifications.addNotificationResponseReceivedListener(async (response) => {
     const actionId = response.actionIdentifier;
