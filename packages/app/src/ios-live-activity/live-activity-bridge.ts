@@ -2,8 +2,7 @@
  * Bridge to the native iOS Live Activity module via expo-live-activity.
  *
  * Maps Chroxy's LiveActivityContentState to the expo-live-activity
- * package format (title/subtitle/progressBar) and delegates to the
- * native module.
+ * package format (title/subtitle) and delegates to the native module.
  */
 import { Platform } from 'react-native';
 import type {
