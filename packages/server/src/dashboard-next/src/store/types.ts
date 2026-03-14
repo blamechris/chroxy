@@ -408,6 +408,8 @@ export interface ConnectionState {
 
   // Available models from server (CLI mode)
   availableModels: ModelInfo[];
+  // Server-reported default model short id (from SDK)
+  defaultModelId: string | null;
 
   // Available permission modes from server (CLI mode)
   availablePermissionModes: { id: string; label: string }[];

@@ -4,7 +4,7 @@
  * Extracted from ws-server.js to separate the post-authentication
  * handshake and history replay concerns from core server orchestration.
  */
-import { toShortModelId, getModels } from './models.js'
+import { toShortModelId, getModels, getDefaultModelId } from './models.js'
 import { PERMISSION_MODES } from './handler-utils.js'
 import { createLogger } from './logger.js'
 
@@ -115,7 +115,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       )
     }
 
-    send(ws, { type: 'available_models', models: getModels() })
+    send(ws, { type: 'available_models', models: getModels(), defaultModel: getDefaultModelId() })
     send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
     permissions.resendPendingPermissions(ws)
     return
@@ -130,7 +130,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       type: 'model_changed',
       model: cliSession.model ? toShortModelId(cliSession.model) : null,
     })
-    send(ws, { type: 'available_models', models: getModels() })
+    send(ws, { type: 'available_models', models: getModels(), defaultModel: getDefaultModelId() })
     send(ws, {
       type: 'permission_mode_changed',
       mode: cliSession.permissionMode || 'approve',

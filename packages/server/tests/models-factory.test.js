@@ -48,17 +48,35 @@ describe('createModelsRegistry', () => {
     assert.ok(registry.getAllowedModelIds().has('test-model'))
   })
 
-  it('strips Default(...) wrapper from SDK displayName', () => {
+  it('detects SDK default model from displayName', () => {
     const registry = createModelsRegistry()
     registry.updateModels([
       { value: 'claude-sonnet-4-20250514', displayName: 'Default (recommended)', description: '' },
       { value: 'claude-opus-4-20250514', displayName: 'Opus', description: '' },
     ])
-    const models = registry.getModels()
-    // "Default (recommended)" should become just "recommended"
-    assert.equal(models[0].label, 'recommended')
-    // Non-Default displayName should pass through unchanged
-    assert.equal(models[1].label, 'Opus')
+    assert.equal(registry.getDefaultModelId(), 'sonnet-4-20250514')
+    // Also strips the Default prefix from label
+    assert.equal(registry.getModels()[0].label, 'recommended')
+    // Non-Default displayName passes through unchanged
+    assert.equal(registry.getModels()[1].label, 'Opus')
+  })
+
+  it('returns null defaultModelId when no model has Default prefix', () => {
+    const registry = createModelsRegistry()
+    registry.updateModels([
+      { value: 'claude-sonnet-4', displayName: 'Sonnet', description: '' },
+    ])
+    assert.equal(registry.getDefaultModelId(), null)
+  })
+
+  it('resets defaultModelId on resetModels', () => {
+    const registry = createModelsRegistry()
+    registry.updateModels([
+      { value: 'claude-test', displayName: 'Default (recommended)', description: '' },
+    ])
+    assert.ok(registry.getDefaultModelId())
+    registry.resetModels()
+    assert.equal(registry.getDefaultModelId(), null)
   })
 
   it('resetModels restores defaults', () => {

@@ -1,4 +1,5 @@
 import { createLogger } from './logger.js'
+import { getDefaultModelId } from './models.js'
 
 const log = createLogger('ws-forwarding')
 
@@ -50,7 +51,7 @@ function setupSessionForwarding(normalizer, ctx) {
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     // models_updated is global — broadcast to ALL clients, not per-session
     if (event === 'models_updated' && data?.models) {
-      broadcast({ type: 'available_models', models: data.models })
+      broadcast({ type: 'available_models', models: data.models, defaultModel: getDefaultModelId() })
       return
     }
 
@@ -178,7 +179,7 @@ function setupCliForwarding(normalizer, ctx) {
   // models_updated bypasses normalizer — global broadcast
   cliSession.on('models_updated', (data) => {
     if (data?.models) {
-      broadcast({ type: 'available_models', models: data.models })
+      broadcast({ type: 'available_models', models: data.models, defaultModel: getDefaultModelId() })
     }
   })
 }

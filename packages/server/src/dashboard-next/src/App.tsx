@@ -97,6 +97,7 @@ export function App() {
   const activeSessionId = useConnectionStore(s => s.activeSessionId)
   const viewMode = useConnectionStore(s => s.viewMode)
   const availableModels = useConnectionStore(s => s.availableModels)
+  const defaultModelId = useConnectionStore(s => s.defaultModelId)
   const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
   const serverErrors = useConnectionStore(s => s.serverErrors)
   const infoNotifications = useConnectionStore(s => s.infoNotifications ?? [])
@@ -765,14 +766,18 @@ export function App() {
                 if (v) {
                   setModel(v);
                 } else {
-                  const defaultModel = availableModels[0];
-                  if (defaultModel) setModel(defaultModel.id);
+                  const dm = defaultModelId
+                    ? availableModels.find(m => m.id === defaultModelId)
+                    : availableModels[0];
+                  if (dm) setModel(dm.id);
                 }
               }}
               aria-label="Select model"
             >
               <option value="">
-                Default ({availableModels[0]?.label ?? 'recommended'})
+                Default ({(defaultModelId
+                  ? availableModels.find(m => m.id === defaultModelId)?.label
+                  : availableModels[0]?.label) ?? 'recommended'})
               </option>
               {availableModels.map(m => (
                 <option key={m.id} value={m.id}>{m.label}</option>
