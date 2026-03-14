@@ -270,10 +270,27 @@ pub fn run() {
                 let settings = app.state::<Mutex<DesktopSettings>>();
                 let s = lock_or_recover(&settings);
                 if let (Some(x), Some(y)) = (s.last_window_x, s.last_window_y) {
-                    let _ = win.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
+                    // Validate position is on a visible monitor before restoring
+                    let on_screen = win.available_monitors().map(|monitors| {
+                        monitors.iter().any(|m| {
+                            let pos = m.position();
+                            let size = m.size();
+                            let mx = pos.x as f64;
+                            let my = pos.y as f64;
+                            let mw = size.width as f64;
+                            let mh = size.height as f64;
+                            x >= mx && x < mx + mw && y >= my && y < my + mh
+                        })
+                    }).unwrap_or(false);
+                    if on_screen {
+                        let _ = win.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
+                    }
+                    // If off-screen, fall through to Tauri's default center behavior
                 }
                 if let (Some(w), Some(h)) = (s.last_window_width, s.last_window_height) {
-                    let _ = win.set_size(tauri::PhysicalSize::new(w as u32, h as u32));
+                    let w = w.max(200.0) as u32;
+                    let h = h.max(200.0) as u32;
+                    let _ = win.set_size(tauri::PhysicalSize::new(w, h));
                 }
             }
 
