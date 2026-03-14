@@ -761,7 +761,11 @@ export function App() {
               value={activeModel || ''}
               onChange={e => {
                 const v = e.target.value;
-                if (v) setModel(v);
+                if (v) {
+                  setModel(v);
+                } else if (availableModels.length > 0) {
+                  setModel(availableModels[0].id);
+                }
               }}
               aria-label="Select model"
             >
