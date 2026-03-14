@@ -877,6 +877,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (!parsed) break;
       const { sessionId: parsedSessionId, ...parsedMsg } = parsed;
       const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...parsedMsg };
+      // Write user message to terminal buffer for Output view
+      if (parsed.content) {
+        get().appendTerminalData(`\r\n\x1b[33m> ${parsed.content}\x1b[0m\r\n\r\n`);
+      }
       updateSession(parsedSessionId, (ss) => ({
         messages: [...ss.messages, uiMsg],
       }));
@@ -1035,6 +1039,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         clearTimeout(deltaFlushTimer);
       }
       flushPendingDeltas();
+      // Add newline separator after response ends for Output view readability
+      get().appendTerminalData('\r\n');
       // Clean up permission boundary split tracking
       _postPermissionSplits.delete(msg.messageId as string);
       _deltaIdRemaps.delete(msg.messageId as string);
