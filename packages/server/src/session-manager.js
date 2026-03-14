@@ -75,29 +75,97 @@ export function formatIdleDuration(ms) {
   return minutes > 0 ? `${hPart} ${minutes} minute${minutes !== 1 ? 's' : ''}` : hPart
 }
 
+/**
+ * @typedef {Object} SessionManagerConfig
+ *
+ * Server identity
+ * @property {number}  [port]                    - Server port (used in push notification metadata)
+ * @property {string}  [apiToken]                - API token for authentication
+ *
+ * Session defaults
+ * @property {number}  [maxSessions=5]           - Maximum concurrent sessions
+ * @property {string}  [defaultCwd]              - Default working directory (falls back to process.cwd())
+ * @property {string}  [defaultModel]            - Default Claude model identifier
+ * @property {string}  [defaultPermissionMode='approve'] - Default permission mode
+ * @property {string}  [providerType='claude-sdk'] - Provider type from providers.js registry
+ *
+ * Session behavior
+ * @property {string}  [sessionTimeout]          - Idle timeout duration string (e.g. '30m', '2h'), parsed by parseDuration()
+ * @property {number}  [maxToolInput]            - Max characters for tool input display
+ * @property {Array}   [transforms=[]]           - Message transform functions
+ * @property {string}  [costBudget]              - Cost budget string (e.g. '$5.00')
+ *
+ * State persistence
+ * @property {string}  [stateFilePath]           - Path to session state JSON file (default: ~/.chroxy/session-state.json)
+ * @property {number}  [stateTtlMs]              - Max age of persisted state before discard (default: 24 hours)
+ * @property {number}  [persistDebounceMs=2000]  - Debounce interval for state file writes
+ *
+ * Message history
+ * @property {number}  [maxHistory=500]          - Max history entries per session
+ */
 export class SessionManager extends EventEmitter {
-  constructor({ maxSessions = 5, port, apiToken, defaultCwd, defaultModel, defaultPermissionMode, providerType = 'claude-sdk', stateFilePath, stateTtlMs, persistDebounceMs = 2000, maxToolInput, transforms, sessionTimeout, costBudget, maxHistory } = {}) {
+  /**
+   * @param {SessionManagerConfig} config
+   */
+  constructor({
+    // Server identity
+    port,
+    apiToken,
+
+    // Session defaults
+    maxSessions = 5,
+    defaultCwd,
+    defaultModel,
+    defaultPermissionMode,
+    providerType = 'claude-sdk',
+
+    // Session behavior
+    sessionTimeout,
+    maxToolInput,
+    transforms,
+    costBudget,
+
+    // State persistence
+    stateFilePath,
+    stateTtlMs,
+    persistDebounceMs = 2000,
+
+    // Message history
+    maxHistory,
+  } = {}) {
     super()
-    this.maxSessions = maxSessions
+
+    // Server identity
     this._port = port || null
     this._apiToken = apiToken || null
-    this._providerType = providerType
+
+    // Session defaults
+    this.maxSessions = maxSessions
     this._defaultCwd = defaultCwd || process.cwd()
     this._defaultModel = defaultModel || null
     this._defaultPermissionMode = defaultPermissionMode || 'approve'
+    this._providerType = providerType
+
+    // Session behavior
     this._maxToolInput = maxToolInput || null
     this._transforms = transforms || []
+    this._costBudget = new CostBudgetManager({ budget: costBudget })
+
+    // State persistence
     this._stateFilePath = stateFilePath || DEFAULT_STATE_FILE
     this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000 // 24 hours
     this._persistDebounceMs = persistDebounceMs
-    this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
-    this._locks = new SessionLockManager()
+    this._persistTimer = null
+
+    // Message history
+    this._maxHistory = maxHistory || 500
     this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
-    this._maxHistory = maxHistory || 500
     this._historyTruncated = new Map() // sessionId -> boolean
-    this._persistTimer = null
-    this._costBudget = new CostBudgetManager({ budget: costBudget })
+
+    // Internal state
+    this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
+    this._locks = new SessionLockManager()
 
     // Session idle timeout
     const parsedTimeout = sessionTimeout ? parseDuration(sessionTimeout) : null
