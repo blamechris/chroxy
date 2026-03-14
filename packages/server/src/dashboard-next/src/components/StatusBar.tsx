@@ -1,6 +1,7 @@
 /**
  * StatusBar — model, cost, context, busy indicator, agent badges.
  */
+import { getProviderInfo } from '../lib/provider-labels'
 
 export interface StatusBarProps {
   model?: string
@@ -11,19 +12,8 @@ export interface StatusBarProps {
   provider?: string
 }
 
-function providerLabel(provider: string): { short: string; tooltip: string; type: 'sdk' | 'cli' } {
-  const isSdk = provider.includes('sdk')
-  return {
-    short: isSdk ? 'SDK' : 'CLI',
-    tooltip: isSdk
-      ? 'Anthropic API — billed per token via ANTHROPIC_API_KEY'
-      : 'Claude Code CLI — uses your claude.ai subscription',
-    type: isSdk ? 'sdk' : 'cli',
-  }
-}
-
 export function StatusBar({ model, cost, context, isBusy, agentCount, provider }: StatusBarProps) {
-  const prov = provider ? providerLabel(provider) : null
+  const prov = provider ? getProviderInfo(provider) : null
   return (
     <div className="status-bar" data-testid="status-bar">
       {isBusy && (

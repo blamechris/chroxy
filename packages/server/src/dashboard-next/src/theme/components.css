@@ -562,12 +562,16 @@
   cursor: help;
 }
 .tab-provider[data-provider="sdk"] {
-  color: var(--accent-orange, #e88a3a);
-  background: color-mix(in srgb, var(--accent-orange, #e88a3a) 15%, transparent);
+  color: var(--accent-orange);
+  background: color-mix(in srgb, var(--accent-orange) 15%, transparent);
 }
 .tab-provider[data-provider="cli"] {
   color: var(--accent-blue);
   background: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+}
+.tab-provider[data-provider="other"] {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
 }
 
 .tab-close {
@@ -2013,12 +2017,16 @@
   cursor: help;
 }
 .status-provider[data-provider="sdk"] {
-  color: var(--accent-orange, #e88a3a);
-  background: color-mix(in srgb, var(--accent-orange, #e88a3a) 15%, transparent);
+  color: var(--accent-orange);
+  background: color-mix(in srgb, var(--accent-orange) 15%, transparent);
 }
 .status-provider[data-provider="cli"] {
   color: var(--accent-blue);
   background: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+}
+.status-provider[data-provider="other"] {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
 }
 
 .status-model {

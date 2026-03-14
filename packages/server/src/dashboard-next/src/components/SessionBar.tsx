@@ -4,6 +4,7 @@
  * Features: active highlight, busy dot, close/rename, cwd badge, model badge, provider badge.
  */
 import { useState, useCallback, useRef, useEffect } from 'react'
+import { getProviderInfo } from '../lib/provider-labels'
 
 export type SessionStatus = 'idle' | 'busy' | 'needs-attention'
 
@@ -42,17 +43,7 @@ function abbreviateCwd(cwd: string): string {
 }
 
 function shortenProvider(provider: string): string {
-  return provider.replace(/^claude-/, '').toUpperCase()
-}
-
-function providerType(provider: string): 'sdk' | 'cli' {
-  return provider.includes('sdk') ? 'sdk' : 'cli'
-}
-
-function providerTooltip(provider: string): string {
-  return provider.includes('sdk')
-    ? 'SDK provider — uses Anthropic API key (billed per token)'
-    : 'CLI provider — uses Claude Code subscription (claude.ai account)'
+  return getProviderInfo(provider).short
 }
 
 export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession }: SessionBarProps) {
@@ -180,8 +171,8 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             {session.provider && (
               <span
                 className="tab-provider"
-                data-provider={providerType(session.provider)}
-                title={providerTooltip(session.provider)}
+                data-provider={getProviderInfo(session.provider).type}
+                title={getProviderInfo(session.provider).tooltip}
               >
                 {shortenProvider(session.provider)}
               </span>
