@@ -7,7 +7,7 @@ describe('ws-file-ops EMFILE handling', () => {
 
   before(async () => {
     source = await readFile(
-      new URL('../src/ws-file-ops.js', import.meta.url),
+      new URL('../src/ws-file-ops/browser.js', import.meta.url),
       'utf8'
     )
     assert.ok(source.length > 0)
