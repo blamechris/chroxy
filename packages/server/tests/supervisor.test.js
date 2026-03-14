@@ -514,7 +514,7 @@ describe('Supervisor', () => {
 
     it('3 crashes within window triggers rollback', () => {
       const { supervisor } = setup({ maxRestarts: 10 })
-      supervisor._rollbackResult = false // rollback fails, falls through
+      supervisor._rollbackResult = false // rollback fails, exits
       supervisor._lastDeployTimestamp = Date.now()
 
       for (let i = 0; i < 3; i++) {
@@ -541,7 +541,7 @@ describe('Supervisor', () => {
       assert.equal(supervisor._restartCount, 0, 'restart count should reset')
     })
 
-    it('failed rollback falls through to normal restart', () => {
+    it('failed rollback exits to prevent crash loop', () => {
       const { supervisor } = setup({ maxRestarts: 10 })
       supervisor._rollbackResult = false
       supervisor._lastDeployTimestamp = Date.now()
@@ -551,9 +551,7 @@ describe('Supervisor', () => {
       supervisor.lastChild.simulateExit(1, null)
 
       assert.equal(supervisor._rollbackCalls.length, 1)
-      // Failed rollback → normal restart path with backoff
-      assert.ok(supervisor._metrics.lastBackoffMs > 0, 'backoff should be applied')
-      assert.equal(supervisor._restartCount, 1, 'restart count should increment normally')
+      assert.equal(supervisor._exitCalled, 1, 'should exit with code 1')
     })
 
     it('crash outside deploy window does NOT count as deploy failure', () => {
