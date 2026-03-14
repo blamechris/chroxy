@@ -451,7 +451,9 @@ export class SdkSession extends BaseSession {
 
     // Interrupt active query
     if (this._query) {
-      this._query.interrupt().catch(() => {})
+      this._query.interrupt().catch((err) => {
+        log.warn(`Failed to interrupt active query: ${err.message} (non-critical, session destroying)`)
+      })
       this._query = null
     }
 

@@ -1,3 +1,7 @@
+import { createLogger } from './logger.js'
+
+const log = createLogger('ws-forwarding')
+
 /**
  * Set up event forwarding from backends to clients via EventNormalizer.
  *
@@ -194,7 +198,9 @@ function executeSideEffects(sideEffects, sessionId, ctx) {
         if (sessionManager) {
           sessionManager.getSessionContext(effect.sessionId || sessionId).then((ctxData) => {
             if (ctxData) broadcastToSession(effect.sessionId || sessionId, { type: 'session_context', ...ctxData })
-          }).catch(() => {})
+          }).catch((err) => {
+            log.warn(`Failed to refresh session context for ${effect.sessionId || sessionId}: ${err.message} (non-critical, stale context)`)
+          })
         }
         break
       case 'push':
@@ -215,7 +221,7 @@ function executeSideEffects(sideEffects, sessionId, ctx) {
         break
       }
       case 'log':
-        console.log(effect.message)
+        log.info(effect.message)
         break
     }
   }
