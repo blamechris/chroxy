@@ -741,7 +741,7 @@ export function App() {
               aria-label="Select model"
             >
               <option value="">
-                Default ({availableModels[0].label})
+                Default ({availableModels[0]?.label ?? 'recommended'})
               </option>
               {availableModels.map(m => (
                 <option key={m.id} value={m.id}>{m.label}</option>
