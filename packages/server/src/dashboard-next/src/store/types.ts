@@ -410,6 +410,9 @@ export interface ConnectionState {
   // Available permission modes from server (CLI mode)
   availablePermissionModes: { id: string; label: string }[];
 
+  // Previous permission mode (for Shift+Tab plan mode toggle)
+  previousPermissionMode: string | null;
+
   // Connected clients (multi-client awareness)
   myClientId: string | null;
   connectedClients: ConnectedClient[];

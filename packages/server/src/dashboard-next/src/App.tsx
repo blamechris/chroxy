@@ -38,6 +38,11 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { isTauri } from './utils/tauri'
+// Lazy import to avoid pulling @tauri-apps/api/core in non-Tauri (test) environments
+const startServer = async () => {
+  const mod = await import('./hooks/useTauriIPC')
+  return mod.startServer()
+}
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab } from './store/persistence'
@@ -298,6 +303,20 @@ export function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === '.') {
         e.preventDefault()
         sendInterrupt()
+        return
+      }
+      // Shift+Tab: toggle plan mode
+      if (e.shiftKey && e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault()
+        const state = useConnectionStore.getState()
+        const currentMode = state.permissionMode
+        if (currentMode === 'plan') {
+          // Switch back to previous mode (default to 'approve')
+          setPermissionMode(state.previousPermissionMode || 'approve')
+        } else {
+          // Switch to plan mode
+          setPermissionMode('plan')
+        }
         return
       }
       // ?: toggle shortcut help (no modifiers, not in text input)
@@ -614,6 +633,10 @@ export function App() {
     connect(wsUrl, token)
   }, [connect])
 
+  const handleStartServer = useCallback(() => {
+    startServer()
+  }, [])
+
   // Build id->message map for O(1) lookups in renderMessage
   const storeMsgMap = useMemo(
     () => new Map(storeMessages.map(m => [m.id, m])),
@@ -684,6 +707,7 @@ export function App() {
     { keys: 'Cmd+Shift+[', description: 'Previous tab', section: 'Session' },
     { keys: 'Cmd+Shift+]', description: 'Next tab', section: 'Session' },
     { keys: 'Cmd+W', description: 'Close tab (desktop)', section: 'Session' },
+    { keys: 'Shift+Tab', description: 'Toggle plan mode', section: 'Session' },
     { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
     { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
   ], [])
@@ -720,6 +744,7 @@ export function App() {
         maxAttempts={5}
         message={connectionPhase === 'server_restarting' ? 'Server restarting...' : undefined}
         onRetry={handleRetry}
+        onStartServer={isTauri() ? handleStartServer : undefined}
       />
 
       {/* Header */}
@@ -734,9 +759,15 @@ export function App() {
           {availableModels.length > 0 && (
             <select
               value={activeModel || ''}
-              onChange={e => setModel(e.target.value)}
+              onChange={e => {
+                const v = e.target.value;
+                if (v) setModel(v);
+              }}
               aria-label="Select model"
             >
+              <option value="">
+                Default ({availableModels[0]?.label ?? 'recommended'})
+              </option>
               {availableModels.map(m => (
                 <option key={m.id} value={m.id}>{m.label}</option>
               ))}
@@ -828,7 +859,37 @@ export function App() {
             error={connectionError}
             logs={serverStartupLogs}
             onRetry={handleRetry}
+            onStartServer={isTauri() ? handleStartServer : undefined}
           />
+        )}
+
+        {/* Disconnected screen — shown when not connected with no error (e.g. server stopped) */}
+        {connectionPhase === 'disconnected' && !connectionError && !isConnected && sessions.length === 0 && (
+          <div className="startup-error-screen" data-testid="disconnected-screen">
+            <div className="startup-error-content">
+              <h2 className="startup-error-title">Disconnected</h2>
+              <p className="startup-error-message">Not connected to a Chroxy server.</p>
+              <div className="startup-error-actions">
+                {isTauri() && (
+                  <button
+                    className="startup-error-retry-btn startup-error-start-btn"
+                    onClick={handleStartServer}
+                    type="button"
+                    data-testid="disconnected-start-server-button"
+                  >
+                    Start Server
+                  </button>
+                )}
+                <button
+                  className="startup-error-retry-btn"
+                  onClick={handleRetry}
+                  type="button"
+                >
+                  Reconnect
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Welcome screen — shown when connected but no sessions */}

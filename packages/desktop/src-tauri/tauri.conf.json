@@ -22,6 +22,9 @@
         "height": 800,
         "minWidth": 800,
         "minHeight": 500,
+        "maximizable": true,
+        "minimizable": true,
+        "fullscreen": false,
         "visible": true,
         "center": true
       }

@@ -4520,3 +4520,14 @@
 .startup-error-retry-btn:hover {
   opacity: 0.85;
 }
+
+.startup-error-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.startup-error-start-btn {
+  background: var(--success, #34d058);
+}
