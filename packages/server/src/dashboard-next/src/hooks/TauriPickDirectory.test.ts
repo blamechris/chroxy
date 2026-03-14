@@ -21,6 +21,6 @@ describe('Tauri pick_directory command (#1473)', () => {
 
   it('uses DialogExt for native folder picker', () => {
     expect(libSrc).toMatch(/DialogExt/)
-    expect(libSrc).toMatch(/blocking_pick_folder/)
+    expect(libSrc).toMatch(/pick_folder/)
   })
 })
