@@ -7,16 +7,19 @@ export async function waitForTunnel(httpUrl, { maxAttempts = 10, interval = 2000
   const startTime = Date.now()
 
   for (let i = 0; i < maxAttempts; i++) {
+    const attempt = i + 1
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 5000)
     try {
       const res = await fetch(httpUrl, { signal: controller.signal })
       if (res.ok) {
-        console.log(`[tunnel] Tunnel verified (took ${((Date.now() - startTime) / 1000).toFixed(1)}s)`)
+        console.log(`[tunnel] Tunnel verified on attempt ${attempt}/${maxAttempts} (took ${((Date.now() - startTime) / 1000).toFixed(1)}s)`)
         return
       }
-    } catch {
-      // Not ready yet
+      console.log(`[tunnel] Attempt ${attempt}/${maxAttempts} failed: HTTP ${res.status}`)
+    } catch (err) {
+      const reason = err.name === 'AbortError' ? 'timeout' : err.message
+      console.log(`[tunnel] Attempt ${attempt}/${maxAttempts} failed: ${reason}`)
     } finally {
       clearTimeout(timeout)
     }
@@ -27,5 +30,5 @@ export async function waitForTunnel(httpUrl, { maxAttempts = 10, interval = 2000
   }
 
   // Don't fail — the tunnel might still work, just warn
-  console.log('[tunnel] Warning: could not verify tunnel, proceeding anyway')
+  console.log(`[tunnel] Warning: could not verify tunnel after ${maxAttempts} attempts, proceeding anyway`)
 }
