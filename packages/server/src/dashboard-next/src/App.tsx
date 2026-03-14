@@ -763,8 +763,9 @@ export function App() {
                 const v = e.target.value;
                 if (v) {
                   setModel(v);
-                } else if (availableModels.length > 0) {
-                  setModel(availableModels[0].id);
+                } else {
+                  const defaultModel = availableModels[0];
+                  if (defaultModel) setModel(defaultModel.id);
                 }
               }}
               aria-label="Select model"
