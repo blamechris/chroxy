@@ -14,6 +14,7 @@ import { createLogger } from './logger.js'
 
 const log = createLogger('session-manager')
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
+const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
 
 /**
  * Base error class for session management operations.
@@ -575,9 +576,13 @@ export class SessionManager extends EventEmitter {
 
     const conversationId = entry.session.resumeSessionId
     if (conversationId) {
-      const filePath = resolveJsonlPath(entry.cwd, conversationId)
-      const history = await readConversationHistoryAsync(filePath)
-      if (history.length > 0) return history
+      try {
+        const filePath = resolveJsonlPath(entry.cwd, conversationId)
+        const history = await readConversationHistoryAsync(filePath)
+        if (history.length > 0) return history
+      } catch (err) {
+        log.error(`Failed to read JSONL history for session ${sessionId}: ${err?.message || err}`)
+      }
     }
 
     // Fallback to ring buffer
@@ -657,6 +662,10 @@ export class SessionManager extends EventEmitter {
         const key = `${sessionId}:${data.messageId}`
         const existing = this._pendingStreams.get(key)
         if (existing !== undefined) {
+          if (existing.length + data.delta.length > MAX_PENDING_STREAM_SIZE) {
+            log.warn(`Stream delta exceeded size limit for ${key}`)
+            return
+          }
           this._pendingStreams.set(key, existing + data.delta)
         }
         break
