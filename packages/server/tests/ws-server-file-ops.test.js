@@ -1169,27 +1169,31 @@ describe('get_diff handler', () => {
   it('returns friendly error for non-git directory', async () => {
     // Create a plain (non-git) temp directory
     const nonGitDir = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-nongit-')))
-    const mockSession = createMockSession()
-    mockSession.cwd = nonGitDir
+    let ws
+    try {
+      const mockSession = createMockSession()
+      mockSession.cwd = nonGitDir
 
-    server = new WsServer({
-      port: 0,
-      apiToken: 'test-token',
-      cliSession: mockSession,
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-    const { ws, messages } = await createClient(port, true)
+      server = new WsServer({
+        port: 0,
+        apiToken: 'test-token',
+        cliSession: mockSession,
+        authRequired: false,
+      })
+      const port = await startServerAndGetPort(server)
+      const client = await createClient(port, true)
+      ws = client.ws
 
-    send(ws, { type: 'get_diff' })
-    const result = await waitForMessage(messages, 'diff_result', 5000)
+      send(ws, { type: 'get_diff' })
+      const result = await waitForMessage(client.messages, 'diff_result', 5000)
 
-    assert.ok(result.error, 'Should return error for non-git dir')
-    assert.match(result.error, /not a git repository/i)
-    assert.deepEqual(result.files, [])
-
-    ws.close()
-    rmSync(nonGitDir, { recursive: true, force: true })
+      assert.ok(result.error, 'Should return error for non-git dir')
+      assert.match(result.error, /not a git repository/i)
+      assert.deepEqual(result.files, [])
+    } finally {
+      if (ws) ws.close()
+      rmSync(nonGitDir, { recursive: true, force: true })
+    }
   })
 })
 

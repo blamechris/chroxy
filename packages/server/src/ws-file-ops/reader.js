@@ -242,11 +242,16 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           cwd: cwdReal,
           timeout: 5000,
         })
-      } catch {
+      } catch (revParseErr) {
+        const stderr = (revParseErr.stderr || revParseErr.message || '').toLowerCase()
+        const isNotGitRepo = stderr.includes('not a git repository') ||
+          revParseErr.code === 128
         sendFn(ws, {
           type: 'diff_result',
           files: [],
-          error: 'Not a git repository',
+          error: isNotGitRepo
+            ? 'Not a git repository'
+            : `Git error: ${revParseErr.message || 'unknown failure'}`,
         })
         return
       }
