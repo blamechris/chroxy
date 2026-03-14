@@ -13,6 +13,21 @@ Merge PRs, verify auto-version bump, and rebuild the Tauri desktop app.
 
 ## Instructions
 
+### Phase 0: Mandatory Review Gate
+
+**CRITICAL: Every PR MUST be reviewed before merging. No exceptions for "obvious" fixes.**
+
+For each PR to be merged, check if `/full-review` has already been run:
+
+```bash
+# Check for existing review comments (agent-review posts a structured review)
+gh api repos/${REPO}/issues/${PR_NUM}/comments --jq '[.[] | select(.body | test("Code Review|Review Comments Addressed"))] | length'
+```
+
+If no review exists, run `/full-review ${PR_NUM}` **before proceeding to merge**. For multiple PRs, run reviews in parallel (background agents), then merge sequentially after all reviews complete.
+
+**The only exception:** Pure documentation/skill file changes (`.md` files in `.claude/commands/`, `docs/`) with zero code changes may skip review.
+
 ### Phase 1: Pre-Merge Preparation
 
 ```bash
@@ -237,8 +252,9 @@ grep 'src=' /Applications/Chroxy.app/Contents/Resources/server/src/dashboard-nex
 
 ## Critical Rules
 
-1. **For 3+ PRs, delegate to /batch-merge** — don't reinvent sequential merge logic
-2. **Always set TAURI_ENV_PLATFORM=darwin** for dashboard builds
+1. **NEVER merge without /full-review** — every PR must be reviewed before merging. This is a hard gate. Run Phase 0 first. The only exception is pure .md skill/doc files with zero code changes.
+2. **For 3+ PRs, delegate to /batch-merge** — don't reinvent sequential merge logic
+3. **Always set TAURI_ENV_PLATFORM=darwin** for dashboard builds
 3. **Always touch src-tauri/src/lib.rs** before cargo build to force resource re-bundling
 4. **Always rm -rf target/release/bundle** before cargo tauri bundle
 5. **Always verify dashboard base path** — `/assets/` not `/dashboard/assets/`
