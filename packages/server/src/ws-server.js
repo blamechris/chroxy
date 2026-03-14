@@ -8,7 +8,7 @@ import { dirname, join } from 'path'
 import { encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from './crypto.js'
 import { ClientMessageSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
 import { EventNormalizer } from './event-normalizer.js'
-import { createFileOps } from './ws-file-ops.js'
+import { createFileOps } from './ws-file-ops/index.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
@@ -622,6 +622,11 @@ export class WsServer {
         }
         this._handleMessage(ws, msg).catch((err) => {
           log.error(`Unhandled error in message handler: ${err.message}`)
+          try {
+            this._send(ws, { type: 'server_error', message: err.message, recoverable: true })
+          } catch {
+            // Best-effort — client may already be disconnected
+          }
         })
       })
 

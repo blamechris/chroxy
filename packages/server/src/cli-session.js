@@ -69,6 +69,7 @@ export class CliSession extends BaseSession {
     this._pendingMessage = null
     this._respawnCount = 0
     this._respawnTimer = null
+    this._respawnScheduled = false
     this._interruptTimer = null
 
     // Hook manager (shared module)
@@ -224,6 +225,7 @@ export class CliSession extends BaseSession {
    */
   _scheduleRespawn() {
     if (this._destroying) return
+    if (this._respawnScheduled) return
 
     this._respawnCount++
     if (this._respawnCount > 5) {
@@ -236,8 +238,10 @@ export class CliSession extends BaseSession {
     const delay = delays[Math.min(this._respawnCount - 1, delays.length - 1)]
     console.log(`[cli-session] Respawning in ${delay}ms (attempt ${this._respawnCount}/5)`)
 
+    this._respawnScheduled = true
     this._respawnTimer = setTimeout(() => {
       this._respawnTimer = null
+      this._respawnScheduled = false
       if (!this._destroying) {
         this.start()
       }
@@ -571,6 +575,7 @@ export class CliSession extends BaseSession {
       clearTimeout(this._respawnTimer)
       this._respawnTimer = null
     }
+    this._respawnScheduled = false
 
     this._cleanupReadlines()
 
@@ -702,6 +707,7 @@ export class CliSession extends BaseSession {
       clearTimeout(this._respawnTimer)
       this._respawnTimer = null
     }
+    this._respawnScheduled = false
 
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
