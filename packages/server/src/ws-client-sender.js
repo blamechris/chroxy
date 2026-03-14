@@ -1,14 +1,30 @@
 import { encrypt, DIRECTION_SERVER } from './crypto.js'
 
+/** Backpressure thresholds (bytes) */
+const WARN_THRESHOLD = 64 * 1024    // 64KB — log warning
+const EVICT_THRESHOLD = 1024 * 1024 // 1MB — close stale client
+
+/** Minimum interval between backpressure warnings per client (ms) */
+const WARN_THROTTLE_MS = 30_000
+
 /**
  * Factory that creates a send function for WebSocket clients.
  * Handles JSON serialization, optional encryption, sequence numbering,
- * post-auth queue buffering, and flush-overflow buffering.
+ * post-auth queue buffering, flush-overflow buffering, and post-send
+ * backpressure monitoring.
  *
- * @param {object} log - Logger with .error() method
+ * @param {object} log - Logger with .error() and .warn() methods
+ * @param {object} [opts] - Optional overrides (for testing)
+ * @param {number} [opts.warnThreshold] - Bytes above which to log warning
+ * @param {number} [opts.evictThreshold] - Bytes above which to close client
+ * @param {number} [opts.warnThrottleMs] - Min ms between warnings per client
  * @returns {(ws: WebSocket, client: object|undefined, message: object) => void}
  */
-export function createClientSender(log) {
+export function createClientSender(log, opts = {}) {
+  const warnThreshold = opts.warnThreshold ?? WARN_THRESHOLD
+  const evictThreshold = opts.evictThreshold ?? EVICT_THRESHOLD
+  const warnThrottleMs = opts.warnThrottleMs ?? WARN_THROTTLE_MS
+
   return function send(ws, client, message) {
     // Queue messages while key exchange is pending
     if (client?.encryptionPending && client.postAuthQueue) {
@@ -34,6 +50,20 @@ export function createClientSender(log) {
         ws.send(JSON.stringify(envelope))
       } else {
         ws.send(JSON.stringify(message))
+      }
+
+      // Post-send backpressure monitoring
+      const buffered = ws.bufferedAmount
+      if (buffered > evictThreshold && client) {
+        log.warn(`Backpressure: evicting client ${client.id} — bufferedAmount ${buffered} exceeds ${evictThreshold} bytes`)
+        ws.close(4008, 'Backpressure: slow client evicted')
+      } else if (buffered > warnThreshold && client) {
+        const now = Date.now()
+        const lastWarn = client._lastBackpressureWarn || 0
+        if (now - lastWarn >= warnThrottleMs) {
+          client._lastBackpressureWarn = now
+          log.warn(`Backpressure: client ${client.id} bufferedAmount ${buffered} exceeds warning threshold (${warnThreshold} bytes)`)
+        }
       }
     } catch (err) {
       log.error(`Send error: ${err.message}`)
