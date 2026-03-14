@@ -46,9 +46,8 @@ export function useLiveActivity(): LiveActivityHookResult {
       // Start Live Activity on first connected state if not yet active
       if (!isActiveRef.current) {
         isActiveRef.current = true;
-        const sessionName = activeId
-          ? state.sessionStates[activeId]?.sessionInfo?.name ?? 'Session'
-          : 'Session';
+        const session = activeId ? state.sessions.find((s) => s.sessionId === activeId) : undefined;
+        const sessionName = session?.name ?? 'Session';
         void manager.start(sessionName).then(() => {
           // Send initial state update after start
           const liveState = mapActivityState(activityState);
