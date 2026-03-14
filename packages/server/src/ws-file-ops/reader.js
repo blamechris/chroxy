@@ -7,6 +7,17 @@ import { GIT } from '../git.js'
 
 const execFileAsync = promisify(execFileCb)
 
+/** Image extensions to MIME type mapping (module-level to avoid per-call allocation) */
+const IMAGE_MIME = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  ico: 'image/x-icon',
+  bmp: 'image/bmp',
+}
+
 /**
  * File reading, writing, and diff operations.
  *
@@ -94,7 +105,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       const ext = extname(absPath).slice(1).toLowerCase()
 
       // Image files: send as base64 data URL for preview
-      const IMAGE_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp', ico: 'image/x-icon', bmp: 'image/bmp' }
+      // SVG excluded — it's an active document format (scripts/external refs); render as text instead
       if (IMAGE_MIME[ext]) {
         const dataUrl = `data:${IMAGE_MIME[ext]};base64,${buf.toString('base64')}`
         sendFn(ws, {
