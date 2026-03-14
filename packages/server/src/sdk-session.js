@@ -6,8 +6,8 @@ import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { parseMcpToolName } from './mcp-tools.js'
 import { createLogger } from './logger.js'
+import { PermissionManager } from './permission-manager.js'
 
-const ACCEPT_EDITS_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
 const log = createLogger('sdk')
 
 /**
@@ -61,17 +61,15 @@ export class SdkSession extends BaseSession {
     this._sdkSessionId = resumeSessionId || null
     this._sessionId = null
     this._query = null
-    this._waitingForAnswer = false
 
-    // Permission handling
-    this._pendingPermissions = new Map() // requestId -> { resolve, input }
-    this._permissionTimers = new Map() // requestId -> timer
-    this._permissionCounter = 0
-    this._lastPermissionData = new Map() // requestId -> emitted permission_request payload (for reconnect re-send)
+    // Permission handling — delegated to PermissionManager
+    this._permissions = new PermissionManager({ log })
+    this._permissions.on('permission_request', (data) => this.emit('permission_request', data))
+    this._permissions.on('user_question', (data) => this.emit('user_question', data))
 
-    // AskUserQuestion handling
-    this._pendingUserAnswer = null // { resolve, input } when waiting for user answer
-    this._questionTimer = null
+    // Backward-compatible accessors (used by ws-permissions.js, settings-handlers.js)
+    this._pendingPermissions = this._permissions._pendingPermissions
+    this._lastPermissionData = this._permissions._lastPermissionData
   }
 
   get sessionId() {
@@ -352,167 +350,18 @@ export class SdkSession extends BaseSession {
 
   /**
    * In-process permission handler for canUseTool callback.
-   *
-   * For AskUserQuestion: emits user_question and waits for respondToQuestion()
-   * to deliver the user's answer, then returns it as structured updatedInput.
-   *
-   * For all other tools: emits permission_request and waits for
-   * respondToPermission() to deliver the user's allow/deny decision.
+   * Delegates to the PermissionManager.
    */
   _handlePermission(toolName, input, signal) {
-    if (toolName === 'AskUserQuestion') {
-      return this._handleAskUserQuestion(input, signal)
-    }
-
-    // acceptEdits: auto-approve file operations, prompt for everything else
-    if (this.permissionMode === 'acceptEdits' && ACCEPT_EDITS_TOOLS.has(toolName)) {
-      return Promise.resolve({ behavior: 'allow', updatedInput: input || {} })
-    }
-
-    return new Promise((resolve) => {
-      const requestId = `perm-${++this._permissionCounter}-${Date.now()}`
-      this._pendingPermissions.set(requestId, { resolve, input: input || {} })
-
-      const toolInput = input || {}
-      const description = toolInput.description
-        || toolInput.command
-        || toolInput.file_path
-        || toolInput.pattern
-        || toolInput.query
-        || (Object.keys(toolInput).length > 0 ? JSON.stringify(toolInput).slice(0, 200) : toolName)
-
-      log.info(`Permission request ${requestId}: ${toolName}`)
-
-      const permPayload = {
-        requestId,
-        tool: toolName,
-        description,
-        input: toolInput,
-        remainingMs: 300_000,
-        createdAt: Date.now(),
-      }
-      this._lastPermissionData.set(requestId, permPayload)
-      this.emit('permission_request', permPayload)
-
-      // Auto-deny on abort signal (user interrupted)
-      if (signal) {
-        signal.addEventListener('abort', () => {
-          if (this._pendingPermissions.has(requestId)) {
-            this._pendingPermissions.delete(requestId)
-            this._lastPermissionData.delete(requestId)
-            this._clearPermissionTimer(requestId)
-            resolve({ behavior: 'deny', message: 'Request cancelled' })
-          }
-        }, { once: true })
-      }
-
-      // Auto-deny after 5 minutes if no response
-      const timer = setTimeout(() => {
-        this._permissionTimers.delete(requestId)
-        if (this._pendingPermissions.has(requestId)) {
-          log.info(`Permission ${requestId} timed out, auto-denying`)
-          this._pendingPermissions.delete(requestId)
-          this._lastPermissionData.delete(requestId)
-          resolve({ behavior: 'deny', message: 'Permission timed out' })
-        }
-      }, 300_000)
-      this._permissionTimers.set(requestId, timer)
-    })
-  }
-
-  /**
-   * Handle AskUserQuestion via canUseTool.
-   * Emits user_question and waits for respondToQuestion() to deliver the
-   * user's answer, then resolves with structured updatedInput.
-   */
-  _handleAskUserQuestion(input, signal) {
-    return new Promise((resolve) => {
-      const questionInput = input || {}
-      this._waitingForAnswer = true
-      this._pendingUserAnswer = { resolve, input: questionInput }
-
-      const toolUseId = `ask-${++this._permissionCounter}-${Date.now()}`
-      log.info(`AskUserQuestion detected (${toolUseId})`)
-
-      this.emit('user_question', {
-        toolUseId,
-        questions: questionInput.questions,
-      })
-
-      // Auto-deny on abort signal
-      if (signal) {
-        signal.addEventListener('abort', () => {
-          if (this._pendingUserAnswer) {
-            this._clearQuestionTimer()
-            this._pendingUserAnswer = null
-            this._waitingForAnswer = false
-            resolve({ behavior: 'deny', message: 'Cancelled' })
-          }
-        }, { once: true })
-      }
-
-      // Auto-deny after 5 minutes if no response
-      this._questionTimer = setTimeout(() => {
-        this._questionTimer = null
-        if (this._pendingUserAnswer) {
-          log.info(`Question ${toolUseId} timed out, auto-denying`)
-          this._pendingUserAnswer = null
-          this._waitingForAnswer = false
-          resolve({ behavior: 'deny', message: 'Question timed out' })
-        }
-      }, 300_000)
-    })
-  }
-
-  /**
-   * Clear the AskUserQuestion timeout timer.
-   */
-  _clearQuestionTimer() {
-    if (this._questionTimer) {
-      clearTimeout(this._questionTimer)
-      this._questionTimer = null
-    }
-  }
-
-  /**
-   * Clear a permission timeout timer by request ID.
-   */
-  _clearPermissionTimer(requestId) {
-    const timer = this._permissionTimers.get(requestId)
-    if (timer) {
-      clearTimeout(timer)
-      this._permissionTimers.delete(requestId)
-    }
+    return this._permissions.handlePermission(toolName, input, signal, this.permissionMode)
   }
 
   /**
    * Resolve a pending permission request (called by WsServer when
    * the app sends permission_response).
-   *
-   * Note: Claude does NOT see the user's allow/deny decision directly.
-   * The SDK invokes the tool (or skips it) based on the decision, and
-   * Claude only sees the tool's result (or an error if denied). This
-   * is why Claude doesn't explicitly acknowledge "thanks for approving".
    */
   respondToPermission(requestId, decision) {
-    const pending = this._pendingPermissions.get(requestId)
-    if (!pending) {
-      log.warn(`No pending permission for ${requestId}`)
-      return
-    }
-    this._pendingPermissions.delete(requestId)
-    this._lastPermissionData.delete(requestId)
-    this._clearPermissionTimer(requestId)
-
-    log.info(`Permission ${requestId} resolved: ${decision}`)
-
-    if (decision === 'allow') {
-      pending.resolve({ behavior: 'allow', updatedInput: pending.input })
-    } else if (decision === 'allowAlways') {
-      pending.resolve({ behavior: 'allowAlways', updatedInput: pending.input })
-    } else {
-      pending.resolve({ behavior: 'deny', message: 'User denied' })
-    }
+    this._permissions.respondToPermission(requestId, decision)
   }
 
   /**
@@ -521,39 +370,7 @@ export class SdkSession extends BaseSession {
    * This method resolves it with the user's answer as structured updatedInput.
    */
   respondToQuestion(text, answersMap) {
-    if (!this._pendingUserAnswer) return
-    this._clearQuestionTimer()
-    const { resolve, input } = this._pendingUserAnswer
-    this._pendingUserAnswer = null
-    this._waitingForAnswer = false
-
-    log.info(`Question response received: "${text.slice(0, 60)}"`)
-
-    // Build structured answers map: SDK expects { [questionText]: selectedLabel }
-    const answers = {}
-    const questions = input.questions || []
-    const questionKeys = new Set(questions.map(q => q.question))
-    if (answersMap && typeof answersMap === 'object' && Object.keys(answersMap).length > 0) {
-      // Per-question answers provided by the client — only copy known question keys
-      for (const key of Object.keys(answersMap)) {
-        if (questionKeys.has(key)) {
-          answers[key] = answersMap[key]
-        }
-      }
-    } else if (questions.length > 0) {
-      // Fallback: single answer mapped to all questions
-      for (const q of questions) {
-        answers[q.question] = text
-      }
-    }
-
-    resolve({
-      behavior: 'allow',
-      updatedInput: {
-        questions,
-        answers,
-      },
-    })
+    this._permissions.respondToQuestion(text, answersMap)
   }
 
   /**
@@ -618,22 +435,7 @@ export class SdkSession extends BaseSession {
    */
   _clearMessageState() {
     super._clearMessageState()
-    this._waitingForAnswer = false
-
-    // Auto-deny any pending permissions and clear their timers
-    for (const [requestId, pending] of this._pendingPermissions) {
-      this._clearPermissionTimer(requestId)
-      pending.resolve({ behavior: 'deny', message: 'Message completed' })
-    }
-    this._pendingPermissions.clear()
-    this._lastPermissionData.clear()
-
-    // Auto-deny pending user answer
-    this._clearQuestionTimer()
-    if (this._pendingUserAnswer) {
-      this._pendingUserAnswer.resolve({ behavior: 'deny', message: 'Message completed' })
-      this._pendingUserAnswer = null
-    }
+    this._permissions.clearAll()
   }
 
   /**
@@ -655,6 +457,9 @@ export class SdkSession extends BaseSession {
 
     // Emit completions for any tracked agents and clear busy state
     this._clearMessageState()
+
+    // Clean up permission manager
+    this._permissions.destroy()
 
     this._processReady = false
     this.removeAllListeners()
