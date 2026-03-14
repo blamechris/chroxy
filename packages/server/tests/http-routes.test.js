@@ -1,8 +1,18 @@
-import { describe, it, afterEach } from 'node:test'
+import { describe, it, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
+import { existsSync, renameSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { createHttpHandler } from '../src/http-routes.js'
+
+// The QR endpoint falls back to reading ~/.chroxy/connection.json from disk.
+// If a Chroxy server is running (or left a stale file), the test gets 200 instead of 503.
+// Temporarily hide the file during this test suite.
+const connInfoPath = join(homedir(), '.chroxy', 'connection.json')
+const connInfoBackup = connInfoPath + '.test-backup'
+let connInfoHidden = false
 
 function createMockServer(overrides = {}) {
   return {
@@ -47,6 +57,20 @@ function createMockServer(overrides = {}) {
 describe('http-routes', () => {
   let httpServer
   let port
+
+  before(() => {
+    if (existsSync(connInfoPath)) {
+      renameSync(connInfoPath, connInfoBackup)
+      connInfoHidden = true
+    }
+  })
+
+  after(() => {
+    if (connInfoHidden && existsSync(connInfoBackup)) {
+      renameSync(connInfoBackup, connInfoPath)
+      connInfoHidden = false
+    }
+  })
 
   async function startWith(mockServer) {
     const handler = createHttpHandler(mockServer)
