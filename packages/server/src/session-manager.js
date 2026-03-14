@@ -576,9 +576,13 @@ export class SessionManager extends EventEmitter {
 
     const conversationId = entry.session.resumeSessionId
     if (conversationId) {
-      const filePath = resolveJsonlPath(entry.cwd, conversationId)
-      const history = await readConversationHistoryAsync(filePath)
-      if (history.length > 0) return history
+      try {
+        const filePath = resolveJsonlPath(entry.cwd, conversationId)
+        const history = await readConversationHistoryAsync(filePath)
+        if (history.length > 0) return history
+      } catch (err) {
+        log.error(`Failed to read JSONL history for session ${sessionId}: ${err?.message || err}`)
+      }
     }
 
     // Fallback to ring buffer
