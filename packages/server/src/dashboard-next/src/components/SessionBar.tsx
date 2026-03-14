@@ -45,6 +45,16 @@ function shortenProvider(provider: string): string {
   return provider.replace(/^claude-/, '').toUpperCase()
 }
 
+function providerType(provider: string): 'sdk' | 'cli' {
+  return provider.includes('sdk') ? 'sdk' : 'cli'
+}
+
+function providerTooltip(provider: string): string {
+  return provider.includes('sdk')
+    ? 'SDK provider — uses Anthropic API key (billed per token)'
+    : 'CLI provider — uses Claude Code subscription (claude.ai account)'
+}
+
 export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession }: SessionBarProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -168,7 +178,11 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             )}
 
             {session.provider && (
-              <span className="tab-provider" title={session.provider}>
+              <span
+                className="tab-provider"
+                data-provider={providerType(session.provider)}
+                title={providerTooltip(session.provider)}
+              >
                 {shortenProvider(session.provider)}
               </span>
             )}
