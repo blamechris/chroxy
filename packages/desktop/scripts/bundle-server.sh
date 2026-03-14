@@ -49,10 +49,36 @@ fi
 cp "$SERVER_DIR/hooks/permission-hook.sh" "$STAGING/hooks/permission-hook.sh"
 chmod +x "$STAGING/hooks/permission-hook.sh"
 
+# Copy workspace packages that aren't on npm
+PROTOCOL_DIR="$REPO_ROOT/packages/protocol"
+if [ -d "$PROTOCOL_DIR/dist" ]; then
+  mkdir -p "$STAGING/node_modules/@chroxy/protocol"
+  cp "$PROTOCOL_DIR/package.json" "$STAGING/node_modules/@chroxy/protocol/"
+  cp -r "$PROTOCOL_DIR/dist/"* "$STAGING/node_modules/@chroxy/protocol/"
+  echo "[bundle-server] Copied @chroxy/protocol workspace package"
+fi
+
+STORE_CORE_DIR="$REPO_ROOT/packages/store-core"
+if [ -d "$STORE_CORE_DIR/dist" ]; then
+  mkdir -p "$STAGING/node_modules/@chroxy/store-core"
+  cp "$STORE_CORE_DIR/package.json" "$STAGING/node_modules/@chroxy/store-core/"
+  cp -r "$STORE_CORE_DIR/dist/"* "$STAGING/node_modules/@chroxy/store-core/"
+  echo "[bundle-server] Copied @chroxy/store-core workspace package"
+fi
+
+# Remove workspace deps from package.json before npm ci (they're already copied)
+cd "$STAGING"
+node -e "
+const pkg = require('./package.json');
+for (const key of Object.keys(pkg.dependencies || {})) {
+  if (key.startsWith('@chroxy/')) delete pkg.dependencies[key];
+}
+require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+"
+
 # Install production dependencies (deterministic via lockfile)
 echo "[bundle-server] Installing production dependencies..."
-cd "$STAGING"
-npm ci --omit=dev --no-audit --no-fund 2>&1
+npm install --omit=dev --no-audit --no-fund 2>&1
 
 echo "[bundle-server] Bundle complete."
 du -sh "$STAGING" 2>/dev/null || true
