@@ -51,15 +51,23 @@ pub struct ServerRestartingPayload {
 
 // -- Event emission (replaces eval-based injection) --
 
-/// Emit `server_ready` event with dashboard URL payload.
-/// The loading page JS listens and navigates to the URL.
+/// Navigate the main webview to the dashboard URL and emit `server_ready` event.
+/// Uses direct Rust-side navigation instead of relying on JS in the loading page,
+/// because Tauri v2's CSP nonce system blocks inline scripts.
 pub fn emit_server_ready(app: &AppHandle, port: u16, token: Option<&str>) {
     let url = dashboard_url(port, token);
     let payload = ServerReadyPayload {
         port,
         token: token.unwrap_or("").to_string(),
-        url,
+        url: url.clone(),
     };
+    // Navigate the webview directly to the dashboard
+    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+        use tauri::WebviewUrl;
+        if let Ok(parsed) = url.parse::<tauri::Url>() {
+            let _ = window.navigate(parsed);
+        }
+    }
     let _ = app.emit("server_ready", payload);
     show_window(app);
 }

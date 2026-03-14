@@ -25,9 +25,6 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     chunkSizeWarningLimit: 800,
-    rollupOptions: {
-      external: ['@tauri-apps/api/core', '@tauri-apps/plugin-dialog'],
-    },
   },
   server: {
     proxy: {
