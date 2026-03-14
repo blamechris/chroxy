@@ -11,11 +11,11 @@ import { SessionLockManager } from './session-lock.js'
 import { CostBudgetManager } from './cost-budget-manager.js'
 import { SessionStatePersistence } from './session-state-persistence.js'
 import { SessionTimeoutManager, formatIdleDuration } from './session-timeout-manager.js'
+import { SessionMessageHistory } from './session-message-history.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('session-manager')
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
-const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
 
 /**
  * Base error class for session management operations.
@@ -159,11 +159,18 @@ export class SessionManager extends EventEmitter {
       configurable: true,
     })
 
-    // Message history
-    this._maxHistory = maxHistory || 500
-    this._messageHistory = new Map() // sessionId -> Array<{ type, ...data }>
-    this._pendingStreams = new Map() // sessionId:messageId -> accumulated delta text
-    this._historyTruncated = new Map() // sessionId -> boolean
+    // Message history (delegated to SessionMessageHistory)
+    this._history = new SessionMessageHistory({ maxHistory, maxToolInput })
+    // Backward-compatible accessors for tests that reference internal state
+    this._maxHistory = this._history.maxHistory
+    this._messageHistory = this._history._messageHistory
+    this._pendingStreams = this._history.pendingStreams
+    this._historyTruncated = this._history._historyTruncated
+
+    // Wire auto_label events from history to session_updated emissions
+    this._history.on('auto_label', ({ sessionId, label }) => {
+      this.emit('session_updated', { sessionId, name: label })
+    })
 
     // Internal state
     this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
@@ -219,19 +226,8 @@ export class SessionManager extends EventEmitter {
   _cleanupSessionMaps(sessionId) {
     this._sessions.delete(sessionId)
     this._timeoutManager.removeSession(sessionId)
-    this._messageHistory.delete(sessionId)
-    this._historyTruncated.delete(sessionId)
+    this._history.cleanupSession(sessionId)
     this._costBudget.removeSession(sessionId)
-
-    // Clean up pending stream state (composite keys: `${sessionId}:messageId`).
-    // destroySession() emits synthetic stream_end before calling this helper,
-    // so remaining entries here are only from the sync catch path.
-    const prefix = sessionId + ':'
-    for (const key of this._pendingStreams.keys()) {
-      if (key.startsWith(prefix)) {
-        this._pendingStreams.delete(key)
-      }
-    }
   }
 
   /**
@@ -485,10 +481,8 @@ export class SessionManager extends EventEmitter {
     }
     this._sessions.clear()
     this._timeoutManager.destroy()
-    this._messageHistory.clear()
-    this._historyTruncated.clear()
+    this._history.clear()
     this._costBudget.clear()
-    this._pendingStreams.clear()
   }
 
   /**
@@ -512,7 +506,7 @@ export class SessionManager extends EventEmitter {
   serializeState() {
     const state = { version: 1, timestamp: Date.now(), sessions: [] }
     for (const [id, entry] of this._sessions) {
-      const history = (this._messageHistory.get(id) || []).map(e => this._truncateEntry(e))
+      const history = this._history.getHistory(id).map(e => this._history.truncateEntry(e))
       state.sessions.push({
         id,
         sdkSessionId: (typeof entry.session.resumeSessionId !== 'undefined' ? entry.session.resumeSessionId : null),
@@ -563,7 +557,7 @@ export class SessionManager extends EventEmitter {
         if (saved.id) oldToNew.set(saved.id, sessionId)
         // Restore message history if present (v1+)
         if (hasVersion && Array.isArray(saved.history) && saved.history.length > 0) {
-          this._messageHistory.set(sessionId, saved.history)
+          this._history.setHistory(sessionId, saved.history)
         }
         if (!firstId) firstId = sessionId
         log.info(`Restored session "${saved.name}" (SDK resume: ${saved.sdkSessionId || 'none'})`)
@@ -595,7 +589,7 @@ export class SessionManager extends EventEmitter {
    * @returns {Array<{ type, ...data }>}
    */
   getHistory(sessionId) {
-    return this._messageHistory.get(sessionId) || []
+    return this._history.getHistory(sessionId)
   }
 
   /**
@@ -604,7 +598,7 @@ export class SessionManager extends EventEmitter {
    * @returns {number}
    */
   getHistoryCount(sessionId) {
-    return (this._messageHistory.get(sessionId) || []).length
+    return this._history.getHistoryCount(sessionId)
   }
 
   /**
@@ -612,7 +606,7 @@ export class SessionManager extends EventEmitter {
    * @returns {boolean}
    */
   isHistoryTruncated(sessionId) {
-    return this._historyTruncated.get(sessionId) || false
+    return this._history.isHistoryTruncated(sessionId)
   }
 
   /**
@@ -658,165 +652,30 @@ export class SessionManager extends EventEmitter {
    * ("Session N" or "New Session") to a truncation of the input text.
    */
   recordUserInput(sessionId, text) {
-    this._autoLabelSession(sessionId, text)
-    this._recordHistory(sessionId, 'message', {
-      type: 'user_input',
-      content: text,
-      timestamp: Date.now(),
-    })
-  }
-
-  /**
-   * Auto-label a session from the first user input if it still has a default name.
-   * Truncates to ~40 chars at word boundary, appends "..." if truncated.
-   */
-  _autoLabelSession(sessionId, text) {
     const entry = this._sessions.get(sessionId)
-    if (!entry) return
-    if (entry._autoLabeled) return
-
-    // Only rename sessions with default names
-    const isDefault = /^(Session \d+|New Session)$/i.test(entry.name)
-    if (!isDefault) return
-
-    const trimmed = text.trim()
-    if (!trimmed) return
-
-    // Skip attachment-only markers (e.g. "[2 file(s) attached]") — not meaningful labels
-    if (/^\[\d+ file\(s\) attached\]$/.test(trimmed)) return
-
-    entry._autoLabeled = true
-
-    const MAX_LEN = 40
-    let label
-    if (trimmed.length <= MAX_LEN) {
-      label = trimmed
-    } else {
-      // Truncate at last space within MAX_LEN
-      const cut = trimmed.lastIndexOf(' ', MAX_LEN)
-      label = (cut > 10 ? trimmed.slice(0, cut) : trimmed.slice(0, MAX_LEN)) + '...'
-    }
-
-    entry.name = label
-    log.info(`Auto-labeled session ${sessionId} to "${label}"`)
-    this.emit('session_updated', { sessionId, name: label })
+    this._history.recordUserInput(sessionId, text, entry || undefined)
   }
 
   /**
    * Record an event into the session's message history ring buffer.
+   * Delegates to SessionMessageHistory and triggers persist when needed.
    */
   _recordHistory(sessionId, event, data) {
-    if (!this._messageHistory.has(sessionId)) {
-      this._messageHistory.set(sessionId, [])
-    }
-    const history = this._messageHistory.get(sessionId)
-
-    switch (event) {
-      case 'stream_start': {
-        // Start accumulating deltas for this stream
-        const key = `${sessionId}:${data.messageId}`
-        this._pendingStreams.set(key, '')
-        break
-      }
-
-      case 'stream_delta': {
-        const key = `${sessionId}:${data.messageId}`
-        const existing = this._pendingStreams.get(key)
-        if (existing !== undefined) {
-          if (existing.length + data.delta.length > MAX_PENDING_STREAM_SIZE) {
-            log.warn(`Stream delta exceeded size limit for ${key}`)
-            return
-          }
-          this._pendingStreams.set(key, existing + data.delta)
-        }
-        break
-      }
-
-      case 'stream_end': {
-        // Reconstruct complete message from accumulated deltas
-        const key = `${sessionId}:${data.messageId}`
-        const content = this._pendingStreams.get(key) || ''
-        this._pendingStreams.delete(key)
-        if (content) {
-          this._pushHistory(history, {
-            type: 'message',
-            messageType: 'response',
-            content,
-            messageId: data.messageId,
-            timestamp: Date.now(),
-          }, sessionId)
-        }
-        this._schedulePersist()
-        break
-      }
-
-      case 'message':
-        this._pushHistory(history, {
-          type: 'message',
-          messageType: data.type,
-          content: data.content,
-          tool: data.tool,
-          options: data.options,
-          timestamp: data.timestamp,
-        }, sessionId)
-        this._schedulePersist()
-        break
-
-      case 'tool_start':
-        this._pushHistory(history, {
-          type: 'tool_start',
-          messageId: data.messageId,
-          toolUseId: data.toolUseId,
-          tool: data.tool,
-          input: data.input,
-          timestamp: Date.now(),
-        }, sessionId)
-        break
-
-      case 'tool_result':
-        this._pushHistory(history, {
-          type: 'tool_result',
-          toolUseId: data.toolUseId,
-          result: data.result,
-          truncated: data.truncated,
-          timestamp: Date.now(),
-        }, sessionId)
-        break
-
-      case 'result':
-        this._pushHistory(history, {
-          type: 'result',
-          cost: data.cost,
-          duration: data.duration,
-          usage: data.usage,
-          timestamp: Date.now(),
-        }, sessionId)
-        this._schedulePersist()
-        break
-
-      case 'user_question':
-        this._pushHistory(history, {
-          type: 'user_question',
-          toolUseId: data.toolUseId,
-          questions: data.questions,
-          timestamp: Date.now(),
-        }, sessionId)
-        break
+    const { persistNeeded } = this._history.recordHistory(sessionId, event, data)
+    if (persistNeeded) {
+      this._schedulePersist()
     }
   }
 
   /**
    * Push an entry to the history array, trimming to max size.
+   * Backward-compatible delegate to SessionMessageHistory._pushHistory.
    * @param {Array} history - The session history array to push to
    * @param {object} entry - The history entry to add
    * @param {string} sessionId - The session ID (used for truncation tracking)
    */
   _pushHistory(history, entry, sessionId) {
-    history.push(entry)
-    if (history.length > this._maxHistory) {
-      history.shift()
-      this._historyTruncated.set(sessionId, true)
-    }
+    this._history._pushHistory(history, entry, sessionId)
   }
 
   /**
@@ -824,22 +683,6 @@ export class SessionManager extends EventEmitter {
    */
   _schedulePersist() {
     this._persistence.schedulePersist(() => this.serializeState())
-  }
-
-  /**
-   * Shallow-clone and truncate a history entry for serialization.
-   * Content/input fields >50KB are truncated to avoid bloated state files.
-   */
-  _truncateEntry(entry) {
-    const MAX = 50 * 1024
-    const clone = { ...entry }
-    if (typeof clone.content === 'string' && clone.content.length > MAX) {
-      clone.content = clone.content.slice(0, MAX) + '[truncated]'
-    }
-    if (typeof clone.input === 'string' && clone.input.length > MAX) {
-      clone.input = clone.input.slice(0, MAX) + '[truncated]'
-    }
-    return clone
   }
 
   /**
