@@ -36,14 +36,32 @@ jobs:
 
       - name: Validate bump
         run: |
-          # Verify all version files parse correctly before pushing
-          node -e "const v = require('./packages/server/package.json').version; if (!/^\d+\.\d+\.\d+$/.test(v)) { throw new Error('Invalid version: ' + v); } console.log('server:', v);"
-          node -e "const v = require('./packages/app/package.json').version; console.log('app:', v);"
-          node -e "const v = require('./packages/desktop/package.json').version; console.log('desktop:', v);"
-          node -e "const v = require('./package.json').version; console.log('root:', v);"
-          node -e "const c = require('./packages/desktop/src-tauri/tauri.conf.json'); console.log('tauri:', c.version);"
-          grep -q '^version = "' packages/desktop/src-tauri/Cargo.toml && echo "Cargo.toml: OK"
-          echo "All version files validated."
+          # Verify all version files parse correctly and agree before pushing
+          node -e "
+            const fs = require('fs');
+            const re = /^\d+\.\d+\.\d+$/;
+            const files = {
+              'server': require('./packages/server/package.json').version,
+              'app': require('./packages/app/package.json').version,
+              'desktop': require('./packages/desktop/package.json').version,
+              'root': require('./package.json').version,
+              'tauri': require('./packages/desktop/src-tauri/tauri.conf.json').version,
+            };
+            // Extract Cargo.toml [package] version
+            const cargo = fs.readFileSync('./packages/desktop/src-tauri/Cargo.toml', 'utf-8');
+            const m = cargo.match(/^\[package\][\s\S]*?^version\s*=\s*\"([^\"]+)\"/m);
+            if (!m) { throw new Error('Failed to parse Cargo.toml [package] version'); }
+            files['cargo'] = m[1];
+            // Validate format and consistency
+            const versions = new Set();
+            for (const [name, v] of Object.entries(files)) {
+              if (!re.test(v)) { throw new Error(name + ': invalid version ' + v); }
+              versions.add(v);
+              console.log(name + ': ' + v);
+            }
+            if (versions.size !== 1) { throw new Error('Version mismatch: ' + JSON.stringify(files)); }
+            console.log('All version files validated.');
+          "
 
       - name: Commit and push
         run: |
