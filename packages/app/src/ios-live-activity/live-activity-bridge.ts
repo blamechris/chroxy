@@ -1,35 +1,47 @@
-import { Platform } from 'react-native'
-import type { LiveActivityAttributes, LiveActivityContentState } from './types'
+/**
+ * Bridge to the native iOS Live Activity module.
+ *
+ * These are stubs that return null/void until the native Swift module
+ * is implemented in #2171. The manager handles null activity IDs gracefully.
+ */
+import { Platform } from 'react-native';
+import type {
+  LiveActivityAttributes,
+  LiveActivityContentState,
+} from './types';
 
-const MIN_IOS_VERSION = 16.2
-
-function isLiveActivitySupported(): boolean {
-  if (Platform.OS !== 'ios') return false
-  const version = parseFloat(Platform.Version as string)
-  return version >= MIN_IOS_VERSION
+/** Whether the current device supports Live Activities (iOS 16.1+). */
+export function isLiveActivitySupported(): boolean {
+  return Platform.OS === 'ios' && parseInt(Platform.Version as string, 10) >= 16;
 }
 
-// Stub implementations — will be replaced with actual native bridge in #2171
+/**
+ * Request a new Live Activity. Returns the activity ID, or null if
+ * the native module is not yet implemented or the request fails.
+ */
 export async function startLiveActivity(
   _attributes: LiveActivityAttributes,
-  _state: LiveActivityContentState
+  _initialState: LiveActivityContentState,
 ): Promise<string | null> {
-  if (!isLiveActivitySupported()) return null
-  // TODO: Call native module when widget extension is ready (#2171)
-  return null
+  // Stub — native implementation in #2171
+  return null;
 }
 
+/**
+ * Update the content state of a running Live Activity.
+ */
 export async function updateLiveActivity(
   _activityId: string,
-  _state: LiveActivityContentState
+  _state: LiveActivityContentState,
 ): Promise<void> {
-  if (!isLiveActivitySupported()) return
-  // TODO: Call native module when widget extension is ready (#2171)
+  // Stub — native implementation in #2171
 }
 
-export async function endLiveActivity(_activityId: string): Promise<void> {
-  if (!isLiveActivitySupported()) return
-  // TODO: Call native module when widget extension is ready (#2171)
+/**
+ * End a running Live Activity.
+ */
+export async function endLiveActivity(
+  _activityId: string,
+): Promise<void> {
+  // Stub — native implementation in #2171
 }
-
-export { isLiveActivitySupported }
