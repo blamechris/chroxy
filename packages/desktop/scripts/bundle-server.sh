@@ -20,10 +20,8 @@ echo "[bundle-server] Staging server to $STAGING"
 rm -rf "$STAGING"
 mkdir -p "$STAGING/src/dashboard-next" "$STAGING/hooks"
 
-# package.json + lockfile — reproducible installs via npm ci
-# If dependencies change in package.json, regenerate the lockfile:
-#   cd packages/server && npm install --package-lock-only
-# Must be run from packages/server/ (not repo root) to avoid workspace protocol refs.
+# package.json + lockfile for dependency installation.
+# Workspace deps (@chroxy/*) are stripped before install and copied manually after.
 cp "$SERVER_DIR/package.json" "$STAGING/package.json"
 cp "$SERVER_DIR/package-lock.json" "$STAGING/package-lock.json"
 
@@ -49,10 +47,30 @@ fi
 cp "$SERVER_DIR/hooks/permission-hook.sh" "$STAGING/hooks/permission-hook.sh"
 chmod +x "$STAGING/hooks/permission-hook.sh"
 
-# Install production dependencies (deterministic via lockfile)
-echo "[bundle-server] Installing production dependencies..."
+# Remove workspace deps from package.json before npm install
+# (workspace packages are copied into node_modules AFTER npm install)
 cd "$STAGING"
-npm ci --omit=dev --no-audit --no-fund 2>&1
+node -e "
+const pkg = require('./package.json');
+for (const key of Object.keys(pkg.dependencies || {})) {
+  if (key.startsWith('@chroxy/')) delete pkg.dependencies[key];
+}
+require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+"
+
+# Install production dependencies
+echo "[bundle-server] Installing production dependencies..."
+npm install --omit=dev --no-audit --no-fund 2>&1
+
+# Copy workspace packages AFTER npm install (npm wipes node_modules during install).
+# Preserve the dist/ directory structure so "main": "./dist/index.js" resolves correctly.
+PROTOCOL_DIR="$REPO_ROOT/packages/protocol"
+if [ -d "$PROTOCOL_DIR/dist" ]; then
+  mkdir -p "$STAGING/node_modules/@chroxy/protocol/dist"
+  cp "$PROTOCOL_DIR/package.json" "$STAGING/node_modules/@chroxy/protocol/"
+  cp -r "$PROTOCOL_DIR/dist/"* "$STAGING/node_modules/@chroxy/protocol/dist/"
+  echo "[bundle-server] Copied @chroxy/protocol workspace package"
+fi
 
 echo "[bundle-server] Bundle complete."
 du -sh "$STAGING" 2>/dev/null || true
