@@ -622,6 +622,11 @@ export class WsServer {
         }
         this._handleMessage(ws, msg).catch((err) => {
           log.error(`Unhandled error in message handler: ${err.message}`)
+          try {
+            this._send(ws, { type: 'server_error', message: err.message, recoverable: true })
+          } catch {
+            // Best-effort — client may already be disconnected
+          }
         })
       })
 

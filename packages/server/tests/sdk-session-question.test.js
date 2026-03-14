@@ -9,22 +9,25 @@ const __dirname = dirname(__filename)
 
 describe('respondToQuestion multi-question support (#1945)', () => {
   let sdkSrc
+  let permMgrSrc
 
   beforeEach(() => {
     sdkSrc = readFileSync(join(__dirname, '../src/sdk-session.js'), 'utf-8')
+    permMgrSrc = readFileSync(join(__dirname, '../src/permission-manager.js'), 'utf-8')
   })
 
   it('respondToQuestion accepts optional answersMap parameter', () => {
-    // The method signature should accept (text, answersMap)
-    const match = sdkSrc.match(/respondToQuestion\s*\(\s*text\s*,\s*answersMap\s*\)/)
-    assert.ok(match, 'respondToQuestion should accept (text, answersMap) parameters')
+    // The method signature should accept (text, answersMap) — either directly or via delegation
+    const sdkMatch = sdkSrc.match(/respondToQuestion\s*\(\s*text\s*,\s*answersMap\s*\)/)
+    const pmMatch = permMgrSrc.match(/respondToQuestion\s*\(\s*text\s*,\s*answersMap\s*\)/)
+    assert.ok(sdkMatch || pmMatch, 'respondToQuestion should accept (text, answersMap) parameters')
   })
 
   it('uses answersMap when provided instead of mapping single text to all questions', () => {
-    // The method body should check for answersMap before falling back to single-text mapping
-    const methodStart = sdkSrc.indexOf('respondToQuestion(text, answersMap)')
-    assert.ok(methodStart > -1, 'Method should have answersMap parameter')
-    const methodBody = sdkSrc.slice(methodStart, sdkSrc.indexOf('\n  }', methodStart + 100) + 4)
+    // The implementation lives in PermissionManager (extracted from SdkSession)
+    const methodStart = permMgrSrc.indexOf('respondToQuestion(text, answersMap)')
+    assert.ok(methodStart > -1, 'PermissionManager.respondToQuestion should have answersMap parameter')
+    const methodBody = permMgrSrc.slice(methodStart, permMgrSrc.indexOf('\n  }', methodStart + 100) + 4)
     assert.ok(methodBody.includes('answersMap'), 'respondToQuestion body should use answersMap')
     assert.ok(methodBody.includes('Object.keys(answersMap)') || methodBody.includes('Object.assign'),
       'Should check or use answersMap contents')
