@@ -69,8 +69,10 @@ export async function updateSessionNotification(
       content: {
         title: title ?? 'Session active',
         body: body || undefined,
+        // Android-only: keeps notification persistent until explicitly dismissed.
+        // Not in expo-notifications types but supported at runtime.
         ongoing: true,
-      },
+      } as Notifications.NotificationContentInput & { ongoing: boolean },
       trigger: null,
     });
   } catch {
