@@ -265,6 +265,18 @@ pub fn run() {
             let is_first_run = setup::ensure_config();
             IS_FIRST_RUN.store(is_first_run, Ordering::Relaxed);
 
+            // Restore saved window position and size
+            if let Some(win) = app.get_webview_window("main") {
+                let settings = app.state::<Mutex<DesktopSettings>>();
+                let s = lock_or_recover(&settings);
+                if let (Some(x), Some(y)) = (s.last_window_x, s.last_window_y) {
+                    let _ = win.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
+                }
+                if let (Some(w), Some(h)) = (s.last_window_width, s.last_window_height) {
+                    let _ = win.set_size(tauri::PhysicalSize::new(w as u32, h as u32));
+                }
+            }
+
             setup_tray(app)?;
 
             // Auto-start server on launch if configured (skip on first run — wizard handles it)
