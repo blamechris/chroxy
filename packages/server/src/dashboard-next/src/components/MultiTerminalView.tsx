@@ -24,14 +24,14 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
   // Track whether active session has terminal data for empty state
   const activeBuffer = useConnectionStore(s => {
     if (!activeSessionId) return ''
-    return s.sessionStates[activeSessionId]?.terminalRawBuffer || s.terminalRawBuffer || ''
+    return s.sessionStates[activeSessionId]?.terminalRawBuffer || ''
   })
 
   // Get initial data for a session from the store (one-time, at mount)
   const getInitialData = useCallback((sessionId: string) => {
     const state = useConnectionStore.getState()
     const ss = state.sessionStates[sessionId]
-    return ss?.terminalRawBuffer || state.terminalRawBuffer || ''
+    return ss?.terminalRawBuffer || ''
   }, [])
 
   // Wire the active session's terminal to the store write callback
