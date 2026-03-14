@@ -11,7 +11,8 @@ describe('_pushHistory simplification (#1990)', () => {
   let src
 
   beforeEach(() => {
-    src = readFileSync(join(__dirname, '../src/session-manager.js'), 'utf-8')
+    // _pushHistory now lives in session-message-history.js (extracted from session-manager.js)
+    src = readFileSync(join(__dirname, '../src/session-message-history.js'), 'utf-8')
   })
 
   it('uses single shift instead of while loop', () => {
