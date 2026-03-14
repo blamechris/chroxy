@@ -10,7 +10,7 @@ describe('ios-live-activity', () => {
   })
 
   function requireBridge() {
-    return require('../src/ios-live-activity')
+    return require('../src/ios-live-activity/live-activity-bridge')
   }
 
   function mockPlatform(os: string, version: string | number) {
@@ -21,7 +21,7 @@ describe('ios-live-activity', () => {
 
   describe('types', () => {
     it('LiveActivityState accepts valid values', () => {
-      const states: LiveActivityState[] = ['thinking', 'writing', 'waiting', 'idle', 'error']
+      const states: LiveActivityState[] = ['active', 'thinking', 'waiting', 'error', 'ended']
       expect(states).toHaveLength(5)
     })
 
@@ -34,15 +34,13 @@ describe('ios-live-activity', () => {
       const state: LiveActivityContentState = {
         state: 'thinking',
         elapsedSeconds: 42,
-        sessionCount: 1,
       }
       expect(state.detail).toBeUndefined()
 
       const stateWithDetail: LiveActivityContentState = {
-        state: 'writing',
+        state: 'active',
         detail: 'Editing main.ts',
         elapsedSeconds: 10,
-        sessionCount: 2,
       }
       expect(stateWithDetail.detail).toBe('Editing main.ts')
     })
@@ -55,8 +53,8 @@ describe('ios-live-activity', () => {
       expect(isLiveActivitySupported()).toBe(false)
     })
 
-    it('returns false on iOS < 16.2', () => {
-      mockPlatform('ios', '16.1')
+    it('returns false on iOS < 16', () => {
+      mockPlatform('ios', '15.7')
       const { isLiveActivitySupported } = requireBridge()
       expect(isLiveActivitySupported()).toBe(false)
     })
@@ -80,7 +78,7 @@ describe('ios-live-activity', () => {
       const { startLiveActivity } = requireBridge()
       const result = await startLiveActivity(
         { sessionName: 'test' },
-        { state: 'thinking', elapsedSeconds: 0, sessionCount: 1 }
+        { state: 'thinking', elapsedSeconds: 0 }
       )
       expect(result).toBeNull()
     })
@@ -90,7 +88,7 @@ describe('ios-live-activity', () => {
       const { startLiveActivity } = requireBridge()
       const result = await startLiveActivity(
         { sessionName: 'test' },
-        { state: 'thinking', elapsedSeconds: 0, sessionCount: 1 }
+        { state: 'thinking', elapsedSeconds: 0 }
       )
       expect(result).toBeNull()
     })
@@ -101,7 +99,7 @@ describe('ios-live-activity', () => {
       mockPlatform('android', 34)
       const { updateLiveActivity } = requireBridge()
       await expect(
-        updateLiveActivity('activity-123', { state: 'writing', elapsedSeconds: 5, sessionCount: 1 })
+        updateLiveActivity('activity-123', { state: 'active', elapsedSeconds: 5 })
       ).resolves.toBeUndefined()
     })
   })
