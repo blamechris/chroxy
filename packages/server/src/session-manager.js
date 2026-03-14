@@ -10,6 +10,7 @@ import { parseDuration } from './duration.js'
 import { SessionLockManager } from './session-lock.js'
 import { CostBudgetManager } from './cost-budget-manager.js'
 import { SessionStatePersistence } from './session-state-persistence.js'
+import { SessionTimeoutManager, formatIdleDuration } from './session-timeout-manager.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('session-manager')
@@ -61,20 +62,9 @@ export class SessionDirectoryError extends SessionError {
  *   session_warning   { sessionId, name, reason, message, remainingMs } — session nearing idle timeout
  *   session_timeout   { sessionId, name, idleMs } — session destroyed due to idle timeout
  */
-/**
- * Format milliseconds into a human-friendly duration string.
- * Examples: "2 minutes", "1 hour 30 minutes", "45 seconds"
- */
-export function formatIdleDuration(ms) {
-  const totalSeconds = Math.round(ms / 1000)
-  if (totalSeconds < 60) return `${totalSeconds} second${totalSeconds !== 1 ? 's' : ''}`
-  const totalMinutes = Math.round(totalSeconds / 60)
-  if (totalMinutes < 60) return `${totalMinutes} minute${totalMinutes !== 1 ? 's' : ''}`
-  const hours = Math.floor(totalMinutes / 60)
-  const minutes = totalMinutes % 60
-  const hPart = `${hours} hour${hours !== 1 ? 's' : ''}`
-  return minutes > 0 ? `${hPart} ${minutes} minute${minutes !== 1 ? 's' : ''}` : hPart
-}
+
+// Re-export formatIdleDuration from SessionTimeoutManager for backward compatibility
+export { formatIdleDuration }
 
 /**
  * @typedef {Object} SessionManagerConfig
@@ -179,16 +169,43 @@ export class SessionManager extends EventEmitter {
     this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
     this._locks = new SessionLockManager()
 
-    // Session idle timeout
+    // Session idle timeout (delegated to SessionTimeoutManager)
     const parsedTimeout = sessionTimeout ? parseDuration(sessionTimeout) : null
     if (sessionTimeout != null && parsedTimeout == null) {
       log.warn(`Invalid sessionTimeout value "${sessionTimeout}". Session timeouts are disabled.`)
     }
     this._sessionTimeoutMs = parsedTimeout
-    this._lastActivity = new Map() // sessionId -> timestamp
-    this._sessionWarned = new Set() // sessionIds that have received a timeout warning
-    this._timeoutCheckTimer = null
-    this._hasActiveViewersFn = null // Set via setActiveViewersFn() by WsServer
+    this._timeoutManager = new SessionTimeoutManager({ sessionTimeoutMs: parsedTimeout })
+
+    // Wire timeout manager events to SessionManager events
+    this._timeoutManager.on('warning', ({ sessionId, remainingMs }) => {
+      const entry = this._sessions.get(sessionId)
+      if (!entry) return
+      const friendly = formatIdleDuration(remainingMs)
+      log.info(`Session ${sessionId} idle warning (${friendly} remaining)`)
+      this.emit('session_warning', {
+        sessionId,
+        name: entry.name,
+        reason: 'idle_timeout',
+        message: `Session "${entry.name}" will be closed in ${friendly} due to inactivity`,
+        remainingMs,
+      })
+    })
+
+    this._timeoutManager.on('timeout', ({ sessionId, idleMs }) => {
+      const entry = this._sessions.get(sessionId)
+      if (!entry) return
+      const friendly = formatIdleDuration(idleMs)
+      log.info(`Session ${sessionId} timed out after ${friendly} idle`)
+      this.emit('session_timeout', { sessionId, name: entry.name, idleMs })
+      this.destroySession(sessionId)
+    })
+
+    // Wire isRunning check so timeout manager can skip busy sessions
+    this._timeoutManager.setIsRunningFn((sessionId) => {
+      const entry = this._sessions.get(sessionId)
+      return entry ? entry.session.isRunning : false
+    })
 
     // Validate provider exists at construction time for fail-fast behavior
     getProvider(this._providerType)
@@ -201,8 +218,7 @@ export class SessionManager extends EventEmitter {
    */
   _cleanupSessionMaps(sessionId) {
     this._sessions.delete(sessionId)
-    this._lastActivity.delete(sessionId)
-    this._sessionWarned.delete(sessionId)
+    this._timeoutManager.removeSession(sessionId)
     this._messageHistory.delete(sessionId)
     this._historyTruncated.delete(sessionId)
     this._costBudget.removeSession(sessionId)
@@ -271,7 +287,7 @@ export class SessionManager extends EventEmitter {
     }
 
     this._sessions.set(sessionId, entry)
-    this._lastActivity.set(sessionId, Date.now())
+    this._timeoutManager.touchActivity(sessionId)
     this._wireSessionEvents(sessionId, session)
 
     try {
@@ -468,8 +484,7 @@ export class SessionManager extends EventEmitter {
       this.emit('session_destroyed', { sessionId })
     }
     this._sessions.clear()
-    this._lastActivity.clear()
-    this._sessionWarned.clear()
+    this._timeoutManager.destroy()
     this._messageHistory.clear()
     this._historyTruncated.clear()
     this._costBudget.clear()
@@ -837,7 +852,7 @@ export class SessionManager extends EventEmitter {
     const ACTIVITY_EVENTS = new Set(['message', 'stream_start', 'tool_start', 'result', 'user_question'])
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
-        if (ACTIVITY_EVENTS.has(event)) this._touchActivity(sessionId)
+        if (ACTIVITY_EVENTS.has(event)) this._timeoutManager.touchActivity(sessionId)
         this._recordHistory(sessionId, event, data)
         this.emit('session_event', { sessionId, event, data })
 
@@ -874,7 +889,7 @@ export class SessionManager extends EventEmitter {
   }
 
   // ---------------------------------------------------------------------------
-  // Session idle timeout
+  // Session idle timeout (delegated to SessionTimeoutManager)
   // ---------------------------------------------------------------------------
 
   /**
@@ -883,7 +898,7 @@ export class SessionManager extends EventEmitter {
    * @param {(sessionId: string) => boolean} fn
    */
   setActiveViewersFn(fn) {
-    this._hasActiveViewersFn = fn
+    this._timeoutManager.setActiveViewersFn(fn)
   }
 
   /**
@@ -891,16 +906,19 @@ export class SessionManager extends EventEmitter {
    * Called internally on relevant events, and publicly by WsServer on user input.
    */
   touchActivity(sessionId) {
-    this._touchActivity(sessionId)
+    this._timeoutManager.touchActivity(sessionId)
   }
 
-  /** @private */
-  _touchActivity(sessionId) {
-    this._lastActivity.set(sessionId, Date.now())
-    // Clear warning flag if session becomes active again
-    if (this._sessionWarned.has(sessionId)) {
-      this._sessionWarned.delete(sessionId)
-    }
+  /**
+   * Expose internal timeout tracking state for backward compatibility.
+   * Tests and internal code may reference these directly.
+   */
+  get _lastActivity() {
+    return this._timeoutManager._lastActivity
+  }
+
+  get _sessionWarned() {
+    return this._timeoutManager._sessionWarned
   }
 
   // ---------------------------------------------------------------------------
@@ -948,87 +966,14 @@ export class SessionManager extends EventEmitter {
    * Only starts if sessionTimeout was configured.
    */
   startSessionTimeouts() {
-    if (!this._sessionTimeoutMs) return
-    if (this._timeoutCheckTimer) return
-
-    const checkIntervalMs = Math.min(60_000, Math.floor(this._sessionTimeoutMs / 4))
-    log.info(`Session timeout enabled: ${this._sessionTimeoutMs}ms (check every ${checkIntervalMs}ms)`)
-    this._timeoutCheckTimer = setInterval(() => {
-      this._checkSessionTimeouts()
-    }, checkIntervalMs)
+    this._timeoutManager.start()
   }
 
   /**
    * Stop periodic session timeout checks.
    */
   stopSessionTimeouts() {
-    if (this._timeoutCheckTimer) {
-      clearInterval(this._timeoutCheckTimer)
-      this._timeoutCheckTimer = null
-    }
-  }
-
-  /**
-   * Check all sessions for idle timeout. Warn first, then destroy on next check.
-   * Sessions with active WebSocket viewers or running queries are exempt.
-   */
-  _checkSessionTimeouts() {
-    if (!this._sessionTimeoutMs) return
-
-    const now = Date.now()
-    // Warning threshold: 2 minutes before timeout (or half the timeout, whichever is smaller)
-    const warningMs = Math.min(2 * 60_000, Math.floor(this._sessionTimeoutMs / 2))
-
-    // Collect candidates before destroying to avoid Map mutation during iteration (#815)
-    const toDestroy = []
-
-    for (const [sessionId, entry] of this._sessions) {
-      const lastActive = this._lastActivity.get(sessionId) || entry.createdAt
-      const idleMs = now - lastActive
-
-      // Skip sessions with active viewers
-      if (this._hasActiveViewersFn && this._hasActiveViewersFn(sessionId)) {
-        this._touchActivity(sessionId) // Viewing counts as activity
-        continue
-      }
-
-      // Skip busy sessions (query in progress)
-      if (entry.session.isRunning) {
-        this._touchActivity(sessionId)
-        continue
-      }
-
-      // Timeout fully elapsed — destroy (whether or not a warning was sent).
-      // Handles both the normal warned->timeout path and the edge case where
-      // the session jumped past the warning threshold (clock jump, stall). (#815)
-      if (idleMs >= this._sessionTimeoutMs) {
-        toDestroy.push({ sessionId, name: entry.name, idleMs })
-        continue
-      }
-
-      // Warning threshold reached — send warning (#817: human-friendly durations)
-      if (!this._sessionWarned.has(sessionId) && idleMs >= this._sessionTimeoutMs - warningMs) {
-        const remainingMs = Math.max(0, this._sessionTimeoutMs - idleMs)
-        const friendly = formatIdleDuration(remainingMs)
-        log.info(`Session ${sessionId} idle warning (${friendly} remaining)`)
-        this._sessionWarned.add(sessionId)
-        this.emit('session_warning', {
-          sessionId,
-          name: entry.name,
-          reason: 'idle_timeout',
-          message: `Session "${entry.name}" will be closed in ${friendly} due to inactivity`,
-          remainingMs,
-        })
-      }
-    }
-
-    // Destroy outside the iteration loop (#815)
-    for (const { sessionId, name, idleMs } of toDestroy) {
-      const friendly = formatIdleDuration(idleMs)
-      log.info(`Session ${sessionId} timed out after ${friendly} idle`)
-      this.emit('session_timeout', { sessionId, name, idleMs })
-      this.destroySession(sessionId)
-    }
+    this._timeoutManager.stop()
   }
 
   getSessionCost(sessionId) {
