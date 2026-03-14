@@ -93,6 +93,35 @@ export function createHttpHandler(server) {
       return
     }
 
+    // Metrics endpoint — operational counters for monitoring
+    if (req.method === 'GET' && req.url === '/metrics') {
+      if (!server._validateBearerAuth(req, res)) return
+      const mem = process.memoryUsage()
+      const sessions = server.sessionManager?.listSessions() || []
+      const metrics = {
+        uptime: Math.round((Date.now() - server._startedAt) / 1000),
+        sessions: {
+          active: sessions.length,
+        },
+        clients: {
+          connected: server._clientManager?.clients?.size || 0,
+          authenticated: server._clientManager?.authenticatedCount || 0,
+        },
+        memory: {
+          rss: mem.rss,
+          heapUsed: mem.heapUsed,
+          heapTotal: mem.heapTotal,
+        },
+        process: {
+          pid: process.pid,
+          nodeVersion: process.version,
+        },
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(metrics))
+      return
+    }
+
     // Permission hook endpoint
     if (req.method === 'POST' && req.url === '/permission') {
       server._permissions.handlePermissionRequest(req, res)
