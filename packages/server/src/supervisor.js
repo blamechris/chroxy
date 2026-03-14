@@ -358,7 +358,9 @@ export class Supervisor extends EventEmitter {
             this._restartTimer = setTimeout(() => this.startChild(), 2000)
             return
           }
-          this._log.error('Rollback failed, continuing with normal restart')
+          this._log.error('Rollback failed — exiting to prevent crash loop')
+          this._exit(1)
+          return
         }
       }
 
