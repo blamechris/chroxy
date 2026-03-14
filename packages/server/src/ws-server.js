@@ -28,6 +28,18 @@ import { WsClientManager } from './ws-client-manager.js'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf-8'))
+
+export function sanitizeErrorMessage(err) {
+  const safeMessages = {
+    INVALID_MESSAGE: 'Message validation failed',
+    SESSION_NOT_FOUND: 'Session not found',
+    PERMISSION_DENIED: 'Permission denied',
+  }
+  if (err && err.code && safeMessages[err.code]) {
+    return safeMessages[err.code]
+  }
+  return 'An internal error occurred'
+}
 const SERVER_VERSION = packageJson.version
 const log = createLogger('ws')
 
@@ -635,8 +647,9 @@ export class WsServer {
         }
         this._handleMessage(ws, msg).catch((err) => {
           log.error(`Unhandled error in message handler: ${err.message}`)
+          if (err.stack) log.error(err.stack)
           try {
-            this._send(ws, { type: 'server_error', message: err.message, recoverable: true })
+            this._send(ws, { type: 'server_error', message: sanitizeErrorMessage(err), recoverable: true })
           } catch {
             // Best-effort — client may already be disconnected
           }

@@ -113,7 +113,7 @@ describe('handler error response', () => {
     )
 
     assert.equal(errorMsg.type, 'server_error')
-    assert.equal(errorMsg.message, 'test handler explosion')
+    assert.equal(errorMsg.message, 'An internal error occurred')
     assert.equal(errorMsg.recoverable, true)
 
     ws.close()
