@@ -300,6 +300,20 @@ export function App() {
         sendInterrupt()
         return
       }
+      // Shift+Tab: toggle plan mode
+      if (e.shiftKey && e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault()
+        const state = useConnectionStore.getState()
+        const currentMode = state.permissionMode
+        if (currentMode === 'plan') {
+          // Switch back to previous mode (default to 'approve')
+          setPermissionMode(state.previousPermissionMode || 'approve')
+        } else {
+          // Switch to plan mode
+          setPermissionMode('plan')
+        }
+        return
+      }
       // ?: toggle shortcut help (no modifiers, not in text input)
       if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const tag = (e.target as HTMLElement).tagName
@@ -684,6 +698,7 @@ export function App() {
     { keys: 'Cmd+Shift+[', description: 'Previous tab', section: 'Session' },
     { keys: 'Cmd+Shift+]', description: 'Next tab', section: 'Session' },
     { keys: 'Cmd+W', description: 'Close tab (desktop)', section: 'Session' },
+    { keys: 'Shift+Tab', description: 'Toggle plan mode', section: 'Session' },
     { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
     { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
   ], [])
