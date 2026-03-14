@@ -23,6 +23,7 @@ import { RateLimiter } from './rate-limiter.js'
 import { createLogger, addLogListener, removeLogListener } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
+import { WsClientManager } from './ws-client-manager.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -290,7 +291,8 @@ export class WsServer {
     this._backpressureMaxDrops = 10 // close connection after this many consecutive drops
     this._rateLimiter = new RateLimiter()
     this._clientSend = createClientSender(log)
-    this.clients = new Map() // ws -> { id, authenticated, mode, activeSessionId, isAlive, deviceInfo, _backpressureDrops }
+    this._clientManager = new WsClientManager()
+    this.clients = this._clientManager.clients // back-compat: expose the raw Map for context objects
     this.httpServer = null
     this.wss = null
     this._pingInterval = null
@@ -557,7 +559,7 @@ export class WsServer {
       // origin and bypass encryption. req.socket.remoteAddress is set by the
       // kernel and cannot be forged over the network.
       const socketIp = req.socket.remoteAddress || 'unknown'
-      this.clients.set(ws, {
+      this._clientManager.addClient(ws, {
         id: clientId,
         authenticated: false,
         mode: 'chat', // default to chat view
@@ -641,14 +643,14 @@ export class WsServer {
 
       ws.on('close', () => {
         clearTimeout(authTimeout)
-        const client = this.clients.get(ws)
+        const client = this._clientManager.getClient(ws)
         if (client?._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
         log.info(`Client ${client?.id} disconnected`)
         if (client?.authenticated) {
           this._handleClientDeparture(client)
         }
         if (client?.id) this._rateLimiter.remove(client.id)
-        this.clients.delete(ws)
+        this._clientManager.removeClient(ws)
       })
 
       ws.on('error', (err) => {
@@ -716,7 +718,7 @@ export class WsServer {
         if (!client.isAlive) {
           log.info(`Client ${client.id} unresponsive, terminating`)
           this._handleClientDeparture(client)
-          this.clients.delete(ws)
+          this._clientManager.removeClient(ws)
           try { ws.terminate() } catch {}
           continue
         }
@@ -832,28 +834,12 @@ export class WsServer {
 
   /** Count unauthenticated connections for pre-auth limit enforcement */
   _countPendingConnections() {
-    let count = 0
-    for (const [ws, client] of this.clients) {
-      if (!client.authenticated && ws.readyState === 1) count++
-    }
-    return count
+    return this._clientManager.countPending()
   }
 
   /** Get list of connected clients for auth_ok payload */
   _getConnectedClientList() {
-    const list = []
-    for (const [ws, client] of this.clients) {
-      if (client.authenticated && ws.readyState === 1) {
-        const info = client.deviceInfo || {}
-        list.push({
-          clientId: client.id,
-          deviceName: info.deviceName || null,
-          deviceType: info.deviceType || 'unknown',
-          platform: info.platform || 'unknown',
-        })
-      }
-    }
-    return list
+    return this._clientManager.getConnectedList()
   }
 
   /** Broadcast client_joined to all OTHER authenticated clients */
@@ -938,19 +924,12 @@ export class WsServer {
 
   /** Count of authenticated, connected clients */
   get authenticatedClientCount() {
-    let count = 0
-    for (const [ws, client] of this.clients) {
-      if (client.authenticated && ws.readyState === 1) count++
-    }
-    return count
+    return this._clientManager.authenticatedCount
   }
 
   /** Check if any authenticated client is actively viewing the given session */
   hasActiveViewersForSession(sessionId) {
-    for (const [ws, client] of this.clients) {
-      if (client.authenticated && client.activeSessionId === sessionId && ws.readyState === 1) return true
-    }
-    return false
+    return this._clientManager.hasActiveViewers(sessionId)
   }
 
   /** Send JSON to a single client (delegates to extracted ws-client-sender) */
