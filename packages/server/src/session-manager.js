@@ -1,15 +1,15 @@
 import { EventEmitter } from 'events'
-import { randomUUID, randomBytes } from 'crypto'
-import { statSync, readFileSync, unlinkSync, renameSync, existsSync, mkdirSync } from 'fs'
-import { join, dirname } from 'path'
+import { randomBytes } from 'crypto'
+import { statSync } from 'fs'
+import { join } from 'path'
 import { homedir } from 'os'
 import { getProvider } from './providers.js'
 import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
-import { isWindows, writeFileRestricted } from './platform.js'
 import { readSessionContext } from './session-context.js'
 import { parseDuration } from './duration.js'
 import { SessionLockManager } from './session-lock.js'
 import { CostBudgetManager } from './cost-budget-manager.js'
+import { SessionStatePersistence } from './session-state-persistence.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('session-manager')
@@ -152,11 +152,22 @@ export class SessionManager extends EventEmitter {
     this._transforms = transforms || []
     this._costBudget = new CostBudgetManager({ budget: costBudget })
 
-    // State persistence
-    this._stateFilePath = stateFilePath || DEFAULT_STATE_FILE
-    this._stateTtlMs = stateTtlMs ?? 24 * 60 * 60 * 1000 // 24 hours
-    this._persistDebounceMs = persistDebounceMs
-    this._persistTimer = null
+    // State persistence (delegated to SessionStatePersistence)
+    this._persistence = new SessionStatePersistence({
+      stateFilePath: stateFilePath || DEFAULT_STATE_FILE,
+      stateTtlMs,
+      persistDebounceMs,
+    })
+    // Backward-compatible accessors for tests that reference internal state
+    this._stateFilePath = this._persistence._stateFilePath
+    this._stateTtlMs = this._persistence._stateTtlMs
+    this._persistDebounceMs = this._persistence._persistDebounceMs
+    Object.defineProperty(this, '_persistTimer', {
+      get: () => this._persistence._persistTimer,
+      set: (v) => { this._persistence._persistTimer = v },
+      enumerable: false,
+      configurable: true,
+    })
 
     // Message history
     this._maxHistory = maxHistory || 500
@@ -440,8 +451,7 @@ export class SessionManager extends EventEmitter {
    */
   destroyAll() {
     this.stopSessionTimeouts()
-    clearTimeout(this._persistTimer)
-    this._persistTimer = null
+    this._persistence.cancelPersist()
     try {
       this.serializeState()
     } catch (err) {
@@ -508,20 +518,7 @@ export class SessionManager extends EventEmitter {
     state.budgetExceeded = budgetState.budgetExceeded
     state.budgetPaused = budgetState.budgetPaused
 
-    const dir = dirname(this._stateFilePath)
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    const tmpPath = this._stateFilePath + '.tmp'
-    writeFileRestricted(tmpPath, JSON.stringify(state, null, 2))
-    if (isWindows) {
-      try { unlinkSync(this._stateFilePath) } catch (err) {
-        if (err && err.code !== 'ENOENT') {
-          log.error(`Failed to remove existing state file: ${err.message}`)
-        }
-      }
-    }
-    renameSync(tmpPath, this._stateFilePath)
-    log.info(`Serialized ${state.sessions.length} session(s) to ${this._stateFilePath}`)
-    return state
+    return this._persistence.serializeState(state)
   }
 
   /**
@@ -531,27 +528,8 @@ export class SessionManager extends EventEmitter {
    * @returns {string|null} The first restored session ID, or null
    */
   restoreState() {
-    if (!existsSync(this._stateFilePath)) return null
-
-    let state
-    try {
-      state = JSON.parse(readFileSync(this._stateFilePath, 'utf-8'))
-    } catch (err) {
-      log.error(`Failed to parse session state: ${err.message}`)
-      try { unlinkSync(this._stateFilePath) } catch {}
-      return null
-    }
-
-    if (!Array.isArray(state.sessions) || state.sessions.length === 0) {
-      log.info('No sessions to restore')
-      return null
-    }
-
-    // Reject stale state (older than TTL, default 24h)
-    if (state.timestamp && Date.now() - state.timestamp > this._stateTtlMs) {
-      log.info(`Session state is stale (>${Math.round(this._stateTtlMs / 60000)}min), starting fresh`)
-      return null
-    }
+    const state = this._persistence.restoreState()
+    if (!state) return null
 
     const hasVersion = typeof state.version === 'number'
 
@@ -830,15 +808,7 @@ export class SessionManager extends EventEmitter {
    * Schedule a debounced persist. Multiple rapid calls reset the timer.
    */
   _schedulePersist() {
-    clearTimeout(this._persistTimer)
-    this._persistTimer = setTimeout(() => {
-      this._persistTimer = null
-      try {
-        this.serializeState()
-      } catch (err) {
-        log.error(`Failed to persist session state: ${err?.stack || err}`)
-      }
-    }, this._persistDebounceMs)
+    this._persistence.schedulePersist(() => this.serializeState())
   }
 
   /**
