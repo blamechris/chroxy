@@ -76,7 +76,7 @@ describe('session_timeout handler', () => {
         s1: createEmptySessionState(),
         s2: { ...createEmptySessionState(), messages: [{ id: 'm1', type: 'response', content: 'hello', timestamp: 1 }] },
       },
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -102,7 +102,6 @@ describe('session_timeout handler', () => {
         s1: createEmptySessionState(),
         s2: s2State,
       },
-      messages: [],
     });
 
     setStore(store as any);
@@ -112,20 +111,17 @@ describe('session_timeout handler', () => {
 
     const state = store.getState();
     expect(state.activeSessionId).toBe('s2');
-    // Flat fields should be synced from s2
-    expect(state.messages).toEqual(s2State.messages);
+    // Active session messages should be from s2
+    expect(state.sessionStates['s2'].messages).toEqual(s2State.messages);
   });
 
-  it('clears flat fields when no sessions remain', () => {
+  it('sets activeSessionId to null when no sessions remain', () => {
     const store = createMockStore({
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'Session 1' } as any],
       sessionStates: {
         s1: createEmptySessionState(),
       },
-      messages: [{ id: 'm1', type: 'response' as const, content: 'test', timestamp: 1 }],
-      claudeReady: true,
-      activeModel: 'claude-sonnet',
     });
 
     setStore(store as any);
@@ -135,10 +131,7 @@ describe('session_timeout handler', () => {
 
     const state = store.getState();
     expect(state.activeSessionId).toBeNull();
-    expect(state.messages).toEqual([]);
-    expect(state.claudeReady).toBe(false);
-    expect(state.activeModel).toBeNull();
-    expect(state.isIdle).toBe(true);
+    expect(Object.keys(state.sessionStates)).not.toContain('s1');
   });
 
   it('calls clearPersistedSession for the timed-out session', () => {
@@ -146,7 +139,7 @@ describe('session_timeout handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'Test' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -162,7 +155,7 @@ describe('session_timeout handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'My Project' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -187,7 +180,7 @@ describe('session_timeout handler', () => {
         s1: createEmptySessionState(),
         s2: createEmptySessionState(),
       },
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -216,7 +209,7 @@ describe('session_list GC handler', () => {
         s1: createEmptySessionState(),
         s2: createEmptySessionState(),
       },
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -237,7 +230,7 @@ describe('session_list GC handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'Session 1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -264,7 +257,7 @@ describe('session_list GC handler', () => {
         s2: createEmptySessionState(),
         s3: createEmptySessionState(),
       },
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -297,7 +290,7 @@ describe('session_list GC handler', () => {
         s1: createEmptySessionState(),
         s2: s2State,
       },
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -311,10 +304,10 @@ describe('session_list GC handler', () => {
 
     const state = store.getState();
     expect(state.activeSessionId).toBe('s2');
-    expect(state.messages).toEqual(s2State.messages);
+    expect(state.sessionStates['s2'].messages).toEqual(s2State.messages);
   });
 
-  it('clears flat fields when all sessions removed via empty list', () => {
+  it('sets activeSessionId to null when all sessions removed via empty list', () => {
     const store = createMockStore({
       activeSessionId: 's1',
       sessions: [
@@ -325,9 +318,6 @@ describe('session_list GC handler', () => {
         s1: createEmptySessionState(),
         s2: createEmptySessionState(),
       },
-      messages: [{ id: 'm1', type: 'response' as const, content: 'test', timestamp: 1 }],
-      claudeReady: true,
-      activeModel: 'claude-sonnet',
     });
 
     setStore(store as any);
@@ -344,9 +334,7 @@ describe('session_list GC handler', () => {
 
     const state = store.getState();
     expect(state.activeSessionId).toBeNull();
-    expect(state.messages).toEqual([]);
-    expect(state.claudeReady).toBe(false);
-    expect(state.activeModel).toBeNull();
+    expect(Object.keys(state.sessionStates)).toHaveLength(0);
   });
 });
 
@@ -357,7 +345,7 @@ describe('checkpoint_restored handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
       switchSession,
     } as any);
 
@@ -375,7 +363,7 @@ describe('checkpoint_restored handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
       switchSession,
     } as any);
 
@@ -393,7 +381,7 @@ describe('checkpoint_restored handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
       switchSession,
     } as any);
 
@@ -411,7 +399,7 @@ describe('checkpoint_restored handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
       switchSession,
     } as any);
 
@@ -429,7 +417,7 @@ describe('checkpoint_restored handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
       switchSession,
     } as any);
 
@@ -545,7 +533,7 @@ describe('unknown message type (default case)', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -565,7 +553,7 @@ describe('unknown message type (default case)', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -582,7 +570,7 @@ describe('unknown message type (default case)', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -614,7 +602,7 @@ describe('client_focus_changed follow mode', () => {
         s1: createEmptySessionState(),
         s2: { ...createEmptySessionState(), messages: [{ id: 'm1', type: 'response' as const, content: 'hello', timestamp: 1 }] },
       },
-      messages: [],
+
       switchSession: jest.fn(),
     });
 
@@ -644,7 +632,7 @@ describe('client_focus_changed follow mode', () => {
         s1: createEmptySessionState(),
         s2: createEmptySessionState(),
       },
-      messages: [],
+
       switchSession: jest.fn(),
     });
 
@@ -676,7 +664,7 @@ describe('client_focus_changed follow mode', () => {
         s1: createEmptySessionState(),
         s2: createEmptySessionState(),
       },
-      messages: [],
+
       switchSession: jest.fn(),
     });
 
@@ -708,7 +696,7 @@ describe('client_focus_changed follow mode', () => {
         s1: createEmptySessionState(),
         s2: createEmptySessionState(),
       },
-      messages: [],
+
       switchSession: jest.fn(),
     });
 
@@ -760,7 +748,7 @@ describe('git result handlers', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -788,7 +776,7 @@ describe('git result handlers', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -811,7 +799,7 @@ describe('git result handlers', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -836,7 +824,7 @@ describe('git result handlers', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -853,7 +841,7 @@ describe('git result handlers', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -870,7 +858,7 @@ describe('git result handlers', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -887,7 +875,7 @@ describe('git result handlers', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -912,7 +900,7 @@ describe('git result handlers', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -942,7 +930,7 @@ describe('permission_request rich notification details', () => {
         s1: createEmptySessionState(),
         s2: createEmptySessionState(),
       },
-      messages: [],
+
       sessionNotifications: [],
     });
 
@@ -978,7 +966,7 @@ describe('permission_request rich notification details', () => {
         s1: createEmptySessionState(),
         s2: createEmptySessionState(),
       },
-      messages: [],
+
       sessionNotifications: [],
     });
 
@@ -1011,7 +999,7 @@ describe('permission_request rich notification details', () => {
         s1: createEmptySessionState(),
         s2: createEmptySessionState(),
       },
-      messages: [],
+
       sessionNotifications: [],
     });
 
@@ -1045,7 +1033,7 @@ describe('plan_ready notification', () => {
         s1: createEmptySessionState(),
         s2: createEmptySessionState(),
       },
-      messages: [],
+
       sessionNotifications: [],
     });
 
@@ -1075,7 +1063,7 @@ describe('plan_ready notification', () => {
       sessionStates: {
         s1: createEmptySessionState(),
       },
-      messages: [],
+
       sessionNotifications: [],
     });
 
@@ -1099,7 +1087,7 @@ describe('session subscription (#1692)', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
       socket: { readyState: 1, send: mockSend } as any,
     });
 
@@ -1128,7 +1116,7 @@ describe('session subscription (#1692)', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
       socket: { readyState: 1, send: mockSend } as any,
     });
 
@@ -1151,7 +1139,7 @@ describe('session subscription (#1692)', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
       socket: { readyState: 1, send: mockSend } as any,
     });
 
@@ -1183,7 +1171,7 @@ describe('session subscription (#1692)', () => {
       activeSessionId: 's1',
       sessions: [],
       sessionStates: {},
-      messages: [],
+
     });
 
     setStore(store as any);
@@ -1267,7 +1255,7 @@ describe('stream_start handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1286,7 +1274,7 @@ describe('stream_start handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: { ...createEmptySessionState(), messages: [existing], streamingMessageId: null } },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1306,7 +1294,7 @@ describe('stream_start handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: { ...createEmptySessionState(), messages: [toolMsg] } },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1342,7 +1330,7 @@ describe('stream_delta handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1364,7 +1352,7 @@ describe('stream_delta handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: { ...createEmptySessionState(), messages: [toolMsg] } },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1393,7 +1381,7 @@ describe('stream_end handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1416,7 +1404,7 @@ describe('tool_start handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1455,7 +1443,7 @@ describe('tool_result handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: { ...createEmptySessionState(), messages: [toolMsg] } },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1476,7 +1464,7 @@ describe('tool_result handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1503,7 +1491,7 @@ describe('result handler', () => {
           messages: [{ id: 'msg-1', type: 'response' as const, content: 'done', timestamp: 1 }],
         },
       },
-      messages: [],
+
       sessionNotifications: [],
     });
     setStore(store as any);
@@ -1543,7 +1531,7 @@ describe('permission_resolved handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: { ...createEmptySessionState(), messages: [permMsg] } },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1578,7 +1566,7 @@ describe('permission_resolved handler', () => {
         s1: createEmptySessionState(),
         s2: { ...createEmptySessionState(), messages: [permMsg] },
       },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1593,31 +1581,24 @@ describe('permission_resolved handler', () => {
     expect(msg?.answered).toBe('deny');
   });
 
-  it('falls back to flat messages when requestId not in any session state', () => {
-    const permMsg = {
-      id: 'perm-3',
-      type: 'prompt' as const,
-      content: 'Allow?',
-      requestId: 'req-3',
-      timestamp: 1,
-    };
+  it('is a no-op when requestId not in any session state', () => {
     const store = createMockStore({
       activeSessionId: null,
       sessions: [],
       sessionStates: {},
-      messages: [permMsg],
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
 
+    // Should not throw when no session has the requestId
     _testMessageHandler.handle({
       type: 'permission_resolved',
-      requestId: 'req-3',
+      requestId: 'req-nonexistent',
       decision: 'allowAlways',
     });
 
-    const msg = store.getState().messages.find((m: any) => m.requestId === 'req-3');
-    expect((msg as any)?.answered).toBe('allowAlways');
+    // No sessions, so nothing to check — just verifying no crash
+    expect(store.getState().sessionStates).toEqual({});
   });
 
   it('clears matching sessionNotification when permission is resolved', () => {
@@ -1625,7 +1606,7 @@ describe('permission_resolved handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
       sessionNotifications: [
         { requestId: 'req-notif', sessionId: 's1', message: 'Allow bash?' } as any,
         { requestId: 'other-req', sessionId: 's1', message: 'Other' } as any,
@@ -1665,7 +1646,7 @@ describe('permission_expired handler', () => {
           ],
         },
       },
-      messages: [],
+
       sessionNotifications: [
         { requestId: 'req-exp', sessionId: 's1', message: 'Allow bash?' } as any,
         { requestId: 'keep-me', sessionId: 's1', message: 'Other' } as any,
@@ -1693,7 +1674,7 @@ describe('permission_request message handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
       sessionNotifications: [],
     });
     setStore(store as any);
@@ -1723,7 +1704,7 @@ describe('permission_request message handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
       sessionNotifications: [],
     });
     setStore(store as any);
@@ -1750,7 +1731,7 @@ describe('session_context handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1777,7 +1758,7 @@ describe('session_context handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
@@ -1804,7 +1785,7 @@ describe('user_question handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
       sessionNotifications: [],
     });
     setStore(store as any);
@@ -1831,7 +1812,7 @@ describe('user_question handler', () => {
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-      messages: [],
+
       sessionNotifications: [],
     });
     setStore(store as any);

@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview, stripAnsi } from '../store/connection';
+import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview, stripAnsi } from '../store/connection';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
@@ -113,20 +113,20 @@ export function SessionScreen() {
 
   // Individual selectors for state values — avoids subscribing to every store change
   const viewMode = useConnectionStore((s) => s.viewMode);
-  const messages = useConnectionStore((s) => s.messages);
+  const messages = useConnectionStore(selectMessages);
   const inputSettings = useConnectionStore((s) => s.inputSettings);
-  const claudeReady = useConnectionStore((s) => s.claudeReady);
+  const claudeReady = useConnectionStore(selectClaudeReady);
   const serverMode = useConnectionStore((s) => s.serverMode);
   const sessionCwd = useConnectionStore((s) => s.sessionCwd);
-  const streamingMessageId = useConnectionStore((s) => s.streamingMessageId);
+  const streamingMessageId = useConnectionStore(selectStreamingMessageId);
   const connectionPhase = useConnectionStore((s) => s.connectionPhase);
-  const activeModel = useConnectionStore((s) => s.activeModel);
+  const activeModel = useConnectionStore(selectActiveModel);
   const availableModels = useConnectionStore((s) => s.availableModels);
-  const permissionMode = useConnectionStore((s) => s.permissionMode);
+  const permissionMode = useConnectionStore(selectPermissionMode);
   const availablePermissionModes = useConnectionStore((s) => s.availablePermissionModes);
-  const contextUsage = useConnectionStore((s) => s.contextUsage);
-  const lastResultCost = useConnectionStore((s) => s.lastResultCost);
-  const lastResultDuration = useConnectionStore((s) => s.lastResultDuration);
+  const contextUsage = useConnectionStore(selectContextUsage);
+  const lastResultCost = useConnectionStore(selectLastResultCost);
+  const lastResultDuration = useConnectionStore(selectLastResultDuration);
 
   // Action functions — stable references, individual selectors to avoid omnibus subscription
   const setViewMode = useConnectionStore((s) => s.setViewMode);
@@ -150,10 +150,7 @@ export function SessionScreen() {
   const exitCachedSession = useConnectionStore((s) => s.exitCachedSession);
   const savedConnection = useConnectionStore((s) => s.savedConnection);
   const connect = useConnectionStore((s) => s.connect);
-  const isIdle = useConnectionStore((s) => {
-    const id = s.activeSessionId;
-    return id && s.sessionStates[id] ? s.sessionStates[id].isIdle : s.isIdle;
-  });
+  const isIdle = useConnectionStore(selectIsIdle);
   const activeAgents = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].activeAgents : EMPTY_AGENTS;
