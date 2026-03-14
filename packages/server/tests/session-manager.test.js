@@ -875,7 +875,7 @@ describe('#987 — dead code removal in session-manager (behavioral)', () => {
     session.isRunning = false
     session.destroy = () => {}
     mgr._sessions.set('s1', { session, type: 'cli', name: 'S1', cwd: '/tmp' })
-    mgr._lastActivity = new Map([['s1', Date.now()]])
+    mgr.touchActivity('s1')
 
     // Spy on _schedulePersist
     let persistCallCount = 0
