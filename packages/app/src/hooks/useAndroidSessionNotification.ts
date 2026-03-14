@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useConnectionStore } from '../store/connection';
-import { updateSessionNotification, dismissSessionNotification } from '../android-session-notification';
+import { updateSessionNotification, dismissSessionNotification, startElapsedTimer, stopElapsedTimer } from '../android-session-notification';
 import { getActivityLabel } from '../components/BackgroundSessionProgress';
 
 /**
@@ -21,6 +21,7 @@ export function useAndroidSessionNotification(): void {
       prevStateRef.current = activityState;
 
       if (activityState === 'idle') {
+        stopElapsedTimer();
         void dismissSessionNotification();
         return;
       }
@@ -28,10 +29,16 @@ export function useAndroidSessionNotification(): void {
       const label = getActivityLabel(activityState, activity?.detail) ?? 'Session active';
       const elapsed = activity ? Math.floor((Date.now() - activity.startedAt) / 1000) : 0;
       void updateSessionNotification(activityState, label, elapsed);
+
+      // Start periodic elapsed-time updates so the notification stays fresh
+      if (activity) {
+        startElapsedTimer(label, activity.startedAt);
+      }
     });
 
     return () => {
       unsubscribe();
+      stopElapsedTimer();
       void dismissSessionNotification();
     };
   }, []);
