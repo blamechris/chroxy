@@ -217,6 +217,50 @@ describe('App', () => {
     expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
   })
 
+  describe('Model selector onChange', () => {
+    const modelsState = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+      availableModels: [
+        { id: 'claude-sonnet', label: 'Sonnet' },
+        { id: 'claude-opus', label: 'Opus' },
+      ],
+    }
+
+    it('calls setModel with model id when a specific model is selected', () => {
+      const setModelFn = vi.fn()
+      stateOverrides = { ...modelsState, setModel: setModelFn }
+      render(<App />)
+      const select = screen.getByLabelText('Select model')
+      fireEvent.change(select, { target: { value: 'claude-opus' } })
+      expect(setModelFn).toHaveBeenCalledWith('claude-opus')
+    })
+
+    it('calls setModel with first model id when Default is selected', () => {
+      const setModelFn = vi.fn()
+      stateOverrides = {
+        ...modelsState,
+        setModel: setModelFn,
+        getActiveSessionState: () => ({
+          messages: [],
+          streamingMessageId: null,
+          activeModel: 'claude-opus',
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+      }
+      render(<App />)
+      const select = screen.getByLabelText('Select model')
+      fireEvent.change(select, { target: { value: '' } })
+      expect(setModelFn).toHaveBeenCalledWith('claude-sonnet')
+    })
+  })
+
   describe('System events tab', () => {
     const connectedState = {
       connectionPhase: 'connected' as const,
