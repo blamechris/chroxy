@@ -22,7 +22,7 @@ export function ReconnectBanner({ visible, attempt, maxAttempts, message, onRetr
       {onStartServer && (
         <button
           className="btn-retry"
-          data-testid="start-server-button"
+          data-testid="banner-start-server-button"
           onClick={onStartServer}
           type="button"
         >

@@ -39,7 +39,7 @@ export function StartupErrorScreen({ error, logs, onRetry, onStartServer }: Star
               onClick={onStartServer}
               type="button"
               aria-label="Start Server"
-              data-testid="start-server-button"
+              data-testid="error-start-server-button"
             >
               Start Server
             </button>

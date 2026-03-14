@@ -850,7 +850,7 @@ export function App() {
                     className="startup-error-retry-btn startup-error-start-btn"
                     onClick={handleStartServer}
                     type="button"
-                    data-testid="start-server-button"
+                    data-testid="disconnected-start-server-button"
                   >
                     Start Server
                   </button>
