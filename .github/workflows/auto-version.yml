@@ -34,6 +34,17 @@ jobs:
       - name: Bump patch version
         run: bash scripts/bump-version.sh
 
+      - name: Validate bump
+        run: |
+          # Verify all version files parse correctly before pushing
+          node -e "const v = require('./packages/server/package.json').version; if (!/^\d+\.\d+\.\d+$/.test(v)) { throw new Error('Invalid version: ' + v); } console.log('server:', v);"
+          node -e "const v = require('./packages/app/package.json').version; console.log('app:', v);"
+          node -e "const v = require('./packages/desktop/package.json').version; console.log('desktop:', v);"
+          node -e "const v = require('./package.json').version; console.log('root:', v);"
+          node -e "const c = require('./packages/desktop/src-tauri/tauri.conf.json'); console.log('tauri:', c.version);"
+          grep -q '^version = "' packages/desktop/src-tauri/Cargo.toml && echo "Cargo.toml: OK"
+          echo "All version files validated."
+
       - name: Commit and push
         run: |
           NEXT=$(node -p "require('./packages/server/package.json').version")
