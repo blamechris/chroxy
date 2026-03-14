@@ -26,8 +26,8 @@ describe('SettingsPanel dynamic provider dropdown (#1966)', () => {
   it('imports shared PROVIDER_LABELS with Gemini entry', () => {
     assert.ok(src.includes('PROVIDER_LABELS'),
       'Should import PROVIDER_LABELS from shared module')
-    assert.ok(labelsSrc.includes("'gemini'") && labelsSrc.includes('Gemini CLI'),
-      'Shared module should have Gemini CLI in provider labels')
+    assert.ok(labelsSrc.includes("'gemini'") && labelsSrc.includes('Gemini (CLI)'),
+      'Shared module should have Gemini (CLI) in provider labels')
   })
 
   it('renders dynamic options when availableProviders is non-empty', () => {
