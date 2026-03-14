@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 /// Subset of ~/.chroxy/config.json fields that the desktop app needs.
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -28,6 +29,7 @@ pub fn config_path() -> Option<PathBuf> {
 }
 
 /// Load and parse ~/.chroxy/config.json. Returns default config if file doesn't exist.
+/// Falls back to OS keychain for apiToken if not present in config file.
 pub fn load_config() -> ChroxyConfig {
     let path = match config_path() {
         Some(p) => p,
@@ -39,12 +41,63 @@ pub fn load_config() -> ChroxyConfig {
         Err(_) => return ChroxyConfig::default(),
     };
 
-    match serde_json::from_str(&contents) {
+    let mut config: ChroxyConfig = match serde_json::from_str(&contents) {
         Ok(config) => config,
         Err(e) => {
             eprintln!("[config] Failed to parse {}: {}", path.display(), e);
             ChroxyConfig::default()
         }
+    };
+
+    // Fallback: if apiToken is missing from config file, check OS keychain.
+    // The server migrates tokens from config.json to keychain on first run.
+    if config.api_token.is_none() {
+        if let Some(token) = get_keychain_token() {
+            println!("[config] Loaded API token from OS keychain");
+            config.api_token = Some(token);
+        }
+    }
+
+    config
+}
+
+/// Read the API token from the OS keychain.
+/// Uses the same service/account as the Node.js server (keychain.js):
+///   service = "chroxy", account = "api-token"
+fn get_keychain_token() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("security")
+            .args(["find-generic-password", "-s", "chroxy", "-a", "api-token", "-w"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !token.is_empty() {
+                return Some(token);
+            }
+        }
+        None
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("secret-tool")
+            .args(["lookup", "service", "chroxy", "account", "api-token"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !token.is_empty() {
+                return Some(token);
+            }
+        }
+        None
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
     }
 }
 
@@ -122,5 +175,16 @@ mod tests {
         assert!(path.is_some());
         let p = path.unwrap();
         assert!(p.ends_with(".chroxy/config.json"));
+    }
+
+    #[test]
+    fn get_keychain_token_returns_option() {
+        // Should not panic regardless of keychain state
+        let result = get_keychain_token();
+        // We can't assert the value (depends on machine state),
+        // but it should be Some(non-empty) or None — never panic.
+        if let Some(ref token) = result {
+            assert!(!token.is_empty());
+        }
     }
 }
