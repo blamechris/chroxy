@@ -108,31 +108,30 @@ For each PR:
 
 Run `/batch-merge ${PR_NUMS}` — it handles sequential merge with update-branch, CI waiting, Copilot gating, and conflict resolution. After delegation completes, continue to Phase 2b with the list of successfully merged PRs.
 
-### Phase 2b: Version Verification
+### Phase 2b: Version Bump (Manual)
 
-After merging, wait for the auto-version CI to bump the patch version:
+Version bumps are manual. After merging, ask the user if they want to bump the version:
 
-```bash
-# Wait 15s for the workflow to trigger
-sleep 15
-
-# Poll for completion (every 15s, max 3 min)
-for i in $(seq 1 12); do
-  STATUS=$(gh run list --workflow auto-version.yml --branch main --limit 1 --json status,conclusion,headSha --jq '.[0]')
-  CONCLUSION=$(echo "$STATUS" | jq -r '.conclusion // empty')
-  if [ "$CONCLUSION" = "success" ]; then
-    break
-  fi
-  sleep 15
-done
-
-# Fetch the new version
-PRE_VERSION=$(node -p "require('./packages/server/package.json').version")
-NEW_VERSION=$(gh api repos/${REPO}/contents/packages/server/package.json --jq '.content' | base64 -d | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).version")
-echo "Version: v${PRE_VERSION} → v${NEW_VERSION}"
+```
+Current version: v0.5.0
+Bump version? (patch → v0.5.1, or skip)
 ```
 
-If the workflow doesn't complete in 3 min, warn and continue — never block the rebuild on version verification.
+If yes:
+
+```bash
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" bash scripts/bump-version.sh
+git checkout -b chore/bump-version main
+git add package.json packages/server/package.json packages/app/package.json \
+  packages/desktop/package.json packages/desktop/src-tauri/tauri.conf.json \
+  packages/desktop/src-tauri/Cargo.toml packages/desktop/src-tauri/Cargo.lock
+NEXT=$(node -p "require('./packages/server/package.json').version")
+git commit -m "chore: bump version to v${NEXT}"
+git push -u origin chore/bump-version
+gh pr create --title "chore: bump version to v${NEXT}" --body "Patch version bump."
+```
+
+Merge after CI passes (version-only change, review gate exception).
 
 If `--skip-version-check` is set, skip this phase.
 
