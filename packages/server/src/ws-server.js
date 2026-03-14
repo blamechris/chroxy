@@ -759,6 +759,9 @@ export class WsServer {
     const client = this.clients.get(ws)
     if (!client) return
 
+    // Generate a correlation ID for tracing this message through the pipeline
+    const correlationId = randomBytes(4).toString('hex')
+
     // Auth handling (delegates to ws-auth.js)
     if (!client.authenticated) {
       if (msg.type === 'pair') {
@@ -800,17 +803,25 @@ export class WsServer {
     const parsed = ClientMessageSchema.safeParse(msg)
     if (!parsed.success) {
       const details = parsed.error.issues.map(i => i.message).join(', ')
-      log.warn(`Invalid message from ${client.id}: ${details}`)
-      this._send(ws, { type: 'error', code: 'INVALID_MESSAGE', details })
+      log.warn(`[${correlationId}] Invalid message from ${client.id}: ${details}`)
+      this._send(ws, { type: 'error', code: 'INVALID_MESSAGE', correlationId, details })
       return
     }
     const validatedMsg = parsed.data
 
-    // Route based on server mode
-    if (this.sessionManager) {
-      handleSessionMessage(ws, client, validatedMsg, this._handlerCtx)
-    } else if (this.cliSession) {
-      handleCliMessage(ws, client, validatedMsg, this._handlerCtx)
+    log.debug(`[${correlationId}] Handling ${validatedMsg.type} from ${client.id}`)
+
+    // Route based on server mode — pass correlationId in context
+    const ctx = { ...this._handlerCtx, correlationId }
+    try {
+      if (this.sessionManager) {
+        await handleSessionMessage(ws, client, validatedMsg, ctx)
+      } else if (this.cliSession) {
+        await handleCliMessage(ws, client, validatedMsg, ctx)
+      }
+    } catch (err) {
+      log.error(`[${correlationId}] Handler error for ${validatedMsg.type}: ${err.message}`)
+      this._send(ws, { type: 'server_error', correlationId, message: err.message, recoverable: true })
     }
   }
 
