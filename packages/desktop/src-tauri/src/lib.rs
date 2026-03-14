@@ -210,14 +210,18 @@ fn save_setup_config(
 }
 
 #[tauri::command]
-fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> Result<Option<String>, String> {
+async fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
     let mut builder = app.dialog().file();
     if let Some(ref path) = default_path {
         builder = builder.set_directory(path);
     }
-    let result = builder.blocking_pick_folder();
-    Ok(result.map(|p| p.to_string()))
+    builder.pick_folder(move |folder| {
+        let _ = tx.send(folder.map(|p| p.to_string()));
+    });
+    let result = rx.await.map_err(|e| e.to_string())?;
+    Ok(result)
 }
 
 pub fn run() {
