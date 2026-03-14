@@ -2,8 +2,6 @@ import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import { Alert, Platform } from 'react-native';
-import { useConnectionStore } from './store/connection';
-import { loadConnection } from './store/connection';
 
 /**
  * Configure notification behavior — show alerts and play sounds
@@ -108,6 +106,10 @@ async function sendPermissionResponseHttp(
   requestId: string,
   decision: string,
 ): Promise<boolean> {
+  // Lazy import to break require cycle: connection → message-handler → notifications → connection
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { useConnectionStore, loadConnection } = require('./store/connection');
+
   // Try Zustand store first, fall back to SecureStore for cold start
   let wsUrl = useConnectionStore.getState().wsUrl;
   let apiToken = useConnectionStore.getState().apiToken;
@@ -178,6 +180,10 @@ async function sendPermissionResponseHttp(
  * Returns the subscription — caller should call .remove() on cleanup.
  */
 export function setupNotificationResponseListener(): Notifications.EventSubscription {
+  // Lazy import to break require cycle: connection → message-handler → notifications → connection
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { useConnectionStore } = require('./store/connection');
+
   return Notifications.addNotificationResponseReceivedListener(async (response) => {
     const actionId = response.actionIdentifier;
 
