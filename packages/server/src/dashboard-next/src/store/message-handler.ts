@@ -694,6 +694,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           set(patch);
         }
         set({ sessions: sessionList });
+        // Sync activeModel from session list to prevent dropdown reset.
+        // session_list sends full model IDs (e.g. claude-sonnet-4-5-20250929) but the
+        // dropdown uses short IDs (e.g. sonnet). Resolve via availableModels lookup.
+        const activeSessionId = get().activeSessionId;
+        if (activeSessionId) {
+          const activeSessionInfo = sessionList.find((s: { sessionId?: string }) => s.sessionId === activeSessionId);
+          if (activeSessionInfo?.model) {
+            const fullId = activeSessionInfo.model as string;
+            const models = get().availableModels;
+            const matched = models.find((m) => m.fullId === fullId || m.id === fullId);
+            set({ activeModel: matched ? matched.id : fullId });
+          }
+        }
         // Initialize session state for any new sessions not yet tracked
         const currentStates = get().sessionStates;
         const newInitStates = { ...currentStates };
