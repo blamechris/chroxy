@@ -90,10 +90,15 @@ describe('#1931 — CWD real path cache TTL', () => {
 
   it('cache implementation uses TTL-based expiry', async () => {
     const { readFile } = await import('node:fs/promises')
-    const source = await readFile(
-      new URL('../src/ws-file-ops.js', import.meta.url),
+    const indexSource = await readFile(
+      new URL('../src/ws-file-ops/index.js', import.meta.url),
       'utf8'
     )
+    const commonSource = await readFile(
+      new URL('../src/ws-file-ops/common.js', import.meta.url),
+      'utf8'
+    )
+    const source = indexSource + commonSource
 
     // Verify structural requirements
     assert.ok(source.includes('_cwdRealCache'), 'should have CWD real path cache')

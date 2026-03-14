@@ -98,7 +98,7 @@ describe('SdkSession', () => {
 
       const promise = session._handlePermission('Bash', { command: 'npm test' }, null)
       const requestId = events[0].requestId
-      assert.ok(session._permissionTimers.has(requestId))
+      assert.ok(session._permissions._permissionTimers.has(requestId))
 
       session.respondToPermission(requestId, 'allowAlways')
 
@@ -106,7 +106,7 @@ describe('SdkSession', () => {
       assert.equal(result.behavior, 'allowAlways')
       assert.deepEqual(result.updatedInput, { command: 'npm test' })
       assert.ok(!session._pendingPermissions.has(requestId))
-      assert.ok(!session._permissionTimers.has(requestId))
+      assert.ok(!session._permissions._permissionTimers.has(requestId))
     })
 
     it('auto-denies on abort signal', async () => {
@@ -125,10 +125,10 @@ describe('SdkSession', () => {
 
       session._handlePermission('Read', {}, null)
       const requestId = events[0].requestId
-      assert.ok(session._permissionTimers.has(requestId))
+      assert.ok(session._permissions._permissionTimers.has(requestId))
 
       session.respondToPermission(requestId, 'allow')
-      assert.ok(!session._permissionTimers.has(requestId))
+      assert.ok(!session._permissions._permissionTimers.has(requestId))
     })
 
     it('warns on unknown requestId', () => {
@@ -197,35 +197,35 @@ describe('SdkSession', () => {
       session.on('user_question', (data) => events.push(data))
 
       const questions = [{ question: 'Pick one?', options: [{ label: 'A' }] }]
-      const promise = session._handleAskUserQuestion({ questions }, null)
+      const promise = session._permissions._handleAskUserQuestion({ questions }, null)
 
       assert.equal(events.length, 1)
       assert.deepEqual(events[0].questions, questions)
-      assert.equal(session._waitingForAnswer, true)
+      assert.equal(session._permissions._waitingForAnswer, true)
 
       session.respondToQuestion('A')
       const result = await promise
       assert.equal(result.behavior, 'allow')
       assert.deepEqual(result.updatedInput.answers, { 'Pick one?': 'A' })
-      assert.equal(session._waitingForAnswer, false)
+      assert.equal(session._permissions._waitingForAnswer, false)
     })
 
     it('auto-denies on abort signal', async () => {
       const controller = new AbortController()
-      const promise = session._handleAskUserQuestion({ questions: [] }, controller.signal)
+      const promise = session._permissions._handleAskUserQuestion({ questions: [] }, controller.signal)
       controller.abort()
 
       const result = await promise
       assert.equal(result.behavior, 'deny')
-      assert.equal(session._waitingForAnswer, false)
+      assert.equal(session._permissions._waitingForAnswer, false)
     })
 
     it('clears question timer on respondToQuestion', async () => {
-      session._handleAskUserQuestion({ questions: [] }, null)
-      assert.ok(session._questionTimer !== null)
+      session._permissions._handleAskUserQuestion({ questions: [] }, null)
+      assert.ok(session._permissions._questionTimer !== null)
 
       session.respondToQuestion('answer')
-      assert.equal(session._questionTimer, null)
+      assert.equal(session._permissions._questionTimer, null)
     })
 
     it('no-ops respondToQuestion when no pending answer', () => {
@@ -356,12 +356,12 @@ describe('SdkSession', () => {
     })
 
     it('auto-denies pending user answer', async () => {
-      const promise = session._handleAskUserQuestion({ questions: [] }, null)
+      const promise = session._permissions._handleAskUserQuestion({ questions: [] }, null)
       session._clearMessageState()
 
       const result = await promise
       assert.equal(result.behavior, 'deny')
-      assert.equal(session._pendingUserAnswer, null)
+      assert.equal(session._permissions._pendingUserAnswer, null)
     })
 
     it('clears result timeout', () => {
@@ -371,9 +371,9 @@ describe('SdkSession', () => {
     })
 
     it('clears question timer', () => {
-      session._questionTimer = setTimeout(() => {}, 999999)
+      session._permissions._questionTimer = setTimeout(() => {}, 999999)
       session._clearMessageState()
-      assert.equal(session._questionTimer, null)
+      assert.equal(session._permissions._questionTimer, null)
     })
   })
 
@@ -466,7 +466,7 @@ describe('SdkSession', () => {
     })
 
     it('cleans up pending user answer', async () => {
-      const promise = session._handleAskUserQuestion({ questions: [] }, null)
+      const promise = session._permissions._handleAskUserQuestion({ questions: [] }, null)
       session.destroy()
 
       const result = await promise
