@@ -106,7 +106,7 @@ describe('ios-live-activity', () => {
       )
       expect(result).toBe('native-activity-1')
       expect(mockStartActivity).toHaveBeenCalledWith(
-        { title: 'My Session', subtitle: 'Thinking...' },
+        { title: 'Chroxy', subtitle: 'Thinking...' },
         expect.objectContaining({ backgroundColor: '#0f0f1a', deepLinkUrl: 'chroxy://' }),
       )
     })
@@ -119,7 +119,7 @@ describe('ios-live-activity', () => {
         { state: 'active', elapsedSeconds: 5, detail: 'Editing 3 files' }
       )
       expect(mockStartActivity).toHaveBeenCalledWith(
-        { title: 'Session', subtitle: 'Editing 3 files' },
+        { title: 'Chroxy', subtitle: 'Editing 3 files' },
         expect.any(Object),
       )
     })

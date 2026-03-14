@@ -69,7 +69,7 @@ const WIDGET_CONFIG = {
  * the native module is unavailable or the request fails.
  */
 export async function startLiveActivity(
-  attributes: LiveActivityAttributes,
+  _attributes: LiveActivityAttributes,
   initialState: LiveActivityContentState,
 ): Promise<string | null> {
   const mod = getNativeModule();
@@ -78,7 +78,7 @@ export async function startLiveActivity(
   try {
     const id = mod.startActivity(
       {
-        title: attributes.sessionName,
+        title: 'Chroxy',
         subtitle: stateToSubtitle(initialState.state, initialState.detail),
       },
       WIDGET_CONFIG,
