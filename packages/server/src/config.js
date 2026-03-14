@@ -12,6 +12,7 @@ import { readFileSync, existsSync, mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
+import { parseDuration } from './duration.js'
 
 /**
  * Known configuration keys and their expected types.
@@ -77,6 +78,32 @@ export function validateConfig(config, verbose = false) {
       if (actualType !== expectedType) {
         warnings.push(`Invalid type for '${key}': expected ${expectedType}, got ${actualType}`)
       }
+    }
+  }
+
+  // Range validation for numeric and duration fields (only when type is correct)
+  if (typeof config.port === 'number' && (config.port < 1 || config.port > 65535)) {
+    warnings.push(`Invalid value for 'port': ${config.port} (must be 1-65535)`)
+  }
+
+  if (typeof config.maxSessions === 'number' && config.maxSessions < 1) {
+    warnings.push(`Invalid value for 'maxSessions': ${config.maxSessions} (must be >= 1)`)
+  }
+
+  if (typeof config.sessionTimeout === 'string' && config.sessionTimeout.length > 0) {
+    const ms = parseDuration(config.sessionTimeout)
+    if (ms == null) {
+      warnings.push(`Invalid duration format for 'sessionTimeout': '${config.sessionTimeout}'`)
+    } else if (ms < 30_000) {
+      warnings.push(`Value for 'sessionTimeout' is too low: '${config.sessionTimeout}' (minimum 30s)`)
+    }
+  }
+
+  if (typeof config.maxPayload === 'number') {
+    if (config.maxPayload < 1024) {
+      warnings.push(`Invalid value for 'maxPayload': ${config.maxPayload} (minimum 1KB / 1024 bytes)`)
+    } else if (config.maxPayload > 100 * 1024 * 1024) {
+      warnings.push(`Invalid value for 'maxPayload': ${config.maxPayload} (maximum 100MB)`)
     }
   }
 

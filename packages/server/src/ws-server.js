@@ -660,6 +660,10 @@ export class WsServer {
       })
     })
 
+    this.wss.on('error', (err) => {
+      log.error(`WebSocket server error: ${err.message}`)
+    })
+
     this.httpServer.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
         log.error(`Port ${this.port} is already in use — is another Chroxy instance running?`)
