@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach, mock } from 'node:test'
+import { describe, it, beforeEach, afterEach, after, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
@@ -21,6 +21,10 @@ function tmpStateFile() {
   if (!_globalTmpDir) _globalTmpDir = mkdtempSync(join(tmpdir(), 'sm-global-'))
   return join(_globalTmpDir, `state-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
 }
+
+after(() => {
+  if (_globalTmpDir) rmSync(_globalTmpDir, { recursive: true, force: true })
+})
 
 describe('SessionManager.allIdle', () => {
   it('returns true when no sessions exist', () => {
