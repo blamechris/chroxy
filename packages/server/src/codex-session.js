@@ -158,6 +158,11 @@ export class CodexSession extends BaseSession {
 
         case 'turn.completed': {
           didEmitResult = true
+          // End stream before result (standard provider contract)
+          if (didStreamStart) {
+            this.emit('stream_end', { messageId: this._currentMessageId })
+            didStreamStart = false
+          }
           const usage = event.usage || {}
           this.emit('result', {
             cost: null,
