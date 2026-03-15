@@ -70,7 +70,7 @@ export class CliSession extends BaseSession {
     this._planAllowedPrompts = null
     this._waitingForAnswer = false
     this._currentCtx = null
-    this._pendingMessage = null
+    this._pendingQueue = []
     this._respawnCount = 0
     this._respawnTimer = null
     this._respawnScheduled = false
@@ -212,16 +212,11 @@ export class CliSession extends BaseSession {
     log.info('Process started, ready for messages')
     this.emit('ready', { sessionId: null, model: this.model, tools: [] })
 
-    // Dequeue any message that arrived during respawn
-    if (this._pendingMessage) {
-      const pending = this._pendingMessage
-      this._pendingMessage = null
-      log.info('Dequeuing pending message')
-      if (typeof pending === 'string') {
-        this.sendMessage(pending)
-      } else {
-        this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
-      }
+    // Dequeue any messages that arrived during respawn (FIFO)
+    if (this._pendingQueue.length > 0) {
+      const pending = this._pendingQueue.shift()
+      log.info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
+      this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
     }
   }
 
@@ -265,8 +260,12 @@ export class CliSession extends BaseSession {
     }
 
     if (!this._processReady) {
-      log.info('Process not ready, queuing message')
-      this._pendingMessage = { prompt, attachments, options }
+      if (this._pendingQueue.length >= 3) {
+        this.emit('error', { message: 'Pending message queue full (max 3) — message discarded' })
+        return
+      }
+      log.info(`Process not ready, queuing message (queue depth: ${this._pendingQueue.length + 1})`)
+      this._pendingQueue.push({ prompt, attachments, options })
       return
     }
 
