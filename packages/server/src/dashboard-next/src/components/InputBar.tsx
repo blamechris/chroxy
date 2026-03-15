@@ -44,10 +44,19 @@ export interface InputBarProps {
   onFileAttach?: (path: string) => void
   /** When true, bare Enter sends; when false (default), Cmd/Ctrl+Enter sends. */
   sendOnEnter?: boolean
+  /** Voice input state (from useVoiceInput hook) */
+  voiceInput?: {
+    isRecording: boolean
+    isAvailable: boolean
+    transcript: string
+    start: () => void
+    stop: () => void
+  }
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, sendOnEnter }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, sendOnEnter, voiceInput }: InputBarProps) {
   const [value, setValue] = useState('')
+  const dictationStartRef = useRef(0)
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -274,6 +283,34 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     el.style.height = assignedHeight + 'px'
   }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger])
 
+  // Merge voice transcript into input value
+  const prevTranscriptRef = useRef('')
+  const isVoiceUpdateRef = useRef(false)
+  if (voiceInput?.isRecording && voiceInput.transcript && voiceInput.transcript !== prevTranscriptRef.current) {
+    prevTranscriptRef.current = voiceInput.transcript
+    const prefix = value.slice(0, dictationStartRef.current)
+    const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : ''
+    isVoiceUpdateRef.current = true
+    // Use direct setValue since this runs during render — React will batch it
+    if (!isVoiceUpdateRef.current) {
+      // guard already set above
+    }
+    setValue(prefix + separator + voiceInput.transcript)
+  }
+  if (!voiceInput?.isRecording && prevTranscriptRef.current) {
+    prevTranscriptRef.current = ''
+  }
+
+  const handleMicPress = useCallback(() => {
+    if (!voiceInput) return
+    if (voiceInput.isRecording) {
+      voiceInput.stop()
+    } else {
+      dictationStartRef.current = value.length
+      voiceInput.start()
+    }
+  }, [voiceInput, value.length])
+
   const hasChips = dedupedAttachments && dedupedAttachments.length > 0
 
   const handlePaste = useCallback((e: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -397,28 +434,52 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         aria-describedby={shortcutsId}
         rows={1}
       />
-      {(isStreaming || isBusy) ? (
-        <button
-          data-testid="interrupt-button"
-          className="btn-interrupt"
-          onClick={onInterrupt}
-          type="button"
-          aria-label="Stop generation"
-        >
-          Stop
-        </button>
-      ) : (
-        <button
-          data-testid="send-button"
-          className="btn-send"
-          onClick={send}
-          disabled={disabled}
-          type="button"
-          aria-label="Send message"
-        >
-          Send
-        </button>
-      )}
+      <div className="input-bar-actions">
+        {voiceInput?.isAvailable && (
+          <button
+            data-testid="mic-button"
+            className={`btn-mic${voiceInput.isRecording ? ' recording' : ''}`}
+            onClick={handleMicPress}
+            disabled={disabled || isBusy}
+            type="button"
+            aria-label={voiceInput.isRecording ? 'Stop recording' : 'Start voice input'}
+          >
+            {voiceInput.isRecording ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                <line x1="12" x2="12" y1="19" y2="22" />
+              </svg>
+            )}
+          </button>
+        )}
+        {(isStreaming || isBusy) ? (
+          <button
+            data-testid="interrupt-button"
+            className="btn-interrupt"
+            onClick={onInterrupt}
+            type="button"
+            aria-label="Stop generation"
+          >
+            Stop
+          </button>
+        ) : (
+          <button
+            data-testid="send-button"
+            className="btn-send"
+            onClick={send}
+            disabled={disabled}
+            type="button"
+            aria-label="Send message"
+          >
+            Send
+          </button>
+        )}
+      </div>
     </div>
   )
 }

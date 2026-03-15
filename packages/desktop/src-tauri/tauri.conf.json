@@ -36,11 +36,13 @@
       "icons/icon.png"
     ],
     "resources": {
-      "server-bundle": "server"
+      "server-bundle": "server",
+      "swift/speech-helper": "speech-helper"
     },
     "createUpdaterArtifacts": true,
     "macOS": {
-      "signingIdentity": "$APPLE_SIGNING_IDENTITY"
+      "signingIdentity": "$APPLE_SIGNING_IDENTITY",
+      "infoPlist": "Info.plist"
     }
   },
   "plugins": {
