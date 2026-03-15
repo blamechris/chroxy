@@ -12,7 +12,7 @@ export interface StatusBarProps {
   provider?: string
 }
 
-export function StatusBar({ model, cost, context, isBusy, agentCount, provider }: StatusBarProps) {
+export function StatusBar({ cost, context, isBusy, agentCount, provider }: StatusBarProps) {
   const prov = provider ? getProviderInfo(provider) : null
   return (
     <div className="status-bar" data-testid="status-bar">
@@ -29,7 +29,6 @@ export function StatusBar({ model, cost, context, isBusy, agentCount, provider }
           {prov.short}
         </span>
       )}
-      {model && <span className="status-model">{model}</span>}
       <span className="status-cost">{cost != null ? `$${cost.toFixed(4)}` : '\u00A0'}</span>
       <span className="status-context">{context || '\u00A0'}</span>
       {agentCount != null && agentCount > 0 && (

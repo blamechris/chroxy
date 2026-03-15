@@ -13,14 +13,10 @@ describe('StatusBar', () => {
     expect(screen.getByTestId('status-bar')).toBeInTheDocument()
   })
 
-  it('shows model name when provided', () => {
-    render(<StatusBar model="claude-sonnet" />)
-    expect(screen.getByText('claude-sonnet')).toBeInTheDocument()
-  })
-
-  it('does not show model element when not provided', () => {
-    const { container } = render(<StatusBar />)
+  it('does not render model (model shown in header dropdown)', () => {
+    const { container } = render(<StatusBar model="claude-sonnet" />)
     expect(container.querySelector('.status-model')).toBeNull()
+    expect(screen.queryByText('claude-sonnet')).not.toBeInTheDocument()
   })
 
   it('shows formatted cost with 4 decimal places', () => {

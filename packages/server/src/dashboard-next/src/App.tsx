@@ -834,7 +834,6 @@ export function App() {
             &#9881;
           </button>
           <StatusBar
-            model={activeModel || undefined}
             cost={sessionCost ?? undefined}
             context={formatContext(contextUsage)}
             isBusy={!isIdle}
