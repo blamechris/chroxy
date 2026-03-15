@@ -769,7 +769,7 @@ export function App() {
           {/* Model selector */}
           {availableModels.length > 0 && (
             <select
-              value={activeModel || ''}
+              value={activeModel === defaultModelId ? '' : (activeModel || '')}
               onChange={e => {
                 const v = e.target.value;
                 if (v) {
