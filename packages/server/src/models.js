@@ -44,7 +44,11 @@ export function createModelsRegistry() {
         .map(m => {
           const fullId = m.value
           const id = fullId.startsWith('claude-') ? fullId.slice(7) : fullId
-          const label = m.displayName || id
+          // Strip "Default (...)" wrapper from SDK displayName to avoid nested labels
+          // e.g. SDK sends "Default (recommended)" → we want just "recommended" or the model name
+          let label = m.displayName || id
+          const defaultMatch = label.match(/^Default\s*\((.+)\)$/)
+          if (defaultMatch) label = defaultMatch[1]
           return { id, label, fullId }
         })
 
