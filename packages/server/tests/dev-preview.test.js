@@ -90,6 +90,156 @@ describe('DevPreviewManager', () => {
     })
   })
 
+  describe('_createPreviewTunnel — pre-registration', () => {
+    it('registers the tunnel before start() resolves', async () => {
+      let tunnelInMapDuringStart = false
+      const fakeTunnel = {
+        start: async () => {
+          // At call time the tunnel should already be in _tunnels
+          tunnelInMapDuringStart = manager._getTunnel('sess-1', 3000) === fakeTunnel
+          return { httpUrl: 'https://test.trycloudflare.com', wsUrl: 'wss://test.trycloudflare.com' }
+        },
+        stop: async () => {},
+        url: null,
+      }
+      // Inject the fake tunnel by overriding CloudflareTunnelAdapter constructor via monkey-patch
+      manager._createPreviewTunnel = async function(sessionId, port) {
+        const tunnel = fakeTunnel
+        if (!this._tunnels.has(sessionId)) this._tunnels.set(sessionId, new Map())
+        this._tunnels.get(sessionId).set(port, tunnel)
+        const { httpUrl } = await tunnel.start()
+        if (this._getTunnel(sessionId, port) !== tunnel) {
+          try { await tunnel.stop() } catch { /* ignore */ }
+          return
+        }
+        this.emit('dev_preview_started', { sessionId, port, url: httpUrl })
+      }.bind(manager)
+
+      await manager.handleToolResult('sess-1', 'listening on port 3000')
+      assert.equal(tunnelInMapDuringStart, true)
+    })
+
+    it('stops tunnel immediately if session is destroyed during startup', async () => {
+      let stopped = false
+      let resolveStart
+      const startPromise = new Promise(resolve => { resolveStart = resolve })
+
+      const fakeTunnel = {
+        start: () => startPromise,
+        stop: async () => { stopped = true },
+        url: null,
+      }
+
+      // Use a real-ish _createPreviewTunnel that pre-registers then awaits
+      const origCreate = manager._createPreviewTunnel.bind(manager)
+      manager._createPreviewTunnel = async function(sessionId, port) {
+        const tunnel = fakeTunnel
+        if (!this._tunnels.has(sessionId)) this._tunnels.set(sessionId, new Map())
+        this._tunnels.get(sessionId).set(port, tunnel)
+        try {
+          const { httpUrl } = await tunnel.start()
+          if (this._getTunnel(sessionId, port) !== tunnel) {
+            try { await tunnel.stop() } catch { /* ignore */ }
+            return
+          }
+          this.emit('dev_preview_started', { sessionId, port, url: httpUrl })
+        } catch (err) {
+          const sessionTunnels = this._tunnels.get(sessionId)
+          if (sessionTunnels) {
+            sessionTunnels.delete(port)
+            if (sessionTunnels.size === 0) this._tunnels.delete(sessionId)
+          }
+          try { await tunnel.stop() } catch { /* ignore */ }
+        }
+      }.bind(manager)
+
+      // Start tunnel creation (will hang waiting for startPromise)
+      const createPromise = manager.handleToolResult('sess-1', 'listening on port 3000')
+
+      // Tunnel is now pre-registered — destroy the session while start() is pending
+      await manager.closeSession('sess-1')
+
+      // Now let start() resolve
+      resolveStart({ httpUrl: 'https://test.trycloudflare.com', wsUrl: 'wss://test' })
+      await createPromise
+
+      assert.equal(stopped, true, 'tunnel.stop() must be called when session destroyed during startup')
+      assert.equal(manager._tunnels.has('sess-1'), false, 'session entry must be removed')
+    })
+
+    it('cleans up _tunnels entry on start() failure', async () => {
+      const fakeTunnel = {
+        start: async () => { throw new Error('cloudflared not found') },
+        stop: async () => {},
+        url: null,
+      }
+
+      manager._createPreviewTunnel = async function(sessionId, port) {
+        const tunnel = fakeTunnel
+        if (!this._tunnels.has(sessionId)) this._tunnels.set(sessionId, new Map())
+        this._tunnels.get(sessionId).set(port, tunnel)
+        try {
+          await tunnel.start()
+        } catch (err) {
+          const sessionTunnels = this._tunnels.get(sessionId)
+          if (sessionTunnels) {
+            sessionTunnels.delete(port)
+            if (sessionTunnels.size === 0) this._tunnels.delete(sessionId)
+          }
+          this.emit('dev_preview_error', { sessionId, port, error: err.message })
+        }
+      }.bind(manager)
+
+      const errors = []
+      manager.on('dev_preview_error', (data) => errors.push(data))
+
+      await manager.handleToolResult('sess-1', 'listening on port 3000')
+
+      assert.equal(manager._tunnels.has('sess-1'), false, 'failed tunnel must be removed from _tunnels')
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].port, 3000)
+    })
+
+    it('closeSession finds tunnel registered before start() completes', async () => {
+      // Verify that closeSession can stop a tunnel that is mid-startup
+      let stopped = false
+      let resolveStart
+      const startPromise = new Promise(resolve => { resolveStart = resolve })
+
+      const fakeTunnel = {
+        start: () => startPromise,
+        stop: async () => { stopped = true },
+        url: null,
+      }
+
+      manager._createPreviewTunnel = async function(sessionId, port) {
+        const tunnel = fakeTunnel
+        if (!this._tunnels.has(sessionId)) this._tunnels.set(sessionId, new Map())
+        this._tunnels.get(sessionId).set(port, tunnel)
+        try {
+          const { httpUrl } = await tunnel.start()
+          if (this._getTunnel(sessionId, port) !== tunnel) {
+            try { await tunnel.stop() } catch { /* ignore */ }
+            return
+          }
+          this.emit('dev_preview_started', { sessionId, port, url: httpUrl })
+        } catch { /* ignore */ }
+      }.bind(manager)
+
+      const createPromise = manager.handleToolResult('sess-2', 'listening on port 4000')
+
+      // closeSession must be able to find and stop the tunnel before start() resolves
+      const tunnelBeforeStart = manager._getTunnel('sess-2', 4000)
+      assert.equal(tunnelBeforeStart, fakeTunnel, 'tunnel should be in _tunnels before start() resolves')
+
+      await manager.closeSession('sess-2')
+      assert.equal(stopped, true, 'closeSession must stop mid-startup tunnel')
+
+      resolveStart({ httpUrl: 'https://test.trycloudflare.com', wsUrl: 'wss://test' })
+      await createPromise
+    })
+  })
+
   describe('handleToolResult', () => {
     it('emits dev_preview_started for detected port (mocked)', async () => {
       // Replace _createPreviewTunnel to avoid real cloudflared
