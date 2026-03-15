@@ -174,6 +174,7 @@ export class SessionManager extends EventEmitter {
 
     // Internal state
     this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
+    this._sessionCounter = 0   // monotonically incrementing; used for auto-naming
     this._locks = new SessionLockManager()
 
     // Session idle timeout (delegated to SessionTimeoutManager)
@@ -258,7 +259,7 @@ export class SessionManager extends EventEmitter {
     }
 
     const sessionId = randomBytes(16).toString('hex')
-    const sessionName = name || `Session ${this._sessions.size + 1}`
+    const sessionName = name || `Session ${++this._sessionCounter}`
 
     const resolvedProvider = provider || this._providerType
     const ProviderClass = getProvider(resolvedProvider)
@@ -555,6 +556,15 @@ export class SessionManager extends EventEmitter {
           provider: saved.provider || undefined,
         })
         if (saved.id) oldToNew.set(saved.id, sessionId)
+        // Keep _sessionCounter ahead of any restored "Session N" names so the
+        // first new auto-named session after restore never collides (#2338).
+        if (saved.name) {
+          const match = saved.name.match(/^Session (\d+)$/)
+          if (match) {
+            const n = parseInt(match[1], 10)
+            if (n > this._sessionCounter) this._sessionCounter = n
+          }
+        }
         // Restore message history if present (v1+)
         if (hasVersion && Array.isArray(saved.history) && saved.history.length > 0) {
           this._history.setHistory(sessionId, saved.history)
