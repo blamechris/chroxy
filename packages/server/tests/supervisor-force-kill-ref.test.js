@@ -142,6 +142,10 @@ describe('supervisor force-kill child reference (#2321)', () => {
   })
 
   it('force-kill timer is cancelled when the captured child exits before timeout', async () => {
+    // Structural assertion: this test verifies the timer-cleared path, not the race itself.
+    // The timer always fires AFTER the child exit in this synchronous test setup, so the
+    // timer is always cleared before it fires. The race (child replaced before timer fires)
+    // is covered by the first test, which uses a mock intruder child to verify identity.
     // Verify the happy path: child exits cleanly → timer is cleared → no force-kill
     const { supervisor, tmpDir } = setup()
     cleanups.push(() => rmSync(tmpDir, { recursive: true, force: true }))
