@@ -84,28 +84,108 @@ function getStore(): StoreApi {
   return _store;
 }
 
+// Re-export encrypt for wsSend (import is used inside the function)
+import { encrypt, decrypt } from '../utils/crypto';
+
+// ---------------------------------------------------------------------------
+// MessageHandlerContext — all resettable per-connection mutable state
+//
+// Grouping these here makes it possible to reset the entire handler state
+// in one call (resetAllHandlerState) and paves the way for per-handler
+// extraction in future refactoring steps.
+// ---------------------------------------------------------------------------
+
+interface MessageHandlerContext {
+  // E2E encryption
+  encryptionState: EncryptionState | null;
+  pendingKeyPair: KeyPair | null;
+
+  // History replay
+  receivingHistoryReplay: boolean;
+  isSessionSwitchReplay: boolean;
+  pendingSwitchSessionId: string | null;
+
+  // Permission boundary message splitting (#554)
+  postPermissionSplits: Set<string>;
+  deltaIdRemaps: Map<string, string>;
+
+  // Terminal write batching
+  pendingTerminalWrites: string;
+  terminalWriteTimer: ReturnType<typeof setTimeout> | null;
+
+  // Client-side heartbeat
+  heartbeatInterval: ReturnType<typeof setInterval> | null;
+  pongTimeout: ReturnType<typeof setTimeout> | null;
+  lastPingSentAt: number;
+  ewmaRtt: number | null;
+
+  // Delta batching
+  pendingDeltas: Map<string, { sessionId: string | null; delta: string }>;
+  deltaFlushTimer: ReturnType<typeof setTimeout> | null;
+
+  // Message queue
+  messageQueue: QueuedMessage[];
+}
+
+function createDefaultContext(): MessageHandlerContext {
+  return {
+    encryptionState: null,
+    pendingKeyPair: null,
+    receivingHistoryReplay: false,
+    isSessionSwitchReplay: false,
+    pendingSwitchSessionId: null,
+    postPermissionSplits: new Set<string>(),
+    deltaIdRemaps: new Map<string, string>(),
+    pendingTerminalWrites: '',
+    terminalWriteTimer: null,
+    heartbeatInterval: null,
+    pongTimeout: null,
+    lastPingSentAt: 0,
+    ewmaRtt: null,
+    pendingDeltas: new Map<string, { sessionId: string | null; delta: string }>(),
+    deltaFlushTimer: null,
+    messageQueue: [],
+  };
+}
+
+let _ctx: MessageHandlerContext = createDefaultContext();
+
+/**
+ * Reset all resettable handler state to defaults.
+ * Clears timers, drains buffers, and resets all per-connection flags.
+ * Also resets the connection attempt tracking variables.
+ */
+export function resetAllHandlerState(): void {
+  // Clear pending timers before overwriting
+  if (_ctx.terminalWriteTimer) clearTimeout(_ctx.terminalWriteTimer);
+  if (_ctx.heartbeatInterval) clearInterval(_ctx.heartbeatInterval);
+  if (_ctx.pongTimeout) clearTimeout(_ctx.pongTimeout);
+  if (_ctx.deltaFlushTimer) clearTimeout(_ctx.deltaFlushTimer);
+  _ctx = createDefaultContext();
+  // Reset connection-attempt tracking (kept as export let for live-binding semantics)
+  connectionAttemptId = 0;
+  disconnectedAttemptId = -1;
+  lastConnectedUrl = null;
+  pendingPairingId = null;
+}
+
 // ---------------------------------------------------------------------------
 // E2E encryption state — reset on every new connection
 // ---------------------------------------------------------------------------
-let _encryptionState: EncryptionState | null = null;
-let _pendingKeyPair: KeyPair | null = null;
 
 /**
  * Send a JSON message over WebSocket, encrypting if E2E encryption is active.
  * Use this instead of raw `socket.send(JSON.stringify(...))`.
  */
 export function wsSend(socket: WebSocket, payload: Record<string, unknown>): void {
-  if (_encryptionState) {
-    const envelope = encrypt(JSON.stringify(payload), _encryptionState.sharedKey, _encryptionState.sendNonce, DIRECTION_CLIENT);
-    _encryptionState.sendNonce++;
+  if (_ctx.encryptionState) {
+    const envelope = encrypt(JSON.stringify(payload), _ctx.encryptionState.sharedKey, _ctx.encryptionState.sendNonce, DIRECTION_CLIENT);
+    _ctx.encryptionState.sendNonce++;
     socket.send(JSON.stringify(envelope));
   } else {
     socket.send(JSON.stringify(payload));
   }
 }
-
-// Re-export encrypt for wsSend (import is used inside the function)
-import { encrypt, decrypt } from '../utils/crypto';
 
 // ---------------------------------------------------------------------------
 // Connection context (set by connect(), read by handleMessage)
@@ -124,23 +204,26 @@ export function getConnectionContext(): ConnectionContext | null {
 // Encryption state accessors
 // ---------------------------------------------------------------------------
 export function getEncryptionState(): EncryptionState | null {
-  return _encryptionState;
+  return _ctx.encryptionState;
 }
 
 export function setEncryptionState(state: EncryptionState | null): void {
-  _encryptionState = state;
+  _ctx.encryptionState = state;
 }
 
 export function getPendingKeyPair(): KeyPair | null {
-  return _pendingKeyPair;
+  return _ctx.pendingKeyPair;
 }
 
 export function setPendingKeyPair(kp: KeyPair | null): void {
-  _pendingKeyPair = kp;
+  _ctx.pendingKeyPair = kp;
 }
 
 // ---------------------------------------------------------------------------
 // Connection attempt tracking
+// These are kept as export let (not in _ctx) to preserve ES module live-binding
+// semantics: connection.ts snapshots the value and later compares against the
+// live export to detect stale connection attempts.
 // ---------------------------------------------------------------------------
 export let connectionAttemptId = 0;
 export let disconnectedAttemptId = -1;
@@ -168,68 +251,54 @@ export function setPendingPairingId(id: string | null): void {
 // ---------------------------------------------------------------------------
 // History replay flags
 // ---------------------------------------------------------------------------
-let _receivingHistoryReplay = false;
-let _isSessionSwitchReplay = false;
-let _pendingSwitchSessionId: string | null = null;
-
 export function setPendingSwitchSessionId(id: string | null): void {
-  _pendingSwitchSessionId = id;
+  _ctx.pendingSwitchSessionId = id;
 }
 
 export function resetReplayFlags(): void {
-  _receivingHistoryReplay = false;
-  _isSessionSwitchReplay = false;
-  _pendingSwitchSessionId = null;
+  _ctx.receivingHistoryReplay = false;
+  _ctx.isSessionSwitchReplay = false;
+  _ctx.pendingSwitchSessionId = null;
 }
 
 // ---------------------------------------------------------------------------
 // Permission boundary message splitting (#554)
 // ---------------------------------------------------------------------------
-const _postPermissionSplits = new Set<string>();
-const _deltaIdRemaps = new Map<string, string>();
-
 export function clearPermissionSplits(): void {
-  _postPermissionSplits.clear();
-  _deltaIdRemaps.clear();
+  _ctx.postPermissionSplits.clear();
+  _ctx.deltaIdRemaps.clear();
 }
 
 // ---------------------------------------------------------------------------
 // Terminal write batching
 // ---------------------------------------------------------------------------
-let _pendingTerminalWrites = '';
-let _terminalWriteTimer: ReturnType<typeof setTimeout> | null = null;
-
 export function flushTerminalWrites(): void {
-  _terminalWriteTimer = null;
-  if (_pendingTerminalWrites.length === 0) return;
-  const data = _pendingTerminalWrites;
-  _pendingTerminalWrites = '';
+  _ctx.terminalWriteTimer = null;
+  if (_ctx.pendingTerminalWrites.length === 0) return;
+  const data = _ctx.pendingTerminalWrites;
+  _ctx.pendingTerminalWrites = '';
   const cb = getCallback('terminalWrite');
   if (cb) cb(data);
 }
 
 export function appendPendingTerminalWrite(data: string): void {
-  _pendingTerminalWrites += data;
-  if (!_terminalWriteTimer) {
-    _terminalWriteTimer = setTimeout(flushTerminalWrites, 50);
+  _ctx.pendingTerminalWrites += data;
+  if (!_ctx.terminalWriteTimer) {
+    _ctx.terminalWriteTimer = setTimeout(flushTerminalWrites, 50);
   }
 }
 
 export function clearTerminalWriteBatching(): void {
-  if (_terminalWriteTimer) {
-    clearTimeout(_terminalWriteTimer);
-    _terminalWriteTimer = null;
+  if (_ctx.terminalWriteTimer) {
+    clearTimeout(_ctx.terminalWriteTimer);
+    _ctx.terminalWriteTimer = null;
   }
-  _pendingTerminalWrites = '';
+  _ctx.pendingTerminalWrites = '';
 }
 
 // ---------------------------------------------------------------------------
 // Client-side heartbeat
 // ---------------------------------------------------------------------------
-let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-let _pongTimeout: ReturnType<typeof setTimeout> | null = null;
-let _lastPingSentAt = 0;
-let _ewmaRtt: number | null = null; // EWMA-smoothed RTT for stable quality display
 /** Max session IDs per subscribe_sessions message (must match server SubscribeSessionsSchema .max(20)) */
 export const SUBSCRIBE_SESSIONS_CHUNK_SIZE = 20;
 const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -237,21 +306,21 @@ const PONG_TIMEOUT_MS = 5_000;
 const EWMA_ALPHA = 0.3; // Weight for new samples (higher = more responsive)
 
 export function stopHeartbeat(): void {
-  if (_heartbeatInterval) { clearInterval(_heartbeatInterval); _heartbeatInterval = null; }
-  if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
-  _lastPingSentAt = 0;
-  _ewmaRtt = null; // Reset smoothed RTT on disconnect
+  if (_ctx.heartbeatInterval) { clearInterval(_ctx.heartbeatInterval); _ctx.heartbeatInterval = null; }
+  if (_ctx.pongTimeout) { clearTimeout(_ctx.pongTimeout); _ctx.pongTimeout = null; }
+  _ctx.lastPingSentAt = 0;
+  _ctx.ewmaRtt = null; // Reset smoothed RTT on disconnect
 }
 
 export function startHeartbeat(socket: WebSocket): void {
   stopHeartbeat();
-  _heartbeatInterval = setInterval(() => {
+  _ctx.heartbeatInterval = setInterval(() => {
     if (socket.readyState !== WebSocket.OPEN) { stopHeartbeat(); return; }
     try {
-      _lastPingSentAt = Date.now();
+      _ctx.lastPingSentAt = Date.now();
       wsSend(socket, { type: 'ping' });
     } catch { stopHeartbeat(); return; }
-    _pongTimeout = setTimeout(() => {
+    _ctx.pongTimeout = setTimeout(() => {
       console.warn('[ws] Heartbeat pong timeout — closing dead connection');
       stopHeartbeat();
       try { socket.close(); } catch {}
@@ -260,14 +329,14 @@ export function startHeartbeat(socket: WebSocket): void {
 }
 
 function _onPong(): void {
-  if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
+  if (_ctx.pongTimeout) { clearTimeout(_ctx.pongTimeout); _ctx.pongTimeout = null; }
   // Measure RTT and update connection quality using EWMA for stability
-  if (_lastPingSentAt > 0) {
-    const rttMs = Date.now() - _lastPingSentAt;
-    _lastPingSentAt = 0;
+  if (_ctx.lastPingSentAt > 0) {
+    const rttMs = Date.now() - _ctx.lastPingSentAt;
+    _ctx.lastPingSentAt = 0;
     // EWMA: smoothed = alpha * new + (1 - alpha) * prev (first sample bootstraps)
-    _ewmaRtt = _ewmaRtt === null ? rttMs : EWMA_ALPHA * rttMs + (1 - EWMA_ALPHA) * _ewmaRtt;
-    const smoothed = Math.round(_ewmaRtt);
+    _ctx.ewmaRtt = _ctx.ewmaRtt === null ? rttMs : EWMA_ALPHA * rttMs + (1 - EWMA_ALPHA) * _ctx.ewmaRtt;
+    const smoothed = Math.round(_ctx.ewmaRtt);
     const quality: 'good' | 'fair' | 'poor' = smoothed < 200 ? 'good' : smoothed < 500 ? 'fair' : 'poor';
     getStore().setState({ latencyMs: smoothed, connectionQuality: quality });
     useConnectionLifecycleStore.getState().setConnectionQuality(smoothed, quality);
@@ -277,14 +346,11 @@ function _onPong(): void {
 // ---------------------------------------------------------------------------
 // Delta batching
 // ---------------------------------------------------------------------------
-const pendingDeltas = new Map<string, { sessionId: string | null; delta: string }>();
-let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
-
 function flushPendingDeltas(): void {
-  deltaFlushTimer = null;
-  if (pendingDeltas.size === 0) return;
-  const updates = new Map(pendingDeltas);
-  pendingDeltas.clear();
+  _ctx.deltaFlushTimer = null;
+  if (_ctx.pendingDeltas.size === 0) return;
+  const updates = new Map(_ctx.pendingDeltas);
+  _ctx.pendingDeltas.clear();
 
   const state = getStore().getState();
 
@@ -337,11 +403,11 @@ function flushPendingDeltas(): void {
 }
 
 export function clearDeltaBuffers(): void {
-  if (deltaFlushTimer) {
-    clearTimeout(deltaFlushTimer);
-    deltaFlushTimer = null;
+  if (_ctx.deltaFlushTimer) {
+    clearTimeout(_ctx.deltaFlushTimer);
+    _ctx.deltaFlushTimer = null;
   }
-  pendingDeltas.clear();
+  _ctx.pendingDeltas.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -355,23 +421,22 @@ const QUEUE_TTLS: Record<string, number> = {
 };
 const QUEUE_MAX_SIZE = 10;
 const QUEUE_EXCLUDED = new Set(['set_model', 'set_permission_mode', 'mode', 'resize']);
-const messageQueue: QueuedMessage[] = [];
 
 export function enqueueMessage(type: string, payload: unknown): 'queued' | false {
   if (QUEUE_EXCLUDED.has(type)) return false;
   const maxAge = QUEUE_TTLS[type];
   if (!maxAge) return false;
-  if (messageQueue.length >= QUEUE_MAX_SIZE) return false;
-  messageQueue.push({ type, payload, queuedAt: Date.now(), maxAge });
-  console.log(`[queue] Queued ${type} (${messageQueue.length}/${QUEUE_MAX_SIZE})`);
+  if (_ctx.messageQueue.length >= QUEUE_MAX_SIZE) return false;
+  _ctx.messageQueue.push({ type, payload, queuedAt: Date.now(), maxAge });
+  console.log(`[queue] Queued ${type} (${_ctx.messageQueue.length}/${QUEUE_MAX_SIZE})`);
   return 'queued';
 }
 
 export function drainMessageQueue(socket: WebSocket): void {
-  if (messageQueue.length === 0) return;
+  if (_ctx.messageQueue.length === 0) return;
   const now = Date.now();
-  const valid = messageQueue.filter((m) => now - m.queuedAt < m.maxAge);
-  messageQueue.length = 0;
+  const valid = _ctx.messageQueue.filter((m) => now - m.queuedAt < m.maxAge);
+  _ctx.messageQueue.length = 0;
   if (valid.length === 0) return;
   console.log(`[queue] Draining ${valid.length} queued message(s)`);
   for (const m of valid) {
@@ -384,15 +449,15 @@ export function drainMessageQueue(socket: WebSocket): void {
 }
 
 export function clearMessageQueue(): void {
-  messageQueue.length = 0;
+  _ctx.messageQueue.length = 0;
 }
 
 /** @internal Exposed for testing only */
 export const _testQueueInternals = {
-  getQueue: () => messageQueue,
+  getQueue: () => _ctx.messageQueue,
   enqueue: enqueueMessage,
   drain: drainMessageQueue,
-  clear: () => { messageQueue.length = 0; },
+  clear: () => { _ctx.messageQueue.length = 0; },
 };
 
 // ---------------------------------------------------------------------------
@@ -584,9 +649,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'auth_ok': {
       // Reset replay flags — fresh auth means clean slate
-      _receivingHistoryReplay = false;
-      _isSessionSwitchReplay = false;
-      _pendingSwitchSessionId = null;
+      _ctx.receivingHistoryReplay = false;
+      _ctx.isSessionSwitchReplay = false;
+      _ctx.pendingSwitchSessionId = null;
       if (!ctx.isReconnect) hapticSuccess();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
@@ -688,9 +753,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
       // Initiate key exchange if server requires encryption
       if (msg.encryption === 'required') {
-        _pendingKeyPair = createKeyPair();
+        _ctx.pendingKeyPair = createKeyPair();
         // Send key_exchange plaintext (before encryption is active)
-        ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _pendingKeyPair.publicKey }));
+        ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _ctx.pendingKeyPair.publicKey }));
         // Post-auth messages will be sent after key_exchange_ok arrives
         set({ isEncrypted: true });
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: true });
@@ -711,17 +776,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'key_exchange_ok': {
-      if (_pendingKeyPair) {
+      if (_ctx.pendingKeyPair) {
         if (!msg.publicKey || typeof msg.publicKey !== 'string') {
           console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
           ctx.socket.close();
           set({ connectionPhase: 'disconnected', socket: null });
-          _pendingKeyPair = null;
+          _ctx.pendingKeyPair = null;
           break;
         }
-        const sharedKey = deriveSharedKey(msg.publicKey, _pendingKeyPair.secretKey);
-        _encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 };
-        _pendingKeyPair = null;
+        const sharedKey = deriveSharedKey(msg.publicKey, _ctx.pendingKeyPair.secretKey);
+        _ctx.encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 };
+        _ctx.pendingKeyPair = null;
         console.log('[crypto] E2E encryption established');
         // Now send the post-auth messages that were deferred
         wsSend(ctx.socket, { type: 'list_slash_commands' });
@@ -870,10 +935,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const sessionId = msg.sessionId as string;
       // Only treat as session-switch replay if the user explicitly initiated it
       // (auth-triggered session_switched on reconnect should use reconnect dedup)
-      if (_pendingSwitchSessionId && _pendingSwitchSessionId === sessionId) {
-        _isSessionSwitchReplay = true;
+      if (_ctx.pendingSwitchSessionId && _ctx.pendingSwitchSessionId === sessionId) {
+        _ctx.isSessionSwitchReplay = true;
       }
-      _pendingSwitchSessionId = null;
+      _ctx.pendingSwitchSessionId = null;
       const switchConvId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
       set((state: ConnectionState) => {
         // Initialize session state if it doesn't exist
@@ -921,10 +986,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- History replay ---
 
     case 'history_replay_start':
-      _receivingHistoryReplay = true;
+      _ctx.receivingHistoryReplay = true;
       // Full history replay (from request_full_history): clear messages before replay
       if (msg.fullHistory === true) {
-        _isSessionSwitchReplay = true;
+        _ctx.isSessionSwitchReplay = true;
         const targetId = (msg.sessionId as string) || get().activeSessionId;
         if (targetId && get().sessionStates[targetId]) {
           updateSession(targetId, () => ({ messages: [] }));
@@ -944,8 +1009,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
 
     case 'history_replay_end':
-      _receivingHistoryReplay = false;
-      _isSessionSwitchReplay = false;
+      _ctx.receivingHistoryReplay = false;
+      _ctx.isSessionSwitchReplay = false;
       // Mark all replayed prompts as answered — any prompt in history
       // has already been resolved by the server.
       updateActiveSession((ss) => {
@@ -982,14 +1047,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const msgType = (msg.messageType || msg.type) as string;
       // Skip server-echoed user_input — we already show it instantly client-side
       // But allow user_input during full history sync (messages came from terminal)
-      if (msgType === 'user_input' && !(_receivingHistoryReplay && _isSessionSwitchReplay)) break;
+      if (msgType === 'user_input' && !(_ctx.receivingHistoryReplay && _ctx.isSessionSwitchReplay)) break;
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       // During reconnect replay, skip if app already has messages (cache is fresh)
-      if (_receivingHistoryReplay && !_isSessionSwitchReplay && getSessionMessages(targetId).length > 0) break;
+      if (_ctx.receivingHistoryReplay && !_ctx.isSessionSwitchReplay && getSessionMessages(targetId).length > 0) break;
       // During any history replay, skip if an equivalent message is already in cache (dedup).
       // This prevents duplicates when the app already received messages via real-time
       // subscription before switching to the session (which triggers history replay).
-      if (_receivingHistoryReplay) {
+      if (_ctx.receivingHistoryReplay) {
         const cached = getSessionMessages(targetId);
         const isDuplicate = cached.some((m) => {
           if (m.type !== msgType || m.content !== msg.content) return false;
@@ -1040,7 +1105,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // create a new response with a suffixed ID and remap future deltas.
           const responseId = existing ? `${streamId}-response` : streamId;
           if (existing) {
-            _deltaIdRemaps.set(streamId, responseId);
+            _ctx.deltaIdRemaps.set(streamId, responseId);
           }
           return {
             streamingMessageId: responseId,
@@ -1059,10 +1124,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const capturedSessionId = (msg.sessionId as string) || get().activeSessionId;
 
       // Permission boundary split: first delta after a split creates a new message
-      if (_postPermissionSplits.has(deltaId)) {
-        _postPermissionSplits.delete(deltaId);
+      if (_ctx.postPermissionSplits.has(deltaId)) {
+        _ctx.postPermissionSplits.delete(deltaId);
         const newId = `${deltaId}-post-${Date.now()}`;
-        _deltaIdRemaps.set(deltaId, newId);
+        _ctx.deltaIdRemaps.set(deltaId, newId);
         const newMsg: ChatMessage = {
           id: newId,
           type: 'response',
@@ -1078,30 +1143,30 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           }));
         }
         deltaId = newId;
-      } else if (_deltaIdRemaps.has(deltaId)) {
-        deltaId = _deltaIdRemaps.get(deltaId)!;
+      } else if (_ctx.deltaIdRemaps.has(deltaId)) {
+        deltaId = _ctx.deltaIdRemaps.get(deltaId)!;
       }
 
-      const existingDelta = pendingDeltas.get(deltaId);
-      pendingDeltas.set(deltaId, {
+      const existingDelta = _ctx.pendingDeltas.get(deltaId);
+      _ctx.pendingDeltas.set(deltaId, {
         sessionId: capturedSessionId,
         delta: (existingDelta?.delta || '') + (msg.delta as string),
       });
-      if (!deltaFlushTimer) {
-        deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
+      if (!_ctx.deltaFlushTimer) {
+        _ctx.deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
       }
       break;
     }
 
     case 'stream_end':
       // Flush any buffered deltas immediately before clearing streaming state
-      if (deltaFlushTimer) {
-        clearTimeout(deltaFlushTimer);
+      if (_ctx.deltaFlushTimer) {
+        clearTimeout(_ctx.deltaFlushTimer);
       }
       flushPendingDeltas();
       // Clean up permission boundary split tracking
-      _postPermissionSplits.delete(msg.messageId as string);
-      _deltaIdRemaps.delete(msg.messageId as string);
+      _ctx.postPermissionSplits.delete(msg.messageId as string);
+      _ctx.deltaIdRemaps.delete(msg.messageId as string);
       {
         const targetId = (msg.sessionId as string) || get().activeSessionId;
         if (targetId && get().sessionStates[targetId]) {
@@ -1120,11 +1185,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'tool_start': {
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       // During reconnect replay, skip if app already has messages (cache is fresh)
-      if (_receivingHistoryReplay && !_isSessionSwitchReplay && getSessionMessages(targetId).length > 0) break;
+      if (_ctx.receivingHistoryReplay && !_ctx.isSessionSwitchReplay && getSessionMessages(targetId).length > 0) break;
       // Use server messageId as stable identifier for dedup (same ID on live + replay)
       const toolId = (msg.messageId as string) || nextMessageId('tool');
       // During session-switch replay, skip if tool already in cache (dedup by stable ID)
-      if (_receivingHistoryReplay && _isSessionSwitchReplay) {
+      if (_ctx.receivingHistoryReplay && _ctx.isSessionSwitchReplay) {
         const cached = getSessionMessages(targetId);
         if (cached.some((m) => m.id === toolId)) break;
       }
@@ -1179,13 +1244,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'result': {
       hapticSuccess();
       // Flush any buffered deltas before clearing streaming state
-      if (deltaFlushTimer) {
-        clearTimeout(deltaFlushTimer);
+      if (_ctx.deltaFlushTimer) {
+        clearTimeout(_ctx.deltaFlushTimer);
       }
       flushPendingDeltas();
       // Clean up permission boundary split tracking
-      _postPermissionSplits.clear();
-      _deltaIdRemaps.clear();
+      _ctx.postPermissionSplits.clear();
+      _ctx.deltaIdRemaps.clear();
       const usage = msg.usage as Record<string, number> | undefined;
       const resultPatch = {
         streamingMessageId: null as string | null,
@@ -1398,18 +1463,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const permSs = permTargetId ? get().sessionStates[permTargetId] : null;
         const currentStreamId = permSs ? permSs.streamingMessageId : null;
         if (currentStreamId && currentStreamId !== 'pending') {
-          if (deltaFlushTimer) {
-            clearTimeout(deltaFlushTimer);
+          if (_ctx.deltaFlushTimer) {
+            clearTimeout(_ctx.deltaFlushTimer);
           }
           flushPendingDeltas();
           let serverStreamId = currentStreamId;
-          for (const [origId, remappedId] of _deltaIdRemaps) {
+          for (const [origId, remappedId] of _ctx.deltaIdRemaps) {
             if (remappedId === currentStreamId) {
               serverStreamId = origId;
               break;
             }
           }
-          _postPermissionSplits.add(serverStreamId);
+          _ctx.postPermissionSplits.add(serverStreamId);
           const clearTarget = permTargetId || get().activeSessionId;
           if (clearTarget && get().sessionStates[clearTarget]) {
             updateSession(clearTarget, () => ({ streamingMessageId: null }));
