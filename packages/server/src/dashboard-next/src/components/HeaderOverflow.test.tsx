@@ -34,9 +34,13 @@ describe('Header overflow prevention (#2297)', () => {
     expect(block![0]).toMatch(/flex:\s*1\s+1\s+auto/)
   })
 
-  it('.header-center select has max-width constraint', () => {
-    const match = css.match(/\.header-center select\s*\{[^}]*max-width:\s*180px/s)
-    expect(match).toBeTruthy()
+  it('.header-center select has max-width and text truncation', () => {
+    const block = css.match(/\.header-center select\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/max-width:\s*180px/)
+    expect(block![0]).toMatch(/overflow:\s*hidden/)
+    expect(block![0]).toMatch(/white-space:\s*nowrap/)
+    expect(block![0]).toMatch(/text-overflow:\s*ellipsis/)
   })
 
   it('.status-bar has min-width: 0 and white-space: nowrap', () => {
