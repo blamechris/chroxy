@@ -156,6 +156,25 @@ describe('CreateSessionSchema', () => {
   it('rejects name exceeding max length (#1920)', () => {
     assert.ok(!CreateSessionSchema.safeParse({ type: 'create_session', name: 'x'.repeat(201) }).success)
   })
+
+  it('preserves model and permissionMode fields', () => {
+    const result = CreateSessionSchema.safeParse({ type: 'create_session', name: 'dev', model: 'opus', permissionMode: 'auto' })
+    assert.ok(result.success)
+    assert.equal(result.data.model, 'opus')
+    assert.equal(result.data.permissionMode, 'auto')
+  })
+
+  it('rejects invalid permissionMode values', () => {
+    const result = CreateSessionSchema.safeParse({ type: 'create_session', name: 'dev', permissionMode: 'invalid' })
+    assert.ok(!result.success)
+  })
+
+  it('accepts all valid permissionMode values', () => {
+    for (const mode of ['approve', 'acceptEdits', 'auto', 'plan']) {
+      const result = CreateSessionSchema.safeParse({ type: 'create_session', name: 'dev', permissionMode: mode })
+      assert.ok(result.success, `Should accept permissionMode "${mode}"`)
+    }
+  })
 })
 
 describe('RenameSessionSchema', () => {

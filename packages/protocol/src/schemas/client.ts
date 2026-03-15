@@ -96,6 +96,8 @@ export const CreateSessionSchema = z.object({
   name: z.string().max(200).optional(),
   cwd: z.string().optional(),
   provider: z.string().optional(),
+  model: z.string().optional(),
+  permissionMode: z.enum(['approve', 'acceptEdits', 'auto', 'plan']).optional(),
 })
 
 export const DestroySessionSchema = z.object({
