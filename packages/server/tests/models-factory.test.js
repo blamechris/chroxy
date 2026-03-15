@@ -48,6 +48,19 @@ describe('createModelsRegistry', () => {
     assert.ok(registry.getAllowedModelIds().has('test-model'))
   })
 
+  it('strips Default(...) wrapper from SDK displayName', () => {
+    const registry = createModelsRegistry()
+    registry.updateModels([
+      { value: 'claude-sonnet-4-20250514', displayName: 'Default (recommended)', description: '' },
+      { value: 'claude-opus-4-20250514', displayName: 'Opus', description: '' },
+    ])
+    const models = registry.getModels()
+    // "Default (recommended)" should become just "recommended"
+    assert.equal(models[0].label, 'recommended')
+    // Non-Default displayName should pass through unchanged
+    assert.equal(models[1].label, 'Opus')
+  })
+
   it('resetModels restores defaults', () => {
     const registry = createModelsRegistry()
     registry.updateModels([

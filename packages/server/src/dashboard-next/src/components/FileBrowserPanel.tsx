@@ -134,7 +134,26 @@ export function FileBrowserPanel() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  // Restore selected file from session state (persists across tab switches)
+  const activeSessionId = useConnectionStore(s => s.activeSessionId)
+  const savedFilePath = useConnectionStore(s =>
+    activeSessionId ? s.sessionStates[activeSessionId]?.selectedFilePath ?? null : null
+  )
+  const [selectedFile, _setSelectedFile] = useState<string | null>(savedFilePath)
+  const setSelectedFile = useCallback((path: string | null) => {
+    _setSelectedFile(path)
+    // Persist to session state
+    const sid = useConnectionStore.getState().activeSessionId
+    if (sid) {
+      const { sessionStates } = useConnectionStore.getState()
+      const ss = sessionStates[sid]
+      if (ss) {
+        useConnectionStore.setState({
+          sessionStates: { ...sessionStates, [sid]: { ...ss, selectedFilePath: path } }
+        })
+      }
+    }
+  }, [])
   const [fileContent, setFileContent] = useState<string | null>(null)
   const [fileLanguage, setFileLanguage] = useState<string | null>(null)
   const [fileSize, setFileSize] = useState<number | null>(null)
@@ -182,13 +201,19 @@ export function FileBrowserPanel() {
     return () => setGitStatusCallback(null)
   }, [setGitStatusCallback])
 
-  // Load initial directory listing
+  // Load initial directory listing (and restore file preview if saved)
+  const savedFilePathRef = useRef(savedFilePath)
   useEffect(() => {
     setLoading(true)
     rootPath.current = null
     requestFileListing()
     requestGitStatus()
-  }, [requestFileListing, requestGitStatus])
+    // Restore previously selected file
+    if (savedFilePathRef.current) {
+      setFileLoading(true)
+      requestFileContent(savedFilePathRef.current)
+    }
+  }, [requestFileListing, requestGitStatus, requestFileContent])
 
   const gitStatusMap = useMemo(
     () => buildGitStatusMap(gitStatus, rootPath.current),
