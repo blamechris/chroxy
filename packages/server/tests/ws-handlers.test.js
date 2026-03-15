@@ -205,6 +205,76 @@ describe('WS handler: destroy_session', () => {
 
     ws.close()
   })
+
+  it('awaits destroySessionLocked when present', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'sess-1', name: 'First', cwd: '/tmp' },
+      { id: 'sess-2', name: 'Second', cwd: '/tmp' },
+    ])
+
+    let resolveDestroy
+    const destroyPromise = new Promise(resolve => { resolveDestroy = resolve })
+    const destroyOrder = []
+
+    manager.destroySessionLocked = createSpy((id) => {
+      return destroyPromise.then(() => {
+        destroyOrder.push('destroy')
+        sessionsMap.delete(id)
+      })
+    })
+
+    server = new WsServer({
+      port: 0, apiToken: 'test-token', authRequired: false,
+      sessionManager: manager,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    messages.length = 0
+    send(ws, { type: 'destroy_session', sessionId: 'sess-2' })
+
+    // Resolve the async destroy after a brief delay
+    await new Promise(r => setTimeout(r, 50))
+    assert.equal(manager.destroySessionLocked.callCount, 1, 'destroySessionLocked should be called once')
+
+    resolveDestroy()
+
+    const destroyed = await waitForMessage(messages, 'session_destroyed')
+    assert.equal(destroyed.sessionId, 'sess-2')
+    assert.deepEqual(destroyOrder, ['destroy'], 'destroy should complete before broadcast')
+
+    ws.close()
+  })
+
+  it('uses destroySessionLocked over destroySession when both present', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'sess-1', name: 'First', cwd: '/tmp' },
+      { id: 'sess-2', name: 'Second', cwd: '/tmp' },
+    ])
+
+    manager.destroySession = createSpy((id) => { sessionsMap.delete(id) })
+    manager.destroySessionLocked = createSpy((id) => {
+      sessionsMap.delete(id)
+      return Promise.resolve()
+    })
+
+    server = new WsServer({
+      port: 0, apiToken: 'test-token', authRequired: false,
+      sessionManager: manager,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    messages.length = 0
+    send(ws, { type: 'destroy_session', sessionId: 'sess-2' })
+
+    await waitForMessage(messages, 'session_destroyed')
+
+    assert.equal(manager.destroySessionLocked.callCount, 1, 'destroySessionLocked should be called')
+    assert.equal(manager.destroySession.callCount, 0, 'destroySession should NOT be called')
+
+    ws.close()
+  })
 })
 
 describe('WS handler: rename_session', () => {
