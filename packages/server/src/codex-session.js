@@ -1,8 +1,7 @@
 import { spawn } from 'child_process'
 import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
-import { existsSync } from 'fs'
-import { execFileSync } from 'child_process'
+import { resolveBinary } from './utils/resolve-binary.js'
 
 /**
  * Manages a Codex CLI session using `codex exec --json`.
@@ -29,26 +28,11 @@ import { execFileSync } from 'child_process'
 
 const DEFAULT_MODEL = 'o4-mini'
 
-function resolveCodex() {
-  try {
-    return execFileSync('which', ['codex'], {
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim()
-  } catch { /* not on PATH */ }
-
-  const candidates = [
-    '/opt/homebrew/bin/codex',
-    '/usr/local/bin/codex',
-    '/usr/bin/codex',
-  ]
-  for (const c of candidates) {
-    if (existsSync(c)) return c
-  }
-  return 'codex'
-}
-
-const CODEX = resolveCodex()
+const CODEX = resolveBinary('codex', [
+  '/opt/homebrew/bin/codex',
+  '/usr/local/bin/codex',
+  '/usr/bin/codex',
+])
 
 export class CodexSession extends BaseSession {
   static get capabilities() {

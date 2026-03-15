@@ -1,8 +1,7 @@
 import { spawn } from 'child_process'
 import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
-import { existsSync } from 'fs'
-import { execFileSync } from 'child_process'
+import { resolveBinary } from './utils/resolve-binary.js'
 
 /**
  * Manages a Gemini CLI session using `gemini -p --output-format stream-json`.
@@ -27,26 +26,11 @@ import { execFileSync } from 'child_process'
 
 const DEFAULT_MODEL = 'gemini-2.5-pro'
 
-function resolveGemini() {
-  try {
-    return execFileSync('which', ['gemini'], {
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim()
-  } catch { /* not on PATH */ }
-
-  const candidates = [
-    '/opt/homebrew/bin/gemini',
-    '/usr/local/bin/gemini',
-    '/usr/bin/gemini',
-  ]
-  for (const c of candidates) {
-    if (existsSync(c)) return c
-  }
-  return 'gemini'
-}
-
-const GEMINI = resolveGemini()
+const GEMINI = resolveBinary('gemini', [
+  '/opt/homebrew/bin/gemini',
+  '/usr/local/bin/gemini',
+  '/usr/bin/gemini',
+])
 
 export class GeminiSession extends BaseSession {
   static get capabilities() {
