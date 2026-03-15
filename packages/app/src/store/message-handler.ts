@@ -1252,7 +1252,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             return null;
           })
           .filter((m: ModelInfo | null): m is ModelInfo => m !== null);
-        const defaultModelId = typeof msg.defaultModel === 'string' ? msg.defaultModel : null;
+        const defaultModelId = typeof msg.defaultModel === 'string' && msg.defaultModel.trim() ? msg.defaultModel.trim() : null;
         set({ availableModels: cleaned, defaultModelId });
       }
       break;
