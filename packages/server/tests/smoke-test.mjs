@@ -305,7 +305,7 @@ async function run() {
     // Make sure no input is focused first
     await page.click('body')
     await page.waitForTimeout(200)
-    await page.keyboard.press('Shift+/')  // ? = Shift+/
+    await page.keyboard.press('?')
     await page.waitForTimeout(500)
     await screenshot(page, '04-shortcut-help')
 
