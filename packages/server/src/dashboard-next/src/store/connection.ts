@@ -248,8 +248,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   contextUsage: null,
   lastResultCost: null,
   lastResultDuration: null,
-  totalCost: null,
-  costBudget: null,
   isIdle: true,
   inputSettings: {
     chatEnterToSend: true,
@@ -703,8 +701,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       contextUsage: null,
       lastResultCost: null,
       lastResultDuration: null,
-      totalCost: null,
-      costBudget: null,
       webFeatures: { available: false, remote: false, teleport: false },
       webTasks: [],
       savedConnection: null,

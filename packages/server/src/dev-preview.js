@@ -1,5 +1,8 @@
 import { EventEmitter } from 'events'
 import { CloudflareTunnelAdapter } from './tunnel/cloudflare.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('dev-preview')
 
 /**
  * Detects when Claude starts a localhost dev server and creates
@@ -109,6 +112,7 @@ export class DevPreviewManager extends EventEmitter {
 
     try {
       const { httpUrl } = await tunnel.start()
+      log.info(`Tunnel started for session ${sessionId} port ${port}: ${httpUrl}`)
 
       // Check whether the session was destroyed while we were waiting for start()
       if (this._getTunnel(sessionId, port) !== tunnel) {
@@ -121,7 +125,7 @@ export class DevPreviewManager extends EventEmitter {
       console.log(`[dev-preview] Tunnel started for session ${sessionId} port ${port}: ${httpUrl}`)
       this.emit('dev_preview_started', { sessionId, port, url: httpUrl })
     } catch (err) {
-      console.error(`[dev-preview] Failed to create tunnel for port ${port}:`, err.message)
+      log.error(`Failed to create tunnel for port ${port}: ${err.message}`)
       this.emit('dev_preview_error', { sessionId, port, error: err.message })
       // Remove the placeholder entry left by pre-registration
       const sessionTunnels = this._tunnels.get(sessionId)
@@ -152,7 +156,7 @@ export class DevPreviewManager extends EventEmitter {
     }
 
     this.emit('dev_preview_stopped', { sessionId, port })
-    console.log(`[dev-preview] Tunnel stopped for session ${sessionId} port ${port}`)
+    log.info(`Tunnel stopped for session ${sessionId} port ${port}`)
   }
 
   /**
