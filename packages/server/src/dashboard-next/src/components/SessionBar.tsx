@@ -4,6 +4,7 @@
  * Features: active highlight, busy dot, close/rename, cwd badge, model badge, provider badge.
  */
 import { useState, useCallback, useRef, useEffect } from 'react'
+import { getProviderInfo } from '../lib/provider-labels'
 
 export type SessionStatus = 'idle' | 'busy' | 'needs-attention'
 
@@ -42,7 +43,7 @@ function abbreviateCwd(cwd: string): string {
 }
 
 function shortenProvider(provider: string): string {
-  return provider.replace(/^claude-/, '').toUpperCase()
+  return getProviderInfo(provider).short
 }
 
 export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession }: SessionBarProps) {
@@ -168,7 +169,11 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             )}
 
             {session.provider && (
-              <span className="tab-provider" title={session.provider}>
+              <span
+                className="tab-provider"
+                data-provider={getProviderInfo(session.provider).type}
+                title={getProviderInfo(session.provider).tooltip}
+              >
                 {shortenProvider(session.provider)}
               </span>
             )}

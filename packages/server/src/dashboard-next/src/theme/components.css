@@ -555,13 +555,24 @@
 }
 
 .tab-provider {
-  color: var(--accent-blue);
-  font-size: 9px;
-  background: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+  font-size: 10px;
   border-radius: 3px;
-  padding: 1px 4px;
+  padding: 1px 5px;
   flex-shrink: 0;
   font-weight: 600;
+  cursor: help;
+}
+.tab-provider[data-provider="sdk"] {
+  color: var(--accent-orange);
+  background: color-mix(in srgb, var(--accent-orange) 15%, transparent);
+}
+.tab-provider[data-provider="cli"] {
+  color: var(--accent-blue);
+  background: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+}
+.tab-provider[data-provider="other"] {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
 }
 
 .tab-close {
@@ -1997,6 +2008,26 @@
   font-size: var(--text-sm);
   color: var(--text-dim);
   flex-shrink: 0;
+}
+
+.status-provider {
+  font-weight: 600;
+  font-size: var(--text-xs, 11px);
+  border-radius: 3px;
+  padding: 1px 6px;
+  cursor: help;
+}
+.status-provider[data-provider="sdk"] {
+  color: var(--accent-orange);
+  background: color-mix(in srgb, var(--accent-orange) 15%, transparent);
+}
+.status-provider[data-provider="cli"] {
+  color: var(--accent-blue);
+  background: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+}
+.status-provider[data-provider="other"] {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
 }
 
 .status-model {

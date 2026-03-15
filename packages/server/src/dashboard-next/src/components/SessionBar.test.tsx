@@ -284,7 +284,7 @@ describe('SessionBar', () => {
       />
     )
     const badge = screen.getByText('CLI')
-    expect(badge).toHaveAttribute('title', 'claude-cli')
+    expect(badge.getAttribute('title')).toContain('subscription')
   })
 
   describe('session status indicators (#2091)', () => {
