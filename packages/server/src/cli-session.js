@@ -308,6 +308,8 @@ export class CliSession extends BaseSession {
     } catch (err) {
       log.error(`stdin.write failed (sendMessage): ${err.message}`)
       this._clearMessageState()
+      this.emit('error', { message: `Failed to send message: ${err.message}` })
+      return
     }
 
     // Safety timeout: force-clear if result never arrives (5 min)

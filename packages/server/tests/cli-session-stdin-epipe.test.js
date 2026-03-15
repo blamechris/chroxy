@@ -29,6 +29,9 @@ function createReadySession(opts = {}) {
   const session = new CliSession({ cwd: '/tmp', ...opts })
   session._processReady = true
   session._child = createMockChild()
+  // Attach a default no-op error listener so emitted errors don't become
+  // unhandled EventEmitter exceptions. Tests that assert on errors replace this.
+  session.on('error', () => {})
   return session
 }
 
@@ -45,11 +48,41 @@ describe('stdin EPIPE guard — sendMessage', () => {
     assert.doesNotThrow(() => {
       session.sendMessage('hello')
     })
+  })
 
-    // Clean up result timeout
-    clearTimeout(session._resultTimeout)
-    session._resultTimeout = null
-    session._isBusy = false
+  it('clears busy state after EPIPE so session is not left wedged', () => {
+    const session = createReadySession()
+    session._child.stdin.write = () => {
+      const err = new Error('write EPIPE')
+      err.code = 'EPIPE'
+      throw err
+    }
+
+    session.sendMessage('hello')
+
+    // Session must not be left wedged — no manual reset required
+    assert.equal(session._isBusy, false, '_isBusy must be false after EPIPE')
+    assert.equal(session._currentMessageId, null, '_currentMessageId must be cleared')
+    assert.equal(session._resultTimeout, null, '_resultTimeout must be cleared')
+  })
+
+  it('emits an error event after EPIPE so callers are notified', () => {
+    const session = createReadySession()
+    session._child.stdin.write = () => {
+      const err = new Error('write EPIPE')
+      err.code = 'EPIPE'
+      throw err
+    }
+
+    const errors = []
+    // Replace the default no-op listener with a capturing one
+    session.removeAllListeners('error')
+    session.on('error', (e) => errors.push(e))
+
+    session.sendMessage('hello')
+
+    assert.equal(errors.length, 1)
+    assert.ok(errors[0].message.includes('EPIPE'), 'error message should mention EPIPE')
   })
 
   it('continues normally after a swallowed EPIPE', () => {
@@ -65,11 +98,7 @@ describe('stdin EPIPE guard — sendMessage', () => {
     session.sendMessage('first message')
     assert.equal(writeCount, 1)
 
-    // Manually reset busy so we can send a second message
-    clearTimeout(session._resultTimeout)
-    session._resultTimeout = null
-    session._isBusy = false
-
+    // Session is not wedged — second send goes through without manual reset
     session.sendMessage('second message')
     assert.equal(writeCount, 2)
   })
@@ -86,9 +115,8 @@ describe('stdin EPIPE guard — sendMessage', () => {
       session.sendMessage('hello')
     })
 
-    clearTimeout(session._resultTimeout)
-    session._resultTimeout = null
-    session._isBusy = false
+    // Must not be wedged
+    assert.equal(session._isBusy, false)
   })
 })
 
