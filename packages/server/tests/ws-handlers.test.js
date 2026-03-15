@@ -146,6 +146,7 @@ describe('WS handler: destroy_session', () => {
     ])
     manager.destroySession = createSpy((id) => {
       sessionsMap.delete(id)
+      return true
     })
 
     server = new WsServer({
@@ -202,6 +203,37 @@ describe('WS handler: destroy_session', () => {
 
     const error = await waitForMessage(messages, 'session_error')
     assert.ok(error.message.includes('not found'), 'Error should say session not found')
+
+    ws.close()
+  })
+
+  it('returns error and does not broadcast when destroySessionLocked returns false (TOCTOU race)', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'First', cwd: '/tmp' },
+      { id: 'sess-2', name: 'Second', cwd: '/tmp' },
+    ])
+    // Simulate TOCTOU: session passes the initial getSession check but is
+    // already gone by the time destroySessionLocked acquires the lock
+    manager.destroySessionLocked = createSpy(async () => false)
+
+    server = new WsServer({
+      port: 0, apiToken: 'test-token', authRequired: false,
+      sessionManager: manager,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    messages.length = 0
+    send(ws, { type: 'destroy_session', sessionId: 'sess-2' })
+
+    const error = await waitForMessage(messages, 'session_error')
+    assert.ok(error.message.includes('not found'), 'Error should say session not found')
+    assert.equal(manager.destroySessionLocked.callCount, 1, 'destroySessionLocked should have been called')
+
+    // No session_destroyed broadcast should be sent
+    await new Promise(r => setTimeout(r, 150))
+    const destroyed = messages.find(m => m.type === 'session_destroyed')
+    assert.equal(destroyed, undefined, 'session_destroyed must not be broadcast when destroy returns false')
 
     ws.close()
   })

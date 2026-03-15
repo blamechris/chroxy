@@ -57,7 +57,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   }
 }
 
-function handleDestroySession(ws, client, msg, ctx) {
+async function handleDestroySession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
   if (!ctx.sessionManager.getSession(targetId)) {
     ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
@@ -74,11 +74,18 @@ function handleDestroySession(ws, client, msg, ctx) {
     return
   }
 
+  let destroyed
   if (typeof ctx.sessionManager.destroySessionLocked === 'function') {
-    ctx.sessionManager.destroySessionLocked(targetId)
+    destroyed = await ctx.sessionManager.destroySessionLocked(targetId)
   } else {
-    ctx.sessionManager.destroySession(targetId)
+    destroyed = ctx.sessionManager.destroySession(targetId)
   }
+
+  if (!destroyed) {
+    ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+    return
+  }
+
   ctx.primaryClients.delete(targetId)
 
   const firstId = ctx.sessionManager.firstSessionId
