@@ -107,6 +107,52 @@ describe('session auto-naming counter (#2338)', () => {
     }
   })
 
+  it('counter advances past restored "Session N" names so new sessions do not collide', () => {
+    // Simulate restoreState() bringing back sessions named "Session 1", "Session 2",
+    // "Session 3". The next auto-named session must be "Session 4", not "Session 1".
+    const mgr = makeMgr()
+    try {
+      // Create and serialize three sessions
+      const src = makeMgr()
+      try {
+        src.createSession({ cwd: '/tmp', provider: 'test-noop-naming' }) // Session 1
+        src.createSession({ cwd: '/tmp', provider: 'test-noop-naming' }) // Session 2
+        src.createSession({ cwd: '/tmp', provider: 'test-noop-naming' }) // Session 3
+        src.serializeState()
+
+        // Copy state file path so mgr can restore it
+        mgr._persistence._stateFilePath = src._persistence._stateFilePath
+        mgr._stateFilePath = src._persistence._stateFilePath
+      } finally {
+        // Destroy sessions but don't cleanup tmpDir yet — state file still needed
+        src.destroyAll()
+      }
+
+      mgr.restoreState()
+
+      // After restoring, counter should be at least 3
+      assert.ok(mgr._sessionCounter >= 3,
+        `_sessionCounter must be >= 3 after restoring "Session 1"–"Session 3", got ${mgr._sessionCounter}`)
+
+      // The next auto-named session must NOT be "Session 1", "Session 2", or "Session 3"
+      const newId = mgr.createSession({ cwd: '/tmp', provider: 'test-noop-naming' })
+      const newName = mgr.getSession(newId).name
+      const existingNames = mgr.listSessions()
+        .filter(s => s.sessionId !== newId)
+        .map(s => s.name)
+      assert.ok(
+        !existingNames.includes(newName),
+        `new session name "${newName}" must not collide with restored names: ${existingNames.join(', ')}`
+      )
+
+      // Specifically: should be "Session 4" (counter was 3, increments to 4)
+      assert.equal(newName, 'Session 4',
+        'first new session after restoring Session 1-3 must be Session 4')
+    } finally {
+      cleanup(mgr)
+    }
+  })
+
   it('respects explicit name and does not increment counter', () => {
     const mgr = makeMgr()
     try {
