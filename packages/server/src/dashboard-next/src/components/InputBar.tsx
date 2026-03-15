@@ -5,7 +5,7 @@
  * Supports file picker (@ trigger), attachment chips, slash command picker (/ trigger),
  * image paste/drag-drop (#1288), and image preview thumbnails (#1289).
  */
-import { useState, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent } from 'react'
+import { useState, useEffect, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent } from 'react'
 import { FilePicker, type FilePickerItem } from './FilePicker'
 import { AttachmentChip } from './AttachmentChip'
 import { SlashCommandPicker } from './SlashCommandPicker'
@@ -283,23 +283,19 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     el.style.height = assignedHeight + 'px'
   }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger])
 
-  // Merge voice transcript into input value
+  // Merge voice transcript into input value via effect (not during render)
   const prevTranscriptRef = useRef('')
-  const isVoiceUpdateRef = useRef(false)
-  if (voiceInput?.isRecording && voiceInput.transcript && voiceInput.transcript !== prevTranscriptRef.current) {
-    prevTranscriptRef.current = voiceInput.transcript
-    const prefix = value.slice(0, dictationStartRef.current)
-    const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : ''
-    isVoiceUpdateRef.current = true
-    // Use direct setValue since this runs during render — React will batch it
-    if (!isVoiceUpdateRef.current) {
-      // guard already set above
+  useEffect(() => {
+    if (voiceInput?.isRecording && voiceInput.transcript && voiceInput.transcript !== prevTranscriptRef.current) {
+      prevTranscriptRef.current = voiceInput.transcript
+      const prefix = value.slice(0, dictationStartRef.current)
+      const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : ''
+      setValue(prefix + separator + voiceInput.transcript)
     }
-    setValue(prefix + separator + voiceInput.transcript)
-  }
-  if (!voiceInput?.isRecording && prevTranscriptRef.current) {
-    prevTranscriptRef.current = ''
-  }
+    if (!voiceInput?.isRecording && prevTranscriptRef.current) {
+      prevTranscriptRef.current = ''
+    }
+  }, [voiceInput?.isRecording, voiceInput?.transcript, value])
 
   const handleMicPress = useCallback(() => {
     if (!voiceInput) return

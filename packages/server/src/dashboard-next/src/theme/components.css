@@ -2113,6 +2113,10 @@
   50% { opacity: 0.5; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .btn-mic.recording { animation: none; }
+}
+
 .btn-mic:focus-visible {
   outline: 2px solid var(--border-focus);
   outline-offset: 2px;

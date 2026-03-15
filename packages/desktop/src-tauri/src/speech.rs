@@ -9,7 +9,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde::{Deserialize, Serialize};
@@ -35,26 +35,20 @@ struct HelperOutput {
     is_final: Option<bool>,
     error: Option<String>,
     available: Option<bool>,
+    #[allow(dead_code)]
     authorized: Option<bool>,
 }
 
 /// State for managing the speech helper process.
 pub struct SpeechState {
-    child: Mutex<Option<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
 }
-
-unsafe impl Send for SpeechState {}
-unsafe impl Sync for SpeechState {}
 
 impl SpeechState {
     pub fn new() -> Self {
         Self {
-            child: Mutex::new(None),
+            child: Arc::new(Mutex::new(None)),
         }
-    }
-
-    pub fn is_recording(&self) -> bool {
-        self.child.lock().unwrap().is_some()
     }
 }
 
@@ -127,8 +121,9 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
     *child_lock = Some(child);
     drop(child_lock);
 
-    // Spawn reader thread to emit Tauri events from helper output
+    // Spawn reader thread — clears child handle when helper exits
     let app_handle = app.clone();
+    let child_ref = Arc::clone(&state.child);
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -161,7 +156,14 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
             }
         }
 
-        // Helper exited — emit a final empty transcription to signal end
+        // Helper exited — reap the child process and clear the handle
+        if let Ok(mut lock) = child_ref.lock() {
+            if let Some(ref mut child) = *lock {
+                let _ = child.wait();
+            }
+            *lock = None;
+        }
+
         let _ = app_handle.emit("voice_stopped", ());
     });
 
@@ -172,21 +174,41 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
 pub fn stop(state: &SpeechState) {
     let mut child_lock = state.child.lock().unwrap();
     if let Some(ref mut child) = *child_lock {
-        // Send "stop" to the helper's stdin
+        // Send "stop" to the helper's stdin — triggers clean shutdown
         if let Some(ref mut stdin) = child.stdin {
             let _ = stdin.write_all(b"stop\n");
             let _ = stdin.flush();
         }
+        // Drop stdin to signal EOF as a fallback
+        child.stdin.take();
 
-        // Give it a moment to clean up, then kill if needed
-        let child_id = child.id();
-        thread::spawn(move || {
-            thread::sleep(std::time::Duration::from_secs(2));
-            // Kill if still running
-            unsafe {
-                libc::kill(child_id as i32, libc::SIGTERM);
+        // Wait briefly for clean exit, then force kill if needed
+        let pid = child.id();
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                // Already exited
+                *child_lock = None;
             }
-        });
+            _ => {
+                // Still running — the reader thread will reap it after the
+                // helper responds to the "stop" command. If it hangs,
+                // the reader thread will see EOF when we drop stdin above.
+                // Leave child_lock populated — reader thread clears it.
+                drop(child_lock);
+
+                // Safety net: kill after 3 seconds if still alive
+                thread::spawn(move || {
+                    thread::sleep(std::time::Duration::from_secs(3));
+                    // Check if the process is still around before killing.
+                    // waitpid with WNOHANG: 0 = still running
+                    unsafe {
+                        let status = libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG);
+                        if status == 0 {
+                            libc::kill(pid as i32, libc::SIGTERM);
+                        }
+                    }
+                });
+            }
+        }
     }
-    *child_lock = None;
 }

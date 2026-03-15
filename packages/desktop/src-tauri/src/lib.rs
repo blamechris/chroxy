@@ -297,7 +297,12 @@ pub fn run() {
         ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
-        .manage(Mutex::new(speech::SpeechState::new()))
+        .manage({
+            #[cfg(target_os = "macos")]
+            { Mutex::new(speech::SpeechState::new()) }
+            #[cfg(not(target_os = "macos"))]
+            { Mutex::new(()) }
+        })
         .setup(|app| {
             // First-run: generate config if needed
             let is_first_run = setup::ensure_config();
