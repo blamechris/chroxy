@@ -738,11 +738,10 @@ export class CliSession extends BaseSession {
     this._destroying = true
     this._respawning = false
 
-    // Clean up permission hook — unregister first (fire-and-forget: the hook
-    // falls through harmlessly when env vars are absent, so best-effort is fine),
-    // then destroy to cancel any pending retry timers.
+    // Clean up permission hook — destroy() now chains unregister() after any
+    // in-flight register() promise, preventing a register-after-unregister race
+    // that would leave a dead hook in settings.json.
     if (this._hookManager) {
-      this._hookManager.unregister()
       this._hookManager.destroy()
     }
 
