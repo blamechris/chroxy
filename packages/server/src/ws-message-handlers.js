@@ -67,6 +67,11 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
  * Create a session-manager adapter that wraps a single CLI session.
  * This allows handleCliMessage to delegate to handleSessionMessage
  * without duplicating all the message handling logic.
+ *
+ * NOTE: This path is unused in production — server-cli.js always passes a full
+ * SessionManager and never a cliSession. However, ~11 test files pass a cliSession
+ * mock as a lightweight harness, so this adapter is exercised by the test suite.
+ * Removing it requires migrating those tests to use SessionManager directly; see #2330.
  */
 function createCliSessionAdapter(cliSession) {
   const cwd = cliSession?.cwd || null
