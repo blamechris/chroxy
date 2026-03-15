@@ -297,3 +297,44 @@ describe('WsServer hook secret registry', () => {
     assert.equal(server._validateHookAuth(req, res), true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Tests: WsServer legacy cliSession mode — hook secret registered at construction
+// ---------------------------------------------------------------------------
+describe('WsServer legacy cliSession mode — hook secret auto-registration', () => {
+  it('registers cliSession hook secret in _hookSecrets at construction time', async () => {
+    const { WsServer } = await import('../src/ws-server.js')
+    const fakeCliSession = { _hookSecret: 'legacy-hook-secret-abc123' }
+    const server = new WsServer({ apiToken: 'main-token', authRequired: true, cliSession: fakeCliSession })
+    assert.ok(server._hookSecrets.has('legacy-hook-secret-abc123'), '_hookSecrets should contain the cliSession hook secret')
+  })
+
+  it('_validateHookAuth accepts the cliSession hook secret in legacy mode', async () => {
+    const { WsServer } = await import('../src/ws-server.js')
+    const fakeCliSession = { _hookSecret: 'legacy-hook-secret-abc123' }
+    const server = new WsServer({ apiToken: 'main-token', authRequired: true, cliSession: fakeCliSession })
+
+    const req = { headers: { authorization: 'Bearer legacy-hook-secret-abc123' } }
+    const res = { writeHead() {}, end() {} }
+    assert.equal(server._validateHookAuth(req, res), true)
+  })
+
+  it('_validateHookAuth rejects main API token in legacy mode (hook secret registered)', async () => {
+    const { WsServer } = await import('../src/ws-server.js')
+    const fakeCliSession = { _hookSecret: 'legacy-hook-secret-abc123' }
+    const server = new WsServer({ apiToken: 'main-token', authRequired: true, cliSession: fakeCliSession })
+
+    const req = { headers: { authorization: 'Bearer main-token' } }
+    let statusCode = null
+    const res = { writeHead(code) { statusCode = code }, end() {} }
+    assert.equal(server._validateHookAuth(req, res), false)
+    assert.equal(statusCode, 403)
+  })
+
+  it('does not register a hook secret when cliSession has no _hookSecret', async () => {
+    const { WsServer } = await import('../src/ws-server.js')
+    const fakeCliSession = {} // no _hookSecret property
+    const server = new WsServer({ apiToken: 'main-token', authRequired: true, cliSession: fakeCliSession })
+    assert.equal(server._hookSecrets.size, 0)
+  })
+})

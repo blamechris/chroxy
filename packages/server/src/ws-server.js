@@ -462,6 +462,10 @@ export class WsServer {
     // Legacy single-session mode: wrap cliSession in a minimal shim
     if (!sessionManager && cliSession) {
       this.cliSession = cliSession
+      // Register the hook secret immediately — no session_created event fires in legacy mode
+      if (cliSession._hookSecret) {
+        this.registerHookSecret(cliSession._hookSecret)
+      }
     } else {
       this.cliSession = null
     }
