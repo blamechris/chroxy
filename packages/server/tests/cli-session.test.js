@@ -573,8 +573,9 @@ describe('_killAndRespawn behavioral tests (#1009)', () => {
     // Trigger model change → _killAndRespawn
     session.setModel('opus')
 
-    // _destroying should be set before kill
-    assert.equal(session._destroying, true)
+    // _respawning should be set before kill (not _destroying — that's only for permanent teardown)
+    assert.equal(session._respawning, true)
+    assert.equal(session._destroying, false)
     assert.equal(session._processReady, false)
     assert.equal(session._child, null, 'Old child should be detached')
     assert.equal(oldChild.kill.mock.calls.length, 1, 'kill() should be called on old child')
@@ -588,6 +589,7 @@ describe('_killAndRespawn behavioral tests (#1009)', () => {
 
     // Now start() should have been called
     assert.equal(startCalled, true)
+    assert.equal(session._respawning, false)
     assert.equal(session._destroying, false)
     assert.equal(session._respawnCount, 0)
   })
@@ -601,13 +603,15 @@ describe('_killAndRespawn behavioral tests (#1009)', () => {
 
     session.setPermissionMode('auto')
 
-    assert.equal(session._destroying, true)
+    assert.equal(session._respawning, true)
+    assert.equal(session._destroying, false)
     assert.equal(session.permissionMode, 'auto')
     assert.equal(oldChild.kill.mock.calls.length, 1)
 
     oldChild.emit('close', 0)
 
     assert.equal(startCalled, true)
+    assert.equal(session._respawning, false)
     assert.equal(session._destroying, false)
   })
 
@@ -641,6 +645,7 @@ describe('_killAndRespawn behavioral tests (#1009)', () => {
 
     // Should call start() immediately (no child to kill)
     assert.equal(startCalled, true)
+    assert.equal(session._respawning, false)
     assert.equal(session._destroying, false)
   })
 
