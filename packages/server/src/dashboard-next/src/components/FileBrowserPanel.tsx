@@ -201,19 +201,38 @@ export function FileBrowserPanel() {
     return () => setGitStatusCallback(null)
   }, [setGitStatusCallback])
 
-  // Load initial directory listing (and restore file preview if saved)
-  const savedFilePathRef = useRef(savedFilePath)
+  // Load directory listing when session changes (including follow mode switches)
   useEffect(() => {
-    setLoading(true)
+    // Reset local state for the new session
+    setEntries([])
+    setCurrentPath(null)
+    setParentPath(null)
+    setError(null)
+    setFileContent(null)
+    setFileLanguage(null)
+    setFileSize(null)
+    setFileTruncated(false)
+    setFileError(null)
+    setGitStatus(null)
     rootPath.current = null
+
+    // Restore selected file from session state
+    const state = useConnectionStore.getState()
+    const sid = state.activeSessionId
+    const restoredPath = sid ? state.sessionStates[sid]?.selectedFilePath ?? null : null
+    _setSelectedFile(restoredPath)
+
+    // Request fresh listing
+    setLoading(true)
     requestFileListing()
     requestGitStatus()
-    // Restore previously selected file
-    if (savedFilePathRef.current) {
+
+    // Restore previously selected file content
+    if (restoredPath) {
       setFileLoading(true)
-      requestFileContent(savedFilePathRef.current)
+      requestFileContent(restoredPath)
     }
-  }, [requestFileListing, requestGitStatus, requestFileContent])
+  }, [activeSessionId, requestFileListing, requestGitStatus, requestFileContent])
 
   const gitStatusMap = useMemo(
     () => buildGitStatusMap(gitStatus, rootPath.current),
