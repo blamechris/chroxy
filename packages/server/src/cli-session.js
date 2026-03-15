@@ -74,6 +74,7 @@ export class CliSession extends BaseSession {
     this._respawnCount = 0
     this._respawnTimer = null
     this._respawnScheduled = false
+    this._respawning = false
     this._interruptTimer = null
 
     // Hook manager (shared module)
@@ -190,6 +191,7 @@ export class CliSession extends BaseSession {
       this._child = null
 
       if (this._destroying) return
+      if (this._respawning) return
 
       // Safety net: if we were mid-message, close the stream
       if (this._isBusy && this._currentMessageId) {
@@ -229,6 +231,7 @@ export class CliSession extends BaseSession {
    */
   _scheduleRespawn() {
     if (this._destroying) return
+    if (this._respawning) return
     if (this._respawnScheduled) return
 
     this._respawnCount++
@@ -566,7 +569,7 @@ export class CliSession extends BaseSession {
    * Suppresses auto-respawn during the kill, clears timers, and starts fresh.
    */
   _killAndRespawn() {
-    this._destroying = true
+    this._respawning = true
     this._processReady = false
     this._sessionId = null
 
@@ -591,8 +594,9 @@ export class CliSession extends BaseSession {
       const respawn = () => {
         if (didClose) return
         didClose = true
-        this._destroying = false
+        this._respawning = false
         this._respawnCount = 0
+        if (this._destroying) return
         this.start()
       }
 
@@ -616,9 +620,11 @@ export class CliSession extends BaseSession {
 
       oldChild.kill('SIGTERM')
     } else {
-      this._destroying = false
+      this._respawning = false
       this._respawnCount = 0
-      this.start()
+      if (!this._destroying) {
+        this.start()
+      }
     }
   }
 
@@ -698,6 +704,7 @@ export class CliSession extends BaseSession {
   /** Clean up resources */
   destroy() {
     this._destroying = true
+    this._respawning = false
 
     // Clean up permission hook — unregister first (fire-and-forget: the hook
     // falls through harmlessly when env vars are absent, so best-effort is fine),
