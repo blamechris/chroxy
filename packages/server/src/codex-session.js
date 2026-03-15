@@ -119,6 +119,7 @@ export class CodexSession extends BaseSession {
 
     this._process = proc
     let didStreamStart = false
+    let didEmitResult = false
 
     const rl = createInterface({ input: proc.stdout })
 
@@ -156,6 +157,7 @@ export class CodexSession extends BaseSession {
         }
 
         case 'turn.completed': {
+          didEmitResult = true
           const usage = event.usage || {}
           this.emit('result', {
             cost: null,
@@ -177,7 +179,7 @@ export class CodexSession extends BaseSession {
     proc.stderr.on('data', (chunk) => {
       if (this._destroying) return
       const msg = chunk.toString().trim()
-      if (msg && !msg.includes('ERROR') && !msg.includes('WARN')) {
+      if (msg && (msg.includes('ERROR') || msg.includes('WARN'))) {
         console.error(`[codex] stderr: ${msg}`)
       }
     })
@@ -192,13 +194,15 @@ export class CodexSession extends BaseSession {
       if (code !== 0 && code !== null) {
         this.emit('error', { message: `Codex process exited with code ${code}` })
       }
-      // Emit result if turn.completed wasn't received
-      this.emit('result', {
-        cost: null,
-        duration: null,
-        usage: null,
-        sessionId: null,
-      })
+      // Emit result only if turn.completed wasn't received
+      if (!didEmitResult) {
+        this.emit('result', {
+          cost: null,
+          duration: null,
+          usage: null,
+          sessionId: null,
+        })
+      }
     })
 
     proc.on('error', (err) => {
@@ -218,7 +222,7 @@ export class CodexSession extends BaseSession {
   }
 
   setModel(model) {
-    this.model = model
+    super.setModel(model)
   }
 
   setPermissionMode(_mode) {
