@@ -91,7 +91,7 @@ export interface ProviderCapabilities {
   planMode: boolean;
   resume: boolean;
   terminal: boolean;
-  thinkingLevel: boolean;
+  thinkingLevel?: boolean;
 }
 
 export interface ProviderInfo {

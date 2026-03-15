@@ -99,6 +99,7 @@ export function App() {
   const availableModels = useConnectionStore(s => s.availableModels)
   const defaultModelId = useConnectionStore(s => s.defaultModelId)
   const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
+  const availableProviders = useConnectionStore(s => s.availableProviders)
   const serverErrors = useConnectionStore(s => s.serverErrors)
   const infoNotifications = useConnectionStore(s => s.infoNotifications ?? [])
   const connectionError = useConnectionStore(s => s.connectionError)
@@ -801,7 +802,7 @@ export function App() {
           {/* Thinking level selector — only for providers with thinkingLevel capability */}
           {(() => {
             const activeProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider
-            const providerInfo = useConnectionStore.getState().availableProviders.find(p => p.name === activeProvider)
+            const providerInfo = availableProviders.find(p => p.name === activeProvider)
             return activeProvider && providerInfo?.capabilities?.thinkingLevel
           })() && (
             <select

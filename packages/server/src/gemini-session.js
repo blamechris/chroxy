@@ -58,6 +58,7 @@ export class GeminiSession extends BaseSession {
       planMode: false,
       resume: false,
       terminal: false,
+      thinkingLevel: false,
     }
   }
 

@@ -57,6 +57,8 @@ export class SdkSession extends BaseSession {
   /** Token budgets for thinking levels. null = adaptive (SDK default). */
   static THINKING_BUDGETS = { default: null, high: 32000, max: 128000 }
 
+  get thinkingLevel() { return this._thinkingLevel }
+
   constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput } = {}) {
     super({ cwd, model, permissionMode })
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH

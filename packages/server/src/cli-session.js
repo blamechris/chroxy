@@ -46,6 +46,7 @@ export class CliSession extends BaseSession {
       planMode: true,
       resume: false,
       terminal: false,
+      thinkingLevel: false,
     }
   }
 
