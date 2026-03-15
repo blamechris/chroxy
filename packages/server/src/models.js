@@ -13,6 +13,7 @@ export const MODELS = [
  */
 export function createModelsRegistry() {
   let activeModels = MODELS
+  let defaultModelId = null
   let allowedModelIds = new Set(MODELS.flatMap(m => [m.id, m.fullId]))
   let toFullIdMap = new Map(MODELS.flatMap(m => [[m.id, m.fullId], [m.fullId, m.fullId]]))
   let toShortIdMap = new Map(MODELS.flatMap(m => [[m.fullId, m.id], [m.id, m.id]]))
@@ -39,16 +40,20 @@ export function createModelsRegistry() {
     updateModels(sdkModels) {
       if (!Array.isArray(sdkModels)) return null
 
+      defaultModelId = null
       const converted = sdkModels
         .filter(m => m && typeof m.value === 'string' && m.value.length > 0)
         .map(m => {
           const fullId = m.value
           const id = fullId.startsWith('claude-') ? fullId.slice(7) : fullId
-          // Strip "Default (...)" wrapper from SDK displayName to avoid nested labels
-          // e.g. SDK sends "Default (recommended)" → we want just "recommended" or the model name
           let label = m.displayName || id
-          const defaultMatch = label.match(/^Default\s*\((.+)\)$/)
-          if (defaultMatch) label = defaultMatch[1]
+          // Detect SDK default model (displayName starts with "Default")
+          if (typeof m.displayName === 'string' && /^default\b/i.test(m.displayName)) {
+            defaultModelId = id
+            // Strip "Default (...)" wrapper to avoid nested labels
+            const match = label.match(/^Default\s*\((.+)\)$/)
+            if (match) label = match[1]
+          }
           return { id, label, fullId }
         })
 
@@ -61,7 +66,12 @@ export function createModelsRegistry() {
 
     resetModels() {
       activeModels = MODELS
+      defaultModelId = null
       rebuildLookups(MODELS)
+    },
+
+    getDefaultModelId() {
+      return defaultModelId
     },
 
     resolveModelId(model) {
@@ -110,4 +120,8 @@ export function resolveModelId(model) {
 
 export function toShortModelId(model) {
   return defaultRegistry.toShortModelId(model)
+}
+
+export function getDefaultModelId() {
+  return defaultRegistry.getDefaultModelId()
 }
