@@ -2260,6 +2260,44 @@
   margin-bottom: 10px;
 }
 
+.advanced-toggle {
+  margin: 8px 0 4px;
+}
+
+.advanced-toggle-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  padding: 4px 0;
+}
+.advanced-toggle-btn:hover {
+  color: var(--text-primary);
+}
+
+.advanced-section {
+  padding: 8px 0;
+  border-top: 1px solid var(--border-primary);
+}
+
+.advanced-section .form-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.advanced-section label {
+  min-width: 120px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.advanced-section select {
+  flex: 1;
+}
+
 .provider-select {
   display: flex;
   align-items: center;
