@@ -16,6 +16,7 @@ import { useCommands, recordMruCommand, getMruCommands } from './store/commands'
 import { ChatView } from './components/ChatView'
 import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
+import { useVoiceInput } from './hooks/useVoiceInput'
 import { toWireAttachments } from './utils/attachment-utils'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
@@ -113,6 +114,9 @@ export function App() {
 
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
+
+  // Voice input (Tauri only — no-op in browser)
+  const voiceInput = useVoiceInput()
 
   // Session-level state via useShallow — includes messages from sessionStates.
   // stream_end/result handlers force a new messages[] reference so useShallow
@@ -1089,6 +1093,7 @@ export function App() {
               onRemoveImage={handleRemoveImage}
               onFileAttach={handleFileSelect}
               sendOnEnter={inputSettings.chatEnterToSend}
+              voiceInput={voiceInput.isAvailable ? voiceInput : undefined}
             />
           </>
         )}

@@ -5,6 +5,8 @@ mod qrcode;
 mod server;
 mod settings;
 mod setup;
+#[cfg(target_os = "macos")]
+mod speech;
 mod window;
 
 use server::{ServerManager, ServerStatus};
@@ -224,6 +226,31 @@ async fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> 
     Ok(result)
 }
 
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn voice_available() -> bool {
+    speech::is_available()
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn start_voice_input(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<speech::SpeechState>>,
+) -> Result<(), String> {
+    let s = lock_or_recover(&state);
+    speech::start(&s, &app)
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn stop_voice_input(
+    state: tauri::State<'_, Mutex<speech::SpeechState>>,
+) {
+    let s = lock_or_recover(&state);
+    speech::stop(&s);
+}
+
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
@@ -261,9 +288,21 @@ pub fn run() {
             check_dependencies,
             get_setup_state,
             save_setup_config,
+            #[cfg(target_os = "macos")]
+            voice_available,
+            #[cfg(target_os = "macos")]
+            start_voice_input,
+            #[cfg(target_os = "macos")]
+            stop_voice_input,
         ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
+        .manage({
+            #[cfg(target_os = "macos")]
+            { Mutex::new(speech::SpeechState::new()) }
+            #[cfg(not(target_os = "macos"))]
+            { Mutex::new(()) }
+        })
         .setup(|app| {
             // First-run: generate config if needed
             let is_first_run = setup::ensure_config();

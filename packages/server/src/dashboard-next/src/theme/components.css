@@ -2068,6 +2068,60 @@
   outline-offset: 2px;
 }
 
+.input-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.btn-mic {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.btn-mic:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.btn-mic:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-mic.recording {
+  color: var(--accent-red);
+  animation: mic-pulse 1.5s ease-in-out infinite;
+}
+
+.btn-mic.recording:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+@keyframes mic-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn-mic.recording { animation: none; }
+}
+
+.btn-mic:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
 .thinking-indicator {
   display: flex;
   align-items: center;
