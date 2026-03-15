@@ -31,7 +31,9 @@ function handleCreateSession(ws, client, msg, ctx) {
   const cwd = (typeof msg.cwd === 'string' && msg.cwd.trim()) ? msg.cwd.trim() : undefined
   const provider = (typeof msg.provider === 'string' && msg.provider.trim()) ? msg.provider.trim() : undefined
   const model = (typeof msg.model === 'string' && msg.model.trim()) ? msg.model.trim() : undefined
-  const permissionMode = (typeof msg.permissionMode === 'string' && msg.permissionMode.trim()) ? msg.permissionMode.trim() : undefined
+  const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
+  const rawPermMode = (typeof msg.permissionMode === 'string' && msg.permissionMode.trim()) ? msg.permissionMode.trim() : undefined
+  const permissionMode = rawPermMode && VALID_PERMISSION_MODES.includes(rawPermMode) ? rawPermMode : undefined
 
   if (cwd) {
     const cwdError = validateCwdWithinHome(cwd)

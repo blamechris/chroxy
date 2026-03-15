@@ -135,6 +135,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       } else {
         setProvider(defaultProvider)
       }
+      setShowAdvanced(false)
+      setPermissionMode('')
       setShowSuggestions(false)
       setSelectedSuggestion(-1)
       setBrowsing(false)
