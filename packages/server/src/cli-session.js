@@ -177,6 +177,12 @@ export class CliSession extends BaseSession {
       }
     })
 
+    // Absorb EPIPE and other low-level stdin errors so they don't become
+    // unhandled exceptions. Writes are already wrapped in try/catch below.
+    child.stdin.on('error', (err) => {
+      log.warn(`stdin error (ignored): ${err.message}`)
+    })
+
     child.on('error', (err) => {
       this._cleanupReadlines()
       this._processReady = false
@@ -296,7 +302,14 @@ export class CliSession extends BaseSession {
     })
 
     log.info(`Sending message ${this._currentMessageId}: "${(prompt || '').slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
-    this._child.stdin.write(ndjson + '\n')
+    try {
+      this._child.stdin.write(ndjson + '\n')
+    } catch (err) {
+      log.error(`stdin.write failed (sendMessage): ${err.message}`)
+      this._clearMessageState()
+      this.emit('error', { message: `Failed to send message: ${err.message}` })
+      return
+    }
 
     // Safety timeout: force-clear if result never arrives (5 min)
     this._resultTimeout = setTimeout(() => {
@@ -680,7 +693,11 @@ export class CliSession extends BaseSession {
         content: [{ type: 'text', text }],
       },
     })
-    this._child.stdin.write(ndjson + '\n')
+    try {
+      this._child.stdin.write(ndjson + '\n')
+    } catch (err) {
+      log.error(`stdin.write failed (respondToQuestion): ${err.message}`)
+    }
   }
 
   /** Interrupt the current message (send SIGINT to child process) */
