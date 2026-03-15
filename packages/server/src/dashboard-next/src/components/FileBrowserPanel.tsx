@@ -268,7 +268,7 @@ export function FileBrowserPanel() {
 
   // Syntax-highlighted lines for the file viewer
   const highlightedLines = useMemo(() => {
-    if (!fileContent || !fileLanguage) return null
+    if (!fileContent || !fileLanguage || fileLanguage === 'image') return null
     const lines = fileContent.split('\n')
     return lines.map(line => tokenize(line, fileLanguage))
   }, [fileContent, fileLanguage])
@@ -362,7 +362,16 @@ export function FileBrowserPanel() {
           <div className="file-viewer-content">
             {fileLoading && <div className="file-viewer-loading">Loading file...</div>}
             {!fileLoading && fileError && <div className="file-viewer-error">{fileError}</div>}
-            {!fileLoading && !fileError && fileContent !== null && (
+            {!fileLoading && !fileError && fileContent !== null && fileLanguage === 'image' && (
+              <div className="file-viewer-image">
+                <img
+                  src={fileContent}
+                  alt={selectedFile.split('/').pop() || 'Image preview'}
+                  style={{ maxWidth: '100%', maxHeight: '80vh', objectFit: 'contain' }}
+                />
+              </div>
+            )}
+            {!fileLoading && !fileError && fileContent !== null && fileLanguage !== 'image' && (
               <pre className="file-viewer-code">
                 <code>
                   {highlightedLines

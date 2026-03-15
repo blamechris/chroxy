@@ -3727,6 +3727,15 @@
   overflow: auto;
 }
 
+.file-viewer-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  padding: 16px;
+  background: var(--bg-secondary, #1a1a2e);
+}
+
 .file-viewer-loading,
 .file-viewer-error {
   padding: 16px;
