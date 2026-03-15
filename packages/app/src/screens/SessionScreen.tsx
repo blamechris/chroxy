@@ -762,6 +762,7 @@ export function SessionScreen() {
             setSettingsExpanded((prev) => !prev);
           }}
           activeModel={activeModel}
+          defaultModelId={useConnectionStore((s) => s.defaultModelId)}
           availableModels={availableModels}
           permissionMode={permissionMode}
           availablePermissionModes={availablePermissionModes}
