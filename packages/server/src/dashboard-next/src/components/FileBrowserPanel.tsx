@@ -134,7 +134,26 @@ export function FileBrowserPanel() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  // Restore selected file from session state (persists across tab switches)
+  const activeSessionId = useConnectionStore(s => s.activeSessionId)
+  const savedFilePath = useConnectionStore(s =>
+    activeSessionId ? s.sessionStates[activeSessionId]?.selectedFilePath ?? null : null
+  )
+  const [selectedFile, _setSelectedFile] = useState<string | null>(savedFilePath)
+  const setSelectedFile = useCallback((path: string | null) => {
+    _setSelectedFile(path)
+    // Persist to session state
+    const sid = useConnectionStore.getState().activeSessionId
+    if (sid) {
+      const { sessionStates } = useConnectionStore.getState()
+      const ss = sessionStates[sid]
+      if (ss) {
+        useConnectionStore.setState({
+          sessionStates: { ...sessionStates, [sid]: { ...ss, selectedFilePath: path } }
+        })
+      }
+    }
+  }, [])
   const [fileContent, setFileContent] = useState<string | null>(null)
   const [fileLanguage, setFileLanguage] = useState<string | null>(null)
   const [fileSize, setFileSize] = useState<number | null>(null)
@@ -182,13 +201,19 @@ export function FileBrowserPanel() {
     return () => setGitStatusCallback(null)
   }, [setGitStatusCallback])
 
-  // Load initial directory listing
+  // Load initial directory listing (and restore file preview if saved)
+  const savedFilePathRef = useRef(savedFilePath)
   useEffect(() => {
     setLoading(true)
     rootPath.current = null
     requestFileListing()
     requestGitStatus()
-  }, [requestFileListing, requestGitStatus])
+    // Restore previously selected file
+    if (savedFilePathRef.current) {
+      setFileLoading(true)
+      requestFileContent(savedFilePathRef.current)
+    }
+  }, [requestFileListing, requestGitStatus, requestFileContent])
 
   const gitStatusMap = useMemo(
     () => buildGitStatusMap(gitStatus, rootPath.current),
@@ -243,7 +268,7 @@ export function FileBrowserPanel() {
 
   // Syntax-highlighted lines for the file viewer
   const highlightedLines = useMemo(() => {
-    if (!fileContent || !fileLanguage) return null
+    if (!fileContent || !fileLanguage || fileLanguage === 'image') return null
     const lines = fileContent.split('\n')
     return lines.map(line => tokenize(line, fileLanguage))
   }, [fileContent, fileLanguage])
@@ -337,7 +362,16 @@ export function FileBrowserPanel() {
           <div className="file-viewer-content">
             {fileLoading && <div className="file-viewer-loading">Loading file...</div>}
             {!fileLoading && fileError && <div className="file-viewer-error">{fileError}</div>}
-            {!fileLoading && !fileError && fileContent !== null && (
+            {!fileLoading && !fileError && fileContent !== null && fileLanguage === 'image' && (
+              <div className="file-viewer-image">
+                <img
+                  src={fileContent}
+                  alt={selectedFile.split('/').pop() || 'Image preview'}
+                  style={{ maxWidth: '100%', maxHeight: '80vh', objectFit: 'contain' }}
+                />
+              </div>
+            )}
+            {!fileLoading && !fileError && fileContent !== null && fileLanguage !== 'image' && (
               <pre className="file-viewer-code">
                 <code>
                   {highlightedLines

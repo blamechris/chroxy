@@ -268,6 +268,8 @@ export interface SessionState {
   sessionContext: SessionContext | null;
   mcpServers: McpServer[];
   devPreviews: DevPreview[];
+  // Files tab: selected file path (persists across tab switches)
+  selectedFilePath: string | null;
 }
 
 export interface LogEntry {

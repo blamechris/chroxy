@@ -7,6 +7,17 @@ import { GIT } from '../git.js'
 
 const execFileAsync = promisify(execFileCb)
 
+/** Image extensions to MIME type mapping (module-level to avoid per-call allocation) */
+const IMAGE_MIME = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  ico: 'image/x-icon',
+  bmp: 'image/bmp',
+}
+
 /**
  * File reading, writing, and diff operations.
  *
@@ -91,6 +102,23 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       }
 
       const buf = await readFile(realAbsPath)
+      const ext = extname(absPath).slice(1).toLowerCase()
+
+      // Image files: send as base64 data URL for preview
+      // SVG excluded — it's an active document format (scripts/external refs); render as text instead
+      if (IMAGE_MIME[ext]) {
+        const dataUrl = `data:${IMAGE_MIME[ext]};base64,${buf.toString('base64')}`
+        sendFn(ws, {
+          type: 'file_content',
+          path: absPath,
+          content: dataUrl,
+          language: 'image',
+          size: fileStat.size,
+          truncated: false,
+          error: null,
+        })
+        return
+      }
 
       // Binary detection: check first 8KB for null bytes
       const checkLen = Math.min(buf.length, 8192)
@@ -115,8 +143,6 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         content = content.slice(0, 100 * 1024)
         truncated = true
       }
-
-      const ext = extname(absPath).slice(1).toLowerCase()
 
       sendFn(ws, {
         type: 'file_content',
@@ -235,6 +261,27 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
     try {
       const cwdReal = await resolveSessionCwd(sessionCwd)
+
+      // Check if the directory is a git repository before running git commands
+      try {
+        await execFileAsync(GIT, ['rev-parse', '--git-dir'], {
+          cwd: cwdReal,
+          timeout: 5000,
+        })
+      } catch (revParseErr) {
+        const stderr = (revParseErr.stderr || revParseErr.message || '').toLowerCase()
+        const isNotGitRepo = stderr.includes('not a git repository') ||
+          revParseErr.code === 128
+        sendFn(ws, {
+          type: 'diff_result',
+          files: [],
+          error: isNotGitRepo
+            ? 'Not a git repository'
+            : `Git error: ${revParseErr.message || 'unknown failure'}`,
+        })
+        return
+      }
+
       const rawBase = (typeof base === 'string' && base.trim()) ? base.trim() : 'HEAD'
       // Validate ref name to prevent git flag injection
       const diffBase = /^[a-zA-Z0-9._\-\/~^@{}:]+$/.test(rawBase) ? rawBase : 'HEAD'

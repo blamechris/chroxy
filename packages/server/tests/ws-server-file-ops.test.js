@@ -1165,6 +1165,36 @@ describe('get_diff handler', () => {
 
     ws.close()
   })
+
+  it('returns friendly error for non-git directory', async () => {
+    // Create a plain (non-git) temp directory
+    const nonGitDir = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-nongit-')))
+    let ws
+    try {
+      const mockSession = createMockSession()
+      mockSession.cwd = nonGitDir
+
+      server = new WsServer({
+        port: 0,
+        apiToken: 'test-token',
+        cliSession: mockSession,
+        authRequired: false,
+      })
+      const port = await startServerAndGetPort(server)
+      const client = await createClient(port, true)
+      ws = client.ws
+
+      send(ws, { type: 'get_diff' })
+      const result = await waitForMessage(client.messages, 'diff_result', 5000)
+
+      assert.ok(result.error, 'Should return error for non-git dir')
+      assert.match(result.error, /not a git repository/i)
+      assert.deepEqual(result.files, [])
+    } finally {
+      if (ws) ws.close()
+      rmSync(nonGitDir, { recursive: true, force: true })
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1470,10 +1500,10 @@ describe('browse_files and read_file handlers', () => {
     ws.close()
   })
 
-  it('read_file: detects binary files', async () => {
-    // Create a file with null bytes (binary)
+  it('read_file: returns base64 data URL for image files', async () => {
+    // Create a small PNG-like file with null bytes (binary)
     const binaryContent = Buffer.alloc(100)
-    binaryContent[0] = 0x89  // PNG-like header
+    binaryContent[0] = 0x89  // PNG header
     binaryContent[1] = 0x50
     binaryContent[2] = 0x4e
     binaryContent[3] = 0x47
@@ -1485,7 +1515,25 @@ describe('browse_files and read_file handlers', () => {
     send(ws, { type: 'read_file', path: 'image.png' })
     const content = await waitForMessage(messages, 'file_content', 2000)
 
-    assert.ok(content.error, 'Should return an error for binary file')
+    assert.equal(content.error, null, 'Image files should not return error')
+    assert.equal(content.language, 'image')
+    assert.ok(content.content.startsWith('data:image/png;base64,'), 'Should return base64 data URL')
+
+    ws.close()
+  })
+
+  it('read_file: detects non-image binary files', async () => {
+    // Create a generic binary file (not an image extension)
+    const binaryContent = Buffer.alloc(100)
+    binaryContent[10] = 0x00 // null byte
+    writeFileSync(join(tempDir, 'data.bin'), binaryContent)
+
+    const { ws, messages } = await createTestServer()
+
+    send(ws, { type: 'read_file', path: 'data.bin' })
+    const content = await waitForMessage(messages, 'file_content', 2000)
+
+    assert.ok(content.error, 'Should return an error for non-image binary file')
     assert.match(content.error, /binary/i)
     assert.equal(content.content, null)
 

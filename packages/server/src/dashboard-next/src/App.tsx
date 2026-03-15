@@ -808,6 +808,7 @@ export function App() {
             context={formatContext(contextUsage)}
             isBusy={!isIdle}
             agentCount={activeAgents.length}
+            provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
           />
         </div>
       </header>
