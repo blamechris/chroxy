@@ -201,4 +201,30 @@ describe('MultiTerminalView', () => {
     renderMultiTerminal()
     expect(screen.queryByTestId('terminal-empty-state')).toBeNull()
   })
+
+  it('does not leak global buffer into new session without session-specific data', () => {
+    // Global buffer has data but the active session (s2) has no session-specific buffer
+    mockStoreState = {
+      sessionStates: {
+        s1: { terminalRawBuffer: 'session-1-data' },
+        // s2 has no terminalRawBuffer — simulates a freshly created session
+      },
+      terminalRawBuffer: 'session-1-data',
+    }
+    mockGetState.mockReturnValue({
+      activeSessionId: 's2',
+      terminalRawBuffer: 'session-1-data',
+      sessionStates: mockStoreState.sessionStates,
+    })
+
+    renderMultiTerminal({ activeSessionId: 's2' })
+
+    // The active session (s2) should show empty state, NOT the global buffer
+    expect(screen.getByTestId('terminal-empty-state')).toBeTruthy()
+
+    // Verify the terminal for s2 got empty initialData, not the global buffer
+    const terminals = screen.getAllByTestId('mock-terminal')
+    const s2Terminal = terminals[1]! // s2 is the second session
+    expect(s2Terminal.dataset.initialData).toBe('')
+  })
 })

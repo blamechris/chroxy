@@ -30,10 +30,8 @@ export function StatusBar({ model, cost, context, isBusy, agentCount, provider }
         </span>
       )}
       {model && <span className="status-model">{model}</span>}
-      {cost != null && (
-        <span className="status-cost">${cost.toFixed(4)}</span>
-      )}
-      {context && <span className="status-context">{context}</span>}
+      <span className="status-cost">{cost != null ? `$${cost.toFixed(4)}` : '\u00A0'}</span>
+      <span className="status-context">{context || '\u00A0'}</span>
       {agentCount != null && agentCount > 0 && (
         <span className="agent-badge" data-testid="agent-badge">
           {agentCount} {agentCount === 1 ? 'agent' : 'agents'}
