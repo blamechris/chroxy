@@ -5,7 +5,7 @@ import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 
 /**
- * ws-forwarding.js unit tests (#1732)
+ * ws-forwarding.js unit tests (#1732, #2376)
  *
  * Tests cover:
  * - onFlush wiring: normalizer delta flush → broadcast
@@ -14,6 +14,9 @@ import { EventNormalizer } from '../src/event-normalizer.js'
  * - result: broadcasts session_activity with isBusy=false + cost
  * - session_updated: broadcasts session name change
  * - Normal session_event: routes to broadcastToSession
+ * - setupCliForwarding: forwards events through normalizer, models_updated broadcast
+ * - executeSideEffects: session_list refresh, push notification trigger, flush_deltas
+ * - executeRegistrations: permissionSessionMap/questionSessionMap population
  */
 
 function makeCtx(overrides = {}) {
@@ -168,5 +171,406 @@ describe('setupForwarding', () => {
       // Should not throw
       assert.doesNotThrow(() => setupForwarding(ctx))
     })
+  })
+})
+
+function makeCliCtx(overrides = {}) {
+  const cliSession = new EventEmitter()
+  const devPreview = new EventEmitter()
+  devPreview.handleToolResult = mock.fn()
+  devPreview.closeSession = mock.fn()
+  const normalizer = new EventNormalizer()
+
+  return {
+    normalizer,
+    sessionManager: null,
+    cliSession,
+    devPreview,
+    pushManager: null,
+    permissionSessionMap: new Map(),
+    questionSessionMap: new Map(),
+    broadcast: mock.fn(),
+    broadcastToSession: mock.fn(),
+    ...overrides,
+  }
+}
+
+describe('setupCliForwarding', () => {
+  it('forwards a ready event through the normalizer and broadcasts claude_ready', () => {
+    const ctx = makeCliCtx()
+    // Provide a minimal cliSession entry for the normalizer's getSessionEntry
+    ctx.cliSession.model = null
+    ctx.cliSession.permissionMode = 'approve'
+    setupForwarding(ctx)
+
+    ctx.cliSession.emit('ready', {})
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const readyMsg = calls.find(m => m.type === 'claude_ready')
+    assert.ok(readyMsg, 'expected claude_ready broadcast')
+  })
+
+  it('forwards a message event through the normalizer and broadcasts message', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    ctx.cliSession.emit('message', {
+      type: 'assistant',
+      content: 'Hello',
+      tool: null,
+      options: null,
+      timestamp: 1000,
+    })
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const msgCall = calls.find(m => m.type === 'message')
+    assert.ok(msgCall, 'expected message broadcast')
+    assert.equal(msgCall.content, 'Hello')
+  })
+
+  it('buffers stream_delta and does not immediately broadcast', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    ctx.cliSession.emit('stream_delta', { messageId: 'msg-1', delta: 'chunk' })
+
+    // Buffered — no broadcast yet
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const deltaCall = calls.find(m => m.type === 'stream_delta')
+    assert.equal(deltaCall, undefined, 'stream_delta should be buffered, not immediately broadcast')
+  })
+
+  it('broadcasts models_updated as available_models bypassing the normalizer', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    ctx.cliSession.emit('models_updated', {
+      models: [{ id: 'claude-opus-4-6', label: 'Claude Opus' }],
+    })
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const modelsMsg = calls.find(m => m.type === 'available_models')
+    assert.ok(modelsMsg, 'expected available_models broadcast')
+    assert.deepEqual(modelsMsg.models, [{ id: 'claude-opus-4-6', label: 'Claude Opus' }])
+    assert.ok('defaultModel' in modelsMsg, 'expected defaultModel field')
+  })
+
+  it('does not broadcast available_models when models_updated has no models field', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    ctx.cliSession.emit('models_updated', {})
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const modelsMsg = calls.find(m => m.type === 'available_models')
+    assert.equal(modelsMsg, undefined)
+  })
+
+  it('does not forward unrecognised events', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    // 'custom_internal' is not in FORWARDED_EVENTS — should be silently dropped
+    ctx.cliSession.emit('custom_internal', { foo: 'bar' })
+
+    assert.equal(ctx.broadcast.mock.calls.length, 0)
+  })
+})
+
+describe('executeSideEffects (via setupCliForwarding)', () => {
+  it('session_list side-effect: broadcasts session_list when sessionManager present', () => {
+    const sm = new EventEmitter()
+    sm.getSession = mock.fn(() => null)
+    sm.listSessions = mock.fn(() => [{ id: 's1' }])
+    sm.getSessionContext = mock.fn(() => Promise.resolve(null))
+    const normalizer = new EventNormalizer()
+    const devPreview = new EventEmitter()
+    devPreview.handleToolResult = mock.fn()
+    devPreview.closeSession = mock.fn()
+    const ctx = {
+      normalizer,
+      sessionManager: sm,
+      cliSession: null,
+      devPreview,
+      pushManager: null,
+      permissionSessionMap: new Map(),
+      questionSessionMap: new Map(),
+      broadcast: mock.fn(),
+      broadcastToSession: mock.fn(),
+    }
+    setupForwarding(ctx)
+
+    // stream_start triggers a session_list side-effect
+    sm.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'stream_start',
+      data: { messageId: 'msg-1' },
+    })
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const listMsg = calls.find(m => m.type === 'session_list')
+    assert.ok(listMsg, 'expected session_list broadcast')
+    assert.deepEqual(listMsg.sessions, [{ id: 's1' }])
+    assert.equal(sm.listSessions.mock.calls.length >= 1, true)
+  })
+
+  it('session_list side-effect: skipped when sessionManager is null (CLI mode)', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    // stream_start via CLI; normalizer returns session_list side-effect but sessionManager is null
+    ctx.cliSession.emit('stream_start', { messageId: 'msg-1' })
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const listMsg = calls.find(m => m.type === 'session_list')
+    assert.equal(listMsg, undefined, 'session_list must not broadcast without sessionManager')
+  })
+
+  it('push side-effect: calls pushManager.send with correct args', () => {
+    const sm = new EventEmitter()
+    sm.getSession = mock.fn(() => null)
+    sm.listSessions = mock.fn(() => [])
+    sm.getSessionContext = mock.fn(() => Promise.resolve(null))
+    const pushManager = { send: mock.fn() }
+    const normalizer = new EventNormalizer()
+    const devPreview = new EventEmitter()
+    devPreview.handleToolResult = mock.fn()
+    devPreview.closeSession = mock.fn()
+    const ctx = {
+      normalizer,
+      sessionManager: sm,
+      cliSession: null,
+      devPreview,
+      pushManager,
+      permissionSessionMap: new Map(),
+      questionSessionMap: new Map(),
+      broadcast: mock.fn(),
+      broadcastToSession: mock.fn(),
+    }
+    setupForwarding(ctx)
+
+    // permission_request triggers a push side-effect
+    sm.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'permission_request',
+      data: {
+        requestId: 'req-1',
+        tool: 'bash',
+        description: 'run a script',
+        input: { command: 'ls' },
+        remainingMs: 30000,
+      },
+    })
+
+    assert.equal(pushManager.send.mock.calls.length, 1)
+    const [category, title, body] = pushManager.send.mock.calls[0].arguments
+    assert.equal(category, 'permission')
+    assert.equal(title, 'Permission needed')
+    assert.match(body, /bash/)
+  })
+
+  it('push side-effect: skipped when pushManager is null', () => {
+    const sm = new EventEmitter()
+    sm.getSession = mock.fn(() => null)
+    sm.listSessions = mock.fn(() => [])
+    sm.getSessionContext = mock.fn(() => Promise.resolve(null))
+    const normalizer = new EventNormalizer()
+    const devPreview = new EventEmitter()
+    devPreview.handleToolResult = mock.fn()
+    devPreview.closeSession = mock.fn()
+    const ctx = {
+      normalizer,
+      sessionManager: sm,
+      cliSession: null,
+      devPreview,
+      pushManager: null,
+      permissionSessionMap: new Map(),
+      questionSessionMap: new Map(),
+      broadcast: mock.fn(),
+      broadcastToSession: mock.fn(),
+    }
+    setupForwarding(ctx)
+
+    // Should not throw even though pushManager is null
+    assert.doesNotThrow(() => {
+      sm.emit('session_event', {
+        sessionId: 'sess-1',
+        event: 'permission_request',
+        data: {
+          requestId: 'req-1',
+          tool: 'bash',
+          description: 'run',
+          input: {},
+          remainingMs: 30000,
+        },
+      })
+    })
+  })
+
+  it('flush_deltas side-effect: flushes buffered deltas before stream_end broadcast', () => {
+    const sm = new EventEmitter()
+    sm.getSession = mock.fn(() => null)
+    sm.listSessions = mock.fn(() => [])
+    sm.getSessionContext = mock.fn(() => Promise.resolve(null))
+    const normalizer = new EventNormalizer()
+    const devPreview = new EventEmitter()
+    devPreview.handleToolResult = mock.fn()
+    devPreview.closeSession = mock.fn()
+    const ctx = {
+      normalizer,
+      sessionManager: sm,
+      cliSession: null,
+      devPreview,
+      pushManager: null,
+      permissionSessionMap: new Map(),
+      questionSessionMap: new Map(),
+      broadcast: mock.fn(),
+      broadcastToSession: mock.fn(),
+    }
+    setupForwarding(ctx)
+
+    // Buffer a delta manually
+    normalizer.bufferDelta('sess-1', 'msg-1', 'accumulated text')
+
+    // stream_end triggers flush_deltas side-effect
+    sm.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'stream_end',
+      data: { messageId: 'msg-1' },
+    })
+
+    const sessionCalls = ctx.broadcastToSession.mock.calls
+    const deltaCall = sessionCalls.find(c => c.arguments[1]?.type === 'stream_delta')
+    assert.ok(deltaCall, 'expected stream_delta broadcast from flush_deltas')
+    assert.equal(deltaCall.arguments[0], 'sess-1')
+    assert.equal(deltaCall.arguments[1].delta, 'accumulated text')
+    assert.equal(deltaCall.arguments[1].messageId, 'msg-1')
+  })
+
+  it('flush_deltas in CLI mode broadcasts without sessionId', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    // Buffer a delta in legacy (null sessionId) mode
+    ctx.normalizer.bufferDelta(null, 'msg-99', 'legacy delta')
+
+    // stream_end triggers flush_deltas
+    ctx.cliSession.emit('stream_end', { messageId: 'msg-99' })
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const deltaMsg = calls.find(m => m.type === 'stream_delta')
+    assert.ok(deltaMsg, 'expected stream_delta broadcast in CLI mode')
+    assert.equal(deltaMsg.delta, 'legacy delta')
+    assert.equal(deltaMsg.messageId, 'msg-99')
+  })
+})
+
+describe('executeRegistrations (via setupCliForwarding)', () => {
+  it('registers permission requestId in permissionSessionMap', () => {
+    const sm = new EventEmitter()
+    sm.getSession = mock.fn(() => null)
+    sm.listSessions = mock.fn(() => [])
+    sm.getSessionContext = mock.fn(() => Promise.resolve(null))
+    const normalizer = new EventNormalizer()
+    const devPreview = new EventEmitter()
+    devPreview.handleToolResult = mock.fn()
+    devPreview.closeSession = mock.fn()
+    const permissionSessionMap = new Map()
+    const questionSessionMap = new Map()
+    const ctx = {
+      normalizer,
+      sessionManager: sm,
+      cliSession: null,
+      devPreview,
+      pushManager: null,
+      permissionSessionMap,
+      questionSessionMap,
+      broadcast: mock.fn(),
+      broadcastToSession: mock.fn(),
+    }
+    setupForwarding(ctx)
+
+    sm.emit('session_event', {
+      sessionId: 'sess-42',
+      event: 'permission_request',
+      data: {
+        requestId: 'req-abc',
+        tool: 'bash',
+        description: 'run',
+        input: {},
+        remainingMs: 30000,
+      },
+    })
+
+    assert.equal(permissionSessionMap.has('req-abc'), true)
+    assert.equal(permissionSessionMap.get('req-abc'), 'sess-42')
+  })
+
+  it('registers question toolUseId in questionSessionMap', () => {
+    const sm = new EventEmitter()
+    sm.getSession = mock.fn(() => null)
+    sm.listSessions = mock.fn(() => [])
+    sm.getSessionContext = mock.fn(() => Promise.resolve(null))
+    const normalizer = new EventNormalizer()
+    const devPreview = new EventEmitter()
+    devPreview.handleToolResult = mock.fn()
+    devPreview.closeSession = mock.fn()
+    const permissionSessionMap = new Map()
+    const questionSessionMap = new Map()
+    const ctx = {
+      normalizer,
+      sessionManager: sm,
+      cliSession: null,
+      devPreview,
+      pushManager: null,
+      permissionSessionMap,
+      questionSessionMap,
+      broadcast: mock.fn(),
+      broadcastToSession: mock.fn(),
+    }
+    setupForwarding(ctx)
+
+    sm.emit('session_event', {
+      sessionId: 'sess-99',
+      event: 'user_question',
+      data: {
+        toolUseId: 'tool-xyz',
+        questions: ['Are you sure?'],
+      },
+    })
+
+    assert.equal(questionSessionMap.has('tool-xyz'), true)
+    assert.equal(questionSessionMap.get('tool-xyz'), 'sess-99')
+  })
+
+  it('registers question in CLI mode (sessionId stored as null)', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    ctx.cliSession.emit('user_question', {
+      toolUseId: 'tool-cli-1',
+      questions: ['Proceed?'],
+    })
+
+    assert.equal(ctx.questionSessionMap.has('tool-cli-1'), true)
+    assert.equal(ctx.questionSessionMap.get('tool-cli-1'), null)
+  })
+
+  it('does not throw when both maps are empty and no registrations needed', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    assert.doesNotThrow(() => {
+      ctx.cliSession.emit('message', {
+        type: 'assistant',
+        content: 'Hi',
+        tool: null,
+        options: null,
+        timestamp: 0,
+      })
+    })
+
+    assert.equal(ctx.permissionSessionMap.size, 0)
+    assert.equal(ctx.questionSessionMap.size, 0)
   })
 })
