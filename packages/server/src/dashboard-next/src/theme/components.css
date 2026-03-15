@@ -97,6 +97,7 @@
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .logo {
@@ -2005,11 +2006,13 @@
 .status-cost {
   color: var(--accent-green);
   font-family: var(--font-mono);
+  min-width: 60px;
 }
 
 .status-context {
   color: var(--text-muted);
   font-family: var(--font-mono);
+  min-width: 50px;
 }
 
 .busy-indicator {
