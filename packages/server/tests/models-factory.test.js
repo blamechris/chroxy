@@ -55,8 +55,8 @@ describe('createModelsRegistry', () => {
       { value: 'claude-opus-4-20250514', displayName: 'Opus', description: '' },
     ])
     assert.equal(registry.getDefaultModelId(), 'sonnet-4-20250514')
-    // Also strips the Default prefix from label
-    assert.equal(registry.getModels()[0].label, 'recommended')
+    // Strips the Default prefix and derives readable label from model ID
+    assert.equal(registry.getModels()[0].label, 'Sonnet 4')
     // Non-Default displayName passes through unchanged
     assert.equal(registry.getModels()[1].label, 'Opus')
   })
@@ -89,6 +89,57 @@ describe('createModelsRegistry', () => {
     registry.resetModels()
     assert.ok(registry.getModels().length >= 4)
     assert.ok(registry.getAllowedModelIds().has('sonnet'))
+  })
+})
+
+describe('updateModels label derivation', () => {
+  it('derives readable label from model ID when displayName is missing', () => {
+    const registry = createModelsRegistry()
+    registry.updateModels([
+      { value: 'claude-opus-4-5-20251101', description: '' },
+    ])
+    assert.equal(registry.getModels()[0].label, 'Opus 4.5')
+  })
+
+  it('derives readable label from model ID without date suffix', () => {
+    const registry = createModelsRegistry()
+    registry.updateModels([
+      { value: 'claude-opus-4-6', description: '' },
+    ])
+    assert.equal(registry.getModels()[0].label, 'Opus 4.6')
+  })
+
+  it('derives readable label for single-version models', () => {
+    const registry = createModelsRegistry()
+    registry.updateModels([
+      { value: 'claude-sonnet-4-20250514', description: '' },
+    ])
+    assert.equal(registry.getModels()[0].label, 'Sonnet 4')
+  })
+
+  it('uses displayName when provided', () => {
+    const registry = createModelsRegistry()
+    registry.updateModels([
+      { value: 'claude-opus-4-6', displayName: 'Opus 4.6', description: '' },
+    ])
+    assert.equal(registry.getModels()[0].label, 'Opus 4.6')
+  })
+
+  it('strips Default wrapper and derives label from ID when inner text is generic', () => {
+    const registry = createModelsRegistry()
+    registry.updateModels([
+      { value: 'claude-sonnet-4-20250514', displayName: 'Default (recommended)', description: '' },
+    ])
+    // Should derive from model ID, not use "recommended" as the label
+    assert.equal(registry.getModels()[0].label, 'Sonnet 4')
+  })
+
+  it('strips Default wrapper and keeps inner label when descriptive', () => {
+    const registry = createModelsRegistry()
+    registry.updateModels([
+      { value: 'claude-sonnet-4-6', displayName: 'Default (Sonnet 4.6)', description: '' },
+    ])
+    assert.equal(registry.getModels()[0].label, 'Sonnet 4.6')
   })
 })
 
