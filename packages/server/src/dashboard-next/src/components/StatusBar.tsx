@@ -1,10 +1,9 @@
 /**
- * StatusBar — model, cost, context, busy indicator, agent badges.
+ * StatusBar — cost, context, busy indicator, agent badges.
  */
 import { getProviderInfo } from '../lib/provider-labels'
 
 export interface StatusBarProps {
-  model?: string
   cost?: number
   context?: string
   isBusy?: boolean

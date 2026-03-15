@@ -14,9 +14,8 @@ describe('StatusBar', () => {
   })
 
   it('does not render model (model shown in header dropdown)', () => {
-    const { container } = render(<StatusBar model="claude-sonnet" />)
+    const { container } = render(<StatusBar />)
     expect(container.querySelector('.status-model')).toBeNull()
-    expect(screen.queryByText('claude-sonnet')).not.toBeInTheDocument()
   })
 
   it('shows formatted cost with 4 decimal places', () => {
