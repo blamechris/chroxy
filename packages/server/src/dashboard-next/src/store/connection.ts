@@ -360,6 +360,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       mcpServers: EMPTY_MCP_SERVERS,
       devPreviews: EMPTY_DEV_PREVIEWS,
       selectedFilePath: null,
+      thinkingLevel: 'default',
     };
   },
 
@@ -1019,6 +1020,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     if (socket && socket.readyState === WebSocket.OPEN) {
       const payload: Record<string, unknown> = { type: 'set_permission_mode', mode };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      wsSend(socket, payload);
+    }
+  },
+
+  setThinkingLevel: (level: string) => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const payload: Record<string, unknown> = { type: 'set_thinking_level', level };
       if (activeSessionId) payload.sessionId = activeSessionId;
       wsSend(socket, payload);
     }

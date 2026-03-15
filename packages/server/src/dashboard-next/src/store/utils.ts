@@ -86,5 +86,6 @@ export function createEmptySessionState(): SessionState {
     mcpServers: [],
     devPreviews: [],
     selectedFilePath: null,
+    thinkingLevel: 'default',
   };
 }

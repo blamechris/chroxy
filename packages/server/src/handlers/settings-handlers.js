@@ -138,10 +138,36 @@ function handleListProviders(ws, client, msg, ctx) {
   ctx.send(ws, { type: 'provider_list', providers: listProviders() })
 }
 
+const VALID_THINKING_LEVELS = new Set(['default', 'high', 'max'])
+
+function handleSetThinkingLevel(ws, client, msg, ctx) {
+  const level = typeof msg.level === 'string' ? msg.level.trim() : ''
+  if (!VALID_THINKING_LEVELS.has(level)) {
+    ctx.send(ws, { type: 'session_error', message: `Invalid thinking level: ${level}` })
+    return
+  }
+
+  const sessionId = msg.sessionId || client.activeSessionId
+  const entry = ctx.sessionManager?.getSession(sessionId)
+  if (!entry) {
+    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    return
+  }
+
+  if (typeof entry.session.setThinkingLevel !== 'function') {
+    ctx.send(ws, { type: 'session_error', message: 'This provider does not support thinking level control' })
+    return
+  }
+
+  entry.session.setThinkingLevel(level)
+  ctx.broadcastToSession(sessionId, { type: 'thinking_level_changed', level })
+}
+
 export const settingsHandlers = {
   set_model: handleSetModel,
   set_permission_mode: handleSetPermissionMode,
   permission_response: handlePermissionResponse,
   query_permission_audit: handleQueryPermissionAudit,
   list_providers: handleListProviders,
+  set_thinking_level: handleSetThinkingLevel,
 }

@@ -125,6 +125,7 @@ export function App() {
     isIdle,
     activeAgents,
     isPlanPending,
+    thinkingLevel,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
   // Fire native notifications for permission requests when window is not focused
@@ -157,6 +158,7 @@ export function App() {
   const setViewMode = useConnectionStore(s => s.setViewMode)
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
+  const setThinkingLevel = useConnectionStore(s => s.setThinkingLevel)
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
   const dismissInfoNotification = useConnectionStore(s => s.dismissInfoNotification)
   const dismissSessionNotification = useConnectionStore(s => s.dismissSessionNotification)
@@ -796,6 +798,17 @@ export function App() {
               ))}
             </select>
           )}
+          {/* Thinking level selector */}
+          <select
+            value={thinkingLevel || 'default'}
+            onChange={e => setThinkingLevel(e.target.value)}
+            aria-label="Thinking level"
+            className="thinking-level-select"
+          >
+            <option value="default">Think: Auto</option>
+            <option value="high">Think: High</option>
+            <option value="max">Think: Max</option>
+          </select>
         </div>
         <div className="header-right">
           <button
