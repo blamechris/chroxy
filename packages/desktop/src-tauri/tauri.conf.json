@@ -1,6 +1,6 @@
 {
   "productName": "Chroxy",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "identifier": "com.chroxy.desktop",
   "build": {
     "frontendDist": "../dist",
