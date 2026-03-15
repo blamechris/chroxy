@@ -221,7 +221,8 @@ export function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Prevent Backspace from triggering browser/webview "back" navigation
-      if (e.key === 'Backspace' && !['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName) && !(e.target as HTMLElement).isContentEditable) {
+      const target = e.target instanceof HTMLElement ? e.target : null
+      if (e.key === 'Backspace' && (!target || (!['INPUT', 'TEXTAREA'].includes(target.tagName) && !target.isContentEditable))) {
         e.preventDefault()
         return
       }

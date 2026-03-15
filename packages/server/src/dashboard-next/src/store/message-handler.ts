@@ -1846,9 +1846,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         updateSession(budgetExceededTargetId, (ss) => ({
           messages: [...ss.messages, budgetExceededMsg],
         }));
+      } else {
+        get().addMessage(budgetExceededMsg);
       }
-      // Always add to flat messages too (ensures it shows in both Chat and System tabs)
-      get().addMessage(budgetExceededMsg);
       // Show toast notification
       _adapters.alert.alert('Budget Exceeded', `${exceededMessage}\n\nNew messages are paused.`);
       // Auto-resume budget
