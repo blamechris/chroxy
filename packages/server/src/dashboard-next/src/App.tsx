@@ -769,7 +769,7 @@ export function App() {
           {/* Model selector */}
           {availableModels.length > 0 && (
             <select
-              value={activeModel || ''}
+              value={activeModel === defaultModelId ? '' : (activeModel || '')}
               onChange={e => {
                 const v = e.target.value;
                 if (v) {
@@ -788,9 +788,11 @@ export function App() {
                   ? availableModels.find(m => m.id === defaultModelId)?.label
                   : availableModels[0]?.label) ?? 'recommended'})
               </option>
-              {availableModels.map(m => (
-                <option key={m.id} value={m.id}>{m.label}</option>
-              ))}
+              {availableModels
+                .filter(m => m.id !== defaultModelId)
+                .map(m => (
+                  <option key={m.id} value={m.id}>{m.label}</option>
+                ))}
             </select>
           )}
           {/* Permission mode selector */}

@@ -8,6 +8,20 @@ export const MODELS = [
 ]
 
 /**
+ * Derive a human-readable label from a stripped model ID.
+ * E.g. "opus-4-5-20251101" → "Opus 4.5", "sonnet-4-20250514" → "Sonnet 4"
+ */
+function humanizeModelId(id) {
+  // Strip date suffix (8+ digits at end)
+  let clean = id.replace(/-\d{8,}$/, '')
+  const parts = clean.split('-')
+  if (parts.length === 0) return id
+  const family = parts[0].charAt(0).toUpperCase() + parts[0].slice(1)
+  const version = parts.slice(1).join('.')
+  return version ? `${family} ${version}` : family
+}
+
+/**
  * Factory function that creates an isolated models registry.
  * Each instance has its own mutable state, preventing test pollution.
  */
@@ -46,13 +60,17 @@ export function createModelsRegistry() {
         .map(m => {
           const fullId = m.value
           const id = fullId.startsWith('claude-') ? fullId.slice(7) : fullId
-          let label = m.displayName || id
+          let label = m.displayName || ''
           // Detect SDK default model (displayName starts with "Default")
           if (typeof m.displayName === 'string' && /^default\b/i.test(m.displayName)) {
             defaultModelId = id
             // Strip "Default (...)" wrapper to avoid nested labels
             const match = label.match(/^Default\s*\((.+)\)$/)
             if (match) label = match[1]
+          }
+          // If label is empty or generic (e.g. "recommended"), derive from model ID
+          if (!label || /^recommended$/i.test(label)) {
+            label = humanizeModelId(id)
           }
           return { id, label, fullId }
         })
