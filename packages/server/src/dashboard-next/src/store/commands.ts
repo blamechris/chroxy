@@ -32,7 +32,7 @@ export function useCommands(): Command[] {
         name: 'New Session',
         category: 'Session',
         shortcut: 'Cmd+N',
-        action: () => createSession('New Session'),
+        action: () => createSession({ name: 'New Session' }),
       },
       {
         id: 'interrupt',
