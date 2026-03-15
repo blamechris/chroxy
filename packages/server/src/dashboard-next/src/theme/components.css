@@ -139,6 +139,7 @@
   border-radius: 8px;
   padding: 12px 16px;
   min-width: 240px;
+  max-width: calc(100vw - 32px);
   z-index: 100;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   display: flex;
