@@ -415,13 +415,19 @@ export class WsServer {
     this.defaultSessionId = defaultSessionId || null
     this._checkpointManager = new CheckpointManager()
 
-    // Clean up checkpoints when sessions are destroyed
+    // Clean up checkpoints and routing maps when sessions are destroyed
     if (sessionManager && typeof sessionManager.on === 'function') {
       sessionManager.on('session_destroyed', ({ sessionId }) => {
         try {
           this._checkpointManager.clearCheckpoints(sessionId)
         } catch (err) {
           log.warn(`Failed to clear checkpoints for destroyed session ${sessionId}: ${err.message}`)
+        }
+        for (const [key, sid] of this._permissionSessionMap) {
+          if (sid === sessionId) this._permissionSessionMap.delete(key)
+        }
+        for (const [key, sid] of this._questionSessionMap) {
+          if (sid === sessionId) this._questionSessionMap.delete(key)
         }
       })
     }
