@@ -30,6 +30,8 @@ function handleCreateSession(ws, client, msg, ctx) {
   const name = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : undefined
   const cwd = (typeof msg.cwd === 'string' && msg.cwd.trim()) ? msg.cwd.trim() : undefined
   const provider = (typeof msg.provider === 'string' && msg.provider.trim()) ? msg.provider.trim() : undefined
+  const model = (typeof msg.model === 'string' && msg.model.trim()) ? msg.model.trim() : undefined
+  const permissionMode = (typeof msg.permissionMode === 'string' && msg.permissionMode.trim()) ? msg.permissionMode.trim() : undefined
 
   if (cwd) {
     const cwdError = validateCwdWithinHome(cwd)
@@ -40,7 +42,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   }
 
   try {
-    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider })
+    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode })
     client.activeSessionId = sessionId
     client.subscribedSessionIds.add(sessionId)
     const entry = ctx.sessionManager.getSession(sessionId)

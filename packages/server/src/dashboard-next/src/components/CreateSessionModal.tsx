@@ -17,6 +17,7 @@ export interface CreateSessionData {
   name: string
   cwd: string
   provider?: string
+  permissionMode?: string
 }
 
 export interface CreateSessionModalProps {
@@ -84,6 +85,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [cwd, setCwd] = useState('')
   const [provider, setProvider] = useState(defaultProvider)
   const [nameError, setNameError] = useState('')
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [permissionMode, setPermissionMode] = useState('')
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1)
   const cwdInputRef = useRef<HTMLInputElement>(null)
@@ -155,8 +158,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       flushSync(() => setNameError('Session name is required'))
       return
     }
-    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider })
-  }, [onCreate, provider])
+    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined })
+  }, [onCreate, provider, permissionMode])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -451,6 +454,35 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           )
         })()}
       </div>
+      <div className="advanced-toggle">
+        <button
+          type="button"
+          className="advanced-toggle-btn"
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          aria-expanded={showAdvanced}
+        >
+          {showAdvanced ? '\u25BC' : '\u25B6'} Advanced
+        </button>
+      </div>
+      {showAdvanced && (
+        <div className="advanced-section" data-testid="advanced-section">
+          <div className="form-field">
+            <label htmlFor="permission-mode-select">Permission mode</label>
+            <select
+              id="permission-mode-select"
+              value={permissionMode}
+              onChange={e => setPermissionMode(e.target.value)}
+              aria-label="Permission mode"
+            >
+              <option value="">Server default</option>
+              <option value="approve">Approve</option>
+              <option value="acceptEdits">Accept Edits</option>
+              <option value="auto">Auto (bypass)</option>
+              <option value="plan">Plan</option>
+            </select>
+          </div>
+        </div>
+      )}
       {serverError && (
         <span className="form-error" role="alert">{serverError}</span>
       )}
