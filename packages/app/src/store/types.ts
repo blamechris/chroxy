@@ -362,8 +362,6 @@ export interface ConnectionState {
   sessionCwd: string | null;
   serverVersion: string | null;
   latestVersion: string | null;
-  serverCommit: string | null;
-  serverProtocolVersion: number | null;
 
   // Multi-session state
   sessions: SessionInfo[];

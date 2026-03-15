@@ -10,6 +10,7 @@ import { createEmptySessionState } from '../../store/utils';
 import { clearPersistedSession } from '../../store/persistence';
 import { setCallback, clearAllCallbacks } from '../../store/imperative-callbacks';
 import { useMultiClientStore } from '../../store/multi-client';
+import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import type { ConnectionState } from '../../store/types';
 
 // Mock persistence to track calls
@@ -525,15 +526,16 @@ describe('unknown message type (default case)', () => {
 
   afterEach(() => {
     warnSpy.mockRestore();
+    // Reset lifecycle store so serverProtocolVersion doesn't leak across tests
+    useConnectionLifecycleStore.getState().reset();
   });
 
   it('logs warning when server protocol version is newer than client', () => {
+    useConnectionLifecycleStore.getState().setServerInfo({ serverProtocolVersion: CLIENT_PROTOCOL_VERSION + 1 });
     const store = createMockStore({
-      serverProtocolVersion: CLIENT_PROTOCOL_VERSION + 1,
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-
     });
 
     setStore(store as any);
@@ -548,12 +550,11 @@ describe('unknown message type (default case)', () => {
   });
 
   it('does not log when server protocol version matches client', () => {
+    useConnectionLifecycleStore.getState().setServerInfo({ serverProtocolVersion: CLIENT_PROTOCOL_VERSION });
     const store = createMockStore({
-      serverProtocolVersion: CLIENT_PROTOCOL_VERSION,
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-
     });
 
     setStore(store as any);
@@ -565,12 +566,11 @@ describe('unknown message type (default case)', () => {
   });
 
   it('does not log when server protocol version is null', () => {
+    useConnectionLifecycleStore.getState().setServerInfo({ serverProtocolVersion: null });
     const store = createMockStore({
-      serverProtocolVersion: null,
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', name: 'S1' } as any],
       sessionStates: { s1: createEmptySessionState() },
-
     });
 
     setStore(store as any);
