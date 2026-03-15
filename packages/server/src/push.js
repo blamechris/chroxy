@@ -207,39 +207,7 @@ export class PushManager {
       ...(categoryId && { categoryId }),
     }))
 
-    try {
-      const res = await fetchWithRetry(EXPO_PUSH_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(messages),
-      })
-
-      if (!res.ok) {
-        console.error(`[push] Expo Push API returned ${res.status}`)
-        return
-      }
-
-      const result = await res.json()
-
-      // Prune tokens that returned errors (invalid/expired)
-      let pruned = false
-      if (result.data) {
-        for (let i = 0; i < result.data.length; i++) {
-          const ticket = result.data[i]
-          if (ticket.status === 'error') {
-            const token = messages[i].to
-            console.warn(`[push] Removing invalid token: ${token.slice(0, 30)}... (${ticket.message})`)
-            this.tokens.delete(token)
-            pruned = true
-          }
-        }
-      }
-      if (pruned) this._persistToDisk()
-
-      console.log(`[push] Sent ${category} notification to ${messages.length} device(s)`)
-    } catch (err) {
-      console.error(`[push] Failed to send notification:`, err.message)
-    }
+    await this._sendToTokenSet(this.tokens, messages, category, 'notification')
   }
 
   /**
@@ -267,6 +235,19 @@ export class PushManager {
       data: { state, detail, category },
     }))
 
+    await this._sendToTokenSet(this._liveActivityTokens, messages, category, 'Live Activity update')
+  }
+
+  /**
+   * Post messages to the Expo Push API and prune any tokens that come back
+   * with an error status. Shared by send() and sendLiveActivityUpdate().
+   *
+   * @param {Set<string>} tokenSet - The Set to prune invalid tokens from
+   * @param {object[]} messages - Pre-built Expo push message objects
+   * @param {string} category - Category label used in log output
+   * @param {string} logLabel - Human-readable label for log messages (e.g. 'notification', 'Live Activity update')
+   */
+  async _sendToTokenSet(tokenSet, messages, category, logLabel) {
     try {
       const res = await fetchWithRetry(EXPO_PUSH_URL, {
         method: 'POST',
@@ -281,24 +262,24 @@ export class PushManager {
 
       const result = await res.json()
 
-      // Prune Live Activity tokens that returned errors (invalid/expired)
+      // Prune tokens that returned errors (invalid/expired)
       let pruned = false
       if (result.data) {
         for (let i = 0; i < result.data.length; i++) {
           const ticket = result.data[i]
           if (ticket.status === 'error') {
             const token = messages[i].to
-            console.warn(`[push] Removing invalid Live Activity token: ${token.slice(0, 30)}... (${ticket.message})`)
-            this._liveActivityTokens.delete(token)
+            console.warn(`[push] Removing invalid token: ${token.slice(0, 30)}... (${ticket.message})`)
+            tokenSet.delete(token)
             pruned = true
           }
         }
       }
       if (pruned) this._persistToDisk()
 
-      console.log(`[push] Sent live_activity update to ${messages.length} device(s)`)
+      console.log(`[push] Sent ${category} ${logLabel} to ${messages.length} device(s)`)
     } catch (err) {
-      console.error(`[push] Failed to send Live Activity update:`, err.message)
+      console.error(`[push] Failed to send ${logLabel}:`, err.message)
     }
   }
 }
