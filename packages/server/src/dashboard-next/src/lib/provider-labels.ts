@@ -3,6 +3,7 @@ export const PROVIDER_LABELS: Record<string, string> = {
   'claude-sdk': 'Claude Code (SDK)',
   'claude-cli': 'Claude Code (CLI)',
   'gemini': 'Gemini (CLI)',
+  'codex': 'Codex (CLI)',
 }
 
 export type ProviderType = 'sdk' | 'cli' | 'other'
@@ -27,6 +28,11 @@ const KNOWN_PROVIDERS: Record<string, ProviderInfo> = {
   'gemini': {
     short: 'Gemini',
     tooltip: 'Gemini CLI — uses Google API credits',
+    type: 'other',
+  },
+  'codex': {
+    short: 'Codex',
+    tooltip: 'Codex CLI — uses OpenAI API credits',
     type: 'other',
   },
 }

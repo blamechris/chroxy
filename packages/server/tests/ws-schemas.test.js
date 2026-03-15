@@ -600,17 +600,10 @@ describe('dead code removal', () => {
     assert.equal(exports.ModeSchema, undefined, 'ModeSchema should not be exported')
   })
 
-  it('codex-session.js does not exist (removed dead code)', async () => {
-    try {
-      await import('../src/codex-session.js')
-      assert.fail('codex-session.js should have been deleted')
-    } catch (err) {
-      assert.ok(
-        (err.code === 'ERR_MODULE_NOT_FOUND' || err.message.includes('Cannot find')) &&
-          err.message.includes('codex-session.js'),
-        'Expected module not found error for codex-session.js',
-      )
-    }
+  it('codex-session.js exports CodexSession', async () => {
+    const mod = await import('../src/codex-session.js')
+    assert.ok(mod.CodexSession, 'CodexSession should be exported')
+    assert.equal(typeof mod.CodexSession, 'function', 'CodexSession should be a class/constructor')
   })
 
   it('session-db.js does not exist', async () => {
