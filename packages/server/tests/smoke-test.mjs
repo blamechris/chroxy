@@ -23,12 +23,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const SCREENSHOT_DIR = join(__dirname, 'screenshots')
 const headed = process.argv.includes('--headed')
 
-// Read config for auth token
+// Read config for auth token (config.json first, then OS keychain fallback)
 const configPath = join(process.env.HOME, '.chroxy', 'config.json')
 let apiToken = null
 if (existsSync(configPath)) {
   const config = JSON.parse(readFileSync(configPath, 'utf8'))
   apiToken = config.apiToken
+}
+if (!apiToken) {
+  try {
+    const { execFileSync } = await import('child_process')
+    apiToken = execFileSync('security', ['find-generic-password', '-s', 'chroxy', '-a', 'api-token', '-w'], { encoding: 'utf-8' }).trim() || null
+  } catch { /* keychain not available or no entry */ }
 }
 
 const SERVER_DIR = join(__dirname, '..')
