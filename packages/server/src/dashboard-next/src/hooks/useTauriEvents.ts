@@ -14,10 +14,6 @@ import { useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { getTauriInvoke, getTauriListen } from '../utils/tauri-bridge'
 
-interface TauriEvent<T> {
-  payload: T
-}
-
 interface ServerReadyPayload {
   port: number
   token: string
