@@ -124,6 +124,7 @@ export function SessionScreen() {
   const connectionPhase = useConnectionStore((s) => s.connectionPhase);
   const activeModel = useConnectionStore(selectActiveModel);
   const availableModels = useConnectionStore((s) => s.availableModels);
+  const defaultModelId = useConnectionStore((s) => s.defaultModelId);
   const permissionMode = useConnectionStore(selectPermissionMode);
   const availablePermissionModes = useConnectionStore((s) => s.availablePermissionModes);
   const contextUsage = useConnectionStore(selectContextUsage);
@@ -762,6 +763,7 @@ export function SessionScreen() {
             setSettingsExpanded((prev) => !prev);
           }}
           activeModel={activeModel}
+          defaultModelId={defaultModelId}
           availableModels={availableModels}
           permissionMode={permissionMode}
           availablePermissionModes={availablePermissionModes}

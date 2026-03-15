@@ -18,6 +18,7 @@ export interface SettingsBarProps {
   expanded: boolean;
   onToggle: () => void;
   activeModel: string | null;
+  defaultModelId?: string | null;
   availableModels: ModelInfo[];
   permissionMode: string | null;
   availablePermissionModes: { id: string; label: string }[];
@@ -88,6 +89,7 @@ export function SettingsBar({
   expanded,
   onToggle,
   activeModel,
+  defaultModelId,
   availableModels,
   permissionMode,
   availablePermissionModes,
@@ -261,7 +263,8 @@ export function SettingsBar({
           {availableModels.length > 0 && (
                 <View style={styles.chipRow}>
                   {availableModels.map((m) => {
-                    const isActive = activeModel === m.id || activeModel === m.fullId;
+                    const isActive = activeModel === m.id || activeModel === m.fullId
+                      || (!activeModel && defaultModelId === m.id);
                     return (
                       <TouchableOpacity
                         key={m.id}

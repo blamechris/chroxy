@@ -1199,7 +1199,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  createSession: (name: string, cwd?: string, provider?: string, model?: string, permissionMode?: string) => {
+  createSession: ({ name, cwd, provider, model, permissionMode }) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, string> = { type: 'create_session' };
