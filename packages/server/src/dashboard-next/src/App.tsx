@@ -21,6 +21,7 @@ import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
 import { StatusBar } from './components/StatusBar'
+import { ChatSettingsDropdown } from './components/ChatSettingsDropdown'
 import { PermissionPrompt } from './components/PermissionPrompt'
 import { QuestionPrompt } from './components/QuestionPrompt'
 import { ToolBubble } from './components/ToolBubble'
@@ -766,64 +767,22 @@ export function App() {
           <span className={`status-dot ${connectionPhase}`} />
         </div>
         <div className="header-center">
-          {/* Model selector */}
-          {availableModels.length > 0 && (
-            <select
-              value={activeModel === defaultModelId ? '' : (activeModel || '')}
-              onChange={e => {
-                const v = e.target.value;
-                if (v) {
-                  setModel(v);
-                } else {
-                  const dm = defaultModelId
-                    ? availableModels.find(m => m.id === defaultModelId)
-                    : availableModels[0];
-                  if (dm) setModel(dm.id);
-                }
-              }}
-              aria-label="Select model"
-            >
-              <option value="">
-                Default ({(defaultModelId
-                  ? availableModels.find(m => m.id === defaultModelId)?.label
-                  : availableModels[0]?.label) ?? 'recommended'})
-              </option>
-              {availableModels
-                .filter(m => m.id !== defaultModelId)
-                .map(m => (
-                  <option key={m.id} value={m.id}>{m.label}</option>
-                ))}
-            </select>
-          )}
-          {/* Permission mode selector */}
-          {availablePermissionModes.length > 0 && (
-            <select
-              value={permissionMode || ''}
-              onChange={e => setPermissionMode(e.target.value)}
-              aria-label="Select permission mode"
-            >
-              {availablePermissionModes.map(m => (
-                <option key={m.id} value={m.id}>{m.label}</option>
-              ))}
-            </select>
-          )}
-          {/* Thinking level selector — only for providers with thinkingLevel capability */}
-          {(() => {
-            const activeProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider
-            const providerInfo = availableProviders.find(p => p.name === activeProvider)
-            return activeProvider && providerInfo?.capabilities?.thinkingLevel
-          })() && (
-            <select
-              value={thinkingLevel || 'default'}
-              onChange={e => setThinkingLevel(e.target.value as 'default' | 'high' | 'max')}
-              aria-label="Thinking level"
-              className="thinking-level-select"
-            >
-              <option value="default">Think: Auto</option>
-              <option value="high">Think: High</option>
-              <option value="max">Think: Max</option>
-            </select>
-          )}
+          <ChatSettingsDropdown
+            availableModels={availableModels}
+            activeModel={activeModel}
+            defaultModelId={defaultModelId}
+            onModelChange={setModel}
+            availablePermissionModes={availablePermissionModes}
+            permissionMode={permissionMode}
+            onPermissionModeChange={setPermissionMode}
+            showThinkingLevel={(() => {
+              const activeProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider
+              const providerInfo = availableProviders.find(p => p.name === activeProvider)
+              return !!(activeProvider && providerInfo?.capabilities?.thinkingLevel)
+            })()}
+            thinkingLevel={thinkingLevel}
+            onThinkingLevelChange={level => setThinkingLevel(level as 'default' | 'high' | 'max')}
+          />
         </div>
         <div className="header-right">
           <button
