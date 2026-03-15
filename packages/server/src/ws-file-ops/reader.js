@@ -261,6 +261,27 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
     try {
       const cwdReal = await resolveSessionCwd(sessionCwd)
+
+      // Check if the directory is a git repository before running git commands
+      try {
+        await execFileAsync(GIT, ['rev-parse', '--git-dir'], {
+          cwd: cwdReal,
+          timeout: 5000,
+        })
+      } catch (revParseErr) {
+        const stderr = (revParseErr.stderr || revParseErr.message || '').toLowerCase()
+        const isNotGitRepo = stderr.includes('not a git repository') ||
+          revParseErr.code === 128
+        sendFn(ws, {
+          type: 'diff_result',
+          files: [],
+          error: isNotGitRepo
+            ? 'Not a git repository'
+            : `Git error: ${revParseErr.message || 'unknown failure'}`,
+        })
+        return
+      }
+
       const rawBase = (typeof base === 'string' && base.trim()) ? base.trim() : 'HEAD'
       // Validate ref name to prevent git flag injection
       const diffBase = /^[a-zA-Z0-9._\-\/~^@{}:]+$/.test(rawBase) ? rawBase : 'HEAD'

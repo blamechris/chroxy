@@ -482,6 +482,8 @@ export async function startCliServer(config) {
     }
     if (tokenManager) tokenManager.destroy()
     if (pairingManager) pairingManager.destroy()
+    // Persist sessions before destroying (enables restore on restart)
+    try { sessionManager.serializeState() } catch {}
     sessionManager.destroyAll()
     wsServer.close()
     if (tunnel) await tunnel.stop()

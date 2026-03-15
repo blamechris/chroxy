@@ -352,6 +352,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionContext: null,
       mcpServers: EMPTY_MCP_SERVERS,
       devPreviews: EMPTY_DEV_PREVIEWS,
+      selectedFilePath: null,
     };
   },
 

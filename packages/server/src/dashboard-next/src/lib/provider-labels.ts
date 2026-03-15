@@ -4,3 +4,45 @@ export const PROVIDER_LABELS: Record<string, string> = {
   'claude-cli': 'Claude Code (CLI)',
   'gemini': 'Gemini (CLI)',
 }
+
+export type ProviderType = 'sdk' | 'cli' | 'other'
+
+export interface ProviderInfo {
+  short: string
+  tooltip: string
+  type: ProviderType
+}
+
+const KNOWN_PROVIDERS: Record<string, ProviderInfo> = {
+  'claude-sdk': {
+    short: 'SDK',
+    tooltip: 'Anthropic API — billed per token via ANTHROPIC_API_KEY',
+    type: 'sdk',
+  },
+  'claude-cli': {
+    short: 'CLI',
+    tooltip: 'Claude Code CLI — uses your claude.ai subscription',
+    type: 'cli',
+  },
+  'gemini': {
+    short: 'Gemini',
+    tooltip: 'Gemini CLI — uses Google API credits',
+    type: 'other',
+  },
+}
+
+const FALLBACK: ProviderInfo = {
+  short: 'API',
+  tooltip: 'External provider — check your billing dashboard',
+  type: 'other',
+}
+
+/** Get display info for a provider string. Handles unknown providers gracefully. */
+export function getProviderInfo(provider: string): ProviderInfo {
+  if (KNOWN_PROVIDERS[provider]) return KNOWN_PROVIDERS[provider]
+  // Heuristic fallback for unregistered providers containing 'sdk'
+  if (provider.includes('sdk')) {
+    return { short: 'SDK', tooltip: 'SDK provider — billed per token', type: 'sdk' }
+  }
+  return { ...FALLBACK, short: provider.replace(/^claude-/, '').toUpperCase() }
+}

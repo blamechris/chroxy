@@ -33,9 +33,18 @@ describe('StatusBar', () => {
     expect(screen.getByText('$0.0000')).toBeInTheDocument()
   })
 
-  it('does not show cost element when not provided', () => {
+  it('renders cost placeholder when not provided (prevents layout shift)', () => {
     const { container } = render(<StatusBar />)
-    expect(container.querySelector('.status-cost')).toBeNull()
+    const el = container.querySelector('.status-cost')
+    expect(el).not.toBeNull()
+    expect(el!.textContent).toBe('\u00A0')
+  })
+
+  it('renders context placeholder when not provided (prevents layout shift)', () => {
+    const { container } = render(<StatusBar />)
+    const el = container.querySelector('.status-context')
+    expect(el).not.toBeNull()
+    expect(el!.textContent).toBe('\u00A0')
   })
 
   it('shows context when provided', () => {
@@ -73,5 +82,34 @@ describe('StatusBar', () => {
   it('hides agent badge when agentCount is not provided', () => {
     render(<StatusBar />)
     expect(screen.queryByTestId('agent-badge')).not.toBeInTheDocument()
+  })
+
+  it('shows SDK provider badge with billing tooltip', () => {
+    render(<StatusBar provider="claude-sdk" />)
+    const badge = screen.getByTestId('status-provider')
+    expect(badge).toHaveTextContent('SDK')
+    expect(badge.getAttribute('data-provider')).toBe('sdk')
+    expect(badge.getAttribute('title')).toContain('API')
+  })
+
+  it('shows CLI provider badge with subscription tooltip', () => {
+    render(<StatusBar provider="claude-cli" />)
+    const badge = screen.getByTestId('status-provider')
+    expect(badge).toHaveTextContent('CLI')
+    expect(badge.getAttribute('data-provider')).toBe('cli')
+    expect(badge.getAttribute('title')).toContain('subscription')
+  })
+
+  it('hides provider badge when not provided', () => {
+    render(<StatusBar />)
+    expect(screen.queryByTestId('status-provider')).not.toBeInTheDocument()
+  })
+
+  it('shows non-Claude provider with generic badge and tooltip', () => {
+    render(<StatusBar provider="gemini" />)
+    const badge = screen.getByTestId('status-provider')
+    expect(badge).toHaveTextContent('Gemini')
+    expect(badge.getAttribute('data-provider')).toBe('other')
+    expect(badge.getAttribute('title')).toContain('Google')
   })
 })
