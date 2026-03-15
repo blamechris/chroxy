@@ -804,7 +804,8 @@ export class WsServer {
     if (msg.type === 'permission_response' || msg.type === 'user_question_response') {
       const { allowed, retryAfterMs } = this._permissionRateLimiter.check(client.id)
       if (!allowed) {
-        this._send(ws, { type: 'rate_limited', retryAfterMs, message: 'Too many permission responses. Please slow down.' })
+        const label = msg.type === 'user_question_response' ? 'question responses' : 'permission responses'
+        this._send(ws, { type: 'rate_limited', retryAfterMs, message: `Too many ${label}. Please slow down.` })
         return
       }
     } else {
