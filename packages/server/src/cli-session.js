@@ -7,6 +7,9 @@ import { forceKill } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { parseMcpToolName } from './mcp-tools.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('cli-session')
 
 // Default max accumulated size for tool_use input_json_delta chunks (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
@@ -112,7 +115,7 @@ export class CliSession extends BaseSession {
       args.push('--allowedTools', this.allowedTools.join(','))
     }
 
-    console.log(`[cli-session] Starting persistent process (model: ${this.model || 'default'}, permission: ${this.permissionMode})`)
+    log.info(`Starting persistent process (model: ${this.model || 'default'}, permission: ${this.permissionMode})`)
     this._spawnPersistentProcess(args)
   }
 
@@ -169,7 +172,7 @@ export class CliSession extends BaseSession {
     this._stderrRL = stderrRL
     stderrRL.on('line', (line) => {
       if (line.trim()) {
-        console.log(`[cli-session] stderr: ${line}`)
+        log.info(`stderr: ${line}`)
       }
     })
 
@@ -196,7 +199,7 @@ export class CliSession extends BaseSession {
         this._clearMessageState()
       }
 
-      console.log(`[cli-session] Process exited (code ${code}), scheduling respawn`)
+      log.info(`Process exited (code ${code}), scheduling respawn`)
       this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
       this._scheduleRespawn()
     })
@@ -204,14 +207,14 @@ export class CliSession extends BaseSession {
     // stdin is writable immediately — process is ready for NDJSON messages.
     // system.init arrives with the first response, not at startup.
     this._processReady = true
-    console.log('[cli-session] Process started, ready for messages')
+    log.info('Process started, ready for messages')
     this.emit('ready', { sessionId: null, model: this.model, tools: [] })
 
     // Dequeue any message that arrived during respawn
     if (this._pendingMessage) {
       const pending = this._pendingMessage
       this._pendingMessage = null
-      console.log('[cli-session] Dequeuing pending message')
+      log.info('Dequeuing pending message')
       if (typeof pending === 'string') {
         this.sendMessage(pending)
       } else {
@@ -230,14 +233,14 @@ export class CliSession extends BaseSession {
 
     this._respawnCount++
     if (this._respawnCount > 5) {
-      console.error('[cli-session] Max respawn attempts reached (5), giving up')
+      log.error('Max respawn attempts reached (5), giving up')
       this.emit('error', { message: 'Claude process failed to stay alive after 5 attempts' })
       return
     }
 
     const delays = [1000, 2000, 4000, 8000, 15000]
     const delay = delays[Math.min(this._respawnCount - 1, delays.length - 1)]
-    console.log(`[cli-session] Respawning in ${delay}ms (attempt ${this._respawnCount}/5)`)
+    log.info(`Respawning in ${delay}ms (attempt ${this._respawnCount}/5)`)
 
     this._respawnScheduled = true
     this._respawnTimer = setTimeout(() => {
@@ -259,7 +262,7 @@ export class CliSession extends BaseSession {
     }
 
     if (!this._processReady) {
-      console.log('[cli-session] Process not ready, queuing message')
+      log.info('Process not ready, queuing message')
       this._pendingMessage = { prompt, attachments, options }
       return
     }
@@ -290,13 +293,13 @@ export class CliSession extends BaseSession {
       },
     })
 
-    console.log(`[cli-session] Sending message ${this._currentMessageId}: "${(prompt || '').slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
+    log.info(`Sending message ${this._currentMessageId}: "${(prompt || '').slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
     this._child.stdin.write(ndjson + '\n')
 
     // Safety timeout: force-clear if result never arrives (5 min)
     this._resultTimeout = setTimeout(() => {
       if (this._isBusy) {
-        console.warn('[cli-session] Result timeout (5 min) — force-clearing busy state')
+        log.warn('Result timeout (5 min) — force-clearing busy state')
         const messageId = this._currentMessageId
         if (this._currentCtx?.hasStreamStarted) {
           this.emit('stream_end', { messageId })
@@ -317,7 +320,7 @@ export class CliSession extends BaseSession {
         if (data.subtype === 'init') {
           this._sessionId = data.session_id
           this._respawnCount = 0
-          console.log(`[cli-session] Session initialized: ${data.session_id}`)
+          log.info(`Session initialized: ${data.session_id}`)
           this.emit('ready', {
             sessionId: data.session_id,
             model: data.model,
@@ -326,7 +329,7 @@ export class CliSession extends BaseSession {
           // Emit MCP server status if present (including empty list to clear stale state)
           if (Array.isArray(data.mcp_servers)) {
             if (data.mcp_servers.length > 0) {
-              console.log(`[cli-session] MCP servers: ${data.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+              log.info(`MCP servers: ${data.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
             }
             this.emit('mcp_servers', { servers: data.mcp_servers })
           }
@@ -334,7 +337,7 @@ export class CliSession extends BaseSession {
           // Forward non-init system events (e.g. usage limits, sub-agent
           // notifications) as system messages to the client
           const text = data.message || data.text || data.subtype || 'System event'
-          console.log(`[cli-session] System event (${data.subtype || 'unknown'}): ${text}`)
+          log.info(`System event (${data.subtype || 'unknown'}): ${text}`)
           this.emit('message', {
             type: 'system',
             content: text,
@@ -396,9 +399,9 @@ export class CliSession extends BaseSession {
               if (typeof delta.partial_json === 'string' && !ctx.toolInputOverflow) {
                 const chunkBytes = Buffer.byteLength(delta.partial_json, 'utf8')
                 if (ctx.toolInputBytes + chunkBytes > this._maxToolInput) {
-                  console.warn(`[cli-session] toolInputChunks exceeded ${this._maxToolInput} bytes, discarding buffer`)
                   ctx.toolInputChunks = ''
                   ctx.toolInputOverflow = true
+                  log.warn(`toolInputChunks exceeded ${this._maxToolInput} bytes, discarding buffer`)
                   this.emit('error', {
                     message: `Tool input too large (>${Math.round(this._maxToolInput / 1024)}KB) for ${ctx.currentToolName || 'unknown tool'} — input was truncated`,
                   })
@@ -417,14 +420,14 @@ export class CliSession extends BaseSession {
             if (ctx && ctx.currentToolName === 'AskUserQuestion' && ctx.toolInputChunks) {
               try {
                 const input = JSON.parse(ctx.toolInputChunks)
-                console.log(`[cli-session] AskUserQuestion detected (${ctx.currentToolUseId})`)
+                log.info(`AskUserQuestion detected (${ctx.currentToolUseId})`)
                 this._waitingForAnswer = true
                 this.emit('user_question', {
                   toolUseId: ctx.currentToolUseId,
                   questions: input.questions,
                 })
               } catch (err) {
-                console.error(`[cli-session] Failed to parse AskUserQuestion input: ${err.message}`)
+                log.error(`Failed to parse AskUserQuestion input: ${err.message}`)
               }
             }
             if (ctx && ctx.currentToolName === 'Task' && ctx.toolInputChunks) {
@@ -440,7 +443,7 @@ export class CliSession extends BaseSession {
                 this._activeAgents.set(ctx.currentToolUseId, agentInfo)
                 this.emit('agent_spawned', agentInfo)
               } catch (err) {
-                console.warn(`[cli-session] Failed to parse Task tool input: ${err.message}`)
+                log.warn(`Failed to parse Task tool input: ${err.message}`)
               }
             }
             if (ctx && ctx.currentToolName === 'EnterPlanMode') {
@@ -454,7 +457,7 @@ export class CliSession extends BaseSession {
                   const input = JSON.parse(ctx.toolInputChunks)
                   allowedPrompts = Array.isArray(input.allowedPrompts) ? input.allowedPrompts : []
                 } catch (err) {
-                  console.warn(`[cli-session] Failed to parse ExitPlanMode input: ${err.message}`)
+                  log.warn(`Failed to parse ExitPlanMode input: ${err.message}`)
                 }
               }
               this._planAllowedPrompts = allowedPrompts
@@ -601,7 +604,7 @@ export class CliSession extends BaseSession {
       // Force-kill after 10s if process doesn't exit cleanly
       const forceKillTimer = setTimeout(() => {
         if (!didClose) {
-          console.warn('[cli-session] Process did not exit after 10s, force-killing')
+          log.warn('Process did not exit after 10s, force-killing')
           try {
             forceKill(oldChild)
           } catch (_err) {
@@ -637,13 +640,13 @@ export class CliSession extends BaseSession {
    */
   setModel(model) {
     if (!super.setModel(model)) return
-    console.log(`[cli-session] Model changed to ${this.model || 'default'}, restarting process`)
+    log.info(`Model changed to ${this.model || 'default'}, restarting process`)
     this._killAndRespawn()
   }
 
   setPermissionMode(mode) {
     if (!super.setPermissionMode(mode)) return
-    console.log(`[cli-session] Permission mode changed to ${mode}, restarting process`)
+    log.info(`Permission mode changed to ${mode}, restarting process`)
     this._killAndRespawn()
   }
 
@@ -669,7 +672,7 @@ export class CliSession extends BaseSession {
   interrupt() {
     if (!this._child) return
 
-    console.log('[cli-session] Sending SIGINT to claude process')
+    log.info('Sending SIGINT to claude process')
     this._child.kill('SIGINT')
 
     // Safety: if still busy after 5s, force-clear state.
@@ -682,7 +685,7 @@ export class CliSession extends BaseSession {
     this._interruptTimer = setTimeout(() => {
       this._interruptTimer = null
       if (this._isBusy) {
-        console.warn('[cli-session] Interrupt safety timeout — force-clearing busy state')
+        log.warn('Interrupt safety timeout — force-clearing busy state')
         const messageId = this._currentMessageId
         if (this._currentCtx?.hasStreamStarted) {
           this.emit('stream_end', { messageId })
