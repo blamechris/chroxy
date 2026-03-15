@@ -18,6 +18,7 @@ export interface CreateSessionData {
   cwd: string
   provider?: string
   permissionMode?: string
+  model?: string
 }
 
 export interface CreateSessionModalProps {
@@ -79,6 +80,7 @@ const CAPABILITY_BADGES: [keyof import('../store/types').ProviderCapabilities, s
 
 export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS, serverError, isCreating }: CreateSessionModalProps) {
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
+  const defaultModel = useConnectionStore(s => s.defaultModel)
   const availableProviders = useConnectionStore(s => s.availableProviders)
   const [name, setName] = useState('')
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)
@@ -160,8 +162,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       flushSync(() => setNameError('Session name is required'))
       return
     }
-    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined })
-  }, [onCreate, provider, permissionMode])
+    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model: defaultModel || undefined })
+  }, [onCreate, provider, permissionMode, defaultModel])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)

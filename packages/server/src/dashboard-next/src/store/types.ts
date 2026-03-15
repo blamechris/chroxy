@@ -630,6 +630,8 @@ export interface ConnectionState {
   // Session defaults
   defaultProvider: string;
   setDefaultProvider: (provider: string) => void;
+  defaultModel: string;
+  setDefaultModel: (model: string) => void;
 
   // Multi-server registry actions
   addServer: (name: string, wsUrl: string, token: string) => ServerEntry;
