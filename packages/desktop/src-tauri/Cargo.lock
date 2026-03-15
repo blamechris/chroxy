@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "chroxy-desktop"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "dirs 5.0.1",
  "image",

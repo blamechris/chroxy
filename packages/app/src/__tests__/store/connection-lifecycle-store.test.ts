@@ -95,7 +95,7 @@ describe('useConnectionLifecycleStore', () => {
       useConnectionLifecycleStore.getState().setServerInfo({
         serverMode: 'cli',
         serverVersion: '0.5.0',
-        latestVersion: '0.5.2',
+        latestVersion: '0.5.3',
         serverCommit: 'abc123',
         serverProtocolVersion: 1,
         sessionCwd: '/home/user',
@@ -104,7 +104,7 @@ describe('useConnectionLifecycleStore', () => {
       const state = useConnectionLifecycleStore.getState();
       expect(state.serverMode).toBe('cli');
       expect(state.serverVersion).toBe('0.5.0');
-      expect(state.latestVersion).toBe('0.5.2');
+      expect(state.latestVersion).toBe('0.5.3');
       expect(state.serverCommit).toBe('abc123');
       expect(state.serverProtocolVersion).toBe(1);
       expect(state.sessionCwd).toBe('/home/user');
