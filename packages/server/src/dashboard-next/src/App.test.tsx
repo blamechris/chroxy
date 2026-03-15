@@ -176,6 +176,27 @@ describe('App', () => {
     }
   })
 
+  it('prevents Backspace from navigating when target is not an input', () => {
+    render(<App />)
+    const event = new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true })
+    const spy = vi.spyOn(event, 'preventDefault')
+    window.dispatchEvent(event)
+    expect(spy).toHaveBeenCalled()
+  })
+
+  it('allows Backspace inside a textarea', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+    render(<App />)
+    const textarea = screen.getByRole('textbox', { name: /message input/i })
+    const event = fireEvent.keyDown(textarea, { key: 'Backspace' })
+    // fireEvent returns false if preventDefault was called; true means it was not prevented
+    expect(event).toBe(true)
+  })
+
   it('shows session loading skeleton when connecting', () => {
     stateOverrides = { connectionPhase: 'connecting' }
     render(<App />)

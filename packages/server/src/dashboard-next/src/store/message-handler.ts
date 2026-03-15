@@ -1835,16 +1835,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'budget_exceeded': {
       const exceededMessage = typeof msg.message === 'string' ? msg.message : 'Cost budget exceeded';
       const budgetExceededTargetId = (msg.sessionId as string) || get().activeSessionId;
-      // Show warning and auto-resume (no interactive Alert on web)
-      _adapters.alert.alert('Budget Exceeded', `${exceededMessage}\n\nNew messages are paused.`);
-      const socket = get().socket;
-      if (socket && budgetExceededTargetId) {
-        wsSend(socket, { type: 'resume_budget', sessionId: budgetExceededTargetId });
-      }
+      // Add system message BEFORE auto-resume so it's visible in the UI
       const budgetExceededMsg: ChatMessage = {
         id: nextMessageId('system'),
         type: 'system',
-        content: `${exceededMessage} — session paused`,
+        content: `${exceededMessage} — session paused. Budget will auto-resume.`,
         timestamp: Date.now(),
       };
       if (budgetExceededTargetId && get().sessionStates[budgetExceededTargetId]) {
@@ -1853,6 +1848,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }));
       } else {
         get().addMessage(budgetExceededMsg);
+      }
+      // Show toast notification
+      _adapters.alert.alert('Budget Exceeded', `${exceededMessage}\n\nNew messages are paused.`);
+      // Auto-resume budget
+      const socket = get().socket;
+      if (socket && budgetExceededTargetId) {
+        wsSend(socket, { type: 'resume_budget', sessionId: budgetExceededTargetId });
       }
       break;
     }

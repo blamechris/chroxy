@@ -220,6 +220,12 @@ export function App() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Prevent Backspace from triggering browser/webview "back" navigation
+      const target = e.target instanceof HTMLElement ? e.target : null
+      if (e.key === 'Backspace' && (!target || (!['INPUT', 'TEXTAREA'].includes(target.tagName) && !target.isContentEditable))) {
+        e.preventDefault()
+        return
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault()
         setPaletteOpen(prev => !prev)

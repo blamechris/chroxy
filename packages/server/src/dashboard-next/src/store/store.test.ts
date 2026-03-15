@@ -1105,4 +1105,46 @@ describe('server_error toast scope filtering', () => {
 
     useConnectionStore.setState({ serverErrors: [], activeSessionId: null });
   });
+
+  it('budget_exceeded adds system message once for active session (no duplication)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    const sessionState = { ...createEmptySessionState(), messages: [] as ChatMessage[] };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      messages: [],
+      sessionStates: { s1: sessionState },
+    });
+
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    _testMessageHandler.handle({
+      type: 'budget_exceeded',
+      sessionId: 's1',
+      message: 'Cost budget exceeded ($5.00/$5.00)',
+    });
+
+    const state = useConnectionStore.getState();
+    // updateSession syncs to flat messages for active session, so only 1 copy should exist
+    const flatBudgetMsgs = state.messages.filter(
+      (m: ChatMessage) => m.type === 'system' && m.content.includes('budget')
+    );
+    expect(flatBudgetMsgs).toHaveLength(1);
+
+    // Session state should also have exactly 1
+    const ssMsgs = (state.sessionStates.s1 as SessionState).messages.filter(
+      (m: ChatMessage) => m.type === 'system' && m.content.includes('budget')
+    );
+    expect(ssMsgs).toHaveLength(1);
+
+    _testMessageHandler.clearContext();
+    useConnectionStore.setState({ activeSessionId: null, messages: [], sessionStates: {} });
+  });
 });
