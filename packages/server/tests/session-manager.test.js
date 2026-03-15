@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach, mock } from 'node:test'
+import { describe, it, beforeEach, afterEach, after, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
@@ -9,18 +9,31 @@ import { SessionManager, formatIdleDuration } from '../src/session-manager.js'
 /**
  * Tests for SessionManager serialization, restoration, and allIdle.
  *
- * All filesystem tests use temp directories via stateFilePath to avoid
- * writing to real ~/.chroxy/session-state.json (see #429).
+ * CRITICAL: Every SessionManager instance MUST use a temp stateFilePath.
+ * Without it, tests write to real ~/.chroxy/session-state.json, contaminating
+ * the user's server with test data like name:'S1', cwd:'/tmp' (see #429, #2314).
  */
+
+// Module-level temp dir for tests that don't manage their own.
+// Each call returns a unique file path to avoid cross-test interference.
+let _globalTmpDir
+function tmpStateFile() {
+  if (!_globalTmpDir) _globalTmpDir = mkdtempSync(join(tmpdir(), 'sm-global-'))
+  return join(_globalTmpDir, `state-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+}
+
+after(() => {
+  if (_globalTmpDir) rmSync(_globalTmpDir, { recursive: true, force: true })
+})
 
 describe('SessionManager.allIdle', () => {
   it('returns true when no sessions exist', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     assert.equal(mgr.allIdle(), true)
   })
 
   it('returns true when all sessions are idle', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     const session1 = new EventEmitter()
     session1.isRunning = false
     session1.destroy = () => {}
@@ -35,7 +48,7 @@ describe('SessionManager.allIdle', () => {
   })
 
   it('returns false when any session is busy', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     const session1 = new EventEmitter()
     session1.isRunning = false
     session1.destroy = () => {}
@@ -436,7 +449,7 @@ describe('SessionManager auto-persist', () => {
 
 describe('SessionManager.getConversationId', () => {
   it('returns resumeSessionId when available', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     const session = new EventEmitter()
     Object.defineProperty(session, 'resumeSessionId', { get: () => 'conv-uuid-123' })
     session.destroy = () => {}
@@ -446,7 +459,7 @@ describe('SessionManager.getConversationId', () => {
   })
 
   it('returns null when resumeSessionId is not set', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     const session = new EventEmitter()
     Object.defineProperty(session, 'resumeSessionId', { get: () => null })
     session.destroy = () => {}
@@ -456,14 +469,14 @@ describe('SessionManager.getConversationId', () => {
   })
 
   it('returns null for nonexistent session', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     assert.equal(mgr.getConversationId('nonexistent'), null)
   })
 })
 
 describe('SessionManager.listSessions includes conversationId', () => {
   it('includes conversationId in session list entries', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
 
     const session1 = new EventEmitter()
     session1.isRunning = false
@@ -490,17 +503,17 @@ describe('SessionManager.listSessions includes conversationId', () => {
 
 describe('SessionManager provider support', () => {
   it('defaults to claude-sdk provider', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     assert.equal(mgr._providerType, 'claude-sdk')
   })
 
   it('accepts providerType parameter', () => {
-    const mgr = new SessionManager({ maxSessions: 5, providerType: 'claude-cli' })
+    const mgr = new SessionManager({ maxSessions: 5, providerType: 'claude-cli', stateFilePath: tmpStateFile() })
     assert.equal(mgr._providerType, 'claude-cli')
   })
 
   it('listSessions includes provider and capabilities', () => {
-    const mgr = new SessionManager({ maxSessions: 5, providerType: 'claude-sdk' })
+    const mgr = new SessionManager({ maxSessions: 5, providerType: 'claude-sdk', stateFilePath: tmpStateFile() })
 
     // Manually insert a mock session with a constructor that has capabilities
     class MockProvider extends EventEmitter {
@@ -556,12 +569,12 @@ describe('SessionManager.serializeState includes conversationId', () => {
 
 describe('SessionManager ring buffer size', () => {
   it('defaults to 500 max history entries', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     assert.equal(mgr._maxHistory, 500)
   })
 
   it('trims history when exceeding 500 entries', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     mgr._messageHistory.set('s1', [])
     const history = mgr._messageHistory.get('s1')
 
@@ -576,7 +589,7 @@ describe('SessionManager ring buffer size', () => {
   })
 
   it('sets truncation flag via sessionId parameter without reverse lookup (#1928)', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     // Create history for s1 but do NOT register it in _messageHistory
     // This proves _pushHistory uses the sessionId param directly,
     // not a reverse-lookup scan of _messageHistory
@@ -592,19 +605,19 @@ describe('SessionManager ring buffer size', () => {
 
 describe('SessionManager persist debounce default', () => {
   it('defaults to 2000ms persist debounce', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     assert.equal(mgr._persistDebounceMs, 2000)
   })
 
   it('allows overriding persist debounce', () => {
-    const mgr = new SessionManager({ maxSessions: 5, persistDebounceMs: 500 })
+    const mgr = new SessionManager({ maxSessions: 5, persistDebounceMs: 500, stateFilePath: tmpStateFile() })
     assert.equal(mgr._persistDebounceMs, 500)
   })
 })
 
 describe('SessionManager.isHistoryTruncated', () => {
   it('returns false when history has not been truncated', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     mgr._messageHistory.set('s1', [])
     const history = mgr._messageHistory.get('s1')
 
@@ -616,7 +629,7 @@ describe('SessionManager.isHistoryTruncated', () => {
   })
 
   it('returns true after ring buffer drops messages', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     mgr._messageHistory.set('s1', [])
     const history = mgr._messageHistory.get('s1')
 
@@ -629,12 +642,12 @@ describe('SessionManager.isHistoryTruncated', () => {
   })
 
   it('returns false for unknown session', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     assert.equal(mgr.isHistoryTruncated('nonexistent'), false)
   })
 
   it('clears truncation flag when session is destroyed', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
 
     const session = new EventEmitter()
     session.isRunning = false
@@ -856,7 +869,7 @@ describe('#987 — dead code removal in session-manager (behavioral)', () => {
   })
 
   it('does not have a sync getFullHistory method on instances', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     assert.equal(typeof mgr.getFullHistory, 'undefined',
       'getFullHistory (sync) should not exist — only getFullHistoryAsync')
     assert.equal(typeof mgr.getFullHistoryAsync, 'function',
@@ -895,7 +908,7 @@ describe('#987 — dead code removal in session-manager (behavioral)', () => {
 
 describe('createSession failure cleanup (FM-03)', () => {
   it('cleans up _sessions and _lastActivity when session.start() throws', async () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
 
     // Register a test provider whose start() throws
     const { registerProvider } = await import('../src/providers.js')
@@ -928,7 +941,7 @@ describe('createSession failure cleanup (FM-03)', () => {
   })
 
   it('does not emit session_created when start() throws', async () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     let emitted = false
     mgr.on('session_created', () => { emitted = true })
 
@@ -959,7 +972,7 @@ describe('createSession failure cleanup (FM-03)', () => {
   })
 
   it('calls session.destroy() when start() throws', async () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
 
     const { registerProvider } = await import('../src/providers.js')
     let destroyCalled = false
@@ -991,7 +1004,7 @@ describe('createSession failure cleanup (FM-03)', () => {
 
 describe('#1204 — _cleanupSessionMaps helper cleans all maps', () => {
   it('sync start() failure cleans all session-scoped maps', async () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
 
     const { registerProvider } = await import('../src/providers.js')
     let sessionIdCapture = null
@@ -1047,7 +1060,7 @@ describe('#1204 — _cleanupSessionMaps helper cleans all maps', () => {
 
 describe('#1202 — guard session.destroy() with try-catch', () => {
   it('propagates original start() error when destroy() also throws', async () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
 
     const { registerProvider } = await import('../src/providers.js')
     class DoubleFailProvider extends EventEmitter {
@@ -1079,7 +1092,7 @@ describe('#1202 — guard session.destroy() with try-catch', () => {
   })
 
   it('cleans up when async start() rejects and destroy() throws', async () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
 
     const { registerProvider } = await import('../src/providers.js')
     class AsyncDoubleFailProvider extends EventEmitter {
@@ -1114,7 +1127,7 @@ describe('#1202 — guard session.destroy() with try-catch', () => {
 
 describe('#1227 — guard destroyAll() session.destroy() with try-catch', () => {
   it('cleans up all sessions even when one destroy() throws', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
 
     // Session 1: destroy throws
     const session1 = new EventEmitter()
@@ -1144,7 +1157,7 @@ describe('#1227 — guard destroyAll() session.destroy() with try-catch', () => 
 
 describe('#1942 — destroyAll() wraps serializeState in try-catch', () => {
   it('continues destroying sessions when serializeState throws', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
 
     // Make serializeState throw
     mgr.serializeState = () => { throw new Error('disk full') }
@@ -1168,7 +1181,7 @@ describe('#1942 — destroyAll() wraps serializeState in try-catch', () => {
 
 describe('#1243 — destroyAll() clears all session-scoped maps', () => {
   it('clears messageHistory, historyTruncated, sessionCosts, budget maps, pendingStreams after destroyAll', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
 
     const session1 = new EventEmitter()
     session1.isRunning = false
@@ -1203,7 +1216,7 @@ describe('#1243 — destroyAll() clears all session-scoped maps', () => {
 
 describe('#1141 — async start() rejection guard', () => {
   it('cleans up phantom session when start() returns a rejected promise', async () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
 
     const { registerProvider } = await import('../src/providers.js')
     let destroyCalled = false
@@ -1243,7 +1256,7 @@ describe('#1141 — async start() rejection guard', () => {
 
 describe('#1091 — destroy-while-streaming event leak', () => {
   it('removes listeners before calling session.destroy()', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     const session = new EventEmitter()
     session.destroy = () => {
       session.emit('stream_end', { messageId: 'msg-1' })
@@ -1263,7 +1276,7 @@ describe('#1091 — destroy-while-streaming event leak', () => {
   })
 
   it('does not write to _pendingStreams when events fire during destroy()', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     const session = new EventEmitter()
     session.destroy = () => {
       session.emit('stream_start', { messageId: 'orphan-1' })
@@ -1280,7 +1293,7 @@ describe('#1091 — destroy-while-streaming event leak', () => {
   })
 
   it('emits synthetic stream_end for pending streams on destroy', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     const session = new EventEmitter()
     session.destroy = () => {}
     session.isRunning = false
@@ -1326,7 +1339,7 @@ describe('Session ID generation (#1856)', () => {
     }
     registerProvider('test-session-id', TestProvider)
 
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     mgr.createSession({ cwd: '/tmp', provider: 'test-session-id' })
 
     const [sessionId] = [...mgr._sessions.keys()]
@@ -1339,34 +1352,34 @@ describe('Session ID generation (#1856)', () => {
 
 describe('SessionManager.defaultCwd getter (#1475)', () => {
   it('exposes defaultCwd via public getter', () => {
-    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp/test-cwd' })
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp/test-cwd', stateFilePath: tmpStateFile() })
     assert.equal(mgr.defaultCwd, '/tmp/test-cwd')
   })
 
   it('defaults to process.cwd() when no defaultCwd provided', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     assert.equal(mgr.defaultCwd, process.cwd())
   })
 })
 
 describe('Configurable magic numbers (#1848)', () => {
   it('maxHistory defaults to 500', () => {
-    const mgr = new SessionManager({ maxSessions: 5 })
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
     assert.equal(mgr._maxHistory, 500)
   })
 
   it('maxHistory can be configured', () => {
-    const mgr = new SessionManager({ maxSessions: 5, maxHistory: 1000 })
+    const mgr = new SessionManager({ maxSessions: 5, maxHistory: 1000, stateFilePath: tmpStateFile() })
     assert.equal(mgr._maxHistory, 1000)
   })
 
   it('maxSessions can be configured', () => {
-    const mgr = new SessionManager({ maxSessions: 10 })
+    const mgr = new SessionManager({ maxSessions: 10, stateFilePath: tmpStateFile() })
     assert.equal(mgr.maxSessions, 10)
   })
 
   it('maxSessions defaults to 5', () => {
-    const mgr = new SessionManager({})
+    const mgr = new SessionManager({ stateFilePath: tmpStateFile() })
     assert.equal(mgr.maxSessions, 5)
   })
 })
