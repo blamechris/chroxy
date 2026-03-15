@@ -8,6 +8,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { ModelInfo } from '../store/types'
 
+const TABBABLE_SELECTOR = 'select:not(:disabled), button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])'
+
 export interface ChatSettingsDropdownProps {
   availableModels: ModelInfo[]
   activeModel: string | null
@@ -70,7 +72,7 @@ export function ChatSettingsDropdown({
     if (!open) return
     const panel = panelRef.current
     if (!panel) return
-    const first = panel.querySelector<HTMLElement>('select, button, input, [tabindex]')
+    const first = panel.querySelector<HTMLElement>(TABBABLE_SELECTOR)
     first?.focus()
   }, [open])
 
@@ -79,7 +81,7 @@ export function ChatSettingsDropdown({
     if (e.key !== 'Tab') return
     const panel = panelRef.current
     if (!panel) return
-    const focusable = panel.querySelectorAll<HTMLElement>('select, button, input, [tabindex]')
+    const focusable = panel.querySelectorAll<HTMLElement>(TABBABLE_SELECTOR)
     if (focusable.length === 0) return
     const first = focusable[0]!
     const last = focusable[focusable.length - 1]!

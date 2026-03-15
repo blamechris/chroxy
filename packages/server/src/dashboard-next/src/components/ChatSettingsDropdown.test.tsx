@@ -153,6 +153,31 @@ describe('ChatSettingsDropdown', () => {
     expect(document.activeElement).toBe(screen.getByTestId('chat-settings-trigger'))
   })
 
+  it('Tab wraps across all 3 selects when thinking level is visible', () => {
+    render(
+      <ChatSettingsDropdown
+        availableModels={MODELS}
+        activeModel="sonnet"
+        defaultModelId={null}
+        onModelChange={vi.fn()}
+        availablePermissionModes={PERMISSION_MODES}
+        permissionMode="approve"
+        onPermissionModeChange={vi.fn()}
+        showThinkingLevel={true}
+        thinkingLevel="default"
+        onThinkingLevelChange={vi.fn()}
+      />
+    )
+    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
+    const panel = screen.getByTestId('chat-settings-panel')
+    const thinkingSelect = screen.getByLabelText('Thinking Level')
+
+    // Focus last select (Thinking Level), Tab should wrap to Model
+    thinkingSelect.focus()
+    fireEvent.keyDown(panel, { key: 'Tab', bubbles: true })
+    expect(document.activeElement).toBe(screen.getByLabelText('Model'))
+  })
+
   it('shows Default option for model when defaultModelId is set', () => {
     renderDropdown({ defaultModelId: 'sonnet' })
     fireEvent.click(screen.getByTestId('chat-settings-trigger'))
