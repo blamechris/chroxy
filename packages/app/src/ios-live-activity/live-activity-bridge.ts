@@ -34,18 +34,34 @@ export function isLiveActivitySupported(): boolean {
   return version >= 16.1;
 }
 
+/** Format seconds into a compact duration string (e.g., "2m 15s"). */
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
+}
+
 /** Map state enum to human-readable subtitle text. */
 function stateToSubtitle(
   state: LiveActivityContentState['state'],
   detail?: string,
+  elapsedSeconds?: number,
 ): string {
   if (detail) return detail;
 
+  const elapsed = elapsedSeconds != null && elapsedSeconds > 0
+    ? ` · ${formatDuration(elapsedSeconds)}`
+    : '';
+
   switch (state) {
     case 'thinking':
-      return 'Thinking...';
+      return `Thinking...${elapsed}`;
     case 'active':
-      return 'Running';
+      return `Running${elapsed}`;
     case 'waiting':
       return 'Waiting for input';
     case 'error':
@@ -53,7 +69,7 @@ function stateToSubtitle(
     case 'ended':
       return 'Session ended';
     default:
-      return 'Running';
+      return `Running${elapsed}`;
   }
 }
 
@@ -80,7 +96,7 @@ export async function startLiveActivity(
     const id = mod.startActivity(
       {
         title: 'Chroxy',
-        subtitle: stateToSubtitle(initialState.state, initialState.detail),
+        subtitle: stateToSubtitle(initialState.state, initialState.detail, initialState.elapsedSeconds),
       },
       WIDGET_CONFIG,
     );
@@ -103,7 +119,7 @@ export async function updateLiveActivity(
   try {
     mod.updateActivity(activityId, {
       title: 'Chroxy',
-      subtitle: stateToSubtitle(state.state, state.detail),
+      subtitle: stateToSubtitle(state.state, state.detail, state.elapsedSeconds),
     });
   } catch {
     // Swallow — activity may have been dismissed by the user
