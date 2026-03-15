@@ -1,50 +1,48 @@
 /**
- * Header overflow prevention tests (#2297)
+ * Header overflow prevention CSS tests (#2297)
  *
- * Verifies that header CSS prevents horizontal scroll when many elements
+ * Verifies that header CSS rules prevent horizontal scroll when many elements
  * are present (model dropdown, permission dropdown, thinking level, status bar).
  */
-import { describe, it, expect, afterEach } from 'vitest'
-import { render, cleanup } from '@testing-library/react'
+import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'fs'
+import { resolve } from 'path'
 
-afterEach(cleanup)
+const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf-8')
 
 describe('Header overflow prevention (#2297)', () => {
-  it('header-right allows flex shrinking (no flex-shrink: 0)', () => {
-    const { container } = render(
-      <div id="header" style={{ display: 'flex', width: '400px' }}>
-        <div className="header-left">Logo</div>
-        <div className="header-center">
-          <select><option>Model</option></select>
-          <select><option>Approve</option></select>
-          <select><option>Think: Auto</option></select>
-        </div>
-        <div className="header-right">
-          <div className="status-bar">
-            <span>SDK</span>
-            <span>$0.1507</span>
-            <span>73 tokens</span>
-          </div>
-        </div>
-      </div>
-    )
-    const headerRight = container.querySelector('.header-right') as HTMLElement
-    // Verify that header-right does not have flex-shrink: 0 applied
-    // (CSS is not loaded in jsdom, so we test the markup structure exists)
-    expect(headerRight).not.toBeNull()
+  it('#header has overflow: hidden', () => {
+    const match = css.match(/#header\s*\{[^}]*overflow:\s*hidden/s)
+    expect(match).toBeTruthy()
   })
 
-  it('header contains overflow: hidden to prevent page scroll', () => {
-    // This test documents the requirement — actual CSS testing requires
-    // a browser environment. The CSS rule #header { overflow: hidden }
-    // must be present in components.css.
-    const { container } = render(
-      <div id="header">
-        <div className="header-left">Logo</div>
-        <div className="header-center">Content</div>
-        <div className="header-right">Status</div>
-      </div>
-    )
-    expect(container.querySelector('#header')).not.toBeNull()
+  it('.header-right does not have flex-shrink: 0', () => {
+    const headerRightBlock = css.match(/\.header-right\s*\{[^}]*\}/s)
+    expect(headerRightBlock).toBeTruthy()
+    expect(headerRightBlock![0]).not.toMatch(/flex-shrink:\s*0/)
+  })
+
+  it('.header-right has min-width: 0 for flex truncation', () => {
+    const match = css.match(/\.header-right\s*\{[^}]*min-width:\s*0/s)
+    expect(match).toBeTruthy()
+  })
+
+  it('.header-center has min-width: 0 and flex: 1 1 auto', () => {
+    const block = css.match(/\.header-center\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/min-width:\s*0/)
+    expect(block![0]).toMatch(/flex:\s*1\s+1\s+auto/)
+  })
+
+  it('.header-center select has max-width constraint', () => {
+    const match = css.match(/\.header-center select\s*\{[^}]*max-width:\s*180px/s)
+    expect(match).toBeTruthy()
+  })
+
+  it('.status-bar has min-width: 0 and white-space: nowrap', () => {
+    const block = css.match(/\.status-bar\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/min-width:\s*0/)
+    expect(block![0]).toMatch(/white-space:\s*nowrap/)
   })
 })
