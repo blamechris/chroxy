@@ -45,7 +45,7 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const setDefaultProvider = useConnectionStore(s => s.setDefaultProvider)
   const defaultModel = useConnectionStore(s => s.defaultModel)
   const setDefaultModel = useConnectionStore(s => s.setDefaultModel)
-  const availableModels = useConnectionStore(s => s.availableModels)
+  const availableModels = useConnectionStore(s => s.availableModels ?? [])
   const availableProviders = useConnectionStore(s => s.availableProviders ?? [])
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const updateInputSettings = useConnectionStore(s => s.updateInputSettings)
