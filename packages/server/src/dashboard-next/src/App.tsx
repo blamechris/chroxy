@@ -798,17 +798,19 @@ export function App() {
               ))}
             </select>
           )}
-          {/* Thinking level selector */}
-          <select
-            value={thinkingLevel || 'default'}
-            onChange={e => setThinkingLevel(e.target.value)}
-            aria-label="Thinking level"
-            className="thinking-level-select"
-          >
-            <option value="default">Think: Auto</option>
-            <option value="high">Think: High</option>
-            <option value="max">Think: Max</option>
-          </select>
+          {/* Thinking level selector (SDK provider only) */}
+          {sessions.find(s => s.sessionId === activeSessionId)?.provider?.includes('sdk') && (
+            <select
+              value={thinkingLevel || 'default'}
+              onChange={e => setThinkingLevel(e.target.value)}
+              aria-label="Thinking level"
+              className="thinking-level-select"
+            >
+              <option value="default">Think: Auto</option>
+              <option value="high">Think: High</option>
+              <option value="max">Think: Max</option>
+            </select>
+          )}
         </div>
         <div className="header-right">
           <button

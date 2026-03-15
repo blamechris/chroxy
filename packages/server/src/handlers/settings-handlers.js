@@ -140,7 +140,7 @@ function handleListProviders(ws, client, msg, ctx) {
 
 const VALID_THINKING_LEVELS = new Set(['default', 'high', 'max'])
 
-function handleSetThinkingLevel(ws, client, msg, ctx) {
+async function handleSetThinkingLevel(ws, client, msg, ctx) {
   const level = typeof msg.level === 'string' ? msg.level.trim() : ''
   if (!VALID_THINKING_LEVELS.has(level)) {
     ctx.send(ws, { type: 'session_error', message: `Invalid thinking level: ${level}` })
@@ -159,8 +159,12 @@ function handleSetThinkingLevel(ws, client, msg, ctx) {
     return
   }
 
-  entry.session.setThinkingLevel(level)
-  ctx.broadcastToSession(sessionId, { type: 'thinking_level_changed', level })
+  try {
+    await entry.session.setThinkingLevel(level)
+    ctx.broadcastToSession(sessionId, { type: 'thinking_level_changed', level })
+  } catch (err) {
+    ctx.send(ws, { type: 'session_error', message: `Failed to set thinking level: ${err.message}` })
+  }
 }
 
 export const settingsHandlers = {

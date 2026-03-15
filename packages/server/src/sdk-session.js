@@ -140,6 +140,12 @@ export class SdkSession extends BaseSession {
       options.model = this.model
     }
 
+    // Apply thinking level if set
+    if (this._thinkingLevel) {
+      const budgets = { high: 32000, max: 128000 }
+      options.maxThinkingTokens = budgets[this._thinkingLevel] || undefined
+    }
+
     // In-process permission handling (only when not bypassing)
     if (this.permissionMode !== 'auto') {
       options.canUseTool = (toolName, input, { signal }) =>
@@ -409,7 +415,7 @@ export class SdkSession extends BaseSession {
       }
     }
 
-    this.emit('thinking_level_changed', { level: this._thinkingLevel || 'default' })
+    // Note: thinking_level_changed is broadcast by the WS handler, not emitted here
   }
 
   /**
