@@ -68,6 +68,12 @@ export const SetPermissionModeSchema = z.object({
   confirmed: z.boolean().optional(),
 }).passthrough()
 
+export const SetThinkingLevelSchema = z.object({
+  type: z.literal('set_thinking_level'),
+  level: z.enum(['default', 'high', 'max']),
+  sessionId: z.string().optional(),
+}).passthrough()
+
 export const PermissionResponseSchema = z.object({
   type: z.literal('permission_response'),
   requestId: z.string().min(1),
@@ -323,6 +329,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   InterruptSchema,
   SetModelSchema,
   SetPermissionModeSchema,
+  SetThinkingLevelSchema,
   PermissionResponseSchema,
   ListSessionsSchema,
   SwitchSessionSchema,

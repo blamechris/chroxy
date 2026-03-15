@@ -50,6 +50,7 @@ export class SdkSession extends BaseSession {
       planMode: false,
       resume: true,
       terminal: false,
+      thinkingLevel: true,
     }
   }
 
@@ -137,6 +138,12 @@ export class SdkSession extends BaseSession {
 
     if (this.model) {
       options.model = this.model
+    }
+
+    // Apply thinking level if set
+    if (this._thinkingLevel) {
+      const budgets = { high: 32000, max: 128000 }
+      options.maxThinkingTokens = budgets[this._thinkingLevel] || undefined
     }
 
     // In-process permission handling (only when not bypassing)
@@ -384,6 +391,31 @@ export class SdkSession extends BaseSession {
   setPermissionMode(mode) {
     if (!super.setPermissionMode(mode)) return
     log.info(`Permission mode changed to ${mode}`)
+  }
+
+  /**
+   * Set thinking level by adjusting max thinking tokens.
+   * @param {string} level - 'default' | 'high' | 'max'
+   */
+  async setThinkingLevel(level) {
+    const THINKING_BUDGETS = {
+      default: null,
+      high: 32000,
+      max: 128000,
+    }
+    const budget = THINKING_BUDGETS[level] ?? null
+    this._thinkingLevel = level === 'default' ? null : level
+
+    if (this._query && typeof this._query.setMaxThinkingTokens === 'function') {
+      try {
+        await this._query.setMaxThinkingTokens(budget)
+        log.info(`Thinking level set to ${level} (${budget ?? 'adaptive'} tokens)`)
+      } catch (err) {
+        log.warn(`Failed to set thinking level: ${err.message}`)
+      }
+    }
+
+    // Note: thinking_level_changed is broadcast by the WS handler, not emitted here
   }
 
   /**

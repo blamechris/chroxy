@@ -93,6 +93,10 @@
   border-color: var(--accent-blue);
 }
 
+.thinking-level-select {
+  font-size: var(--text-sm);
+}
+
 .header-right {
   display: flex;
   gap: 8px;

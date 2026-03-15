@@ -1225,6 +1225,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'thinking_level_changed': {
+      const level = (typeof msg.level === 'string' && msg.level.trim()) ? msg.level.trim() : 'default';
+      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, () => ({ thinkingLevel: level }));
+      }
+      break;
+    }
+
     case 'confirm_permission_mode': {
       const confirmMode = typeof msg.mode === 'string' ? msg.mode : null;
       const warning = typeof msg.warning === 'string' ? msg.warning : 'Are you sure?';
