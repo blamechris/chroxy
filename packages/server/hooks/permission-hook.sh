@@ -4,7 +4,9 @@
 # Claude Code calls this via its hooks system (PreToolUse event). The script:
 # 1. Checks if this is a Chroxy-spawned session (CHROXY_PORT env var present)
 # 2. Reads the hook input JSON from stdin (contains tool_name, tool_input, etc.)
-# 3. POSTs it to the Chroxy HTTP server with Bearer auth (long-poll, blocks until user responds)
+# 3. POSTs it to the Chroxy HTTP server with per-session hook secret auth
+#    (long-poll, blocks until user responds). CHROXY_HOOK_SECRET is a short-lived
+#    random secret specific to this session — never the primary API token.
 # 4. Translates the response into Claude Code's hookSpecificOutput format
 #
 # Non-Chroxy Claude sessions don't have CHROXY_PORT set, so the hook immediately
@@ -17,7 +19,7 @@ if [ -z "$CHROXY_PORT" ]; then
 fi
 
 PORT="$CHROXY_PORT"
-TOKEN="$CHROXY_TOKEN"
+TOKEN="$CHROXY_HOOK_SECRET"
 PERM_MODE="${CHROXY_PERMISSION_MODE:-approve}"
 
 # Sanitize: PORT must be numeric

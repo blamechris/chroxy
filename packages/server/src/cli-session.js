@@ -1,5 +1,6 @@
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
+import { randomBytes } from 'crypto'
 import { createPermissionHookManager } from './permission-hook.js'
 import { BaseSession } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
@@ -58,6 +59,8 @@ export class CliSession extends BaseSession {
     this.allowedTools = allowedTools || []
     this._port = port || null
     this._apiToken = apiToken || null
+    // Per-session secret for the permission hook endpoint — never the primary API token
+    this._hookSecret = randomBytes(32).toString('hex')
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sessionId = null
@@ -132,7 +135,10 @@ export class CliSession extends BaseSession {
       CLAUDE_HEADLESS: '1',
       CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
       ...(this._port ? { CHROXY_PORT: String(this._port) } : {}),
-      ...(this._apiToken ? { CHROXY_TOKEN: this._apiToken } : {}),
+      // Pass a short-lived per-session secret instead of the primary API token.
+      // This limits the blast radius if a tool reads process.env — the hook secret
+      // only authorises POST /permission, not the WebSocket API.
+      ...(this._port ? { CHROXY_HOOK_SECRET: this._hookSecret } : {}),
       CHROXY_PERMISSION_MODE: this.permissionMode,
     }
   }

@@ -312,6 +312,8 @@ export class WsServer {
     this._pingInterval = null
     this._pendingPermissions = new Map() // requestId -> { resolve, timer }
     this._permissionSessionMap = new Map() // requestId -> sessionId (for routing responses to correct session)
+    this._hookSecrets = new Set() // per-session hook secrets registered by active CliSessions
+    this._sessionHookSecrets = new Map() // sessionId -> hookSecret (for cleanup on session_destroyed)
     this._questionSessionMap = new Map() // toolUseId -> sessionId (for routing question responses)
     this._primaryClients = new Map() // sessionId -> clientId (last-writer-wins)
     // Late-binding wrappers: allows tests to monkey-patch _send/_broadcast
@@ -329,6 +331,7 @@ export class WsServer {
       sendFn,
       broadcastFn,
       validateBearerAuth: (req, res) => self._validateBearerAuth(req, res),
+      validateHookAuth: (req, res) => self._validateHookAuth(req, res),
       pushManager,
       pendingPermissions: this._pendingPermissions,
       permissionSessionMap: this._permissionSessionMap,
@@ -417,9 +420,25 @@ export class WsServer {
     this.defaultSessionId = defaultSessionId || null
     this._checkpointManager = new CheckpointManager()
 
-    // Clean up checkpoints and routing maps when sessions are destroyed
+    // Register/unregister per-session hook secrets and clean up checkpoints on lifecycle events
     if (sessionManager && typeof sessionManager.on === 'function') {
+      sessionManager.on('session_created', ({ sessionId }) => {
+        const entry = sessionManager.getSession(sessionId)
+        const secret = entry?.session?._hookSecret
+        if (secret) {
+          this.registerHookSecret(secret)
+          this._sessionHookSecrets.set(sessionId, secret)
+          log.debug(`Registered hook secret for session ${sessionId}`)
+        }
+      })
       sessionManager.on('session_destroyed', ({ sessionId }) => {
+        // Look up the stored secret — the session is already removed from the map
+        const secret = this._sessionHookSecrets.get(sessionId)
+        if (secret) {
+          this.unregisterHookSecret(secret)
+          this._sessionHookSecrets.delete(sessionId)
+          log.debug(`Unregistered hook secret for session ${sessionId}`)
+        }
         try {
           this._checkpointManager.clearCheckpoints(sessionId)
         } catch (err) {
@@ -443,6 +462,10 @@ export class WsServer {
     // Legacy single-session mode: wrap cliSession in a minimal shim
     if (!sessionManager && cliSession) {
       this.cliSession = cliSession
+      // Register the hook secret immediately — no session_created event fires in legacy mode
+      if (cliSession._hookSecret) {
+        this.registerHookSecret(cliSession._hookSecret)
+      }
     } else {
       this.cliSession = null
     }
@@ -535,6 +558,55 @@ export class WsServer {
       return false
     }
     return true
+  }
+
+  /**
+   * Validate the per-session hook secret on a POST /permission request.
+   * Only accepts secrets registered by active CliSessions — never the primary
+   * API token. Falls back to bearer auth when no hook secrets are registered
+   * (e.g. single-session legacy mode without hook secret support).
+   */
+  _validateHookAuth(req, res) {
+    if (!this.authRequired) return true
+    const authHeader = req.headers['authorization'] || ''
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+    if (!token) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'unauthorized' }))
+      return false
+    }
+    if (this._hookSecrets.size > 0) {
+      if (!this._hookSecrets.has(token)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return false
+      }
+      return true
+    }
+    // No hook secrets registered — fall back to main token validation
+    // (handles legacy single-session setups and tests that don't register secrets)
+    if (!this._isTokenValid(token)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'unauthorized' }))
+      return false
+    }
+    return true
+  }
+
+  /**
+   * Register a per-session hook secret so POST /permission accepts it.
+   * Called by session-manager when a CliSession is created.
+   */
+  registerHookSecret(secret) {
+    if (secret) this._hookSecrets.add(secret)
+  }
+
+  /**
+   * Remove a per-session hook secret when the session is destroyed.
+   * Called by session-manager when a CliSession is destroyed.
+   */
+  unregisterHookSecret(secret) {
+    if (secret) this._hookSecrets.delete(secret)
   }
 
   start(host) {

@@ -39,17 +39,23 @@ function sanitizeToolInput(input) {
  * @param {Object} opts
  * @param {Function} opts.sendFn - (ws, message) => void
  * @param {Function} opts.broadcastFn - (message) => void
- * @param {Function} opts.validateBearerAuth - (req, res) => boolean
+ * @param {Function} opts.validateBearerAuth - (req, res) => boolean — validates main API token (used by /permission-response)
+ * @param {Function} opts.validateHookAuth - (req, res) => boolean — validates per-session hook secret (used by /permission)
  * @param {Object|null} opts.pushManager - PushManager instance (nullable)
  * @param {Map} opts.pendingPermissions - requestId -> { resolve, timer } (owned by WsServer)
  * @param {Map} opts.permissionSessionMap - requestId -> sessionId (owned by WsServer)
  * @param {Function} opts.getSessionManager - () => sessionManager (late-bound for test compat)
  * @returns {Object} Permission handler methods
  */
-export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager }) {
+export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager }) {
+  let _permissionCounter = 0
+
+  // Fall back to validateBearerAuth if validateHookAuth is not provided (backwards compat for tests)
+  const _validateHookAuth = validateHookAuth || validateBearerAuth
+
   /** Handle POST /permission from the hook script */
   function handlePermissionRequest(req, res) {
-    if (!validateBearerAuth(req, res)) {
+    if (!_validateHookAuth(req, res)) {
       console.warn('[ws] Rejected unauthenticated POST /permission')
       return
     }
