@@ -302,6 +302,8 @@ export class WsServer {
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024 // 1MB default
     this._backpressureMaxDrops = 10 // close connection after this many consecutive drops
     this._rateLimiter = new RateLimiter()
+    // Separate, relaxed limiter for permission/question responses (60 per minute, no burst)
+    this._permissionRateLimiter = new RateLimiter({ windowMs: 60_000, maxMessages: 60, burst: 0 })
     this._clientSend = createClientSender(log)
     this._clientManager = new WsClientManager()
     this.clients = this._clientManager.clients // back-compat: expose the raw Map for context objects
@@ -664,7 +666,10 @@ export class WsServer {
         if (client?.authenticated) {
           this._handleClientDeparture(client)
         }
-        if (client?.id) this._rateLimiter.remove(client.id)
+        if (client?.id) {
+          this._rateLimiter.remove(client.id)
+          this._permissionRateLimiter.remove(client.id)
+        }
         this._clientManager.removeClient(ws)
       })
 
@@ -795,8 +800,14 @@ export class WsServer {
       return
     }
 
-    // Rate limiting (skip for permission responses and pings)
-    if (msg.type !== 'permission_response' && msg.type !== 'user_question_response') {
+    // Rate limiting — permission/question responses use a relaxed separate limiter (60/min)
+    if (msg.type === 'permission_response' || msg.type === 'user_question_response') {
+      const { allowed, retryAfterMs } = this._permissionRateLimiter.check(client.id)
+      if (!allowed) {
+        this._send(ws, { type: 'rate_limited', retryAfterMs, message: 'Too many permission responses. Please slow down.' })
+        return
+      }
+    } else {
       const { allowed, retryAfterMs } = this._rateLimiter.check(client.id)
       if (!allowed) {
         this._send(ws, { type: 'rate_limited', retryAfterMs, message: 'Too many messages. Please slow down.' })
