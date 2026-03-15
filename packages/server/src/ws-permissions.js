@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+
 // -- Permission TTL --
 const PERMISSION_TTL_MS = 300_000 // 5 minutes
 
@@ -45,8 +47,6 @@ function sanitizeToolInput(input) {
  * @returns {Object} Permission handler methods
  */
 export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager }) {
-  let _permissionCounter = 0
-
   /** Handle POST /permission from the hook script */
   function handlePermissionRequest(req, res) {
     if (!validateBearerAuth(req, res)) {
@@ -80,7 +80,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         return
       }
 
-      const requestId = `perm-${++_permissionCounter}-${Date.now()}`
+      const requestId = `perm-${randomUUID()}`
 
       console.log(`[ws] Permission request ${requestId}: ${hookData.tool_name || 'unknown tool'}`)
 
