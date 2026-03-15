@@ -13,12 +13,7 @@ describe('StatusBar', () => {
     expect(screen.getByTestId('status-bar')).toBeInTheDocument()
   })
 
-  it('shows model name when provided', () => {
-    render(<StatusBar model="claude-sonnet" />)
-    expect(screen.getByText('claude-sonnet')).toBeInTheDocument()
-  })
-
-  it('does not show model element when not provided', () => {
+  it('does not render model (model shown in header dropdown)', () => {
     const { container } = render(<StatusBar />)
     expect(container.querySelector('.status-model')).toBeNull()
   })

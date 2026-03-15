@@ -2034,10 +2034,6 @@
   background: var(--bg-secondary);
 }
 
-.status-model {
-  color: var(--text-secondary);
-}
-
 .status-cost {
   color: var(--accent-green);
   font-family: var(--font-mono);
