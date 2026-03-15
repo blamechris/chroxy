@@ -43,6 +43,9 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const setTheme = useConnectionStore(s => s.setTheme)
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
   const setDefaultProvider = useConnectionStore(s => s.setDefaultProvider)
+  const defaultModel = useConnectionStore(s => s.defaultModel)
+  const setDefaultModel = useConnectionStore(s => s.setDefaultModel)
+  const availableModels = useConnectionStore(s => s.availableModels ?? [])
   const availableProviders = useConnectionStore(s => s.availableProviders ?? [])
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const updateInputSettings = useConnectionStore(s => s.updateInputSettings)
@@ -64,6 +67,10 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const handleProviderChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     setDefaultProvider(e.target.value)
   }, [setDefaultProvider])
+
+  const handleModelChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    setDefaultModel(e.target.value)
+  }, [setDefaultModel])
 
   const handleSendShortcutChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     updateInputSettings({ chatEnterToSend: e.target.value === 'enter' })
@@ -143,6 +150,22 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 }
               </select>
             </div>
+            {availableModels.length > 0 && (
+              <div className="settings-field">
+                <label htmlFor="default-model">Default model</label>
+                <select
+                  id="default-model"
+                  aria-label="Default model"
+                  value={defaultModel}
+                  onChange={handleModelChange}
+                >
+                  <option value="">Server default</option>
+                  {availableModels.map(m => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="settings-field">
               <label htmlFor="send-shortcut">Send message with</label>
               <select

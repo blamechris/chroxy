@@ -217,6 +217,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   followMode: false,
   activeTheme: loadPersistedSetting('chroxy_persist_theme', 'default'),
   defaultProvider: loadPersistedSetting('chroxy_default_provider', 'claude-sdk'),
+  defaultModel: loadPersistedSetting('chroxy_default_model', ''),
   connectionError: null,
   connectionRetryCount: 0,
   serverStartupLogs: null,
@@ -322,6 +323,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setDefaultProvider: (provider: string) => {
     set({ defaultProvider: provider });
     try { localStorage.setItem('chroxy_default_provider', provider); } catch { /* noop */ }
+  },
+
+  setDefaultModel: (model: string) => {
+    set({ defaultModel: model });
+    try { localStorage.setItem('chroxy_default_model', model); } catch { /* noop */ }
   },
 
   getActiveSessionState: () => {
