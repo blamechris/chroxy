@@ -552,13 +552,14 @@ export class Supervisor extends EventEmitter {
     this._stopStandbyServer()
 
     if (this._child) {
-      this._child.send({ type: 'shutdown' })
+      const childRef = this._child
+      childRef.send({ type: 'shutdown' })
       const forceKillTimer = setTimeout(() => {
         this._log.info('Force-killing child after 5s timeout')
-        try { forceKill(this._child) } catch {}
+        try { forceKill(childRef) } catch {}
       }, 5000)
 
-      this._child.on('exit', () => clearTimeout(forceKillTimer))
+      childRef.once('exit', () => clearTimeout(forceKillTimer))
     }
 
     if (this._tunnel) {
