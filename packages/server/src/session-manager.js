@@ -174,6 +174,7 @@ export class SessionManager extends EventEmitter {
 
     // Internal state
     this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
+    this._sessionCounter = 0   // monotonically incrementing; used for auto-naming
     this._locks = new SessionLockManager()
 
     // Session idle timeout (delegated to SessionTimeoutManager)
@@ -258,7 +259,7 @@ export class SessionManager extends EventEmitter {
     }
 
     const sessionId = randomBytes(16).toString('hex')
-    const sessionName = name || `Session ${this._sessions.size + 1}`
+    const sessionName = name || `Session ${++this._sessionCounter}`
 
     const resolvedProvider = provider || this._providerType
     const ProviderClass = getProvider(resolvedProvider)
