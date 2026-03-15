@@ -701,10 +701,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         apiToken: effectiveToken,
         socket: ctx.socket,
         claudeReady: false,
-        serverMode: authServerMode,
         sessionCwd: authSessionCwd,
-        serverVersion: authServerVersion,
-        latestVersion: authLatestVersion,
         streamingMessageId: null,
         myClientId: myClientId, // kept for backward compat; canonical source is useMultiClientStore
         connectedClients: clients, // kept for backward compat; canonical source is useMultiClientStore
@@ -817,13 +814,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'server_mode':
-      set({ serverMode: msg.mode === 'cli' ? 'cli' : null });
+    case 'server_mode': {
+      const newServerMode = msg.mode === 'cli' ? 'cli' as const : null;
+      useConnectionLifecycleStore.getState().setServerInfo({ serverMode: newServerMode });
       // Force chat view in CLI mode (no terminal available)
       if (msg.mode === 'cli' && get().viewMode === 'terminal') {
         set({ viewMode: 'chat' });
       }
       break;
+    }
 
     // --- Multi-session messages ---
 
