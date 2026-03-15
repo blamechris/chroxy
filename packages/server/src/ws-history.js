@@ -163,6 +163,14 @@ export function sendSessionInfo(ctx, ws, sessionId) {
     mode: session.permissionMode || 'approve',
     sessionId,
   })
+  // Sync thinking level if the session has one set
+  if (session._thinkingLevel) {
+    send(ws, {
+      type: 'thinking_level_changed',
+      level: session._thinkingLevel,
+      sessionId,
+    })
+  }
 }
 
 /**

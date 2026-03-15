@@ -41,6 +41,7 @@ import type {
   SessionNotification,
   SessionState,
   SlashCommand,
+  ThinkingLevel,
   FilePickerItem,
   LogEntry,
   ConversationSummary,
@@ -1226,7 +1227,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'thinking_level_changed': {
-      const level = (typeof msg.level === 'string' && msg.level.trim()) ? msg.level.trim() : 'default';
+      const raw = (typeof msg.level === 'string' && msg.level.trim()) ? msg.level.trim() : 'default';
+      const level = (['default', 'high', 'max'].includes(raw) ? raw : 'default') as ThinkingLevel;
       const targetId = (msg.sessionId as string) || get().activeSessionId;
       if (targetId && get().sessionStates[targetId]) {
         updateSession(targetId, () => ({ thinkingLevel: level }));
