@@ -52,15 +52,49 @@ export function ChatSettingsDropdown({
     return () => document.removeEventListener('mousedown', handleClick)
   }, [open])
 
-  // Close on Escape
+  // Close on Escape and return focus to trigger
   useEffect(() => {
     if (!open) return
     function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key === 'Escape') {
+        setOpen(false)
+        triggerRef.current?.focus()
+      }
     }
     document.addEventListener('keydown', handleKey)
     return () => document.removeEventListener('keydown', handleKey)
   }, [open])
+
+  // Focus first select when panel opens
+  useEffect(() => {
+    if (!open) return
+    const panel = panelRef.current
+    if (!panel) return
+    const first = panel.querySelector<HTMLElement>('select, button, input, [tabindex]')
+    first?.focus()
+  }, [open])
+
+  // Trap Tab/Shift+Tab within the panel
+  const handlePanelKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key !== 'Tab') return
+    const panel = panelRef.current
+    if (!panel) return
+    const focusable = panel.querySelectorAll<HTMLElement>('select, button, input, [tabindex]')
+    if (focusable.length === 0) return
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (e.shiftKey) {
+      if (document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      }
+    } else {
+      if (document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+  }, [])
 
   const modelLabel = activeModel
     ? (availableModels.find(m => m.id === activeModel)?.label ?? activeModel)
@@ -105,6 +139,7 @@ export function ChatSettingsDropdown({
           data-testid="chat-settings-panel"
           role="dialog"
           aria-label="Chat Settings"
+          onKeyDown={handlePanelKeyDown}
         >
           {/* Model */}
           {availableModels.length > 0 && (
