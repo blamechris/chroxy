@@ -337,7 +337,14 @@ describe('auto permission mode confirmation handshake', () => {
     // Send with confirmed: true
     send(ws, { type: 'set_permission_mode', mode: 'auto', confirmed: true })
 
-    const modeChanged = await waitForMessage(messages, 'permission_mode_changed', 2000)
+    // Use predicate match — post-auth sends permission_mode_changed with default 'approve'
+    // which can race with messages.length=0 clear above, so match on mode too
+    const modeChanged = await waitForMessageMatch(
+      messages,
+      m => m.type === 'permission_mode_changed' && m.mode === 'auto',
+      2000,
+      'permission_mode_changed with mode=auto'
+    )
     assert.ok(modeChanged, 'Should receive permission_mode_changed')
     assert.equal(modeChanged.mode, 'auto')
     assert.equal(appliedMode, 'auto', 'Auto mode should be applied with confirmation')
