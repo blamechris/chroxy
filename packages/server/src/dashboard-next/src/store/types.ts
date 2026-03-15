@@ -91,6 +91,7 @@ export interface ProviderCapabilities {
   planMode: boolean;
   resume: boolean;
   terminal: boolean;
+  thinkingLevel?: boolean;
 }
 
 export interface ProviderInfo {
@@ -270,9 +271,10 @@ export interface SessionState {
   devPreviews: DevPreview[];
   // Files tab: selected file path (persists across tab switches)
   selectedFilePath: string | null;
-  // Thinking level: 'default' | 'high' | 'max'
-  thinkingLevel: string;
+  thinkingLevel: ThinkingLevel;
 }
+
+export type ThinkingLevel = 'default' | 'high' | 'max';
 
 export interface LogEntry {
   id: string;
@@ -534,7 +536,7 @@ export interface ConnectionState {
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
   setModel: (model: string) => void;
   setPermissionMode: (mode: string) => void;
-  setThinkingLevel: (level: string) => void;
+  setThinkingLevel: (level: ThinkingLevel) => void;
   confirmPermissionMode: (mode: string) => void;
   cancelPermissionConfirm: () => void;
   resize: (cols: number, rows: number) => void;

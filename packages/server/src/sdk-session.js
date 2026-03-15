@@ -54,6 +54,11 @@ export class SdkSession extends BaseSession {
     }
   }
 
+  /** Token budgets for thinking levels. null = adaptive (SDK default). */
+  static THINKING_BUDGETS = { default: null, high: 32000, max: 128000 }
+
+  get thinkingLevel() { return this._thinkingLevel }
+
   constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput } = {}) {
     super({ cwd, model, permissionMode })
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
@@ -62,6 +67,7 @@ export class SdkSession extends BaseSession {
     this._sdkSessionId = resumeSessionId || null
     this._sessionId = null
     this._query = null
+    this._thinkingLevel = null
 
     // Permission handling — delegated to PermissionManager
     this._permissions = new PermissionManager({ log })
@@ -142,8 +148,8 @@ export class SdkSession extends BaseSession {
 
     // Apply thinking level if set
     if (this._thinkingLevel) {
-      const budgets = { high: 32000, max: 128000 }
-      options.maxThinkingTokens = budgets[this._thinkingLevel] || undefined
+      const budget = SdkSession.THINKING_BUDGETS[this._thinkingLevel]
+      if (budget != null) options.maxThinkingTokens = budget
     }
 
     // In-process permission handling (only when not bypassing)
@@ -398,12 +404,7 @@ export class SdkSession extends BaseSession {
    * @param {string} level - 'default' | 'high' | 'max'
    */
   async setThinkingLevel(level) {
-    const THINKING_BUDGETS = {
-      default: null,
-      high: 32000,
-      max: 128000,
-    }
-    const budget = THINKING_BUDGETS[level] ?? null
+    const budget = SdkSession.THINKING_BUDGETS[level] ?? null
     this._thinkingLevel = level === 'default' ? null : level
 
     if (this._query && typeof this._query.setMaxThinkingTokens === 'function') {

@@ -32,6 +32,7 @@
  *       planMode: false,
  *       resume: false,
  *       terminal: false,
+ *       thinkingLevel: false,
  *     }
  *   }
  *

@@ -163,6 +163,15 @@ export function sendSessionInfo(ctx, ws, sessionId) {
     mode: session.permissionMode || 'approve',
     sessionId,
   })
+  // Always sync thinking level on reconnect so stale dashboard state is overwritten
+  const thinkingLevel = session.thinkingLevel
+  if (thinkingLevel !== undefined) {
+    send(ws, {
+      type: 'thinking_level_changed',
+      level: thinkingLevel || 'default',
+      sessionId,
+    })
+  }
 }
 
 /**

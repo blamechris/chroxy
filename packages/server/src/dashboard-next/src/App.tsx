@@ -99,6 +99,7 @@ export function App() {
   const availableModels = useConnectionStore(s => s.availableModels)
   const defaultModelId = useConnectionStore(s => s.defaultModelId)
   const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
+  const availableProviders = useConnectionStore(s => s.availableProviders)
   const serverErrors = useConnectionStore(s => s.serverErrors)
   const infoNotifications = useConnectionStore(s => s.infoNotifications ?? [])
   const connectionError = useConnectionStore(s => s.connectionError)
@@ -798,11 +799,15 @@ export function App() {
               ))}
             </select>
           )}
-          {/* Thinking level selector (SDK provider only) */}
-          {sessions.find(s => s.sessionId === activeSessionId)?.provider?.includes('sdk') && (
+          {/* Thinking level selector — only for providers with thinkingLevel capability */}
+          {(() => {
+            const activeProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider
+            const providerInfo = availableProviders.find(p => p.name === activeProvider)
+            return activeProvider && providerInfo?.capabilities?.thinkingLevel
+          })() && (
             <select
               value={thinkingLevel || 'default'}
-              onChange={e => setThinkingLevel(e.target.value)}
+              onChange={e => setThinkingLevel(e.target.value as 'default' | 'high' | 'max')}
               aria-label="Thinking level"
               className="thinking-level-select"
             >

@@ -31,6 +31,9 @@ export class BaseSession extends EventEmitter {
     return this._isBusy
   }
 
+  /** Current thinking level. Override in subclasses that support it. */
+  get thinkingLevel() { return undefined }
+
   get isReady() {
     return this._processReady && !this._isBusy
   }
