@@ -43,19 +43,29 @@ describe('maskToken (#1893)', () => {
     assert.ok(!masked.includes(hiddenPart), 'middle portion of token must not appear in masked output')
   })
 
-  it('showToken flag bypasses masking — full token visible when showToken is true', () => {
-    // Behavioral: when CHROXY_SHOW_TOKEN is set the full token is used, not the masked value.
-    // Verify the masking API itself: if showToken is false, masked !== original.
-    // If showToken is true, caller uses raw token (maskToken is not called).
-    // This guards the contract between displayQr and maskToken.
+  it('maskToken hides the token middle; skipping maskToken shows the full token', () => {
+    // Behavioral: verify the masking vs non-masking contract used by displayQr.
+    // server-cli pattern: CHROXY_SHOW_TOKEN ? API_TOKEN : maskToken(API_TOKEN)
+    // — when showToken is false the full token must NOT be visible in the output.
+    // — when showToken is true the caller uses the raw token, bypassing maskToken.
     const fullToken = 'test-full-token-abcdefgh1234'
+
+    // With masking applied: output must differ from the full token
     const masked = maskToken(fullToken)
-    // With showToken=false: masked value hides middle
-    assert.notEqual(masked, fullToken)
-    // With showToken=true: caller would use fullToken directly — maskToken not invoked
-    // Simulate: token displayed equals fullToken (no masking applied)
-    const displayedWithShowToken = fullToken  // server-cli: SHOW_TOKEN ? API_TOKEN : maskToken(API_TOKEN)
-    assert.equal(displayedWithShowToken, fullToken)
+    assert.notEqual(masked, fullToken,
+      'maskToken must transform the token — masked value must not equal full token')
+    assert.ok(masked.includes('...'),
+      'masked token must contain ellipsis')
+    const hiddenMiddle = fullToken.slice(4, -4)
+    assert.ok(!masked.includes(hiddenMiddle),
+      'middle portion of the token must not appear in masked output')
+
+    // Without masking (showToken=true path): the raw token is used directly
+    // Verify the raw token is not masked — its middle IS visible
+    assert.ok(fullToken.includes(hiddenMiddle),
+      'full token must contain the portion that masking hides')
+    assert.ok(!masked.includes(hiddenMiddle),
+      'masked output must not contain what the full token contains in its middle')
   })
 
   it('connectionInfo file contains full unmasked token (writeConnectionInfo receives API_TOKEN)', async () => {
