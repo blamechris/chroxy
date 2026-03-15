@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomUUID } from 'crypto'
 
 // -- Permission TTL --
 const PERMISSION_TTL_MS = 300_000 // 5 minutes
