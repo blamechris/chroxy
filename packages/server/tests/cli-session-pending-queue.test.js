@@ -190,6 +190,81 @@ describe('CliSession._pendingQueue — FIFO dequeue on ready', () => {
   })
 })
 
+describe('CliSession._pendingQueue — drain via _clearMessageState', () => {
+  it('drains all 3 queued messages in FIFO order after each result', () => {
+    const written = []
+    const mockChild = createMockChild()
+    mockChild.stdin = new Writable({ write(chunk, enc, cb) { written.push(chunk.toString()); cb() } })
+
+    const session = createSession()
+    session._processReady = false
+
+    // Queue 3 messages while process is not ready
+    session.sendMessage('msg-1')
+    session.sendMessage('msg-2')
+    session.sendMessage('msg-3')
+
+    assert.equal(session._pendingQueue.length, 3)
+
+    // Process becomes ready — send the first queued message (spawn-time drain)
+    session._processReady = true
+    session._child = mockChild
+    const first = session._pendingQueue.shift()
+    session.sendMessage(first.prompt, first.attachments, first.options || {})
+    clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+
+    // msg-1 was written; msg-2 and msg-3 still queued
+    assert.equal(written.length, 1)
+    assert.equal(JSON.parse(written[0].trim()).message.content[0].text, 'msg-1')
+    assert.equal(session._pendingQueue.length, 2)
+
+    // Simulate result for msg-1: _clearMessageState should auto-drain msg-2
+    session._isBusy = true  // set as if sendMessage ran
+    session._clearMessageState()
+    clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+
+    assert.equal(written.length, 2, 'msg-2 should have been written after msg-1 result')
+    assert.equal(JSON.parse(written[1].trim()).message.content[0].text, 'msg-2')
+    assert.equal(session._pendingQueue.length, 1)
+
+    // Simulate result for msg-2: _clearMessageState should auto-drain msg-3
+    session._isBusy = true
+    session._clearMessageState()
+    clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+
+    assert.equal(written.length, 3, 'msg-3 should have been written after msg-2 result')
+    assert.equal(JSON.parse(written[2].trim()).message.content[0].text, 'msg-3')
+    assert.equal(session._pendingQueue.length, 0)
+  })
+
+  it('does not drain when process is not ready (mid-respawn)', () => {
+    const written = []
+    const mockChild = createMockChild()
+    mockChild.stdin = new Writable({ write(chunk, enc, cb) { written.push(chunk.toString()); cb() } })
+
+    const session = createSession()
+    session._processReady = true
+    session._child = mockChild
+
+    // Queue a message manually (simulate pre-spawn queuing)
+    session._pendingQueue.push({ prompt: 'queued', attachments: undefined, options: {} })
+
+    // Process goes down mid-session
+    session._processReady = false
+
+    // _clearMessageState called while process is down (e.g. crash cleanup)
+    session._isBusy = true
+    session._clearMessageState()
+
+    // Queue should remain untouched since process is not ready
+    assert.equal(session._pendingQueue.length, 1)
+    assert.equal(written.length, 0)
+  })
+})
+
 describe('CliSession._pendingQueue — busy guard is unaffected', () => {
   it('still rejects send when busy, regardless of queue', () => {
     const session = createReadySession()

@@ -544,6 +544,8 @@ export class CliSession extends BaseSession {
 
   /**
    * Clear per-message state, marking us as ready for the next message.
+   * After clearing, drains the next item from _pendingQueue (if any) so
+   * that all queued messages are eventually delivered in FIFO order.
    */
   _clearMessageState() {
     super._clearMessageState()
@@ -560,6 +562,14 @@ export class CliSession extends BaseSession {
     if (this._interruptTimer) {
       clearTimeout(this._interruptTimer)
       this._interruptTimer = null
+    }
+
+    // Drain the next queued message now that the process is free.
+    // Only drain when the process is ready (not mid-respawn).
+    if (this._pendingQueue.length > 0 && this._processReady) {
+      const pending = this._pendingQueue.shift()
+      log.info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
+      this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
     }
   }
 
