@@ -235,7 +235,7 @@ export class PushManager {
       data: { state, detail, category },
     }))
 
-    await this._sendToTokenSet(this._liveActivityTokens, messages, category, 'Live Activity update')
+    await this._sendToTokenSet(this._liveActivityTokens, messages, category, 'update')
   }
 
   /**
