@@ -188,6 +188,7 @@ export class CliSession extends BaseSession {
       this._child = null
 
       if (this._destroying) return
+      if (this._respawning) return
 
       // Safety net: if we were mid-message, close the stream
       if (this._isBusy && this._currentMessageId) {
