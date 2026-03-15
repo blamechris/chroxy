@@ -46,6 +46,19 @@ describe('CliSession constructor', () => {
     assert.equal(session._processReady, false)
   })
 
+  it('generates a per-session hookSecret as a 64-char hex string', () => {
+    const session = createSession()
+    assert.equal(typeof session._hookSecret, 'string')
+    assert.equal(session._hookSecret.length, 64)
+    assert.ok(/^[0-9a-f]+$/.test(session._hookSecret), 'hookSecret should be lowercase hex')
+  })
+
+  it('generates unique hookSecrets for each session', () => {
+    const s1 = createSession()
+    const s2 = createSession()
+    assert.notEqual(s1._hookSecret, s2._hookSecret)
+  })
+
   it('creates hook manager when port is provided', () => {
     const session = createSession({ port: 8765 })
     assert.ok(session._hookManager)
@@ -722,16 +735,33 @@ describe('CliSession._buildChildEnv', () => {
     assert.equal(env.CHROXY_PERMISSION_MODE, 'auto')
   })
 
-  it('includes CHROXY_TOKEN when apiToken is provided', () => {
+  it('never passes CHROXY_TOKEN (primary API token) to child env', () => {
     const session = createSession({ apiToken: 'tok-abc123' })
     const env = session._buildChildEnv()
-    assert.equal(env.CHROXY_TOKEN, 'tok-abc123')
+    assert.ok(!Object.prototype.hasOwnProperty.call(env, 'CHROXY_TOKEN'),
+      'CHROXY_TOKEN must not appear in child env — use CHROXY_HOOK_SECRET instead')
   })
 
-  it('omits CHROXY_TOKEN when apiToken is not set', () => {
+  it('includes CHROXY_HOOK_SECRET when port is set', () => {
+    const session = createSession({ port: 8765 })
+    session._hookManager?.destroy()
+    const env = session._buildChildEnv()
+    assert.ok(typeof env.CHROXY_HOOK_SECRET === 'string', 'CHROXY_HOOK_SECRET should be a string')
+    assert.ok(env.CHROXY_HOOK_SECRET.length >= 64, 'CHROXY_HOOK_SECRET should be at least 64 hex chars (32 bytes)')
+  })
+
+  it('omits CHROXY_HOOK_SECRET when port is not set', () => {
     const session = createSession()
     const env = session._buildChildEnv()
-    assert.ok(!Object.prototype.hasOwnProperty.call(env, 'CHROXY_TOKEN'), 'CHROXY_TOKEN should not be present in child env when apiToken is not set')
+    assert.ok(!Object.prototype.hasOwnProperty.call(env, 'CHROXY_HOOK_SECRET'),
+      'CHROXY_HOOK_SECRET should not appear when no port is configured')
+  })
+
+  it('CHROXY_HOOK_SECRET matches the session _hookSecret', () => {
+    const session = createSession({ port: 8765 })
+    session._hookManager?.destroy()
+    const env = session._buildChildEnv()
+    assert.equal(env.CHROXY_HOOK_SECRET, session._hookSecret)
   })
 
   it('forwards arbitrary process.env keys to child env', () => {
