@@ -239,6 +239,97 @@ describe('ChatSettingsDropdown', () => {
     expect(screen.queryByTestId('chat-settings-panel')).not.toBeInTheDocument()
   })
 
+  it('focuses first select when panel opens', () => {
+    render(
+      <ChatSettingsDropdown
+        availableModels={MODELS}
+        activeModel="sonnet"
+        defaultModelId={null}
+        onModelChange={vi.fn()}
+        availablePermissionModes={PERMISSION_MODES}
+        permissionMode="approve"
+        onPermissionModeChange={vi.fn()}
+        showThinkingLevel={false}
+        thinkingLevel={null}
+        onThinkingLevelChange={vi.fn()}
+      />
+    )
+    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
+    expect(document.activeElement).toBe(screen.getByLabelText('Model'))
+  })
+
+  it('traps Tab within the panel', () => {
+    render(
+      <ChatSettingsDropdown
+        availableModels={MODELS}
+        activeModel="sonnet"
+        defaultModelId={null}
+        onModelChange={vi.fn()}
+        availablePermissionModes={PERMISSION_MODES}
+        permissionMode="approve"
+        onPermissionModeChange={vi.fn()}
+        showThinkingLevel={false}
+        thinkingLevel={null}
+        onThinkingLevelChange={vi.fn()}
+      />
+    )
+    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
+    const panel = screen.getByTestId('chat-settings-panel')
+    const permSelect = screen.getByLabelText('Permission Mode')
+
+    // Focus the last focusable element, then Tab — should wrap to first
+    permSelect.focus()
+    fireEvent.keyDown(panel, { key: 'Tab', bubbles: true })
+    expect(document.activeElement).toBe(screen.getByLabelText('Model'))
+  })
+
+  it('traps Shift+Tab within the panel', () => {
+    render(
+      <ChatSettingsDropdown
+        availableModels={MODELS}
+        activeModel="sonnet"
+        defaultModelId={null}
+        onModelChange={vi.fn()}
+        availablePermissionModes={PERMISSION_MODES}
+        permissionMode="approve"
+        onPermissionModeChange={vi.fn()}
+        showThinkingLevel={false}
+        thinkingLevel={null}
+        onThinkingLevelChange={vi.fn()}
+      />
+    )
+    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
+    const panel = screen.getByTestId('chat-settings-panel')
+    const modelSelect = screen.getByLabelText('Model')
+
+    // Focus first element, then Shift+Tab — should wrap to last
+    modelSelect.focus()
+    fireEvent.keyDown(panel, { key: 'Tab', shiftKey: true, bubbles: true })
+    expect(document.activeElement).toBe(screen.getByLabelText('Permission Mode'))
+  })
+
+  it('returns focus to trigger on Escape', () => {
+    render(
+      <ChatSettingsDropdown
+        availableModels={MODELS}
+        activeModel="sonnet"
+        defaultModelId={null}
+        onModelChange={vi.fn()}
+        availablePermissionModes={PERMISSION_MODES}
+        permissionMode="approve"
+        onPermissionModeChange={vi.fn()}
+        showThinkingLevel={false}
+        thinkingLevel={null}
+        onThinkingLevelChange={vi.fn()}
+      />
+    )
+    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
+    expect(screen.getByTestId('chat-settings-panel')).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('chat-settings-panel')).not.toBeInTheDocument()
+    expect(document.activeElement).toBe(screen.getByTestId('chat-settings-trigger'))
+  })
+
   it('shows Default option for model when defaultModelId is set', () => {
     render(
       <ChatSettingsDropdown
