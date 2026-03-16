@@ -2,7 +2,7 @@
  * chroxy tunnel — Tunnel management commands
  */
 import { existsSync, mkdirSync, readFileSync } from 'fs'
-import { getTunnel, listTunnels } from '../tunnel/registry.js'
+import { CloudflareTunnelAdapter } from '../tunnel/index.js'
 import { writeFileRestricted } from '../platform.js'
 import { CONFIG_DIR, CONFIG_FILE, prompt } from './shared.js'
 
@@ -13,32 +13,15 @@ export function registerTunnelCommand(program) {
 
   tunnelCmd
     .command('setup')
-    .description('Interactive tunnel setup (defaults to Cloudflare)')
-    .option('--provider <name>', 'Tunnel provider to set up (default: cloudflare)', 'cloudflare')
-    .action(async (options) => {
-      const providerName = options.provider
-
-      await import('../tunnel/index.js')
-      let TunnelAdapter
-      try {
-        TunnelAdapter = getTunnel(providerName)
-      } catch (_err) {
-        const available = listTunnels().map(t => t.name).join(', ')
-        console.error(`❌ Unknown tunnel provider "${providerName}". Available: ${available}`)
-        process.exit(1)
-      }
-
-      const binary = TunnelAdapter.checkBinary()
+    .description('Interactive Cloudflare Named Tunnel setup')
+    .action(async () => {
+      const binary = CloudflareTunnelAdapter.checkBinary()
       if (!binary.available) {
-        console.error(`❌ ${TunnelAdapter.capabilities.binaryName || providerName} not found.${binary.hint ? ' ' + binary.hint : ''}`)
+        console.error(`❌ cloudflared not found.${binary.hint ? ' ' + binary.hint : ''}`)
         process.exit(1)
       }
 
-      if (providerName === 'cloudflare') {
-        await setupCloudflare()
-      } else {
-        await TunnelAdapter.setup({ prompt, configDir: CONFIG_DIR, configFile: CONFIG_FILE })
-      }
+      await setupCloudflare()
     })
 }
 

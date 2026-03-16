@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { EventEmitter } from 'events'
-import { getTunnel, parseTunnelArg } from './tunnel/index.js'
+import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { createLogger } from './logger.js'
 import qrcode from 'qrcode-terminal'
@@ -98,15 +98,12 @@ export class Supervisor extends EventEmitter {
     if (!tunnelArg) {
       throw new Error('Supervisor requires a tunnel (cannot use tunnel=none)')
     }
-    const TunnelAdapter = getTunnel(tunnelArg.provider)
-    return new TunnelAdapter({
+    return createTunnel({
       port: this._port,
       mode: tunnelArg.mode,
-      config: {
-        ...this.config.tunnelConfig,
-        tunnelName: this.config.tunnelName || null,
-        tunnelHostname: this.config.tunnelHostname || null,
-      },
+      tunnelConfig: this.config.tunnelConfig,
+      tunnelName: this.config.tunnelName || null,
+      tunnelHostname: this.config.tunnelHostname || null,
     })
   }
 
@@ -174,7 +171,7 @@ export class Supervisor extends EventEmitter {
 
     // Compute modeLabel early so tunnel_recovered handler can reference it
     const tunnelArg = parseTunnelArg(this._tunnelMode)
-    this._modeLabel = tunnelArg ? `${tunnelArg.provider}:${tunnelArg.mode}` : this._tunnelMode
+    this._modeLabel = tunnelArg ? `cloudflare:${tunnelArg.mode}` : this._tunnelMode
 
     this._tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
       this._log.info(`Tunnel recovered after ${attempt} attempt(s)`)
