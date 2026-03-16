@@ -36,3 +36,18 @@ export type {
 export {
   parseUserInputMessage,
 } from './user-input-handler'
+
+export type {
+  TokenType,
+  Token,
+  SyntaxRule,
+  LanguageDef,
+} from './syntax'
+
+export {
+  SYNTAX_COLORS,
+  getLanguage,
+  getSyntaxRules,
+  tokenize,
+  highlightCode,
+} from './syntax'

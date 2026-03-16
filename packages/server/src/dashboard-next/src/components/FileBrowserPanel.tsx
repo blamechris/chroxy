@@ -7,7 +7,7 @@
  */
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
-import { tokenize } from '../lib/syntax'
+import { tokenize } from '@chroxy/store-core'
 import type { FileEntry, FileListing, FileContent, GitStatusResult } from '../store/types'
 
 /** File icon by extension */

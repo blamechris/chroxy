@@ -2,7 +2,7 @@
  * Syntax highlighting tokenizer tests (#1155)
  */
 import { describe, it, expect } from 'vitest'
-import { tokenize, highlightCode, getSyntaxRules } from './syntax'
+import { tokenize, highlightCode, getSyntaxRules } from '@chroxy/store-core'
 
 describe('getSyntaxRules', () => {
   it('returns rules for known languages', () => {
