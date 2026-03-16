@@ -51,3 +51,20 @@ export {
   tokenize,
   highlightCode,
 } from './syntax'
+
+export type {
+  KeyPair,
+  EncryptedEnvelope,
+  EncryptionState,
+} from './crypto'
+
+export {
+  DIRECTION_SERVER,
+  DIRECTION_CLIENT,
+  initPRNG,
+  createKeyPair,
+  deriveSharedKey,
+  nonceFromCounter,
+  encrypt,
+  decrypt,
+} from './crypto'

@@ -10,6 +10,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
+  "dependencies": {
+    "tweetnacl": "^1.0.3",
+    "tweetnacl-util": "^0.15.1"
+  },
   "devDependencies": {
     "vitest": "^3.2.1"
   }
