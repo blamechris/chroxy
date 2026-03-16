@@ -525,8 +525,9 @@ export async function startCliServer(config) {
   process.on('uncaughtException', (err) => {
     console.error('[fatal] Uncaught exception:', err)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
-    try { wsServer.close() } catch {}
+    // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
     try { sessionManager.destroyAll() } catch {}
+    try { wsServer.close() } catch {}
     try { if (tunnel) tunnel.stop() } catch {}
     try { removeConnectionInfo() } catch {}
     setTimeout(() => process.exit(1), 100)
@@ -535,8 +536,9 @@ export async function startCliServer(config) {
   process.on('unhandledRejection', (err) => {
     console.error('[fatal] Unhandled rejection:', err)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
-    try { wsServer.close() } catch {}
+    // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
     try { sessionManager.destroyAll() } catch {}
+    try { wsServer.close() } catch {}
     try { if (tunnel) tunnel.stop() } catch {}
     try { removeConnectionInfo() } catch {}
     setTimeout(() => process.exit(1), 100)

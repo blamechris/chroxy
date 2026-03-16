@@ -1517,3 +1517,98 @@ describe('Reconnect permission recovery (_resendPendingPermissions)', () => {
       'Should not populate routing map for expired permissions')
   })
 })
+
+describe('clearAllPendingPermissions (#2405)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      // Avoid calling close() again if we already called it in the test
+      try { server.close() } catch {}
+      server = null
+    }
+  })
+
+  it('auto-denies legacy HTTP hook pending permissions', () => {
+    server = new WsServer({ port: 0, apiToken: 'test-token', authRequired: false })
+
+    const decisions = []
+    server._pendingPermissions.set('leg-1', {
+      resolve: (d) => decisions.push(d),
+      timer: null,
+    })
+    server._pendingPermissions.set('leg-2', {
+      resolve: (d) => decisions.push(d),
+      timer: null,
+    })
+
+    server.clearAllPendingPermissions()
+
+    assert.equal(decisions.length, 2, 'Both legacy permissions should be resolved')
+    assert.ok(decisions.every(d => d === 'deny'), 'All legacy permissions resolved as deny')
+    assert.equal(server._pendingPermissions.size, 0, 'Legacy pendingPermissions map should be empty')
+  })
+
+  it('calls clearAll() on each SDK session PermissionManager', () => {
+    server = new WsServer({ port: 0, apiToken: 'test-token', authRequired: false })
+
+    const cleared = []
+    const sdkSession1 = {
+      _permissions: {
+        clearAll: () => cleared.push('session-1'),
+      },
+    }
+    const sdkSession2 = {
+      _permissions: {
+        clearAll: () => cleared.push('session-2'),
+      },
+    }
+
+    const _sessions = new Map([
+      ['session-1', { session: sdkSession1 }],
+      ['session-2', { session: sdkSession2 }],
+    ])
+    server.sessionManager = { _sessions }
+
+    server.clearAllPendingPermissions()
+
+    assert.deepEqual(cleared.sort(), ['session-1', 'session-2'],
+      'clearAll() should be called on every SDK session PermissionManager')
+  })
+
+  it('tolerates sessions without a _permissions object', () => {
+    server = new WsServer({ port: 0, apiToken: 'test-token', authRequired: false })
+
+    const _sessions = new Map([
+      ['session-no-perms', { session: {} }],
+    ])
+    server.sessionManager = { _sessions }
+
+    // Should not throw
+    assert.doesNotThrow(() => server.clearAllPendingPermissions())
+  })
+
+  it('close() clears both legacy and SDK permissions', () => {
+    server = new WsServer({ port: 0, apiToken: 'test-token', authRequired: false })
+
+    const decisions = []
+    server._pendingPermissions.set('leg-close', {
+      resolve: (d) => decisions.push(d),
+      timer: null,
+    })
+
+    const sdkCleared = []
+    server.sessionManager = {
+      _sessions: new Map([
+        ['sess-close', { session: { _permissions: { clearAll: () => sdkCleared.push(true) } } }],
+      ]),
+    }
+
+    server.close()
+    server = null // prevent afterEach double-close
+
+    assert.equal(decisions.length, 1, 'Legacy permission should be resolved on close()')
+    assert.equal(decisions[0], 'deny')
+    assert.equal(sdkCleared.length, 1, 'SDK session clearAll() should be called on close()')
+  })
+})
