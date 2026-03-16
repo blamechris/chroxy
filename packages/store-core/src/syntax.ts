@@ -1,23 +1,77 @@
-import type { TokenType } from './theme';
+/**
+ * Shared syntax highlighting tokenizer.
+ *
+ * Supports 15+ languages with regex-based tokenization using sticky patterns.
+ * Used by both the mobile app and the web dashboard.
+ */
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** Token types produced by the syntax tokenizer. */
+export type TokenType =
+  | 'keyword'
+  | 'string'
+  | 'comment'
+  | 'number'
+  | 'function'
+  | 'operator'
+  | 'punctuation'
+  | 'type'
+  | 'property'
+  | 'plain'
+  | 'diff_add'
+  | 'diff_remove'
+
+/** A single token with text and type. */
+export interface Token {
+  text: string
+  type: TokenType
+}
 
 /** A single syntax rule: a sticky regex pattern and the token type it produces. */
 export interface SyntaxRule {
-  pattern: RegExp;
-  type: TokenType;
+  pattern: RegExp
+  type: TokenType
 }
 
 /** Language definition: ordered array of rules (first match wins). */
-export type LanguageDef = SyntaxRule[];
+export type LanguageDef = SyntaxRule[]
 
-// -- Helpers --
+// ---------------------------------------------------------------------------
+// Colors
+// ---------------------------------------------------------------------------
+
+/** Maps each token type to its display color. */
+export const SYNTAX_COLORS: Record<TokenType, string> = {
+  keyword: '#c4a5ff',
+  string: '#4eca6a',
+  comment: '#7a7a7a',
+  number: '#ff9a52',
+  function: '#4a9eff',
+  operator: '#e0e0e0',
+  punctuation: '#888888',
+  type: '#4a9eff',
+  property: '#4eca6a',
+  plain: '#a0d0ff',
+  diff_add: '#4eca6a',
+  diff_remove: '#ff5b5b',
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /** Build a sticky regex from a non-sticky source pattern, preserving all original flags. */
 function s(pattern: RegExp): RegExp {
-  const flags = pattern.flags.includes('y') ? pattern.flags : pattern.flags + 'y';
-  return new RegExp(pattern.source, flags);
+  const flags = pattern.flags.includes('y') ? pattern.flags : pattern.flags + 'y'
+  return new RegExp(pattern.source, flags)
 }
 
-// -- Language Definitions --
+// ---------------------------------------------------------------------------
+// Language definitions
+// ---------------------------------------------------------------------------
 
 const javascript: LanguageDef = [
   { pattern: s(/\/\/[^\n]*/), type: 'comment' },
@@ -33,7 +87,7 @@ const javascript: LanguageDef = [
   { pattern: s(/[a-zA-Z_$][\w$]*(?=\s*\()/), type: 'function' },
   { pattern: s(/=>|[+\-*/%=!<>&|^~?:]+/), type: 'operator' },
   { pattern: s(/[{}()\[\];,.]/), type: 'punctuation' },
-];
+]
 
 const typescript: LanguageDef = [
   { pattern: s(/\/\/[^\n]*/), type: 'comment' },
@@ -50,7 +104,7 @@ const typescript: LanguageDef = [
   { pattern: s(/[a-zA-Z_$][\w$]*(?=\s*[<(])/), type: 'function' },
   { pattern: s(/=>|[+\-*/%=!<>&|^~?:]+/), type: 'operator' },
   { pattern: s(/[{}()\[\];,.]/), type: 'punctuation' },
-];
+]
 
 const python: LanguageDef = [
   { pattern: s(/#[^\n]*/), type: 'comment' },
@@ -68,7 +122,7 @@ const python: LanguageDef = [
   { pattern: s(/[a-zA-Z_]\w*(?=\s*\()/), type: 'function' },
   { pattern: s(/[-+*/%=!<>&|^~@:]+/), type: 'operator' },
   { pattern: s(/[{}()\[\];,.]/), type: 'punctuation' },
-];
+]
 
 const bash: LanguageDef = [
   { pattern: s(/#[^\n]*/), type: 'comment' },
@@ -80,7 +134,7 @@ const bash: LanguageDef = [
   { pattern: s(/\b\d+\b/), type: 'number' },
   { pattern: s(/[|&;><!=]+/), type: 'operator' },
   { pattern: s(/[{}()\[\]]/), type: 'punctuation' },
-];
+]
 
 const json: LanguageDef = [
   { pattern: s(/"(?:[^"\\]|\\.)*"\s*(?=:)/), type: 'property' },
@@ -89,7 +143,7 @@ const json: LanguageDef = [
   { pattern: s(/-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/), type: 'number' },
   { pattern: s(/:/), type: 'operator' },
   { pattern: s(/[{}()\[\],]/), type: 'punctuation' },
-];
+]
 
 const diff: LanguageDef = [
   { pattern: s(/^\+\+\+[^\n]*/m), type: 'keyword' },
@@ -97,7 +151,7 @@ const diff: LanguageDef = [
   { pattern: s(/^@@[^\n]*@@[^\n]*/m), type: 'keyword' },
   { pattern: s(/^\+[^\n]*/m), type: 'diff_add' },
   { pattern: s(/^-[^\n]*/m), type: 'diff_remove' },
-];
+]
 
 const html: LanguageDef = [
   { pattern: s(/<!--[\s\S]*?-->/), type: 'comment' },
@@ -106,7 +160,7 @@ const html: LanguageDef = [
   { pattern: s(/\/?>/), type: 'keyword' },
   { pattern: s(/[a-zA-Z][\w-]*(?=\s*=)/), type: 'property' },
   { pattern: s(/[=]/), type: 'operator' },
-];
+]
 
 const css: LanguageDef = [
   { pattern: s(/\/\*[\s\S]*?\*\//), type: 'comment' },
@@ -119,7 +173,7 @@ const css: LanguageDef = [
   { pattern: s(/[a-zA-Z-]+(?=\s*:)/), type: 'property' },
   { pattern: s(/[.#][a-zA-Z][\w-]*/), type: 'type' },
   { pattern: s(/[:;{}(),>+~*=]/), type: 'punctuation' },
-];
+]
 
 const yaml: LanguageDef = [
   { pattern: s(/#[^\n]*/), type: 'comment' },
@@ -128,7 +182,7 @@ const yaml: LanguageDef = [
   { pattern: s(/\b(?:true|false|null|yes|no|on|off)\b/i), type: 'keyword' },
   { pattern: s(/\b\d[\d_]*(?:\.[\d_]*)?\b/), type: 'number' },
   { pattern: s(/[:\-|>]/), type: 'operator' },
-];
+]
 
 const go: LanguageDef = [
   { pattern: s(/\/\/[^\n]*/), type: 'comment' },
@@ -143,7 +197,7 @@ const go: LanguageDef = [
   { pattern: s(/[a-zA-Z_]\w*(?=\s*\()/), type: 'function' },
   { pattern: s(/:=|[+\-*/%=!<>&|^~]+/), type: 'operator' },
   { pattern: s(/[{}()\[\];,.]/), type: 'punctuation' },
-];
+]
 
 const rust: LanguageDef = [
   { pattern: s(/\/\/[^\n]*/), type: 'comment' },
@@ -157,7 +211,7 @@ const rust: LanguageDef = [
   { pattern: s(/[a-zA-Z_]\w*(?=\s*[!(<])/), type: 'function' },
   { pattern: s(/=>|->|[+\-*/%=!<>&|^~?:]+/), type: 'operator' },
   { pattern: s(/[{}()\[\];,.#]/), type: 'punctuation' },
-];
+]
 
 const java: LanguageDef = [
   { pattern: s(/\/\/[^\n]*/), type: 'comment' },
@@ -171,7 +225,7 @@ const java: LanguageDef = [
   { pattern: s(/[a-zA-Z_]\w*(?=\s*\()/), type: 'function' },
   { pattern: s(/[+\-*/%=!<>&|^~?:]+/), type: 'operator' },
   { pattern: s(/[{}()\[\];,.@]/), type: 'punctuation' },
-];
+]
 
 const ruby: LanguageDef = [
   { pattern: s(/#[^\n]*/), type: 'comment' },
@@ -184,7 +238,7 @@ const ruby: LanguageDef = [
   { pattern: s(/[a-zA-Z_]\w*(?=\s*[({])/), type: 'function' },
   { pattern: s(/[+\-*/%=!<>&|^~?:]+/), type: 'operator' },
   { pattern: s(/[{}()\[\];,.@]/), type: 'punctuation' },
-];
+]
 
 const c: LanguageDef = [
   { pattern: s(/\/\/[^\n]*/), type: 'comment' },
@@ -199,7 +253,7 @@ const c: LanguageDef = [
   { pattern: s(/[a-zA-Z_]\w*(?=\s*\()/), type: 'function' },
   { pattern: s(/->|[+\-*/%=!<>&|^~?:]+/), type: 'operator' },
   { pattern: s(/[{}()\[\];,.]/), type: 'punctuation' },
-];
+]
 
 const sql: LanguageDef = [
   { pattern: s(/--[^\n]*/), type: 'comment' },
@@ -211,9 +265,11 @@ const sql: LanguageDef = [
   { pattern: s(/\b\d+(?:\.\d+)?\b/), type: 'number' },
   { pattern: s(/[=<>!]+|[+\-*/%]/), type: 'operator' },
   { pattern: s(/[();,.]/), type: 'punctuation' },
-];
+]
 
-// -- Language Registry --
+// ---------------------------------------------------------------------------
+// Language registry
+// ---------------------------------------------------------------------------
 
 const LANGUAGES: Record<string, LanguageDef> = {
   javascript,
@@ -235,13 +291,12 @@ const LANGUAGES: Record<string, LanguageDef> = {
   c,
   cpp: c,
   sql,
-};
+}
 
 /** Aliases map short names to canonical names.
  *  Some aliases map to a different language family for approximate highlighting
  *  (e.g., kt/kotlin/scala → java, swift → c). These get reasonable keyword and
- *  structure coloring but miss language-specific syntax (null-safety operators,
- *  LINQ, optionals, etc.). */
+ *  structure coloring but miss language-specific syntax. */
 const ALIASES: Record<string, string> = {
   js: 'javascript',
   ts: 'typescript',
@@ -276,10 +331,106 @@ const ALIASES: Record<string, string> = {
   jsonc: 'json',
   json5: 'json',
   toml: 'yaml',
-};
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/** Maximum code length to tokenize. Longer code falls back to a single plain token. */
+const MAX_CODE_LENGTH = 5000
 
 /** Look up the language definition for a given language identifier. Returns undefined if unknown. */
 export function getLanguage(lang: string): LanguageDef | undefined {
-  const key = lang.toLowerCase();
-  return LANGUAGES[key] ?? LANGUAGES[ALIASES[key] ?? ''];
+  const key = lang.toLowerCase()
+  return LANGUAGES[key] ?? LANGUAGES[ALIASES[key] ?? '']
+}
+
+/**
+ * Returns the syntax rules for a given language identifier, or null if unknown.
+ * Alias for getLanguage that returns null instead of undefined for convenience.
+ */
+export function getSyntaxRules(lang: string): LanguageDef | null {
+  if (!lang) return null
+  return getLanguage(lang) ?? null
+}
+
+/** Append a token, merging with the previous if the same type. */
+function pushToken(tokens: Token[], text: string, type: TokenType): void {
+  const last = tokens[tokens.length - 1]
+  if (last && last.type === type) {
+    last.text += text
+  } else {
+    tokens.push({ text, type })
+  }
+}
+
+/**
+ * Tokenize source code into an array of typed tokens.
+ *
+ * Uses an ordered "first match wins" regex scanner. At each position, rules
+ * are tried in order using sticky regexes. Unmatched characters accumulate
+ * as `plain` tokens.
+ *
+ * Returns a single `plain` token if:
+ * - The language is unknown
+ * - The code exceeds MAX_CODE_LENGTH
+ */
+export function tokenize(code: string, lang: string): Token[] {
+  if (!lang || code.length > MAX_CODE_LENGTH) {
+    return [{ text: code, type: 'plain' }]
+  }
+
+  const rules = getLanguage(lang)
+  if (!rules) {
+    return [{ text: code, type: 'plain' }]
+  }
+
+  const tokens: Token[] = []
+  let pos = 0
+  let plainStart = 0
+
+  while (pos < code.length) {
+    let matched = false
+
+    for (const rule of rules) {
+      rule.pattern.lastIndex = pos
+      const m = rule.pattern.exec(code)
+      if (m) {
+        if (pos > plainStart) pushToken(tokens, code.slice(plainStart, pos), 'plain')
+        pushToken(tokens, m[0], rule.type)
+        pos += m[0].length
+        plainStart = pos
+        matched = true
+        break
+      }
+    }
+
+    if (!matched) pos++
+  }
+
+  if (pos > plainStart) pushToken(tokens, code.slice(plainStart, pos), 'plain')
+  return tokens
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+/**
+ * Tokenize source code and return an HTML string with color spans.
+ * Intended for web/dashboard use where HTML output is needed.
+ */
+export function highlightCode(code: string, lang: string): string {
+  const tokens = tokenize(code, lang)
+  let out = ''
+  for (const token of tokens) {
+    const color = SYNTAX_COLORS[token.type] ?? SYNTAX_COLORS.plain
+    out += `<span style="color:${color}">${escapeHtml(token.text)}</span>`
+  }
+  return out
 }
