@@ -51,7 +51,7 @@ import type {
 } from './types';
 import { createEmptySessionState } from './utils';
 import { deriveActivityState } from './session-activity';
-import { clearPersistedSession } from './persistence';
+import { clearPersistedSession, persistLastConversationId, loadLastConversationId } from './persistence';
 import { getCallback } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
@@ -822,6 +822,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'session_list':
       if (Array.isArray(msg.sessions)) {
         const sessionList = msg.sessions as SessionInfo[];
+        // Auto-resume on server restart: if reconnecting and server has no sessions,
+        // restore the last active conversation so user doesn't have to navigate History.
+        if (sessionList.length === 0 && ctx.isReconnect) {
+          void (async () => {
+            const lastId = await loadLastConversationId();
+            if (!lastId) return;
+            const sock = get().socket;
+            if (sock && sock.readyState === WebSocket.OPEN) {
+              console.log('[ws] Server restarted with no sessions — auto-resuming last conversation');
+              wsSend(sock, { type: 'resume_conversation', conversationId: lastId });
+            }
+          })();
+          break;
+        }
         // GC persisted messages for sessions that dropped out of the list
         const prevSessionIds = Object.keys(get().sessionStates);
         const newSessionIdSet = new Set(sessionList.map((s) => s.sessionId));
@@ -866,6 +880,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
               ss.conversationId !== s.conversationId ? { conversationId: s.conversationId } : {}
             );
           }
+        }
+        // Persist the active session's conversationId for auto-resume on server restart.
+        // Use the activeSessionId if set, otherwise fall back to the first session in the list.
+        const resolvedActiveId = get().activeSessionId ?? (sessionList[0]?.sessionId ?? null);
+        const activeSessionEntry = resolvedActiveId
+          ? sessionList.find((s) => s.sessionId === resolvedActiveId)
+          : null;
+        const activeConversationId = activeSessionEntry?.conversationId ?? null;
+        if (activeConversationId) {
+          void persistLastConversationId(activeConversationId);
         }
         // Subscribe to all non-active sessions so we receive their events
         // (permissions, plan approvals, errors) in real-time
