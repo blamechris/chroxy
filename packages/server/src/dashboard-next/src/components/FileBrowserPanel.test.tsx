@@ -147,7 +147,11 @@ describe('FileBrowserPanel', () => {
     })
 
     await waitFor(() => {
-      expect(screen.getByText('console.log("hello")')).toBeTruthy()
+      // Syntax highlighting splits code into token spans, so use a text matcher
+      // that checks the combined text content rather than a single text node
+      expect(screen.getByText((_content, element) =>
+        element?.textContent === 'console.log("hello")\n' || element?.textContent === 'console.log("hello")'
+      )).toBeTruthy()
     })
   })
 
