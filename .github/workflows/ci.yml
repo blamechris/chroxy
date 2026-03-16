@@ -195,6 +195,31 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+  protocol-tests:
+    name: Protocol Tests
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: packages/protocol
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Build @chroxy/protocol
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
+
   desktop-tests:
     name: Desktop Rust Tests
     runs-on: macos-latest
