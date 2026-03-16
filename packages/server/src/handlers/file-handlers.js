@@ -5,81 +5,73 @@
  *          get_diff, git_status, git_branches, git_stage, git_unstage,
  *          git_commit, list_slash_commands, list_agents
  */
+import { resolveSession } from '../handler-utils.js'
 
 function handleListDirectory(ws, client, msg, ctx) {
   ctx.fileOps.listDirectory(ws, msg.path)
 }
 
 function handleBrowseFiles(ws, client, msg, ctx) {
-  const browseSessionId = msg.sessionId || client.activeSessionId
-  const browseEntry = ctx.sessionManager.getSession(browseSessionId)
-  ctx.fileOps.browseFiles(ws, msg.path, browseEntry?.cwd || null)
+  const entry = resolveSession(ctx, msg, client)
+  ctx.fileOps.browseFiles(ws, msg.path, entry?.cwd || null)
 }
 
 function handleListFiles(ws, client, msg, ctx) {
-  const listFilesSessionId = msg.sessionId || client.activeSessionId
-  const listFilesEntry = ctx.sessionManager.getSession(listFilesSessionId)
-  ctx.fileOps.listFiles(ws, listFilesEntry?.cwd || null, msg.query || null, listFilesSessionId)
+  const sid = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  ctx.fileOps.listFiles(ws, entry?.cwd || null, msg.query || null, sid)
 }
 
 function handleReadFile(ws, client, msg, ctx) {
-  const readSessionId = msg.sessionId || client.activeSessionId
-  const readEntry = ctx.sessionManager.getSession(readSessionId)
-  ctx.fileOps.readFile(ws, msg.path, readEntry?.cwd || null)
+  const entry = resolveSession(ctx, msg, client)
+  ctx.fileOps.readFile(ws, msg.path, entry?.cwd || null)
 }
 
 function handleWriteFile(ws, client, msg, ctx) {
-  const writeSessionId = msg.sessionId || client.activeSessionId
-  const writeEntry = ctx.sessionManager.getSession(writeSessionId)
-  ctx.fileOps.writeFile(ws, msg.path, msg.content, writeEntry?.cwd || null)
+  const entry = resolveSession(ctx, msg, client)
+  ctx.fileOps.writeFile(ws, msg.path, msg.content, entry?.cwd || null)
 }
 
 function handleGetDiff(ws, client, msg, ctx) {
-  const diffSessionId = msg.sessionId || client.activeSessionId
-  const diffEntry = ctx.sessionManager.getSession(diffSessionId)
-  ctx.fileOps.getDiff(ws, msg.base, diffEntry?.cwd || null)
+  const entry = resolveSession(ctx, msg, client)
+  ctx.fileOps.getDiff(ws, msg.base, entry?.cwd || null)
 }
 
 function handleGitStatus(ws, client, msg, ctx) {
-  const sid = msg.sessionId || client.activeSessionId
-  const entry = ctx.sessionManager.getSession(sid)
+  const entry = resolveSession(ctx, msg, client)
   ctx.fileOps.gitStatus(ws, entry?.cwd || null)
 }
 
 function handleGitBranches(ws, client, msg, ctx) {
-  const sid = msg.sessionId || client.activeSessionId
-  const entry = ctx.sessionManager.getSession(sid)
+  const entry = resolveSession(ctx, msg, client)
   ctx.fileOps.gitBranches(ws, entry?.cwd || null)
 }
 
 function handleGitStage(ws, client, msg, ctx) {
-  const sid = msg.sessionId || client.activeSessionId
-  const entry = ctx.sessionManager.getSession(sid)
+  const entry = resolveSession(ctx, msg, client)
   ctx.fileOps.gitStage(ws, msg.files, entry?.cwd || null)
 }
 
 function handleGitUnstage(ws, client, msg, ctx) {
-  const sid = msg.sessionId || client.activeSessionId
-  const entry = ctx.sessionManager.getSession(sid)
+  const entry = resolveSession(ctx, msg, client)
   ctx.fileOps.gitUnstage(ws, msg.files, entry?.cwd || null)
 }
 
 function handleGitCommit(ws, client, msg, ctx) {
-  const sid = msg.sessionId || client.activeSessionId
-  const entry = ctx.sessionManager.getSession(sid)
+  const entry = resolveSession(ctx, msg, client)
   ctx.fileOps.gitCommit(ws, msg.message, entry?.cwd || null)
 }
 
 function handleListSlashCommands(ws, client, msg, ctx) {
-  const cmdSessionId = msg.sessionId || client.activeSessionId
-  const entry = ctx.sessionManager.getSession(cmdSessionId)
-  ctx.fileOps.listSlashCommands(ws, entry?.cwd || null, cmdSessionId)
+  const sid = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  ctx.fileOps.listSlashCommands(ws, entry?.cwd || null, sid)
 }
 
 function handleListAgents(ws, client, msg, ctx) {
-  const agentSessionId = msg.sessionId || client.activeSessionId
-  const entry = ctx.sessionManager.getSession(agentSessionId)
-  ctx.fileOps.listAgents(ws, entry?.cwd || null, agentSessionId)
+  const sid = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  ctx.fileOps.listAgents(ws, entry?.cwd || null, sid)
 }
 
 export const fileHandlers = {

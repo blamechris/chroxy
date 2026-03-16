@@ -6,7 +6,7 @@
  */
 import { scanConversations } from '../conversation-scanner.js'
 import { searchConversations } from '../conversation-search.js'
-import { validateCwdWithinHome, broadcastFocusChanged } from '../handler-utils.js'
+import { validateCwdWithinHome, broadcastFocusChanged, resolveSession } from '../handler-utils.js'
 
 async function handleListConversations(ws, client, msg, ctx) {
   try {
@@ -75,7 +75,7 @@ async function handleResumeConversation(ws, client, msg, ctx) {
 
 async function handleRequestFullHistory(ws, client, msg, ctx) {
   const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
-  if (!targetId || !ctx.sessionManager.getSession(targetId)) {
+  if (!targetId || !resolveSession(ctx, msg, client)) {
     const message = msg.sessionId
       ? `Session not found: ${msg.sessionId}`
       : 'No active session'

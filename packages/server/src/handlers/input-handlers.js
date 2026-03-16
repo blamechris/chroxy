@@ -3,13 +3,13 @@
  *
  * Handles: input, interrupt, resume_budget, register_push_token, user_question_response
  */
-import { validateAttachments, resolveFileRefAttachments } from '../handler-utils.js'
+import { validateAttachments, resolveFileRefAttachments, resolveSession } from '../handler-utils.js'
 
 function handleInput(ws, client, msg, ctx) {
   const text = msg.data
   let attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
   const targetSessionId = msg.sessionId || client.activeSessionId
-  const entry = ctx.sessionManager.getSession(targetSessionId)
+  const entry = resolveSession(ctx, msg, client)
   if (!entry) {
     const message = msg.sessionId
       ? `Session not found: ${msg.sessionId}`
@@ -79,7 +79,7 @@ function handleInput(ws, client, msg, ctx) {
 
 function handleInterrupt(ws, client, msg, ctx) {
   const interruptSessionId = msg.sessionId || client.activeSessionId
-  const entry = ctx.sessionManager.getSession(interruptSessionId)
+  const entry = resolveSession(ctx, msg, client)
   if (entry) {
     console.log(`[ws] Interrupt from ${client.id} to session ${interruptSessionId}`)
     entry.session.interrupt()
@@ -88,7 +88,7 @@ function handleInterrupt(ws, client, msg, ctx) {
 
 function handleResumeBudget(ws, client, msg, ctx) {
   const budgetSessionId = msg.sessionId || client.activeSessionId
-  if (!budgetSessionId || !ctx.sessionManager.getSession(budgetSessionId)) {
+  if (!budgetSessionId || !resolveSession(ctx, msg, client)) {
     ctx.send(ws, { type: 'session_error', message: 'No valid session for budget resume' })
     return
   }

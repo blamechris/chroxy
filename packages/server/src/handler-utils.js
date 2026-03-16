@@ -158,3 +158,18 @@ export function broadcastFocusChanged(client, sessionId, ctx) {
     (c) => c.id !== client.id
   )
 }
+
+/**
+ * Resolve a session from a message and client context.
+ * Prefers msg.sessionId, falls back to client.activeSessionId.
+ * Returns the session entry, or null if not found.
+ *
+ * @param {object} ctx - Handler context with sessionManager
+ * @param {object} msg - Incoming WebSocket message
+ * @param {object} client - Connected client state
+ * @returns {object|null} Session entry or null
+ */
+export function resolveSession(ctx, msg, client) {
+  const sid = msg.sessionId || client?.activeSessionId
+  return sid ? ctx.sessionManager?.getSession(sid) : null
+}
