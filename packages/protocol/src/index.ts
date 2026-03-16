@@ -74,6 +74,8 @@ export const ClientMessageType = {
   // Session subscriptions
   SubscribeSessions: 'subscribe_sessions',
   UnsubscribeSessions: 'unsubscribe_sessions',
+  // Model configuration
+  SetThinkingLevel: 'set_thinking_level',
   // Extension
   ExtensionMessage: 'extension_message',
 } as const

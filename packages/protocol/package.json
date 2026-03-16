@@ -18,12 +18,13 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --test tests/*.test.js"
+    "test": "node --import tsx/esm --test tests/*.test.js"
   },
   "dependencies": {
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "tsx": "^4.19.2",
     "typescript": "^5.6.0"
   }
 }

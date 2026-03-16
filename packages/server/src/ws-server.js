@@ -197,6 +197,8 @@ function _isSecureRequest(req) {
  *   { type: 'search_conversations', query }             — search saved conversations
  *   { type: 'subscribe_sessions' }                      — subscribe to session discovery events
  *   { type: 'unsubscribe_sessions' }                    — unsubscribe from session discovery
+ *   { type: 'set_thinking_level', level }               — set thinking budget level ('default'|'high'|'max')
+ *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
@@ -283,6 +285,7 @@ function _isSecureRequest(req) {
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit
  *   { type: 'budget_exceeded', sessionId, message, ... } — budget exceeded
  *   { type: 'web_feature_status', features }            — web feature availability
+ *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
