@@ -171,5 +171,5 @@ export function broadcastFocusChanged(client, sessionId, ctx) {
  */
 export function resolveSession(ctx, msg, client) {
   const sid = msg.sessionId || client?.activeSessionId
-  return sid ? ctx.sessionManager?.getSession(sid) : null
+  return ctx.sessionManager?.getSession(sid) ?? null
 }
