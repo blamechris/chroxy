@@ -172,6 +172,13 @@ export function sendSessionInfo(ctx, ws, sessionId) {
       sessionId,
     })
   }
+  // Replay permission rules so reconnecting clients have current whitelist
+  if (typeof session.getPermissionRules === 'function') {
+    const rules = session.getPermissionRules()
+    if (rules.length > 0) {
+      send(ws, { type: 'permission_rules_updated', rules, sessionId })
+    }
+  }
 }
 
 /**

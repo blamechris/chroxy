@@ -400,6 +400,36 @@ export class SdkSession extends BaseSession {
   }
 
   /**
+   * Set per-session permission rules. Delegates to PermissionManager.
+   * @param {Array<{tool: string, decision: string}>} rules
+   */
+  setPermissionRules(rules) {
+    if (typeof this._permissions.setRules === 'function') {
+      this._permissions.setRules(rules)
+    }
+  }
+
+  /**
+   * Get current per-session permission rules. Delegates to PermissionManager.
+   * @returns {Array<{tool: string, decision: string}>}
+   */
+  getPermissionRules() {
+    if (typeof this._permissions.getRules === 'function') {
+      return this._permissions.getRules()
+    }
+    return []
+  }
+
+  /**
+   * Clear all per-session permission rules. Delegates to PermissionManager.
+   */
+  clearPermissionRules() {
+    if (typeof this._permissions.clearRules === 'function') {
+      this._permissions.clearRules()
+    }
+  }
+
+  /**
    * Set thinking level by adjusting max thinking tokens.
    * @param {string} level - 'default' | 'high' | 'max'
    */

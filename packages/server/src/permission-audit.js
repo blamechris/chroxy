@@ -33,6 +33,23 @@ export class PermissionAuditLog {
   }
 
   /**
+   * Record a whitelist (permission rules) change.
+   * @param {object} params
+   * @param {string} params.clientId - Client that initiated the change
+   * @param {string} params.sessionId - Affected session
+   * @param {Array}  params.rules - The new rule set
+   */
+  logWhitelistChange({ clientId, sessionId, rules }) {
+    this._append({
+      type: 'whitelist_change',
+      clientId,
+      sessionId,
+      rules: Array.isArray(rules) ? rules.slice() : [],
+      timestamp: Date.now(),
+    })
+  }
+
+  /**
    * Record a permission decision (approve/deny).
    * @param {object} params
    * @param {string} params.clientId - Client that responded
