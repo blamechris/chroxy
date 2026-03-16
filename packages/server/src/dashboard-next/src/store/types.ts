@@ -52,7 +52,6 @@ import type {
   McpServer,
   MessageAttachment,
   ModelInfo,
-  QueuedMessage,
   SavedConnection,
   SearchResult,
   SessionContext,
