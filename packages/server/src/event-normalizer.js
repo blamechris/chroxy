@@ -17,7 +17,8 @@ import { toShortModelId } from './models.js'
  *   mode: 'multi' | 'legacy-cli'
  */
 
-const EVENT_MAP = {
+const EVENT_MAP = Object.create(null)
+Object.assign(EVENT_MAP, {
   ready: (data, ctx) => {
     const messages = [{ msg: { type: 'claude_ready' } }]
     const entry = ctx.getSessionEntry?.()
@@ -197,7 +198,7 @@ const EVENT_MAP = {
     }],
   }),
 
-}
+})
 
 /**
  * EventNormalizer transforms session events into a uniform set of
@@ -213,6 +214,27 @@ export class EventNormalizer {
     this._deltaBuffer = new Map()
     this._deltaFlushTimer = null
     this._onFlush = null // callback: (entries) => void, where entries = [{ key, sessionId, messageId, delta }]
+  }
+
+  /**
+   * Register a custom event type handler at runtime.
+   * Allows provider plugins to extend the normalizer without modifying EVENT_MAP.
+   *
+   * @param {string} name - Event name (e.g. 'my_provider_event')
+   * @param {Function} handler - (data, ctx) => { messages, sideEffects?, registrations? }
+   * @throws {Error} if name is not a non-empty string or handler is not a function
+   */
+  registerEventType(name, handler) {
+    if (typeof name !== 'string' || !name) {
+      throw new Error('registerEventType: name must be a non-empty string')
+    }
+    if (name === '__proto__' || name === 'constructor' || name === 'prototype') {
+      throw new Error(`registerEventType: reserved key '${name}' is not allowed`)
+    }
+    if (typeof handler !== 'function') {
+      throw new Error('registerEventType: handler must be a function')
+    }
+    EVENT_MAP[name] = handler
   }
 
   /**

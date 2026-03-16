@@ -1,8 +1,9 @@
-import { describe, it, mock } from 'node:test'
+import { describe, it, mock, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   validateAttachments,
   handleSessionMessage,
+  registerMessageHandler,
   PERMISSION_MODES,
   ALLOWED_PERMISSION_MODE_IDS,
   MAX_ATTACHMENT_COUNT,
@@ -336,5 +337,77 @@ describe('PERMISSION_MODES and ALLOWED_PERMISSION_MODE_IDS', () => {
     for (const { id } of PERMISSION_MODES) {
       assert.ok(ALLOWED_PERMISSION_MODE_IDS.has(id))
     }
+  })
+})
+
+describe('registerMessageHandler', () => {
+  // Track registered test types so tests don't bleed between runs.
+  // The registry is module-level, so we clean up in afterEach.
+  const registeredTypes = []
+
+  afterEach(() => {
+    // Re-register a no-op to neutralise handlers added by these tests.
+    // (We can't delete from the Map directly without importing it, but
+    //  overwriting with a no-op prevents interference between test runs.)
+    for (const type of registeredTypes) {
+      registerMessageHandler(type, async () => {})
+    }
+    registeredTypes.length = 0
+  })
+
+  it('dispatches a custom message type to the registered handler', async () => {
+    const handlerFn = mock.fn()
+    registerMessageHandler('my_custom_action', handlerFn)
+    registeredTypes.push('my_custom_action')
+
+    const ctx = makeCtx()
+    const client = makeClient()
+    const msg = { type: 'my_custom_action', payload: 'hello' }
+    await handleSessionMessage(WS, client, msg, ctx)
+
+    assert.equal(handlerFn.mock.calls.length, 1)
+    const [ws, cl, m, c] = handlerFn.mock.calls[0].arguments
+    assert.equal(ws, WS)
+    assert.equal(cl, client)
+    assert.equal(m, msg)
+    assert.equal(c, ctx)
+  })
+
+  it('passes full ctx to the registered handler', async () => {
+    let capturedCtx = null
+    registerMessageHandler('ctx_capture_test', async (_ws, _client, _msg, ctx) => {
+      capturedCtx = ctx
+    })
+    registeredTypes.push('ctx_capture_test')
+
+    const ctx = makeCtx()
+    const client = makeClient()
+    await handleSessionMessage(WS, client, { type: 'ctx_capture_test' }, ctx)
+
+    assert.ok(capturedCtx !== null)
+    assert.ok(typeof capturedCtx.send === 'function' || capturedCtx.send?.mock)
+  })
+
+  it('overwrites a previously registered handler for the same type', async () => {
+    const first = mock.fn()
+    const second = mock.fn()
+    registerMessageHandler('overwrite_test', first)
+    registerMessageHandler('overwrite_test', second)
+    registeredTypes.push('overwrite_test')
+
+    await handleSessionMessage(WS, makeClient(), { type: 'overwrite_test' }, makeCtx())
+
+    assert.equal(first.mock.calls.length, 0, 'first handler should not be called after overwrite')
+    assert.equal(second.mock.calls.length, 1, 'second handler should be called')
+  })
+
+  it('throws when type is not a non-empty string', () => {
+    assert.throws(() => registerMessageHandler('', async () => {}), /non-empty string/)
+    assert.throws(() => registerMessageHandler(null, async () => {}), /non-empty string/)
+  })
+
+  it('throws when handlerFn is not a function', () => {
+    assert.throws(() => registerMessageHandler('valid_type', 'not-fn'), /function/)
+    assert.throws(() => registerMessageHandler('valid_type', null), /function/)
   })
 })

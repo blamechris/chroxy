@@ -465,6 +465,54 @@ describe('executeSideEffects (via setupCliForwarding)', () => {
   })
 })
 
+describe('custom event type forwarding (registerEventType)', () => {
+  it('forwards a provider-registered event type through the normalizer to broadcastToSession', () => {
+    const ctx = makeCtx()
+    setupForwarding(ctx)
+
+    // Register a custom event type on the normalizer
+    ctx.normalizer.registerEventType('provider_health', (data) => ({
+      messages: [{ msg: { type: 'provider_health', status: data.status } }],
+    }))
+
+    ctx.sessionManager.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'provider_health',
+      data: { status: 'ok' },
+    })
+
+    const call = ctx.broadcastToSession.mock.calls.find(c =>
+      c.arguments[1]?.type === 'provider_health'
+    )
+    assert.ok(call, 'expected provider_health to be broadcast to session')
+    assert.equal(call.arguments[0], 'sess-1')
+    assert.equal(call.arguments[1].status, 'ok')
+
+    // Clean up
+    delete ctx.normalizer._onFlush
+    ctx.normalizer.destroy()
+  })
+
+  it('unknown custom events with no registered handler are silently dropped', () => {
+    const ctx = makeCtx()
+    setupForwarding(ctx)
+
+    ctx.sessionManager.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'totally_unknown_event',
+      data: { foo: 'bar' },
+    })
+
+    // Should not throw, and no broadcast should happen for this unknown event
+    // (session_activity for certain events may fire, but not broadcastToSession
+    //  with type 'totally_unknown_event')
+    const call = ctx.broadcastToSession.mock.calls.find(c =>
+      c.arguments[1]?.type === 'totally_unknown_event'
+    )
+    assert.equal(call, undefined)
+  })
+})
+
 describe('executeRegistrations (via setupCliForwarding)', () => {
   it('registers permission requestId in permissionSessionMap', () => {
     const sm = new EventEmitter()
