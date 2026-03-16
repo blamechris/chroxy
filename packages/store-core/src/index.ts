@@ -10,6 +10,33 @@
  */
 
 export type {
+  MessageAttachment,
+  ToolResultImage,
+  ChatMessage,
+  SavedConnection,
+  ContextUsage,
+  InputSettings,
+  ModelInfo,
+  SessionInfo,
+  AgentInfo,
+  ConnectedClient,
+  SessionHealth,
+  SessionContext,
+  McpServer,
+  DevPreview,
+  WebTask,
+  WebFeatureStatus,
+  ConversationSummary,
+  SearchResult,
+  SlashCommand,
+  CustomAgent,
+  ConnectionPhase,
+  ConnectionContext,
+  QueuedMessage,
+  Checkpoint,
+} from './types'
+
+export type {
   AlertAdapter,
   AlertButton,
   HapticAdapter,

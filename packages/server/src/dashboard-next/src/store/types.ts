@@ -4,84 +4,63 @@
  * Extracted from connection.ts to reduce file size and allow
  * other modules (message-handler, utils) to import types without
  * creating circular dependencies.
+ *
+ * Protocol and message types are imported from @chroxy/store-core.
+ * Platform-specific types (SessionState, ConnectionState) are defined here.
  */
 
-/** Attachment metadata stored on a ChatMessage (base64 data cleared after send) */
-export interface MessageAttachment {
-  id: string;
-  type: 'image' | 'document';
-  uri: string;
-  name: string;
-  mediaType: string;
-  size: number;
-}
+// Re-export shared protocol types from store-core
+export type {
+  MessageAttachment,
+  ToolResultImage,
+  ChatMessage,
+  SavedConnection,
+  ContextUsage,
+  InputSettings,
+  ModelInfo,
+  SessionInfo,
+  AgentInfo,
+  ConnectedClient,
+  SessionHealth,
+  SessionContext,
+  McpServer,
+  DevPreview,
+  WebTask,
+  WebFeatureStatus,
+  ConversationSummary,
+  SearchResult,
+  SlashCommand,
+  CustomAgent,
+  ConnectionPhase,
+  ConnectionContext,
+  QueuedMessage,
+  Checkpoint,
+} from '@chroxy/store-core';
 
-/** Base64 image from a tool result (e.g. computer use screenshots) */
-export interface ToolResultImage {
-  mediaType: string;
-  data: string;
-}
-
-export interface ChatMessage {
-  id: string;
-  type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error' | 'system';
-  content: string;
-  tool?: string;
-  options?: { label: string; value: string }[];
-  requestId?: string;
-  toolInput?: Record<string, unknown>;
-  toolUseId?: string;
-  toolResult?: string;
-  toolResultTruncated?: boolean;
-  /** Base64 images from tool results (e.g. computer use screenshots) */
-  toolResultImages?: ToolResultImage[];
-  answered?: string;
-  /** Timestamp when the user answered a permission prompt */
-  answeredAt?: number;
-  expiresAt?: number;
-  timestamp: number;
-  /** Attachments on user_input messages (images, documents) */
-  attachments?: MessageAttachment[];
-  /** MCP server name (for tool_use messages from MCP tools) */
-  serverName?: string;
-}
-
-export interface SavedConnection {
-  url: string;
-  token: string;
-}
-
-export interface ContextUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheCreation: number;
-  cacheRead: number;
-}
-
-export interface InputSettings {
-  chatEnterToSend: boolean;
-  terminalEnterToSend: boolean;
-}
-
-export interface ModelInfo {
-  id: string;
-  label: string;
-  fullId: string;
-}
-
-export interface SessionInfo {
-  sessionId: string;
-  name: string;
-  cwd: string;
-  type: 'cli';
-  hasTerminal: boolean;
-  model: string | null;
-  permissionMode: string | null;
-  isBusy: boolean;
-  createdAt: number;
-  conversationId: string | null;
-  provider?: string;
-}
+// Import for local use in SessionState/ConnectionState definitions below
+import type {
+  AgentInfo,
+  ChatMessage,
+  Checkpoint,
+  ConnectedClient,
+  ConnectionPhase,
+  ContextUsage,
+  ConversationSummary,
+  CustomAgent,
+  DevPreview,
+  InputSettings,
+  McpServer,
+  MessageAttachment,
+  ModelInfo,
+  SavedConnection,
+  SearchResult,
+  SessionContext,
+  SessionHealth,
+  SessionInfo,
+  SlashCommand,
+  WebFeatureStatus,
+  WebTask,
+} from '@chroxy/store-core';
 
 export interface ProviderCapabilities {
   permissions: boolean;
@@ -146,15 +125,6 @@ export interface GitStatusResult {
   error: string | null;
 }
 
-export interface Checkpoint {
-  id: string;
-  name: string;
-  description: string;
-  messageCount: number;
-  createdAt: number;
-  hasGitSnapshot: boolean;
-}
-
 export interface DiffHunkLine {
   type: 'context' | 'addition' | 'deletion';
   content: string;
@@ -176,102 +146,6 @@ export interface DiffFile {
 export interface DiffResult {
   files: DiffFile[];
   error: string | null;
-}
-
-export interface ConversationSummary {
-  conversationId: string;
-  project: string | null;
-  projectName: string;
-  modifiedAt: string;
-  modifiedAtMs: number;
-  sizeBytes: number;
-  preview: string | null;
-  cwd: string | null;
-}
-
-export interface SearchResult {
-  conversationId: string;
-  projectName: string;
-  project: string | null;
-  cwd: string | null;
-  preview: string | null;
-  snippet: string;
-  matchCount: number;
-}
-
-export interface AgentInfo {
-  toolUseId: string;
-  description: string;
-  startedAt: number;
-}
-
-export interface ConnectedClient {
-  clientId: string;
-  deviceName: string | null;
-  deviceType: 'phone' | 'tablet' | 'desktop' | 'unknown';
-  platform: string;
-  isSelf: boolean;
-}
-
-export type SessionHealth = 'healthy' | 'crashed';
-
-export interface SessionContext {
-  gitBranch: string | null;
-  gitDirty: number;
-  gitAhead: number;
-  projectName: string | null;
-}
-
-export interface McpServer {
-  name: string;
-  status: string;
-}
-
-export interface DevPreview {
-  port: number;
-  url: string;
-}
-
-export interface WebTask {
-  taskId: string;
-  prompt: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  createdAt: number;
-  updatedAt: number;
-  result: string | null;
-  error: string | null;
-}
-
-export interface WebFeatureStatus {
-  available: boolean;
-  remote: boolean;
-  teleport: boolean;
-}
-
-export interface SessionState {
-  messages: ChatMessage[];
-  streamingMessageId: string | null;
-  claudeReady: boolean;
-  terminalRawBuffer: string;
-  activeModel: string | null;
-  permissionMode: string | null;
-  contextUsage: ContextUsage | null;
-  lastResultCost: number | null;
-  lastResultDuration: number | null;
-  sessionCost: number | null;
-  isIdle: boolean;
-  health: SessionHealth;
-  activeAgents: AgentInfo[];
-  isPlanPending: boolean;
-  planAllowedPrompts: { tool: string; prompt: string }[];
-  primaryClientId: string | null;
-  conversationId: string | null;
-  sessionContext: SessionContext | null;
-  mcpServers: McpServer[];
-  devPreviews: DevPreview[];
-  // Files tab: selected file path (persists across tab switches)
-  selectedFilePath: string | null;
-  thinkingLevel: ThinkingLevel;
 }
 
 export type ThinkingLevel = 'default' | 'high' | 'max';
@@ -303,46 +177,10 @@ export interface SessionNotification {
   requestId?: string;
 }
 
-export interface SlashCommand {
-  name: string;
-  description: string;
-  source: 'project' | 'user';
-}
-
 export interface FilePickerItem {
   path: string;
   type: 'file';
   size: number | null;
-}
-
-export interface CustomAgent {
-  name: string;
-  description: string;
-  source: 'project' | 'user';
-}
-
-export type ConnectionPhase =
-  | 'disconnected'        // Not connected, no auto-reconnect
-  | 'connecting'          // Initial connection attempt
-  | 'connected'           // WebSocket open + authenticated
-  | 'reconnecting'        // Auto-reconnecting after unexpected disconnect
-  | 'server_restarting';  // Health check returns { status: 'restarting' }
-
-/** Context captured from connect() closure for use by the extracted handleMessage(). */
-export interface ConnectionContext {
-  url: string;
-  token: string;
-  isReconnect: boolean;
-  silent: boolean;
-  socket: WebSocket;
-}
-
-/** Queued message for offline send buffer */
-export interface QueuedMessage {
-  type: string;
-  payload: unknown;
-  queuedAt: number;
-  maxAge: number;
 }
 
 /** A registered remote Chroxy server */
@@ -357,6 +195,32 @@ export interface ServerEntry {
   token: string;
   /** Timestamp of last successful connection */
   lastConnectedAt: number | null;
+}
+
+export interface SessionState {
+  messages: ChatMessage[];
+  streamingMessageId: string | null;
+  claudeReady: boolean;
+  terminalRawBuffer: string;
+  activeModel: string | null;
+  permissionMode: string | null;
+  contextUsage: ContextUsage | null;
+  lastResultCost: number | null;
+  lastResultDuration: number | null;
+  sessionCost: number | null;
+  isIdle: boolean;
+  health: SessionHealth;
+  activeAgents: AgentInfo[];
+  isPlanPending: boolean;
+  planAllowedPrompts: { tool: string; prompt: string }[];
+  primaryClientId: string | null;
+  conversationId: string | null;
+  sessionContext: SessionContext | null;
+  mcpServers: McpServer[];
+  devPreviews: DevPreview[];
+  // Files tab: selected file path (persists across tab switches)
+  selectedFilePath: string | null;
+  thinkingLevel: ThinkingLevel;
 }
 
 export interface ConnectionState {
