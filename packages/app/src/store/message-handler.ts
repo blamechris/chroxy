@@ -826,12 +826,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // restore the last active conversation so user doesn't have to navigate History.
         if (sessionList.length === 0 && ctx.isReconnect) {
           void (async () => {
+            const snapSocket = ctx.socket;
             const lastId = await loadLastConversationId();
             if (!lastId) return;
-            const sock = get().socket;
-            if (sock && sock.readyState === WebSocket.OPEN) {
+            if (snapSocket && snapSocket.readyState === WebSocket.OPEN) {
               console.log('[ws] Server restarted with no sessions — auto-resuming last conversation');
-              wsSend(sock, { type: 'resume_conversation', conversationId: lastId });
+              wsSend(snapSocket, { type: 'resume_conversation', conversationId: lastId });
             }
           })();
           break;
