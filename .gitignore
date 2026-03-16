@@ -50,6 +50,9 @@ packages/desktop/src-tauri/server-bundle/
 # Testing
 coverage/
 
+# Repo memory cache
+.repo-memory/
+
 # Misc
 .cache/
 tmp/
