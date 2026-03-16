@@ -20,7 +20,7 @@ import { tokenize, SYNTAX_COLORS, Token } from '../utils/syntax';
 
 const MAX_CODE_PREVIEW = 500;
 
-function SyntaxHighlightedCode({
+export function SyntaxHighlightedCode({
   code,
   language,
   maxLines,
@@ -119,7 +119,7 @@ function InlineDiff({ oldStr, newStr }: { oldStr: string; newStr: string }) {
 // Helper: guess language from file extension
 // ---------------------------------------------------------------------------
 
-function langFromPath(filePath: string): string {
+export function langFromPath(filePath: string): string {
   const ext = filePath.split('.').pop()?.toLowerCase() || '';
   // Common mappings; getLanguage handles aliases internally
   return ext;

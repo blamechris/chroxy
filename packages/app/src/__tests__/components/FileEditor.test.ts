@@ -54,7 +54,7 @@ describe('FileEditor', () => {
       expect(source).toContain('Request timed out');
     });
 
-    it('has Cancel and Save buttons with accessibility labels', () => {
+    it('has Cancel editing and Save file accessibility labels', () => {
       expect(source).toContain('Cancel editing');
       expect(source).toContain('Save file');
     });
@@ -66,6 +66,34 @@ describe('FileEditor', () => {
 
     it('disables editing while saving', () => {
       expect(source).toContain('editable={!saving}');
+    });
+
+    it('renders SyntaxHighlightedCode in view mode', () => {
+      expect(source).toContain('SyntaxHighlightedCode');
+      expect(source).toContain('langFromPath');
+    });
+
+    it('tracks isEditing state to switch between view and edit modes', () => {
+      expect(source).toContain('isEditing');
+      expect(source).toContain('setIsEditing');
+    });
+
+    it('shows an Edit button in view mode to enter editing', () => {
+      expect(source).toContain('Edit file');
+      expect(source).toContain("setIsEditing(true)");
+    });
+
+    it('shows a Done button label in view mode', () => {
+      expect(source).toContain("'Done'");
+    });
+
+    it('resets isEditing to false when modal opens with new file', () => {
+      // Confirm setIsEditing(false) is called inside the visible effect
+      expect(source).toContain('setIsEditing(false)');
+    });
+
+    it('imports SyntaxHighlightedCode and langFromPath from PermissionDetail', () => {
+      expect(source).toContain("from './PermissionDetail'");
     });
   });
 });
