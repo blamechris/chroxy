@@ -102,6 +102,26 @@ func startRecognition() {
             return
         }
 
+        // Guard against concurrent teardown from recognition callback and stdin reader.
+        // Only the first caller to acquire the lock with done == false performs teardown.
+        let doneLock = NSLock()
+        var done = false
+
+        func teardown(stopEngine: Bool) {
+            doneLock.lock()
+            let alreadyDone = done
+            if !alreadyDone { done = true }
+            doneLock.unlock()
+
+            guard !alreadyDone else { return }
+
+            if stopEngine {
+                audioEngine.stop()
+                inputNode.removeTap(onBus: 0)
+            }
+            semaphore.signal()
+        }
+
         let task = recognizer.recognitionTask(with: request) { result, error in
             if let error = error as NSError? {
                 // 216 = canceled (normal stop via stdin "stop")
@@ -109,9 +129,7 @@ func startRecognition() {
                 if error.code != 216 && error.code != 1110 {
                     printJSON(["error": error.localizedDescription])
                 }
-                audioEngine.stop()
-                inputNode.removeTap(onBus: 0)
-                semaphore.signal()
+                teardown(stopEngine: true)
                 return
             }
 
@@ -122,9 +140,7 @@ func startRecognition() {
                 ])
 
                 if result.isFinal {
-                    audioEngine.stop()
-                    inputNode.removeTap(onBus: 0)
-                    semaphore.signal()
+                    teardown(stopEngine: true)
                 }
             }
         }
@@ -134,10 +150,12 @@ func startRecognition() {
             while let line = readLine() {
                 if line.trimmingCharacters(in: .whitespaces) == "stop" {
                     request.endAudio()
-                    audioEngine.stop()
-                    inputNode.removeTap(onBus: 0)
                     task.cancel()
-                    semaphore.signal()
+                    // task.cancel() triggers the recognition callback with error 216,
+                    // which will call teardown(stopEngine: true). We call teardown here
+                    // as well so that if the callback fires first we don't double-stop,
+                    // and if this path wins we still perform a clean shutdown.
+                    teardown(stopEngine: true)
                     break
                 }
             }
