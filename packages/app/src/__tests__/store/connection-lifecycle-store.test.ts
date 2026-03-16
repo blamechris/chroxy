@@ -90,6 +90,142 @@ describe('useConnectionLifecycleStore', () => {
     });
   });
 
+  describe('transitionPhase (FSM)', () => {
+    it('allows valid transition: disconnected → connecting', () => {
+      const store = useConnectionLifecycleStore.getState();
+      expect(store.connectionPhase).toBe('disconnected');
+      store.transitionPhase('connecting');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connecting');
+    });
+
+    it('allows valid transition: connecting → connected', () => {
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('connected');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
+    });
+
+    it('allows valid transition: connected → reconnecting', () => {
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('connected');
+      store.transitionPhase('reconnecting');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('reconnecting');
+    });
+
+    it('allows valid transition: connected → server_restarting', () => {
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('connected');
+      store.transitionPhase('server_restarting');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_restarting');
+    });
+
+    it('allows valid transition: reconnecting → connected', () => {
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('connected');
+      store.transitionPhase('reconnecting');
+      store.transitionPhase('connected');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
+    });
+
+    it('allows valid transition: server_restarting → connecting', () => {
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('connected');
+      store.transitionPhase('server_restarting');
+      store.transitionPhase('connecting');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connecting');
+    });
+
+    it('warns on illegal transition and still applies the phase', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      // disconnected → connected is not a valid transition
+      store.transitionPhase('connected');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[ConnectionFSM] Illegal transition: disconnected → connected')
+      );
+      // Phase is still applied so production never silently breaks
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
+      warnSpy.mockRestore();
+    });
+
+    it('warns on illegal transition: connected → connecting (must go via disconnected or reconnecting first)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('connected');
+      store.transitionPhase('connecting');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[ConnectionFSM] Illegal transition: connected → connecting')
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('allows connecting → reconnecting (retry escalation)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('reconnecting');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('reconnecting');
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('allows connecting → server_restarting (health check returns restarting)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('server_restarting');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_restarting');
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('allows self-transitions for reconnecting (retry loop)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('reconnecting');
+      store.transitionPhase('reconnecting');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('reconnecting');
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('allows self-transitions for connecting (concurrent connect calls)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('connecting');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connecting');
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn on valid transitions', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('connected');
+      store.transitionPhase('disconnected');
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('setConnectionPhase delegates to transitionPhase (validates)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      // Illegal path via the public setConnectionPhase API
+      useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[ConnectionFSM] Illegal transition: disconnected → reconnecting')
+      );
+      warnSpy.mockRestore();
+    });
+  });
+
   describe('setServerInfo', () => {
     it('sets all server info fields', () => {
       useConnectionLifecycleStore.getState().setServerInfo({

@@ -8,6 +8,28 @@
 import { create } from 'zustand';
 import type { ConnectionPhase, SavedConnection } from './types';
 
+/**
+ * Finite state machine: maps each phase to the set of phases it may
+ * legally transition into.  Any transition not listed here is invalid and
+ * will be logged as a warning (but still applied so production never
+ * silently breaks).
+ *
+ * Notes on non-obvious entries:
+ *  - connecting → server_restarting: health check returns "restarting" during the
+ *    initial connect attempt before a WebSocket is ever opened.
+ *  - connecting → reconnecting: the retry loop inside connect() escalates to
+ *    "reconnecting" after the first failed attempt.
+ *  - reconnecting → reconnecting / connecting → connecting: self-transitions are
+ *    allowed so that recursive retry calls do not generate spurious warnings.
+ */
+const VALID_TRANSITIONS: Record<ConnectionPhase, ConnectionPhase[]> = {
+  disconnected: ['connecting'],
+  connecting: ['connecting', 'connected', 'disconnected', 'reconnecting', 'server_restarting'],
+  connected: ['disconnected', 'reconnecting', 'server_restarting'],
+  reconnecting: ['reconnecting', 'connected', 'disconnected', 'server_restarting'],
+  server_restarting: ['connecting', 'reconnecting', 'disconnected'],
+};
+
 interface ServerInfo {
   serverMode?: 'cli' | null;
   serverVersion?: string | null;
@@ -47,6 +69,7 @@ interface ConnectionLifecycleState {
 
   // Actions
   setConnectionPhase: (phase: ConnectionPhase) => void;
+  transitionPhase: (to: ConnectionPhase) => void;
   setConnectionDetails: (url: string, token: string) => void;
   setServerInfo: (info: ServerInfo) => void;
   setConnectionQuality: (latencyMs: number | null, quality: 'good' | 'fair' | 'poor' | null) => void;
@@ -75,10 +98,22 @@ const initialState = {
   userDisconnected: false,
 };
 
-export const useConnectionLifecycleStore = create<ConnectionLifecycleState>((set) => ({
+export const useConnectionLifecycleStore = create<ConnectionLifecycleState>((set, get) => ({
   ...initialState,
 
-  setConnectionPhase: (phase) => set({ connectionPhase: phase }),
+  transitionPhase: (to) => {
+    const from = get().connectionPhase;
+    const allowed = VALID_TRANSITIONS[from];
+    if (!allowed.includes(to)) {
+      console.warn(
+        `[ConnectionFSM] Illegal transition: ${from} → ${to}. ` +
+          `Allowed from ${from}: [${allowed.join(', ')}]`
+      );
+    }
+    set({ connectionPhase: to });
+  },
+
+  setConnectionPhase: (phase) => get().transitionPhase(phase),
 
   setConnectionDetails: (url, token) => set({ wsUrl: url, apiToken: token }),
 
