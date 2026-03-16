@@ -81,7 +81,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
     pulseAnim.setValue(1);
   }, [isRecognizing, pulseAnim]);
 
-  const showMicButton = viewMode === 'chat' && !isStreaming && !disabled && (onMicPress || speechUnavailable);
+  const showMicButton = viewMode === 'chat' && !disabled && (onMicPress || speechUnavailable);
   const showAttachButton = viewMode === 'chat' && !hasTerminal && !isStreaming && !disabled && onAttach;
   const showCameraButton = viewMode === 'chat' && !hasTerminal && !isStreaming && !disabled && onCamera;
 
