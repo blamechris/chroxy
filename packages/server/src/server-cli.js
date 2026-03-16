@@ -2,7 +2,6 @@ import { SessionManager } from './session-manager.js'
 import { WsServer } from './ws-server.js'
 import { getTunnel, parseTunnelArg } from './tunnel/index.js'
 import { waitForTunnel } from './tunnel-check.js'
-import { wireTunnelEvents } from './tunnel-events.js'
 import { PushManager } from './push.js'
 import { hostname, homedir } from 'os'
 import { readFileSync, existsSync } from 'fs'
@@ -11,8 +10,6 @@ import { dirname, join, relative, sep } from 'path'
 import qrcode from 'qrcode-terminal'
 import { setJsonMode } from './logger.js'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
-import { checkNoAuthWarnings } from './no-auth-warnings.js'
-import { maskToken } from './mask-token.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
 import { getLanIp } from './lan-ip.js'
@@ -26,6 +23,40 @@ const SERVER_VERSION = packageJson.version
 
 // Tools that indicate a "writing" activity state for push notifications (#2085)
 const ACTIVITY_WRITE_TOOLS = ['Write', 'Edit', 'NotebookEdit']
+
+function checkNoAuthWarnings({ authRequired, tunnel }) {
+  if (authRequired) return
+  console.warn('[SECURITY] --no-auth disables all authentication. Only safe on isolated networks!')
+  if (tunnel && tunnel !== 'none') {
+    console.error('[SECURITY] --no-auth with tunnel exposes your server to the internet without authentication!')
+  }
+}
+
+function maskToken(token) {
+  if (!token) return ''
+  if (token.length <= 8) return token
+  return `${token.slice(0, 4)}...${token.slice(-4)}`
+}
+
+function wireTunnelEvents(tunnel, wsServer) {
+  tunnel.on('tunnel_lost', ({ code, signal }) => {
+    const exitReason = signal ? `signal ${signal}` : `code ${code}`
+    console.log(`\n[!] Tunnel lost (${exitReason})`)
+    wsServer.broadcastError('tunnel', `Tunnel connection lost (${exitReason}). Recovering...`, true)
+  })
+
+  tunnel.on('tunnel_recovering', ({ attempt, delayMs }) => {
+    console.log(`[!] Attempting tunnel recovery (attempt ${attempt}, waiting ${delayMs}ms)...`)
+    wsServer.broadcastStatus('Tunnel recovering...')
+  })
+
+  tunnel.on('tunnel_failed', ({ message, lastExitCode, lastSignal }) => {
+    console.error(`\n[!] ${message}`)
+    console.error(`[!] Last exit: code=${lastExitCode} signal=${lastSignal}`)
+    console.error(`[!] Server will continue on localhost only. Remote connections will not work.`)
+    wsServer.broadcastError('tunnel', 'Tunnel recovery failed. Remote connections will not work.', false)
+  })
+}
 
 function isWithinHome(dir) {
   const rel = relative(homedir(), dir)

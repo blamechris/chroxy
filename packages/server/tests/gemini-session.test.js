@@ -62,23 +62,23 @@ describe('GeminiSession', () => {
     assert.equal(session.isRunning, false)
   })
 
-  describe('_parseGeminiLine', () => {
+  describe('_parseJsonLine', () => {
     it('parses valid JSON', () => {
       const session = new GeminiSession({ cwd: '/tmp' })
-      const result = session._parseGeminiLine('{"type":"content_block_start"}')
+      const result = session._parseJsonLine('{"type":"content_block_start"}')
       assert.deepEqual(result, { type: 'content_block_start' })
     })
 
     it('returns null for invalid JSON', () => {
       const session = new GeminiSession({ cwd: '/tmp' })
-      const result = session._parseGeminiLine('not json')
+      const result = session._parseJsonLine('not json')
       assert.equal(result, null)
     })
 
     it('returns null for empty line', () => {
       const session = new GeminiSession({ cwd: '/tmp' })
-      assert.equal(session._parseGeminiLine(''), null)
-      assert.equal(session._parseGeminiLine('   '), null)
+      assert.equal(session._parseJsonLine(''), null)
+      assert.equal(session._parseJsonLine('   '), null)
     })
   })
 
