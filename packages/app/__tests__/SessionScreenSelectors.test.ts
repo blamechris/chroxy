@@ -18,8 +18,6 @@ describe('SessionScreen selective store usage (#1923)', () => {
     // Fields that still use inline selectors from useConnectionStore
     const inlineSelectors = [
       'viewMode',
-      'sessionCwd',
-      'connectionPhase',
       'availableModels',
       'availablePermissionModes',
       'inputSettings',
@@ -49,6 +47,15 @@ describe('SessionScreen selective store usage (#1923)', () => {
     // Fields migrated to useConnectionLifecycleStore (canonical source)
     const lifecycleFields = [
       'serverMode',
+      'sessionCwd',
+      'connectionPhase',
+      'savedConnection',
+      'isEncrypted',
+      'wsUrl',
+      'latencyMs',
+      'connectionQuality',
+      'connectionError',
+      'connectionRetryCount',
     ];
 
     for (const field of lifecycleFields) {

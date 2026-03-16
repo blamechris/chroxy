@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import * as Network from 'expo-network';
 import { useConnectionStore } from '../store/connection';
+import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { setPendingPairingId } from '../store/message-handler';
 import { Icon } from '../components/Icon';
 import { ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
@@ -96,10 +97,10 @@ export function ConnectScreen() {
   const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connect = useConnectionStore((state) => state.connect);
-  const connectionPhase = useConnectionStore((state) => state.connectionPhase);
-  const connectionError = useConnectionStore((state) => state.connectionError);
-  const connectionRetryCount = useConnectionStore((state) => state.connectionRetryCount);
-  const savedConnection = useConnectionStore((state) => state.savedConnection);
+  const connectionPhase = useConnectionLifecycleStore((state) => state.connectionPhase);
+  const connectionError = useConnectionLifecycleStore((state) => state.connectionError);
+  const connectionRetryCount = useConnectionLifecycleStore((state) => state.connectionRetryCount);
+  const savedConnection = useConnectionLifecycleStore((state) => state.savedConnection);
   const loadSavedConnection = useConnectionStore((state) => state.loadSavedConnection);
   const clearSavedConnection = useConnectionStore((state) => state.clearSavedConnection);
   const viewCachedSession = useConnectionStore((state) => state.viewCachedSession);
@@ -112,10 +113,10 @@ export function ConnectScreen() {
   // Load saved connection and auto-connect on mount (skip auto-connect if user just disconnected)
   useEffect(() => {
     let mounted = true;
-    const { userDisconnected } = useConnectionStore.getState();
+    const { userDisconnected } = useConnectionLifecycleStore.getState();
     loadSavedConnection().then(() => {
       if (!mounted || userDisconnected) return;
-      const saved = useConnectionStore.getState().savedConnection;
+      const saved = useConnectionLifecycleStore.getState().savedConnection;
       if (saved) {
         setAutoConnecting(true);
         connect(saved.url, saved.token, { silent: true });

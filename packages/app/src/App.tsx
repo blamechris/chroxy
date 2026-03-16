@@ -13,7 +13,8 @@ import { SettingsScreen } from './screens/SettingsScreen';
 import { PermissionHistoryScreen } from './screens/PermissionHistoryScreen';
 import { HistoryScreen } from './screens/HistoryScreen';
 import { LockScreen } from './components/LockScreen';
-import { useConnectionStore, selectShowSession } from './store/connection';
+import { useConnectionStore } from './store/connection';
+import { useConnectionLifecycleStore } from './store/connection-lifecycle';
 import { setupNotificationResponseListener } from './notifications';
 import { useBiometricLock } from './hooks/useBiometricLock';
 
@@ -43,7 +44,9 @@ function SessionScreenWithBoundary(_props: NativeStackScreenProps<RootStackParam
 }
 
 export default function App() {
-  const showSession = useConnectionStore(selectShowSession);
+  const connectionPhase = useConnectionLifecycleStore((s) => s.connectionPhase);
+  const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);
+  const showSession = connectionPhase !== 'disconnected' || viewingCachedSession;
   const { isLocked, unlock } = useBiometricLock();
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null);
 

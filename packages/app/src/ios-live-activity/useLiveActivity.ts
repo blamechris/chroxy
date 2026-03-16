@@ -6,6 +6,7 @@
  */
 import { useEffect, useRef, useMemo } from 'react';
 import { useConnectionStore } from '../store/connection';
+import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { LiveActivityManager, mapActivityState } from './live-activity-manager';
 
 interface LiveActivityHookResult {
@@ -27,7 +28,7 @@ export function useLiveActivity(): LiveActivityHookResult {
 
     const unsubscribe = useConnectionStore.subscribe((state) => {
       const activeId = state.activeSessionId;
-      const phase = state.connectionPhase;
+      const phase = useConnectionLifecycleStore.getState().connectionPhase;
 
       // Stop on disconnect
       if (phase === 'disconnected' && isActiveRef.current) {

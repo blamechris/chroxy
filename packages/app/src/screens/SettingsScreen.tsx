@@ -92,12 +92,12 @@ export function SettingsScreen() {
     disconnect,
     clearSavedConnection,
     requestFullHistory,
-    wsUrl,
   } = useConnectionStore();
 
   const serverVersion = useConnectionLifecycleStore((s) => s.serverVersion);
   const latestVersion = useConnectionLifecycleStore((s) => s.latestVersion);
   const serverMode = useConnectionLifecycleStore((s) => s.serverMode);
+  const wsUrl = useConnectionLifecycleStore((s) => s.wsUrl);
 
   const conversationId = useConnectionStore((s) => {
     const id = s.activeSessionId;
