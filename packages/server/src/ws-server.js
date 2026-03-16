@@ -1060,6 +1060,30 @@ export class WsServer {
     this._clientSend(ws, client, message)
   }
 
+  /**
+   * Clear all pending permission requests across both subsystems.
+   *
+   * Covers:
+   *   - Legacy HTTP hook permissions held in this._pendingPermissions (via ws-permissions.js)
+   *   - SDK in-process permissions held by each session's PermissionManager
+   *
+   * Called by close() automatically. Exposed as a public method so callers can
+   * drain permissions independently (e.g. before a controlled restart).
+   */
+  clearAllPendingPermissions() {
+    // Legacy HTTP hook permissions: auto-deny and clear
+    this._permissions.destroy()
+
+    // SDK in-process permissions: auto-deny via each session's PermissionManager
+    if (this.sessionManager?._sessions instanceof Map) {
+      for (const [, entry] of this.sessionManager._sessions) {
+        try {
+          entry.session?._permissions?.clearAll()
+        } catch {}
+      }
+    }
+  }
+
   /** Graceful shutdown */
   close() {
     // Remove TokenManager listener to prevent post-shutdown broadcasts
@@ -1077,8 +1101,8 @@ export class WsServer {
       this._authCleanupInterval = null
     }
 
-    // Auto-deny any pending permission requests
-    this._permissions.destroy()
+    // Auto-deny all pending permission requests (both subsystems)
+    this.clearAllPendingPermissions()
     this._questionSessionMap.clear()
     this._primaryClients.clear()
     this._normalizer.destroy()
