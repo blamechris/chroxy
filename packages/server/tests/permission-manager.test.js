@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { PermissionManager } from '../src/permission-manager.js'
+import { PermissionManager, ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW } from '../src/permission-manager.js'
 
 /**
  * Tests for PermissionManager — permission request lifecycle,
@@ -325,6 +325,263 @@ describe('PermissionManager', () => {
       pm.destroy()
       assert.equal(pm.listenerCount('permission_request'), 0)
       assert.equal(pm.listenerCount('user_question'), 0)
+    })
+  })
+
+  // -- Rule engine constants --
+
+  describe('ELIGIBLE_TOOLS and NEVER_AUTO_ALLOW constants', () => {
+    it('ELIGIBLE_TOOLS contains the expected file operation tools', () => {
+      const expected = ['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']
+      for (const tool of expected) {
+        assert.ok(ELIGIBLE_TOOLS.has(tool), `Expected ELIGIBLE_TOOLS to contain ${tool}`)
+      }
+      assert.equal(ELIGIBLE_TOOLS.size, expected.length)
+    })
+
+    it('NEVER_AUTO_ALLOW contains the expected dangerous tools', () => {
+      const expected = ['Bash', 'Task', 'WebFetch', 'WebSearch']
+      for (const tool of expected) {
+        assert.ok(NEVER_AUTO_ALLOW.has(tool), `Expected NEVER_AUTO_ALLOW to contain ${tool}`)
+      }
+      assert.equal(NEVER_AUTO_ALLOW.size, expected.length)
+    })
+
+    it('ELIGIBLE_TOOLS and NEVER_AUTO_ALLOW are disjoint', () => {
+      for (const tool of ELIGIBLE_TOOLS) {
+        assert.ok(!NEVER_AUTO_ALLOW.has(tool), `${tool} must not be in both sets`)
+      }
+    })
+  })
+
+  // -- setRules / getRules / clearRules --
+
+  describe('setRules / getRules / clearRules', () => {
+    it('sets and retrieves rules', () => {
+      pm.setRules([{ tool: 'Read', decision: 'allow' }])
+      const rules = pm.getRules()
+      assert.equal(rules.length, 1)
+      assert.equal(rules[0].tool, 'Read')
+      assert.equal(rules[0].decision, 'allow')
+    })
+
+    it('getRules returns a copy (mutations do not affect internal state)', () => {
+      pm.setRules([{ tool: 'Read', decision: 'allow' }])
+      const rules = pm.getRules()
+      rules.push({ tool: 'Write', decision: 'deny' })
+      assert.equal(pm.getRules().length, 1)
+    })
+
+    it('setRules replaces existing rules', () => {
+      pm.setRules([{ tool: 'Read', decision: 'allow' }])
+      pm.setRules([{ tool: 'Write', decision: 'deny' }, { tool: 'Glob', decision: 'allow' }])
+      const rules = pm.getRules()
+      assert.equal(rules.length, 2)
+      assert.equal(rules[0].tool, 'Write')
+    })
+
+    it('clearRules empties the rule list', () => {
+      pm.setRules([{ tool: 'Read', decision: 'allow' }])
+      pm.clearRules()
+      assert.equal(pm.getRules().length, 0)
+    })
+
+    it('starts with no rules', () => {
+      assert.equal(pm.getRules().length, 0)
+    })
+
+    it('accepts multiple rules for different tools', () => {
+      const rules = [
+        { tool: 'Read', decision: 'allow' },
+        { tool: 'Write', decision: 'deny' },
+        { tool: 'Edit', decision: 'allow' },
+      ]
+      pm.setRules(rules)
+      assert.equal(pm.getRules().length, 3)
+    })
+  })
+
+  // -- setRules validation --
+
+  describe('setRules validation', () => {
+    it('throws if rules is not an array', () => {
+      assert.throws(() => pm.setRules(null), /rules must be an array/)
+      assert.throws(() => pm.setRules('allow'), /rules must be an array/)
+      assert.throws(() => pm.setRules({}), /rules must be an array/)
+    })
+
+    it('throws if a rule has no tool', () => {
+      assert.throws(() => pm.setRules([{ decision: 'allow' }]), /tool/)
+    })
+
+    it('throws if tool is not a string', () => {
+      assert.throws(() => pm.setRules([{ tool: 42, decision: 'allow' }]), /tool/)
+    })
+
+    it('throws if decision is not allow or deny', () => {
+      assert.throws(
+        () => pm.setRules([{ tool: 'Read', decision: 'allowAlways' }]),
+        /decision must be 'allow' or 'deny'/
+      )
+      assert.throws(
+        () => pm.setRules([{ tool: 'Read', decision: '' }]),
+        /decision must be 'allow' or 'deny'/
+      )
+    })
+
+    it('throws for NEVER_AUTO_ALLOW tools', () => {
+      for (const tool of ['Bash', 'Task', 'WebFetch', 'WebSearch']) {
+        assert.throws(
+          () => pm.setRules([{ tool, decision: 'allow' }]),
+          /NEVER_AUTO_ALLOW/,
+          `Expected error for ${tool}`
+        )
+      }
+    })
+
+    it('throws for tools not in ELIGIBLE_TOOLS', () => {
+      assert.throws(
+        () => pm.setRules([{ tool: 'UnknownTool', decision: 'allow' }]),
+        /ELIGIBLE_TOOLS/
+      )
+    })
+
+    it('accepts deny decision for all ELIGIBLE_TOOLS', () => {
+      for (const tool of ELIGIBLE_TOOLS) {
+        assert.doesNotThrow(() => pm.setRules([{ tool, decision: 'deny' }]))
+      }
+    })
+
+    it('accepts allow decision for all ELIGIBLE_TOOLS', () => {
+      for (const tool of ELIGIBLE_TOOLS) {
+        assert.doesNotThrow(() => pm.setRules([{ tool, decision: 'allow' }]))
+      }
+    })
+
+    it('does not change rules on invalid input', () => {
+      pm.setRules([{ tool: 'Read', decision: 'allow' }])
+      assert.throws(() => pm.setRules([{ tool: 'Bash', decision: 'allow' }]))
+      assert.equal(pm.getRules().length, 1, 'rules should be unchanged after failed setRules')
+    })
+  })
+
+  // -- _matchesRule --
+
+  describe('_matchesRule', () => {
+    it('returns null when no rules set', () => {
+      assert.equal(pm._matchesRule('Read'), null)
+    })
+
+    it('returns the rule decision for a matching tool', () => {
+      pm.setRules([{ tool: 'Read', decision: 'allow' }])
+      assert.equal(pm._matchesRule('Read'), 'allow')
+    })
+
+    it('returns deny for a deny rule', () => {
+      pm.setRules([{ tool: 'Write', decision: 'deny' }])
+      assert.equal(pm._matchesRule('Write'), 'deny')
+    })
+
+    it('returns null for a tool not in rules', () => {
+      pm.setRules([{ tool: 'Read', decision: 'allow' }])
+      assert.equal(pm._matchesRule('Write'), null)
+    })
+
+    it('uses first matching rule (FIFO)', () => {
+      pm._sessionRules = [
+        { tool: 'Read', decision: 'allow' },
+        { tool: 'Read', decision: 'deny' },
+      ]
+      assert.equal(pm._matchesRule('Read'), 'allow')
+    })
+  })
+
+  // -- handlePermission with rules --
+
+  describe('handlePermission with session rules', () => {
+    it('auto-allows a tool matching an allow rule without emitting permission_request', async () => {
+      const events = []
+      pm.on('permission_request', (data) => events.push(data))
+      pm.setRules([{ tool: 'Read', decision: 'allow' }])
+
+      const result = await pm.handlePermission('Read', { file_path: '/tmp/x' }, null, 'approve')
+      assert.equal(result.behavior, 'allow')
+      assert.deepEqual(result.updatedInput, { file_path: '/tmp/x' })
+      assert.equal(events.length, 0)
+    })
+
+    it('auto-denies a tool matching a deny rule without emitting permission_request', async () => {
+      const events = []
+      pm.on('permission_request', (data) => events.push(data))
+      pm.setRules([{ tool: 'Write', decision: 'deny' }])
+
+      const result = await pm.handlePermission('Write', { file_path: '/tmp/y' }, null, 'approve')
+      assert.equal(result.behavior, 'deny')
+      assert.equal(result.message, 'Denied by session rule')
+      assert.equal(events.length, 0)
+    })
+
+    it('rules take priority over acceptEdits mode', async () => {
+      // With no rules, acceptEdits auto-allows Read
+      const resultNoRule = await pm.handlePermission('Read', {}, null, 'acceptEdits')
+      assert.equal(resultNoRule.behavior, 'allow')
+
+      // With a deny rule, the rule wins even in acceptEdits mode
+      pm.setRules([{ tool: 'Read', decision: 'deny' }])
+      const resultWithRule = await pm.handlePermission('Read', {}, null, 'acceptEdits')
+      assert.equal(resultWithRule.behavior, 'deny')
+    })
+
+    it('falls through to prompt when no rule matches', async () => {
+      const events = []
+      pm.on('permission_request', (data) => events.push(data))
+      pm.setRules([{ tool: 'Read', decision: 'allow' }])
+
+      // Write is not in our rules so it should prompt
+      const promise = pm.handlePermission('Write', { file_path: '/tmp/z' }, null, 'approve')
+      assert.equal(events.length, 1, 'Should emit permission_request for unmatched tool')
+      pm.respondToPermission(events[0].requestId, 'allow')
+      const result = await promise
+      assert.equal(result.behavior, 'allow')
+    })
+
+    it('passes updatedInput with empty object when input is null', async () => {
+      pm.setRules([{ tool: 'Glob', decision: 'allow' }])
+      const result = await pm.handlePermission('Glob', null, null, 'approve')
+      assert.equal(result.behavior, 'allow')
+      assert.deepEqual(result.updatedInput, {})
+    })
+
+    it('clears rules does not affect in-flight prompt requests', async () => {
+      const events = []
+      pm.on('permission_request', (data) => events.push(data))
+
+      const promise = pm.handlePermission('Write', { file_path: '/x' }, null, 'approve')
+      assert.equal(events.length, 1)
+
+      pm.clearRules() // clear while prompt is pending
+
+      pm.respondToPermission(events[0].requestId, 'allow')
+      const result = await promise
+      assert.equal(result.behavior, 'allow')
+    })
+  })
+
+  // -- clearRules on mode change --
+
+  describe('clearRules on mode change', () => {
+    it('clearRules is idempotent when called multiple times', () => {
+      pm.clearRules()
+      pm.clearRules()
+      assert.equal(pm.getRules().length, 0)
+    })
+
+    it('rules are independent across multiple setRules calls', () => {
+      pm.setRules([{ tool: 'Read', decision: 'allow' }])
+      pm.clearRules()
+      pm.setRules([{ tool: 'Write', decision: 'deny' }])
+      assert.equal(pm.getRules().length, 1)
+      assert.equal(pm.getRules()[0].tool, 'Write')
     })
   })
 
