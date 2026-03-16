@@ -144,7 +144,7 @@ const AUTO_RECONNECT_DELAY = 1500;
 const ERROR_RECONNECT_DELAY = 2000;
 
 export const selectShowSession = (s: ConnectionState): boolean =>
-  s.connectionPhase !== 'disconnected' || s.viewingCachedSession;
+  useConnectionLifecycleStore.getState().connectionPhase !== 'disconnected' || s.viewingCachedSession;
 
 // Session-aware selectors — read from sessionStates[activeSessionId]
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -216,11 +216,7 @@ function getDeviceInfo(): { deviceName: string | null; deviceType: 'phone' | 'ta
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
-  connectionPhase: 'disconnected',
-  wsUrl: null,
-  apiToken: null,
   socket: null,
-  sessionCwd: null,
   sessions: [],
   activeSessionId: null,
   sessionStates: {},
@@ -231,16 +227,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectedClients: [],
   primaryClientId: null,
   followMode: false,
-  connectionError: null,
-  connectionRetryCount: 0,
-  latencyMs: null,
-  connectionQuality: null,
   serverErrors: [],
   sessionNotifications: [],
   shutdownReason: null,
   restartEtaMs: null,
   restartingSince: null,
-  isEncrypted: false,
   pendingPermissionConfirm: null,
   timeoutWarning: null,
   slashCommands: [],
@@ -259,8 +250,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     chatEnterToSend: true,
     terminalEnterToSend: false,
   },
-  savedConnection: null,
-  userDisconnected: false,
   viewingCachedSession: false,
   viewMode: 'chat',
   terminalBuffer: '',
@@ -333,7 +322,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   loadSavedConnection: async () => {
     const saved = await loadConnection();
     if (saved) {
-      set({ savedConnection: saved });
       useConnectionLifecycleStore.getState().setSavedConnection(saved);
     }
     // Load persisted input settings
@@ -387,7 +375,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   clearSavedConnection: async () => {
     await clearConnection();
-    set({ savedConnection: null });
     useConnectionLifecycleStore.getState().setSavedConnection(null);
   },
 
@@ -403,7 +390,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000];
 
     // Detect if connecting to a different server — clear old session data + queue
-    const currentUrl = get().wsUrl;
+    const currentUrl = useConnectionLifecycleStore.getState().wsUrl;
     if (_retryCount === 0 && currentUrl !== null && currentUrl !== url) {
       get().forgetSession();
       clearMessageQueue();
@@ -427,14 +414,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       existing.close();
     }
     const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
-    // Only clear connectionError on fresh user-initiated connections (not retries/reconnects)
-    const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
-    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, userDisconnected: false, ...errorPatch });
+    set({ socket: null });
     useConnectionLifecycleStore.getState().setConnectionPhase(phase);
-    // Only clear error in lifecycle store when main store clears it (fresh connections, not retries)
-    if ('connectionError' in errorPatch) {
-      useConnectionLifecycleStore.getState().setConnectionError(null, _retryCount);
-    }
+    useConnectionLifecycleStore.getState().setConnectionError(
+      // Only clear on fresh user-initiated connections (not retries/reconnects)
+      _retryCount === 0 && !isReconnect ? null : useConnectionLifecycleStore.getState().connectionError,
+      _retryCount,
+    );
     useConnectionLifecycleStore.getState().setUserDisconnected(false);
 
     if (_retryCount > 0) {
@@ -460,7 +446,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             const healthEta = typeof body.restartEtaMs === 'number' ? body.restartEtaMs : null;
             const currentState = get();
             set({
-              connectionPhase: 'server_restarting',
               shutdownReason: currentState.shutdownReason ?? 'restart',
               restartEtaMs: healthEta,
               restartingSince: currentState.restartingSince || Date.now(),
@@ -473,7 +458,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
                 get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
               }, delay);
             } else {
-              set({ connectionPhase: 'disconnected', connectionError: 'Server restart timed out' });
               useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
               useConnectionLifecycleStore.getState().setConnectionError('Server restart timed out', _retryCount);
               if (!silent) {
@@ -502,7 +486,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         const reason = err.name === 'AbortError' ? 'Server not responding'
           : err.message?.startsWith('HTTP ') ? err.message
           : 'Network error';
-        set({ connectionError: reason });
         useConnectionLifecycleStore.getState().setConnectionError(reason, _retryCount);
         if (_retryCount < MAX_RETRIES) {
           const delay = withJitter(RETRY_DELAYS[_retryCount]);
@@ -512,7 +495,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
           }, delay);
         } else {
-          set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });
           useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
           useConnectionLifecycleStore.getState().setConnectionError('Could not reach server', _retryCount);
           if (!silent) {
@@ -597,7 +579,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Stale socket from a previous connection attempt — ignore
       if (myAttemptId !== connectionAttemptId) return;
 
-      const wasConnected = get().connectionPhase === 'connected';
+      const wasConnected = useConnectionLifecycleStore.getState().connectionPhase === 'connected';
       set({ socket: null });
 
       // Clear transient streaming/plan state so stale UI doesn't persist
@@ -615,18 +597,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] Connection lost, auto-reconnecting...');
-        set({ connectionPhase: 'reconnecting', connectionError: 'Connection lost', connectionRetryCount: 0 });
         useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
         useConnectionLifecycleStore.getState().setConnectionError('Connection lost', 0);
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
         }, AUTO_RECONNECT_DELAY);
-      } else if (disconnectedAttemptId === myAttemptId) {
-        set({ connectionPhase: 'disconnected' });
-        useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       } else {
-        set({ connectionPhase: 'disconnected' });
         useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       }
     };
@@ -640,7 +617,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Auto-reconnect on unexpected WS error
       if (disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] WebSocket error, reconnecting...');
-        set({ connectionPhase: 'reconnecting', connectionError: 'Connection error', connectionRetryCount: 0 });
         useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
         useConnectionLifecycleStore.getState().setConnectionError('Connection error', 0);
         setTimeout(() => {
@@ -683,25 +659,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     useCostStore.getState().reset();
     // Preserve sessions, activeSessionId, sessionStates (messages live there now)
     set({
-      connectionPhase: 'disconnected',
       socket: null,
-      sessionCwd: null,
       availableModels: [],
       defaultModelId: null,
       availablePermissionModes: [],
       myClientId: null,
       connectedClients: [],
       primaryClientId: null,
-      connectionError: null,
-      connectionRetryCount: 0,
-      latencyMs: null,
-      connectionQuality: null,
       serverErrors: [],
       sessionNotifications: [],
       shutdownReason: null,
       restartEtaMs: null,
       restartingSince: null,
-      isEncrypted: false,
       pendingPermissionConfirm: null,
       timeoutWarning: null,
       slashCommands: [],
@@ -711,8 +680,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       costBudget: null,
       webFeatures: { available: false, remote: false, teleport: false }, // kept for backward compat
       webTasks: [], // kept for backward compat
-      savedConnection: null,
-      userDisconnected: true,
       viewingCachedSession: false,
       conversationHistory: [],
       conversationHistoryLoading: false,
@@ -740,14 +707,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessions: [],
       activeSessionId: null,
       sessionStates: {},
-      wsUrl: null,
-      apiToken: null,
-      sessionCwd: null,
       viewingCachedSession: false,
       conversationHistory: [],
       conversationHistoryLoading: false,
       conversationHistoryError: null,
     });
+    useConnectionLifecycleStore.setState({ wsUrl: null, apiToken: null });
     useConnectionLifecycleStore.getState().setServerInfo({
       serverMode: null,
       serverVersion: null,
@@ -1334,7 +1299,8 @@ if (global.__chroxy_appStateSub) {
 }
 export const _appStateSub = AppState.addEventListener('change', (nextState) => {
   if (nextState === 'active') {
-    const { socket, connectionPhase, wsUrl, apiToken } = useConnectionStore.getState();
+    const { socket } = useConnectionStore.getState();
+    const { connectionPhase, wsUrl, apiToken } = useConnectionLifecycleStore.getState();
     if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
       console.log('[ws] App resumed, socket stale — reconnecting');
       useConnectionStore.getState().connect(wsUrl, apiToken);

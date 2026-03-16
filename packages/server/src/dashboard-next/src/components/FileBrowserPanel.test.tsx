@@ -147,7 +147,10 @@ describe('FileBrowserPanel', () => {
     })
 
     await waitFor(() => {
-      expect(screen.getByText('console.log("hello")')).toBeTruthy()
+      // Syntax highlighting splits code into token spans — verify the code is rendered
+      // by checking that key tokens appear in the document
+      expect(document.body.textContent).toContain('console')
+      expect(document.body.textContent).toContain('hello')
     })
   })
 

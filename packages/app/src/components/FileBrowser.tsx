@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, FileListing, FileContent } from '../store/connection';
+import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { COLORS } from '../constants/colors';
 import { Icon } from './Icon';
 import { tokenize, SYNTAX_COLORS } from '../utils/syntax';
@@ -232,7 +233,7 @@ export function FileBrowser() {
 
   const setFileBrowserCallback = useConnectionStore((s) => s.setFileBrowserCallback);
   const requestFileListing = useConnectionStore((s) => s.requestFileListing);
-  const sessionCwd = useConnectionStore((s) => s.sessionCwd);
+  const sessionCwd = useConnectionLifecycleStore((s) => s.sessionCwd);
 
   const requestIdRef = useRef(0);
   const activeRequestRef = useRef(0);

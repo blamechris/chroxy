@@ -120,9 +120,9 @@ export function SessionScreen() {
   const inputSettings = useConnectionStore((s) => s.inputSettings);
   const claudeReady = useConnectionStore(selectClaudeReady);
   const serverMode = useConnectionLifecycleStore((s) => s.serverMode);
-  const sessionCwd = useConnectionStore((s) => s.sessionCwd);
+  const sessionCwd = useConnectionLifecycleStore((s) => s.sessionCwd);
   const streamingMessageId = useConnectionStore(selectStreamingMessageId);
-  const connectionPhase = useConnectionStore((s) => s.connectionPhase);
+  const connectionPhase = useConnectionLifecycleStore((s) => s.connectionPhase);
   const activeModel = useConnectionStore(selectActiveModel);
   const availableModels = useConnectionStore((s) => s.availableModels);
   const defaultModelId = useConnectionStore((s) => s.defaultModelId);
@@ -152,7 +152,7 @@ export function SessionScreen() {
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
   const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);
   const exitCachedSession = useConnectionStore((s) => s.exitCachedSession);
-  const savedConnection = useConnectionStore((s) => s.savedConnection);
+  const savedConnection = useConnectionLifecycleStore((s) => s.savedConnection);
   const connect = useConnectionStore((s) => s.connect);
   const isIdle = useConnectionStore(selectIsIdle);
   const activeAgents = useConnectionStore((s) => {
@@ -198,19 +198,19 @@ export function SessionScreen() {
   });
   const closeDevPreview = useConnectionStore((s) => s.closeDevPreview);
   const webFeatures = useConnectionStore((s) => s.webFeatures);
-  const isEncrypted = useConnectionStore((s) => s.isEncrypted);
+  const isEncrypted = useConnectionLifecycleStore((s) => s.isEncrypted);
   const timeoutWarning = useConnectionStore((s) => s.timeoutWarning);
   const dismissTimeoutWarning = useConnectionStore((s) => s.dismissTimeoutWarning);
-  const wsUrl = useConnectionStore((s) => s.wsUrl);
+  const wsUrl = useConnectionLifecycleStore((s) => s.wsUrl);
   const webTasks = useConnectionStore((s) => s.webTasks);
   const launchWebTask = useConnectionStore((s) => s.launchWebTask);
   const teleportWebTask = useConnectionStore((s) => s.teleportWebTask);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const switchSession = useConnectionStore((s) => s.switchSession);
-  const latencyMs = useConnectionStore((s) => s.latencyMs);
-  const connectionQuality = useConnectionStore((s) => s.connectionQuality);
-  const connectionError = useConnectionStore((s) => s.connectionError);
-  const connectionRetryCount = useConnectionStore((s) => s.connectionRetryCount);
+  const latencyMs = useConnectionLifecycleStore((s) => s.latencyMs);
+  const connectionQuality = useConnectionLifecycleStore((s) => s.connectionQuality);
+  const connectionError = useConnectionLifecycleStore((s) => s.connectionError);
+  const connectionRetryCount = useConnectionLifecycleStore((s) => s.connectionRetryCount);
   const shutdownReason = useConnectionStore((s) => s.shutdownReason);
   const restartEtaMs = useConnectionStore((s) => s.restartEtaMs);
   const restartingSince = useConnectionStore((s) => s.restartingSince);

@@ -11,6 +11,7 @@ import {
   _testQueueInternals,
   _testMessageHandler,
 } from '../../store/connection';
+import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import { clearAllCallbacks, getCallback } from '../../store/imperative-callbacks';
 
 // Reset store between tests
@@ -19,16 +20,19 @@ beforeEach(() => {
   useConnectionStore.setState({
     terminalBuffer: '',
     terminalRawBuffer: '',
-    connectionError: null,
-    connectionRetryCount: 0,
     serverErrors: [],
     connectedClients: [],
     myClientId: null,
     primaryClientId: null,
-    connectionPhase: 'disconnected',
     sessionStates: { default: createEmptySessionState() },
     activeSessionId: 'default',
     viewingCachedSession: false,
+  });
+  useConnectionLifecycleStore.setState({
+    connectionPhase: 'disconnected',
+    connectionError: null,
+    connectionRetryCount: 0,
+    userDisconnected: false,
   });
 });
 
@@ -145,7 +149,8 @@ describe('selectShowSession', () => {
 
   it('returns false only for disconnected', () => {
     for (const phase of phases) {
-      useConnectionStore.setState({ connectionPhase: phase, viewingCachedSession: false });
+      useConnectionLifecycleStore.setState({ connectionPhase: phase });
+      useConnectionStore.setState({ viewingCachedSession: false });
       const result = selectShowSession(useConnectionStore.getState());
       if (phase === 'disconnected') {
         expect(result).toBe(false);
@@ -156,7 +161,8 @@ describe('selectShowSession', () => {
   });
 
   it('returns true when viewingCachedSession even if disconnected', () => {
-    useConnectionStore.setState({ connectionPhase: 'disconnected', viewingCachedSession: true });
+    useConnectionLifecycleStore.setState({ connectionPhase: 'disconnected' });
+    useConnectionStore.setState({ viewingCachedSession: true });
     expect(selectShowSession(useConnectionStore.getState())).toBe(true);
   });
 });
@@ -291,23 +297,23 @@ describe('store actions', () => {
 
   describe('disconnect sets userDisconnected flag', () => {
     it('sets userDisconnected to true on explicit disconnect', () => {
-      useConnectionStore.setState({ connectionPhase: 'connected', userDisconnected: false });
+      useConnectionLifecycleStore.setState({ connectionPhase: 'connected', userDisconnected: false });
       useConnectionStore.getState().disconnect();
-      expect(useConnectionStore.getState().userDisconnected).toBe(true);
+      expect(useConnectionLifecycleStore.getState().userDisconnected).toBe(true);
     });
 
     it('disconnect sets both userDisconnected and connectionPhase', () => {
-      useConnectionStore.setState({ connectionPhase: 'connected', userDisconnected: false });
+      useConnectionLifecycleStore.setState({ connectionPhase: 'connected', userDisconnected: false });
       useConnectionStore.getState().disconnect();
-      expect(useConnectionStore.getState().userDisconnected).toBe(true);
-      expect(useConnectionStore.getState().connectionPhase).toBe('disconnected');
+      expect(useConnectionLifecycleStore.getState().userDisconnected).toBe(true);
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('disconnected');
     });
 
     it('connect() clears userDisconnected flag', () => {
-      useConnectionStore.setState({ userDisconnected: true, connectionPhase: 'disconnected' });
+      useConnectionLifecycleStore.setState({ userDisconnected: true, connectionPhase: 'disconnected' });
       // connect() will fail (no server) but should clear the flag immediately
       useConnectionStore.getState().connect('ws://localhost:9999', 'test-token');
-      expect(useConnectionStore.getState().userDisconnected).toBe(false);
+      expect(useConnectionLifecycleStore.getState().userDisconnected).toBe(false);
       // Clean up — disconnect to cancel any pending retries
       useConnectionStore.getState().disconnect();
     });
@@ -362,7 +368,7 @@ describe('message queue', () => {
   beforeEach(() => {
     // Clear queue by calling disconnect, then reset state
     useConnectionStore.getState().disconnect();
-    useConnectionStore.setState({ connectionPhase: 'disconnected' });
+    useConnectionLifecycleStore.setState({ connectionPhase: 'disconnected' });
   });
 
   it('queues input when socket is not connected', () => {
@@ -587,16 +593,16 @@ describe('myClientId state', () => {
 
 describe('connectionError and connectionRetryCount state', () => {
   it('initializes with null error and zero retry count', () => {
-    const state = useConnectionStore.getState();
+    const state = useConnectionLifecycleStore.getState();
     expect(state.connectionError).toBeNull();
     expect(state.connectionRetryCount).toBe(0);
   });
 
   it('clears both on disconnect', () => {
-    useConnectionStore.setState({ connectionError: 'Connection lost', connectionRetryCount: 3 });
+    useConnectionLifecycleStore.setState({ connectionError: 'Connection lost', connectionRetryCount: 3 });
     useConnectionStore.getState().disconnect();
-    expect(useConnectionStore.getState().connectionError).toBeNull();
-    expect(useConnectionStore.getState().connectionRetryCount).toBe(0);
+    expect(useConnectionLifecycleStore.getState().connectionError).toBeNull();
+    expect(useConnectionLifecycleStore.getState().connectionRetryCount).toBe(0);
   });
 
   it('auth_ok clears both fields', () => {
@@ -605,9 +611,9 @@ describe('connectionError and connectionRetryCount state', () => {
       url: 'wss://test', token: 'tok', isReconnect: false,
       silent: false, socket: mockSocket,
     });
-    useConnectionStore.setState({ connectionError: 'Network error', connectionRetryCount: 2 });
+    useConnectionLifecycleStore.setState({ connectionError: 'Network error', connectionRetryCount: 2 });
     _testMessageHandler.handle({ type: 'auth_ok', serverMode: 'cli' });
-    const state = useConnectionStore.getState();
+    const state = useConnectionLifecycleStore.getState();
     expect(state.connectionError).toBeNull();
     expect(state.connectionRetryCount).toBe(0);
     _testMessageHandler.clearContext();
@@ -797,7 +803,7 @@ describe('WS message handler (direct)', () => {
         cwd: '/home/user',
       });
       const state = useConnectionStore.getState();
-      expect(state.connectionPhase).toBe('connected');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
       expect(state.myClientId).toBe('me-123');
       expect(state.connectedClients).toHaveLength(2);
       expect(state.connectedClients[0].isSelf).toBe(true);
@@ -811,7 +817,7 @@ describe('WS message handler (direct)', () => {
         serverMode: 'cli',
       });
       const state = useConnectionStore.getState();
-      expect(state.connectionPhase).toBe('connected');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
       expect(state.connectedClients).toEqual([]);
     });
   });
@@ -936,7 +942,7 @@ describe('WS message handler (direct)', () => {
       _testMessageHandler.clearContext();
       // Should not throw
       _testMessageHandler.handle({ type: 'auth_ok', clientId: 'x' });
-      expect(useConnectionStore.getState().connectionPhase).toBe('disconnected');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('disconnected');
     });
   });
 
@@ -1145,8 +1151,8 @@ describe('permission boundary splitting', () => {
     useConnectionStore.setState({
       activeSessionId: 'default',
       sessionStates: { default: createEmptySessionState() },
-      connectionPhase: 'disconnected',
     });
+    useConnectionLifecycleStore.setState({ connectionPhase: 'disconnected' });
     (mockSocket.send as jest.Mock).mockClear();
     (mockSocket.close as jest.Mock).mockClear();
     _testMessageHandler.setContext({
@@ -1329,8 +1335,8 @@ describe('permission_request dedup on reconnect', () => {
     useConnectionStore.setState({
       activeSessionId: 'default',
       sessionStates: { default: createEmptySessionState() },
-      connectionPhase: 'disconnected',
     });
+    useConnectionLifecycleStore.setState({ connectionPhase: 'disconnected' });
     (mockSocket.send as jest.Mock).mockClear();
     (mockSocket.close as jest.Mock).mockClear();
     _testMessageHandler.setContext({
