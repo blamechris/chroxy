@@ -22,6 +22,7 @@ import {
 import { registerForPushNotifications } from '../notifications';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
 import { parseUserInputMessage } from '@chroxy/store-core';
+import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
 import type {
   ChatMessage,
@@ -64,7 +65,7 @@ import { useConnectionLifecycleStore } from './connection-lifecycle';
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
 // ---------------------------------------------------------------------------
-export const CLIENT_PROTOCOL_VERSION = 1;
+export const CLIENT_PROTOCOL_VERSION = PROTOCOL_VERSION;
 
 // ---------------------------------------------------------------------------
 // Late-bound store reference — set once by connection.ts after store creation
