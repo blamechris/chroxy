@@ -6,6 +6,13 @@ const SpeechMod = require('expo-speech-recognition');
 const MockModule = SpeechMod.ExpoSpeechRecognitionModule;
 const mockUseSpeechEvent = SpeechMod.useSpeechRecognitionEvent as jest.Mock;
 
+// Controllable SecureStore mock — allows tests to defer getItemAsync
+jest.mock('expo-secure-store', () => ({
+  getItemAsync: jest.fn(() => Promise.resolve(null)),
+  setItemAsync: jest.fn(() => Promise.resolve()),
+  deleteItemAsync: jest.fn(() => Promise.resolve()),
+}));
+
 // Capture event handlers registered via useSpeechRecognitionEvent
 type EventHandler = (event: any) => void;
 let eventHandlers: Record<string, EventHandler> = {};
@@ -190,6 +197,87 @@ describe('useSpeechRecognition', () => {
     await actAsync(async () => {
       resolvePermission!({ granted: true });
       await startPromise!;
+    });
+
+    expect(MockModule.start).not.toHaveBeenCalled();
+  });
+
+  it('does not start if component unmounts during permission await', async () => {
+    let resolvePermission: (v: any) => void;
+    MockModule.requestPermissionsAsync.mockReturnValue(
+      new Promise((resolve) => { resolvePermission = resolve; })
+    );
+
+    const { result, unmount } = renderHookSimple(() => useSpeechRecognition());
+
+    let startPromise: Promise<void>;
+    actSync(() => {
+      startPromise = result.current.startListening();
+    });
+
+    // Unmount while permission request is in flight
+    unmount();
+
+    await actAsync(async () => {
+      resolvePermission!({ granted: true });
+      await startPromise!;
+    });
+
+    expect(MockModule.start).not.toHaveBeenCalled();
+  });
+
+  it('does not start if component unmounts during getSpeechLang await', async () => {
+    // Permission resolves immediately; use a deferred SecureStore to create the async gap,
+    // then unmount the component before resolving, simulating unmount mid-getSpeechLang
+    MockModule.requestPermissionsAsync.mockResolvedValue({ granted: true });
+
+    const SecureStore = jest.requireMock('expo-secure-store');
+
+    let resolveStore!: (v: string | null) => void;
+    const storePromise = new Promise<string | null>((resolve) => { resolveStore = resolve; });
+    SecureStore.getItemAsync.mockImplementationOnce(() => storePromise);
+
+    const { result, unmount } = renderHookSimple(() => useSpeechRecognition());
+
+    // startListening will block at getItemAsync (after permissions resolve)
+    let startPromise: Promise<void>;
+    actSync(() => { startPromise = result.current.startListening(); });
+
+    // Flush microtasks so startListening advances past permissions to getItemAsync
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Now the code is suspended inside getSpeechLang awaiting the deferred promise.
+    // Unmount the component to set mountedRef.current = false.
+    unmount();
+
+    // Resolve the deferred promise and let startListening finish
+    await actAsync(async () => {
+      resolveStore(null);
+      await startPromise!;
+    });
+
+    expect(MockModule.start).not.toHaveBeenCalled();
+  });
+
+  it('does not start if stopListening called during getSpeechLang await', async () => {
+    MockModule.requestPermissionsAsync.mockResolvedValue({ granted: true });
+
+    const SecureStore = jest.requireMock('expo-secure-store');
+    const { result } = renderHookSimple(() => useSpeechRecognition());
+
+    // Install a deferred getItemAsync that also triggers stopListening when called,
+    // simulating stopListening being called while getSpeechLang is in flight
+    SecureStore.getItemAsync.mockImplementationOnce(
+      () => {
+        // stopListening fires synchronously when getSpeechLang reaches getItemAsync
+        result.current.stopListening();
+        return Promise.resolve(null);
+      }
+    );
+
+    await actAsync(async () => {
+      await result.current.startListening();
     });
 
     expect(MockModule.start).not.toHaveBeenCalled();

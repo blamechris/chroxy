@@ -12,11 +12,7 @@
  */
 import { useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
-import { isTauri } from '../utils/tauri'
-
-interface TauriEvent<T> {
-  payload: T
-}
+import { getTauriInvoke, getTauriListen } from '../utils/tauri-bridge'
 
 interface ServerReadyPayload {
   port: number
@@ -36,32 +32,16 @@ interface ServerErrorPayload {
 
 type UnlistenFn = () => void
 
-function getTauriEvent(): { listen: <T>(event: string, handler: (e: TauriEvent<T>) => void) => Promise<UnlistenFn> } | null {
-  if (!isTauri()) return null
-  const tauri = (window as unknown as Record<string, unknown>).__TAURI__ as Record<string, unknown>
-  return tauri.event as { listen: <T>(event: string, handler: (e: TauriEvent<T>) => void) => Promise<UnlistenFn> }
-}
-
-/** Get the Tauri invoke function for IPC commands, or null if not in Tauri. */
-function getTauriInvoke(): ((cmd: string) => Promise<unknown>) | null {
-  if (!isTauri()) return null
-  const tauri = (window as unknown as Record<string, unknown>).__TAURI__ as Record<string, unknown>
-  const core = tauri.core as Record<string, unknown> | undefined
-  if (core?.invoke) return core.invoke as (cmd: string) => Promise<unknown>
-  // Fallback for older Tauri JS API shapes
-  return (tauri.invoke as (cmd: string) => Promise<unknown>) ?? null
-}
-
 export function useTauriEvents() {
   useEffect(() => {
-    const tauriEvent = getTauriEvent()
-    if (!tauriEvent) return
+    const listen = getTauriListen()
+    if (!listen) return
 
     const unlisteners: Promise<UnlistenFn>[] = []
 
     // Server ready — navigate to dashboard URL (or reconnect if already there)
     unlisteners.push(
-      tauriEvent.listen<ServerReadyPayload>('server_ready', (event) => {
+      listen<ServerReadyPayload>('server_ready', (event) => {
         const { url, token, port } = event.payload
         // Clear any previous startup failure logs
         useConnectionStore.setState({ serverStartupLogs: null })
@@ -79,21 +59,21 @@ export function useTauriEvents() {
 
     // Server stopped — disconnect cleanly (prevents reconnect attempts)
     unlisteners.push(
-      tauriEvent.listen('server_stopped', () => {
+      listen('server_stopped', () => {
         useConnectionStore.getState().disconnect()
       })
     )
 
     // Server restarting — set phase to server_restarting
     unlisteners.push(
-      tauriEvent.listen<ServerRestartingPayload>('server_restarting', () => {
+      listen<ServerRestartingPayload>('server_restarting', () => {
         useConnectionStore.setState({ connectionPhase: 'server_restarting' })
       })
     )
 
     // Server error — disconnect, set error, and fetch server logs for diagnostics
     unlisteners.push(
-      tauriEvent.listen<ServerErrorPayload>('server_error', (event) => {
+      listen<ServerErrorPayload>('server_error', (event) => {
         useConnectionStore.getState().disconnect()
         useConnectionStore.setState({ connectionError: event.payload.message })
 
@@ -115,14 +95,14 @@ export function useTauriEvents() {
 
     // Navigate to console — triggered by tray menu "Console" item
     unlisteners.push(
-      tauriEvent.listen('navigate_console', () => {
+      listen('navigate_console', () => {
         useConnectionStore.getState().setViewMode('console')
       })
     )
 
     // Update available — show info toast notification (not error)
     unlisteners.push(
-      tauriEvent.listen<string>('update_available', (event) => {
+      listen<string>('update_available', (event) => {
         const store = useConnectionStore.getState()
         store.addInfoNotification(`Chroxy ${event.payload} is available.`)
       })
@@ -130,7 +110,7 @@ export function useTauriEvents() {
 
     // Update installed — show info toast with restart prompt
     unlisteners.push(
-      tauriEvent.listen<string>('update_installed', (event) => {
+      listen<string>('update_installed', (event) => {
         const store = useConnectionStore.getState()
         store.addInfoNotification(`Chroxy ${event.payload} installed. Restart to apply.`)
       })
