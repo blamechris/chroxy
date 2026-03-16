@@ -15,6 +15,7 @@ const KEY_VIEW_MODE = `${KEY_PREFIX}view_mode`;
 const KEY_ACTIVE_SESSION = `${KEY_PREFIX}active_session_id`;
 const KEY_TERMINAL_BUFFER = `${KEY_PREFIX}terminal_buffer`;
 const KEY_SESSION_LIST = `${KEY_PREFIX}session_list`;
+const KEY_LAST_CONVERSATION_ID = `${KEY_PREFIX}last_conversation_id`;
 
 /** Max messages to persist per session (keeps storage bounded) */
 const MAX_MESSAGES = 100;
@@ -131,6 +132,28 @@ export function persistSessionList(sessions: SessionInfo[]): void {
   _sessionListPersister.schedule(async () => {
     await AsyncStorage.setItem(KEY_SESSION_LIST, JSON.stringify(sessions));
   });
+}
+
+/** Persist the last active conversation ID for auto-resume on reconnect */
+export async function persistLastConversationId(conversationId: string | null): Promise<void> {
+  try {
+    if (conversationId) {
+      await AsyncStorage.setItem(KEY_LAST_CONVERSATION_ID, conversationId);
+    } else {
+      await AsyncStorage.removeItem(KEY_LAST_CONVERSATION_ID);
+    }
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Load the last active conversation ID (used for auto-resume on server restart) */
+export async function loadLastConversationId(): Promise<string | null> {
+  try {
+    return await AsyncStorage.getItem(KEY_LAST_CONVERSATION_ID);
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
