@@ -84,7 +84,7 @@ class ShimmedCodexSession extends CodexSession {
 
     rl.on('line', (line) => {
       if (this._destroying) return
-      const event = this._parseCodexLine(line)
+      const event = this._parseJsonLine(line)
       if (!event || !event.type) return
 
       switch (event.type) {
@@ -309,7 +309,7 @@ describe('CodexSession', () => {
     })
   })
 
-  describe('_parseCodexLine()', () => {
+  describe('_parseJsonLine()', () => {
     let session
 
     beforeEach(() => {
@@ -317,20 +317,20 @@ describe('CodexSession', () => {
     })
 
     it('parses a valid JSON line', () => {
-      const result = session._parseCodexLine('{"type":"thread.started","thread_id":"t1"}')
+      const result = session._parseJsonLine('{"type":"thread.started","thread_id":"t1"}')
       assert.deepEqual(result, { type: 'thread.started', thread_id: 't1' })
     })
 
     it('returns null for invalid JSON', () => {
-      assert.equal(session._parseCodexLine('not json'), null)
+      assert.equal(session._parseJsonLine('not json'), null)
     })
 
     it('returns null for an empty string', () => {
-      assert.equal(session._parseCodexLine(''), null)
+      assert.equal(session._parseJsonLine(''), null)
     })
 
     it('returns null for whitespace-only string', () => {
-      assert.equal(session._parseCodexLine('   '), null)
+      assert.equal(session._parseJsonLine('   '), null)
     })
 
     it('round-trips item.completed correctly', () => {
@@ -338,7 +338,7 @@ describe('CodexSession', () => {
         type: 'item.completed',
         item: { type: 'agent_message', text: 'Hello from Codex' },
       })
-      const parsed = session._parseCodexLine(line)
+      const parsed = session._parseJsonLine(line)
       assert.equal(parsed.type, 'item.completed')
       assert.equal(parsed.item.text, 'Hello from Codex')
     })
@@ -348,7 +348,7 @@ describe('CodexSession', () => {
         type: 'turn.completed',
         usage: { input_tokens: 10, output_tokens: 5 },
       })
-      const parsed = session._parseCodexLine(line)
+      const parsed = session._parseJsonLine(line)
       assert.equal(parsed.type, 'turn.completed')
       assert.equal(parsed.usage.input_tokens, 10)
     })
@@ -358,7 +358,7 @@ describe('CodexSession', () => {
         type: 'item.completed',
         item: { type: 'tool_call', id: 'tc1', name: 'read_file', arguments: { path: 'a.txt' } },
       })
-      const parsed = session._parseCodexLine(line)
+      const parsed = session._parseJsonLine(line)
       assert.equal(parsed.item.type, 'tool_call')
       assert.equal(parsed.item.name, 'read_file')
     })
@@ -368,7 +368,7 @@ describe('CodexSession', () => {
         type: 'item.completed',
         item: { type: 'tool_output', call_id: 'tc1', output: 'file contents' },
       })
-      const parsed = session._parseCodexLine(line)
+      const parsed = session._parseJsonLine(line)
       assert.equal(parsed.item.type, 'tool_output')
       assert.equal(parsed.item.output, 'file contents')
     })
