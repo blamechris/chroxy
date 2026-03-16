@@ -13,6 +13,7 @@
  * Connection persistence uses @chroxy/store-core adapters for DI.
  */
 import { consoleAlert, noopHaptic, noopPush, createStorageAdapter, parseUserInputMessage, type PlatformAdapters, type StorageAdapter } from '@chroxy/store-core'
+import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -55,7 +56,7 @@ import { clearPersistedSession } from './persistence';
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
 // ---------------------------------------------------------------------------
-export const CLIENT_PROTOCOL_VERSION = 1;
+export const CLIENT_PROTOCOL_VERSION = PROTOCOL_VERSION;
 
 // ---------------------------------------------------------------------------
 // Late-bound store reference — set once by connection.ts after store creation
