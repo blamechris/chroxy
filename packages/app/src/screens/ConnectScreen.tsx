@@ -269,11 +269,15 @@ export function ConnectScreen() {
   }, [scanning, scanPort]);
 
   const handleSelectDiscovered = (server: DiscoveredServer) => {
-    setUrl(`ws://${server.ip}:${server.port}`);
+    const wsUrl = `ws://${server.ip}:${server.port}`;
+    setUrl(wsUrl);
+    // LAN servers use local ws:// URLs, which don't require a token (--no-auth or
+    // localhost-equivalent). Connect immediately so the user doesn't need to tap again.
+    // If auth is actually required the server will reject the connection and the user
+    // can fall back to entering a token via the manual form.
     setShowManual(true);
-    setTimeout(() => {
-      scrollRef.current?.scrollToEnd({ animated: true });
-    }, 100);
+    scrollToInput();
+    connect(wsUrl, '');
   };
 
   if (autoConnecting) {
