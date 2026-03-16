@@ -55,6 +55,18 @@ function setupSessionForwarding(normalizer, ctx) {
       return
     }
 
+    // Sidebar activity feed: lightweight status broadcast to ALL authenticated clients
+    if (event === 'stream_start') {
+      broadcast({ type: 'session_activity', sessionId, isBusy: true, lastCost: null })
+    } else if (event === 'result') {
+      broadcast({ type: 'session_activity', sessionId, isBusy: false, lastCost: data?.cost ?? null })
+    }
+
+    // Dev server preview: scan tool_result events for localhost server patterns
+    if (event === 'tool_result' && data?.result) {
+      devPreview.handleToolResult(sessionId, data.result)
+    }
+
     const normCtx = {
       sessionId,
       mode: 'multi',
@@ -83,25 +95,9 @@ function setupSessionForwarding(normalizer, ctx) {
     }
   })
 
-  // Sidebar activity feed: lightweight status broadcast to ALL authenticated clients
-  sessionManager.on('session_event', ({ sessionId, event, data }) => {
-    if (event === 'stream_start') {
-      broadcast({ type: 'session_activity', sessionId, isBusy: true, lastCost: null })
-    } else if (event === 'result') {
-      broadcast({ type: 'session_activity', sessionId, isBusy: false, lastCost: data?.cost ?? null })
-    }
-  })
-
   // Session metadata updates (e.g. auto-labeling) — broadcast to ALL clients
   sessionManager.on('session_updated', ({ sessionId, name }) => {
     broadcast({ type: 'session_updated', sessionId, name })
-  })
-
-  // Dev server preview: scan tool_result events for localhost server patterns
-  sessionManager.on('session_event', ({ sessionId, event, data }) => {
-    if (event === 'tool_result' && data?.result) {
-      devPreview.handleToolResult(sessionId, data.result)
-    }
   })
 
   // Dev server preview: broadcast tunnel start/stop to clients
