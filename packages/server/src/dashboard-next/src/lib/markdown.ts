@@ -6,7 +6,7 @@
  * blockquotes, lists, and paragraphs.
  */
 import DOMPurify from 'dompurify'
-import { highlightCode } from './syntax'
+import { highlightCode } from '@chroxy/store-core'
 
 function escapeHtml(text: string): string {
   return text
