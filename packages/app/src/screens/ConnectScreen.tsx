@@ -276,6 +276,7 @@ export function ConnectScreen() {
     // If auth is actually required the server will reject the connection and the user
     // can fall back to entering a token via the manual form.
     setShowManual(true);
+    scrollToInput();
     connect(wsUrl, '');
   };
 
