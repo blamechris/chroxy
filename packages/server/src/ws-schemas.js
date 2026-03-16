@@ -58,6 +58,7 @@ export {
   ListReposSchema,
   AddRepoSchema,
   RemoveRepoSchema,
+  ExtensionMessageSchema,
   EncryptedEnvelopeSchema,
   ClientMessageSchema,
 
@@ -99,4 +100,5 @@ export {
   ServerWebTaskUpdatedSchema,
   ServerWebTaskErrorSchema,
   ServerWebTaskListSchema,
+  ServerExtensionMessageSchema,
 } from '@chroxy/protocol'

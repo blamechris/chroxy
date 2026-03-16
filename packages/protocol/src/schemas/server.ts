@@ -259,6 +259,16 @@ export const ServerWebTaskListSchema = z.object({
   tasks: z.array(WebTaskSchema),
 })
 
+// -- Extension message (server → client) --
+
+export const ServerExtensionMessageSchema = z.object({
+  type: z.literal('extension_message'),
+  provider: z.string().min(1),
+  subtype: z.string().min(1),
+  data: z.unknown(),
+  sessionId: z.string().optional(),
+})
+
 // -- Inferred TypeScript types --
 
 export type ServerAuthOkMessage = z.infer<typeof ServerAuthOkSchema>
@@ -266,3 +276,4 @@ export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>
+export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>
