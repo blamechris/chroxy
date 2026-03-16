@@ -170,7 +170,7 @@ export class GeminiSession extends BaseSession {
   }
 
   setModel(model) {
-    if (!super.setModel(model)) return
+    return super.setModel(model)
   }
 
   setPermissionMode(_mode) {
