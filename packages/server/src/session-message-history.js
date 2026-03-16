@@ -37,11 +37,31 @@ export class SessionMessageHistory extends EventEmitter {
   }
 
   /**
-   * Get the pending streams map (used by SessionManager for destroy cleanup).
+   * Get the pending streams map (used by tests and cleanupSession internals).
    * @returns {Map}
    */
   get pendingStreams() {
     return this._pendingStreams
+  }
+
+  /**
+   * Close all in-flight pending streams for a session, emitting synthetic
+   * stream_end data so callers can notify clients of stream termination.
+   *
+   * @param {string} sessionId
+   * @returns {string[]} Array of messageIds that were closed
+   */
+  closePendingStreams(sessionId) {
+    const prefix = sessionId + ':'
+    const closedMessageIds = []
+    for (const key of this._pendingStreams.keys()) {
+      if (key.startsWith(prefix)) {
+        const messageId = key.slice(prefix.length)
+        closedMessageIds.push(messageId)
+        this._pendingStreams.delete(key)
+      }
+    }
+    return closedMessageIds
   }
 
   /**

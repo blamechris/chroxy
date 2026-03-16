@@ -440,12 +440,9 @@ export class SessionManager extends EventEmitter {
     // Prevent unhandled 'error' throw if session emits error during destroy
     entry.session.on('error', () => {})
     // Emit synthetic stream_end for any in-flight streams so clients see termination
-    for (const key of this._pendingStreams.keys()) {
-      if (key.startsWith(`${sessionId}:`)) {
-        const messageId = key.slice(sessionId.length + 1)
-        this.emit('session_event', { sessionId, event: 'stream_end', data: { messageId } })
-        this._pendingStreams.delete(key)
-      }
+    const closedMessageIds = this._history.closePendingStreams(sessionId)
+    for (const messageId of closedMessageIds) {
+      this.emit('session_event', { sessionId, event: 'stream_end', data: { messageId } })
     }
     try {
       entry.session.destroy()
