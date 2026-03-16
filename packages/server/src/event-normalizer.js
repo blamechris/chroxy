@@ -17,7 +17,8 @@ import { toShortModelId } from './models.js'
  *   mode: 'multi' | 'legacy-cli'
  */
 
-const EVENT_MAP = {
+const EVENT_MAP = Object.create(null)
+Object.assign(EVENT_MAP, {
   ready: (data, ctx) => {
     const messages = [{ msg: { type: 'claude_ready' } }]
     const entry = ctx.getSessionEntry?.()
@@ -197,7 +198,7 @@ const EVENT_MAP = {
     }],
   }),
 
-}
+})
 
 /**
  * EventNormalizer transforms session events into a uniform set of
@@ -226,6 +227,9 @@ export class EventNormalizer {
   registerEventType(name, handler) {
     if (typeof name !== 'string' || !name) {
       throw new Error('registerEventType: name must be a non-empty string')
+    }
+    if (name === '__proto__' || name === 'constructor' || name === 'prototype') {
+      throw new Error(`registerEventType: reserved key '${name}' is not allowed`)
     }
     if (typeof handler !== 'function') {
       throw new Error('registerEventType: handler must be a function')
