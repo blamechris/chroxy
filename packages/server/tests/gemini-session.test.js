@@ -33,6 +33,20 @@ describe('GeminiSession', () => {
     assert.equal(session.model, 'gemini-2.5-flash')
   })
 
+  it('setModel is a no-op when busy', () => {
+    const session = new GeminiSession({ cwd: '/tmp' })
+    session._isBusy = true
+    const before = session.model
+    session.setModel('gemini-2.5-flash')
+    assert.equal(session.model, before)
+  })
+
+  it('setModel is a no-op when model is unchanged', () => {
+    const session = new GeminiSession({ cwd: '/tmp', model: 'gemini-2.5-pro' })
+    session.setModel('gemini-2.5-pro')
+    assert.equal(session.model, 'gemini-2.5-pro')
+  })
+
   it('setPermissionMode is a no-op (no throw)', () => {
     const session = new GeminiSession({ cwd: '/tmp' })
     assert.doesNotThrow(() => session.setPermissionMode('auto'))
