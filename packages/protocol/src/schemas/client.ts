@@ -313,6 +313,16 @@ export const RemoveRepoSchema = z.object({
   path: z.string().min(1),
 })
 
+// -- Extension message --
+
+export const ExtensionMessageSchema = z.object({
+  type: z.literal('extension_message'),
+  provider: z.string().min(1),
+  subtype: z.string().min(1),
+  data: z.unknown(),
+  sessionId: z.string().optional(),
+})
+
 // -- Encrypted envelope --
 
 export const EncryptedEnvelopeSchema = z.object({
@@ -373,6 +383,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   AddRepoSchema,
   RemoveRepoSchema,
   QueryPermissionAuditSchema,
+  ExtensionMessageSchema,
 ])
 
 // -- Inferred TypeScript types --
@@ -384,5 +395,6 @@ export type InterruptMessage = z.infer<typeof InterruptSchema>
 export type SetModelMessage = z.infer<typeof SetModelSchema>
 export type SetPermissionModeMessage = z.infer<typeof SetPermissionModeSchema>
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>
+export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
 export type EncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>

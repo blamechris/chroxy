@@ -74,6 +74,8 @@ export const ClientMessageType = {
   // Session subscriptions
   SubscribeSessions: 'subscribe_sessions',
   UnsubscribeSessions: 'unsubscribe_sessions',
+  // Extension
+  ExtensionMessage: 'extension_message',
 } as const
 
 export type ClientMessageTypeValue = typeof ClientMessageType[keyof typeof ClientMessageType]
@@ -169,6 +171,8 @@ export const ServerMessageType = {
   BudgetWarning: 'budget_warning',
   BudgetExceeded: 'budget_exceeded',
   WebFeatureStatus: 'web_feature_status',
+  // Extension
+  ExtensionMessage: 'extension_message',
 } as const
 
 export type ServerMessageTypeValue = typeof ServerMessageType[keyof typeof ServerMessageType]

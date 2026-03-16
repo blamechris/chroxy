@@ -15,6 +15,7 @@ import { conversationHandlers } from './handlers/conversation-handlers.js'
 import { checkpointHandlers } from './handlers/checkpoint-handlers.js'
 import { webTaskHandlers } from './handlers/web-task-handlers.js'
 import { repoHandlers } from './handlers/repo-handlers.js'
+import { extensionHandlers } from './handlers/extension-handlers.js'
 
 // Re-export shared constants and utilities for backward compatibility.
 // Canonical source is handler-utils.js — handler modules import from there directly.
@@ -39,6 +40,7 @@ const handlerRegistry = new Map([
   ...Object.entries(checkpointHandlers),
   ...Object.entries(webTaskHandlers),
   ...Object.entries(repoHandlers),
+  ...Object.entries(extensionHandlers),
 ])
 
 /**
