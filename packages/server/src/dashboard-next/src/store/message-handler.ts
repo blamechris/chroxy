@@ -549,6 +549,546 @@ function handleThinkingLevelChanged(msg: Record<string, unknown>, get: MsgGet, _
   }
 }
 
+function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const mode = (typeof msg.mode === 'string' && (msg.mode as string).trim()) ? (msg.mode as string).trim() : null;
+  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, () => ({ permissionMode: mode }));
+  } else {
+    set({ permissionMode: mode });
+  }
+  // Clear pending confirm if mode change arrived (confirmation was accepted)
+  set({ pendingPermissionConfirm: null });
+}
+
+function handleAvailablePermissionModes(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  if (Array.isArray(msg.modes)) {
+    const cleaned = (msg.modes as unknown[])
+      .filter((m): m is { id: string; label: string } =>
+        typeof m === 'object' && m !== null &&
+        typeof (m as { id: unknown }).id === 'string' &&
+        typeof (m as { label: unknown }).label === 'string'
+      );
+    set({ availablePermissionModes: cleaned });
+  }
+}
+
+function handleSessionUpdated(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const updatedId = msg.sessionId as string;
+  const updatedName = msg.name as string;
+  if (updatedId && updatedName) {
+    const sessions = get().sessions.map((s) =>
+      s.sessionId === updatedId ? { ...s, name: updatedName } : s,
+    );
+    set({ sessions });
+  }
+}
+
+function handleSessionSwitched(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const sessionId = msg.sessionId as string;
+  // Only treat as session-switch replay if the user explicitly initiated it
+  // (auth-triggered session_switched on reconnect should use reconnect dedup)
+  if (_pendingSwitchSessionId && _pendingSwitchSessionId === sessionId) {
+    _isSessionSwitchReplay = true;
+  }
+  _pendingSwitchSessionId = null;
+  const switchConvId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
+  set((state: ConnectionState) => {
+    // Initialize session state if it doesn't exist
+    const sessionStates = { ...state.sessionStates };
+    if (!sessionStates[sessionId]) {
+      sessionStates[sessionId] = createEmptySessionState();
+    }
+    // Update conversationId if provided
+    if (switchConvId) {
+      sessionStates[sessionId] = { ...sessionStates[sessionId], conversationId: switchConvId };
+    }
+    const ss = sessionStates[sessionId];
+    return {
+      activeSessionId: sessionId,
+      sessionStates,
+      // Sync flat state from the switched-to session
+      messages: ss.messages,
+      streamingMessageId: ss.streamingMessageId,
+      claudeReady: ss.claudeReady,
+      activeModel: ss.activeModel,
+      permissionMode: ss.permissionMode,
+      contextUsage: ss.contextUsage,
+      lastResultCost: ss.lastResultCost,
+      lastResultDuration: ss.lastResultDuration,
+      isIdle: ss.isIdle,
+    };
+  });
+  // Refresh slash commands (project commands may differ per session cwd)
+  get().fetchSlashCommands();
+  // Refresh agents (project agents may differ per session cwd)
+  get().fetchCustomAgents();
+}
+
+function handleClaudeReady(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, () => ({ claudeReady: true }));
+  } else {
+    set({ claudeReady: true });
+  }
+  // Drain queued messages on reconnect
+  const readySocket = get().socket;
+  if (readySocket && readySocket.readyState === WebSocket.OPEN) {
+    drainMessageQueue(readySocket);
+  }
+}
+
+function handleAgentIdle(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const idleTargetId = (msg.sessionId as string) || get().activeSessionId;
+  if (idleTargetId && get().sessionStates[idleTargetId]) {
+    updateSession(idleTargetId, () => ({ isIdle: true }));
+  }
+}
+
+function handleAgentBusy(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const busyTargetId = (msg.sessionId as string) || get().activeSessionId;
+  if (busyTargetId && get().sessionStates[busyTargetId]) {
+    updateSession(busyTargetId, () => ({ isIdle: false }));
+  }
+}
+
+function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const streamId = msg.messageId as string;
+  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, (ss) => {
+      const existing = ss.messages.find((m) => m.id === streamId);
+      if (existing && existing.type === 'response') {
+        // Reuse existing response message (reconnect replay dedup)
+        return { streamingMessageId: streamId };
+      }
+      // If the ID collides with a non-response message (e.g., tool_use),
+      // create a new response with a suffixed ID and remap future deltas.
+      const responseId = existing ? `${streamId}-response` : streamId;
+      if (existing) {
+        _deltaIdRemaps.set(streamId, responseId);
+      }
+      return {
+        streamingMessageId: responseId,
+        messages: [
+          ...filterThinking(ss.messages),
+          { id: responseId, type: 'response' as const, content: '', timestamp: Date.now() },
+        ],
+      };
+    });
+  } else {
+    set((state: ConnectionState) => {
+      const existing = state.messages.find((m) => m.id === streamId);
+      if (existing && existing.type === 'response') {
+        return { streamingMessageId: streamId };
+      }
+      const responseId = existing ? `${streamId}-response` : streamId;
+      if (existing) {
+        _deltaIdRemaps.set(streamId, responseId);
+      }
+      return {
+        streamingMessageId: responseId,
+        messages: [
+          ...filterThinking(state.messages),
+          { id: responseId, type: 'response' as const, content: '', timestamp: Date.now() },
+        ],
+      };
+    });
+  }
+}
+
+function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  let deltaId = msg.messageId as string;
+  const capturedSessionId = (msg.sessionId as string) || get().activeSessionId;
+
+  // Forward delta text to terminal view (synthesize raw output in CLI mode)
+  if (typeof msg.delta === 'string' && msg.delta.length > 0) {
+    get().appendTerminalData(msg.delta);
+  }
+
+  // Permission boundary split: first delta after a split creates a new message
+  if (_postPermissionSplits.has(deltaId)) {
+    _postPermissionSplits.delete(deltaId);
+    const newId = `${deltaId}-post-${Date.now()}`;
+    _deltaIdRemaps.set(deltaId, newId);
+    const newMsg: ChatMessage = {
+      id: newId,
+      type: 'response',
+      content: '',
+      timestamp: Date.now(),
+    };
+    const targetId = capturedSessionId;
+    if (targetId && get().sessionStates[targetId]) {
+      updateSession(targetId, (ss) => ({
+        streamingMessageId: newId,
+        messages: [...ss.messages, newMsg],
+      }));
+    } else {
+      set((state: ConnectionState) => ({
+        streamingMessageId: newId,
+        messages: [...state.messages, newMsg],
+      }));
+    }
+    deltaId = newId;
+  } else if (_deltaIdRemaps.has(deltaId)) {
+    deltaId = _deltaIdRemaps.get(deltaId)!;
+  }
+
+  const existingDelta = pendingDeltas.get(deltaId);
+  pendingDeltas.set(deltaId, {
+    sessionId: capturedSessionId,
+    delta: (existingDelta?.delta || '') + (msg.delta as string),
+  });
+  if (!deltaFlushTimer) {
+    deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
+  }
+}
+
+function handleStreamEnd(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  // Flush any buffered deltas immediately before clearing streaming state
+  if (deltaFlushTimer) {
+    clearTimeout(deltaFlushTimer);
+  }
+  flushPendingDeltas();
+  // Add newline separator after response ends for Output view readability
+  get().appendTerminalData('\r\n');
+  // Clean up permission boundary split tracking
+  _postPermissionSplits.delete(msg.messageId as string);
+  _deltaIdRemaps.delete(msg.messageId as string);
+  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  if (targetId && get().sessionStates[targetId]) {
+    // Force a new messages array reference so selectors detect the change,
+    // even when flushPendingDeltas() was a no-op (timer already flushed).
+    updateSession(targetId, (ss) => ({
+      streamingMessageId: null,
+      messages: [...ss.messages],
+    }));
+  } else {
+    set((s) => ({ streamingMessageId: null, messages: [...s.messages] }));
+  }
+}
+
+function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  // Forward tool invocation to terminal view
+  {
+    const toolName = (msg.tool as string) || 'tool';
+    get().appendTerminalData(`\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
+  }
+  // During reconnect replay, skip if app already has messages (cache is fresh)
+  if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) return;
+  // Use server messageId as stable identifier for dedup (same ID on live + replay)
+  const toolId = (msg.messageId as string) || nextMessageId('tool');
+  // During session-switch replay, skip if tool already in cache (dedup by stable ID)
+  if (_receivingHistoryReplay && _isSessionSwitchReplay) {
+    const targetState = targetId ? get().sessionStates[targetId] : null;
+    const cached = targetState ? targetState.messages : get().messages;
+    if (cached.some((m) => m.id === toolId)) return;
+  }
+  const toolMsg: ChatMessage = {
+    id: toolId,
+    type: 'tool_use',
+    content: msg.input ? JSON.stringify(msg.input) : (msg.tool as string) || '',
+    tool: msg.tool as string | undefined,
+    toolUseId: msg.toolUseId as string | undefined,
+    serverName: msg.serverName as string | undefined,
+    timestamp: Date.now(),
+  };
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, (ss) => ({
+      messages: [...ss.messages, toolMsg],
+    }));
+  } else {
+    get().addMessage(toolMsg);
+  }
+}
+
+function handleToolResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const toolUseId = msg.toolUseId as string;
+  if (!toolUseId) return;
+  const resultText = (msg.result as string) || '';
+  const truncated = !!(msg.truncated as boolean);
+  // Forward tool result to terminal view
+  if (resultText) {
+    const preview = resultText.length > 500 ? resultText.slice(0, 500) + '...' : resultText;
+    get().appendTerminalData(`\x1b[2m${preview}\x1b[0m\r\n`);
+  }
+  const images = Array.isArray(msg.images) ? msg.images as ToolResultImage[] : undefined;
+  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  // Find the matching tool_use message and attach the result
+  const patch: Partial<ChatMessage> = { toolResult: resultText, toolResultTruncated: truncated };
+  if (images?.length) patch.toolResultImages = images;
+  const patchResult = (ss: SessionState) => {
+    const idx = ss.messages.findIndex(
+      (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
+    );
+    if (idx === -1) return {};
+    const updated = [...ss.messages];
+    updated[idx] = { ...updated[idx]!, ...patch };
+    return { messages: updated };
+  };
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, patchResult);
+  } else {
+    const idx = get().messages.findIndex(
+      (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
+    );
+    if (idx !== -1) {
+      const updated = [...get().messages];
+      updated[idx] = { ...updated[idx]!, ...patch };
+      set({ messages: updated });
+    }
+  }
+}
+
+function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  // Split streaming response at permission boundary (#554)
+  {
+    const permTargetId = (msg.sessionId as string) || get().activeSessionId;
+    const currentStreamId = permTargetId && get().sessionStates[permTargetId]
+      ? get().sessionStates[permTargetId]!.streamingMessageId
+      : get().streamingMessageId;
+    if (currentStreamId && currentStreamId !== 'pending') {
+      if (deltaFlushTimer) {
+        clearTimeout(deltaFlushTimer);
+      }
+      flushPendingDeltas();
+      let serverStreamId = currentStreamId;
+      for (const [origId, remappedId] of _deltaIdRemaps) {
+        if (remappedId === currentStreamId) {
+          serverStreamId = origId;
+          break;
+        }
+      }
+      _postPermissionSplits.add(serverStreamId);
+      if (permTargetId && get().sessionStates[permTargetId]) {
+        updateSession(permTargetId, () => ({ streamingMessageId: null }));
+      } else {
+        set({ streamingMessageId: null });
+      }
+    }
+  }
+  const permRequestId = msg.requestId as string;
+  const newOptions = [
+    { label: 'Allow', value: 'allow' },
+    { label: 'Deny', value: 'deny' },
+    { label: 'Always Allow', value: 'allowAlways' },
+  ];
+  const newExpiresAt = typeof msg.remainingMs === 'number' ? Date.now() + msg.remainingMs : undefined;
+  const permTargetId = (msg.sessionId as string) || get().activeSessionId;
+
+  const targetMessages = permTargetId && get().sessionStates[permTargetId]
+    ? get().sessionStates[permTargetId]!.messages
+    : get().messages;
+  const existingIdx = targetMessages.findIndex(
+    (m) => m.requestId === permRequestId && m.type === 'prompt'
+  );
+
+  if (existingIdx !== -1) {
+    const updater = (ss: { messages: ChatMessage[] }) => ({
+      messages: ss.messages.map((m) =>
+        m.requestId === permRequestId && m.type === 'prompt'
+          ? { ...m, answered: undefined, options: newOptions, expiresAt: newExpiresAt }
+          : m
+      ),
+    });
+    if (permTargetId && get().sessionStates[permTargetId]) {
+      updateSession(permTargetId, updater);
+    } else {
+      set({ messages: updater({ messages: get().messages }).messages });
+    }
+  } else {
+    const permMsg: ChatMessage = {
+      id: nextMessageId('perm'),
+      type: 'prompt',
+      content: msg.tool ? `${msg.tool}: ${msg.description}` : ((msg.description as string) || 'Permission required'),
+      tool: msg.tool as string | undefined,
+      requestId: permRequestId,
+      toolInput: msg.input && typeof msg.input === 'object' ? msg.input as Record<string, unknown> : undefined,
+      options: newOptions,
+      expiresAt: newExpiresAt,
+      timestamp: Date.now(),
+    };
+    if (permTargetId && get().sessionStates[permTargetId]) {
+      updateSession(permTargetId, (ss) => ({
+        messages: [...ss.messages, permMsg],
+      }));
+    } else {
+      get().addMessage(permMsg);
+    }
+  }
+  if (permTargetId) {
+    const toolDesc = msg.tool ? `${msg.tool}` : 'Permission needed';
+    pushSessionNotification(permTargetId, 'permission', toolDesc, permRequestId);
+  }
+}
+
+function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  // Another client resolved this permission — dismiss the prompt on this client.
+  // The permission_request may have been stored in ANY session state (whichever tab
+  // was active when it arrived), so search all session states for the matching requestId.
+  const resolvedRequestId = msg.requestId as string;
+  const resolvedDecision = msg.decision as string;
+  if (resolvedRequestId) {
+    const updater = (ss: { messages: ChatMessage[] }) => ({
+      messages: ss.messages.map((m) =>
+        m.requestId === resolvedRequestId && m.type === 'prompt'
+          ? { ...m, answered: resolvedDecision, answeredAt: Date.now(), options: undefined }
+          : m
+      ),
+    });
+    // Search all session states for the permission prompt
+    const states = get().sessionStates;
+    let found = false;
+    for (const sid of Object.keys(states)) {
+      if (states[sid]?.messages.some((m) => m.requestId === resolvedRequestId)) {
+        updateSession(sid, updater);
+        found = true;
+        break;
+      }
+    }
+    // Also check flat messages (fallback for sessions not in sessionStates)
+    if (!found) {
+      set({ messages: updater({ messages: get().messages }).messages });
+    }
+    // Auto-dismiss matching notification banner
+    set((s) => ({
+      sessionNotifications: s.sessionNotifications.filter(
+        (n) => n.requestId !== resolvedRequestId
+      ),
+    }));
+  }
+}
+
+function handleBudgetWarning(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const warningMessage = typeof msg.message === 'string' ? msg.message : 'Approaching cost budget limit';
+  _adapters.alert.alert('Budget Warning', warningMessage);
+  const budgetWarnMsg: ChatMessage = {
+    id: nextMessageId('system'),
+    type: 'system',
+    content: warningMessage,
+    timestamp: Date.now(),
+  };
+  const budgetWarnTargetId = (msg.sessionId as string) || get().activeSessionId;
+  if (budgetWarnTargetId && get().sessionStates[budgetWarnTargetId]) {
+    updateSession(budgetWarnTargetId, (ss) => ({
+      messages: [...ss.messages, budgetWarnMsg],
+    }));
+  } else {
+    get().addMessage(budgetWarnMsg);
+  }
+}
+
+function handleBudgetExceeded(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const exceededMessage = typeof msg.message === 'string' ? msg.message : 'Cost budget exceeded';
+  const budgetExceededTargetId = (msg.sessionId as string) || get().activeSessionId;
+  // Add system message BEFORE auto-resume so it's visible in the UI
+  const budgetExceededMsg: ChatMessage = {
+    id: nextMessageId('system'),
+    type: 'system',
+    content: `${exceededMessage} — session paused. Budget will auto-resume.`,
+    timestamp: Date.now(),
+  };
+  if (budgetExceededTargetId && get().sessionStates[budgetExceededTargetId]) {
+    updateSession(budgetExceededTargetId, (ss) => ({
+      messages: [...ss.messages, budgetExceededMsg],
+    }));
+  } else {
+    get().addMessage(budgetExceededMsg);
+  }
+  // Show toast notification
+  _adapters.alert.alert('Budget Exceeded', `${exceededMessage}\n\nNew messages are paused.`);
+  // Auto-resume budget
+  const socket = get().socket;
+  if (socket && budgetExceededTargetId) {
+    wsSend(socket, { type: 'resume_budget', sessionId: budgetExceededTargetId });
+  }
+}
+
+function handleBudgetResumed(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const resumedSessionId = (msg.sessionId as string) || get().activeSessionId;
+  const resumedMsg: ChatMessage = {
+    id: nextMessageId('system'),
+    type: 'system',
+    content: 'Cost budget override — session resumed',
+    timestamp: Date.now(),
+  };
+  if (resumedSessionId && get().sessionStates[resumedSessionId]) {
+    updateSession(resumedSessionId, (ss) => ({
+      messages: [...ss.messages, resumedMsg],
+    }));
+  } else {
+    get().addMessage(resumedMsg);
+  }
+}
+
+function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const allowedCategories = new Set<ServerError['category']>([
+    'tunnel', 'session', 'permission', 'general',
+  ]);
+  const category: ServerError['category'] =
+    typeof msg.category === 'string' && allowedCategories.has(msg.category as ServerError['category'])
+      ? (msg.category as ServerError['category'])
+      : 'general';
+  const message: string =
+    typeof msg.message === 'string' && (msg.message as string).trim().length > 0
+      ? stripAnsi(msg.message as string)
+      : 'Unknown server error';
+  const recoverable: boolean =
+    typeof msg.recoverable === 'boolean' ? msg.recoverable : true;
+
+  const errSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : undefined;
+  const serverError: ServerError = {
+    id: nextMessageId('err'),
+    category,
+    message,
+    recoverable,
+    timestamp: Date.now(),
+    ...(errSessionId ? { sessionId: errSessionId } : {}),
+  };
+  set((state: ConnectionState) => ({
+    serverErrors: [...state.serverErrors, serverError].slice(-10),
+  }));
+  const errorMsg: ChatMessage = {
+    id: nextMessageId('err'),
+    type: 'error',
+    content: serverError.message,
+    timestamp: Date.now(),
+  };
+  if (errSessionId && get().sessionStates[errSessionId]) {
+    // Scoped error — route to the specific session only
+    updateSession(errSessionId, (ss) => ({
+      messages: filterThinking([...ss.messages, errorMsg]),
+      streamingMessageId: null,
+    }));
+  } else {
+    const activeErrId = get().activeSessionId;
+    if (activeErrId && get().sessionStates[activeErrId]) {
+      updateActiveSession((ss) => ({
+        messages: filterThinking([...ss.messages, errorMsg]),
+        streamingMessageId: null,
+      }));
+    } else {
+      set({ streamingMessageId: null });
+      get().addMessage(errorMsg);
+    }
+  }
+  if (!serverError.recoverable) {
+    _adapters.alert.alert('Server Error', serverError.message);
+  }
+}
+
+function handleServerShutdown(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const reason = msg.reason === 'restart' || msg.reason === 'shutdown' || msg.reason === 'crash' ? msg.reason : 'shutdown';
+  const eta = typeof msg.restartEtaMs === 'number' ? msg.restartEtaMs : 0;
+  set({
+    shutdownReason: reason,
+    restartEtaMs: eta,
+    restartingSince: Date.now(),
+  });
+}
+
 /**
  * Map of message type → handler function for the simplest, most self-contained
  * cases. handleMessage() dispatches to this map first; unmatched types fall
@@ -565,6 +1105,25 @@ const HANDLERS: Record<string, Handler> = {
   conversations_list: handleConversationsList,
   model_changed: handleModelChanged,
   thinking_level_changed: handleThinkingLevelChanged,
+  permission_mode_changed: handlePermissionModeChanged,
+  available_permission_modes: handleAvailablePermissionModes,
+  session_updated: handleSessionUpdated,
+  session_switched: handleSessionSwitched,
+  claude_ready: handleClaudeReady,
+  agent_idle: handleAgentIdle,
+  agent_busy: handleAgentBusy,
+  stream_start: handleStreamStart,
+  stream_delta: handleStreamDelta,
+  stream_end: handleStreamEnd,
+  tool_start: handleToolStart,
+  tool_result: handleToolResult,
+  permission_request: handlePermissionRequest,
+  permission_resolved: handlePermissionResolved,
+  budget_warning: handleBudgetWarning,
+  budget_exceeded: handleBudgetExceeded,
+  budget_resumed: handleBudgetResumed,
+  server_error: handleServerError,
+  server_shutdown: handleServerShutdown,
 };
 
 // ---------------------------------------------------------------------------
@@ -830,18 +1389,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       break;
 
-    case 'session_updated': {
-      const updatedId = msg.sessionId as string;
-      const updatedName = msg.name as string;
-      if (updatedId && updatedName) {
-        const sessions = get().sessions.map((s) =>
-          s.sessionId === updatedId ? { ...s, name: updatedName } : s,
-        );
-        set({ sessions });
-      }
-      break;
-    }
-
     case 'session_context': {
       const ctxSessionId = (msg.sessionId as string) || get().activeSessionId;
       if (ctxSessionId && get().sessionStates[ctxSessionId]) {
@@ -854,48 +1401,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           },
         }));
       }
-      break;
-    }
-
-    case 'session_switched': {
-      const sessionId = msg.sessionId as string;
-      // Only treat as session-switch replay if the user explicitly initiated it
-      // (auth-triggered session_switched on reconnect should use reconnect dedup)
-      if (_pendingSwitchSessionId && _pendingSwitchSessionId === sessionId) {
-        _isSessionSwitchReplay = true;
-      }
-      _pendingSwitchSessionId = null;
-      const switchConvId = typeof msg.conversationId === 'string' ? msg.conversationId : null;
-      set((state: ConnectionState) => {
-        // Initialize session state if it doesn't exist
-        const sessionStates = { ...state.sessionStates };
-        if (!sessionStates[sessionId]) {
-          sessionStates[sessionId] = createEmptySessionState();
-        }
-        // Update conversationId if provided
-        if (switchConvId) {
-          sessionStates[sessionId] = { ...sessionStates[sessionId], conversationId: switchConvId };
-        }
-        const ss = sessionStates[sessionId];
-        return {
-          activeSessionId: sessionId,
-          sessionStates,
-          // Sync flat state from the switched-to session
-          messages: ss.messages,
-          streamingMessageId: ss.streamingMessageId,
-          claudeReady: ss.claudeReady,
-          activeModel: ss.activeModel,
-          permissionMode: ss.permissionMode,
-          contextUsage: ss.contextUsage,
-          lastResultCost: ss.lastResultCost,
-          lastResultDuration: ss.lastResultDuration,
-          isIdle: ss.isIdle,
-        };
-      });
-      // Refresh slash commands (project commands may differ per session cwd)
-      get().fetchSlashCommands();
-      // Refresh agents (project agents may differ per session cwd)
-      get().fetchCustomAgents();
       break;
     }
 
@@ -1038,201 +1543,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'stream_start': {
-      const streamId = msg.messageId as string;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, (ss) => {
-          const existing = ss.messages.find((m) => m.id === streamId);
-          if (existing && existing.type === 'response') {
-            // Reuse existing response message (reconnect replay dedup)
-            return { streamingMessageId: streamId };
-          }
-          // If the ID collides with a non-response message (e.g., tool_use),
-          // create a new response with a suffixed ID and remap future deltas.
-          const responseId = existing ? `${streamId}-response` : streamId;
-          if (existing) {
-            _deltaIdRemaps.set(streamId, responseId);
-          }
-          return {
-            streamingMessageId: responseId,
-            messages: [
-              ...filterThinking(ss.messages),
-              { id: responseId, type: 'response' as const, content: '', timestamp: Date.now() },
-            ],
-          };
-        });
-      } else {
-        set((state: ConnectionState) => {
-          const existing = state.messages.find((m) => m.id === streamId);
-          if (existing && existing.type === 'response') {
-            return { streamingMessageId: streamId };
-          }
-          const responseId = existing ? `${streamId}-response` : streamId;
-          if (existing) {
-            _deltaIdRemaps.set(streamId, responseId);
-          }
-          return {
-            streamingMessageId: responseId,
-            messages: [
-              ...filterThinking(state.messages),
-              { id: responseId, type: 'response' as const, content: '', timestamp: Date.now() },
-            ],
-          };
-        });
-      }
-      break;
-    }
-
-    case 'stream_delta': {
-      let deltaId = msg.messageId as string;
-      const capturedSessionId = (msg.sessionId as string) || get().activeSessionId;
-
-      // Forward delta text to terminal view (synthesize raw output in CLI mode)
-      if (typeof msg.delta === 'string' && msg.delta.length > 0) {
-        get().appendTerminalData(msg.delta);
-      }
-
-      // Permission boundary split: first delta after a split creates a new message
-      if (_postPermissionSplits.has(deltaId)) {
-        _postPermissionSplits.delete(deltaId);
-        const newId = `${deltaId}-post-${Date.now()}`;
-        _deltaIdRemaps.set(deltaId, newId);
-        const newMsg: ChatMessage = {
-          id: newId,
-          type: 'response',
-          content: '',
-          timestamp: Date.now(),
-        };
-        const targetId = capturedSessionId;
-        if (targetId && get().sessionStates[targetId]) {
-          updateSession(targetId, (ss) => ({
-            streamingMessageId: newId,
-            messages: [...ss.messages, newMsg],
-          }));
-        } else {
-          set((state: ConnectionState) => ({
-            streamingMessageId: newId,
-            messages: [...state.messages, newMsg],
-          }));
-        }
-        deltaId = newId;
-      } else if (_deltaIdRemaps.has(deltaId)) {
-        deltaId = _deltaIdRemaps.get(deltaId)!;
-      }
-
-      const existingDelta = pendingDeltas.get(deltaId);
-      pendingDeltas.set(deltaId, {
-        sessionId: capturedSessionId,
-        delta: (existingDelta?.delta || '') + (msg.delta as string),
-      });
-      if (!deltaFlushTimer) {
-        deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
-      }
-      break;
-    }
-
-    case 'stream_end':
-      // Flush any buffered deltas immediately before clearing streaming state
-      if (deltaFlushTimer) {
-        clearTimeout(deltaFlushTimer);
-      }
-      flushPendingDeltas();
-      // Add newline separator after response ends for Output view readability
-      get().appendTerminalData('\r\n');
-      // Clean up permission boundary split tracking
-      _postPermissionSplits.delete(msg.messageId as string);
-      _deltaIdRemaps.delete(msg.messageId as string);
-      {
-        const targetId = (msg.sessionId as string) || get().activeSessionId;
-        if (targetId && get().sessionStates[targetId]) {
-          // Force a new messages array reference so selectors detect the change,
-          // even when flushPendingDeltas() was a no-op (timer already flushed).
-          updateSession(targetId, (ss) => ({
-            streamingMessageId: null,
-            messages: [...ss.messages],
-          }));
-        } else {
-          set((s) => ({ streamingMessageId: null, messages: [...s.messages] }));
-        }
-      }
-      break;
-
-    case 'tool_start': {
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      // Forward tool invocation to terminal view
-      {
-        const toolName = (msg.tool as string) || 'tool';
-        get().appendTerminalData(`\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
-      }
-      // During reconnect replay, skip if app already has messages (cache is fresh)
-      if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
-      // Use server messageId as stable identifier for dedup (same ID on live + replay)
-      const toolId = (msg.messageId as string) || nextMessageId('tool');
-      // During session-switch replay, skip if tool already in cache (dedup by stable ID)
-      if (_receivingHistoryReplay && _isSessionSwitchReplay) {
-        const targetState = targetId ? get().sessionStates[targetId] : null;
-        const cached = targetState ? targetState.messages : get().messages;
-        if (cached.some((m) => m.id === toolId)) break;
-      }
-      const toolMsg: ChatMessage = {
-        id: toolId,
-        type: 'tool_use',
-        content: msg.input ? JSON.stringify(msg.input) : (msg.tool as string) || '',
-        tool: msg.tool as string | undefined,
-        toolUseId: msg.toolUseId as string | undefined,
-        serverName: msg.serverName as string | undefined,
-        timestamp: Date.now(),
-      };
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, (ss) => ({
-          messages: [...ss.messages, toolMsg],
-        }));
-      } else {
-        get().addMessage(toolMsg);
-      }
-      break;
-    }
-
-    case 'tool_result': {
-      const toolUseId = msg.toolUseId as string;
-      if (!toolUseId) break;
-      const resultText = (msg.result as string) || '';
-      const truncated = !!(msg.truncated as boolean);
-      // Forward tool result to terminal view
-      if (resultText) {
-        const preview = resultText.length > 500 ? resultText.slice(0, 500) + '...' : resultText;
-        get().appendTerminalData(`\x1b[2m${preview}\x1b[0m\r\n`);
-      }
-      const images = Array.isArray(msg.images) ? msg.images as ToolResultImage[] : undefined;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      // Find the matching tool_use message and attach the result
-      const patch: Partial<ChatMessage> = { toolResult: resultText, toolResultTruncated: truncated };
-      if (images?.length) patch.toolResultImages = images;
-      const patchResult = (ss: SessionState) => {
-        const idx = ss.messages.findIndex(
-          (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
-        );
-        if (idx === -1) return {};
-        const updated = [...ss.messages];
-        updated[idx] = { ...updated[idx]!, ...patch };
-        return { messages: updated };
-      };
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, patchResult);
-      } else {
-        const idx = get().messages.findIndex(
-          (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
-        );
-        if (idx !== -1) {
-          const updated = [...get().messages];
-          updated[idx] = { ...updated[idx]!, ...patch };
-          set({ messages: updated });
-        }
-      }
-      break;
-    }
-
     case 'result': {
       // Flush any buffered deltas before clearing streaming state
       if (deltaFlushTimer) {
@@ -1300,67 +1610,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       break;
 
-    case 'permission_mode_changed': {
-      const mode = (typeof msg.mode === 'string' && (msg.mode as string).trim()) ? (msg.mode as string).trim() : null;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, () => ({ permissionMode: mode }));
-      } else {
-        set({ permissionMode: mode });
-      }
-      // Clear pending confirm if mode change arrived (confirmation was accepted)
-      set({ pendingPermissionConfirm: null });
-      break;
-    }
-
     case 'confirm_permission_mode': {
       const confirmMode = typeof msg.mode === 'string' ? msg.mode : null;
       const warning = typeof msg.warning === 'string' ? msg.warning : 'Are you sure?';
       if (confirmMode) {
         set({ pendingPermissionConfirm: { mode: confirmMode, warning } });
-      }
-      break;
-    }
-
-    case 'available_permission_modes':
-      if (Array.isArray(msg.modes)) {
-        const cleaned = (msg.modes as unknown[])
-          .filter((m): m is { id: string; label: string } =>
-            typeof m === 'object' && m !== null &&
-            typeof (m as { id: unknown }).id === 'string' &&
-            typeof (m as { label: unknown }).label === 'string'
-          );
-        set({ availablePermissionModes: cleaned });
-      }
-      break;
-
-    case 'claude_ready': {
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, () => ({ claudeReady: true }));
-      } else {
-        set({ claudeReady: true });
-      }
-      // Drain queued messages on reconnect
-      const readySocket = get().socket;
-      if (readySocket && readySocket.readyState === WebSocket.OPEN) {
-        drainMessageQueue(readySocket);
-      }
-      break;
-    }
-
-    case 'agent_idle': {
-      const idleTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (idleTargetId && get().sessionStates[idleTargetId]) {
-        updateSession(idleTargetId, () => ({ isIdle: true }));
-      }
-      break;
-    }
-
-    case 'agent_busy': {
-      const busyTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (busyTargetId && get().sessionStates[busyTargetId]) {
-        updateSession(busyTargetId, () => ({ isIdle: false }));
       }
       break;
     }
@@ -1414,127 +1668,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         updateSession(planReadyTargetId, () => ({
           isPlanPending: true,
           planAllowedPrompts: prompts,
-        }));
-      }
-      break;
-    }
-
-    case 'permission_request': {
-      // Split streaming response at permission boundary (#554)
-      {
-        const permTargetId = (msg.sessionId as string) || get().activeSessionId;
-        const currentStreamId = permTargetId && get().sessionStates[permTargetId]
-          ? get().sessionStates[permTargetId]!.streamingMessageId
-          : get().streamingMessageId;
-        if (currentStreamId && currentStreamId !== 'pending') {
-          if (deltaFlushTimer) {
-            clearTimeout(deltaFlushTimer);
-          }
-          flushPendingDeltas();
-          let serverStreamId = currentStreamId;
-          for (const [origId, remappedId] of _deltaIdRemaps) {
-            if (remappedId === currentStreamId) {
-              serverStreamId = origId;
-              break;
-            }
-          }
-          _postPermissionSplits.add(serverStreamId);
-          if (permTargetId && get().sessionStates[permTargetId]) {
-            updateSession(permTargetId, () => ({ streamingMessageId: null }));
-          } else {
-            set({ streamingMessageId: null });
-          }
-        }
-      }
-      const permRequestId = msg.requestId as string;
-      const newOptions = [
-        { label: 'Allow', value: 'allow' },
-        { label: 'Deny', value: 'deny' },
-        { label: 'Always Allow', value: 'allowAlways' },
-      ];
-      const newExpiresAt = typeof msg.remainingMs === 'number' ? Date.now() + msg.remainingMs : undefined;
-      const permTargetId = (msg.sessionId as string) || get().activeSessionId;
-
-      const targetMessages = permTargetId && get().sessionStates[permTargetId]
-        ? get().sessionStates[permTargetId]!.messages
-        : get().messages;
-      const existingIdx = targetMessages.findIndex(
-        (m) => m.requestId === permRequestId && m.type === 'prompt'
-      );
-
-      if (existingIdx !== -1) {
-        const updater = (ss: { messages: ChatMessage[] }) => ({
-          messages: ss.messages.map((m) =>
-            m.requestId === permRequestId && m.type === 'prompt'
-              ? { ...m, answered: undefined, options: newOptions, expiresAt: newExpiresAt }
-              : m
-          ),
-        });
-        if (permTargetId && get().sessionStates[permTargetId]) {
-          updateSession(permTargetId, updater);
-        } else {
-          set({ messages: updater({ messages: get().messages }).messages });
-        }
-      } else {
-        const permMsg: ChatMessage = {
-          id: nextMessageId('perm'),
-          type: 'prompt',
-          content: msg.tool ? `${msg.tool}: ${msg.description}` : ((msg.description as string) || 'Permission required'),
-          tool: msg.tool as string | undefined,
-          requestId: permRequestId,
-          toolInput: msg.input && typeof msg.input === 'object' ? msg.input as Record<string, unknown> : undefined,
-          options: newOptions,
-          expiresAt: newExpiresAt,
-          timestamp: Date.now(),
-        };
-        if (permTargetId && get().sessionStates[permTargetId]) {
-          updateSession(permTargetId, (ss) => ({
-            messages: [...ss.messages, permMsg],
-          }));
-        } else {
-          get().addMessage(permMsg);
-        }
-      }
-      if (permTargetId) {
-        const toolDesc = msg.tool ? `${msg.tool}` : 'Permission needed';
-        pushSessionNotification(permTargetId, 'permission', toolDesc, permRequestId);
-      }
-      break;
-    }
-
-    case 'permission_resolved': {
-      // Another client resolved this permission — dismiss the prompt on this client.
-      // The permission_request may have been stored in ANY session state (whichever tab
-      // was active when it arrived), so search all session states for the matching requestId.
-      const resolvedRequestId = msg.requestId as string;
-      const resolvedDecision = msg.decision as string;
-      if (resolvedRequestId) {
-        const updater = (ss: { messages: ChatMessage[] }) => ({
-          messages: ss.messages.map((m) =>
-            m.requestId === resolvedRequestId && m.type === 'prompt'
-              ? { ...m, answered: resolvedDecision, answeredAt: Date.now(), options: undefined }
-              : m
-          ),
-        });
-        // Search all session states for the permission prompt
-        const states = get().sessionStates;
-        let found = false;
-        for (const sid of Object.keys(states)) {
-          if (states[sid]?.messages.some((m) => m.requestId === resolvedRequestId)) {
-            updateSession(sid, updater);
-            found = true;
-            break;
-          }
-        }
-        // Also check flat messages (fallback for sessions not in sessionStates)
-        if (!found) {
-          set({ messages: updater({ messages: get().messages }).messages });
-        }
-        // Auto-dismiss matching notification banner
-        set((s) => ({
-          sessionNotifications: s.sessionNotifications.filter(
-            (n) => n.requestId !== resolvedRequestId
-          ),
         }));
       }
       break;
@@ -1618,17 +1751,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       } else {
         get().addMessage(statusMsg);
       }
-      break;
-    }
-
-    case 'server_shutdown': {
-      const reason = msg.reason === 'restart' || msg.reason === 'shutdown' || msg.reason === 'crash' ? msg.reason : 'shutdown';
-      const eta = typeof msg.restartEtaMs === 'number' ? msg.restartEtaMs : 0;
-      set({
-        shutdownReason: reason,
-        restartEtaMs: eta,
-        restartingSince: Date.now(),
-      });
       break;
     }
 
@@ -1872,71 +1994,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'budget_warning': {
-      const warningMessage = typeof msg.message === 'string' ? msg.message : 'Approaching cost budget limit';
-      _adapters.alert.alert('Budget Warning', warningMessage);
-      const budgetWarnMsg: ChatMessage = {
-        id: nextMessageId('system'),
-        type: 'system',
-        content: warningMessage,
-        timestamp: Date.now(),
-      };
-      const budgetWarnTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (budgetWarnTargetId && get().sessionStates[budgetWarnTargetId]) {
-        updateSession(budgetWarnTargetId, (ss) => ({
-          messages: [...ss.messages, budgetWarnMsg],
-        }));
-      } else {
-        get().addMessage(budgetWarnMsg);
-      }
-      break;
-    }
-
-    case 'budget_exceeded': {
-      const exceededMessage = typeof msg.message === 'string' ? msg.message : 'Cost budget exceeded';
-      const budgetExceededTargetId = (msg.sessionId as string) || get().activeSessionId;
-      // Add system message BEFORE auto-resume so it's visible in the UI
-      const budgetExceededMsg: ChatMessage = {
-        id: nextMessageId('system'),
-        type: 'system',
-        content: `${exceededMessage} — session paused. Budget will auto-resume.`,
-        timestamp: Date.now(),
-      };
-      if (budgetExceededTargetId && get().sessionStates[budgetExceededTargetId]) {
-        updateSession(budgetExceededTargetId, (ss) => ({
-          messages: [...ss.messages, budgetExceededMsg],
-        }));
-      } else {
-        get().addMessage(budgetExceededMsg);
-      }
-      // Show toast notification
-      _adapters.alert.alert('Budget Exceeded', `${exceededMessage}\n\nNew messages are paused.`);
-      // Auto-resume budget
-      const socket = get().socket;
-      if (socket && budgetExceededTargetId) {
-        wsSend(socket, { type: 'resume_budget', sessionId: budgetExceededTargetId });
-      }
-      break;
-    }
-
-    case 'budget_resumed': {
-      const resumedSessionId = (msg.sessionId as string) || get().activeSessionId;
-      const resumedMsg: ChatMessage = {
-        id: nextMessageId('system'),
-        type: 'system',
-        content: 'Cost budget override — session resumed',
-        timestamp: Date.now(),
-      };
-      if (resumedSessionId && get().sessionStates[resumedSessionId]) {
-        updateSession(resumedSessionId, (ss) => ({
-          messages: [...ss.messages, resumedMsg],
-        }));
-      } else {
-        get().addMessage(resumedMsg);
-      }
-      break;
-    }
-
     case 'dev_preview': {
       const previewSid = (msg.sessionId as string) || get().activeSessionId;
       const preview: DevPreview = { port: msg.port as number, url: msg.url as string };
@@ -2032,63 +2089,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       set((state: ConnectionState) => ({
         logEntries: [...state.logEntries, entry].slice(-500),
       }));
-      break;
-    }
-
-    case 'server_error': {
-      const allowedCategories = new Set<ServerError['category']>([
-        'tunnel', 'session', 'permission', 'general',
-      ]);
-      const category: ServerError['category'] =
-        typeof msg.category === 'string' && allowedCategories.has(msg.category as ServerError['category'])
-          ? (msg.category as ServerError['category'])
-          : 'general';
-      const message: string =
-        typeof msg.message === 'string' && (msg.message as string).trim().length > 0
-          ? stripAnsi(msg.message as string)
-          : 'Unknown server error';
-      const recoverable: boolean =
-        typeof msg.recoverable === 'boolean' ? msg.recoverable : true;
-
-      const errSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : undefined;
-      const serverError: ServerError = {
-        id: nextMessageId('err'),
-        category,
-        message,
-        recoverable,
-        timestamp: Date.now(),
-        ...(errSessionId ? { sessionId: errSessionId } : {}),
-      };
-      set((state: ConnectionState) => ({
-        serverErrors: [...state.serverErrors, serverError].slice(-10),
-      }));
-      const errorMsg: ChatMessage = {
-        id: nextMessageId('err'),
-        type: 'error',
-        content: serverError.message,
-        timestamp: Date.now(),
-      };
-      if (errSessionId && get().sessionStates[errSessionId]) {
-        // Scoped error — route to the specific session only
-        updateSession(errSessionId, (ss) => ({
-          messages: filterThinking([...ss.messages, errorMsg]),
-          streamingMessageId: null,
-        }));
-      } else {
-        const activeErrId = get().activeSessionId;
-        if (activeErrId && get().sessionStates[activeErrId]) {
-          updateActiveSession((ss) => ({
-            messages: filterThinking([...ss.messages, errorMsg]),
-            streamingMessageId: null,
-          }));
-        } else {
-          set({ streamingMessageId: null });
-          get().addMessage(errorMsg);
-        }
-      }
-      if (!serverError.recoverable) {
-        _adapters.alert.alert('Server Error', serverError.message);
-      }
       break;
     }
 
