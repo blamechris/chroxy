@@ -95,3 +95,10 @@ export {
   encrypt,
   decrypt,
 } from './crypto'
+
+export {
+  stripAnsi,
+  nextMessageId,
+  withJitter,
+  filterThinking,
+} from './utils'

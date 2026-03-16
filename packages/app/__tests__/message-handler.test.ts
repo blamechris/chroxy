@@ -74,6 +74,7 @@ jest.mock('expo-secure-store', () => ({
 }));
 
 jest.mock('@chroxy/store-core', () => ({
+  ...jest.requireActual('../../store-core/src/index'),
   parseUserInputMessage: jest.fn((text: string) => ({ type: 'text', content: text })),
 }));
 
