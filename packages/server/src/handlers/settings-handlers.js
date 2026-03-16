@@ -7,6 +7,9 @@
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
 import { ALLOWED_PERMISSION_MODE_IDS, resolveSession } from '../handler-utils.js'
 import { listProviders } from '../providers.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('ws')
 
 function handleSetModel(ws, client, msg, ctx) {
   if (
@@ -16,12 +19,12 @@ function handleSetModel(ws, client, msg, ctx) {
     const modelSessionId = msg.sessionId || client.activeSessionId
     const entry = resolveSession(ctx, msg, client)
     if (entry) {
-      console.log(`[ws] Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+      log.info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
       entry.session.setModel(msg.model)
       ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
     }
   } else {
-    console.warn(`[ws] Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
+    log.warn(`Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
   }
 }
 
@@ -38,7 +41,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         return
       }
       if (msg.mode === 'auto' && !msg.confirmed) {
-        console.log(`[ws] Auto mode requested by ${client.id}, awaiting confirmation`)
+        log.info(`Auto mode requested by ${client.id}, awaiting confirmation`)
         ctx.send(ws, {
           type: 'confirm_permission_mode',
           mode: 'auto',
@@ -47,9 +50,9 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       } else {
         const previousMode = entry.session.permissionMode || 'unknown'
         if (msg.mode === 'auto') {
-          console.log(`[ws] Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()} (was: ${previousMode})`)
+          log.info(`Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()} (was: ${previousMode})`)
         } else {
-          console.log(`[ws] Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
+          log.info(`Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
         }
         const prevMode = entry.session._permissionMode || 'approve'
         entry.session.setPermissionMode(msg.mode)
@@ -65,7 +68,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       }
     }
   } else {
-    console.warn(`[ws] Rejected invalid permission mode from ${client.id}: ${JSON.stringify(msg.mode)}`)
+    log.warn(`Rejected invalid permission mode from ${client.id}: ${JSON.stringify(msg.mode)}`)
   }
 }
 

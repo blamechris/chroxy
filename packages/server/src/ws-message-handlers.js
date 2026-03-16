@@ -7,6 +7,7 @@
  * To add a new message type: export it from the appropriate handler file
  * (or create a new one) and add the import here.
  */
+import { createLogger } from './logger.js'
 import { inputHandlers } from './handlers/input-handlers.js'
 import { sessionHandlers } from './handlers/session-handlers.js'
 import { settingsHandlers } from './handlers/settings-handlers.js'
@@ -16,6 +17,8 @@ import { checkpointHandlers } from './handlers/checkpoint-handlers.js'
 import { webTaskHandlers } from './handlers/web-task-handlers.js'
 import { repoHandlers } from './handlers/repo-handlers.js'
 import { extensionHandlers } from './handlers/extension-handlers.js'
+
+const log = createLogger('ws')
 
 // Re-export shared constants and utilities for backward compatibility.
 // Canonical source is handler-utils.js — handler modules import from there directly.
@@ -80,7 +83,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
   if (handler) {
     await handler(ws, client, msg, ctx)
   } else {
-    console.log(`[ws] Unknown message type: ${msg.type}`)
+    log.debug(`Unknown message type: ${msg.type}`)
   }
 }
 
