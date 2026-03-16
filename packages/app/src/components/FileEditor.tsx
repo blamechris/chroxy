@@ -10,11 +10,13 @@ import {
   ActivityIndicator,
   Platform,
   KeyboardAvoidingView,
+  ScrollView,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore } from '../store/connection';
 import type { FileWriteResult } from '../store/connection';
 import { COLORS } from '../constants/colors';
+import { SyntaxHighlightedCode, langFromPath } from './PermissionDetail';
 
 interface FileEditorProps {
   visible: boolean;
@@ -33,6 +35,7 @@ export function FileEditor({ visible, filePath, initialContent, onClose, onSave 
   const insets = useSafeAreaInsets();
   const [content, setContent] = useState(initialContent);
   const [saving, setSaving] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
 
   const setFileWriteCallback = useConnectionStore((s) => s.setFileWriteCallback);
   const requestFileWrite = useConnectionStore((s) => s.requestFileWrite);
@@ -46,6 +49,7 @@ export function FileEditor({ visible, filePath, initialContent, onClose, onSave 
     if (visible) {
       setContent(initialContent);
       setSaving(false);
+      setIsEditing(false);
       confirmingRef.current = false;
     }
   }, [visible, initialContent]);
@@ -128,19 +132,28 @@ export function FileEditor({ visible, filePath, initialContent, onClose, onSave 
   }, [filePath, fileName, content, saving, onClose, onSave, setFileWriteCallback, requestFileWrite]);
 
   const handleCancel = useCallback(() => {
-    if (hasChanges) {
+    if (isEditing && hasChanges) {
       Alert.alert(
         'Discard Changes',
         'You have unsaved changes. Discard them?',
         [
           { text: 'Keep Editing', style: 'cancel' },
-          { text: 'Discard', style: 'destructive', onPress: onClose },
+          {
+            text: 'Discard',
+            style: 'destructive',
+            onPress: () => {
+              setContent(initialContent);
+              setIsEditing(false);
+            },
+          },
         ],
       );
+    } else if (isEditing) {
+      setIsEditing(false);
     } else {
       onClose();
     }
-  }, [hasChanges, onClose]);
+  }, [hasChanges, isEditing, initialContent, onClose]);
 
   if (!visible) return null;
 
@@ -157,9 +170,11 @@ export function FileEditor({ visible, filePath, initialContent, onClose, onSave 
             onPress={handleCancel}
             disabled={saving}
             accessibilityRole="button"
-            accessibilityLabel="Cancel editing"
+            accessibilityLabel={isEditing ? 'Cancel editing' : 'Close file viewer'}
           >
-            <Text style={[styles.cancelText, saving && styles.disabledText]}>Cancel</Text>
+            <Text style={[styles.cancelText, saving && styles.disabledText]}>
+              {isEditing ? 'Cancel' : 'Done'}
+            </Text>
           </TouchableOpacity>
 
           <View style={styles.headerCenter}>
@@ -167,35 +182,59 @@ export function FileEditor({ visible, filePath, initialContent, onClose, onSave 
             {hasChanges && <Text style={styles.modifiedBadge}>Modified</Text>}
           </View>
 
-          <TouchableOpacity
-            style={styles.headerButton}
-            onPress={handleSave}
-            disabled={saving || !hasChanges}
-            accessibilityRole="button"
-            accessibilityLabel="Save file"
-          >
-            {saving ? (
-              <ActivityIndicator size="small" color={COLORS.accentBlue} />
-            ) : (
-              <Text style={[styles.saveText, !hasChanges && styles.disabledText]}>Save</Text>
-            )}
-          </TouchableOpacity>
+          {isEditing ? (
+            <TouchableOpacity
+              style={styles.headerButton}
+              onPress={handleSave}
+              disabled={saving || !hasChanges}
+              accessibilityRole="button"
+              accessibilityLabel="Save file"
+            >
+              {saving ? (
+                <ActivityIndicator size="small" color={COLORS.accentBlue} />
+              ) : (
+                <Text style={[styles.saveText, !hasChanges && styles.disabledText]}>Save</Text>
+              )}
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={styles.headerButton}
+              onPress={() => setIsEditing(true)}
+              disabled={saving}
+              accessibilityRole="button"
+              accessibilityLabel="Edit file"
+            >
+              <Text style={[styles.saveText, saving && styles.disabledText]}>Edit</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
-        {/* Editor */}
-        <TextInput
-          style={[styles.editor, { paddingBottom: insets.bottom + 12 }]}
-          value={content}
-          onChangeText={setContent}
-          multiline
-          autoCapitalize="none"
-          autoCorrect={false}
-          spellCheck={false}
-          textAlignVertical="top"
-          editable={!saving}
-          scrollEnabled
-          accessibilityLabel="File content editor"
-        />
+        {/* Content: syntax-highlighted view or editable TextInput */}
+        {isEditing ? (
+          <TextInput
+            style={[styles.editor, { paddingBottom: insets.bottom + 12 }]}
+            value={content}
+            onChangeText={setContent}
+            multiline
+            autoCapitalize="none"
+            autoCorrect={false}
+            spellCheck={false}
+            textAlignVertical="top"
+            editable={!saving}
+            scrollEnabled
+            accessibilityLabel="File content editor"
+          />
+        ) : (
+          <ScrollView
+            style={styles.viewerScroll}
+            contentContainerStyle={[styles.viewerContent, { paddingBottom: insets.bottom + 12 }]}
+          >
+            <SyntaxHighlightedCode
+              code={content}
+              language={filePath ? langFromPath(filePath) : ''}
+            />
+          </ScrollView>
+        )}
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -256,5 +295,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 12,
     textAlignVertical: 'top',
+  },
+  viewerScroll: {
+    flex: 1,
+  },
+  viewerContent: {
+    paddingHorizontal: 12,
+    paddingTop: 12,
   },
 });
