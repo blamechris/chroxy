@@ -87,9 +87,14 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
     setIsRecognizing(false);
   });
 
+  // Track whether the component is still mounted
+  const mountedRef = useRef(true);
+
   // Abort on unmount
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       SpeechModule?.abort();
     };
   }, []);
@@ -105,6 +110,10 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
     stopRequestedRef.current = false;
 
     const { granted } = await SpeechModule.requestPermissionsAsync();
+
+    // If component unmounted or stop requested while awaiting permission, bail out
+    if (!mountedRef.current || stopRequestedRef.current) return;
+
     if (!granted) {
       Alert.alert(
         'Permissions Required',
@@ -113,10 +122,10 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
       return;
     }
 
-    // If stopListening was called while we were awaiting permission, don't start
-    if (stopRequestedRef.current) return;
-
     const lang = await getSpeechLang();
+
+    // If component unmounted or stop requested while awaiting language, bail out
+    if (!mountedRef.current || stopRequestedRef.current) return;
 
     SpeechModule.start({
       lang,
