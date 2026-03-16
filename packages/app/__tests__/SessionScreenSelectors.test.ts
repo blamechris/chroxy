@@ -15,10 +15,9 @@ describe('SessionScreen selective store usage (#1923)', () => {
   });
 
   test('all store values use individual selectors', () => {
-    // Fields that still use inline selectors
+    // Fields that still use inline selectors from useConnectionStore
     const inlineSelectors = [
       'viewMode',
-      'serverMode',
       'sessionCwd',
       'connectionPhase',
       'availableModels',
@@ -44,6 +43,16 @@ describe('SessionScreen selective store usage (#1923)', () => {
 
     for (const fn of selectorFunctions) {
       const pattern = new RegExp(`useConnectionStore\\(${fn}\\)`);
+      expect(src).toMatch(pattern);
+    }
+
+    // Fields migrated to useConnectionLifecycleStore (canonical source)
+    const lifecycleFields = [
+      'serverMode',
+    ];
+
+    for (const field of lifecycleFields) {
+      const pattern = new RegExp(`useConnectionLifecycleStore\\(\\(?s\\)?\\s*=>\\s*s\\.${field}\\b`);
       expect(src).toMatch(pattern);
     }
   });

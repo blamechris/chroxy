@@ -78,6 +78,21 @@ export class BaseSession extends EventEmitter {
    * Clear per-message state. Subclasses should call super._clearMessageState()
    * and then clear their own additional state (plan mode, pending permissions, etc.).
    */
+  /**
+   * Parse a JSONL line from a subprocess stdout.
+   * Returns the parsed object or null if the line is empty or invalid JSON.
+   * @param {string} line
+   * @returns {object|null}
+   */
+  _parseJsonLine(line) {
+    if (!line || !line.trim()) return null
+    try {
+      return JSON.parse(line)
+    } catch {
+      return null
+    }
+  }
+
   _clearMessageState() {
     this._isBusy = false
     this._currentMessageId = null

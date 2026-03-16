@@ -17,12 +17,44 @@ const CHECKPOINTS_DIR = join(homedir(), '.chroxy', 'checkpoints')
 const MAX_CHECKPOINTS_PER_SESSION = 50
 
 /**
+ * Per-cwd async mutex map.
+ * Prevents concurrent checkpoint operations (create/restore) on the same
+ * working directory from interleaving git index/commit operations.
+ */
+const _cwdMutexes = new Map()
+
+/**
+ * Acquire an exclusive lock for the given cwd.
+ * Returns a release function — caller MUST call it in a finally block.
+ *
+ * @param {string} cwd
+ * @returns {Promise<() => void>}
+ */
+async function acquireCwdLock(cwd) {
+  if (!_cwdMutexes.has(cwd)) {
+    _cwdMutexes.set(cwd, Promise.resolve())
+  }
+
+  let release
+  const next = new Promise((resolve) => { release = resolve })
+  const current = _cwdMutexes.get(cwd)
+  _cwdMutexes.set(cwd, next)
+
+  await current
+  return () => release()
+}
+
+/**
  * Manages checkpoint creation and restoration for session rewind.
  *
  * Each checkpoint captures:
  * - The SDK session (conversation) ID at that point in time
- * - A git stash ref for the file state (if in a git repo)
+ * - A git snapshot ref for the file state (if in a git repo)
  * - Metadata: timestamp, name, description, message count
+ *
+ * Git snapshots are stored as plain commit objects (not stash entries).
+ * This avoids touching the shared stash stack, making concurrent sessions
+ * in the same repository safe.
  *
  * Rewind creates a new session that resumes from the checkpoint's
  * conversation ID, effectively branching the conversation.
@@ -80,7 +112,12 @@ export class CheckpointManager extends EventEmitter {
     // Capture git state if in a git repo
     const isGit = await this._isGitRepo(cwd)
     if (isGit) {
-      checkpoint.gitRef = await this._createGitSnapshot(cwd, checkpoint.id)
+      const release = await acquireCwdLock(cwd)
+      try {
+        checkpoint.gitRef = await this._createGitSnapshot(cwd, checkpoint.id)
+      } finally {
+        release()
+      }
     }
 
     checkpoints.push(checkpoint)
@@ -134,7 +171,12 @@ export class CheckpointManager extends EventEmitter {
 
     // Restore git state if snapshot exists
     if (checkpoint.gitRef) {
-      await this._restoreGitSnapshot(checkpoint.cwd, checkpoint.gitRef)
+      const release = await acquireCwdLock(checkpoint.cwd)
+      try {
+        await this._restoreGitSnapshot(checkpoint.cwd, checkpoint.gitRef)
+      } finally {
+        release()
+      }
     }
 
     this.emit('checkpoint_restored', checkpoint)
@@ -198,15 +240,28 @@ export class CheckpointManager extends EventEmitter {
   }
 
   /**
-   * Create a lightweight git tag as a snapshot.
-   * Uses tags instead of stash because stashes are fragile
-   * (easily lost with git stash drop, reorder, etc.).
+   * Create a snapshot of the current working tree state using a plain commit
+   * object, without touching the shared git stash stack.
+   *
+   * Strategy:
+   *   1. If the working tree is clean, tag HEAD directly.
+   *   2. Otherwise:
+   *      a. Capture the current index state via `git write-tree`.
+   *      b. Stage everything (tracked + untracked) with `git add -A`.
+   *      c. Create a snapshot commit object via `git commit-tree` (no branch
+   *         or ref is updated — the commit is dangling until we tag it).
+   *      d. Tag the snapshot commit SHA.
+   *      e. Restore the pre-snapshot index with `git read-tree` so the
+   *         working tree is left exactly as it was.
+   *
+   * This never modifies refs/stash, so concurrent sessions operating on the
+   * same repository cannot corrupt each other. The per-cwd mutex in the
+   * caller serialises the git index operations within this process.
    */
   async _createGitSnapshot(cwd, checkpointId) {
     const tagName = `chroxy-checkpoint/${checkpointId}`
 
     try {
-      // Check if there are any changes (tracked or untracked) to capture
       const { stdout: status } = await execFileAsync(
         GIT, ['status', '--porcelain'],
         { cwd }
@@ -218,39 +273,70 @@ export class CheckpointManager extends EventEmitter {
         return tagName
       }
 
-      // Use stash push to capture full state (including untracked files),
-      // tag the stash entry, then drop it from the stack to avoid clutter.
-      await execFileAsync(
-        GIT, ['stash', 'push', '--include-untracked', '-m', `chroxy-checkpoint/${checkpointId}`],
+      // Capture the current index so we can restore it afterwards
+      const { stdout: savedIndexTree } = await execFileAsync(
+        GIT, ['write-tree'],
         { cwd }
       )
-      await execFileAsync(GIT, ['tag', tagName, 'stash@{0}'], { cwd })
-      // Pop the stash to restore the working tree to its pre-snapshot state
-      await execFileAsync(GIT, ['stash', 'pop'], { cwd })
+
+      // Stage everything including untracked files
+      await execFileAsync(GIT, ['add', '-A'], { cwd })
+
+      // Write the full working tree as a tree object
+      const { stdout: snapshotTree } = await execFileAsync(
+        GIT, ['write-tree'],
+        { cwd }
+      )
+
+      // Create a dangling commit from the snapshot tree
+      const { stdout: snapshotSha } = await execFileAsync(
+        GIT, ['commit-tree', snapshotTree.trim(), '-p', 'HEAD', '-m', `chroxy-snapshot/${checkpointId}`],
+        { cwd }
+      )
+
+      // Tag the snapshot commit for stable retrieval
+      await execFileAsync(GIT, ['tag', tagName, snapshotSha.trim()], { cwd })
+
+      // Restore the pre-snapshot index (leaves working tree untouched)
+      await execFileAsync(GIT, ['read-tree', savedIndexTree.trim()], { cwd })
+
       return tagName
     } catch (err) {
-      // If stash push succeeded but tag/pop failed, try to recover
-      try { await execFileAsync(GIT, ['stash', 'pop'], { cwd }) } catch { /* best effort */ }
+      // Best-effort: restore the index if something went wrong mid-way
+      try { await execFileAsync(GIT, ['reset', 'HEAD'], { cwd }) } catch { /* ignore */ }
       log.warn(`Failed to create git snapshot: ${err.message}`)
       return null
     }
   }
 
+  /**
+   * Restore file state from a git snapshot tag.
+   *
+   * The snapshot is a plain commit whose tree captures the full working-tree
+   * state at checkpoint time (tracked + untracked files). Restoring it is a
+   * two-step process:
+   *
+   *   1. Stash any current uncommitted changes so they are not lost (using
+   *      `git stash push` here is intentional and safe because this is a
+   *      user-initiated rewind operation where only one restore runs at a
+   *      time under the per-cwd mutex).
+   *   2. Resolve the tag to its commit SHA and use `git checkout <sha> -- .`
+   *      to overwrite all files in the working tree with the snapshot state.
+   */
   async _restoreGitSnapshot(cwd, gitRef) {
     try {
-      // First check if working tree has changes
+      // Stash any pending changes before restoring
       const { stdout: status } = await execFileAsync(
         GIT, ['status', '--porcelain'],
         { cwd }
       )
 
       if (status.trim()) {
-        // Stash current changes before restoring
-        await execFileAsync(GIT, ['stash', 'push', '-m', 'chroxy: auto-stash before rewind'], { cwd })
+        await execFileAsync(GIT, ['stash', 'push', '-u', '-m', 'chroxy: auto-stash before rewind'], { cwd })
       }
 
-      // Check if tag points to HEAD (clean state at checkpoint)
-      const { stdout: tagCommit } = await execFileAsync(
+      // Resolve the tag to the snapshot commit SHA
+      const { stdout: snapshotSha } = await execFileAsync(
         GIT, ['rev-parse', gitRef],
         { cwd }
       )
@@ -259,19 +345,16 @@ export class CheckpointManager extends EventEmitter {
         { cwd }
       )
 
-      if (tagCommit.trim() === headCommit.trim()) {
-        // Tag points to HEAD — restore was just the stash (already done above)
+      const resolvedSha = snapshotSha.trim()
+      if (resolvedSha === headCommit.trim()) {
+        // Tag points to HEAD — working tree is already at the correct state
         return
       }
 
-      // Restore files from the tagged stash to the working tree.
-      // stash apply restores tracked + untracked files from the stash object.
-      // Fall back to checkout if the ref is a plain commit (e.g., HEAD tag).
-      try {
-        await execFileAsync(GIT, ['stash', 'apply', gitRef], { cwd })
-      } catch {
-        await execFileAsync(GIT, ['checkout', gitRef, '--', '.'], { cwd })
-      }
+      // Checkout all files from the snapshot commit tree into the working tree.
+      // This handles both tracked modifications and files that were untracked
+      // at checkpoint time (they were staged and committed into the snapshot).
+      await execFileAsync(GIT, ['checkout', resolvedSha, '--', '.'], { cwd })
     } catch (err) {
       log.warn(`Failed to restore git snapshot: ${err.message}`)
       throw new Error(`Git restore failed: ${err.message}`)
