@@ -3,6 +3,12 @@ import { EventEmitter } from 'events'
 // Tools that acceptEdits mode auto-approves
 const ACCEPT_EDITS_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
 
+// Tools eligible for session-scoped auto-allow rules
+export const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
+
+// Tools that can never be auto-allowed by rules (too dangerous to whitelist)
+export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'])
+
 // Default permission timeout (5 minutes)
 const DEFAULT_TIMEOUT_MS = 300_000
 
@@ -32,6 +38,9 @@ export class PermissionManager extends EventEmitter {
     this._permissionCounter = 0
     this._lastPermissionData = new Map() // requestId -> emitted permission_request payload
 
+    // Session-scoped permission rules
+    this._sessionRules = [] // [{ tool, decision }]
+
     // AskUserQuestion handling
     this._pendingUserAnswer = null // { resolve, input } when waiting for user answer
     this._questionTimer = null
@@ -39,9 +48,70 @@ export class PermissionManager extends EventEmitter {
   }
 
   /**
+   * Set session-scoped permission rules.
+   * Each rule must have a `tool` in ELIGIBLE_TOOLS and a `decision` of 'allow' or 'deny'.
+   * Rules for NEVER_AUTO_ALLOW tools are rejected with an error.
+   *
+   * @param {Array<{tool: string, decision: string}>} rules
+   * @throws {Error} if any rule is invalid
+   */
+  setRules(rules) {
+    if (!Array.isArray(rules)) {
+      throw new Error('rules must be an array')
+    }
+    for (const rule of rules) {
+      if (!rule || typeof rule.tool !== 'string') {
+        throw new Error('each rule must have a tool string')
+      }
+      if (rule.decision !== 'allow' && rule.decision !== 'deny') {
+        throw new Error(`rule decision must be 'allow' or 'deny', got '${rule.decision}'`)
+      }
+      if (NEVER_AUTO_ALLOW.has(rule.tool)) {
+        throw new Error(`${rule.tool} is in NEVER_AUTO_ALLOW and cannot be auto-allowed`)
+      }
+      if (!ELIGIBLE_TOOLS.has(rule.tool)) {
+        throw new Error(`${rule.tool} is not in ELIGIBLE_TOOLS`)
+      }
+    }
+    this._sessionRules = rules.slice()
+  }
+
+  /**
+   * Return a copy of the current session rules.
+   *
+   * @returns {Array<{tool: string, decision: string}>}
+   */
+  getRules() {
+    return this._sessionRules.slice()
+  }
+
+  /**
+   * Clear all session-scoped permission rules.
+   */
+  clearRules() {
+    this._sessionRules = []
+  }
+
+  /**
+   * Check whether a toolName matches a session rule.
+   *
+   * @param {string} toolName
+   * @returns {'allow'|'deny'|null} null if no rule matches
+   */
+  _matchesRule(toolName) {
+    for (const rule of this._sessionRules) {
+      if (rule.tool === toolName) {
+        return rule.decision
+      }
+    }
+    return null
+  }
+
+  /**
    * Handle a permission check from the SDK canUseTool callback.
    *
    * For AskUserQuestion: emits user_question and waits for respondToQuestion().
+   * For session rules: auto-resolves without prompting.
    * For acceptEdits mode: auto-approves file operation tools.
    * For all other tools: emits permission_request and waits for respondToPermission().
    *
@@ -54,6 +124,16 @@ export class PermissionManager extends EventEmitter {
   handlePermission(toolName, input, signal, permissionMode) {
     if (toolName === 'AskUserQuestion') {
       return this._handleAskUserQuestion(input, signal)
+    }
+
+    // Session rules: check before acceptEdits and the prompt path
+    const ruleDecision = this._matchesRule(toolName)
+    if (ruleDecision !== null) {
+      this._logInfo(`Permission rule matched for ${toolName}: ${ruleDecision}`)
+      if (ruleDecision === 'allow') {
+        return Promise.resolve({ behavior: 'allow', updatedInput: input || {} })
+      }
+      return Promise.resolve({ behavior: 'deny', message: 'Denied by session rule' })
     }
 
     // acceptEdits: auto-approve file operations, prompt for everything else

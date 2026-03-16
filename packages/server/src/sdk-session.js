@@ -396,6 +396,7 @@ export class SdkSession extends BaseSession {
 
   setPermissionMode(mode) {
     if (!super.setPermissionMode(mode)) return
+    this._permissions.clearRules()
     log.info(`Permission mode changed to ${mode}`)
   }
 
