@@ -216,6 +216,24 @@ export class EventNormalizer {
   }
 
   /**
+   * Register a custom event type handler at runtime.
+   * Allows provider plugins to extend the normalizer without modifying EVENT_MAP.
+   *
+   * @param {string} name - Event name (e.g. 'my_provider_event')
+   * @param {Function} handler - (data, ctx) => { messages, sideEffects?, registrations? }
+   * @throws {Error} if name is not a non-empty string or handler is not a function
+   */
+  registerEventType(name, handler) {
+    if (typeof name !== 'string' || !name) {
+      throw new Error('registerEventType: name must be a non-empty string')
+    }
+    if (typeof handler !== 'function') {
+      throw new Error('registerEventType: handler must be a function')
+    }
+    EVENT_MAP[name] = handler
+  }
+
+  /**
    * Set the flush callback. Called with buffered deltas when the timer fires.
    * @param {Function} cb - (entries: Array<{ key, sessionId, messageId, delta }>) => void
    */

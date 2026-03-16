@@ -12,6 +12,20 @@ import { resolveModelId } from './models.js'
 const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
 
 export class BaseSession extends EventEmitter {
+  /**
+   * Custom event names emitted by this provider class that should be proxied
+   * by SessionManager in addition to the built-in PROXIED_EVENTS list.
+   *
+   * Override in a subclass and return an array of event name strings.
+   * Each name will be forwarded as a transient session_event (not recorded
+   * in history and not replayed on reconnect).
+   *
+   * @returns {string[]}
+   */
+  static get customEvents() {
+    return []
+  }
+
   constructor({ cwd, model, permissionMode } = {}) {
     super()
     this.cwd = cwd || process.cwd()

@@ -42,6 +42,25 @@ const handlerRegistry = new Map([
 ])
 
 /**
+ * Register a custom message handler at runtime.
+ * Allows external code (e.g. provider plugins) to handle additional
+ * message types without modifying the handler modules.
+ *
+ * @param {string} type - WS message type (e.g. 'my_custom_action')
+ * @param {Function} handlerFn - async (ws, client, msg, ctx) => void
+ * @throws {Error} if type is not a non-empty string or handlerFn is not a function
+ */
+export function registerMessageHandler(type, handlerFn) {
+  if (typeof type !== 'string' || !type) {
+    throw new Error('registerMessageHandler: type must be a non-empty string')
+  }
+  if (typeof handlerFn !== 'function') {
+    throw new Error('registerMessageHandler: handlerFn must be a function')
+  }
+  handlerRegistry.set(type, handlerFn)
+}
+
+/**
  * Handle messages in multi-session mode.
  *
  * ctx shape: {

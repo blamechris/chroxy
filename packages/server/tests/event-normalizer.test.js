@@ -365,6 +365,72 @@ describe('EventNormalizer', () => {
   })
 })
 
+// ---- registerEventType() ----
+
+describe('registerEventType()', () => {
+  let normalizer
+
+  beforeEach(() => {
+    normalizer = new EventNormalizer({ flushIntervalMs: 10 })
+  })
+
+  afterEach(() => {
+    normalizer.destroy()
+    // Remove any test-registered event types from the shared map
+    delete EVENT_MAP['test_custom_event']
+    delete EVENT_MAP['provider_status']
+  })
+
+  it('registers a new event type and normalize() returns its result', () => {
+    normalizer.registerEventType('test_custom_event', (data) => ({
+      messages: [{ msg: { type: 'custom_ws_msg', payload: data.payload } }],
+    }))
+
+    const result = normalizer.normalize('test_custom_event', { payload: 42 }, makeCtx())
+    assert.ok(result)
+    assert.equal(result.messages[0].msg.type, 'custom_ws_msg')
+    assert.equal(result.messages[0].msg.payload, 42)
+  })
+
+  it('overwrites an existing registration for the same event name', () => {
+    normalizer.registerEventType('test_custom_event', () => ({
+      messages: [{ msg: { type: 'first' } }],
+    }))
+    normalizer.registerEventType('test_custom_event', () => ({
+      messages: [{ msg: { type: 'second' } }],
+    }))
+
+    const result = normalizer.normalize('test_custom_event', {}, makeCtx())
+    assert.equal(result.messages[0].msg.type, 'second')
+  })
+
+  it('throws when name is not a non-empty string', () => {
+    assert.throws(() => normalizer.registerEventType('', () => {}), /non-empty string/)
+    assert.throws(() => normalizer.registerEventType(null, () => {}), /non-empty string/)
+    assert.throws(() => normalizer.registerEventType(42, () => {}), /non-empty string/)
+  })
+
+  it('throws when handler is not a function', () => {
+    assert.throws(() => normalizer.registerEventType('provider_status', 'not-a-fn'), /function/)
+    assert.throws(() => normalizer.registerEventType('provider_status', null), /function/)
+  })
+
+  it('registered handler receives data and ctx correctly', () => {
+    let capturedData = null
+    let capturedCtx = null
+    normalizer.registerEventType('provider_status', (data, ctx) => {
+      capturedData = data
+      capturedCtx = ctx
+      return { messages: [{ msg: { type: 'provider_status_update' } }] }
+    })
+
+    const ctx = makeCtx()
+    normalizer.normalize('provider_status', { status: 'online' }, ctx)
+    assert.deepEqual(capturedData, { status: 'online' })
+    assert.equal(capturedCtx.sessionId, 'sess-1')
+  })
+})
+
 // ---- EVENT_MAP completeness ----
 
 describe('EVENT_MAP', () => {
