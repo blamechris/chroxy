@@ -4,7 +4,7 @@
  * Both commands share options via addServerOptions.
  */
 import { addServerOptions, loadAndMergeConfig, parseExtraOverrides } from './shared.js'
-import { parseTunnelArg } from '../tunnel/registry.js'
+import { parseTunnelArg } from '../tunnel/index.js'
 
 export function registerServerCommands(program) {
   const startCmd = program

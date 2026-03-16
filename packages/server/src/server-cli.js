@@ -1,6 +1,6 @@
 import { SessionManager } from './session-manager.js'
 import { WsServer } from './ws-server.js'
-import { getTunnel, parseTunnelArg } from './tunnel/index.js'
+import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { PushManager } from './push.js'
 import { hostname, homedir } from 'os'
@@ -411,16 +411,13 @@ export async function startCliServer(config) {
   const SKIP_TUNNEL = NO_AUTH || !tunnelArg || !!externalUrl
 
   if (!SKIP_TUNNEL) {
-    // 4. Start the tunnel via adapter registry
-    const TunnelAdapter = getTunnel(tunnelArg.provider)
-    tunnel = new TunnelAdapter({
+    // 4. Start the tunnel
+    tunnel = createTunnel({
       port: PORT,
       mode: tunnelArg.mode,
-      config: {
-        ...config.tunnelConfig,
-        tunnelName: config.tunnelName || null,
-        tunnelHostname: config.tunnelHostname || null,
-      },
+      tunnelConfig: config.tunnelConfig,
+      tunnelName: config.tunnelName || null,
+      tunnelHostname: config.tunnelHostname || null,
     })
     const { wsUrl, httpUrl } = await tunnel.start()
     currentWsUrl = wsUrl
