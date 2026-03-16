@@ -108,14 +108,17 @@ async function sendPermissionResponseHttp(
 ): Promise<boolean> {
   // Lazy import to break require cycle: connection → message-handler → notifications → connection
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { useConnectionStore, loadConnection }: {
-    useConnectionStore: typeof import('./store/connection')['useConnectionStore'];
+  const { loadConnection }: {
     loadConnection: typeof import('./store/connection')['loadConnection'];
   } = require('./store/connection');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { useConnectionLifecycleStore }: {
+    useConnectionLifecycleStore: typeof import('./store/connection-lifecycle')['useConnectionLifecycleStore'];
+  } = require('./store/connection-lifecycle');
 
   // Try Zustand store first, fall back to SecureStore for cold start
-  let wsUrl = useConnectionStore.getState().wsUrl;
-  let apiToken = useConnectionStore.getState().apiToken;
+  let wsUrl = useConnectionLifecycleStore.getState().wsUrl;
+  let apiToken = useConnectionLifecycleStore.getState().apiToken;
 
   if (!wsUrl || !apiToken) {
     const saved = await loadConnection();

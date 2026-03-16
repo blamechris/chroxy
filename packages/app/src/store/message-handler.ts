@@ -338,7 +338,6 @@ function _onPong(): void {
     _ctx.ewmaRtt = _ctx.ewmaRtt === null ? rttMs : EWMA_ALPHA * rttMs + (1 - EWMA_ALPHA) * _ctx.ewmaRtt;
     const smoothed = Math.round(_ctx.ewmaRtt);
     const quality: 'good' | 'fair' | 'poor' = smoothed < 200 ? 'good' : smoothed < 500 ? 'fair' : 'poor';
-    getStore().setState({ latencyMs: smoothed, connectionQuality: quality });
     useConnectionLifecycleStore.getState().setConnectionQuality(smoothed, quality);
   }
 }
@@ -695,18 +694,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // If server provided a sessionToken (via pairing), use it for future auth
       const effectiveToken = typeof msg.sessionToken === 'string' ? msg.sessionToken : ctx.token;
       const connectedState = {
-        connectionPhase: 'connected' as const,
         viewingCachedSession: false,
-        wsUrl: ctx.url,
-        apiToken: effectiveToken,
         socket: ctx.socket,
         claudeReady: false,
-        sessionCwd: authSessionCwd,
         streamingMessageId: null,
         myClientId: myClientId, // kept for backward compat; canonical source is useMultiClientStore
         connectedClients: clients, // kept for backward compat; canonical source is useMultiClientStore
-        connectionError: null as string | null,
-        connectionRetryCount: 0,
         // Clear shutdown state on successful connect
         shutdownReason: null,
         restartEtaMs: null,
@@ -752,18 +745,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // Send key_exchange plaintext (before encryption is active)
         ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _ctx.pendingKeyPair.publicKey }));
         // Post-auth messages will be sent after key_exchange_ok arrives
-        set({ isEncrypted: true });
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: true });
       } else {
         // No encryption — send post-auth messages immediately
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
-        set({ isEncrypted: false });
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: false });
       }
       // Save for quick reconnect (use effectiveToken for pairing flow)
       saveConnection(ctx.url, effectiveToken);
-      set({ savedConnection: { url: ctx.url, token: effectiveToken } });
       useConnectionLifecycleStore.getState().setSavedConnection({ url: ctx.url, token: effectiveToken });
       // Register push token (async, non-blocking)
       void registerPushToken(ctx.socket);
@@ -775,7 +765,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         if (!msg.publicKey || typeof msg.publicKey !== 'string') {
           console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
           ctx.socket.close();
-          set({ connectionPhase: 'disconnected', socket: null });
+          set({ socket: null });
+          useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
           _ctx.pendingKeyPair = null;
           break;
         }
@@ -792,7 +783,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'auth_fail':
       ctx.socket.close();
-      set({ connectionPhase: 'disconnected', socket: null });
+      set({ socket: null });
+      useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       if (!ctx.silent) {
         Alert.alert('Auth Failed', (msg.reason as string) || 'Invalid token');
       }
@@ -800,7 +792,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'pair_fail': {
       ctx.socket.close();
-      set({ connectionPhase: 'disconnected', socket: null });
+      set({ socket: null });
+      useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       if (!ctx.silent) {
         const reason = (msg.reason as string) || 'pairing_failed';
         const pairMessages: Record<string, string> = {

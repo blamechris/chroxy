@@ -6,6 +6,7 @@
  */
 import { Alert } from 'react-native';
 import { useConnectionStore } from '../../store/connection';
+import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import { clearAllCallbacks } from '../../store/imperative-callbacks';
 
 // Spy on Alert.alert — avoids jest.mock('react-native') which triggers native modules
@@ -50,20 +51,22 @@ beforeEach(() => {
   useConnectionStore.setState({
     terminalBuffer: '',
     terminalRawBuffer: '',
-    connectionError: null,
-    connectionRetryCount: 0,
     serverErrors: [],
     connectedClients: [],
     myClientId: null,
     primaryClientId: null,
-    connectionPhase: 'disconnected',
     sessionStates: {},
     activeSessionId: null,
     socket: null,
-    wsUrl: null,
     shutdownReason: null,
     restartEtaMs: null,
     restartingSince: null,
+  });
+  useConnectionLifecycleStore.setState({
+    connectionPhase: 'disconnected',
+    connectionError: null,
+    connectionRetryCount: 0,
+    wsUrl: null,
   });
 });
 
@@ -85,7 +88,7 @@ describe('connect() health check', () => {
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
     await flushPromises();
 
-    expect(useConnectionStore.getState().connectionError).toBe('Server not responding');
+    expect(useConnectionLifecycleStore.getState().connectionError).toBe('Server not responding');
   });
 
   it('sets connectionError on HTTP 500', async () => {
@@ -94,7 +97,7 @@ describe('connect() health check', () => {
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
     await flushPromises();
 
-    expect(useConnectionStore.getState().connectionError).toBe('HTTP 500');
+    expect(useConnectionLifecycleStore.getState().connectionError).toBe('HTTP 500');
   });
 
   it('sets connectionError on network error', async () => {
@@ -103,7 +106,7 @@ describe('connect() health check', () => {
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
     await flushPromises();
 
-    expect(useConnectionStore.getState().connectionError).toBe('Network error');
+    expect(useConnectionLifecycleStore.getState().connectionError).toBe('Network error');
   });
 
   it('transitions to server_restarting on restart response', async () => {
@@ -115,7 +118,7 @@ describe('connect() health check', () => {
     await flushPromises();
 
     const state = useConnectionStore.getState();
-    expect(state.connectionPhase).toBe('server_restarting');
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_restarting');
     expect(state.shutdownReason).toBe('restart');
     expect(state.restartEtaMs).toBe(5000);
   });
@@ -136,9 +139,9 @@ describe('connect() retry exhaustion', () => {
       }
     }
 
-    const state = useConnectionStore.getState();
-    expect(state.connectionPhase).toBe('disconnected');
-    expect(state.connectionError).toBe('Could not reach server');
+    const lifecycleState = useConnectionLifecycleStore.getState();
+    expect(lifecycleState.connectionPhase).toBe('disconnected');
+    expect(lifecycleState.connectionError).toBe('Could not reach server');
   });
 
   it('does not show Alert in silent mode after retries exhausted', async () => {
@@ -195,7 +198,7 @@ describe('connect() WebSocket setup', () => {
 
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
 
-    expect(useConnectionStore.getState().connectionPhase).toBe('connecting');
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connecting');
   });
 });
 
@@ -216,8 +219,8 @@ describe('connect() attempt cancellation', () => {
     await flushPromises();
 
     // State should still be 'connecting' (from the second connect), not have an error
-    const state = useConnectionStore.getState();
-    expect(state.connectionPhase).not.toBe('disconnected');
-    expect(state.connectionError).toBeNull();
+    const lifecycleState = useConnectionLifecycleStore.getState();
+    expect(lifecycleState.connectionPhase).not.toBe('disconnected');
+    expect(lifecycleState.connectionError).toBeNull();
   });
 });

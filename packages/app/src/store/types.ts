@@ -343,20 +343,8 @@ export interface QueuedMessage {
 }
 
 export interface ConnectionState {
-  // Connection
-  connectionPhase: ConnectionPhase;
-  wsUrl: string | null;
-  apiToken: string | null;
+  // Connection socket (lifecycle fields live in useConnectionLifecycleStore)
   socket: WebSocket | null;
-
-  // Saved connection for quick reconnect
-  savedConnection: SavedConnection | null;
-
-  // User explicitly disconnected — prevents auto-reconnect on ConnectScreen mount
-  userDisconnected: boolean;
-
-  // Server context (from auth_ok)
-  sessionCwd: string | null;
 
   // Multi-session state
   sessions: SessionInfo[];
@@ -383,14 +371,6 @@ export interface ConnectionState {
   // Follow mode: auto-switch sessions when another client switches
   followMode: boolean;
 
-  // Connection quality (measured via ping/pong RTT)
-  latencyMs: number | null;
-  connectionQuality: 'good' | 'fair' | 'poor' | null;
-
-  // Connection error feedback
-  connectionError: string | null;
-  connectionRetryCount: number;
-
   // Server errors forwarded over WebSocket (last 10)
   serverErrors: ServerError[];
 
@@ -405,9 +385,6 @@ export interface ConnectionState {
   shutdownReason: 'restart' | 'shutdown' | 'crash' | null;
   restartEtaMs: number | null;
   restartingSince: number | null;
-
-  // E2E encryption status (false when connecting over unencrypted LAN)
-  isEncrypted: boolean;
 
   // Pending auto permission mode confirmation from server
   pendingPermissionConfirm: { mode: string; warning: string } | null;
