@@ -17,6 +17,7 @@ import {
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview, stripAnsi } from '../store/connection';
+import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
@@ -118,7 +119,7 @@ export function SessionScreen() {
   const messages = useConnectionStore(selectMessages);
   const inputSettings = useConnectionStore((s) => s.inputSettings);
   const claudeReady = useConnectionStore(selectClaudeReady);
-  const serverMode = useConnectionStore((s) => s.serverMode);
+  const serverMode = useConnectionLifecycleStore((s) => s.serverMode);
   const sessionCwd = useConnectionStore((s) => s.sessionCwd);
   const streamingMessageId = useConnectionStore(selectStreamingMessageId);
   const connectionPhase = useConnectionStore((s) => s.connectionPhase);

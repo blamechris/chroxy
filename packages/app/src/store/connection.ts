@@ -220,10 +220,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   wsUrl: null,
   apiToken: null,
   socket: null,
-  serverMode: null,
   sessionCwd: null,
-  serverVersion: null,
-  latestVersion: null,
   sessions: [],
   activeSessionId: null,
   sessionStates: {},
@@ -688,10 +685,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({
       connectionPhase: 'disconnected',
       socket: null,
-      serverMode: null,
       sessionCwd: null,
-      serverVersion: null,
-      latestVersion: null,
       availableModels: [],
       defaultModelId: null,
       availablePermissionModes: [],
@@ -748,14 +742,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessionStates: {},
       wsUrl: null,
       apiToken: null,
-      serverMode: null,
       sessionCwd: null,
-      serverVersion: null,
-      latestVersion: null,
       viewingCachedSession: false,
       conversationHistory: [],
       conversationHistoryLoading: false,
       conversationHistoryError: null,
+    });
+    useConnectionLifecycleStore.getState().setServerInfo({
+      serverMode: null,
+      serverVersion: null,
+      latestVersion: null,
+      sessionCwd: null,
     });
     useTerminalStore.getState().reset();
     useConversationStore.getState().reset();

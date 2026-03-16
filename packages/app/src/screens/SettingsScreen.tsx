@@ -16,6 +16,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import Constants from 'expo-constants';
 import * as Clipboard from 'expo-clipboard';
 import { useConnectionStore } from '../store/connection';
+import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { COLORS } from '../constants/colors';
 import type { RootStackParamList } from '../App';
 import { getSpeechLang, setSpeechLang } from '../hooks/useSpeechRecognition';
@@ -92,10 +93,11 @@ export function SettingsScreen() {
     clearSavedConnection,
     requestFullHistory,
     wsUrl,
-    serverVersion,
-    latestVersion,
-    serverMode,
   } = useConnectionStore();
+
+  const serverVersion = useConnectionLifecycleStore((s) => s.serverVersion);
+  const latestVersion = useConnectionLifecycleStore((s) => s.latestVersion);
+  const serverMode = useConnectionLifecycleStore((s) => s.serverMode);
 
   const conversationId = useConnectionStore((s) => {
     const id = s.activeSessionId;
