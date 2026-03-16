@@ -447,7 +447,7 @@ export async function startCliServer(config) {
     await waitForTunnel(httpUrl)
 
     // 7. Generate connection info
-    const modeLabel = `${tunnelArg.provider}:${tunnelArg.mode}`
+    const modeLabel = `cloudflare:${tunnelArg.mode}`
     currentTunnelMode = modeLabel
     displayQr(wsUrl, httpUrl, modeLabel)
 
