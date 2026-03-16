@@ -474,6 +474,100 @@ export function clearConnection(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Map-based handler infrastructure
+// ---------------------------------------------------------------------------
+
+/**
+ * Signature for a standalone message handler extracted from the switch statement.
+ * Receives the raw message, store accessors, and the connection context.
+ */
+type MsgGet = () => ConnectionState;
+type MsgSet = (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void;
+type Handler = (msg: Record<string, unknown>, get: MsgGet, set: MsgSet, ctx: ConnectionContext) => void;
+
+// --- Extracted handler functions ---
+
+function handlePong(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  _onPong();
+}
+
+function handleRaw(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  get().appendTerminalData(msg.data as string);
+}
+
+function handleRawBackground(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  get().appendTerminalData(msg.data as string);
+}
+
+function handleTokenRotated(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  // Token was rotated on the server — the new token is NOT sent over the wire.
+  // The client must re-authenticate (re-scan QR or re-enter token).
+  console.log('[ws] Server token rotated — re-authentication required');
+}
+
+function handleCheckpointRestored(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  // Server has created a new session from the checkpoint.
+  // The session_list update will follow from the server — nothing to do here.
+}
+
+function handleWebFeatureStatus(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  set({
+    webFeatures: {
+      available: !!msg.available,
+      remote: !!msg.remote,
+      teleport: !!msg.teleport,
+    },
+  });
+}
+
+function handleWebTaskList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const tasks = Array.isArray(msg.tasks) ? (msg.tasks as WebTask[]) : [];
+  set({ webTasks: tasks });
+}
+
+function handleConversationsList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const conversations = Array.isArray(msg.conversations) ? (msg.conversations as ConversationSummary[]) : [];
+  set({ conversationHistory: conversations, conversationHistoryLoading: false });
+}
+
+function handleModelChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const model = (typeof msg.model === 'string' && (msg.model as string).trim()) ? (msg.model as string).trim() : null;
+  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, () => ({ activeModel: model }));
+  } else {
+    set({ activeModel: model });
+  }
+}
+
+function handleThinkingLevelChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const raw = (typeof msg.level === 'string' && msg.level.trim()) ? msg.level.trim() : 'default';
+  const level = (['default', 'high', 'max'].includes(raw) ? raw : 'default') as ThinkingLevel;
+  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, () => ({ thinkingLevel: level }));
+  }
+}
+
+/**
+ * Map of message type → handler function for the simplest, most self-contained
+ * cases. handleMessage() dispatches to this map first; unmatched types fall
+ * through to the legacy switch statement below.
+ */
+const HANDLERS: Record<string, Handler> = {
+  pong: handlePong,
+  raw: handleRaw,
+  raw_background: handleRawBackground,
+  token_rotated: handleTokenRotated,
+  checkpoint_restored: handleCheckpointRestored,
+  web_feature_status: handleWebFeatureStatus,
+  web_task_list: handleWebTaskList,
+  conversations_list: handleConversationsList,
+  model_changed: handleModelChanged,
+  thinking_level_changed: handleThinkingLevelChanged,
+};
+
+// ---------------------------------------------------------------------------
 // handleMessage — main message dispatch
 // ---------------------------------------------------------------------------
 
@@ -496,10 +590,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   const set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void =
     (s) => getStore().setState(s as ConnectionState);
 
+  // Dispatch to the handler map first — extracted, self-contained cases.
+  const handler = HANDLERS[msg.type];
+  if (handler) {
+    handler(msg, get, set, ctx);
+    return;
+  }
+
   switch (msg.type) {
-    case 'pong':
-      _onPong();
-      return;
 
     case 'auth_ok': {
       // Reset replay flags — fresh auth means clean slate
@@ -1176,17 +1274,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'model_changed': {
-      const model = (typeof msg.model === 'string' && (msg.model as string).trim()) ? (msg.model as string).trim() : null;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, () => ({ activeModel: model }));
-      } else {
-        set({ activeModel: model });
-      }
-      break;
-    }
-
     case 'available_models':
       if (Array.isArray(msg.models)) {
         const cleaned = (msg.models as unknown[])
@@ -1226,16 +1313,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'thinking_level_changed': {
-      const raw = (typeof msg.level === 'string' && msg.level.trim()) ? msg.level.trim() : 'default';
-      const level = (['default', 'high', 'max'].includes(raw) ? raw : 'default') as ThinkingLevel;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, () => ({ thinkingLevel: level }));
-      }
-      break;
-    }
-
     case 'confirm_permission_mode': {
       const confirmMode = typeof msg.mode === 'string' ? msg.mode : null;
       const warning = typeof msg.warning === 'string' ? msg.warning : 'Are you sure?';
@@ -1255,10 +1332,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           );
         set({ availablePermissionModes: cleaned });
       }
-      break;
-
-    case 'raw':
-      get().appendTerminalData(msg.data as string);
       break;
 
     case 'claude_ready': {
@@ -1345,10 +1418,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       break;
     }
-
-    case 'raw_background':
-      get().appendTerminalData(msg.data as string);
-      break;
 
     case 'permission_request': {
       // Split streaming response at permission boundary (#554)
@@ -1785,12 +1854,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'checkpoint_restored': {
-      // Server has created a new session from the checkpoint
-      // The session_list update will follow from the server
-      break;
-    }
-
     case 'mcp_servers': {
       const mcpTargetId = (msg.sessionId as string) || get().activeSessionId;
       const servers = (msg.servers as McpServer[]) || [];
@@ -1900,17 +1963,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // -- Web tasks (Claude Code Web) --
 
-    case 'web_feature_status': {
-      set({
-        webFeatures: {
-          available: !!msg.available,
-          remote: !!msg.remote,
-          teleport: !!msg.teleport,
-        },
-      });
-      break;
-    }
-
     case 'web_task_created':
     case 'web_task_updated': {
       const task = msg.task as WebTask;
@@ -1949,18 +2001,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       } else {
         get().addMessage(errorMsg);
       }
-      break;
-    }
-
-    case 'web_task_list': {
-      const tasks = Array.isArray(msg.tasks) ? (msg.tasks as WebTask[]) : [];
-      set({ webTasks: tasks });
-      break;
-    }
-
-    case 'conversations_list': {
-      const conversations = Array.isArray(msg.conversations) ? (msg.conversations as ConversationSummary[]) : [];
-      set({ conversationHistory: conversations, conversationHistoryLoading: false });
       break;
     }
 
@@ -2049,13 +2089,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (!serverError.recoverable) {
         _adapters.alert.alert('Server Error', serverError.message);
       }
-      break;
-    }
-
-    case 'token_rotated': {
-      // Token was rotated on the server — the new token is NOT sent over the wire.
-      // The client must re-authenticate (re-scan QR or re-enter token).
-      console.log('[ws] Server token rotated — re-authentication required');
       break;
     }
 
