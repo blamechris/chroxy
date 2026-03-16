@@ -1,0 +1,6 @@
+{
+  "identifier": "voice",
+  "description": "Voice input commands restricted to the main window. Scoping prevents a compromised dashboard or qr_popup window from invoking microphone access after the initial permission grant.",
+  "windows": ["main"],
+  "permissions": []
+}

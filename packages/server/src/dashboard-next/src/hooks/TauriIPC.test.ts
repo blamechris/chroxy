@@ -49,7 +49,7 @@ describe('Tauri IPC commands (#1108)', () => {
     expect(hookSrc).toMatch(/export async function stopServer/)
   })
 
-  test('hook checks for Tauri context before invoking', () => {
-    expect(hookSrc).toMatch(/__TAURI_INTERNALS__|isTauri/)
+  test('hook uses shared tauri-bridge for Tauri context check', () => {
+    expect(hookSrc).toMatch(/tauri-bridge/)
   })
 })

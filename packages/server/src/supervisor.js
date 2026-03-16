@@ -12,7 +12,12 @@ import { waitForTunnel } from './tunnel-check.js'
 import { createLogger } from './logger.js'
 import qrcode from 'qrcode-terminal'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
-import { maskToken } from './mask-token.js'
+
+function maskToken(token) {
+  if (!token) return ''
+  if (token.length <= 8) return token
+  return `${token.slice(0, 4)}...${token.slice(-4)}`
+}
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)

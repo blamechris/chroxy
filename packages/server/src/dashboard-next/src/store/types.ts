@@ -403,10 +403,6 @@ export interface ConnectionState {
   isIdle: boolean;
   messages: ChatMessage[];
 
-  // Cost tracking
-  totalCost: number | null;
-  costBudget: number | null;
-
   // Available providers from server
   availableProviders: ProviderInfo[];
 

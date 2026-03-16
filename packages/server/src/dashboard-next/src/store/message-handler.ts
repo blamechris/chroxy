@@ -1865,13 +1865,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'cost_update': {
       const sessionCost = typeof msg.sessionCost === 'number' ? msg.sessionCost : null;
-      const totalCost = typeof msg.totalCost === 'number' ? msg.totalCost : null;
-      const budget = typeof msg.budget === 'number' ? msg.budget : null;
       const costTargetId = (msg.sessionId as string) || get().activeSessionId;
       if (costTargetId && get().sessionStates[costTargetId]) {
         updateSession(costTargetId, () => ({ sessionCost }));
       }
-      set({ totalCost, costBudget: budget });
       break;
     }
 

@@ -355,13 +355,8 @@ export interface ConnectionState {
   // User explicitly disconnected — prevents auto-reconnect on ConnectScreen mount
   userDisconnected: boolean;
 
-  // Server mode (always 'cli' since v0.2.0)
-  serverMode: 'cli' | null;
-
   // Server context (from auth_ok)
   sessionCwd: string | null;
-  serverVersion: string | null;
-  latestVersion: string | null;
 
   // Multi-session state
   sessions: SessionInfo[];

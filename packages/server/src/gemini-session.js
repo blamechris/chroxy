@@ -107,7 +107,7 @@ export class GeminiSession extends BaseSession {
 
     rl.on('line', (line) => {
       if (this._destroying) return
-      const event = this._parseGeminiLine(line)
+      const event = this._parseJsonLine(line)
       if (event) {
         // For assistant text, use a single stream per sendMessage call
         if (event.type === 'assistant' && event.content && Array.isArray(event.content)) {
@@ -175,20 +175,6 @@ export class GeminiSession extends BaseSession {
 
   setPermissionMode(_mode) {
     // Gemini CLI doesn't support permission mode switching from Chroxy
-  }
-
-  /**
-   * Parse a JSONL line from Gemini stdout.
-   * @param {string} line - Raw JSONL line
-   * @returns {Object|null} Parsed event or null if invalid
-   */
-  _parseGeminiLine(line) {
-    if (!line || !line.trim()) return null
-    try {
-      return JSON.parse(line)
-    } catch {
-      return null
-    }
   }
 
   /**

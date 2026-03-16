@@ -307,4 +307,104 @@ describe('createPermissionHookManager', () => {
 
     manager.destroy()
   })
+
+  it('destroy() returns a promise', async () => {
+    const manager = createPermissionHookManager(emitter)
+    const result = manager.destroy()
+    assert.ok(result instanceof Promise, 'destroy() should return a Promise')
+    await result
+  })
+
+  it('destroy() before register completes leaves no hook in settings (race guard)', async () => {
+    // Simulate the race: register() acquires lock slot, destroy() fires while
+    // still in the queue, then the lock is finally executed.
+    const settingsPath = join(tempDir, 'settings.json')
+
+    // Hold the settings lock with a slow operation
+    let releaseLock
+    const lockHeld = new Promise((resolve) => { releaseLock = resolve })
+
+    // Grab the lock first so register() must queue
+    const { withSettingsLock: lockFn } = await import('../src/permission-hook.js')
+    const blocker = lockFn(() => lockHeld)
+
+    const manager = createPermissionHookManager(emitter, { settingsPath })
+
+    // Fire register() — it queues behind the blocker
+    const registerPromise = manager.register()
+
+    // Call destroy() while register is still pending
+    const destroyPromise = manager.destroy()
+
+    // Release the lock — register() and then unregister() will run in sequence
+    releaseLock()
+    await blocker.catch(() => {})
+    await registerPromise.catch(() => {})
+    await destroyPromise
+
+    // The hook should NOT be present — either register was skipped or
+    // destroy's chained unregister cleaned it up
+    let settings = {}
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    } catch {
+      // File may not exist if register was fully skipped — that's fine
+    }
+    const hooks = settings.hooks?.PreToolUse || []
+    const chrHooks = hooks.filter((h) => h._chroxy)
+    assert.equal(chrHooks.length, 0, 'No dead chroxy hook should remain after destroy-during-register race')
+  })
+
+  it('destroy() after register completes still removes hook cleanly', async () => {
+    const settingsPath = join(tempDir, 'settings.json')
+    const manager = createPermissionHookManager(emitter, { settingsPath })
+
+    await manager.register()
+
+    // Hook should be present
+    let settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    assert.equal(settings.hooks.PreToolUse.length, 1, 'Hook registered')
+
+    // Normal destroy — chains unregister after completed register
+    await manager.destroy()
+
+    settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    const chrHooks = (settings.hooks?.PreToolUse || []).filter((h) => h._chroxy)
+    assert.equal(chrHooks.length, 0, 'Hook removed by destroy()')
+  })
+
+  it('destroying flag prevents register write when lock was contended', async () => {
+    const settingsPath = join(tempDir, 'settings.json')
+    const manager = createPermissionHookManager(emitter, { settingsPath })
+
+    // Manually set destroying before register fires inside the lock
+    // to simulate the exact scenario described in issue #2365
+    let releaseLock
+    const lockHeld = new Promise((resolve) => { releaseLock = resolve })
+    const { withSettingsLock: lockFn } = await import('../src/permission-hook.js')
+    const blocker = lockFn(() => lockHeld)
+
+    // register() queues
+    const registerPromise = manager.register()
+
+    // destroy() sets destroying = true immediately
+    const destroyPromise = manager.destroy()
+
+    // Release blocker — register callback runs with destroying = true,
+    // should skip the write
+    releaseLock()
+    await blocker.catch(() => {})
+    await registerPromise.catch(() => {})
+    await destroyPromise
+
+    let settings = {}
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    } catch {
+      // No file created — register was skipped entirely (best case)
+    }
+    const hooks = settings.hooks?.PreToolUse || []
+    assert.equal(hooks.filter((h) => h._chroxy).length, 0,
+      'destroy() during contended register must not leave a dead hook')
+  })
 })

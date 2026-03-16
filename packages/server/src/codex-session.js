@@ -110,7 +110,7 @@ export class CodexSession extends BaseSession {
 
     rl.on('line', (line) => {
       if (this._destroying) return
-      const event = this._parseCodexLine(line)
+      const event = this._parseJsonLine(line)
       if (!event || !event.type) return
 
       switch (event.type) {
@@ -211,20 +211,8 @@ export class CodexSession extends BaseSession {
     }
   }
 
-  setModel(model) {
-    super.setModel(model)
-  }
-
   setPermissionMode(_mode) {
     // Codex CLI doesn't support permission mode switching from Chroxy
   }
 
-  _parseCodexLine(line) {
-    if (!line || !line.trim()) return null
-    try {
-      return JSON.parse(line)
-    } catch {
-      return null
-    }
-  }
 }
