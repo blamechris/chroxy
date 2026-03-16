@@ -5,7 +5,7 @@
  *          query_permission_audit, list_providers
  */
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
-import { ALLOWED_PERMISSION_MODE_IDS } from '../handler-utils.js'
+import { ALLOWED_PERMISSION_MODE_IDS, resolveSession } from '../handler-utils.js'
 import { listProviders } from '../providers.js'
 
 function handleSetModel(ws, client, msg, ctx) {
@@ -14,7 +14,7 @@ function handleSetModel(ws, client, msg, ctx) {
     ALLOWED_MODEL_IDS.has(msg.model)
   ) {
     const modelSessionId = msg.sessionId || client.activeSessionId
-    const entry = ctx.sessionManager.getSession(modelSessionId)
+    const entry = resolveSession(ctx, msg, client)
     if (entry) {
       console.log(`[ws] Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
       entry.session.setModel(msg.model)
@@ -31,7 +31,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
     ALLOWED_PERMISSION_MODE_IDS.has(msg.mode)
   ) {
     const permModeSessionId = msg.sessionId || client.activeSessionId
-    const entry = ctx.sessionManager.getSession(permModeSessionId)
+    const entry = resolveSession(ctx, msg, client)
     if (entry) {
       if (msg.mode === 'plan' && !entry.session.constructor.capabilities?.planMode) {
         ctx.send(ws, { type: 'session_error', message: 'This provider does not support plan mode' })
@@ -148,7 +148,7 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = ctx.sessionManager?.getSession(sessionId)
+  const entry = resolveSession(ctx, msg, client)
   if (!entry) {
     ctx.send(ws, { type: 'session_error', message: 'No active session' })
     return

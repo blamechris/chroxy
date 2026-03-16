@@ -40,7 +40,7 @@ function handleTeleportWebTask(ws, client, msg, ctx) {
 }
 
 function handleCloseDevPreview(ws, client, msg, ctx) {
-  const previewSessionId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
+  const previewSessionId = msg.sessionId || client.activeSessionId
   if (previewSessionId && typeof msg.port === 'number') {
     ctx.devPreview.closePreview(previewSessionId, msg.port)
   }
