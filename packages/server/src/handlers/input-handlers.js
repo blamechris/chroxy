@@ -37,7 +37,7 @@ function handleInput(ws, client, msg, ctx) {
   if ((!text || !text.trim()) && !attachments?.length) return
   const trimmed = text?.trim() || ''
   const attCount = attachments?.length || 0
-  log.info(`Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
+  log.debug(`Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
 
   if (ctx.sessionManager.isBudgetPaused(targetSessionId)) {
     ctx.send(ws, { type: 'session_error', message: 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.' })

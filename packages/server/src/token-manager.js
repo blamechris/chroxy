@@ -106,7 +106,7 @@ export class TokenManager extends EventEmitter {
     this._currentToken = newToken
     this._expiresAt = this._expiryMs ? Date.now() + this._expiryMs : null
 
-    log.info(`Token rotated: ${oldToken.slice(0, 8)}... → ${newToken.slice(0, 8)}...`)
+    log.info(`Token rotated`)
 
     // Emit event for WsServer to broadcast to clients
     this.emit('token_rotated', {

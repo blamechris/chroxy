@@ -83,7 +83,7 @@ export async function handleSessionMessage(ws, client, msg, ctx) {
   if (handler) {
     await handler(ws, client, msg, ctx)
   } else {
-    log.warn(`Unknown message type: ${msg.type}`)
+    log.debug(`Unknown message type: ${msg.type}`)
   }
 }
 
