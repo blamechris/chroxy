@@ -191,7 +191,7 @@ describe('CliSession._pendingQueue — FIFO dequeue on ready', () => {
 })
 
 describe('CliSession._pendingQueue — drain via _clearMessageState', () => {
-  it('drains all 3 queued messages in FIFO order after each result', () => {
+  it('drains all 3 queued messages in FIFO order after each result', async () => {
     const written = []
     const mockChild = createMockChild()
     mockChild.stdin = new Writable({ write(chunk, enc, cb) { written.push(chunk.toString()); cb() } })
@@ -219,9 +219,11 @@ describe('CliSession._pendingQueue — drain via _clearMessageState', () => {
     assert.equal(JSON.parse(written[0].trim()).message.content[0].text, 'msg-1')
     assert.equal(session._pendingQueue.length, 2)
 
-    // Simulate result for msg-1: _clearMessageState should auto-drain msg-2
+    // Simulate result for msg-1: _clearMessageState schedules drain via nextTick
     session._isBusy = true  // set as if sendMessage ran
     session._clearMessageState()
+    // Wait for the nextTick drain to execute
+    await new Promise(r => process.nextTick(r))
     clearTimeout(session._resultTimeout)
     session._resultTimeout = null
 
@@ -229,9 +231,11 @@ describe('CliSession._pendingQueue — drain via _clearMessageState', () => {
     assert.equal(JSON.parse(written[1].trim()).message.content[0].text, 'msg-2')
     assert.equal(session._pendingQueue.length, 1)
 
-    // Simulate result for msg-2: _clearMessageState should auto-drain msg-3
+    // Simulate result for msg-2: _clearMessageState schedules drain via nextTick
     session._isBusy = true
     session._clearMessageState()
+    // Wait for the nextTick drain to execute
+    await new Promise(r => process.nextTick(r))
     clearTimeout(session._resultTimeout)
     session._resultTimeout = null
 
@@ -240,7 +244,7 @@ describe('CliSession._pendingQueue — drain via _clearMessageState', () => {
     assert.equal(session._pendingQueue.length, 0)
   })
 
-  it('does not drain when process is not ready (mid-respawn)', () => {
+  it('does not drain when process is not ready (mid-respawn)', async () => {
     const written = []
     const mockChild = createMockChild()
     mockChild.stdin = new Writable({ write(chunk, enc, cb) { written.push(chunk.toString()); cb() } })
@@ -259,9 +263,35 @@ describe('CliSession._pendingQueue — drain via _clearMessageState', () => {
     session._isBusy = true
     session._clearMessageState()
 
+    // Wait past the nextTick to confirm nothing was drained
+    await new Promise(r => process.nextTick(r))
+
     // Queue should remain untouched since process is not ready
     assert.equal(session._pendingQueue.length, 1)
     assert.equal(written.length, 0)
+  })
+
+  it('does not drain after destroy() is called', async () => {
+    const written = []
+    const mockChild = createMockChild()
+    mockChild.stdin = new Writable({ write(chunk, enc, cb) { written.push(chunk.toString()); cb() } })
+
+    const session = createSession()
+    session._processReady = true
+    session._child = mockChild
+
+    // Queue a message
+    session._pendingQueue.push({ prompt: 'should-not-send', attachments: undefined, options: {} })
+
+    // Trigger a drain, then immediately destroy before nextTick fires
+    session._isBusy = true
+    session._clearMessageState()
+    session._destroying = true
+
+    // Wait past the nextTick — drain should be suppressed by _destroying guard
+    await new Promise(r => process.nextTick(r))
+
+    assert.equal(written.length, 0, 'no message should be written after destroy()')
   })
 })
 

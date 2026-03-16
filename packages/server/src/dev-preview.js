@@ -93,24 +93,42 @@ export class DevPreviewManager extends EventEmitter {
 
   /**
    * Create a preview tunnel for the given session and port.
+   *
+   * The tunnel object is registered in _tunnels BEFORE start() is called so
+   * that closeSession() can find and stop it even if destruction races the
+   * 30-second startup window (preventing zombie cloudflared processes).
    */
   async _createPreviewTunnel(sessionId, port) {
     const tunnel = new CloudflareTunnelAdapter({ port, mode: 'quick' })
 
+    // Register before starting so closeSession() can reach it during startup
+    if (!this._tunnels.has(sessionId)) {
+      this._tunnels.set(sessionId, new Map())
+    }
+    this._tunnels.get(sessionId).set(port, tunnel)
+
     try {
       const { httpUrl } = await tunnel.start()
-      console.log(`[dev-preview] Tunnel started for session ${sessionId} port ${port}: ${httpUrl}`)
 
-      // Store the tunnel
-      if (!this._tunnels.has(sessionId)) {
-        this._tunnels.set(sessionId, new Map())
+      // Check whether the session was destroyed while we were waiting for start()
+      if (this._getTunnel(sessionId, port) !== tunnel) {
+        // Session was closed during startup — stop the tunnel immediately
+        console.log(`[dev-preview] Session ${sessionId} destroyed during tunnel startup, stopping port ${port}`)
+        try { await tunnel.stop() } catch { /* ignore */ }
+        return
       }
-      this._tunnels.get(sessionId).set(port, tunnel)
 
+      console.log(`[dev-preview] Tunnel started for session ${sessionId} port ${port}: ${httpUrl}`)
       this.emit('dev_preview_started', { sessionId, port, url: httpUrl })
     } catch (err) {
       console.error(`[dev-preview] Failed to create tunnel for port ${port}:`, err.message)
       this.emit('dev_preview_error', { sessionId, port, error: err.message })
+      // Remove the placeholder entry left by pre-registration
+      const sessionTunnels = this._tunnels.get(sessionId)
+      if (sessionTunnels) {
+        sessionTunnels.delete(port)
+        if (sessionTunnels.size === 0) this._tunnels.delete(sessionId)
+      }
       // Clean up failed tunnel
       try { await tunnel.stop() } catch { /* ignore */ }
     }

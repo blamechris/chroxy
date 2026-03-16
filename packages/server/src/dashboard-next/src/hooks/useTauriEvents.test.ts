@@ -27,6 +27,7 @@ function setupTauriMock() {
 
 function clearTauriMock() {
   delete (window as unknown as Record<string, unknown>).__TAURI__
+  delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
 }
 
 function emit(event: string, payload?: unknown) {
@@ -195,6 +196,8 @@ describe('useTauriEvents', () => {
 
   it('fetches server logs on server_error via Tauri IPC (#2094)', async () => {
     const mockInvoke = vi.fn().mockResolvedValue(['[ERROR] EADDRINUSE', '[INFO] Exit 1'])
+    // __TAURI__ provides event.listen (bridge getTauriListen path)
+    // __TAURI_INTERNALS__ provides invoke (bridge getTauriInvoke path)
     Object.defineProperty(window, '__TAURI__', {
       value: {
         event: { listen: vi.fn(async (event: string, handler: Handler) => {
@@ -202,8 +205,12 @@ describe('useTauriEvents', () => {
           listeners.get(event)!.push(handler)
           return unlisten
         })},
-        core: { invoke: mockInvoke },
       },
+      writable: true,
+      configurable: true,
+    })
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      value: { invoke: mockInvoke },
       writable: true,
       configurable: true,
     })

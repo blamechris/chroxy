@@ -5,7 +5,7 @@
  * returns null for all queries and no-ops for commands.
  */
 
-import { isTauri } from '../utils/tauri'
+import { getTauriInvoke } from '../utils/tauri-bridge'
 
 interface ServerInfo {
   port: number
@@ -17,19 +17,10 @@ interface ServerInfo {
 
 /** Invoke a Tauri command (returns null if not in Tauri context) */
 async function tauriInvoke<T>(cmd: string): Promise<T | null> {
-  if (!isTauri()) return null
+  const invoke = getTauriInvoke()
+  if (!invoke) return null
   try {
-    // Access Tauri invoke via window globals instead of importing @tauri-apps/api/core
-    // to avoid bare module specifier resolution issues in non-Tauri browser contexts.
-    // Matches the pattern used in useTauriEvents.ts — try __TAURI__.core.invoke first,
-    // then __TAURI__.invoke as fallback.
-    const w = window as unknown as Record<string, unknown>
-    const tauri = w.__TAURI__ as Record<string, unknown> | undefined
-    if (!tauri) return null
-    const core = tauri.core as Record<string, unknown> | undefined
-    const invokeFn = (core?.invoke ?? tauri.invoke) as ((cmd: string) => Promise<T>) | undefined
-    if (!invokeFn) return null
-    return await invokeFn(cmd)
+    return await invoke(cmd) as T
   } catch {
     return null
   }

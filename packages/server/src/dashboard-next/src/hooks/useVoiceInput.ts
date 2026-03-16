@@ -8,7 +8,7 @@
  * Only active inside Tauri (desktop app). Returns isAvailable=false in browser.
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { isTauri } from '../utils/tauri'
+import { getTauriInvoke, getTauriListen } from '../utils/tauri-bridge'
 
 interface TranscriptionPayload {
   text: string
@@ -20,21 +20,6 @@ interface ErrorPayload {
 }
 
 type UnlistenFn = () => void
-
-function getTauriInvoke(): ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null {
-  if (!isTauri()) return null
-  const w = window as unknown as Record<string, unknown>
-  const internals = w.__TAURI_INTERNALS__ as { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } | undefined
-  return internals?.invoke ?? null
-}
-
-function getTauriListen(): (<T>(event: string, handler: (e: { payload: T }) => void) => Promise<UnlistenFn>) | null {
-  if (!isTauri()) return null
-  const w = window as unknown as Record<string, unknown>
-  const tauri = w.__TAURI__ as Record<string, unknown> | undefined
-  const event = tauri?.event as { listen: <T>(event: string, handler: (e: { payload: T }) => void) => Promise<UnlistenFn> } | undefined
-  return event?.listen ?? null
-}
 
 export function useVoiceInput() {
   const [isRecording, setIsRecording] = useState(false)
