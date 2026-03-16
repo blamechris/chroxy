@@ -117,12 +117,12 @@ export class DevPreviewManager extends EventEmitter {
       // Check whether the session was destroyed while we were waiting for start()
       if (this._getTunnel(sessionId, port) !== tunnel) {
         // Session was closed during startup — stop the tunnel immediately
-        console.log(`[dev-preview] Session ${sessionId} destroyed during tunnel startup, stopping port ${port}`)
+        log.info(`Session ${sessionId} destroyed during tunnel startup, stopping port ${port}`)
         try { await tunnel.stop() } catch { /* ignore */ }
         return
       }
 
-      console.log(`[dev-preview] Tunnel started for session ${sessionId} port ${port}: ${httpUrl}`)
+      log.info(`Tunnel started for session ${sessionId} port ${port}: ${httpUrl}`)
       this.emit('dev_preview_started', { sessionId, port, url: httpUrl })
     } catch (err) {
       log.error(`Failed to create tunnel for port ${port}: ${err.message}`)
