@@ -4,6 +4,9 @@
  * Handles: input, interrupt, resume_budget, register_push_token, user_question_response
  */
 import { validateAttachments, resolveFileRefAttachments, resolveSession } from '../handler-utils.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('ws')
 
 function handleInput(ws, client, msg, ctx) {
   const text = msg.data
@@ -34,7 +37,7 @@ function handleInput(ws, client, msg, ctx) {
   if ((!text || !text.trim()) && !attachments?.length) return
   const trimmed = text?.trim() || ''
   const attCount = attachments?.length || 0
-  console.log(`[ws] Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
+  log.info(`Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
 
   if (ctx.sessionManager.isBudgetPaused(targetSessionId)) {
     ctx.send(ws, { type: 'session_error', message: 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.' })
@@ -61,7 +64,7 @@ function handleInput(ws, client, msg, ctx) {
       cwd: entry.cwd,
       description: trimmed.slice(0, 100),
       messageCount: ctx.sessionManager.getHistoryCount(targetSessionId),
-    }).catch((err) => console.warn(`[ws] Auto-checkpoint failed: ${err.message}`))
+    }).catch((err) => log.warn(`Auto-checkpoint failed: ${err.message}`))
   }
   const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
   ctx.sessionManager.recordUserInput(targetSessionId, historyText)
@@ -81,7 +84,7 @@ function handleInterrupt(ws, client, msg, ctx) {
   const interruptSessionId = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
   if (entry) {
-    console.log(`[ws] Interrupt from ${client.id} to session ${interruptSessionId}`)
+    log.info(`Interrupt from ${client.id} to session ${interruptSessionId}`)
     entry.session.interrupt()
   }
 }
@@ -95,7 +98,7 @@ function handleResumeBudget(ws, client, msg, ctx) {
   if (ctx.sessionManager.isBudgetPaused(budgetSessionId)) {
     ctx.sessionManager.resumeBudget(budgetSessionId)
     ctx.broadcastToSession(budgetSessionId, { type: 'budget_resumed', sessionId: budgetSessionId })
-    console.log(`[ws] Budget resumed for session ${budgetSessionId} by ${client.id}`)
+    log.info(`Budget resumed for session ${budgetSessionId} by ${client.id}`)
   }
 }
 

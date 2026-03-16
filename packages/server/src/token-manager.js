@@ -2,6 +2,9 @@ import { randomBytes } from 'crypto'
 import { EventEmitter } from 'events'
 import { safeTokenCompare } from './crypto.js'
 import { parseDuration } from './duration.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('token-manager')
 
 /**
  * Manages token lifecycle with optional rotation and expiry.
@@ -48,7 +51,7 @@ export class TokenManager extends EventEmitter {
     // Minimum expiry floor: 5 minutes (prevents excessive rotation spam)
     const MIN_EXPIRY_MS = 5 * 60 * 1000
     if (this._expiryMs != null && this._expiryMs < MIN_EXPIRY_MS) {
-      console.warn(`[token-manager] tokenExpiry ${tokenExpiry} (${this._expiryMs}ms) is below minimum ${MIN_EXPIRY_MS}ms — clamping to 5 minutes`)
+      log.warn(`tokenExpiry ${tokenExpiry} (${this._expiryMs}ms) is below minimum ${MIN_EXPIRY_MS}ms — clamping to 5 minutes`)
       this._expiryMs = MIN_EXPIRY_MS
     }
     this._expiresAt = null
@@ -88,7 +91,7 @@ export class TokenManager extends EventEmitter {
     if (!this.rotationEnabled) return
     this._expiresAt = Date.now() + this._expiryMs
     this._scheduleRotation()
-    console.log(`[token-manager] Token rotation enabled (every ${formatDuration(this._expiryMs)}, grace: ${formatDuration(this._graceMs)})`)
+    log.info(`Token rotation enabled (every ${formatDuration(this._expiryMs)}, grace: ${formatDuration(this._graceMs)})`)
   }
 
   /**
@@ -103,7 +106,7 @@ export class TokenManager extends EventEmitter {
     this._currentToken = newToken
     this._expiresAt = this._expiryMs ? Date.now() + this._expiryMs : null
 
-    console.log(`[token-manager] Token rotated: ${oldToken.slice(0, 8)}... → ${newToken.slice(0, 8)}...`)
+    log.info(`Token rotated: ${oldToken.slice(0, 8)}... → ${newToken.slice(0, 8)}...`)
 
     // Emit event for WsServer to broadcast to clients
     this.emit('token_rotated', {
@@ -115,7 +118,7 @@ export class TokenManager extends EventEmitter {
     // Persist the new token
     if (this._onPersist) {
       Promise.resolve(this._onPersist(newToken)).catch(err => {
-        console.error(`[token-manager] Failed to persist new token: ${err.message}`)
+        log.error(`Failed to persist new token: ${err.message}`)
       })
     }
 
@@ -124,7 +127,7 @@ export class TokenManager extends EventEmitter {
     this._graceTimer = setTimeout(() => {
       this._graceTimer = null
       this._previousToken = null
-      console.log(`[token-manager] Grace period expired, old token invalidated`)
+      log.info(`Grace period expired, old token invalidated`)
     }, this._graceMs)
 
     // Schedule next rotation

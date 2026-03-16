@@ -5,6 +5,9 @@
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
 import { validateCwdWithinHome, broadcastFocusChanged } from '../handler-utils.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('ws')
 
 function handleListSessions(ws, client, msg, ctx) {
   ctx.send(ws, { type: 'session_list', sessions: ctx.sessionManager.listSessions() })
@@ -19,7 +22,7 @@ function handleSwitchSession(ws, client, msg, ctx) {
   }
   client.activeSessionId = targetId
   client.subscribedSessionIds.add(targetId)
-  console.log(`[ws] Client ${client.id} switched to session ${targetId}`)
+  log.info(`Client ${client.id} switched to session ${targetId}`)
   ctx.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
   ctx.sendSessionInfo(ws, targetId)
   ctx.replayHistory(ws, targetId)
