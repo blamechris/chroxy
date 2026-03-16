@@ -27,7 +27,7 @@ const VALID_TRANSITIONS: Record<ConnectionPhase, ConnectionPhase[]> = {
   connecting: ['connecting', 'connected', 'disconnected', 'reconnecting', 'server_restarting'],
   connected: ['disconnected', 'reconnecting', 'server_restarting'],
   reconnecting: ['reconnecting', 'connected', 'disconnected', 'server_restarting'],
-  server_restarting: ['connecting', 'disconnected'],
+  server_restarting: ['connecting', 'reconnecting', 'disconnected'],
 };
 
 interface ServerInfo {
