@@ -126,13 +126,16 @@ function unregisterPermissionHookSync(settingsPath) {
  *
  * @param {EventEmitter} emitter - Used to emit 'error' events on failure
  * @param {{ settingsPath?: string }} [options] - Optional settings path for test isolation
- * @returns {{ register(): Promise, unregister(): Promise, destroy(): void }}
+ * @returns {{ register(): Promise, unregister(): Promise, destroy(): Promise }}
  */
 export function createPermissionHookManager(emitter, { settingsPath } = {}) {
   let retryCount = 0
   let retryTimer = null
   let registered = false
   let destroying = false
+  // Tracks the most recent in-flight register() promise so destroy() can
+  // chain unregister() after it, preventing a register-after-unregister race.
+  let pendingRegister = null
 
   function scheduleRetry() {
     if (destroying || registered) return
@@ -160,7 +163,13 @@ export function createPermissionHookManager(emitter, { settingsPath } = {}) {
   }
 
   function register() {
-    return withSettingsLock(() => {
+    const p = withSettingsLock(() => {
+      // Guard: if destroy() was called while we were waiting for the lock,
+      // skip the write so we don't leave a dead hook behind.
+      if (destroying) {
+        log.info('Hook registration skipped — session already destroyed')
+        return
+      }
       try {
         registerPermissionHookSync(settingsPath)
         if (retryTimer) {
@@ -182,6 +191,8 @@ export function createPermissionHookManager(emitter, { settingsPath } = {}) {
         scheduleRetry()
       }
     })
+    pendingRegister = p.catch(() => {})
+    return p
   }
 
   function unregister() {
@@ -200,6 +211,10 @@ export function createPermissionHookManager(emitter, { settingsPath } = {}) {
       clearTimeout(retryTimer)
       retryTimer = null
     }
+    // Chain unregister after any in-flight register so we never leave a
+    // dead hook when destroy() races with a pending settings-lock acquire.
+    const pending = pendingRegister || Promise.resolve()
+    return pending.then(() => unregister())
   }
 
   return { register, unregister, destroy }

@@ -226,18 +226,34 @@ async fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> 
     Ok(result)
 }
 
+/// Reject an IPC call that did not originate from the `main` window.
+///
+/// Voice commands interact with the system microphone. Restricting them to the
+/// main window prevents a compromised `dashboard` or `qr_popup` window from
+/// silently starting a recording after the initial microphone permission has
+/// been granted by the user.
+fn require_main_window(window: &tauri::Window) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("voice commands are restricted to the main window".into());
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn voice_available() -> bool {
-    speech::is_available()
+fn voice_available(window: tauri::Window) -> Result<bool, String> {
+    require_main_window(&window)?;
+    Ok(speech::is_available())
 }
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn start_voice_input(
+    window: tauri::Window,
     app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<speech::SpeechState>>,
 ) -> Result<(), String> {
+    require_main_window(&window)?;
     let s = lock_or_recover(&state);
     speech::start(&s, &app)
 }
@@ -245,10 +261,13 @@ fn start_voice_input(
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn stop_voice_input(
+    window: tauri::Window,
     state: tauri::State<'_, Mutex<speech::SpeechState>>,
-) {
+) -> Result<(), String> {
+    require_main_window(&window)?;
     let s = lock_or_recover(&state);
     speech::stop(&s);
+    Ok(())
 }
 
 pub fn run() {

@@ -583,12 +583,19 @@ export class CliSession extends BaseSession {
       this._interruptTimer = null
     }
 
-    // Drain the next queued message now that the process is free.
-    // Only drain when the process is ready (not mid-respawn).
+    // Drain the next queued message on the next tick so that any synchronous
+    // 'result' event listeners finish before sendMessage() is called.
+    // This prevents re-entrancy where both a result listener and the drain
+    // both call sendMessage() in the same tick, sending two messages when
+    // only one is expected.
     if (this._pendingQueue.length > 0 && this._processReady) {
-      const pending = this._pendingQueue.shift()
-      log.info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
-      this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
+      process.nextTick(() => {
+        if (this._destroying) return
+        if (!this._processReady || this._pendingQueue.length === 0) return
+        const pending = this._pendingQueue.shift()
+        log.info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
+        this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
+      })
     }
   }
 
@@ -738,11 +745,10 @@ export class CliSession extends BaseSession {
     this._destroying = true
     this._respawning = false
 
-    // Clean up permission hook — unregister first (fire-and-forget: the hook
-    // falls through harmlessly when env vars are absent, so best-effort is fine),
-    // then destroy to cancel any pending retry timers.
+    // Clean up permission hook — destroy() now chains unregister() after any
+    // in-flight register() promise, preventing a register-after-unregister race
+    // that would leave a dead hook in settings.json.
     if (this._hookManager) {
-      this._hookManager.unregister()
       this._hookManager.destroy()
     }
 
