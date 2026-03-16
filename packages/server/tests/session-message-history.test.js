@@ -306,6 +306,38 @@ describe('SessionMessageHistory', () => {
     })
   })
 
+  describe('closePendingStreams', () => {
+    it('returns closed messageIds and removes them from the map', () => {
+      history.recordHistory('s1', 'stream_start', { messageId: 'msg-a' })
+      history.recordHistory('s1', 'stream_start', { messageId: 'msg-b' })
+      history.recordHistory('s1', 'stream_delta', { messageId: 'msg-a', delta: 'partial' })
+
+      const closed = history.closePendingStreams('s1')
+
+      assert.equal(closed.length, 2)
+      assert.ok(closed.includes('msg-a'))
+      assert.ok(closed.includes('msg-b'))
+      assert.equal(history.pendingStreams.size, 0)
+    })
+
+    it('does not affect streams from other sessions', () => {
+      history.recordHistory('s1', 'stream_start', { messageId: 'msg-1' })
+      history.recordHistory('s2', 'stream_start', { messageId: 'msg-2' })
+
+      const closed = history.closePendingStreams('s1')
+
+      assert.equal(closed.length, 1)
+      assert.equal(closed[0], 'msg-1')
+      assert.equal(history.pendingStreams.has('s1:msg-1'), false)
+      assert.equal(history.pendingStreams.has('s2:msg-2'), true)
+    })
+
+    it('returns empty array when session has no pending streams', () => {
+      const closed = history.closePendingStreams('nonexistent')
+      assert.deepStrictEqual(closed, [])
+    })
+  })
+
   describe('clear', () => {
     it('clears all state', () => {
       history.recordHistory('s1', 'message', { type: 'user_input', content: 'hello', timestamp: 1 })
