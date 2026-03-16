@@ -565,14 +565,22 @@ export class Supervisor extends EventEmitter {
       }, 5000)
 
       childRef.once('exit', () => clearTimeout(forceKillTimer))
-    }
 
-    if (this._tunnel) {
-      await this._tunnel.stop()
-    }
+      // Register the exit-driven _exit(0) call BEFORE awaiting the tunnel so
+      // it is in place even if the child exits while the tunnel is stopping.
+      // The 5s force-kill above ensures the child eventually exits even if it
+      // ignores the shutdown message, so this listener always fires.
+      childRef.once('exit', () => this._exit(0))
 
-    // Give child a moment to exit
-    setTimeout(() => this._exit(0), 1000)
+      if (this._tunnel) {
+        await this._tunnel.stop()
+      }
+    } else {
+      if (this._tunnel) {
+        await this._tunnel.stop()
+      }
+      this._exit(0)
+    }
   }
 }
 
