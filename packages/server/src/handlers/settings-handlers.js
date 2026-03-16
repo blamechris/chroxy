@@ -2,12 +2,19 @@
  * Model, permission mode, and provider settings handlers.
  *
  * Handles: set_model, set_permission_mode, permission_response,
- *          query_permission_audit, list_providers
+ *          query_permission_audit, list_providers, set_permission_rules
  */
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
 import { ALLOWED_PERMISSION_MODE_IDS, resolveSession } from '../handler-utils.js'
 import { listProviders } from '../providers.js'
 import { createLogger } from '../logger.js'
+
+// Tools that are eligible to be whitelisted via set_permission_rules.
+// These are safe file-operation tools that don't execute code or make network requests.
+const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
+
+// Tools that must never be auto-allowed regardless of user rules.
+const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'])
 
 const log = createLogger('ws')
 
@@ -170,6 +177,70 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
   }
 }
 
+function handleSetPermissionRules(ws, client, msg, ctx) {
+  const rules = msg.rules
+
+  // Validate: must be an array
+  if (!Array.isArray(rules)) {
+    log.warn(`Rejected invalid permission rules from ${client.id}: not an array`)
+    ctx.send(ws, { type: 'session_error', message: 'rules must be an array' })
+    return
+  }
+
+  // Validate each rule shape and eligibility
+  for (let i = 0; i < rules.length; i++) {
+    const rule = rules[i]
+    if (!rule || typeof rule !== 'object') {
+      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: not an object` })
+      return
+    }
+    if (typeof rule.tool !== 'string' || !rule.tool.trim()) {
+      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: missing tool name` })
+      return
+    }
+    if (rule.decision !== 'allow' && rule.decision !== 'deny') {
+      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: decision must be 'allow' or 'deny'` })
+      return
+    }
+    if (NEVER_AUTO_ALLOW.has(rule.tool)) {
+      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: tool '${rule.tool}' cannot be auto-allowed` })
+      return
+    }
+    if (!ELIGIBLE_TOOLS.has(rule.tool)) {
+      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: tool '${rule.tool}' is not eligible for permission rules` })
+      return
+    }
+  }
+
+  const sessionId = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    return
+  }
+
+  if (typeof entry.session.setPermissionRules !== 'function') {
+    ctx.send(ws, { type: 'session_error', message: 'This provider does not support permission rules' })
+    return
+  }
+
+  entry.session.setPermissionRules(rules)
+
+  // Audit the whitelist change
+  if (ctx.permissionAudit) {
+    ctx.permissionAudit.logWhitelistChange({
+      clientId: client.id,
+      sessionId,
+      rules,
+    })
+  }
+
+  // Broadcast updated rules to all session clients
+  const currentRules = entry.session.getPermissionRules ? entry.session.getPermissionRules() : rules
+  ctx.broadcastToSession(sessionId, { type: 'permission_rules_updated', rules: currentRules, sessionId })
+  log.info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} rule(s)`)
+}
+
 export const settingsHandlers = {
   set_model: handleSetModel,
   set_permission_mode: handleSetPermissionMode,
@@ -177,4 +248,7 @@ export const settingsHandlers = {
   query_permission_audit: handleQueryPermissionAudit,
   list_providers: handleListProviders,
   set_thinking_level: handleSetThinkingLevel,
+  set_permission_rules: handleSetPermissionRules,
 }
+
+export { ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW }
