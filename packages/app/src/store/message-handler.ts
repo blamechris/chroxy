@@ -49,6 +49,7 @@ import type {
   WebTask,
   GitFileStatus,
   GitBranch,
+  PermissionRule,
 } from './types';
 import { createEmptySessionState } from './utils';
 import { deriveActivityState } from './session-activity';
@@ -1620,7 +1621,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'permission_rules_updated': {
       const rulesSessionId = (msg.sessionId as string) || get().activeSessionId;
       const rules = Array.isArray(msg.rules)
-        ? (msg.rules as { tool: string; decision: string }[])
+        ? (msg.rules as PermissionRule[])
         : [];
       if (rulesSessionId && get().sessionStates[rulesSessionId]) {
         updateSession(rulesSessionId, () => ({ sessionRules: rules }));
