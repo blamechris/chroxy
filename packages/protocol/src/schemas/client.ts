@@ -74,6 +74,17 @@ export const SetThinkingLevelSchema = z.object({
   sessionId: z.string().optional(),
 }).passthrough()
 
+export const PermissionRuleSchema = z.object({
+  tool: z.string().min(1),
+  decision: z.enum(['allow', 'deny']),
+})
+
+export const SetPermissionRulesSchema = z.object({
+  type: z.literal('set_permission_rules'),
+  rules: z.array(PermissionRuleSchema),
+  sessionId: z.string().optional(),
+})
+
 export const PermissionResponseSchema = z.object({
   type: z.literal('permission_response'),
   requestId: z.string().min(1),
@@ -340,6 +351,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SetModelSchema,
   SetPermissionModeSchema,
   SetThinkingLevelSchema,
+  SetPermissionRulesSchema,
   PermissionResponseSchema,
   ListSessionsSchema,
   SwitchSessionSchema,
@@ -394,6 +406,7 @@ export type InputMessage = z.infer<typeof InputSchema>
 export type InterruptMessage = z.infer<typeof InterruptSchema>
 export type SetModelMessage = z.infer<typeof SetModelSchema>
 export type SetPermissionModeMessage = z.infer<typeof SetPermissionModeSchema>
+export type SetPermissionRulesMessage = z.infer<typeof SetPermissionRulesSchema>
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>
 export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
