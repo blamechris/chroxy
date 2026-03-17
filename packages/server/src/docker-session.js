@@ -1,9 +1,24 @@
-import { spawn, execFileSync } from 'child_process'
+import { spawn, execFile } from 'child_process'
 import { createInterface } from 'readline'
 import { CliSession } from './cli-session.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('docker-session')
+
+/**
+ * Env vars explicitly forwarded into the Docker container.
+ * Only vars needed for Claude Code operation — never forward the full host env.
+ */
+const FORWARDED_ENV_KEYS = [
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
+  'CHROXY_PORT',
+  'CHROXY_HOOK_SECRET',
+  'CHROXY_PERMISSION_MODE',
+  'CLAUDE_HEADLESS',
+  'HOME',
+  'PATH',
+]
 
 /**
  * DockerSession runs Claude Code inside an isolated Docker container.
@@ -38,22 +53,35 @@ export class DockerSession extends CliSession {
   }
 
   /**
-   * Start the container, then call super.start() which invokes
+   * Start the container asynchronously, then call super.start() which invokes
    * _spawnPersistentProcess() with the built Claude args.
    */
   start() {
-    if (!this._containerId) {
-      this._startContainer()
+    if (this._containerId) {
+      super.start()
+      return
     }
-    super.start()
+
+    // Start container async to avoid blocking the event loop
+    this._startContainer((err) => {
+      if (err) {
+        this.emit('error', { message: `Failed to start Docker container: ${err.message}` })
+        // Self-destruct so SessionManager doesn't keep a phantom entry
+        this.destroy()
+        return
+      }
+      super.start()
+    })
   }
 
   /**
    * Launch a long-lived container with security constraints.
    * The container runs `sleep infinity` so it stays alive across
    * multiple `docker exec` invocations (e.g. model switches / respawns).
+   *
+   * Uses async execFile to avoid blocking the event loop during image pull.
    */
-  _startContainer() {
+  _startContainer(callback) {
     const args = [
       'run', '-d', '--init', '--rm',
       '--memory', this._memoryLimit,
@@ -65,6 +93,12 @@ export class DockerSession extends CliSession {
       '-w', '/workspace',
     ]
 
+    // Pass ANTHROPIC_API_KEY to the container so Claude can authenticate
+    const apiKey = process.env.ANTHROPIC_API_KEY
+    if (apiKey) {
+      args.push('--env', `ANTHROPIC_API_KEY=${apiKey}`)
+    }
+
     // On Linux, host.docker.internal is not available by default
     if (process.platform === 'linux') {
       args.push('--add-host', 'host.docker.internal:host-gateway')
@@ -74,44 +108,16 @@ export class DockerSession extends CliSession {
 
     log.info(`Starting container (image: ${this._image}, memory: ${this._memoryLimit}, cpus: ${this._cpuLimit})`)
 
-    try {
-      const result = execFileSync('docker', args, { encoding: 'utf-8' })
-      this._containerId = result.trim()
+    execFile('docker', args, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
+      if (err) {
+        const msg = stderr ? stderr.trim() : err.message
+        callback(new Error(msg))
+        return
+      }
+      this._containerId = stdout.trim()
       log.info(`Container started: ${this._containerId.slice(0, 12)}`)
-    } catch (err) {
-      const msg = err.stderr ? err.stderr.toString().trim() : err.message
-      throw new Error(`Failed to start Docker container: ${msg}`)
-    }
-  }
-
-  /**
-   * Build the Claude CLI args. Mirrors CliSession.start() arg construction
-   * without calling super.start() (we call this from _spawnPersistentProcess).
-   */
-  _buildClaudeArgs() {
-    const args = [
-      '-p',
-      '--input-format', 'stream-json',
-      '--output-format', 'stream-json',
-      '--verbose',
-      '--include-partial-messages',
-    ]
-
-    if (this.model) {
-      args.push('--model', this.model)
-    }
-
-    if (this.permissionMode === 'auto') {
-      args.push('--permission-mode', 'bypassPermissions')
-    } else if (this.permissionMode === 'plan') {
-      args.push('--permission-mode', 'plan')
-    }
-
-    if (this.allowedTools && this.allowedTools.length > 0) {
-      args.push('--allowedTools', this.allowedTools.join(','))
-    }
-
-    return args
+      callback(null)
+    })
   }
 
   /**
@@ -141,11 +147,16 @@ export class DockerSession extends CliSession {
 
     const dockerArgs = ['exec', '-i', '--workdir', '/workspace']
 
-    // Forward env vars into the container
-    for (const [k, v] of Object.entries(env)) {
-      if (v !== undefined) {
-        dockerArgs.push('--env', `${k}=${v}`)
+    // Forward only allowed env vars — never leak host secrets
+    for (const key of FORWARDED_ENV_KEYS) {
+      const val = env[key]
+      if (val !== undefined) {
+        dockerArgs.push('--env', `${key}=${val}`)
       }
+    }
+    // Always forward CHROXY_HOST if set
+    if (env.CHROXY_HOST) {
+      dockerArgs.push('--env', `CHROXY_HOST=${env.CHROXY_HOST}`)
     }
 
     dockerArgs.push(this._containerId, 'claude', ...claudeArgs)
@@ -239,11 +250,9 @@ export class DockerSession extends CliSession {
 
     if (containerId) {
       log.info(`Removing container ${containerId.slice(0, 12)}`)
-      try {
-        execFileSync('docker', ['rm', '-f', containerId], { stdio: 'ignore' })
-      } catch (err) {
-        log.warn(`Failed to remove container ${containerId.slice(0, 12)}: ${err.message}`)
-      }
+      execFile('docker', ['rm', '-f', containerId], { stdio: 'ignore' }, (err) => {
+        if (err) log.warn(`Failed to remove container ${containerId.slice(0, 12)}: ${err.message}`)
+      })
     }
   }
 }
