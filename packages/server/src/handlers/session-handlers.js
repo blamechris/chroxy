@@ -37,6 +37,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
   const rawPermMode = (typeof msg.permissionMode === 'string' && msg.permissionMode.trim()) ? msg.permissionMode.trim() : undefined
   const permissionMode = rawPermMode && VALID_PERMISSION_MODES.includes(rawPermMode) ? rawPermMode : undefined
+  const worktree = msg.worktree === true ? true : undefined
 
   if (cwd) {
     const cwdError = validateCwdWithinHome(cwd)
@@ -47,7 +48,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   }
 
   try {
-    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode })
+    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree })
     client.activeSessionId = sessionId
     client.subscribedSessionIds.add(sessionId)
     const entry = ctx.sessionManager.getSession(sessionId)
