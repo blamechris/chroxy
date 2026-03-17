@@ -1,7 +1,29 @@
+# SECURITY WARNING — read before modifying volumes:
+#
+#   The workspace mount gives the container (and Claude) full read/write access
+#   to whatever directory you bind. Never mount sensitive paths like $HOME, /,
+#   /etc, or directories containing secrets/credentials.
+#
+#   CHROXY_NO_AUTH=true disables the API token check. Do NOT combine this with
+#   an active tunnel (CHROXY_TUNNEL != none) — the entrypoint blocks this and
+#   will refuse to start as an unsafe configuration.
+#
+#   permissionMode: auto in the container means Claude can read/write/execute
+#   anything inside the mounted workspace without prompting.
+
 services:
   chroxy:
     build: .
     restart: unless-stopped
+    init: true                    # reap zombie processes (PID 1 signal forwarding)
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: "2.0"
+    pids_limit: 512
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "${PORT:-8765}:${PORT:-8765}"
     environment:
