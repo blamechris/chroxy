@@ -39,6 +39,11 @@ function handleCreateSession(ws, client, msg, ctx) {
   const permissionMode = rawPermMode && VALID_PERMISSION_MODES.includes(rawPermMode) ? rawPermMode : undefined
   const worktree = msg.worktree === true ? true : undefined
 
+  if (worktree && !cwd) {
+    ctx.send(ws, { type: 'session_error', message: 'worktree requires an explicit cwd' })
+    return
+  }
+
   if (cwd) {
     const cwdError = validateCwdWithinHome(cwd)
     if (cwdError) {

@@ -114,7 +114,11 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
             <View style={styles.toggleRow}>
               <View style={styles.toggleLabel}>
                 <Text style={styles.label}>Isolate filesystem (git worktree)</Text>
-                <Text style={styles.toggleHint}>Runs in a separate worktree — requires a git repo CWD</Text>
+                <Text style={styles.toggleHint}>
+                  {worktree
+                    ? 'CWD must point to an existing git repository'
+                    : 'Runs in a separate worktree — requires a git repo CWD'}
+                </Text>
               </View>
               <Switch
                 value={worktree}
