@@ -237,31 +237,42 @@ describe('SessionManager worktree isolation', () => {
 
 describe('SessionManager _removeWorktree fallback (#2460)', () => {
   let gitRepo
+  let externalWorktreeBase
 
   beforeEach(() => {
     gitRepo = makeGitRepo()
+    // Use a worktree base OUTSIDE the repo (mirrors production ~/.chroxy/worktrees/)
+    // so that deleting the repo does not implicitly remove the worktree directory.
+    externalWorktreeBase = mkdtempSync(join(tmpdir(), 'chroxy-wt-ext-'))
   })
 
   afterEach(() => {
     rmSync(gitRepo, { recursive: true, force: true })
+    rmSync(externalWorktreeBase, { recursive: true, force: true })
   })
 
   it('falls back to rmSync when repoDir is deleted before worktree removal', () => {
     const mgr = makeManager(gitRepo)
+    mgr._worktreeBase = externalWorktreeBase
     const sessionId = mgr.createSession({ cwd: gitRepo, worktree: true })
     const entry = mgr.getSession(sessionId)
     const wtPath = entry.worktreePath
 
     assert.ok(existsSync(wtPath), 'worktree directory should exist before destroy')
+    // Worktree is outside gitRepo — verify it's in the external base
+    assert.ok(wtPath.startsWith(externalWorktreeBase),
+      'worktree should be in external base, not inside repo')
 
-    // Simulate the original repo being deleted/moved before cleanup
-    const savedRepo = gitRepo
+    // Simulate the original repo being deleted before cleanup
     const movedRepo = gitRepo + '-moved'
     renameSync(gitRepo, movedRepo)
     // Point gitRepo to moved path for afterEach cleanup
     gitRepo = movedRepo
 
-    // destroySession should still clean up the worktree via rmSync fallback
+    // Worktree directory still exists even though repo is gone
+    assert.ok(existsSync(wtPath), 'worktree should still exist after repo is moved')
+
+    // destroySession should clean up the worktree via rmSync fallback
     mgr.destroySession(sessionId)
 
     assert.ok(!existsSync(wtPath), 'worktree directory should be removed via rmSync fallback')
@@ -271,6 +282,7 @@ describe('SessionManager _removeWorktree fallback (#2460)', () => {
 
   it('cleans up worktree via git when repoDir still exists (normal path)', () => {
     const mgr = makeManager(gitRepo)
+    mgr._worktreeBase = externalWorktreeBase
     const sessionId = mgr.createSession({ cwd: gitRepo, worktree: true })
     const entry = mgr.getSession(sessionId)
     const wtPath = entry.worktreePath
@@ -286,6 +298,7 @@ describe('SessionManager _removeWorktree fallback (#2460)', () => {
 
   it('handles already-deleted worktree directory gracefully', () => {
     const mgr = makeManager(gitRepo)
+    mgr._worktreeBase = externalWorktreeBase
     const sessionId = mgr.createSession({ cwd: gitRepo, worktree: true })
     const entry = mgr.getSession(sessionId)
     const wtPath = entry.worktreePath
