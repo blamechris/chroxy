@@ -399,7 +399,7 @@ export class SessionManager extends EventEmitter {
       log.info(`Removed worktree for session ${sessionId}: ${worktreePath}`)
       return
     } catch (err) {
-      log.warn(`git worktree remove failed for session ${sessionId}, falling back to rmdir: ${err?.stderr?.trim() || err?.message || String(err)}`)
+      log.warn(`git worktree remove failed for session ${sessionId}, falling back to direct removal: ${err?.stderr?.trim() || err?.message || String(err)}`)
     }
     try {
       rmSync(worktreePath, { recursive: true, force: true })
