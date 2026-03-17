@@ -2153,11 +2153,13 @@ describe('encryption integration (end-to-end)', () => {
 
     const { ws, messages, clientEncryption } = await connectWithEncryption(port)
 
-    // Wait for all encrypted messages to arrive (history replay + post-auth)
-    // history_replay_end is the last message in the history replay sequence
-    // We need enough encrypted messages to cover: server_mode, status, claude_ready, model_changed,
-    // history_replay_start, history entry, history entry, history_replay_end, etc.
-    await waitFor(() => messages.filter(m => m.type === 'encrypted').length >= 5, { label: 'encrypted history messages' })
+    // Wait for encrypted messages to arrive (history replay + post-auth info).
+    // setImmediate chunking means delivery timing varies across environments —
+    // use a generous timeout to avoid flakes on slow CI runners.
+    await waitFor(
+      () => messages.filter(m => m.type === 'encrypted').length >= 5,
+      { timeoutMs: 5000, label: 'encrypted history messages' }
+    )
 
     const decrypted = drainEncryptedMessages(messages, clientEncryption)
 
