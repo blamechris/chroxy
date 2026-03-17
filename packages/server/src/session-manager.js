@@ -431,6 +431,7 @@ export class SessionManager extends EventEmitter {
         provider: entry.provider || this._providerType,
         capabilities: ProviderClass.capabilities || {},
         worktree: entry.worktreePath != null,
+        repoCwd: entry.worktreeRepoDir || null,
       })
     }
     return list

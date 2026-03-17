@@ -38,14 +38,20 @@ prepare_config() {
   if [ -n "$workspace_path" ]; then
     local resolved_path
     resolved_path="$(realpath -m "$workspace_path" 2>/dev/null || echo "$workspace_path")"
-    case "$resolved_path" in
-      /|/bin|/boot|/dev|/etc|/lib|/lib64|/proc|/root|/run|/sbin|/sys|/tmp|/usr|/var)
+    # Block system directories and any subdirectories of them
+    local blocked_prefixes="/bin /boot /dev /etc /lib /lib64 /proc /root /run /sbin /sys /usr /var"
+    if [ "$resolved_path" = "/" ]; then
+      echo "ERROR: WORKSPACE_PATH resolves to /  — mounting the root filesystem is not allowed."
+      exit 1
+    fi
+    for prefix in $blocked_prefixes; do
+      if [ "$resolved_path" = "$prefix" ] || echo "$resolved_path" | grep -q "^${prefix}/"; then
         echo "ERROR: WORKSPACE_PATH resolves to a system directory: ${resolved_path}"
-        echo "  Mounting system directories into the container is not allowed."
+        echo "  Paths under ${prefix}/ are not allowed as workspace mounts."
         echo "  Set WORKSPACE_PATH to your project directory instead."
         exit 1
-        ;;
-    esac
+      fi
+    done
   fi
 
   mkdir -p "$CONFIG_DIR"
