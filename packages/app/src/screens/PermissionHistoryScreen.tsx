@@ -46,7 +46,7 @@ function deriveStatus(msg: ChatMessage): PermissionEntry['status'] {
     if (msg.expiresAt && msg.expiresAt <= Date.now()) return 'expired';
     return 'pending';
   }
-  if (msg.answered === 'allow' || msg.answered === 'allowAlways') return 'allowed';
+  if (msg.answered === 'allow' || msg.answered === 'allowAlways' || msg.answered === 'allowSession') return 'allowed';
   if (msg.answered === 'deny') return 'denied';
   // Resolved via history replay or other means
   return 'allowed';

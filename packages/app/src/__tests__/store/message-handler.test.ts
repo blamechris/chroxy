@@ -1695,7 +1695,7 @@ describe('permission_request message handler', () => {
     expect(msgs[0].type).toBe('prompt');
     expect(msgs[0].requestId).toBe('perm-1');
     expect(msgs[0].options).toHaveLength(3);
-    expect(msgs[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny', 'allowAlways']);
+    expect(msgs[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny', 'allowSession']);
   });
 
   it('sets expiresAt from remainingMs', () => {
@@ -1821,5 +1821,109 @@ describe('user_question handler', () => {
     _testMessageHandler.handle({ type: 'user_question', sessionId: 's1', questions: [] });
 
     expect(store.getState().sessionStates.s1.messages).toHaveLength(0);
+  });
+});
+
+describe('permission_rules_updated handler', () => {
+  it('stores rules in session state', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_rules_updated',
+      sessionId: 's1',
+      rules: [{ tool: 'Bash', decision: 'allow' }],
+    });
+
+    expect(store.getState().sessionStates.s1.sessionRules).toEqual([
+      { tool: 'Bash', decision: 'allow' },
+    ]);
+  });
+
+  it('replaces existing rules with the incoming set', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), sessionRules: [{ tool: 'Write', decision: 'allow' }] },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_rules_updated',
+      sessionId: 's1',
+      rules: [
+        { tool: 'Write', decision: 'allow' },
+        { tool: 'Bash', decision: 'allow' },
+      ],
+    });
+
+    expect(store.getState().sessionStates.s1.sessionRules).toHaveLength(2);
+    expect(store.getState().sessionStates.s1.sessionRules![1].tool).toBe('Bash');
+  });
+
+  it('stores empty rules array when rules is empty', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), sessionRules: [{ tool: 'Bash', decision: 'allow' }] },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_rules_updated',
+      sessionId: 's1',
+      rules: [],
+    });
+
+    expect(store.getState().sessionStates.s1.sessionRules).toEqual([]);
+  });
+
+  it('falls back to activeSessionId when sessionId is missing', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_rules_updated',
+      rules: [{ tool: 'Read', decision: 'allow' }],
+    });
+
+    expect(store.getState().sessionStates.s1.sessionRules).toEqual([
+      { tool: 'Read', decision: 'allow' },
+    ]);
+  });
+
+  it('does not crash when rules field is missing', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    expect(() => {
+      _testMessageHandler.handle({
+        type: 'permission_rules_updated',
+        sessionId: 's1',
+      });
+    }).not.toThrow();
+
+    expect(store.getState().sessionStates.s1.sessionRules).toEqual([]);
   });
 });

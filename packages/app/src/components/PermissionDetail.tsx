@@ -469,7 +469,7 @@ export function PermissionPill({
   onExpand: () => void;
 }) {
   const answer = message.answered || '';
-  const isAllowed = answer === 'allow' || answer === 'allowAlways';
+  const isAllowed = answer === 'allow' || answer === 'allowAlways' || answer === 'allowSession';
   const isDenied = answer === 'deny';
   const summary = getPermissionSummary(message.tool, message.toolInput);
 
