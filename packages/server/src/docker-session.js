@@ -230,8 +230,11 @@ export class DockerSession extends CliSession {
     log.info('Container exec started, ready for messages')
     this.emit('ready', { sessionId: null, model: this.model, tools: [] })
 
-    // Drain any queued messages that arrived during respawn
-    if (this._pendingQueue.length > 0) {
+    // Drain all messages that queued during respawn (FIFO, one-at-a-time).
+    // sendMessage() sets _isBusy on the first call, so the loop naturally
+    // stops after one message.  Remaining items stay in the queue and are
+    // drained one-by-one via _clearMessageState() after each result.
+    while (this._pendingQueue.length > 0 && !this._isBusy) {
       const pending = this._pendingQueue.shift()
       log.info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
       this.sendMessage(pending.prompt, pending.attachments, pending.options || {})

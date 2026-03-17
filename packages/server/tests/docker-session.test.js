@@ -58,6 +58,9 @@ class FakeDockerSession extends EventEmitter {
     this._pendingQueue = []
     this._child = null
 
+    // Track messages drained at spawn time
+    this._drainedMessages = []
+
     // Injected stubs — set by tests
     this._execFileSyncCalls = []
     this._spawnCalls = []
@@ -157,6 +160,15 @@ class FakeDockerSession extends EventEmitter {
     dockerArgs.push(this._containerId, 'claude', ...claudeArgs)
     this._callSpawn('docker', dockerArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
     this._processReady = true
+
+    // Drain all messages that queued during respawn (mirrors real DockerSession)
+    while (this._pendingQueue.length > 0 && !this._isBusy) {
+      const pending = this._pendingQueue.shift()
+      this._drainedMessages.push(pending)
+      // In the real code this calls this.sendMessage() which sets _isBusy;
+      // we simulate the busy flag directly.
+      this._isBusy = true
+    }
   }
 
   // Mirror of DockerSession.start
@@ -497,6 +509,60 @@ describe('DockerSession.start()', () => {
     // No new execFileSync calls — container was already set
     assert.equal(session._execFileSyncCalls.length, 0)
     assert.equal(session._spawnCalls.length, 1)
+  })
+})
+
+describe('DockerSession._spawnPersistentProcess — pending queue drain (#2459)', () => {
+  it('drains only the first queued message and keeps the rest in queue', () => {
+    const session = new FakeDockerSession({ cwd: '/tmp' })
+    session._containerId = 'drain-ctr'
+
+    // Queue 3 messages while process is not ready
+    session._pendingQueue.push(
+      { prompt: 'msg-1', attachments: undefined, options: {} },
+      { prompt: 'msg-2', attachments: undefined, options: {} },
+      { prompt: 'msg-3', attachments: undefined, options: {} },
+    )
+    assert.equal(session._pendingQueue.length, 3)
+
+    // Spawn triggers drain via while loop
+    session._spawnPersistentProcess(['-p'])
+
+    // First message was drained and "sent" (captured in _drainedMessages)
+    assert.equal(session._drainedMessages.length, 1)
+    assert.equal(session._drainedMessages[0].prompt, 'msg-1')
+
+    // Remaining 2 messages still in queue — NOT silently dropped
+    assert.equal(session._pendingQueue.length, 2)
+    assert.equal(session._pendingQueue[0].prompt, 'msg-2')
+    assert.equal(session._pendingQueue[1].prompt, 'msg-3')
+  })
+
+  it('drains nothing when queue is empty', () => {
+    const session = new FakeDockerSession({ cwd: '/tmp' })
+    session._containerId = 'empty-ctr'
+
+    session._spawnPersistentProcess(['-p'])
+
+    assert.equal(session._drainedMessages.length, 0)
+    assert.equal(session._pendingQueue.length, 0)
+  })
+
+  it('does not drain when _isBusy is already true before spawn', () => {
+    const session = new FakeDockerSession({ cwd: '/tmp' })
+    session._containerId = 'busy-ctr'
+    session._isBusy = true
+
+    session._pendingQueue.push(
+      { prompt: 'should-stay', attachments: undefined, options: {} },
+    )
+
+    session._spawnPersistentProcess(['-p'])
+
+    // Message stays in queue because _isBusy was true
+    assert.equal(session._drainedMessages.length, 0)
+    assert.equal(session._pendingQueue.length, 1)
+    assert.equal(session._pendingQueue[0].prompt, 'should-stay')
   })
 })
 
