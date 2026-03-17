@@ -58,6 +58,7 @@ export {
   ListReposSchema,
   AddRepoSchema,
   RemoveRepoSchema,
+  SetPermissionRulesSchema,
   ExtensionMessageSchema,
   EncryptedEnvelopeSchema,
   ClientMessageSchema,

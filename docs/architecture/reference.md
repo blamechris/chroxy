@@ -164,6 +164,7 @@ Store files:
 | `search_conversations` | Search conversation history by query |
 | `set_model` | Change active Claude model |
 | `set_permission_mode` | Change permission handling mode |
+| `set_permission_rules` | Set session-scoped auto-allow/deny rules for eligible tools |
 | `subscribe_sessions` | Subscribe to updates for non-active sessions |
 | `switch_session` | Switch to different active session |
 | `teleport_web_task` | Pull cloud task result into local session |
@@ -221,6 +222,7 @@ Store files:
 | `permission_mode_changed` | Permission mode changed by user |
 | `permission_request` | Permission prompt from hook/SDK |
 | `permission_resolved` | Permission resolved by another client — dismiss prompt |
+| `permission_rules_updated` | Session permission whitelist updated — broadcast to all session clients |
 | `plan_ready` | Plan complete, awaiting user approval |
 | `plan_started` | Claude entered plan mode |
 | `pong` | Heartbeat response to client ping |
@@ -280,6 +282,7 @@ Store files:
 - `client_joined` broadcasts when a new client authenticates; `client_left` on disconnect
 - `primary_changed` broadcasts last-writer-wins primary status per session (fires on `input`)
 - `set_permission_mode` accepts optional `confirmed: true` (required for `auto` mode); without it, server responds with `confirm_permission_mode` challenge containing a `warning` string
+- `set_permission_rules` accepts `{ rules: [{ tool, decision }], sessionId? }` where `tool` must be one of the eligible tools (`Read`, `Write`, `Edit`, `NotebookEdit`, `Glob`, `Grep`) and `decision` is `'allow'` or `'deny'`; tools in `NEVER_AUTO_ALLOW` (`Bash`, `Task`, `WebFetch`, `WebSearch`) are rejected; sending an empty array clears all rules; server broadcasts `permission_rules_updated` with the current rules to all session clients
 - `cost_update` sent after each query with `{ sessionCost, totalCost, budget }` where budget is null if no cost budget configured
 - `budget_warning` sent when session cost exceeds 80% of budget; `budget_exceeded` when budget is hit (session paused); `resume_budget` from client to unpause; `budget_resumed` broadcast by server after successful resume
 - `session_updated` payload: `{ type: 'session_updated', sessionId, name }` — broadcast globally when a session is renamed (user-initiated or auto-label)
