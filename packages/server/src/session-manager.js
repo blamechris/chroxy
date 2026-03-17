@@ -1,9 +1,11 @@
 import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
-import { statSync } from 'fs'
+import { statSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { execFileSync } from 'child_process'
 import { getProvider } from './providers.js'
+import { GIT } from './git.js'
 import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
 import { readSessionContext } from './session-context.js'
 import { parseDuration } from './duration.js'
@@ -49,6 +51,22 @@ export class SessionDirectoryError extends SessionError {
     this.path = path
   }
 }
+
+/**
+ * Thrown when worktree creation fails (e.g. non-git directory).
+ */
+export class WorktreeError extends SessionError {
+  constructor(message) {
+    super(message, 'WORKTREE_ERROR')
+    this.name = 'WorktreeError'
+  }
+}
+
+/**
+ * Default base directory for session worktrees.
+ * @type {string}
+ */
+const DEFAULT_WORKTREE_BASE = join(homedir(), '.chroxy', 'worktrees')
 
 /**
  * Manages the lifecycle of multiple CLI sessions.
@@ -233,33 +251,75 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Create a new session.
+   * @param {object} [options]
+   * @param {string} [options.name]
+   * @param {string} [options.cwd]
+   * @param {string} [options.model]
+   * @param {string} [options.permissionMode]
+   * @param {string} [options.resumeSessionId]
+   * @param {string} [options.provider]
+   * @param {boolean} [options.worktree] - When true, creates a git worktree for isolation
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
     }
 
-    const resolvedCwd = cwd || this._defaultCwd
+    const baseCwd = cwd || this._defaultCwd
     const resolvedModel = model || this._defaultModel
     const resolvedPermissionMode = permissionMode || this._defaultPermissionMode
 
     // Validate cwd exists
     try {
-      const stat = statSync(resolvedCwd)
+      const stat = statSync(baseCwd)
       if (!stat.isDirectory()) {
-        throw new SessionDirectoryError(`Not a directory: ${resolvedCwd}`, resolvedCwd)
+        throw new SessionDirectoryError(`Not a directory: ${baseCwd}`, baseCwd)
       }
     } catch (err) {
       if (err.code === 'ENOENT') {
-        throw new SessionDirectoryError(`Directory does not exist: ${resolvedCwd}`, resolvedCwd)
+        throw new SessionDirectoryError(`Directory does not exist: ${baseCwd}`, baseCwd)
       }
       throw err
     }
 
     const sessionId = randomBytes(16).toString('hex')
     const sessionName = name || `Session ${++this._sessionCounter}`
+
+    // Worktree isolation — create a detached git worktree for this session
+    let resolvedCwd = baseCwd
+    let worktreePath = null
+    if (worktree) {
+      // Verify cwd is inside a git repository
+      try {
+        execFileSync(GIT, ['-C', baseCwd, 'rev-parse', '--git-dir'], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          encoding: 'utf-8',
+        })
+      } catch {
+        throw new WorktreeError(`Not a git repository: ${baseCwd}`)
+      }
+
+      // Create worktree directory
+      const worktreeBase = this._worktreeBase || DEFAULT_WORKTREE_BASE
+      const worktreeDir = join(worktreeBase, sessionId)
+      mkdirSync(worktreeBase, { recursive: true })
+
+      try {
+        execFileSync(GIT, ['-C', baseCwd, 'worktree', 'add', '--detach', worktreeDir, 'HEAD'], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          encoding: 'utf-8',
+        })
+      } catch (err) {
+        const msg = err?.stderr?.trim() || err?.message || String(err)
+        throw new WorktreeError(`Failed to create worktree: ${msg}`)
+      }
+
+      resolvedCwd = worktreeDir
+      worktreePath = worktreeDir
+      log.info(`Created worktree for session ${sessionId} at ${worktreeDir}`)
+    }
 
     const resolvedProvider = provider || this._providerType
     const ProviderClass = getProvider(resolvedProvider)
@@ -281,6 +341,9 @@ export class SessionManager extends EventEmitter {
       cwd: resolvedCwd,
       provider: resolvedProvider,
       createdAt: Date.now(),
+      worktreePath,
+      // Original repo dir needed for `git worktree remove` during cleanup
+      worktreeRepoDir: worktreePath ? baseCwd : null,
     }
 
     this._sessions.set(sessionId, entry)
@@ -308,6 +371,10 @@ export class SessionManager extends EventEmitter {
         log.error(`Failed to destroy session ${sessionId} during start() failure cleanup: ${destroyErr?.stack || destroyErr}`)
       }
       this._cleanupSessionMaps(sessionId)
+      // Clean up worktree if one was created but session start failed
+      if (worktreePath) {
+        this._removeWorktree(worktreePath, baseCwd, sessionId)
+      }
       throw err
     }
 
@@ -315,6 +382,25 @@ export class SessionManager extends EventEmitter {
     this.emit('session_created', { sessionId, name: sessionName, cwd: resolvedCwd })
     this._schedulePersist()
     return sessionId
+  }
+
+  /**
+   * Remove a git worktree, logging errors non-fatally.
+   * @param {string} worktreePath - Absolute path to the worktree directory
+   * @param {string} repoDir - The original git repo directory (needed for git context)
+   * @param {string} sessionId - Used for log messages only
+   */
+  _removeWorktree(worktreePath, repoDir, sessionId) {
+    try {
+      execFileSync(GIT, ['-C', repoDir, 'worktree', 'remove', '--force', worktreePath], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: 'utf-8',
+      })
+      log.info(`Removed worktree for session ${sessionId}: ${worktreePath}`)
+    } catch (err) {
+      const msg = err?.stderr?.trim() || err?.message || String(err)
+      log.error(`Failed to remove worktree for session ${sessionId} at ${worktreePath}: ${msg}`)
+    }
   }
 
   /**
@@ -344,6 +430,7 @@ export class SessionManager extends EventEmitter {
         conversationId: entry.session.resumeSessionId || null,
         provider: entry.provider || this._providerType,
         capabilities: ProviderClass.capabilities || {},
+        worktree: entry.worktreePath != null,
       })
     }
     return list
@@ -450,6 +537,9 @@ export class SessionManager extends EventEmitter {
       log.error(`Error destroying session ${sessionId} "${entry.name}": ${destroyErr?.stack || destroyErr}`)
     }
     this._cleanupSessionMaps(sessionId)
+    if (entry.worktreePath) {
+      this._removeWorktree(entry.worktreePath, entry.worktreeRepoDir, sessionId)
+    }
     log.info(`Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_destroyed', { sessionId })
     this._schedulePersist()
@@ -474,6 +564,9 @@ export class SessionManager extends EventEmitter {
         entry.session.destroy()
       } catch (destroyErr) {
         log.error(`Error destroying session ${sessionId} "${entry.name}" during destroyAll(): ${destroyErr?.stack || destroyErr}`)
+      }
+      if (entry.worktreePath) {
+        this._removeWorktree(entry.worktreePath, entry.worktreeRepoDir, sessionId)
       }
       this.emit('session_destroyed', { sessionId })
     }
