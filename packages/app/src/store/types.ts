@@ -160,6 +160,12 @@ export interface DiffResult {
 import type { SessionActivity, ActivityState } from './session-activity';
 export type { SessionActivity, ActivityState };
 
+export interface PermissionRule {
+  tool: string;
+  decision: 'allow' | 'deny';
+  pattern?: string;
+}
+
 export interface SessionState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
@@ -181,6 +187,7 @@ export interface SessionState {
   mcpServers: McpServer[];
   devPreviews: DevPreview[];
   activityState: SessionActivity;
+  sessionRules?: PermissionRule[];
 }
 
 export interface ServerError {
@@ -369,6 +376,9 @@ export interface ConnectionState {
   listCheckpoints: () => void;
   restoreCheckpoint: (checkpointId: string) => void;
   deleteCheckpoint: (checkpointId: string) => void;
+
+  // Session rules actions
+  setPermissionRules: (rules: PermissionRule[]) => void;
 
   // Plan mode actions
   clearPlanState: () => void;
