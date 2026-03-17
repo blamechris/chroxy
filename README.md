@@ -1,55 +1,58 @@
 # Chroxy
 
-> Remote terminal for Claude Code from your phone.
+> Remote terminal for Claude Code — from your phone or desktop.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
-Run a lightweight daemon on your dev machine. Connect from anywhere via your phone. Get both a full terminal view and a clean chat-like UI that parses Claude Code's output into readable messages.
+Run a lightweight daemon on your dev machine, connect from your phone or desktop via a secure tunnel. Get both a full terminal view and a clean chat-like UI that parses Claude Code's output into readable messages.
 
 ```
 ┌─────────────┐                        ┌──────────────────┐
-│  Phone      │◄───── secure tunnel ──►│  Your Machine    │
-│             │                        │                  │
+│  Phone /    │◄───── secure tunnel ──►│  Your Machine    │
+│  Desktop    │                        │                  │
 │ ┌─────────┐ │                        │ ┌──────────────┐ │
 │ │Chat View│ │◄── parsed messages ────│ │ Chroxy Server│ │
 │ └─────────┘ │                        │ └──────┬───────┘ │
 │ ┌─────────┐ │                        │ ┌──────┴───────┐ │
-│ │Terminal │ │◄── raw PTY stream ─────│ │  Claude Code  │ │
+│ │Terminal │ │◄── raw stream ─────────│ │  Claude Code  │ │
 │ └─────────┘ │                        │ └──────────────┘ │
 └─────────────┘                        └──────────────────┘
 ```
 
 ## Why Chroxy?
 
-- **No tmux required** — CLI headless mode wraps Claude Code directly. Just start the server and connect.
-- **Two views, one session** — Switch between a clean chat UI and a full xterm.js terminal emulator.
-- **Multi-session** — Run multiple Claude sessions from one server. Create, switch, and destroy from the app.
+- **No tmux required** — CLI headless mode wraps Claude Code directly via the Agent SDK. Just start and connect.
+- **Two views, one session** — Switch between a clean chat UI (markdown-rendered) and a full xterm.js terminal emulator.
+- **Multi-session** — Run multiple Claude sessions from one server. Create, switch, and destroy from any client.
+- **Phone + Desktop** — React Native mobile app and a Tauri desktop tray app with a web dashboard.
 - **Encrypted** — End-to-end encryption over Cloudflare tunnel. Your machine, your tunnel, no cloud middleman.
 - **Resilient** — Auto-reconnect on network drops, supervisor auto-restart on crash, push notifications for permission prompts.
-- **Voice input** — Dictate messages with speech-to-text from your phone.
-- **Cross-platform server** — Runs on macOS, Linux, and Windows.
+- **Voice input** — Dictate messages with speech-to-text on mobile and desktop.
+- **Docker isolation** — Run sessions in Docker containers with resource limits and security guards.
 - **Open source** — MIT licensed. Audit it, fork it, improve it.
+
+## Features
+
+**Server:**
+CLI headless mode, Claude Agent SDK integration, WebSocket protocol with auth, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, multi-session management, model switching, plan mode detection, background agent tracking, web dashboard, Docker session provider, git worktree isolation, permission rule engine, extensible provider/handler system
+
+**Desktop (Tauri):**
+System tray app, web dashboard with syntax highlighting (15+ languages), xterm.js terminal, session tabs, desktop notifications, voice-to-text (macOS SFSpeechRecognizer), command palette with keyboard shortcuts
+
+**Mobile (React Native / Expo):**
+QR code scanning, LAN auto-discovery, markdown rendering, dual-view chat/terminal, xterm.js terminal emulation, plan approval UI, agent monitoring, voice-to-text input, biometric lock, conversation search, settings screen, auto-reconnect with ConnectionPhase state machine
 
 ## Prerequisites
 
-- **Node.js 22** — Required for the server. Install via Homebrew (macOS) or your package manager:
+- **Node.js 22+** — Required for the server:
   ```bash
   brew install node@22
   ```
-  Run server commands with Node 22 on your PATH:
-  ```bash
-  PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
-  ```
 
-- **cloudflared** — Cloudflare's tunnel client for remote access. No account needed for Quick Tunnels:
+- **cloudflared** — Cloudflare's tunnel client for remote access (no account needed for Quick Tunnels):
   ```bash
   brew install cloudflared
-  ```
-
-- **tmux** *(optional, macOS/Linux only)* — Only required for PTY mode (`--terminal` flag). CLI headless mode (default) does not need tmux:
-  ```bash
-  brew install tmux
   ```
 
 ## Quick Start
@@ -60,68 +63,31 @@ Run a lightweight daemon on your dev machine. Connect from anywhere via your pho
 # Install and configure
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy init
 
-# Start the server (CLI headless mode — no tmux needed)
+# Start the server
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 ```
 
-The server prints a QR code. Scan it with the Chroxy app.
+The server prints a QR code. Scan it with the Chroxy mobile app, or open the dashboard URL in your browser.
 
-#### Development mode
+### Development mode
 
-Use `chroxy dev` when iterating on Chroxy itself. It forces supervisor mode (auto-restart on crash) regardless of tunnel type, so you can modify server code and deploy without losing your phone connection:
+Use `chroxy dev` when iterating on Chroxy itself. It forces supervisor mode (auto-restart on crash) regardless of tunnel type:
 
 ```bash
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy dev
 ```
 
-Does not support `--terminal` (PTY) mode.
-
 ### Local WiFi (same network)
 
-If your phone and dev machine are on the same WiFi, you can connect directly without the tunnel:
+If your phone and dev machine are on the same WiFi, connect directly without the tunnel:
 
 1. Find your machine's local IP:
    ```bash
    ipconfig getifaddr en0
    ```
 2. In the Chroxy app, tap **"Enter manually"** and enter:
-   - URL: `ws://YOUR_MAC_IP:8765` (e.g. `ws://192.168.1.100:8765`)
+   - URL: `ws://YOUR_IP:8765`
    - Token: your API token from `~/.chroxy/config.json`
-
-This skips the Cloudflare tunnel — lower latency, fully local.
-
-### App (on your phone)
-
-The app requires a **custom dev build** (not Expo Go) because native modules like `expo-speech-recognition` and `expo-secure-store` are included:
-
-```bash
-cd packages/app
-npm install
-
-# Build a dev client (one-time, or when native deps change)
-npx expo run:ios    # or npx expo run:android
-
-# For daily development (hot-reload, same as Expo Go)
-npx expo start
-```
-
-See `packages/app/README.md` for EAS cloud build instructions.
-
-## How It Works
-
-1. **Server** starts a Claude Code process via the Agent SDK (or `claude -p` in legacy mode)
-2. **WebSocket server** streams parsed messages, tool use, and permission requests to the app
-3. **End-to-end encryption** secures all messages between the server and app
-4. **Cloudflare tunnel** provides secure remote access without port forwarding
-5. **Mobile app** renders a chat UI with markdown, handles permissions, and sends input back
-6. **Multi-session manager** lets you run multiple conversations in parallel
-
-### Server Modes
-
-| Mode | Flag | Description |
-|------|------|-------------|
-| CLI headless | *(default)* | Wraps `claude -p` directly. No tmux needed. Structured JSON streaming. |
-| PTY/tmux | `--terminal` | Spawns tmux session for raw terminal access. Requires tmux + node-pty. |
 
 ### Tunnel Modes
 
@@ -131,20 +97,59 @@ See `packages/app/README.md` for EAS cloud build instructions.
 | Named Tunnel | `--tunnel named` | Stable URL that survives restarts. Requires Cloudflare account + domain. |
 | No Tunnel | `--tunnel none` | Local only. Use with `--no-auth` for development. |
 
+### Mobile App
+
+The app requires a **custom dev build** (not Expo Go) because native modules are included:
+
+```bash
+cd packages/app
+npm install
+
+# Build a dev client (one-time, or when native deps change)
+npx expo run:ios    # or npx expo run:android
+
+# Daily development (hot-reload)
+npx expo start
+```
+
+See `packages/app/README.md` for EAS cloud build instructions.
+
+### Desktop App
+
+The desktop app is a Tauri tray application wrapping the web dashboard:
+
+```bash
+cd packages/desktop
+cargo tauri dev
+```
+
 ## Project Structure
 
 ```
 chroxy/
 ├── packages/
-│   ├── server/     # Node.js daemon + CLI (ES modules, no TypeScript)
-│   └── app/        # React Native mobile app (TypeScript, Expo 54)
-├── docs/           # Setup guides, architecture
-└── scripts/        # Install helpers
+│   ├── server/      # Node.js daemon + CLI (ES modules, no TypeScript)
+│   ├── app/         # React Native mobile app (TypeScript, Expo 54)
+│   ├── desktop/     # Tauri tray app (Rust + web dashboard)
+│   ├── protocol/    # Shared protocol types and version
+│   └── store-core/  # Shared utilities and crypto
+├── docs/            # Setup guides, architecture
+└── scripts/         # Install helpers
 ```
 
-## Development
+## Architecture
 
-You need **two terminals** during development:
+```
+Mobile App / Desktop ◄──► Cloudflare Tunnel ◄──► WebSocket Server ◄──► Session Provider ◄──► Claude Code
+```
+
+- **Server:** `server-cli.js` starts a WebSocket server and creates sessions via pluggable providers (`sdk-session.js` for the Agent SDK, `cli-session.js` for legacy `claude -p`, `docker-session.js` for container isolation)
+- **WebSocket layer:** Auth, E2E encryption (TweetNaCl), message routing, session management, permission handling
+- **Tunnel:** Cloudflare Quick or Named tunnel for secure remote access without port forwarding
+- **Supervisor:** In named tunnel mode, owns the tunnel and auto-restarts the server on crash with exponential backoff
+- **Clients:** Mobile app (React Native) and desktop tray app (Tauri) connect over WebSocket; web dashboard served directly by the server
+
+## Development
 
 ```bash
 # Clone the repo
@@ -152,54 +157,37 @@ git clone https://github.com/blamechris/chroxy.git
 cd chroxy
 npm install
 
-# Terminal 1: Start the Chroxy server
+# Terminal 1: Start the server (Node 22 required)
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
-# Terminal 2: Start the Expo dev server (for hot-reload to phone)
+# Terminal 2: Start Expo dev server (for mobile hot-reload)
 cd packages/app
 npx expo start
-```
 
-Open Expo Go on your phone and scan the Expo dev server QR code. Then use the Chroxy app to scan the server's QR code (from Terminal 1) to connect.
+# Terminal 3 (optional): Start desktop in dev mode
+cd packages/desktop
+cargo tauri dev
+```
 
 ### Running Tests
 
 ```bash
-# Server tests (700+ tests)
+# Server tests
 cd packages/server
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test
+
+# Dashboard tests
+cd packages/server
+npm run dashboard:test
 
 # App type check
 cd packages/app
 npx tsc --noEmit
+
+# Lint
+cd packages/server
+npm run lint
 ```
-
-## Roadmap
-
-- [x] CLI headless mode with structured JSON streaming
-- [x] Claude Agent SDK integration
-- [x] WebSocket protocol with auth
-- [x] Cloudflare tunnel (Quick + Named)
-- [x] Supervisor auto-restart (named tunnel mode)
-- [x] Multi-session support
-- [x] Push notifications for permission prompts
-- [x] React Native app with QR scanning
-- [x] Chat view with markdown rendering
-- [x] Permission handling UI (approve/deny/always allow)
-- [x] Model switching and permission mode switching
-- [x] Context window and cost tracking
-- [x] Auto-reconnect with ConnectionPhase state machine
-- [x] Message selection (copy/share)
-- [x] Agent monitoring (background tasks)
-- [x] Terminal view with xterm.js emulation (WebView)
-- [x] Plan mode UI (plan approval card, feedback)
-- [x] End-to-end encryption for WebSocket messages
-- [x] Voice-to-text input (speech recognition)
-- [x] Provider adapter interface (pluggable session backends)
-- [x] Windows support for CLI headless mode
-- [ ] TestFlight / Play Store release
-- [ ] Tailscale support as tunnel alternative
-- [ ] Session recording and replay
 
 ## Contributing
 
