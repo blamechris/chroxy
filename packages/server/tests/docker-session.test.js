@@ -161,7 +161,7 @@ class FakeDockerSession extends EventEmitter {
     this._callSpawn('docker', dockerArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
     this._processReady = true
 
-    // Drain all messages that queued during respawn (mirrors real DockerSession)
+    // Dequeue the next pending message if not already busy (mirrors real DockerSession)
     while (this._pendingQueue.length > 0 && !this._isBusy) {
       const pending = this._pendingQueue.shift()
       this._drainedMessages.push(pending)

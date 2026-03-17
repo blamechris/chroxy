@@ -386,6 +386,32 @@ describe('CliSession._pendingQueue — spawn-time while-loop drain (#2459)', () 
     session._resultTimeout = null
   })
 
+  it('does not drain when _isBusy is already true before spawn', () => {
+    const session = createSession()
+    session._processReady = false
+
+    session.sendMessage('should-stay')
+    assert.equal(session._pendingQueue.length, 1)
+
+    // Simulate spawn with _isBusy already set (e.g. race condition)
+    const written = []
+    const mockChild = createMockChild()
+    mockChild.stdin = new Writable({ write(chunk, enc, cb) { written.push(chunk.toString()); cb() } })
+    session._child = mockChild
+    session._processReady = true
+    session._isBusy = true
+
+    while (session._pendingQueue.length > 0 && !session._isBusy) {
+      const pending = session._pendingQueue.shift()
+      session.sendMessage(pending.prompt, pending.attachments, pending.options || {})
+    }
+
+    // Nothing drained — _isBusy blocked the loop
+    assert.equal(written.length, 0)
+    assert.equal(session._pendingQueue.length, 1)
+    assert.equal(session._pendingQueue[0].prompt, 'should-stay')
+  })
+
   it('full chain: spawn drain + _clearMessageState drains all 3 queued messages', async () => {
     const written = []
     const mockChild = createMockChild()
