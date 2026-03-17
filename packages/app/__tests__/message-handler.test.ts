@@ -299,7 +299,7 @@ describe('message-handler', () => {
       expect(permMsg!.options).toEqual([
         { label: 'Allow', value: 'allow' },
         { label: 'Deny', value: 'deny' },
-        { label: 'Always Allow', value: 'allowAlways' },
+        { label: 'Allow for Session', value: 'allowSession' },
       ]);
     });
 
