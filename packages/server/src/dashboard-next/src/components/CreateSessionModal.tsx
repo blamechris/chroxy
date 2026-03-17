@@ -19,6 +19,7 @@ export interface CreateSessionData {
   provider?: string
   permissionMode?: string
   model?: string
+  worktree?: boolean
 }
 
 export interface CreateSessionModalProps {
@@ -89,6 +90,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [nameError, setNameError] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [permissionMode, setPermissionMode] = useState('')
+  const [worktree, setWorktree] = useState(false)
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1)
   const cwdInputRef = useRef<HTMLInputElement>(null)
@@ -139,6 +141,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       }
       setShowAdvanced(false)
       setPermissionMode('')
+      setWorktree(false)
       setShowSuggestions(false)
       setSelectedSuggestion(-1)
       setBrowsing(false)
@@ -162,8 +165,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       flushSync(() => setNameError('Session name is required'))
       return
     }
-    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model: defaultModel || undefined })
-  }, [onCreate, provider, permissionMode, defaultModel])
+    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model: defaultModel || undefined, worktree: worktree || undefined })
+  }, [onCreate, provider, permissionMode, defaultModel, worktree])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -484,6 +487,22 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               <option value="auto">Auto (bypass)</option>
               <option value="plan">Plan</option>
             </select>
+          </div>
+          <div className="form-field form-field--checkbox">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                id="worktree-checkbox"
+                checked={worktree}
+                onChange={e => setWorktree(e.target.checked)}
+                disabled={!cwdValRef.current.trim()}
+                aria-describedby="worktree-hint"
+              />
+              Isolate filesystem (worktree)
+            </label>
+            <span id="worktree-hint" className="form-hint">
+              Runs in an isolated git worktree — requires a git repo CWD
+            </span>
           </div>
         </div>
       )}

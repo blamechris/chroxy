@@ -4,6 +4,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  Switch,
   Modal,
   StyleSheet,
   KeyboardAvoidingView,
@@ -22,6 +23,7 @@ interface CreateSessionModalProps {
 export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps) {
   const [name, setName] = useState('');
   const [cwd, setCwd] = useState('');
+  const [worktree, setWorktree] = useState(false);
   const createSession = useConnectionStore((s) => s.createSession);
   const sessions = useConnectionStore((s) => s.sessions);
   const [showBrowser, setShowBrowser] = useState(false);
@@ -30,21 +32,24 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   useEffect(() => {
     if (visible) {
       setShowBrowser(false);
+      setWorktree(false);
     }
   }, [visible]);
 
   const handleCreate = () => {
     const sessionName = name.trim() || `Session ${sessions.length + 1}`;
     const sessionCwd = cwd.trim() || undefined;
-    createSession(sessionName, sessionCwd);
+    createSession(sessionName, sessionCwd, worktree || undefined);
     setName('');
     setCwd('');
+    setWorktree(false);
     onClose();
   };
 
   const handleCancel = () => {
     setName('');
     setCwd('');
+    setWorktree(false);
     onClose();
   };
 
@@ -105,6 +110,22 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
               </TouchableOpacity>
             </View>
             <Text style={styles.hint}>Leave empty to use the server's default directory</Text>
+
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleLabel}>
+                <Text style={styles.label}>Isolate filesystem (git worktree)</Text>
+                <Text style={styles.toggleHint}>Runs in a separate worktree — requires a git repo CWD</Text>
+              </View>
+              <Switch
+                value={worktree}
+                onValueChange={setWorktree}
+                disabled={!cwd.trim()}
+                trackColor={{ false: COLORS.borderPrimary, true: COLORS.accentBlue }}
+                thumbColor={COLORS.textPrimary}
+                accessibilityLabel="Isolate filesystem in a git worktree"
+                accessibilityHint="When enabled, the session runs in an isolated git worktree"
+              />
+            </View>
 
             <View style={styles.buttons}>
               <TouchableOpacity style={styles.cancelButton} onPress={handleCancel}>
@@ -196,6 +217,21 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: -8,
     marginBottom: 16,
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+    gap: 12,
+  },
+  toggleLabel: {
+    flex: 1,
+  },
+  toggleHint: {
+    color: COLORS.textDisabled,
+    fontSize: 11,
+    marginTop: 2,
   },
   buttons: {
     flexDirection: 'row',

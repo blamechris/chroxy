@@ -80,6 +80,7 @@ export interface SessionInfo {
   createdAt: number;
   conversationId: string | null;
   provider?: string;
+  worktree?: boolean;
 }
 
 export interface AgentInfo {

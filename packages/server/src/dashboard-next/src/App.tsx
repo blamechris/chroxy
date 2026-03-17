@@ -483,7 +483,7 @@ export function App() {
         repo = { path: s.cwd, name, source: 'auto', exists: true, activeSessions: [], resumableSessions: [] }
         repoMap.set(s.cwd, repo)
       }
-      repo.activeSessions.push({ sessionId: s.sessionId, name: s.name, isBusy: s.isBusy, provider: s.provider })
+      repo.activeSessions.push({ sessionId: s.sessionId, name: s.name, isBusy: s.isBusy, provider: s.provider, worktree: s.worktree })
     }
 
     // If no repos from sessions, create a default
@@ -551,10 +551,10 @@ export function App() {
     setShowCreateSession(true)
   }, [])
 
-  const handleCreateSession = useCallback((data: { name: string; cwd: string; provider?: string; permissionMode?: string; model?: string }) => {
+  const handleCreateSession = useCallback((data: { name: string; cwd: string; provider?: string; permissionMode?: string; model?: string; worktree?: boolean }) => {
     setSessionCreateError(null)
     setIsCreatingSession(true)
-    createSession({ name: data.name, cwd: data.cwd || undefined, provider: data.provider, model: data.model, permissionMode: data.permissionMode })
+    createSession({ name: data.name, cwd: data.cwd || undefined, provider: data.provider, model: data.model, permissionMode: data.permissionMode, worktree: data.worktree })
   }, [createSession])
 
   const handlePlanApprove = useCallback(() => {

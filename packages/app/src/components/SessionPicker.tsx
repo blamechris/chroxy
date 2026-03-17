@@ -71,7 +71,7 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
       onLayout={onLayout}
       activeOpacity={0.7}
       accessibilityRole="tab"
-      accessibilityLabel={`Session ${session.name}`}
+      accessibilityLabel={`Session ${session.name}${session.worktree ? ', isolated worktree' : ''}`}
       accessibilityState={{ selected: isActive }}
       accessibilityHint={isCrashed ? 'Session has crashed and needs attention' : showBusy ? 'Session is currently processing' : undefined}
     >
@@ -85,6 +85,11 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
       <Text style={[styles.pillText, isActive && styles.pillTextActive, isCrashed && styles.pillTextCrashed]} numberOfLines={1}>
         {session.name}
       </Text>
+      {session.worktree && (
+        <View style={styles.worktreeBadge} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+          <Text style={styles.worktreeBadgeText} accessibilityLabel="">W</Text>
+        </View>
+      )}
     </TouchableOpacity>
   );
 }
@@ -409,6 +414,19 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
     lineHeight: 14,
+  },
+  worktreeBadge: {
+    marginLeft: 4,
+    backgroundColor: COLORS.accentGreenLight,
+    borderRadius: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+  },
+  worktreeBadgeText: {
+    color: COLORS.accentGreen,
+    fontSize: 9,
+    fontWeight: '700',
+    lineHeight: 13,
   },
   addButton: {
     width: 32,
