@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
-import { statSync, mkdirSync } from 'fs'
+import { statSync, mkdirSync, rmSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
@@ -397,9 +397,15 @@ export class SessionManager extends EventEmitter {
         encoding: 'utf-8',
       })
       log.info(`Removed worktree for session ${sessionId}: ${worktreePath}`)
+      return
     } catch (err) {
-      const msg = err?.stderr?.trim() || err?.message || String(err)
-      log.error(`Failed to remove worktree for session ${sessionId} at ${worktreePath}: ${msg}`)
+      log.warn(`git worktree remove failed for session ${sessionId}, falling back to rmdir: ${err?.stderr?.trim() || err?.message || String(err)}`)
+    }
+    try {
+      rmSync(worktreePath, { recursive: true, force: true })
+      log.info(`Removed worktree directory for session ${sessionId}: ${worktreePath}`)
+    } catch (err) {
+      log.error(`Failed to remove worktree directory ${worktreePath}: ${err.message}`)
     }
   }
 
