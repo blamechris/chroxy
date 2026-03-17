@@ -28,7 +28,7 @@ Run a lightweight daemon on your dev machine, connect from your phone or desktop
 - **Phone + Desktop** — React Native mobile app and a Tauri desktop tray app with a web dashboard.
 - **Encrypted** — End-to-end encryption over Cloudflare tunnel. Your machine, your tunnel, no cloud middleman.
 - **Resilient** — Auto-reconnect on network drops, supervisor auto-restart on crash, push notifications for permission prompts.
-- **Voice input** — Dictate messages with speech-to-text on mobile and desktop.
+- **Voice input** — Dictate messages with speech-to-text on mobile and macOS desktop.
 - **Docker isolation** — Run sessions in Docker containers with resource limits and security guards.
 - **Open source** — MIT licensed. Audit it, fork it, improve it.
 
@@ -71,7 +71,7 @@ The server prints a QR code. Scan it with the Chroxy mobile app, or open the das
 
 ### Development mode
 
-Use `chroxy dev` when iterating on Chroxy itself. It forces supervisor mode (auto-restart on crash) regardless of tunnel type:
+Use `chroxy dev` when iterating on Chroxy itself. It forces supervisor mode (auto-restart on crash) and requires a tunnel (quick or named):
 
 ```bash
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy dev
@@ -87,7 +87,7 @@ If your phone and dev machine are on the same WiFi, connect directly without the
    ```
 2. In the Chroxy app, tap **"Enter manually"** and enter:
    - URL: `ws://YOUR_IP:8765`
-   - Token: your API token from `~/.chroxy/config.json`
+   - Token: the API token printed during `chroxy init` (stored in OS keychain, or `~/.chroxy/config.json` as fallback)
 
 ### Tunnel Modes
 
@@ -128,7 +128,7 @@ cargo tauri dev
 ```
 chroxy/
 ├── packages/
-│   ├── server/      # Node.js daemon + CLI (ES modules, no TypeScript)
+│   ├── server/      # Node.js daemon + CLI + web dashboard
 │   ├── app/         # React Native mobile app (TypeScript, Expo 54)
 │   ├── desktop/     # Tauri tray app (Rust + web dashboard)
 │   ├── protocol/    # Shared protocol types and version
@@ -146,7 +146,7 @@ Mobile App / Desktop ◄──► Cloudflare Tunnel ◄──► WebSocket Serve
 - **Server:** `server-cli.js` starts a WebSocket server and creates sessions via pluggable providers (`sdk-session.js` for the Agent SDK, `cli-session.js` for legacy `claude -p`, `docker-session.js` for container isolation)
 - **WebSocket layer:** Auth, E2E encryption (TweetNaCl), message routing, session management, permission handling
 - **Tunnel:** Cloudflare Quick or Named tunnel for secure remote access without port forwarding
-- **Supervisor:** In named tunnel mode, owns the tunnel and auto-restarts the server on crash with exponential backoff
+- **Supervisor:** When using a tunnel (quick or named), owns the tunnel and auto-restarts the server on crash with exponential backoff
 - **Clients:** Mobile app (React Native) and desktop tray app (Tauri) connect over WebSocket; web dashboard served directly by the server
 
 ## Development
