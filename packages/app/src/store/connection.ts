@@ -906,6 +906,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  setPermissionRules: (rules) => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const payload: Record<string, unknown> = { type: 'set_permission_rules', rules };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      wsSend(socket, payload);
+    }
+  },
+
   confirmPermissionMode: (mode: string) => {
     const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
