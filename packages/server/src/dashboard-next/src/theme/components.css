@@ -498,6 +498,18 @@
   flex: 1;
 }
 
+.sidebar-worktree-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 13px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--accent-green-light, rgba(34, 197, 94, 0.13));
+  color: var(--accent-green);
+  border: 1px solid var(--accent-green-border, rgba(34, 197, 94, 0.2));
+}
+
 .sidebar-footer {
   display: flex;
   align-items: center;
@@ -2431,6 +2443,33 @@
 
 .advanced-section select {
   flex: 1;
+}
+
+.advanced-section .form-field--checkbox {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.advanced-section .checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: unset;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.advanced-section .checkbox-label input[type='checkbox'] {
+  cursor: pointer;
+}
+
+.form-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 22px;
 }
 
 .provider-select {

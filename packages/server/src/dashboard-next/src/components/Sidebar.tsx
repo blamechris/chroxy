@@ -14,6 +14,7 @@ export interface ActiveSessionNode {
   name: string
   isBusy: boolean
   provider?: string
+  worktree?: boolean
 }
 
 export interface ResumableSessionNode {
@@ -344,6 +345,11 @@ export function Sidebar({
                             <span className="sidebar-idle-dot" title="Session idle — ready for input" />
                           )}
                           <span className="sidebar-session-name">{session.name}</span>
+                          {session.worktree && (
+                            <span className="sidebar-worktree-badge" title="Isolated git worktree">
+                              W
+                            </span>
+                          )}
                           {session.provider && session.provider !== 'claude-sdk' && (
                             <span className="sidebar-provider-badge" title={session.provider}>
                               {session.provider.replace(/^claude-/, '').toUpperCase()}

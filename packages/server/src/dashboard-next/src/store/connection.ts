@@ -1205,15 +1205,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  createSession: ({ name, cwd, provider, model, permissionMode }) => {
+  createSession: ({ name, cwd, provider, model, permissionMode, worktree }) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      const msg: Record<string, string> = { type: 'create_session' };
+      const msg: Record<string, unknown> = { type: 'create_session' };
       if (name) msg.name = name;
       if (cwd) msg.cwd = cwd;
       if (provider) msg.provider = provider;
       if (model) msg.model = model;
       if (permissionMode) msg.permissionMode = permissionMode;
+      if (worktree) msg.worktree = true;
       wsSend(socket, msg);
     }
   },
