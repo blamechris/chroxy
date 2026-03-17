@@ -198,6 +198,7 @@ function _isSecureRequest(req) {
  *   { type: 'subscribe_sessions' }                      — subscribe to session discovery events
  *   { type: 'unsubscribe_sessions' }                    — unsubscribe from session discovery
  *   { type: 'set_thinking_level', level }               — set thinking budget level ('default'|'high'|'max')
+ *   { type: 'set_permission_rules', rules, sessionId }  — set per-session auto-approval rules
  *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
  *
  * Server -> Client:
@@ -285,6 +286,7 @@ function _isSecureRequest(req) {
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit
  *   { type: 'budget_exceeded', sessionId, message, ... } — budget exceeded
  *   { type: 'web_feature_status', features }            — web feature availability
+ *   { type: 'permission_rules_updated', rules }         — per-session auto-approval rules changed
  *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
