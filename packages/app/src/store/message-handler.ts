@@ -1500,7 +1500,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const newOptions = [
         { label: 'Allow', value: 'allow' },
         { label: 'Deny', value: 'deny' },
-        { label: 'Always Allow', value: 'allowAlways' },
+        { label: 'Allow for Session', value: 'allowSession' },
       ];
       const newExpiresAt = typeof msg.remainingMs === 'number' ? Date.now() + msg.remainingMs : undefined;
       const permTargetId = (msg.sessionId as string) || get().activeSessionId;
@@ -1613,6 +1613,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             (n) => n.requestId !== expiredRequestId
           ),
         }));
+      }
+      break;
+    }
+
+    case 'permission_rules_updated': {
+      const rulesSessionId = (msg.sessionId as string) || get().activeSessionId;
+      const rules = Array.isArray(msg.rules)
+        ? (msg.rules as { tool: string; decision: string }[])
+        : [];
+      if (rulesSessionId && get().sessionStates[rulesSessionId]) {
+        updateSession(rulesSessionId, () => ({ sessionRules: rules }));
       }
       break;
     }

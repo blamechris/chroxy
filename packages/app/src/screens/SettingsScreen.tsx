@@ -124,7 +124,7 @@ export function SettingsScreen() {
     const countMsg = (msg: { type: string; requestId?: string; answered?: string }) => {
       if (msg.type !== 'prompt' || !msg.requestId) return;
       total++;
-      if (msg.answered === 'allow' || msg.answered === 'allowAlways') allowed++;
+      if (msg.answered === 'allow' || msg.answered === 'allowAlways' || msg.answered === 'allowSession') allowed++;
       else if (msg.answered === 'deny') denied++;
     };
 

@@ -830,10 +830,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   sendPermissionResponse: (requestId: string, decision: string) => {
     const { socket } = get();
-    const payload = { type: 'permission_response', requestId, decision };
+    // allowSession: send immediate 'allow' unblock + register a session rule for auto-approval
+    const wireDecision = decision === 'allowSession' ? 'allow' : decision;
+    const payload = { type: 'permission_response', requestId, decision: wireDecision };
     let result: 'sent' | 'queued' | false;
     if (socket && socket.readyState === WebSocket.OPEN) {
-      if (decision === 'deny') hapticWarning(); else hapticMedium();
+      if (wireDecision === 'deny') hapticWarning(); else hapticMedium();
       wsSend(socket, payload);
       result = 'sent';
     } else {
@@ -847,6 +849,23 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const targetSid = notifMatch?.sessionId
       ?? Object.entries(sessionStates).find(([, ss]) => ss.messages.some((m) => m.requestId === requestId))?.[0];
     if (targetSid && targetSid !== activeSessionId) get().switchSession(targetSid, { haptic: false });
+    // For allowSession: send set_permission_rules to register auto-approval for this tool
+    if (decision === 'allowSession' && socket && socket.readyState === WebSocket.OPEN) {
+      const sessionId = targetSid ?? activeSessionId;
+      if (sessionId) {
+        const ss = sessionStates[sessionId];
+        const permMsg = ss?.messages.find((m) => m.requestId === requestId && m.type === 'prompt');
+        const permissionTool = permMsg?.tool;
+        if (permissionTool) {
+          const currentRules = ss?.sessionRules ?? [];
+          wsSend(socket, {
+            type: 'set_permission_rules',
+            sessionId,
+            rules: [...currentRules, { tool: permissionTool, decision: 'allow' }],
+          });
+        }
+      }
+    }
     return result;
   },
 
