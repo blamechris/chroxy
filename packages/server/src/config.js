@@ -45,6 +45,7 @@ const CONFIG_SCHEMA = {
   maxHistory: 'number',
   showToken: 'boolean',
   logFormat: 'string',
+  environments: 'object',
 }
 
 /**

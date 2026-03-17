@@ -124,3 +124,28 @@ registerProvider('claude-cli', CliSession)
 registerProvider('claude-sdk', SdkSession)
 registerProvider('gemini', GeminiSession)
 registerProvider('codex', CodexSession)
+
+/**
+ * Register the docker provider when environments are enabled.
+ * Probes `docker info` to confirm Docker is available; skips silently if not.
+ *
+ * @param {object} config - Merged server config
+ */
+export async function registerDockerProvider(config) {
+  if (!config?.environments?.enabled) return
+
+  const { createLogger } = await import('./logger.js')
+  const log = createLogger('providers')
+
+  const { execFileSync } = await import('child_process')
+  try {
+    execFileSync('docker', ['info'], { stdio: 'ignore' })
+  } catch {
+    log.warn('Docker not available — docker provider disabled')
+    return
+  }
+
+  const { DockerSession } = await import('./docker-session.js')
+  registerProvider('docker', DockerSession)
+  log.info('Docker provider registered')
+}
