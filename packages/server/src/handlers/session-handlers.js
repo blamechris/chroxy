@@ -40,7 +40,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   const worktree = msg.worktree === true ? true : undefined
 
   if (worktree && !cwd) {
-    ctx.send(ws, { type: 'session_error', message: 'worktree requires an explicit cwd' })
+    ctx.send(ws, { type: 'session_error', message: 'Worktree requires an explicit CWD' })
     return
   }
 

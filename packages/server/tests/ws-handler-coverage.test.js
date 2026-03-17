@@ -204,7 +204,7 @@ describe('create_session handler', () => {
     assert.equal(ctx.sessionManager.createSession.callCount, 0, 'should not create session')
     const [, payload] = ctx._spies.send.lastCall
     assert.equal(payload.type, 'session_error')
-    assert.match(payload.message, /worktree requires an explicit cwd/)
+    assert.match(payload.message, /Worktree requires an explicit CWD/)
   })
 
   it('rejects worktree with empty string cwd', async () => {
@@ -214,7 +214,7 @@ describe('create_session handler', () => {
     assert.equal(ctx.sessionManager.createSession.callCount, 0, 'should not create session')
     const [, payload] = ctx._spies.send.lastCall
     assert.equal(payload.type, 'session_error')
-    assert.match(payload.message, /worktree requires an explicit cwd/)
+    assert.match(payload.message, /Worktree requires an explicit CWD/)
   })
 
   it('allows worktree with explicit cwd', async () => {
