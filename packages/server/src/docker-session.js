@@ -66,6 +66,8 @@ export class DockerSession extends CliSession {
     this._startContainer((err) => {
       if (err) {
         this.emit('error', { message: `Failed to start Docker container: ${err.message}` })
+        // Self-destruct so SessionManager doesn't keep a phantom entry
+        this.destroy()
         return
       }
       super.start()

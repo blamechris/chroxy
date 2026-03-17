@@ -39,7 +39,7 @@ prepare_config() {
     local resolved_path
     resolved_path="$(realpath -m "$workspace_path" 2>/dev/null || echo "$workspace_path")"
     # Block system directories and any subdirectories of them
-    local blocked_prefixes="/bin /boot /dev /etc /lib /lib64 /proc /root /run /sbin /sys /usr /var"
+    local blocked_prefixes="/bin /boot /dev /etc /lib /lib64 /proc /root /run /sbin /sys /tmp /usr /var"
     if [ "$resolved_path" = "/" ]; then
       echo "ERROR: WORKSPACE_PATH resolves to /  — mounting the root filesystem is not allowed."
       exit 1
