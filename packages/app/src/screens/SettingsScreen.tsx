@@ -18,6 +18,7 @@ import * as Clipboard from 'expo-clipboard';
 import { useConnectionStore } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { COLORS } from '../constants/colors';
+import type { PermissionRule } from '../store/types';
 import type { RootStackParamList } from '../App';
 import { getSpeechLang, setSpeechLang } from '../hooks/useSpeechRecognition';
 import {
@@ -92,7 +93,14 @@ export function SettingsScreen() {
     disconnect,
     clearSavedConnection,
     requestFullHistory,
+    setPermissionRules,
   } = useConnectionStore();
+
+  const activeSessionId = useConnectionStore((s) => s.activeSessionId);
+  const sessionRules = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? (s.sessionStates[id].sessionRules ?? []) : [];
+  });
 
   const serverVersion = useConnectionLifecycleStore((s) => s.serverVersion);
   const latestVersion = useConnectionLifecycleStore((s) => s.latestVersion);
@@ -210,6 +218,63 @@ export function SettingsScreen() {
                 {permissionSummary.allowed} allowed{permissionSummary.denied > 0 ? `, ${permissionSummary.denied} denied` : ''}
               </Text>
             </TouchableOpacity>
+          </View>
+        </>
+      )}
+
+      {/* SESSION RULES */}
+      {activeSessionId != null && (
+        <>
+          <Text style={styles.sectionHeader}>SESSION RULES</Text>
+          <View style={styles.section}>
+            {sessionRules.length === 0 ? (
+              <View style={styles.row}>
+                <Text style={styles.rowHint}>No active rules</Text>
+              </View>
+            ) : (
+              <>
+                <View style={styles.rulesContainer}>
+                  {sessionRules.map((rule: PermissionRule, index: number) => (
+                    <TouchableOpacity
+                      key={`${rule.tool}-${rule.decision}-${index}`}
+                      style={[
+                        styles.ruleChip,
+                        rule.decision === 'allow' ? styles.ruleChipAllow : styles.ruleChipDeny,
+                      ]}
+                      onPress={() => {
+                        const updated = sessionRules.filter((_: PermissionRule, i: number) => i !== index);
+                        setPermissionRules(updated);
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.ruleChipText,
+                          rule.decision === 'allow' ? styles.ruleChipTextAllow : styles.ruleChipTextDeny,
+                        ]}
+                      >
+                        {rule.tool}
+                        {rule.pattern ? ` (${rule.pattern})` : ''} — {rule.decision === 'allow' ? 'auto-allow' : 'auto-deny'}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.ruleChipRemove,
+                          rule.decision === 'allow' ? styles.ruleChipTextAllow : styles.ruleChipTextDeny,
+                        ]}
+                      >
+                        {' \u00d7'}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <View style={styles.separator} />
+                <TouchableOpacity
+                  style={styles.row}
+                  onPress={() => setPermissionRules([])}
+                >
+                  <Text style={styles.destructiveText}>Clear All Rules</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         </>
       )}
@@ -537,5 +602,43 @@ const styles = StyleSheet.create({
   sheetCancelText: {
     color: COLORS.accentRed,
     textAlign: 'center',
+  },
+  rulesContainer: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  ruleChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+  },
+  ruleChipAllow: {
+    backgroundColor: COLORS.accentGreenLight,
+    borderColor: COLORS.accentGreenBorder,
+  },
+  ruleChipDeny: {
+    backgroundColor: COLORS.accentRedSubtle,
+    borderColor: COLORS.accentRedBorder,
+  },
+  ruleChipText: {
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  ruleChipTextAllow: {
+    color: COLORS.accentGreen,
+  },
+  ruleChipTextDeny: {
+    color: COLORS.accentRed,
+  },
+  ruleChipRemove: {
+    fontSize: 15,
+    fontWeight: '600',
+    marginLeft: 2,
   },
 });
