@@ -224,8 +224,11 @@ export class CliSession extends BaseSession {
     log.info('Process started, ready for messages')
     this.emit('ready', { sessionId: null, model: this.model, tools: [] })
 
-    // Dequeue any messages that arrived during respawn (FIFO)
-    if (this._pendingQueue.length > 0) {
+    // Dequeue the next pending message if not already busy.
+    // sendMessage() sets _isBusy, so the loop sends at most one message.
+    // Remaining items stay in the queue and are drained one-by-one via
+    // _clearMessageState() after each result.
+    while (this._pendingQueue.length > 0 && !this._isBusy) {
       const pending = this._pendingQueue.shift()
       log.info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
       this.sendMessage(pending.prompt, pending.attachments, pending.options || {})

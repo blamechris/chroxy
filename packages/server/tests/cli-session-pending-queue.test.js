@@ -310,3 +310,155 @@ describe('CliSession._pendingQueue — busy guard is unaffected', () => {
     assert.equal(session._pendingQueue.length, 0)
   })
 })
+
+describe('CliSession._pendingQueue — spawn-time while-loop drain (#2459)', () => {
+  it('sends the first queued message and keeps the rest in queue (not discarded)', () => {
+    const session = createSession()
+    session._processReady = false
+
+    // Queue 3 messages while process is not ready
+    session.sendMessage('msg-1')
+    session.sendMessage('msg-2')
+    session.sendMessage('msg-3')
+    assert.equal(session._pendingQueue.length, 3)
+
+    // Simulate _spawnPersistentProcess completing: set ready + mock child
+    const written = []
+    const mockChild = createMockChild()
+    mockChild.stdin = new Writable({ write(chunk, enc, cb) { written.push(chunk.toString()); cb() } })
+    session._child = mockChild
+
+    // Simulate the while-loop drain from _spawnPersistentProcess
+    session._processReady = true
+    while (session._pendingQueue.length > 0 && !session._isBusy) {
+      const pending = session._pendingQueue.shift()
+      session.sendMessage(pending.prompt, pending.attachments, pending.options || {})
+    }
+
+    // First message written to stdin
+    assert.equal(written.length, 1)
+    assert.equal(JSON.parse(written[0].trim()).message.content[0].text, 'msg-1')
+
+    // Remaining 2 messages still in queue — NOT silently dropped
+    assert.equal(session._pendingQueue.length, 2)
+    assert.equal(session._pendingQueue[0].prompt, 'msg-2')
+    assert.equal(session._pendingQueue[1].prompt, 'msg-3')
+
+    // Cleanup
+    clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+  })
+
+  it('does not lose queued messages when _isBusy blocks the loop', () => {
+    const session = createSession()
+    session._processReady = false
+
+    session.sendMessage('alpha')
+    session.sendMessage('beta')
+    assert.equal(session._pendingQueue.length, 2)
+
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+
+    // Simulate spawn with the while-loop drain
+    const written = []
+    const mockChild = createMockChild()
+    mockChild.stdin = new Writable({ write(chunk, enc, cb) { written.push(chunk.toString()); cb() } })
+    session._child = mockChild
+    session._processReady = true
+
+    while (session._pendingQueue.length > 0 && !session._isBusy) {
+      const pending = session._pendingQueue.shift()
+      session.sendMessage(pending.prompt, pending.attachments, pending.options || {})
+    }
+
+    // Only 1 message sent, no "Already processing" errors
+    assert.equal(written.length, 1)
+    assert.equal(errors.filter(e => e.message.includes('Already processing')).length, 0,
+      'while-loop with _isBusy guard must NOT emit "Already processing" errors')
+
+    // beta still in queue, waiting for result → _clearMessageState → nextTick drain
+    assert.equal(session._pendingQueue.length, 1)
+    assert.equal(session._pendingQueue[0].prompt, 'beta')
+
+    // Cleanup
+    clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+  })
+
+  it('does not drain when _isBusy is already true before spawn', () => {
+    const session = createSession()
+    session._processReady = false
+
+    session.sendMessage('should-stay')
+    assert.equal(session._pendingQueue.length, 1)
+
+    // Simulate spawn with _isBusy already set (e.g. race condition)
+    const written = []
+    const mockChild = createMockChild()
+    mockChild.stdin = new Writable({ write(chunk, enc, cb) { written.push(chunk.toString()); cb() } })
+    session._child = mockChild
+    session._processReady = true
+    session._isBusy = true
+
+    while (session._pendingQueue.length > 0 && !session._isBusy) {
+      const pending = session._pendingQueue.shift()
+      session.sendMessage(pending.prompt, pending.attachments, pending.options || {})
+    }
+
+    // Nothing drained — _isBusy blocked the loop
+    assert.equal(written.length, 0)
+    assert.equal(session._pendingQueue.length, 1)
+    assert.equal(session._pendingQueue[0].prompt, 'should-stay')
+  })
+
+  it('full chain: spawn drain + _clearMessageState drains all 3 queued messages', async () => {
+    const written = []
+    const mockChild = createMockChild()
+    mockChild.stdin = new Writable({ write(chunk, enc, cb) { written.push(chunk.toString()); cb() } })
+
+    const session = createSession()
+    session._processReady = false
+
+    // Queue 3 messages while process is not ready
+    session.sendMessage('first')
+    session.sendMessage('second')
+    session.sendMessage('third')
+    assert.equal(session._pendingQueue.length, 3)
+
+    // Simulate spawn + while-loop drain
+    session._child = mockChild
+    session._processReady = true
+    while (session._pendingQueue.length > 0 && !session._isBusy) {
+      const pending = session._pendingQueue.shift()
+      session.sendMessage(pending.prompt, pending.attachments, pending.options || {})
+    }
+    clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+
+    // first sent
+    assert.equal(written.length, 1)
+    assert.equal(JSON.parse(written[0].trim()).message.content[0].text, 'first')
+
+    // Simulate result for 'first' → _clearMessageState drains 'second'
+    session._isBusy = true
+    session._clearMessageState()
+    await new Promise(r => process.nextTick(r))
+    clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+
+    assert.equal(written.length, 2)
+    assert.equal(JSON.parse(written[1].trim()).message.content[0].text, 'second')
+
+    // Simulate result for 'second' → _clearMessageState drains 'third'
+    session._isBusy = true
+    session._clearMessageState()
+    await new Promise(r => process.nextTick(r))
+    clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+
+    assert.equal(written.length, 3)
+    assert.equal(JSON.parse(written[2].trim()).message.content[0].text, 'third')
+    assert.equal(session._pendingQueue.length, 0)
+  })
+})
