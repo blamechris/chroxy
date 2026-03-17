@@ -47,6 +47,20 @@ describe('SdkSession', () => {
     it('does not accept allowedTools', () => {
       assert.equal(session.allowedTools, undefined)
     })
+
+    it('stores sandbox option when provided', () => {
+      const sandbox = {
+        network: { allowedDomains: ['example.com'] },
+        filesystem: { allowedPaths: ['/tmp'] },
+      }
+      const s = createSession({ sandbox })
+      assert.deepEqual(s._sandbox, sandbox)
+      s.destroy()
+    })
+
+    it('defaults sandbox to null when not provided', () => {
+      assert.equal(session._sandbox, null)
+    })
   })
 
   // -- start() --
@@ -451,6 +465,56 @@ describe('SdkSession', () => {
       session.sendMessage('hi')
       assert.equal(errors.length, 1)
       assert.ok(errors[0].message.includes('Already processing'))
+    })
+  })
+
+  // -- sandbox option in query --
+
+  describe('sandbox option', () => {
+    it('includes sandbox in query options when configured', async () => {
+      const sandbox = {
+        network: { allowedDomains: ['example.com'] },
+        filesystem: { allowedPaths: ['/tmp'], deniedPaths: ['/etc'] },
+        bash: { allowedCommands: ['ls', 'cat'] },
+        autoAllowBashIfSandboxed: true,
+      }
+      const s = createSession({ sandbox })
+      s._processReady = true
+
+      // Capture the args passed to query() by patching _callQuery
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        // Return an async iterable that yields a result immediately
+        return (async function* () {
+          yield { type: 'result', session_id: 'test-123', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      await s.sendMessage('hello')
+      s.destroy()
+
+      assert.equal(captured.length, 1)
+      assert.deepEqual(captured[0].options.sandbox, sandbox)
+    })
+
+    it('omits sandbox from query options when not configured', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'test-456', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      await s.sendMessage('hello')
+      s.destroy()
+
+      assert.equal(captured.length, 1)
+      assert.equal(captured[0].options.sandbox, undefined)
     })
   })
 

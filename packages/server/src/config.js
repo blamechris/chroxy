@@ -46,6 +46,7 @@ const CONFIG_SCHEMA = {
   showToken: 'boolean',
   logFormat: 'string',
   environments: 'object',
+  sandbox: 'object',
 }
 
 /**
@@ -246,6 +247,7 @@ function envKeyForConfig(key) {
     showToken: 'CHROXY_SHOW_TOKEN',
     repos: 'CHROXY_REPOS',
     logFormat: 'CHROXY_LOG_FORMAT',
+    sandbox: 'CHROXY_SANDBOX',
   }
   return envMap[key] || key.toUpperCase()
 }

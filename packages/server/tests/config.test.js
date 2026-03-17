@@ -118,6 +118,25 @@ describe('validateConfig', () => {
     assert.equal(result.valid, false)
     assert.ok(result.warnings.some(w => w.includes('externalUrl') && w.includes('wss:')))
   })
+
+  it('accepts sandbox as an object', () => {
+    const config = {
+      sandbox: {
+        network: { allowedDomains: ['example.com'] },
+        filesystem: { allowedPaths: ['/tmp'] },
+      },
+    }
+    const result = validateConfig(config)
+    assert.equal(result.valid, true)
+    assert.equal(result.warnings.length, 0)
+  })
+
+  it('warns when sandbox has wrong type', () => {
+    const config = { sandbox: 'enabled' }
+    const result = validateConfig(config)
+    assert.equal(result.valid, false)
+    assert.ok(result.warnings.some(w => w.includes('sandbox') && w.includes('object')))
+  })
 })
 
 describe('mergeConfig', () => {
