@@ -1,5 +1,6 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { homedir } from 'node:os'
 import { handleSessionMessage } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSession, createMockSessionManager } from './test-helpers.js'
 
@@ -194,6 +195,36 @@ describe('create_session handler', () => {
     const [, payload] = ctx._spies.send.lastCall
     assert.equal(payload.type, 'session_error')
     assert.match(payload.message, /limit reached/)
+  })
+
+  it('rejects worktree without explicit cwd', async () => {
+    const msg = { type: 'create_session', name: 'Isolated', worktree: true }
+    await handleSessionMessage(ws, client, msg, ctx)
+
+    assert.equal(ctx.sessionManager.createSession.callCount, 0, 'should not create session')
+    const [, payload] = ctx._spies.send.lastCall
+    assert.equal(payload.type, 'session_error')
+    assert.match(payload.message, /Worktree requires an explicit CWD/)
+  })
+
+  it('rejects worktree with empty string cwd', async () => {
+    const msg = { type: 'create_session', name: 'Isolated', cwd: '  ', worktree: true }
+    await handleSessionMessage(ws, client, msg, ctx)
+
+    assert.equal(ctx.sessionManager.createSession.callCount, 0, 'should not create session')
+    const [, payload] = ctx._spies.send.lastCall
+    assert.equal(payload.type, 'session_error')
+    assert.match(payload.message, /Worktree requires an explicit CWD/)
+  })
+
+  it('allows worktree with explicit cwd', async () => {
+    const msg = { type: 'create_session', name: 'Isolated', cwd: homedir(), worktree: true }
+    await handleSessionMessage(ws, client, msg, ctx)
+
+    assert.equal(ctx.sessionManager.createSession.callCount, 1, 'should create session')
+    const args = ctx.sessionManager.createSession.lastCall[0]
+    assert.equal(args.worktree, true)
+    assert.equal(args.cwd, homedir())
   })
 })
 

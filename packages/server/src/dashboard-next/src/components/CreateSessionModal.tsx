@@ -501,7 +501,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               Isolate filesystem (worktree)
             </label>
             <span id="worktree-hint" className="form-hint">
-              Runs in an isolated git worktree — requires a git repo CWD
+              {worktree
+                ? 'CWD must point to an existing git repository'
+                : 'Runs in an isolated git worktree — requires a git repo CWD'}
             </span>
           </div>
         </div>
