@@ -15,6 +15,7 @@ import { PairingManager } from './pairing.js'
 import { getLanIp } from './lan-ip.js'
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
+import { registerDockerProvider } from './providers.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -136,6 +137,9 @@ export async function startCliServer(config) {
     console.error('    Remove --no-encrypt or disable the tunnel (--tunnel none).')
     process.exit(1)
   }
+
+  // Register optional providers (e.g. docker) based on config
+  await registerDockerProvider(config)
 
   // 1. Create session manager
   const sessionManager = new SessionManager({

@@ -52,6 +52,7 @@ export function addServerOptions(cmd) {
     .option('--cost-budget <dollars>', 'Per-session cost budget in dollars (e.g., 5.00)')
     .option('--log-format <format>', 'Log output format: text (default) or json')
     .option('-v, --verbose', 'Show detailed config sources and validation info')
+    .option('--environments', 'Enable environment isolation providers (e.g. docker)')
 }
 
 /**
@@ -121,6 +122,7 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
   if (options.legacyCli) cliOverrides.legacyCli = true
   if (options.provider !== undefined) cliOverrides.provider = options.provider
   if (options.logFormat !== undefined) cliOverrides.logFormat = options.logFormat
+  if (options.environments) cliOverrides.environments = { enabled: true }
 
   const defaults = {
     port: 8765,

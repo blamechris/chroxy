@@ -6,6 +6,7 @@
  */
 import { toShortModelId, getModels, getDefaultModelId } from './models.js'
 import { PERMISSION_MODES } from './handler-utils.js'
+import { listProviders } from './providers.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('ws')
@@ -51,6 +52,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   const isLocalhost = localhostBypass && (client.socketIp === '127.0.0.1' || client.socketIp === '::1' || client.socketIp === '::ffff:127.0.0.1')
   const requireEncryption = encryptionEnabled && !isLocalhost
 
+  const providers = listProviders()
+  const features = {
+    environments: providers.some(p => p.capabilities?.containerized),
+  }
+
   send(ws, {
     type: 'auth_ok',
     clientId: client.id,
@@ -66,6 +72,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     minProtocolVersion,
     maxProtocolVersion: protocolVersion,
     webFeatures: webTaskManager.getFeatureStatus(),
+    features,
     ...extra,
   })
 
