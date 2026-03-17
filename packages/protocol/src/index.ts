@@ -76,6 +76,7 @@ export const ClientMessageType = {
   UnsubscribeSessions: 'unsubscribe_sessions',
   // Model configuration
   SetThinkingLevel: 'set_thinking_level',
+  SetPermissionRules: 'set_permission_rules',
   // Extension
   ExtensionMessage: 'extension_message',
 } as const
@@ -104,6 +105,7 @@ export const ServerMessageType = {
   ConfirmPermissionMode: 'confirm_permission_mode',
   PermissionModeChanged: 'permission_mode_changed',
   AvailablePermissionModes: 'available_permission_modes',
+  PermissionRulesUpdated: 'permission_rules_updated',
   SessionList: 'session_list',
   SessionSwitched: 'session_switched',
   SessionCreated: 'session_created',
