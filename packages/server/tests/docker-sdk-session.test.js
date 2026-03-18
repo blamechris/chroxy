@@ -219,14 +219,19 @@ class FakeDockerSdkSession extends EventEmitter {
     const containerId = this._containerId
     const containerCliPath = this._containerCliPath || DEFAULT_CONTAINER_CLI_PATH
     const containerUser = this._containerUser
+    const hostCwd = this.cwd || process.cwd()
 
     return (options) => {
       const { command, args, cwd, env, signal } = options
 
       const dockerArgs = ['exec', '-i', '-u', containerUser]
 
+      // Remap host cwd to container mount point (mirrors real implementation)
       if (cwd) {
-        dockerArgs.push('--workdir', cwd)
+        const containerCwd = cwd.startsWith(hostCwd)
+          ? '/workspace' + cwd.slice(hostCwd.length)
+          : '/workspace'
+        dockerArgs.push('--workdir', containerCwd)
       }
 
       for (const key of FORWARDED_ENV_KEYS) {
@@ -1134,7 +1139,7 @@ describe('DockerSdkSession constructor username validation', () => {
 // ──────────────────────────────────────────────────────────────────────────────
 
 describe('DockerSdkSession cwd remapping in spawnClaudeCodeProcess', () => {
-  let session, spawnCallback
+  let session
 
   beforeEach(() => {
     session = new FakeDockerSdkSession({ cwd: '/home/user/project' })
@@ -1147,8 +1152,6 @@ describe('DockerSdkSession cwd remapping in spawnClaudeCodeProcess', () => {
   })
 
   it('remaps host cwd to /workspace when cwd matches exactly', () => {
-    // The real code remaps cwd.startsWith(hostCwd) -> /workspace + rest
-    // The fake harness mirrors this — test it via the real class shape
     const cb = session._createSpawnCallback()
     cb({
       command: 'node',
@@ -1160,7 +1163,37 @@ describe('DockerSdkSession cwd remapping in spawnClaudeCodeProcess', () => {
     const { args } = session._spawnCalls[0]
     const wdIdx = args.indexOf('--workdir')
     assert.ok(wdIdx > -1)
-    assert.equal(args[wdIdx + 1], '/home/user/project')
+    assert.equal(args[wdIdx + 1], '/workspace')
+  })
+
+  it('remaps host subdirectory cwd to /workspace/subdir', () => {
+    const cb = session._createSpawnCallback()
+    cb({
+      command: 'node',
+      args: ['/host/cli.js'],
+      cwd: '/home/user/project/src/lib',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const wdIdx = args.indexOf('--workdir')
+    assert.ok(wdIdx > -1)
+    assert.equal(args[wdIdx + 1], '/workspace/src/lib')
+  })
+
+  it('falls back to /workspace for unrelated cwd', () => {
+    const cb = session._createSpawnCallback()
+    cb({
+      command: 'node',
+      args: ['/host/cli.js'],
+      cwd: '/other/path/entirely',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const wdIdx = args.indexOf('--workdir')
+    assert.ok(wdIdx > -1)
+    assert.equal(args[wdIdx + 1], '/workspace')
   })
 
   it('does not set --workdir when cwd is not provided', () => {
