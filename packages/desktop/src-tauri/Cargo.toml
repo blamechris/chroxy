@@ -26,6 +26,9 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["sync"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
