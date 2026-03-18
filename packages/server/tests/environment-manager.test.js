@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -577,6 +577,303 @@ describe('EnvironmentManager.reconnect()', () => {
 
     const manager = new EnvironmentManager({ statePath, _execFile: createMockExecFile() })
     await manager.reconnect() // Should not throw
+    assert.equal(manager.list().length, 0)
+  })
+})
+
+describe('EnvironmentManager DevContainer support', () => {
+  let tmpDir, statePath, projectDir
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-dc-test-'))
+    statePath = join(tmpDir, 'environments.json')
+    projectDir = join(tmpDir, 'project')
+    mkdirSync(projectDir, { recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('parses devcontainer.json and applies image override', async () => {
+    const dcDir = join(projectDir, '.devcontainer')
+    mkdirSync(dcDir, { recursive: true })
+    writeFileSync(join(dcDir, 'devcontainer.json'), JSON.stringify({
+      image: 'python:3.12-slim',
+      containerEnv: { NODE_ENV: 'development' },
+      forwardPorts: [3000, 8080],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'dc-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'dc-test',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    assert.equal(env.image, 'python:3.12-slim')
+
+    // Verify docker run was called with the devcontainer image
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    assert.ok(runCall.args.includes('python:3.12-slim'))
+
+    // Verify env vars were passed
+    const envIdx = runCall.args.indexOf('NODE_ENV=development')
+    assert.ok(envIdx > 0, 'containerEnv should appear as --env flag')
+    assert.equal(runCall.args[envIdx - 1], '--env')
+
+    // Verify ports were forwarded
+    assert.ok(runCall.args.includes('-p'))
+    assert.ok(runCall.args.includes('3000:3000'))
+    assert.ok(runCall.args.includes('8080:8080'))
+  })
+
+  it('applies remoteUser from devcontainer', async () => {
+    writeFileSync(join(projectDir, '.devcontainer.json'), JSON.stringify({
+      remoteUser: 'vscode',
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'user-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'user-test',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    assert.equal(env.containerUser, 'vscode')
+
+    // Verify setup used the remoteUser
+    const execCalls = mockExec.calls.filter(c => c.args[0] === 'exec')
+    const setupCall = execCalls.find(c => c.args.some(a => typeof a === 'string' && a.includes('useradd')))
+    assert.ok(setupCall.args.some(a => a.includes('vscode')))
+  })
+
+  it('runs postCreateCommand after setup', async () => {
+    const dcDir = join(projectDir, '.devcontainer')
+    mkdirSync(dcDir, { recursive: true })
+    writeFileSync(join(dcDir, 'devcontainer.json'), JSON.stringify({
+      postCreateCommand: 'npm install && npm run build',
+    }))
+
+    const execCalls = []
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      execCalls.push({ cmd, args: [...args] })
+
+      if (args[0] === 'run') {
+        cb(null, 'post-ctr\n', '')
+        return
+      }
+      // All exec calls succeed
+      if (args[0] === 'exec') {
+        cb(null, '/usr/local\n', '')
+        return
+      }
+      cb(null, '', '')
+    }
+    mockExec.calls = execCalls
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'post-create-test',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    // Find the postCreateCommand exec call — should contain our command
+    const postCreateCall = execCalls.find(c =>
+      c.args[0] === 'exec' && c.args.some(a => a.includes('npm install && npm run build'))
+    )
+    assert.ok(postCreateCall, 'postCreateCommand should be executed via docker exec')
+    assert.ok(postCreateCall.args.includes('post-ctr'), 'should run in the created container')
+  })
+
+  it('falls back gracefully when no devcontainer file found', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'fallback-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'fallback-test',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    // Should use defaults when no devcontainer.json exists
+    assert.equal(env.image, 'node:22-slim')
+    assert.equal(env.containerUser, 'chroxy')
+  })
+
+  it('explicit options override devcontainer values', async () => {
+    const dcDir = join(projectDir, '.devcontainer')
+    mkdirSync(dcDir, { recursive: true })
+    writeFileSync(join(dcDir, 'devcontainer.json'), JSON.stringify({
+      image: 'python:3.12-slim',
+      remoteUser: 'vscode',
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'override-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'override-test',
+      cwd: projectDir,
+      image: 'ubuntu:22.04',
+      containerUser: 'myuser',
+      devcontainer: true,
+    })
+
+    // Explicit options should win over devcontainer values
+    assert.equal(env.image, 'ubuntu:22.04')
+    assert.equal(env.containerUser, 'myuser')
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    assert.ok(runCall.args.includes('ubuntu:22.04'))
+    assert.ok(!runCall.args.includes('python:3.12-slim'))
+  })
+
+  it('prefers .devcontainer/devcontainer.json over .devcontainer.json', async () => {
+    // Create both files with different images
+    const dcDir = join(projectDir, '.devcontainer')
+    mkdirSync(dcDir, { recursive: true })
+    writeFileSync(join(dcDir, 'devcontainer.json'), JSON.stringify({
+      image: 'from-directory',
+    }))
+    writeFileSync(join(projectDir, '.devcontainer.json'), JSON.stringify({
+      image: 'from-root',
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'pref-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'pref-test',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    assert.equal(env.image, 'from-directory')
+  })
+
+  it('applies mounts from devcontainer', async () => {
+    writeFileSync(join(projectDir, '.devcontainer.json'), JSON.stringify({
+      mounts: ['/host/data:/container/data', '/host/config:/container/config:ro'],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'mount-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'mount-test',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    // Should have the workspace mount + 2 devcontainer mounts
+    const vFlags = runCall.args.reduce((count, arg, i) => {
+      if (arg === '-v' && i < runCall.args.length - 1) count++
+      return count
+    }, 0)
+    assert.ok(vFlags >= 3, `expected at least 3 -v flags, got ${vFlags}`)
+    assert.ok(runCall.args.includes('/host/data:/container/data'))
+    assert.ok(runCall.args.includes('/host/config:/container/config:ro'))
+  })
+
+  it('handles malformed devcontainer.json gracefully', async () => {
+    writeFileSync(join(projectDir, '.devcontainer.json'), '{ not valid json')
+
+    const mockExec = createMockExecFile({
+      results: { run: 'bad-json-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'bad-json-test',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    // Should fall back to defaults
+    assert.equal(env.image, 'node:22-slim')
+    assert.equal(env.containerUser, 'chroxy')
+  })
+
+  it('does not read devcontainer when flag is false', async () => {
+    writeFileSync(join(projectDir, '.devcontainer.json'), JSON.stringify({
+      image: 'should-not-be-used',
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'no-dc-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'no-dc-test',
+      cwd: projectDir,
+    })
+
+    assert.equal(env.image, 'node:22-slim')
+  })
+
+  it('cleans up container when postCreateCommand fails', async () => {
+    writeFileSync(join(projectDir, '.devcontainer.json'), JSON.stringify({
+      postCreateCommand: 'exit 1',
+    }))
+
+    let rmCalled = false
+    const execSequence = []
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      const sub = args[0]
+      execSequence.push(sub)
+
+      if (sub === 'run') {
+        cb(null, 'cleanup-ctr\n', '')
+        return
+      }
+      if (sub === 'exec') {
+        // setup + install + prefix calls succeed, postCreateCommand fails
+        const isPostCreate = args.some(a => typeof a === 'string' && a.includes('exit 1'))
+        if (isPostCreate) {
+          cb(new Error('Command failed: exit 1'), '', '')
+          return
+        }
+        cb(null, '/usr/local\n', '')
+        return
+      }
+      if (sub === 'rm') {
+        rmCalled = true
+        cb(null, '', '')
+        return
+      }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await assert.rejects(
+      () => manager.create({ name: 'cleanup-test', cwd: projectDir, devcontainer: true }),
+      /postCreateCommand failed/
+    )
+
+    assert.ok(rmCalled, 'container should be cleaned up after postCreateCommand failure')
     assert.equal(manager.list().length, 0)
   })
 })
