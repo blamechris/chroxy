@@ -265,7 +265,7 @@ export class SessionManager extends EventEmitter {
    * @param {object} [options.sandbox] - SDK sandbox settings for lightweight isolation
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -340,6 +340,10 @@ export class SessionManager extends EventEmitter {
     // Sandbox: per-session overrides server-level default
     const resolvedSandbox = sandbox || this._sandbox
     if (resolvedSandbox) providerOpts.sandbox = resolvedSandbox
+    // External container support (EnvironmentManager integration)
+    if (containerId) providerOpts.containerId = containerId
+    if (containerUser) providerOpts.containerUser = containerUser
+    if (containerCliPath) providerOpts.containerCliPath = containerCliPath
     const session = new ProviderClass(providerOpts)
 
     // Derive isolation mode from actual session state, ignoring client-provided value

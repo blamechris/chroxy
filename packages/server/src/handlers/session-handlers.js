@@ -39,6 +39,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   const permissionMode = rawPermMode && VALID_PERMISSION_MODES.includes(rawPermMode) ? rawPermMode : undefined
   const worktree = msg.worktree === true ? true : undefined
   const sandbox = (msg.sandbox && typeof msg.sandbox === 'object' && !Array.isArray(msg.sandbox)) ? msg.sandbox : undefined
+  const environmentId = (typeof msg.environmentId === 'string' && msg.environmentId.trim()) ? msg.environmentId.trim() : undefined
   // Note: isolation is accepted in the schema but always derived server-side
   // from the actual session state (provider capabilities, worktree, sandbox).
 
@@ -55,8 +56,29 @@ function handleCreateSession(ws, client, msg, ctx) {
     }
   }
 
+  // Resolve environment container details if environmentId is specified
+  let envOpts = {}
+  if (environmentId) {
+    if (!ctx.environmentManager) {
+      ctx.send(ws, { type: 'session_error', message: 'Environment management is not enabled' })
+      return
+    }
+    try {
+      const info = ctx.environmentManager.getContainerInfo(environmentId)
+      envOpts = {
+        provider: 'docker-sdk',
+        containerId: info.containerId,
+        containerUser: info.containerUser,
+        containerCliPath: info.containerCliPath,
+      }
+    } catch (err) {
+      ctx.send(ws, { type: 'session_error', message: err.message })
+      return
+    }
+  }
+
   try {
-    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox })
+    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox, ...envOpts })
     client.activeSessionId = sessionId
     client.subscribedSessionIds.add(sessionId)
     const entry = ctx.sessionManager.getSession(sessionId)

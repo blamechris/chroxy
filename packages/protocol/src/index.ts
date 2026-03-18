@@ -79,6 +79,11 @@ export const ClientMessageType = {
   SetPermissionRules: 'set_permission_rules',
   // Extension
   ExtensionMessage: 'extension_message',
+  // Environments
+  CreateEnvironment: 'create_environment',
+  ListEnvironments: 'list_environments',
+  DestroyEnvironment: 'destroy_environment',
+  GetEnvironment: 'get_environment',
 } as const
 
 export type ClientMessageTypeValue = typeof ClientMessageType[keyof typeof ClientMessageType]
@@ -177,6 +182,12 @@ export const ServerMessageType = {
   WebFeatureStatus: 'web_feature_status',
   // Extension
   ExtensionMessage: 'extension_message',
+  // Environments
+  EnvironmentCreated: 'environment_created',
+  EnvironmentList: 'environment_list',
+  EnvironmentDestroyed: 'environment_destroyed',
+  EnvironmentInfo: 'environment_info',
+  EnvironmentError: 'environment_error',
 } as const
 
 export type ServerMessageTypeValue = typeof ServerMessageType[keyof typeof ServerMessageType]

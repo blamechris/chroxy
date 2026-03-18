@@ -135,6 +135,7 @@ export const CreateSessionSchema = z.object({
   worktree: z.boolean().optional(),
   sandbox: SandboxSchema.optional(),
   isolation: z.enum(['none', 'worktree', 'sandbox', 'container']).optional(),
+  environmentId: z.string().optional(),
 })
 
 export const DestroySessionSchema = z.object({
@@ -354,6 +355,31 @@ export const ExtensionMessageSchema = z.object({
   sessionId: z.string().optional(),
 })
 
+// -- Environment management --
+
+export const CreateEnvironmentSchema = z.object({
+  type: z.literal('create_environment'),
+  name: z.string().max(200),
+  cwd: z.string(),
+  image: z.string().optional(),
+  memoryLimit: z.string().optional(),
+  cpuLimit: z.string().optional(),
+})
+
+export const ListEnvironmentsSchema = z.object({
+  type: z.literal('list_environments'),
+})
+
+export const DestroyEnvironmentSchema = z.object({
+  type: z.literal('destroy_environment'),
+  environmentId: z.string(),
+})
+
+export const GetEnvironmentSchema = z.object({
+  type: z.literal('get_environment'),
+  environmentId: z.string(),
+})
+
 // -- Encrypted envelope --
 
 export const EncryptedEnvelopeSchema = z.object({
@@ -416,6 +442,10 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   RemoveRepoSchema,
   QueryPermissionAuditSchema,
   ExtensionMessageSchema,
+  CreateEnvironmentSchema,
+  ListEnvironmentsSchema,
+  DestroyEnvironmentSchema,
+  GetEnvironmentSchema,
 ])
 
 // -- Inferred TypeScript types --
