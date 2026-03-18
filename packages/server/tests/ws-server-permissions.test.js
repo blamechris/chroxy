@@ -310,9 +310,8 @@ describe('auto permission mode confirmation handshake', () => {
     assert.equal(appliedMode, null, 'Auto mode should NOT be applied without confirmation')
 
     // No permission_mode_changed for 'auto' should have been broadcast.
-    // Post-auth sends permission_mode_changed with the default mode ('approve') which can
-    // race with the messages.length=0 clear above, so filter by mode to disambiguate.
-    await new Promise(r => setTimeout(r, 50))
+    // Wait briefly then verify no 'auto' mode change arrived (post-auth broadcasts 'approve').
+    await new Promise(r => setTimeout(r, 200))
     const modeChanged = messages.find(m => m.type === 'permission_mode_changed' && m.mode === 'auto')
     assert.equal(modeChanged, undefined, 'permission_mode_changed for auto should NOT be sent')
 
