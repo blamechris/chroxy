@@ -252,13 +252,17 @@ class FakeDockerSdkSession extends EventEmitter {
         stdio: ['pipe', 'pipe', 'pipe'],
       })
 
-      // Wire up abort signal (mirrors real implementation)
+      // Wire up abort signal — guard against pre-aborted signals (mirrors real implementation)
       if (signal) {
-        signal.addEventListener('abort', () => {
-          if (!child.killed) {
-            child.kill()
-          }
-        }, { once: true })
+        if (signal.aborted) {
+          child.kill()
+        } else {
+          signal.addEventListener('abort', () => {
+            if (!child.killed) {
+              child.kill()
+            }
+          }, { once: true })
+        }
       }
 
       return child
@@ -1380,11 +1384,9 @@ describe('DockerSdkSession spawn callback abort edge cases', () => {
     assert.equal(child.killed, true)
   })
 
-  it('pre-aborted signal does not retroactively kill child', () => {
-    // addEventListener('abort', fn) on an already-aborted signal does NOT fire
-    // the listener in Node.js. This means if the signal is aborted before the
-    // spawn callback is invoked, the child process will NOT be killed.
-    // This documents the real behavior — callers must not pre-abort.
+  it('pre-aborted signal immediately kills child', () => {
+    // Guard: if signal.aborted is already true when the spawn callback runs,
+    // the child must be killed immediately (addEventListener would not fire).
     const ac = new AbortController()
     ac.abort() // Pre-abort
 
@@ -1397,8 +1399,7 @@ describe('DockerSdkSession spawn callback abort edge cases', () => {
       signal: ac.signal,
     })
 
-    // Child is NOT killed because addEventListener doesn't fire retroactively
-    assert.equal(child.killed, false)
+    assert.equal(child.killed, true)
   })
 })
 
