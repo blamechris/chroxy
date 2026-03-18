@@ -356,6 +356,24 @@ pub fn run() {
                 }
             }
 
+            // Enable macOS Sequoia window tiling (Fn+Ctrl+Arrow shortcuts).
+            // Tauri/tao doesn't set FullScreenPrimary by default, so macOS
+            // doesn't consider the window a tiling candidate.
+            #[cfg(target_os = "macos")]
+            if let Some(win) = app.get_webview_window("main") {
+                use cocoa::appkit::NSWindow;
+                use cocoa::base::id;
+                if let Ok(raw) = win.ns_window() {
+                    let ns_win = raw as id;
+                    unsafe {
+                        let mut behavior = ns_win.collectionBehavior();
+                        // FullScreenPrimary (1 << 7): enables green-button fullscreen + tiling
+                        behavior |= cocoa::appkit::NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenPrimary;
+                        ns_win.setCollectionBehavior_(behavior);
+                    }
+                }
+            }
+
             setup_tray(app)?;
 
             // Auto-start server on launch if configured (skip on first run — wizard handles it)
