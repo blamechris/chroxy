@@ -52,7 +52,7 @@ export class EnvironmentManager extends EventEmitter {
    * @param {string} [opts.containerUser] - Non-root user (default: chroxy)
    * @returns {Promise<Object>} The created environment object
    */
-  async create({ name, cwd, image, memoryLimit, cpuLimit, containerUser } = {}) {
+  async create({ name, cwd, image, memoryLimit, cpuLimit, containerUser, compose, primaryService } = {}) {
     if (!name?.trim()) throw new Error('Environment name is required')
     if (!cwd?.trim()) throw new Error('Environment cwd is required')
 
@@ -62,6 +62,12 @@ export class EnvironmentManager extends EventEmitter {
     }
 
     const id = 'env-' + randomBytes(8).toString('hex')
+    const composeProject = compose ? `chroxy-${id}` : null
+
+    if (compose) {
+      return this._createComposeEnvironment({ id, name, cwd, user, compose, primaryService, composeProject })
+    }
+
     const resolvedImage = image || DEFAULT_IMAGE
     const resolvedMemory = memoryLimit || DEFAULT_MEMORY_LIMIT
     const resolvedCpu = cpuLimit || DEFAULT_CPU_LIMIT
@@ -78,7 +84,6 @@ export class EnvironmentManager extends EventEmitter {
       await this._setupContainer(containerId, user)
       containerCliPath = await this._discoverCliPath(containerId)
     } catch (err) {
-      // Clean up orphaned container before re-throwing
       log.warn(`Environment setup failed, removing container ${containerId.slice(0, 12)}: ${err.message}`)
       await this._removeContainer(containerId)
       throw err
@@ -97,12 +102,71 @@ export class EnvironmentManager extends EventEmitter {
       createdAt: new Date().toISOString(),
       memoryLimit: resolvedMemory,
       cpuLimit: resolvedCpu,
+      compose: null,
+      composeProject: null,
     }
 
     this._environments.set(id, env)
     this._persist()
     this.emit('environment_created', env)
     log.info(`Environment "${name}" created (container: ${containerId.slice(0, 12)})`)
+    return env
+  }
+
+  /**
+   * Create a Compose-backed environment.
+   * Starts all services via docker compose, identifies the primary container,
+   * sets up the non-root user, and installs Claude Code.
+   */
+  async _createComposeEnvironment({ id, name, cwd, user, compose, primaryService, composeProject }) {
+    log.info(`Creating compose environment "${name}" (id: ${id}, compose: ${compose})`)
+
+    await this._composeUp(compose, composeProject, cwd)
+
+    let containerId
+    try {
+      containerId = await this._composePrimaryContainerId(composeProject, primaryService)
+    } catch (err) {
+      log.warn(`Failed to identify primary container, tearing down: ${err.message}`)
+      await this._composeDown(compose, composeProject, cwd)
+      throw err
+    }
+
+    let containerCliPath
+    try {
+      await this._setupContainer(containerId, user)
+      containerCliPath = await this._discoverCliPath(containerId)
+    } catch (err) {
+      log.warn(`Compose environment setup failed, tearing down: ${err.message}`)
+      await this._composeDown(compose, composeProject, cwd)
+      throw err
+    }
+
+    const services = await this._composeServices(composeProject)
+
+    const env = {
+      id,
+      name: name.trim(),
+      cwd: cwd.trim(),
+      image: 'compose',
+      containerId,
+      containerUser: user,
+      containerCliPath,
+      status: 'running',
+      sessions: [],
+      createdAt: new Date().toISOString(),
+      memoryLimit: null,
+      cpuLimit: null,
+      compose,
+      composeProject,
+      primaryService: primaryService || null,
+      services,
+    }
+
+    this._environments.set(id, env)
+    this._persist()
+    this.emit('environment_created', env)
+    log.info(`Compose environment "${name}" created (primary: ${containerId.slice(0, 12)}, services: ${services.length})`)
     return env
   }
 
@@ -116,7 +180,9 @@ export class EnvironmentManager extends EventEmitter {
 
     log.info(`Destroying environment "${env.name}" (${envId})`)
 
-    if (env.containerId && env.status === 'running') {
+    if (env.compose && env.composeProject) {
+      await this._composeDown(env.compose, env.composeProject, env.cwd)
+    } else if (env.containerId && env.status === 'running') {
       await this._removeContainer(env.containerId)
     }
 
@@ -322,6 +388,95 @@ export class EnvironmentManager extends EventEmitter {
           return
         }
         resolve(stdout.trim() === 'true')
+      })
+    })
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Docker Compose operations
+  // ──────────────────────────────────────────────────────────────────────────
+
+  _composeUp(composeFile, project, cwd) {
+    return new Promise((resolve, reject) => {
+      this._execFile('docker', [
+        'compose', '-f', composeFile, '-p', project, 'up', '-d',
+      ], { encoding: 'utf-8', timeout: 120_000, cwd }, (err, _stdout, stderr) => {
+        if (err) {
+          reject(new Error(stderr ? stderr.trim() : err.message))
+          return
+        }
+        resolve()
+      })
+    })
+  }
+
+  _composeDown(composeFile, project, cwd) {
+    return new Promise((resolve) => {
+      this._execFile('docker', [
+        'compose', '-f', composeFile, '-p', project, 'down', '--remove-orphans',
+      ], { encoding: 'utf-8', timeout: 30_000, cwd }, (err) => {
+        if (err) log.warn(`docker compose down failed: ${err.message}`)
+        resolve()
+      })
+    })
+  }
+
+  /**
+   * Find the primary container ID in a compose project.
+   * Uses primaryService if specified, otherwise picks the first service.
+   */
+  _composePrimaryContainerId(project, primaryService) {
+    return new Promise((resolve, reject) => {
+      const args = ['compose', '-p', project, 'ps', '--format', 'json']
+      if (primaryService) args.push(primaryService)
+
+      this._execFile('docker', args, { encoding: 'utf-8', timeout: 10_000 }, (err, stdout) => {
+        if (err) {
+          reject(new Error(`Failed to list compose containers: ${err.message}`))
+          return
+        }
+        // docker compose ps --format json outputs one JSON object per line
+        const lines = stdout.trim().split('\n').filter(Boolean)
+        if (lines.length === 0) {
+          reject(new Error('No running containers found in compose project'))
+          return
+        }
+        try {
+          const container = JSON.parse(lines[0])
+          resolve(container.ID || container.Id)
+        } catch {
+          reject(new Error('Failed to parse compose container info'))
+        }
+      })
+    })
+  }
+
+  /**
+   * List all services in a compose project with their status.
+   */
+  _composeServices(project) {
+    return new Promise((resolve) => {
+      this._execFile('docker', [
+        'compose', '-p', project, 'ps', '--format', 'json',
+      ], { encoding: 'utf-8', timeout: 10_000 }, (err, stdout) => {
+        if (err) {
+          resolve([])
+          return
+        }
+        try {
+          const lines = stdout.trim().split('\n').filter(Boolean)
+          const services = lines.map(line => {
+            const c = JSON.parse(line)
+            return {
+              name: c.Service || c.Name,
+              status: c.State || 'unknown',
+              primary: false,
+            }
+          })
+          resolve(services)
+        } catch {
+          resolve([])
+        }
       })
     })
   }
