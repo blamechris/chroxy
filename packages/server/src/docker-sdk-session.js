@@ -7,6 +7,15 @@ const log = createLogger('docker-sdk')
 /**
  * Env vars explicitly forwarded into the Docker container.
  * Only vars needed for Claude Code operation — never forward the full host env.
+ *
+ * This list is intentionally narrower than DockerSession's allowlist.
+ * The SDK manages permissions in-process (no external hook HTTP calls),
+ * so CLI-specific vars like CHROXY_PORT, CHROXY_HOOK_SECRET,
+ * CHROXY_PERMISSION_MODE, and CLAUDE_HEADLESS are not needed.
+ * HOME and PATH are set explicitly in _createSpawnCallback() rather
+ * than forwarded from the host.
+ *
+ * See also: FORWARDED_ENV_KEYS in docker-session.js
  */
 const FORWARDED_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
@@ -244,7 +253,7 @@ export class DockerSdkSession extends SdkSession {
       const containerCommand = command
       const containerArgs = [...args]
 
-      if (containerArgs.length > 0 && containerArgs[0].includes('claude')) {
+      if (containerArgs.length > 0 && containerArgs[0].includes('@anthropic-ai/claude-code/cli.js')) {
         log.info(`Remapped CLI path: ${args[0]} -> ${containerCliPath}`)
         containerArgs[0] = containerCliPath
       }
