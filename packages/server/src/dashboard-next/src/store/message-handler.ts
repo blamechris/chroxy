@@ -2174,6 +2174,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    // -- Environment messages --
+    case 'environment_list': {
+      const environments = Array.isArray(msg.environments) ? msg.environments : [];
+      set({ environments });
+      break;
+    }
+    case 'environment_created':
+    case 'environment_destroyed':
+    case 'environment_info':
+      // Handled implicitly via the environment_list broadcast that follows
+      break;
+    case 'environment_error': {
+      console.error('[ws] Environment error:', msg.error);
+      break;
+    }
+
     default: {
       // Log unknown message types when server protocol is newer (likely new features)
       const serverPV = getStore().getState().serverProtocolVersion;

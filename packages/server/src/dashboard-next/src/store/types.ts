@@ -62,6 +62,21 @@ import type {
   WebTask,
 } from '@chroxy/store-core';
 
+export interface EnvironmentInfo {
+  id: string;
+  name: string;
+  cwd: string;
+  image: string;
+  containerId: string;
+  containerUser: string;
+  containerCliPath: string;
+  status: 'running' | 'stopped' | 'error';
+  sessions: string[];
+  createdAt: string;
+  memoryLimit: string;
+  cpuLimit: string;
+}
+
 export interface ProviderCapabilities {
   permissions: boolean;
   inProcessPermissions: boolean;
@@ -361,8 +376,11 @@ export interface ConnectionState {
   // Offline cached session viewing (shows session screen when disconnected)
   viewingCachedSession: boolean;
 
+  // Environments
+  environments: EnvironmentInfo[];
+
   // View mode
-  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console';
+  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments';
 
   // Input settings
   inputSettings: InputSettings;
@@ -381,7 +399,7 @@ export interface ConnectionState {
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;
-  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console') => void;
+  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments') => void;
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[]) => void;
   appendTerminalData: (data: string) => void;
@@ -421,7 +439,7 @@ export interface ConnectionState {
 
   // Session actions
   switchSession: (sessionId: string) => void;
-  createSession: (opts: { name: string; cwd?: string; provider?: string; model?: string; permissionMode?: string; worktree?: boolean }) => void;
+  createSession: (opts: { name: string; cwd?: string; provider?: string; model?: string; permissionMode?: string; worktree?: boolean; environmentId?: string }) => void;
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
   forgetSession: () => void;
@@ -506,6 +524,11 @@ export interface ConnectionState {
   switchServer: (serverId: string) => void;
   /** Reconnect to a server without clearing session state (auto-reconnect/startup). */
   connectToServer: (serverId: string) => void;
+
+  // Environment actions
+  requestEnvironments: () => void;
+  createEnvironment: (opts: { name: string; cwd: string; image?: string; memoryLimit?: string; cpuLimit?: string }) => void;
+  destroyEnvironment: (environmentId: string) => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;
