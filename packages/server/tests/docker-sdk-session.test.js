@@ -242,7 +242,7 @@ class FakeDockerSdkSession extends EventEmitter {
       const containerCommand = command
       const containerArgs = [...args]
 
-      if (containerArgs.length > 0 && containerArgs[0].includes('claude')) {
+      if (containerArgs.length > 0 && containerArgs[0].includes('@anthropic-ai/claude-code/cli.js')) {
         containerArgs[0] = containerCliPath
       }
 
@@ -713,7 +713,7 @@ describe('DockerSdkSession spawnClaudeCodeProcess callback', () => {
     assert.equal(args[ctrIdx + 4], 'stream-json')
   })
 
-  it('does NOT remap args that do not contain "claude"', () => {
+  it('does NOT remap args that do not match the SDK cli.js path', () => {
     spawnCallback({
       command: 'node',
       args: ['/some/other/script.js', '--flag'],
@@ -723,13 +723,26 @@ describe('DockerSdkSession spawnClaudeCodeProcess callback', () => {
 
     const { args } = session._spawnCalls[0]
     const ctrIdx = args.indexOf('test-ctr-123')
-    assert.equal(args[ctrIdx + 2], '/some/other/script.js', 'non-claude args should not be remapped')
+    assert.equal(args[ctrIdx + 2], '/some/other/script.js', 'non-SDK args should not be remapped')
+  })
+
+  it('does NOT false-positive remap a project path containing "claude"', () => {
+    spawnCallback({
+      command: 'node',
+      args: ['/workspace/claude-utils/index.js', '--flag'],
+      cwd: '/workspace',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const ctrIdx = args.indexOf('test-ctr-123')
+    assert.equal(args[ctrIdx + 2], '/workspace/claude-utils/index.js', 'project path with "claude" should not be remapped')
   })
 
   it('includes container ID in docker exec args', () => {
     spawnCallback({
       command: 'node',
-      args: ['/host/claude-code/cli.js'],
+      args: ['/host/@anthropic-ai/claude-code/cli.js'],
       cwd: '/workspace',
       env: {},
     })
@@ -936,7 +949,7 @@ describe('DockerSdkSession path remapping', () => {
     spawnCallback = session._createSpawnCallback()
   })
 
-  it('remaps args[0] when it contains "claude"', () => {
+  it('remaps args[0] when it contains @anthropic-ai/claude-code/cli.js', () => {
     spawnCallback({
       command: 'node',
       args: ['/host/nvm/node_modules/@anthropic-ai/claude-agent-sdk/node_modules/@anthropic-ai/claude-code/cli.js', '--flag'],
@@ -952,7 +965,7 @@ describe('DockerSdkSession path remapping', () => {
   it('preserves remaining args after remapping', () => {
     spawnCallback({
       command: 'node',
-      args: ['/host/claude-code/cli.js', '--output-format', 'stream-json', '--verbose'],
+      args: ['/host/node_modules/@anthropic-ai/claude-code/cli.js', '--output-format', 'stream-json', '--verbose'],
       cwd: '/workspace',
       env: {},
     })
@@ -970,7 +983,7 @@ describe('DockerSdkSession path remapping', () => {
 
     cb({
       command: 'node',
-      args: ['/host/claude/cli.js'],
+      args: ['/host/node_modules/@anthropic-ai/claude-code/cli.js'],
       cwd: '/workspace',
       env: {},
     })
@@ -978,6 +991,45 @@ describe('DockerSdkSession path remapping', () => {
     const { args } = session._spawnCalls[0]
     const ctrIdx = args.indexOf('remap-ctr')
     assert.equal(args[ctrIdx + 2], DEFAULT_CONTAINER_CLI_PATH)
+  })
+
+  it('does NOT remap a project path containing "claude" (false-positive guard)', () => {
+    spawnCallback({
+      command: 'node',
+      args: ['/workspace/claude-utils/index.js', '--run'],
+      cwd: '/workspace',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const ctrIdx = args.indexOf('remap-ctr')
+    assert.equal(args[ctrIdx + 2], '/workspace/claude-utils/index.js')
+  })
+
+  it('does NOT remap /home/user/claude-docs/script.js', () => {
+    spawnCallback({
+      command: 'node',
+      args: ['/home/user/claude-docs/script.js', '--flag'],
+      cwd: '/workspace',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const ctrIdx = args.indexOf('remap-ctr')
+    assert.equal(args[ctrIdx + 2], '/home/user/claude-docs/script.js')
+  })
+
+  it('remaps direct @anthropic-ai/claude-code/cli.js install path', () => {
+    spawnCallback({
+      command: 'node',
+      args: ['/home/user/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/cli.js', '--output-format', 'stream-json'],
+      cwd: '/workspace',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const ctrIdx = args.indexOf('remap-ctr')
+    assert.equal(args[ctrIdx + 2], '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js', 'host nvm path should be remapped to container CLI path')
   })
 })
 

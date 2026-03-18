@@ -253,7 +253,7 @@ export class DockerSdkSession extends SdkSession {
       const containerCommand = command
       const containerArgs = [...args]
 
-      if (containerArgs.length > 0 && containerArgs[0].includes('claude')) {
+      if (containerArgs.length > 0 && containerArgs[0].includes('@anthropic-ai/claude-code/cli.js')) {
         log.info(`Remapped CLI path: ${args[0]} -> ${containerCliPath}`)
         containerArgs[0] = containerCliPath
       }
