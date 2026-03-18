@@ -20,6 +20,12 @@ const FORWARDED_ENV_KEYS = [
 const DEFAULT_CONTAINER_CLI_PATH = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'
 
 /**
+ * Valid POSIX username: starts with lowercase letter or underscore,
+ * followed by lowercase alphanumeric, underscore, or hyphen.
+ */
+const VALID_USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/
+
+/**
  * DockerSdkSession runs Claude Code inside an isolated Docker container
  * using the Agent SDK's spawnClaudeCodeProcess callback.
  *
@@ -52,7 +58,11 @@ export class DockerSdkSession extends SdkSession {
     this._image = opts.image || 'node:22-slim'
     this._memoryLimit = opts.memoryLimit || '2g'
     this._cpuLimit = opts.cpuLimit || '2'
-    this._containerUser = opts.containerUser || 'chroxy'
+    const user = opts.containerUser || 'chroxy'
+    if (!VALID_USERNAME_RE.test(user)) {
+      throw new Error(`Invalid containerUser "${user}" — must match POSIX username rules`)
+    }
+    this._containerUser = user
     this._containerCliPath = null
   }
 
