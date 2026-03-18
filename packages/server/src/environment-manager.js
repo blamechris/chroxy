@@ -52,11 +52,17 @@ export class EnvironmentManager extends EventEmitter {
    * @param {string} [opts.containerUser] - Non-root user (default: chroxy)
    * @returns {Promise<Object>} The created environment object
    */
-  async create({ name, cwd, image, memoryLimit, cpuLimit, containerUser, compose, primaryService } = {}) {
+  async create({ name, cwd, image, memoryLimit, cpuLimit, containerUser, compose, primaryService, devcontainer } = {}) {
     if (!name?.trim()) throw new Error('Environment name is required')
     if (!cwd?.trim()) throw new Error('Environment cwd is required')
 
-    const user = containerUser || DEFAULT_CONTAINER_USER
+    // Merge devcontainer.json when requested (explicit opts win)
+    let dcConfig = {}
+    if (devcontainer) {
+      dcConfig = this._parseDevContainer(cwd)
+    }
+
+    const user = containerUser || dcConfig.remoteUser || DEFAULT_CONTAINER_USER
     if (!VALID_USERNAME_RE.test(user)) {
       throw new Error(`Invalid containerUser "${user}" — must match POSIX username rules`)
     }
@@ -68,7 +74,7 @@ export class EnvironmentManager extends EventEmitter {
       return this._createComposeEnvironment({ id, name, cwd, user, compose, primaryService, composeProject })
     }
 
-    const resolvedImage = image || DEFAULT_IMAGE
+    const resolvedImage = image || dcConfig.image || DEFAULT_IMAGE
     const resolvedMemory = memoryLimit || DEFAULT_MEMORY_LIMIT
     const resolvedCpu = cpuLimit || DEFAULT_CPU_LIMIT
 
@@ -77,12 +83,18 @@ export class EnvironmentManager extends EventEmitter {
     const containerId = await this._startContainer({
       cwd, image: resolvedImage, memoryLimit: resolvedMemory,
       cpuLimit: resolvedCpu,
+      containerEnv: dcConfig.containerEnv,
+      forwardPorts: dcConfig.forwardPorts,
+      mounts: dcConfig.mounts,
     })
 
     let containerCliPath
     try {
       await this._setupContainer(containerId, user)
       containerCliPath = await this._discoverCliPath(containerId)
+      if (dcConfig.postCreateCommand) {
+        await this._runPostCreateCommand(containerId, dcConfig.postCreateCommand)
+      }
     } catch (err) {
       log.warn(`Environment setup failed, removing container ${containerId.slice(0, 12)}: ${err.message}`)
       await this._removeContainer(containerId)
@@ -375,7 +387,7 @@ export class EnvironmentManager extends EventEmitter {
   // Docker operations (async wrappers around execFile)
   // ──────────────────────────────────────────────────────────────────────────
 
-  _startContainer({ cwd, image, memoryLimit, cpuLimit }) {
+  _startContainer({ cwd, image, memoryLimit, cpuLimit, containerEnv, forwardPorts, mounts }) {
     return new Promise((resolve, reject) => {
       const runArgs = [
         'run', '-d', '--init',
@@ -391,6 +403,27 @@ export class EnvironmentManager extends EventEmitter {
       const apiKey = process.env.ANTHROPIC_API_KEY
       if (apiKey) {
         runArgs.push('--env', `ANTHROPIC_API_KEY=${apiKey}`)
+      }
+
+      // DevContainer: extra environment variables
+      if (containerEnv) {
+        for (const [key, value] of Object.entries(containerEnv)) {
+          runArgs.push('--env', `${key}=${value}`)
+        }
+      }
+
+      // DevContainer: port forwards
+      if (forwardPorts) {
+        for (const port of forwardPorts) {
+          runArgs.push('-p', `${port}:${port}`)
+        }
+      }
+
+      // DevContainer: additional mounts
+      if (mounts) {
+        for (const mount of mounts) {
+          runArgs.push('-v', mount)
+        }
       }
 
       if (process.platform === 'linux') {
@@ -493,6 +526,81 @@ export class EnvironmentManager extends EventEmitter {
           return
         }
         resolve(stdout.trim() === 'true')
+      })
+    })
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // DevContainer support
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Parse a devcontainer.json from the given cwd.
+   * Looks for `.devcontainer/devcontainer.json` first, then `.devcontainer.json`.
+   * Returns an object with supported fields. Logs warnings for unrecognized fields.
+   */
+  _parseDevContainer(cwd) {
+    const candidates = [
+      join(cwd, '.devcontainer', 'devcontainer.json'),
+      join(cwd, '.devcontainer.json'),
+    ]
+
+    let filePath
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        filePath = candidate
+        break
+      }
+    }
+
+    if (!filePath) {
+      log.info('No devcontainer.json found, using defaults')
+      return {}
+    }
+
+    let raw
+    try {
+      raw = JSON.parse(readFileSync(filePath, 'utf-8'))
+    } catch (err) {
+      log.warn(`Failed to parse ${filePath}: ${err.message}`)
+      return {}
+    }
+
+    log.info(`Parsed devcontainer.json from ${filePath}`)
+
+    const SUPPORTED_FIELDS = new Set([
+      'image', 'forwardPorts', 'containerEnv', 'mounts',
+      'remoteUser', 'postCreateCommand',
+    ])
+
+    for (const key of Object.keys(raw)) {
+      if (!SUPPORTED_FIELDS.has(key)) {
+        log.warn(`devcontainer.json: unsupported field "${key}" (ignored)`)
+      }
+    }
+
+    const config = {}
+    if (typeof raw.image === 'string' && raw.image.trim()) config.image = raw.image.trim()
+    if (typeof raw.remoteUser === 'string' && raw.remoteUser.trim()) config.remoteUser = raw.remoteUser.trim()
+    if (typeof raw.postCreateCommand === 'string' && raw.postCreateCommand.trim()) config.postCreateCommand = raw.postCreateCommand.trim()
+    if (raw.containerEnv && typeof raw.containerEnv === 'object' && !Array.isArray(raw.containerEnv)) config.containerEnv = raw.containerEnv
+    if (Array.isArray(raw.forwardPorts)) config.forwardPorts = raw.forwardPorts.filter(p => typeof p === 'number' || typeof p === 'string')
+    if (Array.isArray(raw.mounts)) config.mounts = raw.mounts.filter(m => typeof m === 'string')
+
+    return config
+  }
+
+  /**
+   * Run a postCreateCommand inside a container via docker exec.
+   */
+  _runPostCreateCommand(containerId, command) {
+    return new Promise((resolve, reject) => {
+      log.info(`Running postCreateCommand: ${command}`)
+      this._execFile('docker', [
+        'exec', containerId, 'bash', '-c', command,
+      ], { encoding: 'utf-8', timeout: 120_000 }, (err) => {
+        if (err) reject(new Error(`postCreateCommand failed: ${err.message}`))
+        else resolve()
       })
     })
   }
