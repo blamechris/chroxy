@@ -315,3 +315,45 @@ describe('SessionManager _removeWorktree fallback (#2460)', () => {
     mgr.destroyAll()
   })
 })
+
+describe('SessionManager isolation derivation (#2475)', () => {
+  let gitRepo
+
+  beforeEach(() => {
+    gitRepo = makeGitRepo()
+  })
+
+  afterEach(() => {
+    rmSync(gitRepo, { recursive: true, force: true })
+  })
+
+  it('default session has isolation "none"', () => {
+    const mgr = makeManager(gitRepo)
+    const sessionId = mgr.createSession({ cwd: gitRepo })
+    const list = mgr.listSessions()
+    const session = list.find(s => s.sessionId === sessionId)
+    assert.equal(session.isolation, 'none')
+    mgr.destroyAll()
+  })
+
+  it('worktree session derives isolation "worktree"', () => {
+    const mgr = makeManager(gitRepo)
+    const sessionId = mgr.createSession({ cwd: gitRepo, worktree: true })
+    const list = mgr.listSessions()
+    const session = list.find(s => s.sessionId === sessionId)
+    assert.equal(session.isolation, 'worktree')
+    mgr.destroyAll()
+  })
+
+  it('listSessions exposes isolation field', () => {
+    const mgr = makeManager(gitRepo)
+    const s1 = mgr.createSession({ cwd: gitRepo })
+    const s2 = mgr.createSession({ cwd: gitRepo, worktree: true })
+    const list = mgr.listSessions()
+    const plain = list.find(s => s.sessionId === s1)
+    const wt = list.find(s => s.sessionId === s2)
+    assert.equal(plain.isolation, 'none')
+    assert.equal(wt.isolation, 'worktree')
+    mgr.destroyAll()
+  })
+})

@@ -263,10 +263,9 @@ export class SessionManager extends EventEmitter {
    * @param {string} [options.provider]
    * @param {boolean} [options.worktree] - When true, creates a git worktree for isolation
    * @param {object} [options.sandbox] - SDK sandbox settings for lightweight isolation
-   * @param {string} [options.isolation] - Isolation mode: 'none' | 'worktree' | 'sandbox' | 'container'
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, isolation } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -343,13 +342,12 @@ export class SessionManager extends EventEmitter {
     if (resolvedSandbox) providerOpts.sandbox = resolvedSandbox
     const session = new ProviderClass(providerOpts)
 
-    // Derive isolation mode from explicit field or from provider/worktree/sandbox state
-    let resolvedIsolation = isolation || 'none'
-    if (!isolation) {
-      if (worktreePath) resolvedIsolation = 'worktree'
-      else if (ProviderClass.capabilities?.containerized) resolvedIsolation = 'container'
-      else if (resolvedSandbox) resolvedIsolation = 'sandbox'
-    }
+    // Derive isolation mode from actual session state, ignoring client-provided value
+    // when it conflicts with reality (e.g. isolation:'container' with a non-container provider)
+    let resolvedIsolation = 'none'
+    if (worktreePath) resolvedIsolation = 'worktree'
+    else if (ProviderClass.capabilities?.containerized) resolvedIsolation = 'container'
+    else if (resolvedSandbox) resolvedIsolation = 'sandbox'
 
     const entry = {
       session,

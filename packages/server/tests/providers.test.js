@@ -75,12 +75,20 @@ describe('Docker Provider Naming (#2475)', () => {
     // Register docker providers manually since Docker may not be available in CI
     const { DockerSession } = await import('../src/docker-session.js')
     registerProvider('docker-cli', DockerSession)
-    registerProvider('docker', DockerSession)
+    registerProvider('docker', DockerSession, { alias: true })
 
     const dockerCli = getProvider('docker-cli')
     const docker = getProvider('docker')
     assert.equal(dockerCli, DockerSession)
     assert.equal(docker, DockerSession, '"docker" should resolve to same class as "docker-cli"')
+  })
+
+  it('docker alias is excluded from listProviders()', async () => {
+    const list = listProviders()
+    const dockerCli = list.find(p => p.name === 'docker-cli')
+    const dockerAlias = list.find(p => p.name === 'docker')
+    assert.ok(dockerCli, 'docker-cli should appear in listProviders')
+    assert.equal(dockerAlias, undefined, 'docker alias should NOT appear in listProviders')
   })
 
   it('docker-sdk is registered separately', async () => {

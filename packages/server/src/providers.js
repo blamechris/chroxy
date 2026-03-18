@@ -73,13 +73,15 @@
  */
 
 const providers = new Map()
+const aliases = new Set()
 
 /**
  * Register a provider class by name.
  * @param {string} name - Provider identifier (e.g. 'claude-sdk')
  * @param {Function} ProviderClass - Session class with static capabilities getter
+ * @param {{ alias: boolean }} [opts] - Mark as alias to exclude from listProviders()
  */
-export function registerProvider(name, ProviderClass) {
+export function registerProvider(name, ProviderClass, opts) {
   if (typeof name !== 'string' || !name) {
     throw new Error('Provider name must be a non-empty string')
   }
@@ -87,6 +89,7 @@ export function registerProvider(name, ProviderClass) {
     throw new Error(`Provider "${name}" must be a class/constructor`)
   }
   providers.set(name, ProviderClass)
+  if (opts?.alias) aliases.add(name)
 }
 
 /**
@@ -106,11 +109,13 @@ export function getProvider(name) {
 
 /**
  * List all registered providers with their capabilities.
+ * Excludes aliases (e.g. 'docker') to prevent duplicate entries in UI.
  * @returns {Array<{ name: string, capabilities: ProviderCapabilities }>}
  */
 export function listProviders() {
   const list = []
   for (const [name, ProviderClass] of providers) {
+    if (aliases.has(name)) continue
     list.push({
       name,
       capabilities: ProviderClass.capabilities || {},
@@ -161,8 +166,8 @@ export async function registerDockerProvider(config) {
   const { DockerSdkSession } = await import('./docker-sdk-session.js')
   registerProvider('docker-sdk', DockerSdkSession)
 
-  // Backward compatibility: 'docker' maps to 'docker-cli'
-  registerProvider('docker', DockerSession)
+  // Backward compatibility: 'docker' maps to 'docker-cli' (hidden from listProviders)
+  registerProvider('docker', DockerSession, { alias: true })
 
   log.info('Docker providers registered (docker-cli, docker-sdk)')
 }
