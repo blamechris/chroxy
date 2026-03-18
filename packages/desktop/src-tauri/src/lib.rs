@@ -363,12 +363,14 @@ pub fn run() {
             if let Some(win) = app.get_webview_window("main") {
                 use cocoa::appkit::NSWindow;
                 use cocoa::base::id;
-                let ns_win: id = win.ns_window().unwrap() as id;
-                unsafe {
-                    let mut behavior = ns_win.collectionBehavior();
-                    // FullScreenPrimary (1 << 7): enables green-button fullscreen + tiling
-                    behavior |= cocoa::appkit::NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenPrimary;
-                    ns_win.setCollectionBehavior_(behavior);
+                if let Ok(raw) = win.ns_window() {
+                    let ns_win = raw as id;
+                    unsafe {
+                        let mut behavior = ns_win.collectionBehavior();
+                        // FullScreenPrimary (1 << 7): enables green-button fullscreen + tiling
+                        behavior |= cocoa::appkit::NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenPrimary;
+                        ns_win.setCollectionBehavior_(behavior);
+                    }
                 }
             }
 
