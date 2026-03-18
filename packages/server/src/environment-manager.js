@@ -1,10 +1,10 @@
 import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
-import { existsSync, readFileSync, mkdirSync, renameSync } from 'fs'
+import { existsSync, readFileSync, mkdirSync, renameSync, unlinkSync } from 'fs'
 import { dirname, join } from 'path'
 import { homedir } from 'os'
-import { writeFileRestricted } from './platform.js'
+import { isWindows, writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('environment-manager')
@@ -209,9 +209,9 @@ export class EnvironmentManager extends EventEmitter {
           env.status = 'stopped'
           log.warn(`Environment "${env.name}" container is stopped`)
         }
-      } catch {
+      } catch (err) {
         env.status = 'error'
-        log.warn(`Environment "${env.name}" container not found`)
+        log.warn(`Environment "${env.name}" container inspect failed: ${err.message}`)
       }
       // Clear stale session references — sessions don't survive server restart
       env.sessions = []
@@ -342,6 +342,11 @@ export class EnvironmentManager extends EventEmitter {
 
       const tmpPath = this._statePath + '.tmp'
       writeFileRestricted(tmpPath, JSON.stringify(data, null, 2))
+      if (isWindows) {
+        try { unlinkSync(this._statePath) } catch (e) {
+          if (e && e.code !== 'ENOENT') log.error(`Failed to remove existing state file: ${e.message}`)
+        }
+      }
       renameSync(tmpPath, this._statePath)
     } catch (err) {
       log.error(`Failed to persist environment state: ${err.message}`)
