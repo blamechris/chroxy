@@ -109,17 +109,19 @@ export const SwitchSessionSchema = z.object({
 })
 
 // -- Sandbox settings schema (mirrors SDK SandboxSettings) --
-const SandboxSchema = z.object({
+// Exported for reuse by clients; nested objects use .passthrough() to avoid
+// silently stripping fields added by newer SDK versions.
+export const SandboxSchema = z.object({
   network: z.object({
     allowedDomains: z.array(z.string()).optional(),
-  }).optional(),
+  }).passthrough().optional(),
   filesystem: z.object({
     allowedPaths: z.array(z.string()).optional(),
     deniedPaths: z.array(z.string()).optional(),
-  }).optional(),
+  }).passthrough().optional(),
   bash: z.object({
     allowedCommands: z.array(z.string()).optional(),
-  }).optional(),
+  }).passthrough().optional(),
   autoAllowBashIfSandboxed: z.boolean().optional(),
 }).passthrough()
 
