@@ -272,13 +272,17 @@ export class DockerSdkSession extends SdkSession {
         if (text) log.info(`container stderr: ${text}`)
       })
 
-      // Wire up abort signal
+      // Wire up abort signal — guard against pre-aborted signals
       if (signal) {
-        signal.addEventListener('abort', () => {
-          if (!child.killed) {
-            child.kill('SIGTERM')
-          }
-        }, { once: true })
+        if (signal.aborted) {
+          child.kill('SIGTERM')
+        } else {
+          signal.addEventListener('abort', () => {
+            if (!child.killed) {
+              child.kill('SIGTERM')
+            }
+          }, { once: true })
+        }
       }
 
       return child
