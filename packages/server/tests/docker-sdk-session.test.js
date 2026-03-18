@@ -1022,14 +1022,14 @@ describe('DockerSdkSession path remapping', () => {
   it('remaps direct @anthropic-ai/claude-code/cli.js install path', () => {
     spawnCallback({
       command: 'node',
-      args: ['/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js', '--output-format', 'stream-json'],
+      args: ['/home/user/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/cli.js', '--output-format', 'stream-json'],
       cwd: '/workspace',
       env: {},
     })
 
     const { args } = session._spawnCalls[0]
     const ctrIdx = args.indexOf('remap-ctr')
-    assert.equal(args[ctrIdx + 2], '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js')
+    assert.equal(args[ctrIdx + 2], '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js', 'host nvm path should be remapped to container CLI path')
   })
 })
 
