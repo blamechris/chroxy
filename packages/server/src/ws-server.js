@@ -200,6 +200,10 @@ function _isSecureRequest(req) {
  *   { type: 'set_thinking_level', level }               — set thinking budget level ('default'|'high'|'max')
  *   { type: 'set_permission_rules', rules, sessionId }  — set per-session auto-approval rules
  *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
+ *   { type: 'create_environment', name, cwd, image?, ... } — create persistent container environment
+ *   { type: 'list_environments' }                       — list all persistent environments
+ *   { type: 'destroy_environment', environmentId }      — destroy an environment and its container
+ *   { type: 'get_environment', environmentId }          — get single environment details
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
@@ -288,6 +292,11 @@ function _isSecureRequest(req) {
  *   { type: 'web_feature_status', features }            — web feature availability
  *   { type: 'permission_rules_updated', rules }         — per-session auto-approval rules changed
  *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
+ *   { type: 'environment_created', environmentId, name, status } — environment created
+ *   { type: 'environment_list', environments: [...] }   — list of all environments
+ *   { type: 'environment_destroyed', environmentId }    — environment destroyed
+ *   { type: 'environment_info', environment: {...} }    — single environment details
+ *   { type: 'environment_error', error, environmentId? } — environment operation error
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
