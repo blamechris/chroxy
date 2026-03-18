@@ -7,53 +7,63 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| CLI | `src/cli.js` | `init`, `start`, `config`, `tunnel setup` commands |
-| Config | `src/config.js` | Schema validation + merge (CLI > ENV > file > defaults) |
-| Supervisor | `src/supervisor.js` | Tunnel owner + child auto-restart (named tunnel mode) |
-| ServerCLI | `src/server-cli.js` | CLI mode orchestrator |
-| ServerCLIChild | `src/server-cli-child.js` | Supervised child entry point (IPC to supervisor) |
-| CliSession | `src/cli-session.js` | Claude Code headless executor (stream-json) |
-| SdkSession | `src/sdk-session.js` | Claude Agent SDK executor |
-| DockerSession | `src/docker-session.js` | Containerized CLI executor (extends CliSession) |
-| DockerSdkSession | `src/docker-sdk-session.js` | Containerized SDK executor (extends SdkSession) |
-| WsServer | `src/ws-server.js` | WebSocket protocol with auth + HTTP dashboard |
-| WsMessageHandlers | `src/ws-message-handlers.js` | WS message handler dispatch |
-| WsForwarding | `src/ws-forwarding.js` | Session event → WS broadcast wiring |
-| WsSchemas | `src/ws-schemas.js` | Zod schemas for WebSocket message validation |
-| WsFileOps | `src/ws-file-ops.js` | File browsing/reading WS message handlers |
-| WsPermissions | `src/ws-permissions.js` | Permission request/response WS message handlers |
-| EventNormalizer | `src/event-normalizer.js` | Normalize SDK/CLI events into unified format |
-| SessionManager | `src/session-manager.js` | Session lifecycle management |
-| ConversationScanner | `src/conversation-scanner.js` | Conversation history file scanning (parallel) |
-| CheckpointManager | `src/checkpoint-manager.js` | Checkpoint creation/restore with git state |
-| WebTaskManager | `src/web-task-manager.js` | Claude Code Web cloud task management |
-| DevPreview | `src/dev-preview.js` | Dev server preview tunnel management |
-| TokenManager | `src/token-manager.js` | API token rotation + expiry management |
-| PushManager | `src/push.js` | Push notifications via Expo Push API |
-| ConnectionInfo | `src/connection-info.js` | Write/remove connection info file for programmatic access |
-| SessionContext | `src/session-context.js` | Session context data extraction (git branch, project, diff) |
-| McpTools | `src/mcp-tools.js` | MCP (Model Context Protocol) server integration |
-| ProviderRegistry | `src/providers.js` | Provider adapter interface + built-in registrations |
-| Models | `src/models.js` | Model list management (static + dynamic from SDK) |
-| ContentBlocks | `src/content-blocks.js` | Content block builder for structured output |
-| ToolResult | `src/tool-result.js` | Tool result processing and formatting |
-| MessageTransform | `src/message-transform.js` | Message transformation pipeline |
-| PermissionHook | `src/permission-hook.js` | Permission hook management (CLI mode) |
-| TunnelRegistry | `src/tunnel/registry.js` | Tunnel adapter registry (`registerTunnel`/`getTunnel`/`parseTunnelArg`) |
+| BaseSession | `src/base-session.js` | Shared session logic (model, permissions, lifecycle) |
 | BaseTunnelAdapter | `src/tunnel/base.js` | Base class with shared recovery logic (backoff, events) |
+| CheckpointManager | `src/checkpoint-manager.js` | Checkpoint creation/restore with git state |
+| CLI | `src/cli.js` | `init`, `start`, `config`, `tunnel setup` commands |
+| CliSession | `src/cli-session.js` | Claude Code headless executor (stream-json) |
 | CloudflareTunnelAdapter | `src/tunnel/cloudflare.js` | Cloudflare adapter (quick/named modes) |
-| TunnelManager | `src/tunnel.js` | Backward-compat shim re-exporting CloudflareTunnelAdapter |
-| TunnelEvents | `src/tunnel-events.js` | Tunnel event wiring helpers |
-| TunnelCheck | `src/tunnel-check.js` | Tunnel health verification (DNS propagation) |
+| Config | `src/config.js` | Schema validation + merge (CLI > ENV > file > defaults) |
+| ConnectionInfo | `src/connection-info.js` | Write/remove connection info file for programmatic access |
+| ContentBlocks | `src/content-blocks.js` | Content block builder for structured output |
+| ConversationScanner | `src/conversation-scanner.js` | Conversation history file scanning (parallel) |
+| CostBudgetManager | `src/cost-budget-manager.js` | Per-session cost budget tracking and enforcement |
 | Crypto | `src/crypto.js` | ECDH key exchange + AES-GCM encryption |
+| DevPreview | `src/dev-preview.js` | Dev server preview tunnel management |
 | DiffParser | `src/diff-parser.js` | Unified diff parser for git output |
+| Doctor | `src/doctor.js` | Diagnostic command for troubleshooting |
+| DockerSdkSession | `src/docker-sdk-session.js` | Containerized SDK executor (extends SdkSession) |
+| DockerSession | `src/docker-session.js` | Containerized CLI executor (extends CliSession) |
+| Duration | `src/duration.js` | Duration formatting utilities |
+| EnvironmentHandlers | `src/handlers/environment-handlers.js` | WS message handlers for environment CRUD |
+| EnvironmentManager | `src/environment-manager.js` | Persistent container environment lifecycle (create, destroy, snapshot, restore) |
+| EventNormalizer | `src/event-normalizer.js` | Normalize SDK/CLI events into unified format |
 | JsonlReader | `src/jsonl-reader.js` | JSONL file reading utilities |
 | LanIp | `src/lan-ip.js` | Local network IP detection |
-| Duration | `src/duration.js` | Duration formatting utilities |
-| Platform | `src/platform.js` | Cross-platform utilities (Windows/macOS/Linux) |
 | Logger | `src/logger.js` | Shared logging utility |
-| Doctor | `src/doctor.js` | Diagnostic command for troubleshooting |
+| McpTools | `src/mcp-tools.js` | MCP (Model Context Protocol) server integration |
+| MessageTransform | `src/message-transform.js` | Message transformation pipeline |
+| Models | `src/models.js` | Model list management (static + dynamic from SDK) |
+| PermissionHook | `src/permission-hook.js` | Permission hook management (CLI mode) |
+| PermissionManager | `src/permission-manager.js` | Permission rule engine with per-session auto-allow/deny rules |
+| Platform | `src/platform.js` | Cross-platform utilities (Windows/macOS/Linux) |
+| ProviderRegistry | `src/providers.js` | Provider adapter interface + built-in registrations |
+| PushManager | `src/push.js` | Push notifications via Expo Push API |
+| SdkSession | `src/sdk-session.js` | Claude Agent SDK executor |
+| ServerCLI | `src/server-cli.js` | CLI mode orchestrator |
+| ServerCLIChild | `src/server-cli-child.js` | Supervised child entry point (IPC to supervisor) |
 | Service | `src/service.js` | Service management utilities |
+| SessionContext | `src/session-context.js` | Session context data extraction (git branch, project, diff) |
+| SessionHandlers | `src/handlers/session-handlers.js` | WS message handlers for session lifecycle operations |
+| SessionManager | `src/session-manager.js` | Session lifecycle management |
+| SessionStatePersistence | `src/session-state-persistence.js` | Session state file I/O |
+| SessionTimeoutManager | `src/session-timeout-manager.js` | Session idle timeout management |
+| Supervisor | `src/supervisor.js` | Tunnel owner + child auto-restart (named tunnel mode) |
+| TokenManager | `src/token-manager.js` | API token rotation + expiry management |
+| ToolResult | `src/tool-result.js` | Tool result processing and formatting |
+| TunnelCheck | `src/tunnel-check.js` | Tunnel health verification (DNS propagation) |
+| TunnelEvents | `src/tunnel-events.js` | Tunnel event wiring helpers |
+| TunnelManager | `src/tunnel.js` | Backward-compat shim re-exporting CloudflareTunnelAdapter |
+| TunnelRegistry | `src/tunnel/registry.js` | Tunnel adapter registry (`registerTunnel`/`getTunnel`/`parseTunnelArg`) |
+| WebTaskManager | `src/web-task-manager.js` | Claude Code Web cloud task management |
+| WsBroadcaster | `src/ws-broadcaster.js` | Message broadcast to session and global scopes |
+| WsClientManager | `src/ws-client-manager.js` | Client connection lifecycle management |
+| WsFileOps | `src/ws-file-ops.js` | File browsing/reading WS message handlers |
+| WsForwarding | `src/ws-forwarding.js` | Session event → WS broadcast wiring |
+| WsMessageHandlers | `src/ws-message-handlers.js` | WS message handler dispatch |
+| WsPermissions | `src/ws-permissions.js` | Permission request/response WS message handlers |
+| WsSchemas | `src/ws-schemas.js` | Zod schemas for WebSocket message validation |
+| WsServer | `src/ws-server.js` | WebSocket protocol with auth + HTTP dashboard |
 
 ## Docker Provider Env Var Allowlists
 
@@ -152,8 +162,10 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `browse_files` | Request file/directory listing within project |
 | `close_dev_preview` | Close a dev server preview tunnel |
 | `create_checkpoint` | Create a new checkpoint for session |
+| `create_environment` | Create a persistent container environment (Docker Compose, DevContainer, or plain) |
 | `create_session` | Create new session with optional name/cwd |
 | `delete_checkpoint` | Delete a checkpoint by ID |
+| `destroy_environment` | Remove a persistent container environment |
 | `destroy_session` | Delete session by ID |
 | `encrypted` | Encrypted message envelope (E2E encryption) |
 | `get_diff` | Request git diff for uncommitted changes |
@@ -168,6 +180,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `launch_web_task` | Launch a Claude Code Web cloud task |
 | `list_agents` | Request available custom agent definitions |
 | `list_checkpoints` | Request list of checkpoints for session |
+| `list_environments` | Request list of persistent container environments |
 | `list_conversations` | Request scan of conversation history files |
 | `list_directory` | Request home directory listing for browsing |
 | `list_files` | Recursive file search within session CWD (case-insensitive substring match, max depth 3) |
@@ -191,6 +204,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `set_model` | Change active Claude model |
 | `set_permission_mode` | Change permission handling mode |
 | `set_permission_rules` | Set session-scoped auto-allow/deny rules for eligible tools |
+| `set_thinking_level` | Change thinking level (default, high, max) |
 | `subscribe_sessions` | Subscribe to updates for non-active sessions |
 | `switch_session` | Switch to different active session |
 | `teleport_web_task` | Pull cloud task result into local session |
@@ -230,6 +244,10 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `diff_result` | Git diff for uncommitted changes |
 | `directory_listing` | Home directory listing response |
 | `encrypted` | Encrypted message envelope (E2E encryption) |
+| `environment_created` | Persistent environment created successfully |
+| `environment_destroyed` | Persistent environment removed |
+| `environment_error` | Environment operation error |
+| `environment_list` | List of persistent environments with status |
 | `file_content` | File content with syntax metadata |
 | `file_list` | Response to `list_files` — flat list of matching file paths |
 | `file_listing` | Project file/directory listing response (from `browse_files`) |
@@ -334,22 +352,24 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 
 | File | Purpose |
 |------|---------|
+| `base-session.js` | Shared session logic (model, permissions, lifecycle) |
 | `checkpoint-manager.js` | Checkpoint creation/restore with git state |
 | `cli.js` | CLI commands (init, start, config, tunnel setup) |
 | `cli-session.js` | Claude Code headless executor (stream-json) |
 | `config.js` | Config schema validation + merge precedence |
 | `connection-info.js` | Write/remove connection info file |
-| `docker-session.js` | Containerized CLI executor (extends CliSession) |
-| `docker-sdk-session.js` | Containerized SDK executor (extends SdkSession) |
 | `content-blocks.js` | Content block builder for structured output |
 | `conversation-scanner.js` | Conversation history file scanning (parallel) |
+| `cost-budget-manager.js` | Per-session cost budget tracking |
 | `crypto.js` | ECDH key exchange + AES-GCM encryption |
 | `dev-preview.js` | Dev server preview tunnel management |
 | `diff-parser.js` | Unified diff parser for git output |
-| `docker-session.js` | Container-isolated CLI session (extends CliSession) |
-| `docker-sdk-session.js` | Container-isolated SDK session (extends SdkSession) |
+| `docker-sdk-session.js` | Containerized SDK executor (extends SdkSession) |
+| `docker-session.js` | Containerized CLI executor (extends CliSession) |
 | `doctor.js` | Diagnostic command for troubleshooting |
 | `duration.js` | Duration formatting utilities |
+| `handlers/environment-handlers.js` | WS message handlers for environment operations |
+| `environment-manager.js` | Persistent container environment lifecycle management |
 | `event-normalizer.js` | Normalize SDK/CLI events into unified format |
 | `jsonl-reader.js` | JSONL file reading utilities |
 | `lan-ip.js` | Local network IP detection |
@@ -358,6 +378,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `message-transform.js` | Message transformation pipeline |
 | `models.js` | Model list management (static + dynamic from SDK) |
 | `permission-hook.js` | Permission hook management (CLI mode) |
+| `permission-manager.js` | Permission rule engine (per-session auto-allow/deny) |
 | `platform.js` | Cross-platform utilities (Windows/macOS/Linux) |
 | `providers.js` | Provider adapter registry + built-in registrations |
 | `push.js` | Push notifications via Expo Push API |
@@ -366,18 +387,24 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `server-cli-child.js` | Supervised child entry point (IPC to supervisor) |
 | `service.js` | Service management utilities |
 | `session-context.js` | Session context data extraction (git, project) |
+| `handlers/session-handlers.js` | WS message handlers for session lifecycle |
 | `session-manager.js` | Session lifecycle management |
+| `session-state-persistence.js` | Session state file I/O |
+| `session-timeout-manager.js` | Session idle timeout management |
 | `supervisor.js` | Supervisor: tunnel owner + child auto-restart |
 | `token-manager.js` | API token rotation + expiry management |
 | `tool-result.js` | Tool result processing and formatting |
 | `tunnel.js` | Backward-compat shim (re-exports CloudflareTunnelAdapter) |
-| `tunnel/index.js` | Tunnel module entry — re-exports + registers built-in adapters |
-| `tunnel/registry.js` | Tunnel adapter registry + `parseTunnelArg` flag parser |
-| `tunnel/base.js` | BaseTunnelAdapter — shared recovery logic |
-| `tunnel/cloudflare.js` | CloudflareTunnelAdapter — quick/named modes |
 | `tunnel-check.js` | Tunnel health verification (DNS propagation) |
 | `tunnel-events.js` | Tunnel event wiring helpers |
+| `tunnel/base.js` | BaseTunnelAdapter — shared recovery logic |
+| `tunnel/cloudflare.js` | CloudflareTunnelAdapter — quick/named modes |
+| `tunnel/index.js` | Tunnel module entry — re-exports + registers built-in adapters |
+| `tunnel/registry.js` | Tunnel adapter registry + `parseTunnelArg` flag parser |
 | `web-task-manager.js` | Claude Code Web cloud task management |
+| `ws-broadcaster.js` | Message broadcast to session and global scopes |
+| `ws-client-manager.js` | Client connection lifecycle management |
+| `ws-client-sender.js` | Message send/encrypt logic per client |
 | `ws-file-ops.js` | File browsing/reading WS message handlers |
 | `ws-forwarding.js` | Session event → WS broadcast wiring |
 | `ws-message-handlers.js` | WS message handler dispatch |

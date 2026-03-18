@@ -5,6 +5,115 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-03-18
+
+### Added
+
+**Container Environments**
+- EnvironmentManager for persistent, named container environments with lifecycle management
+- Docker Compose stack support — define multi-container environments with `docker-compose.yml`
+- DevContainer spec support — create environments from `.devcontainer/devcontainer.json`
+- Environment snapshot and restore via `docker commit`
+- WebSocket protocol handlers for environment CRUD operations (create, list, destroy, get)
+- Dashboard environment management panel with session integration
+
+**Container Isolation**
+- DockerSession provider for CLI-based container-isolated sessions
+- DockerSdkSession provider for SDK-based container isolation with in-process permissions
+- External container support — attach sessions to pre-existing Docker containers
+- Sandbox option support for SdkSession (Agent SDK built-in isolation)
+- Resource limits and security hardening: memory caps, CPU limits, PID limits, dropped capabilities
+- Container isolation guide with provider comparison matrix
+
+**Git Worktree Isolation**
+- Git worktree isolation for sessions — each session gets an independent working copy
+- Worktree toggle in CreateSessionModal (app and dashboard)
+- CWD validation when worktree mode is enabled
+
+**Permission System**
+- PermissionManager rule engine with NEVER_AUTO_ALLOW guard for dangerous operations
+- `set_permission_rules` WebSocket handler with reconnect replay
+- Session Rules UI on mobile SettingsScreen
+- "Allow for Session" button for per-session permission grants
+- Per-session CHROXY_HOOK_SECRET replacing global CHROXY_TOKEN
+- Rate limiting on permission_response messages
+
+**Protocol & Shared Packages**
+- `@chroxy/protocol` package — shared WebSocket protocol constants, message types, and Zod schemas
+- `@chroxy/store-core` package — shared store logic, crypto utilities with platform adapters
+- `extension_message` envelope for provider-specific payloads
+- Consolidated syntax highlighter shared across app and dashboard
+- Protocol tests wired into CI pipeline
+
+**Dashboard & Desktop**
+- Voice-to-text input via macOS SFSpeechRecognizer (desktop)
+- Console page with connection info and QR code
+- Live server log panel with filtering and auto-scroll
+- Thinking level control
+- Default model selector in settings panel
+- Advanced session creation with permission mode selection
+- Image preview support in Files tab
+- SDK vs CLI provider badges with color coding
+- System events channel for connect/disconnect notifications
+- Loading skeleton during connect and session switch
+
+**Mobile App**
+- FSM validation on ConnectionPhase transitions
+- Auto-resume last session on server reconnect
+- Syntax highlighting in FileEditor read-only view
+- Show mic button during streaming; one-tap LAN connect
+- Android persistent notification for active sessions
+- Live Activity manager and bridge stubs for iOS
+- Session activity state tracker with elapsed duration
+- Composable store slices: connection lifecycle, file operations, conversation, notification, terminal, web, multi-client
+
+**Server**
+- `registerEventType` and `registerMessageHandler` for runtime extensibility
+- Codex provider with normalized provider labels
+- `/metrics` endpoint for operational monitoring
+- Request correlation IDs on message handling and error responses
+- `--log-format json` for structured logging
+- Security warnings for `--no-auth` usage
+- Ephemeral pairing codes replacing permanent token in QR
+- API token storage in OS keychain
+- Per-session WebSocket rate limiting
+- Concurrent session mutation locking
+- Backpressure monitoring with slow-client eviction
+- Grace period for recently-refreshed pairing IDs
+
+### Changed
+
+- App state management decomposed from monolithic store into composable Zustand slices
+- Server handler architecture refactored to Map-based dispatcher pattern (both server and dashboard)
+- Source-scan tests migrated to behavioral tests across three phases
+- WsServer decomposed: WsClientManager, WsBroadcaster, ws-client-sender extracted
+- SessionManager decomposed: SessionTimeoutManager, SessionStatePersistence, CostBudgetManager extracted
+- SdkSession decomposed: PermissionManager extracted as standalone module
+- ws-file-ops split into domain modules (browser, reader, git)
+- BaseSession extracted to deduplicate CLI/SDK/Gemini session logic
+- Tunnel registry collapsed from plugin system to direct factory
+- Console calls replaced with structured createLogger throughout server
+
+### Fixed
+
+- Pending message queue: replaced single-slot with proper queue, drain via nextTick to prevent re-entrancy
+- Checkpoint manager: replaced git stash push/pop with commit-tree snapshot (avoids dirty-tree conflicts)
+- Supervisor shutdown: awaits child exit instead of wall-clock timer; captures child reference in force-kill
+- Permission hook registration leak to settings.json on destroy race
+- Dev-preview tunnel registered before start() to prevent zombie processes
+- Docker session startup race, env allowlist, and API key forwarding
+- DockerSdkSession path remapping heuristic hardened
+- AbortSignal pre-abort guard in DockerSdkSession spawn callback
+- Flaky encryption and permission tests stabilized
+- Speech recognition unmount guard prevents mic leak
+- EPIPE guard on stdin.write in cli-session
+- Worktree removal fallback to rmSync when git worktree remove fails
+- Config range validation for port, maxSessions, sessionTimeout, maxPayload
+- Push notification fetch timeout with exponential backoff retry
+- WebSocket EADDRINUSE with clear error message
+- Input data and session name max-length validation
+- Non-git directory friendly message in dashboard Diff tab
+
 ## [0.5.0] - 2026-03-08
 
 ### Added

@@ -163,6 +163,45 @@ DockerSdkSession does not need this -- permissions are handled in-process by the
 
 DockerSdkSession creates a non-root user (`chroxy` by default) inside the container. Claude Code refuses `--dangerously-skip-permissions` when running as root, so the non-root user is required. The username is configurable via the `containerUser` option and must be a valid POSIX username.
 
+## Persistent Environments
+
+Beyond per-session containers, Chroxy supports **persistent container environments** — named, long-lived containers that survive across sessions and server restarts.
+
+### Overview
+
+Persistent environments are managed by the EnvironmentManager and exposed through the dashboard's Environment Panel. Unlike session containers (created and destroyed with each session), persistent environments have an independent lifecycle: create, start, stop, snapshot, restore, and destroy.
+
+### Environment Types
+
+**Plain Docker:** A single container from a base image (default `node:22-slim`).
+
+**Docker Compose:** Multi-container stacks defined by a `docker-compose.yml` file. The Compose file is passed at creation time and the full stack is managed as a unit.
+
+**DevContainer:** Environments created from a `.devcontainer/devcontainer.json` spec. Chroxy reads the DevContainer configuration (image, features, mounts, environment variables) and provisions the container accordingly.
+
+### Snapshots
+
+You can snapshot a running environment at any point using `docker commit`. Snapshots are named and stored as Docker images. Restoring a snapshot replaces the environment's container with the snapshotted state, preserving installed tools, configuration changes, and file modifications.
+
+### Usage
+
+**Dashboard:** The Environment Panel provides a UI for creating, listing, and destroying environments. When creating a session, you can attach it to a running environment instead of spinning up a fresh container.
+
+**WebSocket API:** Four environment messages are available (`create_environment`, `list_environments`, `destroy_environment`, `get_environment`). See the protocol table in `docs/architecture/reference.md`. The EnvironmentManager also supports snapshot and restore operations at the server level.
+
+**CLI:**
+
+```bash
+# Start server with environments enabled
+npx chroxy start --environments --provider docker-sdk
+```
+
+### When to Use
+
+- **Development environments** with pre-installed toolchains that take time to set up
+- **Reproducible environments** where snapshots let you reset to a known good state
+- **Team environments** where multiple sessions share a common container with shared state
+
 ## Troubleshooting
 
 ### Docker Not Available

@@ -30,8 +30,11 @@ Thanks for your interest in contributing! This document covers how to get starte
 
 ## Project Structure
 
-- `packages/server` — Node.js daemon with dual modes (CLI headless default, PTY/tmux opt-in) that exposes WebSocket API
+- `packages/server` — Node.js daemon (CLI headless mode) with WebSocket API and web dashboard
 - `packages/app` — React Native app (TypeScript, Expo 54) with chat view, xterm.js terminal, voice input, and plan mode UI
+- `packages/desktop` — Tauri tray app (Rust + web dashboard) with voice-to-text and system integration
+- `packages/protocol` — Shared WebSocket protocol types and Zod schemas (`@chroxy/protocol`)
+- `packages/store-core` — Shared store logic and crypto utilities (`@chroxy/store-core`)
 - `docs/` — Architecture docs and guides
 - `scripts/` — Helper scripts
 
@@ -58,7 +61,6 @@ Thanks for your interest in contributing! This document covers how to get starte
 
 ### Easy Wins
 - UI polish and animations
-- Improve output parser patterns (`packages/server/src/output-parser.js`) for PTY mode
 - Better error messages and edge case handling
 
 ### Medium

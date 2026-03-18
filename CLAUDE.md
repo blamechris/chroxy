@@ -13,17 +13,19 @@ Essential development notes for working with Claude on Chroxy.
 ```
 chroxy/
 ├── packages/
-│   ├── server/     # Node.js daemon + CLI (ES modules, no TypeScript)
-│   ├── app/        # React Native mobile app (TypeScript, Expo 54)
-│   └── desktop/    # Tauri tray app (Rust + web dashboard)
-├── docs/           # Setup guides, architecture
-└── scripts/        # Install helpers
+│   ├── server/      # Node.js daemon + CLI + web dashboard (ES modules, no TypeScript)
+│   ├── app/         # React Native mobile app (TypeScript, Expo 54)
+│   ├── desktop/     # Tauri tray app (Rust + web dashboard)
+│   ├── protocol/    # Shared protocol types and Zod schemas (@chroxy/protocol)
+│   └── store-core/  # Shared store logic and crypto (@chroxy/store-core)
+├── docs/            # Setup guides, architecture
+└── scripts/         # Install helpers
 ```
 
-**Current Status (v0.2.0):**
-- Server works: CLI headless mode, WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, session management, model switching, plan mode detection, background agent tracking, web dashboard
-- Desktop works: Tauri tray app, web dashboard with syntax highlighting, xterm.js terminal, notifications, session tabs
-- App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal, xterm.js terminal emulation (WebView), plan approval UI, agent monitoring, settings screen, voice-to-text input
+**Current Status (v0.6.0):**
+- Server works: CLI headless mode, WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, session management, model switching, plan mode detection, background agent tracking, web dashboard, container environments (Docker Compose, DevContainer, snapshots), container/worktree isolation, permission rule engine, extensible provider/handler system
+- Desktop works: Tauri tray app, web dashboard with syntax highlighting, xterm.js terminal, notifications, session tabs, voice-to-text (macOS), console page, environment management panel
+- App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal, xterm.js terminal emulation (WebView), plan approval UI, agent monitoring, settings screen, voice-to-text input, session rules UI, worktree toggle
 - **Dev build required** — `expo-speech-recognition` native module means Expo Go no longer works. Use `npx expo run:ios` or `npx expo run:android`.
 
 ## Critical Dev Notes
@@ -289,5 +291,5 @@ For detailed component tables, WebSocket protocol messages, file listings, and s
 
 ---
 
-*Last Updated: 2026-02-24*
-*Version: 0.2.0*
+*Last Updated: 2026-03-18*
+*Version: 0.6.0*
