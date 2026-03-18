@@ -107,6 +107,85 @@ export class EnvironmentManager extends EventEmitter {
   }
 
   /**
+   * Create a snapshot of a running environment via docker commit.
+   *
+   * @param {string} envId - Environment ID
+   * @param {Object} [opts]
+   * @param {string} [opts.name] - Human-readable snapshot name
+   * @returns {Promise<Object>} Snapshot metadata { id, name, image, createdAt }
+   */
+  async snapshot(envId, { name } = {}) {
+    const env = this._environments.get(envId)
+    if (!env) throw new Error(`Environment not found: ${envId}`)
+    if (env.status !== 'running') throw new Error(`Environment "${env.name}" is not running (status: ${env.status})`)
+
+    const snapshotId = 'snap-' + randomBytes(8).toString('hex')
+    const timestamp = Date.now()
+    const imageTag = `chroxy-env:${envId}-${timestamp}`
+
+    log.info(`Creating snapshot "${name || snapshotId}" for environment "${env.name}"`)
+
+    await this._commitContainer(env.containerId, imageTag)
+
+    const snap = {
+      id: snapshotId,
+      name: name || snapshotId,
+      image: imageTag,
+      createdAt: new Date().toISOString(),
+    }
+
+    if (!Array.isArray(env.snapshots)) {
+      env.snapshots = []
+    }
+    env.snapshots.push(snap)
+
+    this._persist()
+    this.emit('environment_snapshot', { envId, snapshot: snap })
+    log.info(`Snapshot "${snap.name}" created (image: ${imageTag})`)
+    return snap
+  }
+
+  /**
+   * Restore an environment from a snapshot.
+   *
+   * Stops the current container and starts a new one from the snapshot image,
+   * preserving the same security constraints.
+   *
+   * @param {string} envId - Environment ID
+   * @param {string} snapshotId - Snapshot ID to restore
+   * @returns {Promise<Object>} Updated environment object
+   */
+  async restore(envId, snapshotId) {
+    const env = this._environments.get(envId)
+    if (!env) throw new Error(`Environment not found: ${envId}`)
+
+    const snapshots = env.snapshots || []
+    const snap = snapshots.find(s => s.id === snapshotId)
+    if (!snap) throw new Error(`Snapshot not found: ${snapshotId}`)
+
+    log.info(`Restoring environment "${env.name}" from snapshot "${snap.name}"`)
+
+    // Remove current container
+    await this._removeContainer(env.containerId)
+
+    // Start new container from snapshot image
+    const containerId = await this._startContainer({
+      cwd: env.cwd,
+      image: snap.image,
+      memoryLimit: env.memoryLimit,
+      cpuLimit: env.cpuLimit,
+    })
+
+    env.containerId = containerId
+    env.status = 'running'
+
+    this._persist()
+    this.emit('environment_restored', { envId, snapshotId, containerId })
+    log.info(`Environment "${env.name}" restored (container: ${containerId.slice(0, 12)})`)
+    return env
+  }
+
+  /**
    * Destroy an environment and its container.
    * @param {string} envId - Environment ID
    */
@@ -118,6 +197,13 @@ export class EnvironmentManager extends EventEmitter {
 
     if (env.containerId && env.status === 'running') {
       await this._removeContainer(env.containerId)
+    }
+
+    // Clean up snapshot images
+    if (Array.isArray(env.snapshots)) {
+      for (const snap of env.snapshots) {
+        await this._removeImage(snap.image)
+      }
     }
 
     this._environments.delete(envId)
@@ -303,10 +389,31 @@ export class EnvironmentManager extends EventEmitter {
     })
   }
 
+  _commitContainer(containerId, imageTag) {
+    return new Promise((resolve, reject) => {
+      this._execFile('docker', ['commit', containerId, imageTag], { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
+        if (err) {
+          reject(new Error(stderr ? stderr.trim() : err.message))
+          return
+        }
+        resolve(stdout.trim())
+      })
+    })
+  }
+
   _removeContainer(containerId) {
     return new Promise((resolve) => {
       this._execFile('docker', ['rm', '-f', containerId], { stdio: 'ignore' }, (err) => {
         if (err) log.warn(`Failed to remove container ${containerId.slice(0, 12)}: ${err.message}`)
+        resolve()
+      })
+    })
+  }
+
+  _removeImage(imageTag) {
+    return new Promise((resolve) => {
+      this._execFile('docker', ['rmi', imageTag], { stdio: 'ignore' }, (err) => {
+        if (err) log.warn(`Failed to remove image ${imageTag}: ${err.message}`)
         resolve()
       })
     })

@@ -580,3 +580,286 @@ describe('EnvironmentManager.reconnect()', () => {
     assert.equal(manager.list().length, 0)
   })
 })
+
+describe('EnvironmentManager.snapshot()', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('creates a docker image from running container', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'snap-ctr\n', exec: '/usr/local\n', commit: 'sha256:abc123\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'snap-test', cwd: '/tmp' })
+
+    const snap = await manager.snapshot(env.id, { name: 'my-snapshot' })
+
+    assert.ok(snap.id.startsWith('snap-'))
+    assert.equal(snap.name, 'my-snapshot')
+    assert.ok(snap.image.startsWith(`chroxy-env:${env.id}-`))
+    assert.ok(snap.createdAt)
+
+    // Verify docker commit was called
+    const commitCalls = mockExec.calls.filter(c => c.args[0] === 'commit')
+    assert.equal(commitCalls.length, 1)
+    assert.ok(commitCalls[0].args.includes('snap-ctr'))
+    assert.ok(commitCalls[0].args.some(a => a.startsWith('chroxy-env:')))
+  })
+
+  it('persists snapshot metadata to environment', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'persist-snap-ctr\n', exec: '/usr/local\n', commit: 'sha256:def456\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'persist-snap', cwd: '/tmp' })
+
+    await manager.snapshot(env.id, { name: 'snap-1' })
+    await manager.snapshot(env.id, { name: 'snap-2' })
+
+    const updated = manager.get(env.id)
+    assert.equal(updated.snapshots.length, 2)
+    assert.equal(updated.snapshots[0].name, 'snap-1')
+    assert.equal(updated.snapshots[1].name, 'snap-2')
+
+    // Verify persisted to disk
+    const data = JSON.parse(readFileSync(statePath, 'utf-8'))
+    const persisted = data.environments.find(e => e.id === env.id)
+    assert.equal(persisted.snapshots.length, 2)
+  })
+
+  it('throws for non-running environment', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'stopped-snap-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'stopped-snap', cwd: '/tmp' })
+    env.status = 'stopped'
+
+    await assert.rejects(
+      () => manager.snapshot(env.id),
+      /not running/
+    )
+  })
+
+  it('throws for unknown environment', async () => {
+    const manager = new EnvironmentManager({ statePath, _execFile: createMockExecFile() })
+    await assert.rejects(
+      () => manager.snapshot('env-nonexistent'),
+      /not found/
+    )
+  })
+
+  it('emits environment_snapshot event', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'event-snap-ctr\n', exec: '/usr/local\n', commit: 'sha256:ghi789\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'event-snap', cwd: '/tmp' })
+
+    const events = []
+    manager.on('environment_snapshot', (e) => events.push(e))
+
+    const snap = await manager.snapshot(env.id, { name: 'snap-event' })
+
+    assert.equal(events.length, 1)
+    assert.equal(events[0].envId, env.id)
+    assert.equal(events[0].snapshot.id, snap.id)
+  })
+
+  it('uses snapshot ID as name when name is not provided', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'noname-ctr\n', exec: '/usr/local\n', commit: 'sha256:jkl012\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'noname-snap', cwd: '/tmp' })
+
+    const snap = await manager.snapshot(env.id)
+
+    assert.equal(snap.name, snap.id)
+  })
+})
+
+describe('EnvironmentManager.restore()', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('starts new container from snapshot image', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'restore-ctr\n', exec: '/usr/local\n', commit: 'sha256:aaa\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'restore-test', cwd: '/tmp' })
+
+    const snap = await manager.snapshot(env.id, { name: 'pre-restore' })
+
+    // Clear calls to isolate the restore docker run
+    mockExec.calls.length = 0
+
+    const restored = await manager.restore(env.id, snap.id)
+
+    assert.equal(restored.status, 'running')
+
+    // Should have called: docker rm -f (old container), docker run (new from snapshot image)
+    const rmCalls = mockExec.calls.filter(c => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1)
+
+    const runCalls = mockExec.calls.filter(c => c.args[0] === 'run')
+    assert.equal(runCalls.length, 1)
+    // The run call should use the snapshot image
+    assert.ok(runCalls[0].args.includes(snap.image))
+  })
+
+  it('updates containerId after restore', async () => {
+    let runCount = 0
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'run') {
+        runCount++
+        cb(null, runCount === 1 ? 'original-ctr\n' : 'restored-ctr\n', '')
+        return
+      }
+      if (args[0] === 'commit') {
+        cb(null, 'sha256:bbb\n', '')
+        return
+      }
+      // exec, rm, etc.
+      cb(null, '/usr/local\n', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'ctr-update', cwd: '/tmp' })
+
+    assert.equal(env.containerId, 'original-ctr')
+
+    const snap = await manager.snapshot(env.id, { name: 'snap-for-restore' })
+    const restored = await manager.restore(env.id, snap.id)
+
+    assert.equal(restored.containerId, 'restored-ctr')
+
+    // Verify persisted to disk
+    const data = JSON.parse(readFileSync(statePath, 'utf-8'))
+    assert.equal(data.environments[0].containerId, 'restored-ctr')
+  })
+
+  it('throws for unknown snapshot', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'unknown-snap-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'unknown-snap', cwd: '/tmp' })
+
+    await assert.rejects(
+      () => manager.restore(env.id, 'snap-nonexistent'),
+      /Snapshot not found/
+    )
+  })
+
+  it('throws for unknown environment', async () => {
+    const manager = new EnvironmentManager({ statePath, _execFile: createMockExecFile() })
+    await assert.rejects(
+      () => manager.restore('env-nonexistent', 'snap-whatever'),
+      /Environment not found/
+    )
+  })
+
+  it('emits environment_restored event', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'event-restore-ctr\n', exec: '/usr/local\n', commit: 'sha256:ccc\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'event-restore', cwd: '/tmp' })
+    const snap = await manager.snapshot(env.id, { name: 'snap-event-restore' })
+
+    const events = []
+    manager.on('environment_restored', (e) => events.push(e))
+
+    await manager.restore(env.id, snap.id)
+
+    assert.equal(events.length, 1)
+    assert.equal(events[0].envId, env.id)
+    assert.equal(events[0].snapshotId, snap.id)
+    assert.ok(events[0].containerId)
+  })
+})
+
+describe('EnvironmentManager.destroy() snapshot cleanup', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('removes snapshot images when destroying environment', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'cleanup-ctr\n', exec: '/usr/local\n', commit: 'sha256:ddd\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'cleanup-test', cwd: '/tmp' })
+
+    const snap1 = await manager.snapshot(env.id, { name: 'snap-a' })
+    const snap2 = await manager.snapshot(env.id, { name: 'snap-b' })
+
+    // Clear calls to isolate destroy
+    mockExec.calls.length = 0
+
+    await manager.destroy(env.id)
+
+    // Should have called: docker rm -f (container), docker rmi (snap-a image), docker rmi (snap-b image)
+    const rmCalls = mockExec.calls.filter(c => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1)
+
+    const rmiCalls = mockExec.calls.filter(c => c.args[0] === 'rmi')
+    assert.equal(rmiCalls.length, 2)
+    assert.ok(rmiCalls.some(c => c.args.includes(snap1.image)))
+    assert.ok(rmiCalls.some(c => c.args.includes(snap2.image)))
+  })
+
+  it('destroys cleanly when environment has no snapshots', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'no-snap-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'no-snap', cwd: '/tmp' })
+
+    // No snapshot — just destroy
+    await manager.destroy(env.id)
+
+    assert.equal(manager.get(env.id), null)
+
+    // No rmi calls
+    const rmiCalls = mockExec.calls.filter(c => c.args[0] === 'rmi')
+    assert.equal(rmiCalls.length, 0)
+  })
+})
