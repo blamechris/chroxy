@@ -49,6 +49,7 @@ import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
 import { StartupErrorScreen } from './components/StartupErrorScreen'
 import { ConsolePage } from './components/ConsolePage'
+import { EnvironmentPanel } from './components/EnvironmentPanel'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -972,6 +973,13 @@ export function App() {
                   Console
                 </button>
               )}
+              <button
+                className={`view-tab${viewMode === 'environments' ? ' active' : ''}`}
+                onClick={() => { setViewMode('environments'); setSplitMode(null); persistSplitMode(null) }}
+                type="button"
+              >
+                Envs
+              </button>
               <div className="view-switch-spacer" />
               <button
                 className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`}
@@ -1051,6 +1059,9 @@ export function App() {
                 )}
                 {viewMode === 'console' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <ConsolePage />
+                )}
+                {viewMode === 'environments' && connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <EnvironmentPanel />
                 )}
               </div>
               {checkpointsOpen && (

@@ -206,6 +206,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   streamingMessageId: null,
   activeModel: null,
   availableProviders: [],
+  environments: [],
   availableModels: [],
   defaultModelId: null,
   permissionMode: null,
@@ -673,6 +674,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       streamingMessageId: null,
       activeModel: null,
       availableProviders: [],
+      environments: [],
       availableModels: [],
       defaultModelId: null,
       permissionMode: null,
@@ -1205,7 +1207,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  createSession: ({ name, cwd, provider, model, permissionMode, worktree }) => {
+  createSession: ({ name, cwd, provider, model, permissionMode, worktree, environmentId }) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, unknown> = { type: 'create_session' };
@@ -1215,6 +1217,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (model) msg.model = model;
       if (permissionMode) msg.permissionMode = permissionMode;
       if (worktree) msg.worktree = true;
+      if (environmentId) msg.environmentId = environmentId;
       wsSend(socket, msg);
     }
   },
@@ -1230,6 +1233,36 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'rename_session', sessionId, name });
+    }
+  },
+
+  // Environment actions
+  requestEnvironments: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'list_environments' });
+    }
+  },
+
+  createEnvironment: (opts) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const msg: Record<string, unknown> = {
+        type: 'create_environment',
+        name: opts.name,
+        cwd: opts.cwd,
+      };
+      if (opts.image) msg.image = opts.image;
+      if (opts.memoryLimit) msg.memoryLimit = opts.memoryLimit;
+      if (opts.cpuLimit) msg.cpuLimit = opts.cpuLimit;
+      wsSend(socket, msg);
+    }
+  },
+
+  destroyEnvironment: (environmentId: string) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'destroy_environment', environmentId });
     }
   },
 

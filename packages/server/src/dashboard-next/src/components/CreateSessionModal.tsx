@@ -20,6 +20,7 @@ export interface CreateSessionData {
   permissionMode?: string
   model?: string
   worktree?: boolean
+  environmentId?: string
 }
 
 export interface CreateSessionModalProps {
@@ -93,6 +94,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [permissionMode, setPermissionMode] = useState('')
   const [worktree, setWorktree] = useState(false)
+  const [environmentId, setEnvironmentId] = useState('')
+  const environments = useConnectionStore(s => s.environments)
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1)
   const cwdInputRef = useRef<HTMLInputElement>(null)
@@ -167,8 +170,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       flushSync(() => setNameError('Session name is required'))
       return
     }
-    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model: defaultModel || undefined, worktree: worktree || undefined })
-  }, [onCreate, provider, permissionMode, defaultModel, worktree])
+    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model: defaultModel || undefined, worktree: worktree || undefined, environmentId: environmentId || undefined })
+  }, [onCreate, provider, permissionMode, defaultModel, worktree, environmentId])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -508,6 +511,24 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 : 'Runs in an isolated git worktree — requires a git repo CWD'}
             </span>
           </div>
+          {environments.length > 0 && (
+            <div className="form-field">
+              <label htmlFor="env-select">Environment</label>
+              <select
+                id="env-select"
+                value={environmentId}
+                onChange={e => setEnvironmentId(e.target.value)}
+              >
+                <option value="">None (ephemeral container)</option>
+                {environments.filter(e => e.status === 'running').map(e => (
+                  <option key={e.id} value={e.id}>{e.name} ({e.image})</option>
+                ))}
+              </select>
+              <span className="form-hint">
+                Connect to a persistent environment container
+              </span>
+            </div>
+          )}
         </div>
       )}
       {serverError && (
