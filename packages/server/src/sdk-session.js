@@ -59,10 +59,11 @@ export class SdkSession extends BaseSession {
 
   get thinkingLevel() { return this._thinkingLevel }
 
-  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput } = {}) {
+  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox } = {}) {
     super({ cwd, model, permissionMode })
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
+    this._sandbox = sandbox || null
 
     this._sdkSessionId = resumeSessionId || null
     this._sessionId = null
@@ -152,6 +153,11 @@ export class SdkSession extends BaseSession {
       if (budget != null) options.maxThinkingTokens = budget
     }
 
+    // Sandbox settings (lightweight isolation without Docker)
+    if (this._sandbox) {
+      options.sandbox = this._sandbox
+    }
+
     // In-process permission handling (only when not bypassing)
     if (this.permissionMode !== 'auto') {
       options.canUseTool = (toolName, input, { signal }) =>
@@ -181,7 +187,7 @@ export class SdkSession extends BaseSession {
       if (attachments?.length) {
         queryArgs.prompt = buildContentBlocks(transformedPrompt, attachments)
       }
-      this._query = query(queryArgs)
+      this._query = this._callQuery(queryArgs)
 
       for await (const msg of this._query) {
         if (this._destroying) break
@@ -326,6 +332,15 @@ export class SdkSession extends BaseSession {
     } finally {
       this._query = null
     }
+  }
+
+  /**
+   * Invoke the SDK query function. Extracted for testability.
+   * @param {object} queryArgs - { prompt, options }
+   * @returns {AsyncIterable} SDK message stream
+   */
+  _callQuery(queryArgs) {
+    return query(queryArgs)
   }
 
   /**

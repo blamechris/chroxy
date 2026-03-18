@@ -108,6 +108,23 @@ export const SwitchSessionSchema = z.object({
   sessionId: z.string(),
 })
 
+// -- Sandbox settings schema (mirrors SDK SandboxSettings) --
+// Exported for reuse by clients; nested objects use .passthrough() to avoid
+// silently stripping fields added by newer SDK versions.
+export const SandboxSchema = z.object({
+  network: z.object({
+    allowedDomains: z.array(z.string()).optional(),
+  }).passthrough().optional(),
+  filesystem: z.object({
+    allowedPaths: z.array(z.string()).optional(),
+    deniedPaths: z.array(z.string()).optional(),
+  }).passthrough().optional(),
+  bash: z.object({
+    allowedCommands: z.array(z.string()).optional(),
+  }).passthrough().optional(),
+  autoAllowBashIfSandboxed: z.boolean().optional(),
+}).passthrough()
+
 export const CreateSessionSchema = z.object({
   type: z.literal('create_session'),
   name: z.string().max(200).optional(),
@@ -116,6 +133,7 @@ export const CreateSessionSchema = z.object({
   model: z.string().optional(),
   permissionMode: z.enum(['approve', 'acceptEdits', 'auto', 'plan']).optional(),
   worktree: z.boolean().optional(),
+  sandbox: SandboxSchema.optional(),
 })
 
 export const DestroySessionSchema = z.object({

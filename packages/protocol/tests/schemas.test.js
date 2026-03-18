@@ -82,6 +82,38 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok('EncryptedEnvelopeSchema' in mod, 'Should export EncryptedEnvelopeSchema')
   })
 
+  it('validates create_session with sandbox option', async () => {
+    const { CreateSessionSchema } = await import('../src/schemas/client.ts')
+    const result = CreateSessionSchema.safeParse({
+      type: 'create_session',
+      name: 'Test Session',
+      cwd: '/tmp',
+      sandbox: {
+        network: { allowedDomains: ['example.com'] },
+        filesystem: { allowedPaths: ['/tmp'], deniedPaths: ['/etc'] },
+        bash: { allowedCommands: ['ls', 'cat'] },
+        autoAllowBashIfSandboxed: true,
+      },
+    })
+    assert.ok(result.success, 'Should validate create_session with sandbox')
+    assert.deepEqual(result.data.sandbox, {
+      network: { allowedDomains: ['example.com'] },
+      filesystem: { allowedPaths: ['/tmp'], deniedPaths: ['/etc'] },
+      bash: { allowedCommands: ['ls', 'cat'] },
+      autoAllowBashIfSandboxed: true,
+    })
+  })
+
+  it('validates create_session without sandbox option', async () => {
+    const { CreateSessionSchema } = await import('../src/schemas/client.ts')
+    const result = CreateSessionSchema.safeParse({
+      type: 'create_session',
+      name: 'Test Session',
+    })
+    assert.ok(result.success, 'Should validate create_session without sandbox')
+    assert.equal(result.data.sandbox, undefined)
+  })
+
   it('discriminatedUnion covers all expected message types', async () => {
     const { ClientMessageSchema } = await import('../src/schemas/client.ts')
 

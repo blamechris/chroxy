@@ -153,6 +153,7 @@ export async function startCliServer(config) {
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],
     sessionTimeout: config.sessionTimeout || null,
+    sandbox: config.sandbox || null,
     costBudget: config.costBudget || null,
     maxHistory: config.maxHistory || null,
   })
