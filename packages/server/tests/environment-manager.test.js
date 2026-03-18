@@ -580,3 +580,202 @@ describe('EnvironmentManager.reconnect()', () => {
     assert.equal(manager.list().length, 0)
   })
 })
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Docker Compose stack support
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('EnvironmentManager.create() with compose', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('creates a compose environment with docker compose up', async () => {
+    // Mock: compose -> up succeeds, ps returns JSON, exec succeeds (setup + install + prefix)
+    let callCount = 0
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      callCount++
+      if (args[0] === 'compose' && args.includes('up')) {
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        cb(null, '{"ID":"compose-ctr-123","Service":"app","State":"running"}\n', '')
+        return
+      }
+      if (args[0] === 'exec') {
+        cb(null, '/usr/local\n', '')
+        return
+      }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+
+    const env = await manager.create({
+      name: 'compose-env',
+      cwd: '/home/user/project',
+      compose: '/home/user/project/docker-compose.yml',
+      primaryService: 'app',
+    })
+
+    assert.equal(env.image, 'compose')
+    assert.equal(env.containerId, 'compose-ctr-123')
+    assert.equal(env.compose, '/home/user/project/docker-compose.yml')
+    assert.ok(env.composeProject.startsWith('chroxy-env-'))
+    assert.equal(env.status, 'running')
+    assert.ok(Array.isArray(env.services))
+  })
+
+  it('tears down compose on primary container identification failure', async () => {
+    let downCalled = false
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) {
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        // Return empty — no containers found
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'compose' && args.includes('down')) {
+        downCalled = true
+        cb(null, '', '')
+        return
+      }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+
+    await assert.rejects(
+      () => manager.create({
+        name: 'fail-compose',
+        cwd: '/tmp',
+        compose: '/tmp/docker-compose.yml',
+      }),
+      /No running containers/
+    )
+    assert.ok(downCalled, 'should tear down compose on failure')
+    assert.equal(manager.list().length, 0)
+  })
+
+  it('tears down compose on setup failure', async () => {
+    let downCalled = false
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) {
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        cb(null, '{"ID":"setup-fail-ctr","Service":"app","State":"running"}\n', '')
+        return
+      }
+      if (args[0] === 'compose' && args.includes('down')) {
+        downCalled = true
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'exec') {
+        cb(new Error('useradd failed'), '', '')
+        return
+      }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+
+    await assert.rejects(
+      () => manager.create({
+        name: 'setup-fail',
+        cwd: '/tmp',
+        compose: '/tmp/compose.yml',
+      }),
+      /useradd failed/
+    )
+    assert.ok(downCalled, 'should tear down compose on setup failure')
+  })
+})
+
+describe('EnvironmentManager.destroy() with compose', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('uses docker compose down for compose environments', async () => {
+    let downCalled = false
+    let downArgs = []
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) {
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        cb(null, '{"ID":"down-ctr","Service":"app","State":"running"}\n', '')
+        return
+      }
+      if (args[0] === 'compose' && args.includes('down')) {
+        downCalled = true
+        downArgs = [...args]
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'exec') {
+        cb(null, '/usr/local\n', '')
+        return
+      }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'destroy-compose',
+      cwd: '/tmp',
+      compose: '/tmp/compose.yml',
+    })
+
+    await manager.destroy(env.id)
+
+    assert.ok(downCalled, 'should call docker compose down')
+    assert.ok(downArgs.includes('--remove-orphans'), 'should include --remove-orphans')
+    assert.equal(manager.list().length, 0)
+  })
+
+  it('does NOT use docker compose down for non-compose environments', async () => {
+    let rmCalled = false
+    const mockExec = createMockExecFile({
+      results: { run: 'rm-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'plain-env', cwd: '/tmp' })
+
+    await manager.destroy(env.id)
+
+    const composeCalls = mockExec.calls.filter(c => c.args[0] === 'compose')
+    assert.equal(composeCalls.length, 0, 'should NOT call docker compose for plain environments')
+  })
+})
