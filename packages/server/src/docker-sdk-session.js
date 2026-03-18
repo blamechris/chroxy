@@ -202,15 +202,20 @@ export class DockerSdkSession extends SdkSession {
     const containerId = this._containerId
     const containerCliPath = this._containerCliPath || DEFAULT_CONTAINER_CLI_PATH
     const containerUser = this._containerUser
+    const hostCwd = this.cwd || process.cwd()
 
     return (options) => {
       const { command, args, cwd, env, signal } = options
 
       const dockerArgs = ['exec', '-i', '-u', containerUser]
 
-      // Set working directory inside container
+      // Remap host cwd to container mount point — the SDK passes the host's
+      // absolute path but the container only has /workspace
       if (cwd) {
-        dockerArgs.push('--workdir', cwd)
+        const containerCwd = cwd.startsWith(hostCwd)
+          ? '/workspace' + cwd.slice(hostCwd.length)
+          : '/workspace'
+        dockerArgs.push('--workdir', containerCwd)
       }
 
       // Forward only allowlisted env vars -- never leak the whole host env
