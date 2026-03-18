@@ -102,6 +102,7 @@ export { formatIdleDuration }
  * @property {string}  [sessionTimeout]          - Idle timeout duration string (e.g. '30m', '2h'), parsed by parseDuration()
  * @property {number}  [maxToolInput]            - Max characters for tool input display
  * @property {Array}   [transforms=[]]           - Message transform functions
+ * @property {object}  [sandbox]                 - SDK sandbox settings for lightweight isolation
  * @property {string}  [costBudget]              - Cost budget string (e.g. '$5.00')
  *
  * State persistence
@@ -132,6 +133,7 @@ export class SessionManager extends EventEmitter {
     sessionTimeout,
     maxToolInput,
     transforms,
+    sandbox,
     costBudget,
 
     // State persistence
@@ -158,6 +160,7 @@ export class SessionManager extends EventEmitter {
     // Session behavior
     this._maxToolInput = maxToolInput || null
     this._transforms = transforms || []
+    this._sandbox = sandbox || null
     this._costBudget = new CostBudgetManager({ budget: costBudget })
 
     // State persistence (delegated to SessionStatePersistence)
@@ -259,9 +262,10 @@ export class SessionManager extends EventEmitter {
    * @param {string} [options.resumeSessionId]
    * @param {string} [options.provider]
    * @param {boolean} [options.worktree] - When true, creates a git worktree for isolation
+   * @param {object} [options.sandbox] - SDK sandbox settings for lightweight isolation
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -333,6 +337,9 @@ export class SessionManager extends EventEmitter {
       transforms: this._transforms,
     }
     if (this._maxToolInput) providerOpts.maxToolInput = this._maxToolInput
+    // Sandbox: per-session overrides server-level default
+    const resolvedSandbox = sandbox || this._sandbox
+    if (resolvedSandbox) providerOpts.sandbox = resolvedSandbox
     const session = new ProviderClass(providerOpts)
 
     const entry = {

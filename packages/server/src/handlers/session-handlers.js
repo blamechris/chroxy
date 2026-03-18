@@ -38,6 +38,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   const rawPermMode = (typeof msg.permissionMode === 'string' && msg.permissionMode.trim()) ? msg.permissionMode.trim() : undefined
   const permissionMode = rawPermMode && VALID_PERMISSION_MODES.includes(rawPermMode) ? rawPermMode : undefined
   const worktree = msg.worktree === true ? true : undefined
+  const sandbox = (msg.sandbox && typeof msg.sandbox === 'object' && !Array.isArray(msg.sandbox)) ? msg.sandbox : undefined
 
   if (worktree && !cwd) {
     ctx.send(ws, { type: 'session_error', message: 'Worktree requires an explicit CWD' })
@@ -53,7 +54,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   }
 
   try {
-    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree })
+    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox })
     client.activeSessionId = sessionId
     client.subscribedSessionIds.add(sessionId)
     const entry = ctx.sessionManager.getSession(sessionId)
