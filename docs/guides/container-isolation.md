@@ -185,9 +185,9 @@ You can snapshot a running environment at any point using `docker commit`. Snaps
 
 ### Usage
 
-**Dashboard:** The Environment Panel provides a UI for creating, starting, stopping, snapshotting, and destroying environments. When creating a session, you can attach it to a running environment instead of spinning up a fresh container.
+**Dashboard:** The Environment Panel provides a UI for creating, listing, and destroying environments. When creating a session, you can attach it to a running environment instead of spinning up a fresh container.
 
-**WebSocket API:** Seven environment messages are available (`create_environment`, `list_environments`, `start_environment`, `stop_environment`, `destroy_environment`, `snapshot_environment`, `restore_environment`). See the protocol table in `docs/architecture/reference.md`.
+**WebSocket API:** Four environment messages are available (`create_environment`, `list_environments`, `destroy_environment`, `get_environment`). See the protocol table in `docs/architecture/reference.md`. The EnvironmentManager also supports snapshot and restore operations at the server level.
 
 **CLI:**
 

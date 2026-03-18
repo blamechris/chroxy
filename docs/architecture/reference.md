@@ -25,8 +25,8 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | DockerSdkSession | `src/docker-sdk-session.js` | Containerized SDK executor (extends SdkSession) |
 | DockerSession | `src/docker-session.js` | Containerized CLI executor (extends CliSession) |
 | Duration | `src/duration.js` | Duration formatting utilities |
-| EnvironmentHandlers | `src/environment-handlers.js` | WS message handlers for environment CRUD, snapshot, and restore |
-| EnvironmentManager | `src/environment-manager.js` | Persistent container environment lifecycle (create, start, stop, remove, snapshot, restore) |
+| EnvironmentHandlers | `src/handlers/environment-handlers.js` | WS message handlers for environment CRUD |
+| EnvironmentManager | `src/environment-manager.js` | Persistent container environment lifecycle (create, destroy, snapshot, restore) |
 | EventNormalizer | `src/event-normalizer.js` | Normalize SDK/CLI events into unified format |
 | JsonlReader | `src/jsonl-reader.js` | JSONL file reading utilities |
 | LanIp | `src/lan-ip.js` | Local network IP detection |
@@ -44,7 +44,7 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | ServerCLIChild | `src/server-cli-child.js` | Supervised child entry point (IPC to supervisor) |
 | Service | `src/service.js` | Service management utilities |
 | SessionContext | `src/session-context.js` | Session context data extraction (git branch, project, diff) |
-| SessionHandlers | `src/session-handlers.js` | WS message handlers for session lifecycle operations |
+| SessionHandlers | `src/handlers/session-handlers.js` | WS message handlers for session lifecycle operations |
 | SessionManager | `src/session-manager.js` | Session lifecycle management |
 | SessionStatePersistence | `src/session-state-persistence.js` | Session state file I/O |
 | SessionTimeoutManager | `src/session-timeout-manager.js` | Session idle timeout management |
@@ -198,7 +198,6 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `request_full_history` | Request complete JSONL history for session |
 | `request_session_context` | Get context info for specific session |
 | `restore_checkpoint` | Restore from a checkpoint (creates new session) |
-| `restore_environment` | Restore an environment from a named snapshot |
 | `resume_budget` | Resume a paused session after budget exceeded |
 | `resume_conversation` | Resume a past conversation by creating a new session |
 | `search_conversations` | Search conversation history by query |
@@ -206,9 +205,6 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `set_permission_mode` | Change permission handling mode |
 | `set_permission_rules` | Set session-scoped auto-allow/deny rules for eligible tools |
 | `set_thinking_level` | Change thinking level (default, high, max) |
-| `snapshot_environment` | Create a named snapshot of a running environment |
-| `start_environment` | Start a stopped persistent environment |
-| `stop_environment` | Stop a running persistent environment |
 | `subscribe_sessions` | Subscribe to updates for non-active sessions |
 | `switch_session` | Switch to different active session |
 | `teleport_web_task` | Pull cloud task result into local session |
@@ -252,11 +248,6 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `environment_destroyed` | Persistent environment removed |
 | `environment_error` | Environment operation error |
 | `environment_list` | List of persistent environments with status |
-| `environment_restored` | Environment restored from snapshot |
-| `environment_snapshot` | Environment snapshot created |
-| `environment_started` | Persistent environment started |
-| `environment_stopped` | Persistent environment stopped |
-| `environment_updated` | Environment status or metadata changed |
 | `file_content` | File content with syntax metadata |
 | `file_list` | Response to `list_files` — flat list of matching file paths |
 | `file_listing` | Project file/directory listing response (from `browse_files`) |
@@ -377,7 +368,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `docker-session.js` | Containerized CLI executor (extends CliSession) |
 | `doctor.js` | Diagnostic command for troubleshooting |
 | `duration.js` | Duration formatting utilities |
-| `environment-handlers.js` | WS message handlers for environment operations |
+| `handlers/environment-handlers.js` | WS message handlers for environment operations |
 | `environment-manager.js` | Persistent container environment lifecycle management |
 | `event-normalizer.js` | Normalize SDK/CLI events into unified format |
 | `jsonl-reader.js` | JSONL file reading utilities |
@@ -396,7 +387,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `server-cli-child.js` | Supervised child entry point (IPC to supervisor) |
 | `service.js` | Service management utilities |
 | `session-context.js` | Session context data extraction (git, project) |
-| `session-handlers.js` | WS message handlers for session lifecycle |
+| `handlers/session-handlers.js` | WS message handlers for session lifecycle |
 | `session-manager.js` | Session lifecycle management |
 | `session-state-persistence.js` | Session state file I/O |
 | `session-timeout-manager.js` | Session idle timeout management |

@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docker Compose stack support — define multi-container environments with `docker-compose.yml`
 - DevContainer spec support — create environments from `.devcontainer/devcontainer.json`
 - Environment snapshot and restore via `docker commit`
-- WebSocket protocol handlers for environment CRUD, snapshot, and restore operations
+- WebSocket protocol handlers for environment CRUD operations (create, list, destroy, get)
 - Dashboard environment management panel with session integration
 
 **Container Isolation**
