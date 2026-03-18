@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'child_process'
 import { PassThrough } from 'stream'
@@ -175,8 +175,9 @@ describe('SpawnedProcess interface', () => {
 
 describe('Node ChildProcess satisfies SpawnedProcess', () => {
   it('spawn() return value has all required properties', () => {
-    // Spawn a no-op process to check interface conformance
-    const child = spawn('echo', ['test'], { stdio: ['pipe', 'pipe', 'pipe'] })
+    // Spawn a no-op process to check interface conformance — use process.execPath
+    // for portability (echo binary may not exist or behave differently across platforms)
+    const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: ['pipe', 'pipe', 'pipe'] })
 
     // Required streams
     assert.ok(child.stdin, 'stdin must exist')

@@ -26,7 +26,10 @@
  * Findings are documented inline as comments.
  */
 
-import { spawn, execSync, execFileSync } from 'child_process'
+import { spawn, execFileSync } from 'child_process'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // ─── Configuration ──────────────────────────────────────────────────────────
@@ -61,6 +64,7 @@ function dockerSync(args, opts = {}) {
   const result = execFileSync('docker', args, {
     encoding: 'utf-8',
     timeout: opts.timeout || 30_000,
+    maxBuffer: opts.maxBuffer || 10 * 1024 * 1024, // 10MB — npm install can exceed default 1MB
   })
   return result.trim()
 }
@@ -156,18 +160,28 @@ function createDockerSpawner(containerId, containerCliPath) {
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 let containerId = null
+let tmpWorkDir = null
 
 // Ensure cleanup on any exit
 function cleanup() {
   if (containerId) {
     log('cleanup', `Removing container ${containerId.slice(0, 12)}`)
     try {
-      execSync(`docker rm -f ${containerId}`, { stdio: 'ignore', timeout: 10_000 })
+      execFileSync('docker', ['rm', '-f', containerId], { stdio: 'ignore', timeout: 10_000 })
       log('cleanup', 'Container removed')
     } catch {
       log('cleanup', 'Failed to remove container (may already be gone)')
     }
     containerId = null
+  }
+  if (tmpWorkDir) {
+    try {
+      rmSync(tmpWorkDir, { recursive: true, force: true })
+      log('cleanup', `Removed temp dir: ${tmpWorkDir}`)
+    } catch {
+      log('cleanup', 'Failed to remove temp dir')
+    }
+    tmpWorkDir = null
   }
 }
 
@@ -195,9 +209,13 @@ async function main() {
 
   log('step1', `Starting container (image: ${DOCKER_IMAGE})...`)
   try {
+    // Create a unique temp dir to avoid collisions with concurrent runs
+    tmpWorkDir = mkdtempSync(join(tmpdir(), 'spike-docker-sdk-'))
+    log('step1', `Created temp workspace: ${tmpWorkDir}`)
+
     containerId = dockerSync([
       'run', '-d', '--init', '--rm',
-      '-v', '/tmp/spike-test:/workspace',
+      '-v', `${tmpWorkDir}:/workspace`,
       '-w', CONTAINER_WORKSPACE,
       DOCKER_IMAGE,
       'sleep', 'infinity',
@@ -252,7 +270,7 @@ async function main() {
 
     // Try an alternative approach: check if we can mount the host's claude
     try {
-      const hostClaudePath = execSync('which claude', { encoding: 'utf-8' }).trim()
+      const hostClaudePath = execFileSync('which', ['claude'], { encoding: 'utf-8' }).trim()
       log('step2-alt', `Host claude found at: ${hostClaudePath}`)
       log('step2-alt', 'Could mount host binary but node_modules dependencies would be missing')
     } catch {
@@ -272,8 +290,6 @@ async function main() {
   let containerCliPath = null
   try {
     // Find the container's installed CLI path.
-    // dockerSync uses execSync which runs through sh -c, so we use spawn for
-    // commands with special characters (parens, quotes).
     const globalPrefix = dockerSync([
       'exec', containerId, 'npm', 'prefix', '-g',
     ], { timeout: 10_000 })
@@ -337,7 +353,8 @@ async function main() {
     tools: ['Read', 'Bash'],
     spawnClaudeCodeProcess: trackedSpawner,
     env: {
-      ...process.env,
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      NODE_ENV: process.env.NODE_ENV,
     },
     canUseTool: async (toolName, input, opts) => {
       findings.canUseToolFired = true
