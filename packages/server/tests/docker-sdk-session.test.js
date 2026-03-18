@@ -50,13 +50,14 @@ class FakeDockerSdkSession extends EventEmitter {
     this.cwd = opts.cwd || process.cwd()
     this.model = opts.model || null
     this.permissionMode = opts.permissionMode || 'approve'
-    this._containerId = opts.containerId || null
-    this._containerOwned = !opts.containerId
+    const containerId = opts.containerId?.trim() || null
+    this._containerId = containerId
+    this._containerOwned = !containerId
     this._image = opts.image || 'node:22-slim'
     this._memoryLimit = opts.memoryLimit || '2g'
     this._cpuLimit = opts.cpuLimit || '2'
     this._containerUser = opts.containerUser || 'chroxy'
-    this._containerCliPath = opts.containerCliPath || null
+    this._containerCliPath = opts.containerCliPath?.trim() || null
     this._processReady = false
     this._destroying = false
     this._isBusy = false
@@ -192,19 +193,26 @@ class FakeDockerSdkSession extends EventEmitter {
   // Mirror of DockerSdkSession.start
   start() {
     if (this._containerId) {
-      // External container — discover CLI path if not provided
-      if (!this._containerCliPath) {
-        this._discoverCliPath((err) => {
-          if (err) {
-            this._containerCliPath = DEFAULT_CONTAINER_CLI_PATH
-          }
-          this._superStartCalled = true
-          this._processReady = true
-        })
-        return
-      }
-      this._superStartCalled = true
-      this._processReady = true
+      // External container — verify reachable, then discover CLI path if needed
+      this._verifyContainer((verifyErr) => {
+        if (verifyErr) {
+          this.emit('error', { message: `External container not reachable: ${verifyErr.message}` })
+          this.destroy()
+          return
+        }
+        if (!this._containerCliPath) {
+          this._discoverCliPath((err) => {
+            if (err) {
+              this._containerCliPath = DEFAULT_CONTAINER_CLI_PATH
+            }
+            this._superStartCalled = true
+            this._processReady = true
+          })
+          return
+        }
+        this._superStartCalled = true
+        this._processReady = true
+      })
       return
     }
 
@@ -216,6 +224,19 @@ class FakeDockerSdkSession extends EventEmitter {
       }
       this._superStartCalled = true
       this._processReady = true
+    })
+  }
+
+  // Verify external container is reachable (mirrors real implementation)
+  _verifyContainer(callback) {
+    this._callExecFile('docker', [
+      'exec', this._containerId, 'true',
+    ], { encoding: 'utf-8', timeout: 10_000 }, (err) => {
+      if (err) {
+        callback(new Error(`Container ${this._containerId} is not running or not reachable`))
+      } else {
+        callback(null)
+      }
     })
   }
 
@@ -864,10 +885,13 @@ describe('DockerSdkSession.start()', () => {
     const session = new FakeDockerSdkSession({ cwd: '/tmp' })
     session._containerId = 'existing-ctr'
     session._containerCliPath = DEFAULT_CONTAINER_CLI_PATH
+    session._execFileResults = { exec: '' } // verify container succeeds
 
     session.start()
 
-    assert.equal(session._execFileCalls.length, 0, 'should not call docker run when container exists')
+    // Should call docker exec true (verify) but NOT docker run
+    const runCalls = session._execFileCalls.filter(c => c.args[0] === 'run')
+    assert.equal(runCalls.length, 0, 'should not call docker run when container exists')
     assert.ok(session._superStartCalled)
   })
 
@@ -1502,6 +1526,25 @@ describe('DockerSdkSession external container (containerOwned: false)', () => {
     assert.equal(session._containerId, null)
   })
 
+  it('treats whitespace-only containerId as null (owned mode)', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: '   ',
+    })
+    assert.equal(session._containerId, null)
+    assert.equal(session._containerOwned, true)
+  })
+
+  it('trims containerId and containerCliPath', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: '  abc123  ',
+      containerCliPath: '  /usr/local/cli.js  ',
+    })
+    assert.equal(session._containerId, 'abc123')
+    assert.equal(session._containerCliPath, '/usr/local/cli.js')
+  })
+
   it('accepts containerCliPath via constructor', () => {
     const session = new FakeDockerSdkSession({
       cwd: '/tmp',
@@ -1517,10 +1560,13 @@ describe('DockerSdkSession external container (containerOwned: false)', () => {
       containerId: 'ext-ctr-456',
       containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
     })
+    session._execFileResults = { exec: '' } // verify container succeeds
 
     session.start()
 
-    assert.equal(session._execFileCalls.length, 0, 'should not call docker run')
+    // Should call docker exec true (verify) but NOT docker run
+    const runCalls = session._execFileCalls.filter(c => c.args[0] === 'run')
+    assert.equal(runCalls.length, 0, 'should not call docker run')
     assert.ok(session._superStartCalled, 'should call super.start()')
     assert.ok(session._processReady, 'should be ready')
   })
@@ -1530,11 +1576,12 @@ describe('DockerSdkSession external container (containerOwned: false)', () => {
       cwd: '/tmp',
       containerId: 'ext-ctr-789',
     })
+    // exec stub serves both verify (returns '') and discover (returns '/usr/local\n')
     session._execFileResults = { exec: '/usr/local\n' }
 
     session.start()
 
-    // Should have called docker exec npm prefix -g
+    // Should have called docker exec true (verify) then docker exec npm prefix -g (discover)
     const prefixCall = session._execFileCalls.find(
       c => c.args.includes('npm') && c.args.includes('prefix')
     )
@@ -1551,12 +1598,39 @@ describe('DockerSdkSession external container (containerOwned: false)', () => {
       cwd: '/tmp',
       containerId: 'ext-ctr-fail',
     })
-    session._execFileErrors = { exec: new Error('npm not found') }
+    // Verify succeeds (first exec call), but CLI discovery fails (second exec call)
+    let callCount = 0
+    const origExecFile = session._callExecFile.bind(session)
+    session._callExecFile = (cmd, args, opts, cb) => {
+      callCount++
+      if (callCount === 2) {
+        // CLI discovery call — fail it
+        cb(new Error('npm not found'), '', '')
+        return
+      }
+      origExecFile(cmd, args, opts, cb)
+    }
 
     session.start()
 
     assert.equal(session._containerCliPath, DEFAULT_CONTAINER_CLI_PATH)
     assert.ok(session._superStartCalled)
+  })
+
+  it('start() emits error and destroys when external container is not reachable', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: 'dead-ctr',
+    })
+    session._execFileErrors = { exec: new Error('No such container: dead-ctr') }
+
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    session.start()
+
+    assert.equal(errors.length, 1)
+    assert.ok(errors[0].message.includes('External container not reachable'))
+    assert.ok(session._superDestroyCalled, 'should self-destruct on unreachable container')
   })
 
   it('destroy() does NOT call docker rm for external container', () => {

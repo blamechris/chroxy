@@ -63,8 +63,10 @@ export class DockerSdkSession extends SdkSession {
 
   constructor(opts = {}) {
     super(opts)
-    this._containerId = opts.containerId || null
-    this._containerOwned = !opts.containerId
+    const containerId = opts.containerId?.trim() || null
+    const containerCliPath = opts.containerCliPath?.trim() || null
+    this._containerId = containerId
+    this._containerOwned = !containerId
     this._image = opts.image || 'node:22-slim'
     this._memoryLimit = opts.memoryLimit || '2g'
     this._cpuLimit = opts.cpuLimit || '2'
@@ -73,7 +75,7 @@ export class DockerSdkSession extends SdkSession {
       throw new Error(`Invalid containerUser "${user}" — must match POSIX username rules`)
     }
     this._containerUser = user
-    this._containerCliPath = opts.containerCliPath || null
+    this._containerCliPath = containerCliPath
   }
 
   /**
@@ -85,18 +87,25 @@ export class DockerSdkSession extends SdkSession {
    */
   start() {
     if (this._containerId) {
-      // External container — discover CLI path if not provided
-      if (!this._containerCliPath) {
-        this._discoverCliPath((err) => {
-          if (err) {
-            this._containerCliPath = DEFAULT_CONTAINER_CLI_PATH
-            log.warn(`CLI path discovery failed on external container, using default: ${err.message}`)
-          }
-          super.start()
-        })
-        return
-      }
-      super.start()
+      // External container — verify it's reachable, then discover CLI path if needed
+      this._verifyContainer((err) => {
+        if (err) {
+          this.emit('error', { message: `External container not reachable: ${err.message}` })
+          this.destroy()
+          return
+        }
+        if (!this._containerCliPath) {
+          this._discoverCliPath((discoverErr) => {
+            if (discoverErr) {
+              this._containerCliPath = DEFAULT_CONTAINER_CLI_PATH
+              log.warn(`CLI path discovery failed on external container, using default: ${discoverErr.message}`)
+            }
+            super.start()
+          })
+          return
+        }
+        super.start()
+      })
       return
     }
 
@@ -107,6 +116,22 @@ export class DockerSdkSession extends SdkSession {
         return
       }
       super.start()
+    })
+  }
+
+  /**
+   * Verify that an external container is reachable via docker exec.
+   * Fails fast if the container is not running or Docker is unavailable.
+   */
+  _verifyContainer(callback) {
+    execFile('docker', [
+      'exec', this._containerId, 'true',
+    ], { encoding: 'utf-8', timeout: 10_000 }, (err) => {
+      if (err) {
+        callback(new Error(`Container ${this._containerId.slice(0, 12)} is not running or not reachable`))
+      } else {
+        callback(null)
+      }
     })
   }
 
