@@ -1255,7 +1255,7 @@ describe('DockerSdkSession spawn callback env edge cases', () => {
     assert.equal(envPairs.length, 2)
   })
 
-  it('does not forward env var with empty string value', () => {
+  it('forwards env var with empty string value (defined but empty)', () => {
     const cb = session._createSpawnCallback()
     cb({
       command: 'node',

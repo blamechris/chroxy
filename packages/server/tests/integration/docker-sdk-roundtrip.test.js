@@ -123,12 +123,11 @@ describe('DockerSdkSession container lifecycle (integration)', { skip: SKIP }, (
     // Verify Claude Code was installed
     const cliPath = session._containerCliPath
     assert.ok(cliPath, 'CLI path should be discovered')
-    const { stdout: cliCheck } = await execFileAsync('docker', [
-      'exec', started, 'test', '-f', cliPath, '&&', 'echo', 'exists',
-    ], { timeout: 5000 }).catch(() => ({ stdout: '' }))
-    // cli.js may or may not exist depending on npm install success
-    // but _containerCliPath should at least be set
     assert.ok(typeof cliPath === 'string' && cliPath.length > 0)
+    // Use shell form so && is interpreted; silently catch if file doesn't exist
+    const { stdout: cliCheck } = await execFileAsync('docker', [
+      'exec', started, 'bash', '-c', `test -f ${cliPath} && echo exists`,
+    ], { timeout: 5000 }).catch(() => ({ stdout: '' }))
 
     // Clean up — destroy should remove the container
     session._containerId = started // restore since we intercepted
@@ -239,10 +238,8 @@ describe('DockerSdkSession container lifecycle (integration)', { skip: SKIP }, (
     })
 
     try {
-      // Get the spawn callback and invoke it with a simple command
-      const spawnCb = session._createSpawnCallback()
-
-      // Use a simple `whoami` via docker exec to verify user
+      // Verify container user and env directly via docker exec
+      // (spawn callback is tested in unit tests; this validates the container state)
       const { stdout: whoami } = await execFileAsync('docker', [
         'exec', '-u', 'chroxy', containerId, 'whoami',
       ], { timeout: 5000 })
