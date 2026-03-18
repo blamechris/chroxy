@@ -182,6 +182,10 @@ export class SdkSession extends BaseSession {
     }, 300_000)
 
     try {
+      // Allow subclasses to augment query options (e.g. DockerSdkSession
+      // injects spawnClaudeCodeProcess here)
+      this._augmentQueryOptions(options)
+
       // If attachments present, build multimodal content blocks
       const queryArgs = { prompt: transformedPrompt, options }
       if (attachments?.length) {
@@ -341,6 +345,16 @@ export class SdkSession extends BaseSession {
    */
   _callQuery(queryArgs) {
     return query(queryArgs)
+  }
+
+  /**
+   * Hook for subclasses to modify query options before they're passed to query().
+   * Default implementation is a no-op. Override in subclasses that need to inject
+   * additional options (e.g. spawnClaudeCodeProcess for container isolation).
+   * @param {object} options - The query options object (mutated in place)
+   */
+  _augmentQueryOptions(_options) {
+    // No-op — override in subclasses
   }
 
   /**
