@@ -17,6 +17,7 @@ import { checkpointHandlers } from './handlers/checkpoint-handlers.js'
 import { webTaskHandlers } from './handlers/web-task-handlers.js'
 import { repoHandlers } from './handlers/repo-handlers.js'
 import { extensionHandlers } from './handlers/extension-handlers.js'
+import { environmentHandlers } from './handlers/environment-handlers.js'
 
 const log = createLogger('ws')
 
@@ -44,6 +45,7 @@ const handlerRegistry = new Map([
   ...Object.entries(webTaskHandlers),
   ...Object.entries(repoHandlers),
   ...Object.entries(extensionHandlers),
+  ...Object.entries(environmentHandlers),
 ])
 
 /**

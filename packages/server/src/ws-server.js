@@ -293,7 +293,7 @@ function _isSecureRequest(req) {
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -366,6 +366,7 @@ export class WsServer {
       sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
       replayHistory: (ws, sid) => self._replayHistory(ws, sid),
       get draining() { return self._draining },
+      get environmentManager() { return self.environmentManager },
     }
 
     // Context objects for extracted modules (ws-auth.js, ws-history.js)
@@ -422,6 +423,7 @@ export class WsServer {
 
     // Multi-session support: prefer sessionManager, fall back to single cliSession
     this.sessionManager = sessionManager || null
+    this.environmentManager = environmentManager || null
     this.defaultSessionId = defaultSessionId || null
     this._checkpointManager = new CheckpointManager()
 

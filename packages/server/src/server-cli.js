@@ -141,6 +141,15 @@ export async function startCliServer(config) {
   // Register optional providers (e.g. docker) based on config
   await registerDockerProvider(config)
 
+  // Create environment manager for persistent container environments (optional)
+  let environmentManager = null
+  if (config?.environments?.enabled) {
+    const { EnvironmentManager } = await import('./environment-manager.js')
+    environmentManager = new EnvironmentManager()
+    await environmentManager.reconnect()
+    log.info(`EnvironmentManager ready (${environmentManager.list().length} environment(s))`)
+  }
+
   // 1. Create session manager
   const sessionManager = new SessionManager({
     maxSessions: config.maxSessions || 5,
@@ -330,6 +339,7 @@ export async function startCliServer(config) {
     noEncrypt: config.noEncrypt,
     tokenManager,
     pairingManager,
+    environmentManager,
   })
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
