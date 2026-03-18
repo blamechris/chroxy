@@ -50,12 +50,14 @@ class FakeDockerSdkSession extends EventEmitter {
     this.cwd = opts.cwd || process.cwd()
     this.model = opts.model || null
     this.permissionMode = opts.permissionMode || 'approve'
-    this._containerId = null
+    const containerId = opts.containerId?.trim() || null
+    this._containerId = containerId
+    this._containerOwned = !containerId
     this._image = opts.image || 'node:22-slim'
     this._memoryLimit = opts.memoryLimit || '2g'
     this._cpuLimit = opts.cpuLimit || '2'
     this._containerUser = opts.containerUser || 'chroxy'
-    this._containerCliPath = null
+    this._containerCliPath = opts.containerCliPath?.trim() || null
     this._processReady = false
     this._destroying = false
     this._isBusy = false
@@ -191,8 +193,26 @@ class FakeDockerSdkSession extends EventEmitter {
   // Mirror of DockerSdkSession.start
   start() {
     if (this._containerId) {
-      this._superStartCalled = true
-      this._processReady = true
+      // External container — verify reachable, then discover CLI path if needed
+      this._verifyContainer((verifyErr) => {
+        if (verifyErr) {
+          this.emit('error', { message: `External container not reachable: ${verifyErr.message}` })
+          this.destroy()
+          return
+        }
+        if (!this._containerCliPath) {
+          this._discoverCliPath((err) => {
+            if (err) {
+              this._containerCliPath = DEFAULT_CONTAINER_CLI_PATH
+            }
+            this._superStartCalled = true
+            this._processReady = true
+          })
+          return
+        }
+        this._superStartCalled = true
+        this._processReady = true
+      })
       return
     }
 
@@ -204,6 +224,35 @@ class FakeDockerSdkSession extends EventEmitter {
       }
       this._superStartCalled = true
       this._processReady = true
+    })
+  }
+
+  // Verify external container is reachable (mirrors real implementation)
+  _verifyContainer(callback) {
+    this._callExecFile('docker', [
+      'exec', this._containerId, 'true',
+    ], { encoding: 'utf-8', timeout: 10_000 }, (err) => {
+      if (err) {
+        callback(new Error(`Container ${this._containerId} is not running or not reachable`))
+      } else {
+        callback(null)
+      }
+    })
+  }
+
+  // Discover CLI path on an existing container (for external containers)
+  _discoverCliPath(callback) {
+    this._callExecFile('docker', [
+      'exec', this._containerId,
+      'npm', 'prefix', '-g',
+    ], { encoding: 'utf-8', timeout: 10_000 }, (prefixErr, prefixOut) => {
+      if (!prefixErr && prefixOut) {
+        this._containerCliPath = `${prefixOut.trim()}/lib/node_modules/@anthropic-ai/claude-code/cli.js`
+      } else {
+        callback(new Error('Could not discover CLI path'))
+        return
+      }
+      callback(null)
     })
   }
 
@@ -283,7 +332,7 @@ class FakeDockerSdkSession extends EventEmitter {
     this._processReady = false
     this.removeAllListeners()
 
-    if (containerId) {
+    if (containerId && this._containerOwned) {
       this._callExecFile('docker', ['rm', '-f', containerId], { stdio: 'ignore' }, () => {})
     }
   }
@@ -835,10 +884,14 @@ describe('DockerSdkSession.start()', () => {
   it('does not start a second container if already set', () => {
     const session = new FakeDockerSdkSession({ cwd: '/tmp' })
     session._containerId = 'existing-ctr'
+    session._containerCliPath = DEFAULT_CONTAINER_CLI_PATH
+    session._execFileResults = { exec: '' } // verify container succeeds
 
     session.start()
 
-    assert.equal(session._execFileCalls.length, 0, 'should not call docker run when container exists')
+    // Should call docker exec true (verify) but NOT docker run
+    const runCalls = session._execFileCalls.filter(c => c.args[0] === 'run')
+    assert.equal(runCalls.length, 0, 'should not call docker run when container exists')
     assert.ok(session._superStartCalled)
   })
 
@@ -1450,5 +1503,228 @@ describe('DockerSdkSession.destroy() idempotency', () => {
 
     const rmCalls = session._execFileCalls.filter(c => c.args[0] === 'rm')
     assert.equal(rmCalls.length, 1, 'should only call docker rm once')
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// External container support (container lifecycle separation)
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DockerSdkSession external container (containerOwned: false)', () => {
+  it('accepts containerId via constructor and sets containerOwned to false', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp/project',
+      containerId: 'ext-ctr-123',
+    })
+    assert.equal(session._containerId, 'ext-ctr-123')
+    assert.equal(session._containerOwned, false)
+  })
+
+  it('sets containerOwned to true when no containerId provided', () => {
+    const session = new FakeDockerSdkSession({ cwd: '/tmp' })
+    assert.equal(session._containerOwned, true)
+    assert.equal(session._containerId, null)
+  })
+
+  it('treats whitespace-only containerId as null (owned mode)', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: '   ',
+    })
+    assert.equal(session._containerId, null)
+    assert.equal(session._containerOwned, true)
+  })
+
+  it('trims containerId and containerCliPath', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: '  abc123  ',
+      containerCliPath: '  /usr/local/cli.js  ',
+    })
+    assert.equal(session._containerId, 'abc123')
+    assert.equal(session._containerCliPath, '/usr/local/cli.js')
+  })
+
+  it('accepts containerCliPath via constructor', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: 'ext-ctr',
+      containerCliPath: '/custom/path/cli.js',
+    })
+    assert.equal(session._containerCliPath, '/custom/path/cli.js')
+  })
+
+  it('start() skips container creation for external container with CLI path', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: 'ext-ctr-456',
+      containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+    })
+    session._execFileResults = { exec: '' } // verify container succeeds
+
+    session.start()
+
+    // Should call docker exec true (verify) but NOT docker run
+    const runCalls = session._execFileCalls.filter(c => c.args[0] === 'run')
+    assert.equal(runCalls.length, 0, 'should not call docker run')
+    assert.ok(session._superStartCalled, 'should call super.start()')
+    assert.ok(session._processReady, 'should be ready')
+  })
+
+  it('start() discovers CLI path on external container when not provided', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: 'ext-ctr-789',
+    })
+    // exec stub serves both verify (returns '') and discover (returns '/usr/local\n')
+    session._execFileResults = { exec: '/usr/local\n' }
+
+    session.start()
+
+    // Should have called docker exec true (verify) then docker exec npm prefix -g (discover)
+    const prefixCall = session._execFileCalls.find(
+      c => c.args.includes('npm') && c.args.includes('prefix')
+    )
+    assert.ok(prefixCall, 'should discover CLI path via npm prefix')
+    assert.equal(
+      session._containerCliPath,
+      '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'
+    )
+    assert.ok(session._superStartCalled)
+  })
+
+  it('start() falls back to default CLI path when discovery fails on external container', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: 'ext-ctr-fail',
+    })
+    // Verify succeeds (first exec call), but CLI discovery fails (second exec call)
+    let callCount = 0
+    const origExecFile = session._callExecFile.bind(session)
+    session._callExecFile = (cmd, args, opts, cb) => {
+      callCount++
+      if (callCount === 2) {
+        // CLI discovery call — fail it
+        cb(new Error('npm not found'), '', '')
+        return
+      }
+      origExecFile(cmd, args, opts, cb)
+    }
+
+    session.start()
+
+    assert.equal(session._containerCliPath, DEFAULT_CONTAINER_CLI_PATH)
+    assert.ok(session._superStartCalled)
+  })
+
+  it('start() emits error and destroys when external container is not reachable', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: 'dead-ctr',
+    })
+    session._execFileErrors = { exec: new Error('No such container: dead-ctr') }
+
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    session.start()
+
+    assert.equal(errors.length, 1)
+    assert.ok(errors[0].message.includes('External container not reachable'))
+    assert.ok(session._superDestroyCalled, 'should self-destruct on unreachable container')
+  })
+
+  it('destroy() does NOT call docker rm for external container', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: 'ext-ctr-nodelete',
+    })
+
+    session.destroy()
+
+    const rmCalls = session._execFileCalls.filter(c => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 0, 'should NOT call docker rm for external container')
+    assert.ok(session._superDestroyCalled)
+  })
+
+  it('destroy() DOES call docker rm for owned container', () => {
+    const session = new FakeDockerSdkSession({ cwd: '/tmp' })
+    session._containerId = 'owned-ctr-delete'
+
+    session.destroy()
+
+    const rmCalls = session._execFileCalls.filter(c => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1, 'should call docker rm for owned container')
+  })
+
+  it('spawnClaudeCodeProcess works with external container', () => {
+    const session = new FakeDockerSdkSession({
+      cwd: '/home/user/project',
+      containerId: 'ext-ctr-spawn',
+      containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+    })
+
+    const cb = session._createSpawnCallback()
+    cb({
+      command: 'node',
+      args: ['/host/node_modules/@anthropic-ai/claude-code/cli.js', '--output-format', 'stream-json'],
+      cwd: '/home/user/project/src',
+      env: { ANTHROPIC_API_KEY: 'sk-test' },
+    })
+
+    assert.equal(session._spawnCalls.length, 1)
+    const { args } = session._spawnCalls[0]
+    assert.ok(args.includes('ext-ctr-spawn'), 'should use external container ID')
+
+    // CLI path should be remapped
+    const ctrIdx = args.indexOf('ext-ctr-spawn')
+    assert.equal(args[ctrIdx + 2], '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js')
+
+    // Cwd should be remapped
+    const wdIdx = args.indexOf('--workdir')
+    assert.equal(args[wdIdx + 1], '/workspace/src')
+  })
+
+  it('multiple sessions can use the same container ID', () => {
+    const session1 = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: 'shared-ctr',
+      containerCliPath: DEFAULT_CONTAINER_CLI_PATH,
+    })
+    const session2 = new FakeDockerSdkSession({
+      cwd: '/tmp',
+      containerId: 'shared-ctr',
+      containerCliPath: DEFAULT_CONTAINER_CLI_PATH,
+    })
+
+    const cb1 = session1._createSpawnCallback()
+    const cb2 = session2._createSpawnCallback()
+
+    cb1({ command: 'node', args: ['/host/cli.js'], cwd: '/workspace', env: {} })
+    cb2({ command: 'node', args: ['/host/cli.js'], cwd: '/workspace', env: {} })
+
+    assert.equal(session1._spawnCalls.length, 1)
+    assert.equal(session2._spawnCalls.length, 1)
+    assert.ok(session1._spawnCalls[0].args.includes('shared-ctr'))
+    assert.ok(session2._spawnCalls[0].args.includes('shared-ctr'))
+  })
+})
+
+describe('DockerSdkSession external container (real class)', () => {
+  it('constructor accepts containerId and sets containerOwned to false', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    const session = new DockerSdkSession({
+      containerId: 'real-ext-ctr',
+      containerCliPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+    })
+    assert.equal(session._containerId, 'real-ext-ctr')
+    assert.equal(session._containerOwned, false)
+    assert.equal(session._containerCliPath, '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js')
+  })
+
+  it('constructor defaults to containerOwned: true when no containerId', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    const session = new DockerSdkSession()
+    assert.equal(session._containerOwned, true)
+    assert.equal(session._containerId, null)
   })
 })

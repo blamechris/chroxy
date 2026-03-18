@@ -63,7 +63,10 @@ export class DockerSdkSession extends SdkSession {
 
   constructor(opts = {}) {
     super(opts)
-    this._containerId = null
+    const containerId = opts.containerId?.trim() || null
+    const containerCliPath = opts.containerCliPath?.trim() || null
+    this._containerId = containerId
+    this._containerOwned = !containerId
     this._image = opts.image || 'node:22-slim'
     this._memoryLimit = opts.memoryLimit || '2g'
     this._cpuLimit = opts.cpuLimit || '2'
@@ -72,16 +75,37 @@ export class DockerSdkSession extends SdkSession {
       throw new Error(`Invalid containerUser "${user}" — must match POSIX username rules`)
     }
     this._containerUser = user
-    this._containerCliPath = null
+    this._containerCliPath = containerCliPath
   }
 
   /**
    * Start the session: launch the container, set up the non-root user,
    * install Claude Code, then call super.start() to mark ready.
+   *
+   * When an external containerId was provided (containerOwned: false),
+   * skips container creation and only discovers the CLI path if needed.
    */
   start() {
     if (this._containerId) {
-      super.start()
+      // External container — verify it's reachable, then discover CLI path if needed
+      this._verifyContainer((err) => {
+        if (err) {
+          this.emit('error', { message: `External container not reachable: ${err.message}` })
+          this.destroy()
+          return
+        }
+        if (!this._containerCliPath) {
+          this._discoverCliPath((discoverErr) => {
+            if (discoverErr) {
+              this._containerCliPath = DEFAULT_CONTAINER_CLI_PATH
+              log.warn(`CLI path discovery failed on external container, using default: ${discoverErr.message}`)
+            }
+            super.start()
+          })
+          return
+        }
+        super.start()
+      })
       return
     }
 
@@ -92,6 +116,41 @@ export class DockerSdkSession extends SdkSession {
         return
       }
       super.start()
+    })
+  }
+
+  /**
+   * Verify that an external container is reachable via docker exec.
+   * Fails fast if the container is not running or Docker is unavailable.
+   */
+  _verifyContainer(callback) {
+    execFile('docker', [
+      'exec', this._containerId, 'true',
+    ], { encoding: 'utf-8', timeout: 10_000 }, (err) => {
+      if (err) {
+        callback(new Error(`Container ${this._containerId.slice(0, 12)} is not running or not reachable`))
+      } else {
+        callback(null)
+      }
+    })
+  }
+
+  /**
+   * Discover the CLI path on an existing container via npm prefix -g.
+   * Used when connecting to an externally-managed container.
+   */
+  _discoverCliPath(callback) {
+    execFile('docker', [
+      'exec', this._containerId,
+      'npm', 'prefix', '-g',
+    ], { encoding: 'utf-8', timeout: 10_000 }, (prefixErr, prefixOut) => {
+      if (!prefixErr && prefixOut) {
+        this._containerCliPath = `${prefixOut.trim()}/lib/node_modules/@anthropic-ai/claude-code/cli.js`
+        log.info(`Discovered container CLI path: ${this._containerCliPath}`)
+        callback(null)
+      } else {
+        callback(prefixErr || new Error('Empty npm prefix output'))
+      }
     })
   }
 
@@ -290,8 +349,11 @@ export class DockerSdkSession extends SdkSession {
   }
 
   /**
-   * Destroy the session: interrupt active query, remove the container,
+   * Destroy the session: interrupt active query, optionally remove the container,
    * and clean up SdkSession state.
+   *
+   * When containerOwned is false (external container), the container is left
+   * running — it's managed by EnvironmentManager or the caller.
    */
   destroy() {
     const containerId = this._containerId
@@ -299,11 +361,13 @@ export class DockerSdkSession extends SdkSession {
 
     super.destroy()
 
-    if (containerId) {
+    if (containerId && this._containerOwned) {
       log.info(`Removing container ${containerId.slice(0, 12)}`)
       execFile('docker', ['rm', '-f', containerId], { stdio: 'ignore' }, (err) => {
         if (err) log.warn(`Failed to remove container ${containerId.slice(0, 12)}: ${err.message}`)
       })
+    } else if (containerId) {
+      log.info(`Disconnecting from external container ${containerId.slice(0, 12)} (not removing)`)
     }
   }
 }
