@@ -14,6 +14,8 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | ServerCLIChild | `src/server-cli-child.js` | Supervised child entry point (IPC to supervisor) |
 | CliSession | `src/cli-session.js` | Claude Code headless executor (stream-json) |
 | SdkSession | `src/sdk-session.js` | Claude Agent SDK executor |
+| DockerSession | `src/docker-session.js` | Containerized CLI executor (extends CliSession) |
+| DockerSdkSession | `src/docker-sdk-session.js` | Containerized SDK executor (extends SdkSession) |
 | WsServer | `src/ws-server.js` | WebSocket protocol with auth + HTTP dashboard |
 | WsMessageHandlers | `src/ws-message-handlers.js` | WS message handler dispatch |
 | WsForwarding | `src/ws-forwarding.js` | Session event → WS broadcast wiring |
@@ -52,6 +54,25 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | Logger | `src/logger.js` | Shared logging utility |
 | Doctor | `src/doctor.js` | Diagnostic command for troubleshooting |
 | Service | `src/service.js` | Service management utilities |
+
+## Docker Provider Env Var Allowlists
+
+Both Docker providers forward only explicitly allowlisted env vars into the container — never the full host environment. The allowlists differ because the providers handle permissions differently.
+
+| Env Var | `DockerSession` (CLI) | `DockerSdkSession` (SDK) | Purpose |
+|---------|:---------------------:|:------------------------:|---------|
+| `ANTHROPIC_API_KEY` | yes | yes | API authentication |
+| `NODE_ENV` | — | yes | Node.js environment mode |
+| `CLAUDE_HEADLESS` | yes | — | Enable headless stream-json mode |
+| `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` | yes | — | Enable file checkpointing |
+| `CHROXY_PORT` | yes | — | Permission hook HTTP port on host |
+| `CHROXY_HOOK_SECRET` | yes | — | Permission hook auth secret |
+| `CHROXY_PERMISSION_MODE` | yes | — | Permission handling mode |
+| `CHROXY_HOST` | injected | — | Permission hook hostname (set to `host.docker.internal`) |
+| `HOME` | forwarded from host | hardcoded in container | User home directory |
+| `PATH` | forwarded from host | hardcoded in container | Executable search path |
+
+**Why they differ:** `DockerSession` extends `CliSession`, which runs `claude -p` as a subprocess and uses an external HTTP permission hook to route permission requests back to the host server. This requires `CHROXY_PORT`, `CHROXY_HOOK_SECRET`, and `CHROXY_PERMISSION_MODE` inside the container, plus `CLAUDE_HEADLESS` for stream-json mode. `DockerSdkSession` extends `SdkSession`, which manages the conversation loop and permissions in-process via the Agent SDK — no external hook calls are needed, so those vars are omitted. `HOME` and `PATH` are forwarded from the host env in `DockerSession` but hardcoded by the SDK spawn callback in `DockerSdkSession` (`/home/<user>` and a standard POSIX path). `CHROXY_HOST` is not in the `FORWARDED_ENV_KEYS` array — it is dynamically injected by `DockerSession._spawnPersistentProcess()` when `CHROXY_PORT` is present, set to `host.docker.internal` so the container can reach the host's permission hook endpoint.
 
 ## App Screens
 
@@ -313,6 +334,8 @@ Store files:
 | `cli-session.js` | Claude Code headless executor (stream-json) |
 | `config.js` | Config schema validation + merge precedence |
 | `connection-info.js` | Write/remove connection info file |
+| `docker-session.js` | Containerized CLI executor (extends CliSession) |
+| `docker-sdk-session.js` | Containerized SDK executor (extends SdkSession) |
 | `content-blocks.js` | Content block builder for structured output |
 | `conversation-scanner.js` | Conversation history file scanning (parallel) |
 | `crypto.js` | ECDH key exchange + AES-GCM encryption |
