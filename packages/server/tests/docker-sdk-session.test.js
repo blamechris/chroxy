@@ -1590,7 +1590,7 @@ describe('DockerSdkSession external container (containerOwned: false)', () => {
     })
 
     const cb = session._createSpawnCallback()
-    const child = cb({
+    cb({
       command: 'node',
       args: ['/host/node_modules/@anthropic-ai/claude-code/cli.js', '--output-format', 'stream-json'],
       cwd: '/home/user/project/src',
