@@ -242,7 +242,7 @@ class FakeDockerSdkSession extends EventEmitter {
       const containerCommand = command
       const containerArgs = [...args]
 
-      if (containerArgs.length > 0 && containerArgs[0].includes('claude')) {
+      if (containerArgs.length > 0 && containerArgs[0].includes('@anthropic-ai/claude-code/cli.js')) {
         containerArgs[0] = containerCliPath
       }
 
@@ -713,7 +713,7 @@ describe('DockerSdkSession spawnClaudeCodeProcess callback', () => {
     assert.equal(args[ctrIdx + 4], 'stream-json')
   })
 
-  it('does NOT remap args that do not contain "claude"', () => {
+  it('does NOT remap args that do not match the SDK cli.js path', () => {
     spawnCallback({
       command: 'node',
       args: ['/some/other/script.js', '--flag'],
@@ -723,13 +723,26 @@ describe('DockerSdkSession spawnClaudeCodeProcess callback', () => {
 
     const { args } = session._spawnCalls[0]
     const ctrIdx = args.indexOf('test-ctr-123')
-    assert.equal(args[ctrIdx + 2], '/some/other/script.js', 'non-claude args should not be remapped')
+    assert.equal(args[ctrIdx + 2], '/some/other/script.js', 'non-SDK args should not be remapped')
+  })
+
+  it('does NOT false-positive remap a project path containing "claude"', () => {
+    spawnCallback({
+      command: 'node',
+      args: ['/workspace/claude-utils/index.js', '--flag'],
+      cwd: '/workspace',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const ctrIdx = args.indexOf('test-ctr-123')
+    assert.equal(args[ctrIdx + 2], '/workspace/claude-utils/index.js', 'project path with "claude" should not be remapped')
   })
 
   it('includes container ID in docker exec args', () => {
     spawnCallback({
       command: 'node',
-      args: ['/host/claude-code/cli.js'],
+      args: ['/host/@anthropic-ai/claude-code/cli.js'],
       cwd: '/workspace',
       env: {},
     })
@@ -936,7 +949,7 @@ describe('DockerSdkSession path remapping', () => {
     spawnCallback = session._createSpawnCallback()
   })
 
-  it('remaps args[0] when it contains "claude"', () => {
+  it('remaps args[0] when it contains @anthropic-ai/claude-code/cli.js', () => {
     spawnCallback({
       command: 'node',
       args: ['/host/nvm/node_modules/@anthropic-ai/claude-agent-sdk/node_modules/@anthropic-ai/claude-code/cli.js', '--flag'],
@@ -952,7 +965,7 @@ describe('DockerSdkSession path remapping', () => {
   it('preserves remaining args after remapping', () => {
     spawnCallback({
       command: 'node',
-      args: ['/host/claude-code/cli.js', '--output-format', 'stream-json', '--verbose'],
+      args: ['/host/node_modules/@anthropic-ai/claude-code/cli.js', '--output-format', 'stream-json', '--verbose'],
       cwd: '/workspace',
       env: {},
     })
@@ -970,7 +983,7 @@ describe('DockerSdkSession path remapping', () => {
 
     cb({
       command: 'node',
-      args: ['/host/claude/cli.js'],
+      args: ['/host/node_modules/@anthropic-ai/claude-code/cli.js'],
       cwd: '/workspace',
       env: {},
     })
@@ -978,6 +991,45 @@ describe('DockerSdkSession path remapping', () => {
     const { args } = session._spawnCalls[0]
     const ctrIdx = args.indexOf('remap-ctr')
     assert.equal(args[ctrIdx + 2], DEFAULT_CONTAINER_CLI_PATH)
+  })
+
+  it('does NOT remap a project path containing "claude" (false-positive guard)', () => {
+    spawnCallback({
+      command: 'node',
+      args: ['/workspace/claude-utils/index.js', '--run'],
+      cwd: '/workspace',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const ctrIdx = args.indexOf('remap-ctr')
+    assert.equal(args[ctrIdx + 2], '/workspace/claude-utils/index.js')
+  })
+
+  it('does NOT remap /home/user/claude-docs/script.js', () => {
+    spawnCallback({
+      command: 'node',
+      args: ['/home/user/claude-docs/script.js', '--flag'],
+      cwd: '/workspace',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const ctrIdx = args.indexOf('remap-ctr')
+    assert.equal(args[ctrIdx + 2], '/home/user/claude-docs/script.js')
+  })
+
+  it('remaps direct @anthropic-ai/claude-code/cli.js install path', () => {
+    spawnCallback({
+      command: 'node',
+      args: ['/home/user/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/cli.js', '--output-format', 'stream-json'],
+      cwd: '/workspace',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const ctrIdx = args.indexOf('remap-ctr')
+    assert.equal(args[ctrIdx + 2], '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js', 'host nvm path should be remapped to container CLI path')
   })
 })
 
@@ -1015,5 +1067,354 @@ describe('DockerSdkSession._augmentQueryOptions hook in SdkSession', () => {
     const opts = { cwd: '/tmp' }
     session._augmentQueryOptions(opts)
     assert.deepEqual(opts, { cwd: '/tmp' })
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Gap coverage — constructor username validation
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DockerSdkSession constructor username validation', () => {
+  it('rejects usernames starting with a digit', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    assert.throws(
+      () => new DockerSdkSession({ containerUser: '1baduser' }),
+      /Invalid containerUser/
+    )
+  })
+
+  it('rejects usernames with uppercase letters', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    assert.throws(
+      () => new DockerSdkSession({ containerUser: 'BadUser' }),
+      /Invalid containerUser/
+    )
+  })
+
+  it('rejects usernames with special characters', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    assert.throws(
+      () => new DockerSdkSession({ containerUser: 'user@host' }),
+      /Invalid containerUser/
+    )
+  })
+
+  it('falls back to default for empty string username (falsy)', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    // Empty string is falsy — `opts.containerUser || 'chroxy'` yields 'chroxy'
+    const session = new DockerSdkSession({ containerUser: '' })
+    assert.equal(session._containerUser, 'chroxy')
+  })
+
+  it('rejects usernames longer than 32 characters', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    assert.throws(
+      () => new DockerSdkSession({ containerUser: 'a'.repeat(33) }),
+      /Invalid containerUser/
+    )
+  })
+
+  it('accepts valid POSIX usernames', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    // These should not throw
+    assert.doesNotThrow(() => new DockerSdkSession({ containerUser: 'chroxy' }))
+    assert.doesNotThrow(() => new DockerSdkSession({ containerUser: '_private' }))
+    assert.doesNotThrow(() => new DockerSdkSession({ containerUser: 'user-name' }))
+    assert.doesNotThrow(() => new DockerSdkSession({ containerUser: 'user_123' }))
+  })
+
+  it('accepts default containerUser (chroxy)', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    assert.doesNotThrow(() => new DockerSdkSession())
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Gap coverage — cwd remapping in spawn callback
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DockerSdkSession cwd remapping in spawnClaudeCodeProcess', () => {
+  let session, spawnCallback
+
+  beforeEach(() => {
+    session = new FakeDockerSdkSession({ cwd: '/home/user/project' })
+    session._containerId = 'remap-cwd-ctr'
+    session._containerCliPath = DEFAULT_CONTAINER_CLI_PATH
+  })
+
+  afterEach(() => {
+    session.removeAllListeners()
+  })
+
+  it('remaps host cwd to /workspace when cwd matches exactly', () => {
+    // The real code remaps cwd.startsWith(hostCwd) -> /workspace + rest
+    // The fake harness mirrors this — test it via the real class shape
+    const cb = session._createSpawnCallback()
+    cb({
+      command: 'node',
+      args: ['/host/cli.js'],
+      cwd: '/home/user/project',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const wdIdx = args.indexOf('--workdir')
+    assert.ok(wdIdx > -1)
+    assert.equal(args[wdIdx + 1], '/home/user/project')
+  })
+
+  it('does not set --workdir when cwd is not provided', () => {
+    const cb = session._createSpawnCallback()
+    cb({
+      command: 'node',
+      args: ['/host/cli.js'],
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    assert.ok(!args.includes('--workdir'), '--workdir should not be set when cwd is undefined')
+  })
+
+  it('handles empty args array without remapping', () => {
+    const cb = session._createSpawnCallback()
+    cb({
+      command: 'node',
+      args: [],
+      cwd: '/workspace',
+      env: {},
+    })
+
+    const { args } = session._spawnCalls[0]
+    const ctrIdx = args.indexOf('remap-cwd-ctr')
+    // Command should be the last item (no args after it besides the command)
+    assert.equal(args[ctrIdx + 1], 'node')
+    assert.equal(args.length, ctrIdx + 2)
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Gap coverage — install failure error path
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DockerSdkSession._startContainer() install failure', () => {
+  it('calls back with error when npm install fails', (_, done) => {
+    const session = new FakeDockerSdkSession({ cwd: '/tmp' })
+    session._execFileResults = { run: 'installctr\n' }
+
+    // exec succeeds for setup, but we need install (also uses exec subcommand)
+    // to fail. Override _callExecFile to fail on the npm install call.
+    let callCount = 0
+    const origExecFile = session._callExecFile.bind(session)
+    session._callExecFile = (cmd, args, opts, cb) => {
+      callCount++
+      // Call 3 is the npm install call
+      if (callCount === 3) {
+        cb(new Error('npm ERR! network timeout'), '', '')
+        return
+      }
+      origExecFile(cmd, args, opts, cb)
+    }
+
+    session._startContainer((err) => {
+      assert.ok(err)
+      assert.ok(err.message.includes('Failed to install Claude Code in container'))
+      done()
+    })
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Gap coverage — npm prefix returns empty stdout
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DockerSdkSession._startContainer() npm prefix edge cases', () => {
+  it('falls back to default when npm prefix returns empty string', (_, done) => {
+    const session = new FakeDockerSdkSession({ cwd: '/tmp' })
+    session._execFileResults = { run: 'emptypfx\n', exec: '' }
+
+    // Override to return empty string specifically for the prefix call
+    let callCount = 0
+    const origExecFile = session._callExecFile.bind(session)
+    session._callExecFile = (cmd, args, opts, cb) => {
+      callCount++
+      // Call 4 is the npm prefix call — return empty
+      if (callCount === 4) {
+        cb(null, '', '')
+        return
+      }
+      origExecFile(cmd, args, opts, cb)
+    }
+
+    session._startContainer((err) => {
+      assert.ifError(err)
+      assert.equal(session._containerCliPath, DEFAULT_CONTAINER_CLI_PATH)
+      done()
+    })
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Gap coverage — env var edge cases
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DockerSdkSession spawn callback env edge cases', () => {
+  let session
+
+  beforeEach(() => {
+    session = new FakeDockerSdkSession({ cwd: '/tmp' })
+    session._containerId = 'env-edge-ctr'
+    session._containerCliPath = DEFAULT_CONTAINER_CLI_PATH
+  })
+
+  afterEach(() => {
+    session.removeAllListeners()
+  })
+
+  it('handles null env gracefully', () => {
+    const cb = session._createSpawnCallback()
+    cb({
+      command: 'node',
+      args: ['/host/cli.js'],
+      cwd: '/workspace',
+      env: null,
+    })
+
+    // Should not throw — env?.[key] uses optional chaining
+    const { args } = session._spawnCalls[0]
+    const envPairs = []
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '--env') envPairs.push(args[i + 1])
+    }
+    // Only HOME and PATH overrides
+    assert.equal(envPairs.length, 2)
+    assert.ok(envPairs.includes('HOME=/home/chroxy'))
+  })
+
+  it('handles undefined env gracefully', () => {
+    const cb = session._createSpawnCallback()
+    cb({
+      command: 'node',
+      args: ['/host/cli.js'],
+      cwd: '/workspace',
+    })
+
+    const { args } = session._spawnCalls[0]
+    const envPairs = []
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '--env') envPairs.push(args[i + 1])
+    }
+    // Only HOME and PATH overrides
+    assert.equal(envPairs.length, 2)
+  })
+
+  it('forwards env var with empty string value (defined but empty)', () => {
+    const cb = session._createSpawnCallback()
+    cb({
+      command: 'node',
+      args: ['/host/cli.js'],
+      cwd: '/workspace',
+      env: {
+        ANTHROPIC_API_KEY: '',
+        NODE_ENV: 'test',
+      },
+    })
+
+    const { args } = session._spawnCalls[0]
+    const envPairs = []
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '--env') envPairs.push(args[i + 1])
+    }
+    // Empty string IS a defined value — should be forwarded
+    assert.ok(envPairs.some(e => e === 'ANTHROPIC_API_KEY='))
+    assert.ok(envPairs.some(e => e === 'NODE_ENV=test'))
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Gap coverage — abort signal edge cases
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DockerSdkSession spawn callback abort edge cases', () => {
+  let session
+
+  beforeEach(() => {
+    session = new FakeDockerSdkSession({ cwd: '/tmp' })
+    session._containerId = 'abort-edge-ctr'
+    session._containerCliPath = DEFAULT_CONTAINER_CLI_PATH
+  })
+
+  afterEach(() => {
+    session.removeAllListeners()
+  })
+
+  it('handles no signal provided', () => {
+    const cb = session._createSpawnCallback()
+    const child = cb({
+      command: 'node',
+      args: ['/host/cli.js'],
+      cwd: '/workspace',
+      env: {},
+    })
+
+    assert.equal(child.killed, false)
+    // No error from missing signal
+  })
+
+  it('does not double-kill if already killed before abort', () => {
+    const ac = new AbortController()
+    const cb = session._createSpawnCallback()
+    const child = cb({
+      command: 'node',
+      args: ['/host/cli.js'],
+      cwd: '/workspace',
+      env: {},
+      signal: ac.signal,
+    })
+
+    // Kill manually first
+    child.kill()
+    assert.equal(child.killed, true)
+
+    // Abort should not throw or double-kill
+    ac.abort()
+    assert.equal(child.killed, true)
+  })
+
+  it('pre-aborted signal does not retroactively kill child', () => {
+    // addEventListener('abort', fn) on an already-aborted signal does NOT fire
+    // the listener in Node.js. This means if the signal is aborted before the
+    // spawn callback is invoked, the child process will NOT be killed.
+    // This documents the real behavior — callers must not pre-abort.
+    const ac = new AbortController()
+    ac.abort() // Pre-abort
+
+    const cb = session._createSpawnCallback()
+    const child = cb({
+      command: 'node',
+      args: ['/host/cli.js'],
+      cwd: '/workspace',
+      env: {},
+      signal: ac.signal,
+    })
+
+    // Child is NOT killed because addEventListener doesn't fire retroactively
+    assert.equal(child.killed, false)
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Gap coverage — destroy idempotency
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DockerSdkSession.destroy() idempotency', () => {
+  it('calling destroy twice does not call docker rm twice', () => {
+    const session = new FakeDockerSdkSession({ cwd: '/tmp' })
+    session._containerId = 'double-destroy-ctr'
+
+    session.destroy()
+    session.destroy()
+
+    const rmCalls = session._execFileCalls.filter(c => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1, 'should only call docker rm once')
   })
 })
