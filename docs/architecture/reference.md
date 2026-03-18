@@ -129,12 +129,17 @@ Store files:
 ```
 [Mobile App / Desktop] ←WebSocket→ [Cloudflare] ←→ [WsServer]
                                                        ↕
-                                                 [CliSession / SdkSession]
-                                                       ↕
-                                         [claude -p / Agent SDK]
-                                                       ↕
-                                               [Streaming JSON Events]
+                                              [Session Provider]
+                                             /         |         \
+                                   [CliSession]  [SdkSession]  [Docker*Session]
+                                        ↕              ↕              ↕
+                                   [claude -p]   [Agent SDK]   [docker exec → claude]
+                                        ↕              ↕              ↕
+                                            [Streaming JSON Events]
 ```
+
+Session providers are selected via `--provider` flag or per-session at creation time.
+Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Container Isolation Guide](/docs/guides/container-isolation.md).
 
 ## WebSocket Protocol
 
@@ -341,6 +346,8 @@ Store files:
 | `crypto.js` | ECDH key exchange + AES-GCM encryption |
 | `dev-preview.js` | Dev server preview tunnel management |
 | `diff-parser.js` | Unified diff parser for git output |
+| `docker-session.js` | Container-isolated CLI session (extends CliSession) |
+| `docker-sdk-session.js` | Container-isolated SDK session (extends SdkSession) |
 | `doctor.js` | Diagnostic command for troubleshooting |
 | `duration.js` | Duration formatting utilities |
 | `event-normalizer.js` | Normalize SDK/CLI events into unified format |
@@ -533,3 +540,4 @@ Tauri tray application wrapping the web dashboard with native integrations.
 | `docs/smoke-test.md` | Manual smoke test checklist |
 | `docs/named-tunnel-guide.md` | Named tunnel setup guide |
 | `docs/self-hosting-guide.md` | Self-hosting requirements and deployment |
+| `docs/guides/container-isolation.md` | Container isolation guide (sandbox, Docker, combined) |
