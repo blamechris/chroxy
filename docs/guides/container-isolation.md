@@ -36,7 +36,7 @@ You can enable both sandbox and container isolation simultaneously. The SDK sand
 | Live permission mode switch | Requires respawn | In-place (no restart) |
 | Conversation resume | No | Yes |
 | Container user | root | Non-root (`chroxy` by default) |
-| Claude Code install | Pre-installed in image | Auto-installed on container start |
+| Claude Code install | Must exist in image (not auto-installed) | Auto-installed on container start |
 | Plan mode | Yes | No (SDK limitation) |
 
 Both providers share the same container lifecycle and security defaults:
@@ -148,10 +148,10 @@ These are currently set at the provider level. To change defaults, modify the co
 Containers receive only an explicit allowlist of environment variables. The full host environment is never forwarded.
 
 **DockerSession** forwards:
-`ANTHROPIC_API_KEY`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`, `CHROXY_PORT`, `CHROXY_HOOK_SECRET`, `CHROXY_PERMISSION_MODE`, `CLAUDE_HEADLESS`, `HOME`, `PATH`
+`ANTHROPIC_API_KEY`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`, `CHROXY_PORT`, `CHROXY_HOOK_SECRET`, `CHROXY_PERMISSION_MODE`, `CLAUDE_HEADLESS`, `HOME`, `PATH`, and conditionally `CHROXY_HOST` (set to `host.docker.internal` when the permission hook port is configured)
 
 **DockerSdkSession** forwards:
-`ANTHROPIC_API_KEY`, `NODE_ENV`
+`ANTHROPIC_API_KEY`, `NODE_ENV`, plus hardcoded overrides: `HOME=/home/<containerUser>` and a fixed `PATH` for the container environment (these are not forwarded from the host)
 
 ### Permission Hook Routing (DockerSession only)
 
@@ -196,6 +196,25 @@ If Docker is not running or not installed, the `registerDockerProvider()` call s
 docker pull node:22-slim
 docker run --rm node:22-slim echo ok
 ```
+
+### Claude Not Found in Container (docker provider only)
+
+**Symptom:** Session starts but immediately errors with "claude: not found" or similar.
+
+The `docker` provider (DockerSession) does **not** auto-install Claude Code -- it expects the `claude` CLI to already exist in the container image. The default `node:22-slim` image does not include it.
+
+**Fix:** Use a custom image with Claude Code pre-installed, or install it in the container image:
+```dockerfile
+FROM node:22-slim
+RUN npm install -g @anthropic-ai/claude-code
+```
+
+Then set the custom image in your config:
+```json
+{ "environments": { "enabled": true, "image": "your-custom-image:latest" } }
+```
+
+> **Note:** The `docker-sdk` provider auto-installs Claude Code on each container start, so this issue does not apply to it.
 
 ### Claude Code Installation Failure (docker-sdk only)
 
