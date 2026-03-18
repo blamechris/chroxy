@@ -12,6 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 SERVER_PKG="$ROOT/packages/server/package.json"
 APP_PKG="$ROOT/packages/app/package.json"
+APP_JSON="$ROOT/packages/app/app.json"
 ROOT_PKG="$ROOT/package.json"
 DESKTOP_PKG="$ROOT/packages/desktop/package.json"
 PROTOCOL_PKG="$ROOT/packages/protocol/package.json"
@@ -52,6 +53,14 @@ node -e "
   const pkg = JSON.parse(fs.readFileSync('$APP_PKG', 'utf-8'));
   pkg.version = '$NEW_VERSION';
   fs.writeFileSync('$APP_PKG', JSON.stringify(pkg, null, 2) + '\n');
+"
+
+# Update app.json (Expo config — shown as "App Version" in mobile app)
+node -e "
+  const fs = require('fs');
+  const app = JSON.parse(fs.readFileSync('$APP_JSON', 'utf-8'));
+  app.expo.version = '$NEW_VERSION';
+  fs.writeFileSync('$APP_JSON', JSON.stringify(app, null, 2) + '\n');
 "
 
 # Update root package.json
@@ -118,6 +127,7 @@ echo "Updated:"
 echo "  $ROOT_PKG"
 echo "  $SERVER_PKG"
 echo "  $APP_PKG"
+echo "  $APP_JSON"
 echo "  $DESKTOP_PKG"
 echo "  $PROTOCOL_PKG"
 echo "  $STORE_CORE_PKG"
