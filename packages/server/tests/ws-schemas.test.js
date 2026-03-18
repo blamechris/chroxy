@@ -175,6 +175,25 @@ describe('CreateSessionSchema', () => {
       assert.ok(result.success, `Should accept permissionMode "${mode}"`)
     }
   })
+
+  it('accepts all valid isolation values (#2475)', () => {
+    for (const isolation of ['none', 'worktree', 'sandbox', 'container']) {
+      const result = CreateSessionSchema.safeParse({ type: 'create_session', name: 'dev', isolation })
+      assert.ok(result.success, `Should accept isolation "${isolation}"`)
+      assert.equal(result.data.isolation, isolation)
+    }
+  })
+
+  it('rejects invalid isolation values (#2475)', () => {
+    const result = CreateSessionSchema.safeParse({ type: 'create_session', name: 'dev', isolation: 'docker' })
+    assert.ok(!result.success)
+  })
+
+  it('isolation field is optional (#2475)', () => {
+    const result = CreateSessionSchema.safeParse({ type: 'create_session', name: 'dev' })
+    assert.ok(result.success)
+    assert.equal(result.data.isolation, undefined)
+  })
 })
 
 describe('RenameSessionSchema', () => {

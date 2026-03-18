@@ -263,9 +263,10 @@ export class SessionManager extends EventEmitter {
    * @param {string} [options.provider]
    * @param {boolean} [options.worktree] - When true, creates a git worktree for isolation
    * @param {object} [options.sandbox] - SDK sandbox settings for lightweight isolation
+   * @param {string} [options.isolation] - Isolation mode: 'none' | 'worktree' | 'sandbox' | 'container'
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, isolation } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -342,6 +343,14 @@ export class SessionManager extends EventEmitter {
     if (resolvedSandbox) providerOpts.sandbox = resolvedSandbox
     const session = new ProviderClass(providerOpts)
 
+    // Derive isolation mode from explicit field or from provider/worktree/sandbox state
+    let resolvedIsolation = isolation || 'none'
+    if (!isolation) {
+      if (worktreePath) resolvedIsolation = 'worktree'
+      else if (ProviderClass.capabilities?.containerized) resolvedIsolation = 'container'
+      else if (resolvedSandbox) resolvedIsolation = 'sandbox'
+    }
+
     const entry = {
       session,
       name: sessionName,
@@ -351,6 +360,7 @@ export class SessionManager extends EventEmitter {
       worktreePath,
       // Original repo dir needed for `git worktree remove` during cleanup
       worktreeRepoDir: worktreePath ? baseCwd : null,
+      isolation: resolvedIsolation,
     }
 
     this._sessions.set(sessionId, entry)
@@ -445,6 +455,7 @@ export class SessionManager extends EventEmitter {
         capabilities: ProviderClass.capabilities || {},
         worktree: entry.worktreePath != null,
         repoCwd: entry.worktreeRepoDir || null,
+        isolation: entry.isolation || 'none',
       })
     }
     return list

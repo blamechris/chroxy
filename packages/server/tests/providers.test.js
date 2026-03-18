@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { registerProvider, getProvider, listProviders } from '../src/providers.js'
+import { registerProvider, getProvider, listProviders, registerDockerProvider } from '../src/providers.js'
 import { CliSession } from '../src/cli-session.js'
 import { SdkSession } from '../src/sdk-session.js'
 
@@ -60,6 +60,45 @@ describe('Provider Registry', () => {
     assert.equal(sdkEntry.capabilities.permissions, true)
     assert.equal(sdkEntry.capabilities.inProcessPermissions, true)
     assert.equal(sdkEntry.capabilities.resume, true)
+  })
+})
+
+describe('Docker Provider Naming (#2475)', () => {
+  it('registerDockerProvider skips when environments not enabled', async () => {
+    const before = listProviders().length
+    await registerDockerProvider({})
+    await registerDockerProvider({ environments: { enabled: false } })
+    assert.equal(listProviders().length, before)
+  })
+
+  it('docker alias maps to docker-cli (DockerSession)', async () => {
+    // Register docker providers manually since Docker may not be available in CI
+    const { DockerSession } = await import('../src/docker-session.js')
+    registerProvider('docker-cli', DockerSession)
+    registerProvider('docker', DockerSession)
+
+    const dockerCli = getProvider('docker-cli')
+    const docker = getProvider('docker')
+    assert.equal(dockerCli, DockerSession)
+    assert.equal(docker, DockerSession, '"docker" should resolve to same class as "docker-cli"')
+  })
+
+  it('docker-sdk is registered separately', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    registerProvider('docker-sdk', DockerSdkSession)
+
+    const dockerSdk = getProvider('docker-sdk')
+    assert.equal(dockerSdk, DockerSdkSession)
+  })
+
+  it('docker-cli has containerized capability', async () => {
+    const { DockerSession } = await import('../src/docker-session.js')
+    assert.equal(DockerSession.capabilities.containerized, true)
+  })
+
+  it('docker-sdk has containerized capability', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    assert.equal(DockerSdkSession.capabilities.containerized, true)
   })
 })
 

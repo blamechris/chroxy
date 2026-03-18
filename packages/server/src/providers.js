@@ -8,6 +8,11 @@
  *   - 'claude-sdk': Agent SDK session (SdkSession) — default
  *   - 'claude-cli': Legacy CLI process session (CliSession)
  *
+ * Docker providers (registered at runtime when environments are enabled):
+ *   - 'docker-cli': Docker-isolated CLI session (DockerSession)
+ *   - 'docker-sdk': Docker-isolated SDK session (DockerSdkSession)
+ *   - 'docker': backward-compatible alias for 'docker-cli'
+ *
  * Example: Registering a custom provider
  * ```js
  * import { EventEmitter } from 'events'
@@ -129,9 +134,10 @@ registerProvider('codex', CodexSession)
  * Register docker providers when environments are enabled.
  * Probes `docker info` to confirm Docker is available; skips silently if not.
  *
- * Registers both:
- *   - 'docker': DockerSession (CLI-based, extends CliSession)
+ * Registers:
+ *   - 'docker-cli': DockerSession (CLI-based, extends CliSession)
  *   - 'docker-sdk': DockerSdkSession (SDK-based, extends SdkSession)
+ *   - 'docker': backward-compatible alias for 'docker-cli'
  *
  * @param {object} config - Merged server config
  */
@@ -150,10 +156,13 @@ export async function registerDockerProvider(config) {
   }
 
   const { DockerSession } = await import('./docker-session.js')
-  registerProvider('docker', DockerSession)
+  registerProvider('docker-cli', DockerSession)
 
   const { DockerSdkSession } = await import('./docker-sdk-session.js')
   registerProvider('docker-sdk', DockerSdkSession)
 
-  log.info('Docker providers registered (docker, docker-sdk)')
+  // Backward compatibility: 'docker' maps to 'docker-cli'
+  registerProvider('docker', DockerSession)
+
+  log.info('Docker providers registered (docker-cli, docker-sdk)')
 }
