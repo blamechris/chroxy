@@ -15,7 +15,7 @@ const log = createLogger('docker-session')
  * also needs CLAUDE_HEADLESS and CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING
  * for headless stream-json mode.
  *
- * See also: DockerSdkSession.FORWARDED_ENV_KEYS in docker-sdk-session.js
+ * See also: FORWARDED_ENV_KEYS in docker-sdk-session.js
  */
 const FORWARDED_ENV_KEYS = [
   'ANTHROPIC_API_KEY',

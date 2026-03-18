@@ -15,7 +15,7 @@ const log = createLogger('docker-sdk')
  * HOME and PATH are set explicitly in _createSpawnCallback() rather
  * than forwarded from the host.
  *
- * See also: DockerSession.FORWARDED_ENV_KEYS in docker-session.js
+ * See also: FORWARDED_ENV_KEYS in docker-session.js
  */
 const FORWARDED_ENV_KEYS = [
   'ANTHROPIC_API_KEY',

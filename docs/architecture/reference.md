@@ -68,10 +68,11 @@ Both Docker providers forward only explicitly allowlisted env vars into the cont
 | `CHROXY_PORT` | yes | — | Permission hook HTTP port on host |
 | `CHROXY_HOOK_SECRET` | yes | — | Permission hook auth secret |
 | `CHROXY_PERMISSION_MODE` | yes | — | Permission handling mode |
-| `HOME` | yes | set explicitly | User home directory |
-| `PATH` | yes | set explicitly | Executable search path |
+| `CHROXY_HOST` | injected | — | Permission hook hostname (set to `host.docker.internal`) |
+| `HOME` | forwarded from host | hardcoded in container | User home directory |
+| `PATH` | forwarded from host | hardcoded in container | Executable search path |
 
-**Why they differ:** `DockerSession` extends `CliSession`, which runs `claude -p` as a subprocess and uses an external HTTP permission hook to route permission requests back to the host server. This requires `CHROXY_PORT`, `CHROXY_HOOK_SECRET`, and `CHROXY_PERMISSION_MODE` inside the container, plus `CLAUDE_HEADLESS` for stream-json mode. `DockerSdkSession` extends `SdkSession`, which manages the conversation loop and permissions in-process via the Agent SDK — no external hook calls are needed, so those vars are omitted. `HOME` and `PATH` are set explicitly by the SDK spawn callback rather than forwarded from the host.
+**Why they differ:** `DockerSession` extends `CliSession`, which runs `claude -p` as a subprocess and uses an external HTTP permission hook to route permission requests back to the host server. This requires `CHROXY_PORT`, `CHROXY_HOOK_SECRET`, and `CHROXY_PERMISSION_MODE` inside the container, plus `CLAUDE_HEADLESS` for stream-json mode. `DockerSdkSession` extends `SdkSession`, which manages the conversation loop and permissions in-process via the Agent SDK — no external hook calls are needed, so those vars are omitted. `HOME` and `PATH` are forwarded from the host env in `DockerSession` but hardcoded by the SDK spawn callback in `DockerSdkSession` (`/home/<user>` and a standard POSIX path). `CHROXY_HOST` is not in the `FORWARDED_ENV_KEYS` array — it is dynamically injected by `DockerSession._spawnPersistentProcess()` when `CHROXY_PORT` is present, set to `host.docker.internal` so the container can reach the host's permission hook endpoint.
 
 ## App Screens
 
