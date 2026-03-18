@@ -1010,3 +1010,163 @@ describe('EnvironmentManager.destroy() snapshot cleanup', () => {
     assert.equal(rmiCalls.length, 0)
   })
 })
+// ──────────────────────────────────────────────────────────────────────────────
+// DevContainer spec support
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('EnvironmentManager.create() with devcontainer', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('applies image from devcontainer.json', async () => {
+    // Create a .devcontainer/devcontainer.json in a temp project dir
+    const projectDir = mkdtempSync(join(tmpdir(), 'chroxy-dc-'))
+    const { mkdirSync: mkdir, writeFileSync: writeFile } = await import('fs')
+    mkdir(join(projectDir, '.devcontainer'), { recursive: true })
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      image: 'python:3.12-slim',
+      remoteUser: 'devuser',
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'dc-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'dc-image',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    assert.equal(env.image, 'python:3.12-slim')
+    assert.equal(env.containerUser, 'devuser')
+
+    // Verify docker run used the devcontainer image
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    assert.ok(runCall.args.includes('python:3.12-slim'))
+
+    rmSync(projectDir, { recursive: true, force: true })
+  })
+
+  it('explicit options override devcontainer values', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'chroxy-dc-'))
+    const { mkdirSync: mkdir, writeFileSync: writeFile } = await import('fs')
+    mkdir(join(projectDir, '.devcontainer'), { recursive: true })
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      image: 'python:3.12-slim',
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'override-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'dc-override',
+      cwd: projectDir,
+      image: 'node:22-slim',
+      devcontainer: true,
+    })
+
+    assert.equal(env.image, 'node:22-slim', 'explicit image should override devcontainer')
+
+    rmSync(projectDir, { recursive: true, force: true })
+  })
+
+  it('falls back gracefully when no devcontainer file found', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'chroxy-dc-'))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'nodc-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'dc-missing',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    assert.equal(env.image, 'node:22-slim', 'should use default image when no devcontainer found')
+
+    rmSync(projectDir, { recursive: true, force: true })
+  })
+
+  it('runs postCreateCommand after setup', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'chroxy-dc-'))
+    const { mkdirSync: mkdir, writeFileSync: writeFile } = await import('fs')
+    mkdir(join(projectDir, '.devcontainer'), { recursive: true })
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      postCreateCommand: 'npm install',
+    }))
+
+    let postCreateCalled = false
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'run') { cb(null, 'post-ctr\n', ''); return }
+      if (args[0] === 'exec' && args.includes('bash') && args.includes('npm install')) {
+        postCreateCalled = true
+        cb(null, '', '')
+        return
+      }
+      cb(null, '/usr/local\n', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'dc-postcreate',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    assert.ok(postCreateCalled, 'should run postCreateCommand')
+
+    rmSync(projectDir, { recursive: true, force: true })
+  })
+
+  it('passes containerEnv and forwardPorts to docker run', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'chroxy-dc-'))
+    const { mkdirSync: mkdir, writeFileSync: writeFile } = await import('fs')
+    mkdir(join(projectDir, '.devcontainer'), { recursive: true })
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      containerEnv: { NODE_ENV: 'development', DEBUG: 'true' },
+      forwardPorts: [3000, 5432],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'ports-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'dc-env-ports',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const envPairs = []
+    const portPairs = []
+    for (let i = 0; i < runCall.args.length - 1; i++) {
+      if (runCall.args[i] === '--env') envPairs.push(runCall.args[i + 1])
+      if (runCall.args[i] === '-p') portPairs.push(runCall.args[i + 1])
+    }
+
+    assert.ok(envPairs.includes('NODE_ENV=development'))
+    assert.ok(envPairs.includes('DEBUG=true'))
+    assert.ok(portPairs.includes('3000:3000'))
+    assert.ok(portPairs.includes('5432:5432'))
+
+    rmSync(projectDir, { recursive: true, force: true })
+  })
+})
