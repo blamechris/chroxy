@@ -14,6 +14,8 @@ SERVER_PKG="$ROOT/packages/server/package.json"
 APP_PKG="$ROOT/packages/app/package.json"
 ROOT_PKG="$ROOT/package.json"
 DESKTOP_PKG="$ROOT/packages/desktop/package.json"
+PROTOCOL_PKG="$ROOT/packages/protocol/package.json"
+STORE_CORE_PKG="$ROOT/packages/store-core/package.json"
 TAURI_CONF="$ROOT/packages/desktop/src-tauri/tauri.conf.json"
 CARGO_TOML="$ROOT/packages/desktop/src-tauri/Cargo.toml"
 
@@ -68,6 +70,22 @@ node -e "
   fs.writeFileSync('$DESKTOP_PKG', JSON.stringify(pkg, null, 2) + '\n');
 "
 
+# Update protocol package.json
+node -e "
+  const fs = require('fs');
+  const pkg = JSON.parse(fs.readFileSync('$PROTOCOL_PKG', 'utf-8'));
+  pkg.version = '$NEW_VERSION';
+  fs.writeFileSync('$PROTOCOL_PKG', JSON.stringify(pkg, null, 2) + '\n');
+"
+
+# Update store-core package.json
+node -e "
+  const fs = require('fs');
+  const pkg = JSON.parse(fs.readFileSync('$STORE_CORE_PKG', 'utf-8'));
+  pkg.version = '$NEW_VERSION';
+  fs.writeFileSync('$STORE_CORE_PKG', JSON.stringify(pkg, null, 2) + '\n');
+"
+
 # Update tauri.conf.json
 node -e "
   const fs = require('fs');
@@ -83,7 +101,7 @@ if [ -z "$CARGO_CURRENT" ]; then
   echo "Error: Failed to parse current version from $CARGO_TOML [package] section" >&2
   exit 1
 fi
-sed -i.bak "/^\[package\]/,/^\[/{s/^version = \"$CARGO_CURRENT\"/version = \"$NEW_VERSION\"/}" "$CARGO_TOML"
+sed -i.bak "/^\[package\]/,/^\[/s/^version = \"$CARGO_CURRENT\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
 rm -f "$CARGO_TOML.bak"
 # Verify the replacement succeeded — scope check to [package] section to avoid false-passing
 # on a dependency that happens to share the same version string
@@ -101,6 +119,8 @@ echo "  $ROOT_PKG"
 echo "  $SERVER_PKG"
 echo "  $APP_PKG"
 echo "  $DESKTOP_PKG"
+echo "  $PROTOCOL_PKG"
+echo "  $STORE_CORE_PKG"
 echo "  $TAURI_CONF"
 echo "  $CARGO_TOML"
 echo "  Cargo.lock"
