@@ -8,6 +8,14 @@ const log = createLogger('docker-session')
 /**
  * Env vars explicitly forwarded into the Docker container.
  * Only vars needed for Claude Code operation — never forward the full host env.
+ *
+ * This list is broader than DockerSdkSession's allowlist because CliSession
+ * uses an external permission hook (HTTP callback to the host), which requires
+ * CHROXY_PORT, CHROXY_HOOK_SECRET, and CHROXY_PERMISSION_MODE. The CLI process
+ * also needs CLAUDE_HEADLESS and CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING
+ * for headless stream-json mode.
+ *
+ * See also: DockerSdkSession.FORWARDED_ENV_KEYS in docker-sdk-session.js
  */
 const FORWARDED_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
