@@ -494,13 +494,17 @@ describe('DockerSdkSession._startContainer() Linux add-host flag', () => {
     session._execFileResults = { run: 'linuxctr\n', exec: '/usr/local\n' }
 
     session._startContainer((err) => {
-      assert.ifError(err)
-      const { args } = session._execFileCalls[0]
-      assert.ok(args.includes('--add-host'), 'missing --add-host flag for linux')
-      assert.ok(args.includes('host.docker.internal:host-gateway'), 'wrong --add-host value')
-
-      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true })
-      done()
+      try {
+        assert.ifError(err)
+        const { args } = session._execFileCalls[0]
+        assert.ok(args.includes('--add-host'), 'missing --add-host flag for linux')
+        assert.ok(args.includes('host.docker.internal:host-gateway'), 'wrong --add-host value')
+        done()
+      } catch (e) {
+        done(e)
+      } finally {
+        Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true })
+      }
     })
   })
 
@@ -512,12 +516,16 @@ describe('DockerSdkSession._startContainer() Linux add-host flag', () => {
     session._execFileResults = { run: 'darwinctr\n', exec: '/usr/local\n' }
 
     session._startContainer((err) => {
-      assert.ifError(err)
-      const { args } = session._execFileCalls[0]
-      assert.ok(!args.includes('--add-host'), '--add-host should not be added on darwin')
-
-      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true })
-      done()
+      try {
+        assert.ifError(err)
+        const { args } = session._execFileCalls[0]
+        assert.ok(!args.includes('--add-host'), '--add-host should not be added on darwin')
+        done()
+      } catch (e) {
+        done(e)
+      } finally {
+        Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true })
+      }
     })
   })
 })
