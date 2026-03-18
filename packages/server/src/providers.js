@@ -126,8 +126,12 @@ registerProvider('gemini', GeminiSession)
 registerProvider('codex', CodexSession)
 
 /**
- * Register the docker provider when environments are enabled.
+ * Register docker providers when environments are enabled.
  * Probes `docker info` to confirm Docker is available; skips silently if not.
+ *
+ * Registers both:
+ *   - 'docker': DockerSession (CLI-based, extends CliSession)
+ *   - 'docker-sdk': DockerSdkSession (SDK-based, extends SdkSession)
  *
  * @param {object} config - Merged server config
  */
@@ -141,11 +145,15 @@ export async function registerDockerProvider(config) {
   try {
     execFileSync('docker', ['info'], { stdio: 'ignore' })
   } catch {
-    log.warn('Docker not available — docker provider disabled')
+    log.warn('Docker not available — docker providers disabled')
     return
   }
 
   const { DockerSession } = await import('./docker-session.js')
   registerProvider('docker', DockerSession)
-  log.info('Docker provider registered')
+
+  const { DockerSdkSession } = await import('./docker-sdk-session.js')
+  registerProvider('docker-sdk', DockerSdkSession)
+
+  log.info('Docker providers registered (docker, docker-sdk)')
 }
