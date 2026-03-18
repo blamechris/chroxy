@@ -147,7 +147,7 @@ export async function startCliServer(config) {
     const { EnvironmentManager } = await import('./environment-manager.js')
     environmentManager = new EnvironmentManager()
     await environmentManager.reconnect()
-    log.info(`EnvironmentManager ready (${environmentManager.list().length} environment(s))`)
+    console.log(`[env] EnvironmentManager ready (${environmentManager.list().length} environment(s))`)
   }
 
   // 1. Create session manager
