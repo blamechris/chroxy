@@ -35,7 +35,7 @@ Run a lightweight daemon on your dev machine, connect from your phone or desktop
 ## Features
 
 **Server:**
-CLI headless mode, Claude Agent SDK integration, WebSocket protocol with auth, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, multi-session management, model switching, plan mode detection, background agent tracking, web dashboard, Docker session provider, git worktree isolation, permission rule engine, extensible provider/handler system
+CLI headless mode, Claude Agent SDK integration, WebSocket protocol with auth, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, multi-session management, model switching, plan mode detection, background agent tracking, web dashboard, persistent container environments (Docker Compose, DevContainer, snapshot/restore), Docker session providers, git worktree isolation, permission rule engine, extensible provider/handler system
 
 **Desktop (Tauri):**
 System tray app, web dashboard with syntax highlighting (15+ languages), xterm.js terminal, session tabs, desktop notifications, voice-to-text (macOS SFSpeechRecognizer), command palette with keyboard shortcuts

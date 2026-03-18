@@ -83,9 +83,9 @@ Cross-platform feature availability for Mobile App, Desktop Dashboard, and Serve
 
 | Feature | Mobile | Desktop | Server |
 |---------|--------|---------|--------|
-| Voice-to-Text Input | Y | — | — |
+| Voice-to-Text Input | Y | Y (macOS) | — |
 | Speech Language Selection | Y | — | — |
-| Recording Indicator | Y | — | — |
+| Recording Indicator | Y | Y | — |
 
 ## Slash Commands
 
@@ -102,6 +102,20 @@ Cross-platform feature availability for Mobile App, Desktop Dashboard, and Serve
 | Cost Display | Y | Y | Y |
 | Budget Tracking | Y | Y | Y |
 | Cost Breakdown | Y | Y | Y |
+
+## Container Environments
+
+| Feature | Mobile | Desktop | Server |
+|---------|--------|---------|--------|
+| Persistent Environments | — | Y (panel) | Y |
+| Docker Compose Stacks | — | Y (panel) | Y |
+| DevContainer Support | — | Y (panel) | Y |
+| Environment Snapshots | — | Y (panel) | Y |
+| Snapshot Restore | — | Y (panel) | Y |
+| Docker Session Isolation | — | Y (creation) | Y |
+| Git Worktree Isolation | Y (creation) | Y (creation) | Y |
+| Sandbox Mode (SDK) | — | — | Y |
+| Permission Rules | Y | — | Y |
 
 ## Settings
 

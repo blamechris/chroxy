@@ -22,6 +22,16 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | WsSchemas | `src/ws-schemas.js` | Zod schemas for WebSocket message validation |
 | WsFileOps | `src/ws-file-ops.js` | File browsing/reading WS message handlers |
 | WsPermissions | `src/ws-permissions.js` | Permission request/response WS message handlers |
+| EnvironmentManager | `src/environment-manager.js` | Persistent container environment lifecycle (create, start, stop, remove, snapshot, restore) |
+| EnvironmentHandlers | `src/environment-handlers.js` | WS message handlers for environment CRUD, snapshot, and restore |
+| PermissionManager | `src/permission-manager.js` | Permission rule engine with per-session auto-allow/deny rules |
+| SessionHandlers | `src/session-handlers.js` | WS message handlers for session lifecycle operations |
+| WsClientManager | `src/ws-client-manager.js` | Client connection lifecycle management |
+| WsBroadcaster | `src/ws-broadcaster.js` | Message broadcast to session and global scopes |
+| SessionTimeoutManager | `src/session-timeout-manager.js` | Session idle timeout management |
+| SessionStatePersistence | `src/session-state-persistence.js` | Session state file I/O |
+| CostBudgetManager | `src/cost-budget-manager.js` | Per-session cost budget tracking and enforcement |
+| BaseSession | `src/base-session.js` | Shared session logic (model, permissions, lifecycle) |
 | EventNormalizer | `src/event-normalizer.js` | Normalize SDK/CLI events into unified format |
 | SessionManager | `src/session-manager.js` | Session lifecycle management |
 | ConversationScanner | `src/conversation-scanner.js` | Conversation history file scanning (parallel) |
@@ -152,8 +162,10 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `browse_files` | Request file/directory listing within project |
 | `close_dev_preview` | Close a dev server preview tunnel |
 | `create_checkpoint` | Create a new checkpoint for session |
+| `create_environment` | Create a persistent container environment (Docker Compose, DevContainer, or plain) |
 | `create_session` | Create new session with optional name/cwd |
 | `delete_checkpoint` | Delete a checkpoint by ID |
+| `destroy_environment` | Remove a persistent container environment |
 | `destroy_session` | Delete session by ID |
 | `encrypted` | Encrypted message envelope (E2E encryption) |
 | `get_diff` | Request git diff for uncommitted changes |
@@ -167,6 +179,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `key_exchange` | Send client X25519 public key for encryption |
 | `launch_web_task` | Launch a Claude Code Web cloud task |
 | `list_agents` | Request available custom agent definitions |
+| `list_environments` | Request list of persistent container environments |
 | `list_checkpoints` | Request list of checkpoints for session |
 | `list_conversations` | Request scan of conversation history files |
 | `list_directory` | Request home directory listing for browsing |
@@ -185,9 +198,14 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `request_full_history` | Request complete JSONL history for session |
 | `request_session_context` | Get context info for specific session |
 | `restore_checkpoint` | Restore from a checkpoint (creates new session) |
+| `restore_environment` | Restore an environment from a named snapshot |
 | `resume_budget` | Resume a paused session after budget exceeded |
 | `resume_conversation` | Resume a past conversation by creating a new session |
 | `search_conversations` | Search conversation history by query |
+| `set_thinking_level` | Change thinking level (default, high, max) |
+| `snapshot_environment` | Create a named snapshot of a running environment |
+| `start_environment` | Start a stopped persistent environment |
+| `stop_environment` | Stop a running persistent environment |
 | `set_model` | Change active Claude model |
 | `set_permission_mode` | Change permission handling mode |
 | `set_permission_rules` | Set session-scoped auto-allow/deny rules for eligible tools |
@@ -230,6 +248,15 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `diff_result` | Git diff for uncommitted changes |
 | `directory_listing` | Home directory listing response |
 | `encrypted` | Encrypted message envelope (E2E encryption) |
+| `environment_created` | Persistent environment created successfully |
+| `environment_destroyed` | Persistent environment removed |
+| `environment_error` | Environment operation error |
+| `environment_list` | List of persistent environments with status |
+| `environment_restored` | Environment restored from snapshot |
+| `environment_snapshot` | Environment snapshot created |
+| `environment_started` | Persistent environment started |
+| `environment_stopped` | Persistent environment stopped |
+| `environment_updated` | Environment status or metadata changed |
 | `file_content` | File content with syntax metadata |
 | `file_list` | Response to `list_files` — flat list of matching file paths |
 | `file_listing` | Project file/directory listing response (from `browse_files`) |
@@ -348,6 +375,8 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `diff-parser.js` | Unified diff parser for git output |
 | `docker-session.js` | Container-isolated CLI session (extends CliSession) |
 | `docker-sdk-session.js` | Container-isolated SDK session (extends SdkSession) |
+| `environment-manager.js` | Persistent container environment lifecycle management |
+| `environment-handlers.js` | WS message handlers for environment operations |
 | `doctor.js` | Diagnostic command for troubleshooting |
 | `duration.js` | Duration formatting utilities |
 | `event-normalizer.js` | Normalize SDK/CLI events into unified format |
@@ -358,6 +387,15 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `message-transform.js` | Message transformation pipeline |
 | `models.js` | Model list management (static + dynamic from SDK) |
 | `permission-hook.js` | Permission hook management (CLI mode) |
+| `permission-manager.js` | Permission rule engine (per-session auto-allow/deny) |
+| `base-session.js` | Shared session logic (model, permissions, lifecycle) |
+| `session-handlers.js` | WS message handlers for session lifecycle |
+| `session-timeout-manager.js` | Session idle timeout management |
+| `session-state-persistence.js` | Session state file I/O |
+| `cost-budget-manager.js` | Per-session cost budget tracking |
+| `ws-client-manager.js` | Client connection lifecycle management |
+| `ws-broadcaster.js` | Message broadcast to session and global scopes |
+| `ws-client-sender.js` | Message send/encrypt logic per client |
 | `platform.js` | Cross-platform utilities (Windows/macOS/Linux) |
 | `providers.js` | Provider adapter registry + built-in registrations |
 | `push.js` | Push notifications via Expo Push API |
