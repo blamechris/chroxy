@@ -73,8 +73,16 @@ export class EnvironmentManager extends EventEmitter {
       cpuLimit: resolvedCpu,
     })
 
-    await this._setupContainer(containerId, user)
-    const containerCliPath = await this._discoverCliPath(containerId)
+    let containerCliPath
+    try {
+      await this._setupContainer(containerId, user)
+      containerCliPath = await this._discoverCliPath(containerId)
+    } catch (err) {
+      // Clean up orphaned container before re-throwing
+      log.warn(`Environment setup failed, removing container ${containerId.slice(0, 12)}: ${err.message}`)
+      await this._removeContainer(containerId)
+      throw err
+    }
 
     const env = {
       id,

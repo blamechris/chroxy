@@ -166,6 +166,37 @@ describe('EnvironmentManager.create()', () => {
     )
   })
 
+  it('cleans up container when setup fails after start', async () => {
+    // docker run succeeds, but exec (setup) fails
+    let callCount = 0
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      callCount++
+      if (args[0] === 'run') {
+        cb(null, 'orphan-ctr\n', '')
+        return
+      }
+      if (args[0] === 'exec') {
+        cb(new Error('useradd: command not found'), '', '')
+        return
+      }
+      if (args[0] === 'rm') {
+        cb(null, '', '')
+        return
+      }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await assert.rejects(
+      () => manager.create({ name: 'orphan-test', cwd: '/tmp' }),
+      /useradd/
+    )
+    // Environment should NOT be in the registry
+    assert.equal(manager.list().length, 0)
+  })
+
   it('includes security constraints in docker run', async () => {
     const mockExec = createMockExecFile({
       results: { run: 'sec-ctr\n', exec: '/usr/local\n' },
