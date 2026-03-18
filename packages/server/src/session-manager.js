@@ -342,6 +342,13 @@ export class SessionManager extends EventEmitter {
     if (resolvedSandbox) providerOpts.sandbox = resolvedSandbox
     const session = new ProviderClass(providerOpts)
 
+    // Derive isolation mode from actual session state, ignoring client-provided value
+    // when it conflicts with reality (e.g. isolation:'container' with a non-container provider)
+    let resolvedIsolation = 'none'
+    if (worktreePath) resolvedIsolation = 'worktree'
+    else if (ProviderClass.capabilities?.containerized) resolvedIsolation = 'container'
+    else if (resolvedSandbox) resolvedIsolation = 'sandbox'
+
     const entry = {
       session,
       name: sessionName,
@@ -351,6 +358,7 @@ export class SessionManager extends EventEmitter {
       worktreePath,
       // Original repo dir needed for `git worktree remove` during cleanup
       worktreeRepoDir: worktreePath ? baseCwd : null,
+      isolation: resolvedIsolation,
     }
 
     this._sessions.set(sessionId, entry)
@@ -445,6 +453,7 @@ export class SessionManager extends EventEmitter {
         capabilities: ProviderClass.capabilities || {},
         worktree: entry.worktreePath != null,
         repoCwd: entry.worktreeRepoDir || null,
+        isolation: entry.isolation || 'none',
       })
     }
     return list

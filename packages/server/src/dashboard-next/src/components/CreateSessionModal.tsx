@@ -68,6 +68,8 @@ const EMPTY_STRINGS: string[] = []
 const PROVIDER_BILLING: Record<string, string> = {
   'claude-sdk': 'Uses Anthropic API credits',
   'claude-cli': 'Uses your Claude subscription',
+  'docker-cli': 'Docker-isolated — uses your Claude subscription',
+  'docker-sdk': 'Docker-isolated — uses Anthropic API credits',
   'gemini': 'Uses Google API credits',
 }
 

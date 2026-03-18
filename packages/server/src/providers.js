@@ -8,6 +8,11 @@
  *   - 'claude-sdk': Agent SDK session (SdkSession) — default
  *   - 'claude-cli': Legacy CLI process session (CliSession)
  *
+ * Docker providers (registered at runtime when environments are enabled):
+ *   - 'docker-cli': Docker-isolated CLI session (DockerSession)
+ *   - 'docker-sdk': Docker-isolated SDK session (DockerSdkSession)
+ *   - 'docker': backward-compatible alias for 'docker-cli'
+ *
  * Example: Registering a custom provider
  * ```js
  * import { EventEmitter } from 'events'
@@ -68,13 +73,15 @@
  */
 
 const providers = new Map()
+const aliases = new Set()
 
 /**
  * Register a provider class by name.
  * @param {string} name - Provider identifier (e.g. 'claude-sdk')
  * @param {Function} ProviderClass - Session class with static capabilities getter
+ * @param {{ alias: boolean }} [opts] - Mark as alias to exclude from listProviders()
  */
-export function registerProvider(name, ProviderClass) {
+export function registerProvider(name, ProviderClass, opts) {
   if (typeof name !== 'string' || !name) {
     throw new Error('Provider name must be a non-empty string')
   }
@@ -82,6 +89,7 @@ export function registerProvider(name, ProviderClass) {
     throw new Error(`Provider "${name}" must be a class/constructor`)
   }
   providers.set(name, ProviderClass)
+  if (opts?.alias) aliases.add(name)
 }
 
 /**
@@ -101,11 +109,13 @@ export function getProvider(name) {
 
 /**
  * List all registered providers with their capabilities.
+ * Excludes aliases (e.g. 'docker') to prevent duplicate entries in UI.
  * @returns {Array<{ name: string, capabilities: ProviderCapabilities }>}
  */
 export function listProviders() {
   const list = []
   for (const [name, ProviderClass] of providers) {
+    if (aliases.has(name)) continue
     list.push({
       name,
       capabilities: ProviderClass.capabilities || {},
@@ -129,9 +139,10 @@ registerProvider('codex', CodexSession)
  * Register docker providers when environments are enabled.
  * Probes `docker info` to confirm Docker is available; skips silently if not.
  *
- * Registers both:
- *   - 'docker': DockerSession (CLI-based, extends CliSession)
+ * Registers:
+ *   - 'docker-cli': DockerSession (CLI-based, extends CliSession)
  *   - 'docker-sdk': DockerSdkSession (SDK-based, extends SdkSession)
+ *   - 'docker': backward-compatible alias for 'docker-cli'
  *
  * @param {object} config - Merged server config
  */
@@ -150,10 +161,13 @@ export async function registerDockerProvider(config) {
   }
 
   const { DockerSession } = await import('./docker-session.js')
-  registerProvider('docker', DockerSession)
+  registerProvider('docker-cli', DockerSession)
 
   const { DockerSdkSession } = await import('./docker-sdk-session.js')
   registerProvider('docker-sdk', DockerSdkSession)
 
-  log.info('Docker providers registered (docker, docker-sdk)')
+  // Backward compatibility: 'docker' maps to 'docker-cli' (hidden from listProviders)
+  registerProvider('docker', DockerSession, { alias: true })
+
+  log.info('Docker providers registered (docker-cli, docker-sdk)')
 }

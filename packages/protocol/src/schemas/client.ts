@@ -134,6 +134,7 @@ export const CreateSessionSchema = z.object({
   permissionMode: z.enum(['approve', 'acceptEdits', 'auto', 'plan']).optional(),
   worktree: z.boolean().optional(),
   sandbox: SandboxSchema.optional(),
+  isolation: z.enum(['none', 'worktree', 'sandbox', 'container']).optional(),
 })
 
 export const DestroySessionSchema = z.object({

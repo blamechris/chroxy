@@ -2,6 +2,9 @@
 export const PROVIDER_LABELS: Record<string, string> = {
   'claude-sdk': 'Claude Code (SDK)',
   'claude-cli': 'Claude Code (CLI)',
+  'docker-cli': 'Claude Code (Docker CLI)',
+  'docker-sdk': 'Claude Code (Docker SDK)',
+  'docker': 'Claude Code (Docker CLI)',
   'gemini': 'Gemini (CLI)',
   'codex': 'Codex (CLI)',
 }
@@ -23,6 +26,21 @@ const KNOWN_PROVIDERS: Record<string, ProviderInfo> = {
   'claude-cli': {
     short: 'CLI',
     tooltip: 'Claude Code CLI — uses your claude.ai subscription',
+    type: 'cli',
+  },
+  'docker-cli': {
+    short: 'Docker CLI',
+    tooltip: 'Docker-isolated CLI — uses your claude.ai subscription',
+    type: 'cli',
+  },
+  'docker-sdk': {
+    short: 'Docker SDK',
+    tooltip: 'Docker-isolated SDK — billed per token via ANTHROPIC_API_KEY',
+    type: 'sdk',
+  },
+  'docker': {
+    short: 'Docker CLI',
+    tooltip: 'Docker-isolated CLI — uses your claude.ai subscription (alias for docker-cli)',
     type: 'cli',
   },
   'gemini': {

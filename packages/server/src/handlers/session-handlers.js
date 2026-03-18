@@ -39,6 +39,8 @@ function handleCreateSession(ws, client, msg, ctx) {
   const permissionMode = rawPermMode && VALID_PERMISSION_MODES.includes(rawPermMode) ? rawPermMode : undefined
   const worktree = msg.worktree === true ? true : undefined
   const sandbox = (msg.sandbox && typeof msg.sandbox === 'object' && !Array.isArray(msg.sandbox)) ? msg.sandbox : undefined
+  // Note: isolation is accepted in the schema but always derived server-side
+  // from the actual session state (provider capabilities, worktree, sandbox).
 
   if (worktree && !cwd) {
     ctx.send(ws, { type: 'session_error', message: 'Worktree requires an explicit CWD' })
