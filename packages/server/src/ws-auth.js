@@ -7,8 +7,17 @@
 import { createKeyPair, deriveSharedKey } from './crypto.js'
 import { AuthSchema, KeyExchangeSchema, PairSchema } from './ws-schemas.js'
 import { createLogger } from './logger.js'
+import { MAX_AUTH_FAILURE_ENTRIES } from './ws-server.js'
 
 const log = createLogger('ws')
+
+/** Evict the oldest entry from a Map if it has reached the size cap. */
+function evictOldestIfFull(map) {
+  if (map.size >= MAX_AUTH_FAILURE_ENTRIES) {
+    const oldestKey = map.keys().next().value
+    map.delete(oldestKey)
+  }
+}
 
 /**
  * Handle an auth message from an unauthenticated client.
@@ -82,6 +91,7 @@ export function handleAuthMessage(ctx, ws, msg) {
   // Auth failure — track for rate limiting
   const now = Date.now()
   const existing = authFailures.get(ip) || { count: 0, firstFailure: now, blockedUntil: 0 }
+  if (!authFailures.has(ip)) evictOldestIfFull(authFailures)
   existing.count++
   const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
   existing.blockedUntil = now + backoff
@@ -175,6 +185,7 @@ export function handlePairMessage(ctx, ws, msg) {
   // Pairing failure — track for rate limiting
   const now = Date.now()
   const existing = authFailures.get(ip) || { count: 0, firstFailure: now, blockedUntil: 0 }
+  if (!authFailures.has(ip)) evictOldestIfFull(authFailures)
   existing.count++
   const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
   existing.blockedUntil = now + backoff

@@ -1,7 +1,7 @@
 import { describe, it, before, beforeEach, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { once, EventEmitter } from 'node:events'
-import { WsServer as _WsServer, MIN_PROTOCOL_VERSION, SERVER_PROTOCOL_VERSION } from '../src/ws-server.js'
+import { WsServer as _WsServer, MIN_PROTOCOL_VERSION, SERVER_PROTOCOL_VERSION, MAX_AUTH_FAILURE_ENTRIES } from '../src/ws-server.js'
 import { createMockSession, createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
 
@@ -1048,6 +1048,85 @@ describe('auth rate limiting', () => {
 
     assert.equal(server._authFailures.size, 1, 'Stale entry should be pruned')
     assert.ok(server._authFailures.has('5.6.7.8'), 'Fresh entry should remain')
+  })
+})
+
+describe('_authFailures Map size cap', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('exports MAX_AUTH_FAILURE_ENTRIES constant', () => {
+    assert.equal(typeof MAX_AUTH_FAILURE_ENTRIES, 'number')
+    assert.equal(MAX_AUTH_FAILURE_ENTRIES, 10_000)
+  })
+
+  it('evicts oldest entry when cap is reached', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Fill the map to the cap
+    const now = Date.now()
+    for (let i = 0; i < MAX_AUTH_FAILURE_ENTRIES; i++) {
+      server._authFailures.set(`10.0.${Math.floor(i / 256)}.${i % 256}`, {
+        count: 1,
+        firstFailure: now + i, // ascending time so insertion order = time order
+        blockedUntil: now + i + 1000,
+      })
+    }
+    assert.equal(server._authFailures.size, MAX_AUTH_FAILURE_ENTRIES)
+
+    // The very first IP inserted
+    const oldestIp = '10.0.0.0'
+    assert.ok(server._authFailures.has(oldestIp), 'oldest IP should exist before cap eviction')
+
+    // Now trigger one more auth failure via WebSocket to exceed the cap
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'wrong-token' })
+    await waitForMessage(messages, 'auth_fail', 2000)
+    ws.close()
+
+    // Map size should still be at the cap (not cap + 1)
+    assert.ok(server._authFailures.size <= MAX_AUTH_FAILURE_ENTRIES,
+      `Map size ${server._authFailures.size} should not exceed cap ${MAX_AUTH_FAILURE_ENTRIES}`)
+
+    // The oldest entry should have been evicted
+    assert.ok(!server._authFailures.has(oldestIp),
+      'oldest IP should have been evicted when cap was reached')
+  })
+
+  it('normal auth failure tracking still works under cap', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Should be well under cap
+    assert.equal(server._authFailures.size, 0)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'wrong-token' })
+    await waitForMessage(messages, 'auth_fail', 2000)
+    ws.close()
+
+    assert.equal(server._authFailures.size, 1, 'should track the failure')
+    const entry = server._authFailures.values().next().value
+    assert.equal(entry.count, 1)
   })
 })
 
