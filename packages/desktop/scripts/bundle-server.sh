@@ -12,13 +12,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SERVER_DIR="$REPO_ROOT/packages/server"
+DASHBOARD_DIR="$REPO_ROOT/packages/dashboard"
 STAGING="$REPO_ROOT/packages/desktop/src-tauri/server-bundle"
 
 echo "[bundle-server] Staging server to $STAGING"
 
 # Clean previous bundle
 rm -rf "$STAGING"
-mkdir -p "$STAGING/src/dashboard-next" "$STAGING/hooks"
+mkdir -p "$STAGING/src" "$STAGING/hooks"
 
 # package.json + lockfile for dependency installation.
 # Workspace deps (@chroxy/*) are stripped before install and copied manually after.
@@ -29,18 +30,18 @@ cp "$SERVER_DIR/package-lock.json" "$STAGING/package-lock.json"
 cp "$SERVER_DIR/src/"*.js "$STAGING/src/"
 
 # All JS subdirectories (cli/, tunnel/, utils/, handlers/, ws-file-ops/, etc.)
-# Exclude dashboard-next/ — handled separately below with only the built dist/.
 for subdir in "$SERVER_DIR/src"/*/; do
   dirname="$(basename "$subdir")"
-  [ "$dirname" = "dashboard-next" ] && continue
   cp -r "$subdir" "$STAGING/src/$dirname"
 done
 
-# Built dashboard (served over HTTP by ws-server.js)
-if [ -d "$SERVER_DIR/src/dashboard-next/dist" ]; then
-  cp -r "$SERVER_DIR/src/dashboard-next/dist" "$STAGING/src/dashboard-next/dist"
+# Built dashboard from @chroxy/dashboard workspace package.
+# Copied to src/dashboard-next/dist/ so http-routes.js __dirname-relative path resolves.
+if [ -d "$DASHBOARD_DIR/dist" ]; then
+  mkdir -p "$STAGING/src/dashboard-next"
+  cp -r "$DASHBOARD_DIR/dist" "$STAGING/src/dashboard-next/dist"
 else
-  echo "[bundle-server] WARNING: dashboard-next/dist not found — run 'npm run dashboard:build' first"
+  echo "[bundle-server] WARNING: packages/dashboard/dist not found — run 'npm run build' in packages/dashboard first"
 fi
 
 # hooks/ (permission-hook.sh, loaded by permission-hook.js)
