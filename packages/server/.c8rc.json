@@ -1,0 +1,14 @@
+{
+  "all": true,
+  "src": ["src/"],
+  "exclude": [
+    "src/cli.js",
+    "src/dashboard-next/**",
+    "src/test-client.js",
+    "tests/**",
+    "scripts/**",
+    "node_modules/**"
+  ],
+  "reporter": ["text-summary", "html"],
+  "report-dir": "coverage"
+}

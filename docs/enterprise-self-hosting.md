@@ -266,7 +266,7 @@ The server generates a random API token on `npx chroxy init`. For production:
 
 - **Cloudflare Tunnel**: TLS is handled by Cloudflare edge. Traffic between cloudflared and the server is over localhost — no TLS needed.
 - **Reverse Proxy**: Use a trusted certificate (Let's Encrypt, corporate CA). Never expose the WebSocket port without TLS.
-- **E2E Encryption**: Chroxy supports optional end-to-end encryption (X25519 key exchange + AES-GCM). This encrypts all messages between the app and server, even through the tunnel.
+- **E2E Encryption**: Chroxy supports optional end-to-end encryption (X25519 key exchange + XSalsa20-Poly1305 via tweetnacl secretbox). This encrypts all messages between the app and server, even through the tunnel.
 
 ### Network
 

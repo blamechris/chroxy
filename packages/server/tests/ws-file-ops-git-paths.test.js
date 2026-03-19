@@ -5,7 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
-import { createFileOps } from '../src/ws-file-ops.js'
+import { createFileOps } from '../src/ws-file-ops/index.js'
 
 const execFileAsync = promisify(execFileCb)
 

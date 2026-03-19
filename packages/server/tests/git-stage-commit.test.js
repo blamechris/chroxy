@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
-import { createFileOps } from '../src/ws-file-ops.js'
+import { createFileOps } from '../src/ws-file-ops/index.js'
 import { GIT } from '../src/git.js'
 
 describe('git stage handler', () => {
