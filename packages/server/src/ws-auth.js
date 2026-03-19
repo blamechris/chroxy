@@ -10,6 +10,18 @@ import { createLogger } from './logger.js'
 
 const log = createLogger('ws')
 
+/** Maximum number of IP entries tracked in the auth-failure rate-limit map.
+ *  When the cap is reached the oldest entry is evicted before inserting. */
+export const MAX_AUTH_FAILURE_ENTRIES = 10_000
+
+/** Evict the oldest entry from a Map if it has reached the size cap. */
+function evictOldestIfFull(map) {
+  if (map.size >= MAX_AUTH_FAILURE_ENTRIES) {
+    const oldestKey = map.keys().next().value
+    map.delete(oldestKey)
+  }
+}
+
 /**
  * Handle an auth message from an unauthenticated client.
  * Returns true if the message was consumed (caller should return).
@@ -82,6 +94,7 @@ export function handleAuthMessage(ctx, ws, msg) {
   // Auth failure — track for rate limiting
   const now = Date.now()
   const existing = authFailures.get(ip) || { count: 0, firstFailure: now, blockedUntil: 0 }
+  if (!authFailures.has(ip)) evictOldestIfFull(authFailures)
   existing.count++
   const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
   existing.blockedUntil = now + backoff
@@ -175,6 +188,7 @@ export function handlePairMessage(ctx, ws, msg) {
   // Pairing failure — track for rate limiting
   const now = Date.now()
   const existing = authFailures.get(ip) || { count: 0, firstFailure: now, blockedUntil: 0 }
+  if (!authFailures.has(ip)) evictOldestIfFull(authFailures)
   existing.count++
   const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
   existing.blockedUntil = now + backoff
