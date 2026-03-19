@@ -246,14 +246,6 @@ export function createHttpHandler(server) {
       return
     }
 
-    // Redirect legacy /dashboard-next URLs to /dashboard
-    if (req.method === 'GET' && /^\/dashboard-next(\/|$|\?)/.test(req.url || '')) {
-      const redirectUrl = req.url.replace('/dashboard-next', '/dashboard')
-      res.writeHead(301, { 'Location': redirectUrl, 'Cache-Control': 'no-store' })
-      res.end()
-      return
-    }
-
     // Dashboard (React app built by Vite)
     if (req.method === 'GET' && /^\/dashboard(\/|$|\?)/.test(req.url || '')) {
       const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
@@ -264,7 +256,11 @@ export function createHttpHandler(server) {
         'X-Content-Type-Options': 'nosniff',
       }
 
-      const distDir = join(__dirname, 'dashboard-next', 'dist')
+      const distDir = join(__dirname, '..', '..', 'dashboard', 'dist')
+      if (!existsSync(distDir) && !createHttpHandler._distMissWarned) {
+        createHttpHandler._distMissWarned = true
+        log.warn('Dashboard dist directory not found: %s — run "npm run dashboard:build"', distDir)
+      }
       const relPath = dashUrl.pathname.replace(/^\/dashboard\/?/, '') || 'index.html'
 
       // Serve static assets WITHOUT auth — hashed filenames from Vite build

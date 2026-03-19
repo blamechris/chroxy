@@ -2421,7 +2421,7 @@ describe('WsServer GET /connect redacts apiToken in no-auth mode (#742)', () => 
 describe('dashboard endpoint', () => {
   let server
   const __test_dirname = dirname(fileURLToPath(import.meta.url))
-  const distDir = join(__test_dirname, '..', 'src', 'dashboard-next', 'dist')
+  const distDir = join(__test_dirname, '..', '..', 'dashboard', 'dist')
   const createdPaths = []
 
   before(() => {
@@ -2624,19 +2624,6 @@ describe('dashboard endpoint', () => {
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
   })
 
-  it('/dashboard-next redirects to /dashboard', async () => {
-    server = new WsServer({
-      port: 0,
-      apiToken: 'tok-dn-redirect',
-      cliSession: createMockSession(),
-      authRequired: false,
-    })
-    const port = await startServerAndGetPort(server)
-
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard-next`, { redirect: 'manual' })
-    assert.equal(res.status, 301)
-    assert.equal(res.headers.get('location'), '/dashboard')
-  })
 })
 
 // ---------------------------------------------------------------------------
@@ -3875,7 +3862,7 @@ describe('subscribedSessionIds consistency (#1488)', () => {
 describe('cookie security flags (#1532)', () => {
   let server
   const __cookie_test_dirname = dirname(fileURLToPath(import.meta.url))
-  const cookieDistDir = join(__cookie_test_dirname, '..', 'src', 'dashboard-next', 'dist')
+  const cookieDistDir = join(__cookie_test_dirname, '..', '..', 'dashboard', 'dist')
   const createdCookiePaths = []
 
   before(() => {
