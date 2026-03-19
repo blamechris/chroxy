@@ -7,6 +7,7 @@ import { join } from 'path'
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
 import { CodexSession } from '../src/codex-session.js'
+import { waitFor } from './test-helpers.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -223,7 +224,7 @@ describe('CodexSession', () => {
       session.start()
       assert.equal(events.length, 0, 'ready must not fire synchronously')
 
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => events.length >= 1, { label: 'ready event' })
       assert.equal(events.length, 1)
       assert.ok(events[0].model, 'ready payload should include model')
     })
@@ -231,14 +232,14 @@ describe('CodexSession', () => {
     it('sets _processReady so isReady becomes true', async () => {
       const session = new CodexSession({ cwd: '/tmp' })
       session.start()
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => session.isReady, { label: 'isReady' })
       assert.equal(session.isReady, true)
     })
 
     it('isRunning remains false after start (not yet sending)', async () => {
       const session = new CodexSession({ cwd: '/tmp' })
       session.start()
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => session.isReady, { label: 'isReady' })
       assert.equal(session.isRunning, false)
     })
   })
@@ -247,7 +248,7 @@ describe('CodexSession', () => {
     it('resets isReady and isRunning', async () => {
       const session = new CodexSession({ cwd: '/tmp' })
       session.start()
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => session.isReady, { label: 'isReady' })
 
       session.destroy()
       assert.equal(session.isReady, false)
@@ -257,7 +258,7 @@ describe('CodexSession', () => {
     it('kills _process if one exists', async () => {
       const session = new CodexSession({ cwd: '/tmp' })
       session.start()
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => session.isReady, { label: 'isReady' })
 
       const mockProc = new EventEmitter()
       let killed = false
@@ -272,7 +273,7 @@ describe('CodexSession', () => {
     it('removes all listeners', async () => {
       const session = new CodexSession({ cwd: '/tmp' })
       session.start()
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => session.isReady, { label: 'isReady' })
       session.on('result', () => {})
 
       session.destroy()
@@ -423,7 +424,7 @@ describe('CodexSession', () => {
       collect('stream_start', 'stream_delta', 'stream_end', 'result', 'error')
 
       await session.sendMessage('hi')
-      await new Promise((r) => setTimeout(r, 200))
+      await waitFor(() => events.find(e => e.type === 'result'), { label: 'result event' })
 
       const types = events.map((e) => e.type)
       assert.ok(types.includes('stream_start'), 'expected stream_start')
@@ -448,7 +449,7 @@ describe('CodexSession', () => {
       session.on('result', (d) => results.push(d))
 
       await session.sendMessage('hi')
-      await new Promise((r) => setTimeout(r, 200))
+      await waitFor(() => results.length >= 1, { label: 'result event' })
 
       assert.equal(results.length, 1)
       assert.equal(results[0].usage.input_tokens, 100)
@@ -474,7 +475,7 @@ describe('CodexSession', () => {
       session.on('tool_start', (d) => toolStarts.push(d))
 
       await session.sendMessage('hi')
-      await new Promise((r) => setTimeout(r, 200))
+      await waitFor(() => toolStarts.length >= 1, { label: 'tool_start event' })
 
       assert.equal(toolStarts.length, 1)
       assert.equal(toolStarts[0].tool, 'read_file')
@@ -499,7 +500,7 @@ describe('CodexSession', () => {
       session.on('tool_result', (d) => toolResults.push(d))
 
       await session.sendMessage('hi')
-      await new Promise((r) => setTimeout(r, 200))
+      await waitFor(() => toolResults.length >= 1, { label: 'tool_result event' })
 
       assert.equal(toolResults.length, 1)
       assert.equal(toolResults[0].toolUseId, 'tc-1')
@@ -517,7 +518,7 @@ describe('CodexSession', () => {
       session.on('result', (d) => results.push(d))
 
       await session.sendMessage('hi')
-      await new Promise((r) => setTimeout(r, 200))
+      await waitFor(() => results.length >= 1, { label: 'result event' })
 
       assert.equal(results.length, 1)
       assert.equal(results[0].usage, null)
@@ -535,7 +536,7 @@ describe('CodexSession', () => {
       session.on('result', () => {})
 
       await session.sendMessage('hi')
-      await new Promise((r) => setTimeout(r, 200))
+      await waitFor(() => errors.length >= 1, { label: 'error event' })
 
       assert.equal(errors.length, 1)
       assert.match(errors[0].message, /code 1/)
@@ -554,7 +555,7 @@ describe('CodexSession', () => {
       await session.sendMessage('hi')
       assert.equal(session.isRunning, true)
 
-      await new Promise((r) => setTimeout(r, 200))
+      await waitFor(() => !session.isRunning, { label: 'isRunning cleared' })
       assert.equal(session.isRunning, false)
 
       cleanupShim()
@@ -573,7 +574,7 @@ describe('CodexSession', () => {
       collect('stream_start', 'stream_delta', 'stream_end')
 
       await session.sendMessage('hi')
-      await new Promise((r) => setTimeout(r, 200))
+      await waitFor(() => events.find(e => e.type === 'stream_end'), { label: 'stream_end event' })
 
       const start = events.find((e) => e.type === 'stream_start')
       const deltas = events.filter((e) => e.type === 'stream_delta')
@@ -601,10 +602,13 @@ describe('CodexSession', () => {
       const session = new ShimmedCodexSession({ cwd: '/tmp' }, shimPath)
       session._processReady = true
       const { events, collect } = makeCollector(session)
+      const results = []
+      session.on('result', (d) => results.push(d))
       collect('stream_start', 'stream_delta', 'error')
 
       await session.sendMessage('hi')
-      await new Promise((r) => setTimeout(r, 200))
+      // Wait for process to finish (result event confirms turn.completed was processed)
+      await waitFor(() => results.length >= 1, { label: 'result event' })
 
       const streamEvents = events.filter((e) => e.type === 'stream_start' || e.type === 'stream_delta')
       const errors = events.filter((e) => e.type === 'error')
@@ -619,7 +623,7 @@ describe('CodexSession', () => {
       const readyEvents = []
       session.on('ready', (d) => readyEvents.push(d))
       session.start()
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => readyEvents.length >= 1, { label: 'ready event' })
 
       assert.equal(readyEvents.length, 1)
       assert.equal(readyEvents[0].model, 'o3')
