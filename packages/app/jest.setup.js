@@ -1,6 +1,9 @@
 // Mock @react-native-async-storage/async-storage (native module not available in Jest)
+// Backing store is exported so jest.setup-after-env.js can clear it between tests.
+const _asyncStorageBackingStore = {};
+global.__asyncStorageBackingStore = _asyncStorageBackingStore;
 jest.mock('@react-native-async-storage/async-storage', () => {
-  const store = {};
+  const store = global.__asyncStorageBackingStore;
   return {
     __esModule: true,
     default: {

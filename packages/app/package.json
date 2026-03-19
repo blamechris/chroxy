@@ -21,6 +21,9 @@
     "setupFiles": [
       "./jest.setup.js"
     ],
+    "setupFilesAfterEnv": [
+      "./jest.setup-after-env.js"
+    ],
     "moduleNameMapper": {
       "^@/(.*)$": "<rootDir>/src/$1",
       "^@chroxy/protocol$": "<rootDir>/../protocol/dist/index.js"
