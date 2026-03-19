@@ -21,19 +21,6 @@ import { environmentHandlers } from './handlers/environment-handlers.js'
 
 const log = createLogger('ws')
 
-// Re-export shared constants and utilities for backward compatibility.
-// Canonical source is handler-utils.js — handler modules import from there directly.
-export {
-  PERMISSION_MODES,
-  ALLOWED_PERMISSION_MODE_IDS,
-  MAX_ATTACHMENT_COUNT,
-  MAX_IMAGE_SIZE,
-  MAX_DOCUMENT_SIZE,
-  ALLOWED_IMAGE_TYPES,
-  validateAttachments,
-  resolveFileRefAttachments,
-} from './handler-utils.js'
-
 // -- Handler registry --
 const handlerRegistry = new Map([
   ...Object.entries(inputHandlers),

@@ -23,7 +23,7 @@ describe('#1931 — CWD real path cache TTL', () => {
   })
 
   it('resolves symlinked session CWD to real path via browseFiles', async () => {
-    const { createFileOps } = await import('../src/ws-file-ops.js')
+    const { createFileOps } = await import('../src/ws-file-ops/index.js')
 
     const results = []
     const sendFn = (_ws, msg) => results.push(msg)
@@ -42,7 +42,7 @@ describe('#1931 — CWD real path cache TTL', () => {
   })
 
   it('returns cached CWD resolution when symlink target changes within TTL', async () => {
-    const { createFileOps } = await import('../src/ws-file-ops.js')
+    const { createFileOps } = await import('../src/ws-file-ops/index.js')
 
     const results = []
     const sendFn = (_ws, msg) => results.push(msg)
