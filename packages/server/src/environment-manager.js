@@ -101,7 +101,7 @@ export class EnvironmentManager extends EventEmitter {
     log.info(`Creating environment "${name}" (id: ${id}, image: ${resolvedImage})`)
 
     const containerId = await this._startContainer({
-      cwd, image: resolvedImage, memoryLimit: resolvedMemory,
+      envId: id, cwd, image: resolvedImage, memoryLimit: resolvedMemory,
       cpuLimit: resolvedCpu,
       containerEnv: dcConfig.containerEnv,
       forwardPorts: dcConfig.forwardPorts,
@@ -211,12 +211,11 @@ export class EnvironmentManager extends EventEmitter {
    * @returns {Promise<Object>} Snapshot metadata { id, name, image, createdAt }
    */
   async snapshot(envId, { name } = {}) {
-    const env = this._environments.get(envId)
-    if (!env) throw new Error(`Environment not found: ${envId}`)
-    if (env.status !== 'running') throw new Error(`Environment "${env.name}" is not running (status: ${env.status})`)
-
     const release = await this._acquireLock(envId)
     try {
+      const env = this._environments.get(envId)
+      if (!env) throw new Error(`Environment not found: ${envId}`)
+      if (env.status !== 'running') throw new Error(`Environment "${env.name}" is not running (status: ${env.status})`)
       const snapshotId = 'snap-' + randomBytes(8).toString('hex')
       const timestamp = Date.now()
       const imageTag = `chroxy-env:${envId}-${timestamp}`
@@ -257,29 +256,28 @@ export class EnvironmentManager extends EventEmitter {
    * @returns {Promise<Object>} Updated environment object
    */
   async restore(envId, snapshotId) {
-    const env = this._environments.get(envId)
-    if (!env) throw new Error(`Environment not found: ${envId}`)
-
-    const snapshots = env.snapshots || []
-    const snap = snapshots.find(s => s.id === snapshotId)
-    if (!snap) throw new Error(`Snapshot not found: ${snapshotId}`)
-
     const release = await this._acquireLock(envId)
     try {
+      const env = this._environments.get(envId)
+      if (!env) throw new Error(`Environment not found: ${envId}`)
+
+      const snapshots = env.snapshots || []
+      const snap = snapshots.find(s => s.id === snapshotId)
+      if (!snap) throw new Error(`Snapshot not found: ${snapshotId}`)
       log.info(`Restoring environment "${env.name}" from snapshot "${snap.name}"`)
 
       const oldContainerId = env.containerId
 
-      // Rename old container to avoid name conflict
+      // Rename old container so the new one can reuse the chroxy-env-{envId} name
       await this._renameContainer(oldContainerId, `chroxy-env-${envId}-old`)
 
       // Start new container from snapshot BEFORE removing old one
       const containerId = await this._startContainer({
+        envId,
         cwd: env.cwd,
         image: snap.image,
         memoryLimit: env.memoryLimit || DEFAULT_MEMORY_LIMIT,
         cpuLimit: env.cpuLimit || DEFAULT_CPU_LIMIT,
-        envId,
       })
 
       // Health check: verify the new container is running
@@ -317,11 +315,10 @@ export class EnvironmentManager extends EventEmitter {
    * @param {string} envId - Environment ID
    */
   async destroy(envId) {
-    const env = this._environments.get(envId)
-    if (!env) throw new Error(`Environment not found: ${envId}`)
-
     const release = await this._acquireLock(envId)
     try {
+      const env = this._environments.get(envId)
+      if (!env) throw new Error(`Environment not found: ${envId}`)
       log.info(`Destroying environment "${env.name}" (${envId})`)
 
       if (env.compose && env.composeProject) {
@@ -475,10 +472,11 @@ export class EnvironmentManager extends EventEmitter {
   // Docker operations (async wrappers around execFile)
   // ──────────────────────────────────────────────────────────────────────────
 
-  _startContainer({ cwd, image, memoryLimit, cpuLimit, containerEnv, forwardPorts, mounts }) {
+  _startContainer({ envId, cwd, image, memoryLimit, cpuLimit, containerEnv, forwardPorts, mounts }) {
     return new Promise((resolve, reject) => {
       const runArgs = [
         'run', '-d', '--init',
+        '--name', `chroxy-env-${envId}`,
         '--memory', memoryLimit,
         '--cpus', cpuLimit,
         '--pids-limit', '512',

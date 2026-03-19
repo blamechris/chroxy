@@ -214,6 +214,20 @@ describe('EnvironmentManager.create()', () => {
     assert.ok(runCall.args.includes('512'))
   })
 
+  it('sets --name chroxy-env-{envId} on docker run', async () => {
+    const mockExec = createMockExecFile({
+      results: { run: 'named-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'name-test', cwd: '/tmp' })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const nameIdx = runCall.args.indexOf('--name')
+    assert.ok(nameIdx >= 0, 'should include --name flag')
+    assert.equal(runCall.args[nameIdx + 1], `chroxy-env-${env.id}`)
+  })
+
   it('does NOT use --rm flag (persistent containers)', async () => {
     const mockExec = createMockExecFile({
       results: { run: 'persist-ctr\n', exec: '/usr/local\n' },
