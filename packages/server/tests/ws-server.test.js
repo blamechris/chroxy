@@ -392,8 +392,8 @@ describe('WsServer drain behavior (multi-session mode)', () => {
     send(ws, { type: 'list_sessions' })
     send(ws, { type: 'set_model', model: 'claude-sonnet-4-20250514' })
 
-    // Wait and check no session_list was returned
-    await new Promise(r => setTimeout(r, 200))
+    // Wait long enough for any message processing, then verify silence
+    await new Promise(r => setTimeout(r, 500))
 
     const sessionList = messages.find(m => m.type === 'session_list')
     assert.equal(sessionList, undefined, 'list_sessions should be silently blocked during drain')

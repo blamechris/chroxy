@@ -12,6 +12,7 @@ jobs:
   server-tests:
     name: Server Tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: packages/server
@@ -38,6 +39,7 @@ jobs:
   server-lint:
     name: Server Lint
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     defaults:
       run:
         working-directory: packages/server
@@ -72,6 +74,7 @@ jobs:
   dashboard-tests:
     name: Dashboard Tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: packages/server
@@ -106,6 +109,7 @@ jobs:
   dashboard-typecheck:
     name: Dashboard Type Check
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     defaults:
       run:
         working-directory: packages/server
@@ -132,6 +136,7 @@ jobs:
   store-core-typecheck:
     name: Store Core Type Check
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     defaults:
       run:
         working-directory: packages/store-core
@@ -154,6 +159,7 @@ jobs:
   app-tests:
     name: App Tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     defaults:
       run:
         working-directory: packages/app
@@ -180,6 +186,7 @@ jobs:
   app-typecheck:
     name: App Type Check
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     defaults:
       run:
         working-directory: packages/app
@@ -206,6 +213,7 @@ jobs:
   protocol-tests:
     name: Protocol Tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     defaults:
       run:
         working-directory: packages/protocol
@@ -231,6 +239,7 @@ jobs:
   desktop-tests:
     name: Desktop Rust Tests
     runs-on: macos-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: packages/desktop/src-tauri
