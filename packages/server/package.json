@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node src/cli.js start",
     "dev": "node --watch src/cli.js start",
-    "test": "node --test --test-force-exit './tests/**/*.test.js'",
+    "test": "c8 node --test --test-force-exit './tests/**/*.test.js'",
+    "test:coverage": "c8 --reporter=text --reporter=html node --test --test-force-exit './tests/**/*.test.js'",
     "test:integration": "node --test ./tests/*.integration.test.js",
     "lint": "eslint src/",
     "dashboard:dev": "vite --config src/dashboard-next/vite.config.ts src/dashboard-next",
@@ -53,6 +54,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.4",
+    "c8": "^11.0.0",
     "eslint": "^9.39.3",
     "jsdom": "^28.1.0",
     "playwright": "^1.58.2",

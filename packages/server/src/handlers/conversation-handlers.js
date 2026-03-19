@@ -7,13 +7,16 @@
 import { scanConversations } from '../conversation-scanner.js'
 import { searchConversations } from '../conversation-search.js'
 import { validateCwdWithinHome, broadcastFocusChanged, resolveSession } from '../handler-utils.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('ws')
 
 async function handleListConversations(ws, client, msg, ctx) {
   try {
     const conversations = await scanConversations()
     ctx.send(ws, { type: 'conversations_list', conversations })
   } catch (err) {
-    console.warn(`[ws] Failed to scan conversations: ${err.message}`)
+    log.warn(`Failed to scan conversations: ${err.message}`)
     ctx.send(ws, { type: 'conversations_list', conversations: [] })
   }
 }
@@ -24,7 +27,7 @@ async function handleSearchConversations(ws, client, msg, ctx) {
     const results = await searchConversations(query, { maxResults })
     ctx.send(ws, { type: 'search_results', query, results })
   } catch (err) {
-    console.warn(`[ws] Failed to search conversations: ${err.message}`)
+    log.warn(`Failed to search conversations: ${err.message}`)
     ctx.send(ws, { type: 'search_results', query, results: [] })
   }
 }
@@ -115,7 +118,7 @@ async function handleRequestSessionContext(ws, client, msg, ctx) {
       ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
     }
   } catch (err) {
-    console.warn(`[ws] Failed to read session context: ${err.message}`)
+    log.warn(`Failed to read session context: ${err.message}`)
     ctx.send(ws, { type: 'session_error', message: `Failed to read session context: ${err.message}` })
   }
 }

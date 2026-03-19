@@ -1,4 +1,7 @@
 import { EventEmitter } from 'events'
+import { createLogger } from './logger.js'
+
+const _fallbackLog = createLogger('permission-manager')
 
 // Tools that acceptEdits mode auto-approves
 const ACCEPT_EDITS_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
@@ -361,7 +364,7 @@ export class PermissionManager extends EventEmitter {
     if (this._log.info) {
       this._log.info(msg)
     } else {
-      console.log(msg)
+      _fallbackLog.info(msg)
     }
   }
 
@@ -370,7 +373,7 @@ export class PermissionManager extends EventEmitter {
     if (this._log.warn) {
       this._log.warn(msg)
     } else {
-      console.warn(msg)
+      _fallbackLog.warn(msg)
     }
   }
 }

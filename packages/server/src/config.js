@@ -13,6 +13,9 @@ import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
 import { parseDuration } from './duration.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('config')
 
 /**
  * Known configuration keys and their expected types.
@@ -124,15 +127,14 @@ export function validateConfig(config, verbose = false) {
 
   // Log warnings
   if (warnings.length > 0) {
-    console.warn('\n⚠ Configuration warnings:')
+    log.warn('Configuration warnings:')
     for (const warning of warnings) {
-      console.warn(`  - ${warning}`)
+      log.warn(`  - ${warning}`)
     }
-    console.warn('')
   }
 
   if (verbose && warnings.length === 0) {
-    console.log('[config] ✓ Configuration validated successfully')
+    log.info('Configuration validated successfully')
   }
 
   return {
@@ -200,14 +202,13 @@ export function mergeConfig({ fileConfig = {}, cliOverrides = {}, defaults = {},
 
   // Log sources in verbose mode (after mapping so provider is included)
   if (verbose) {
-    console.log('\n[config] Configuration sources:')
+    log.info('Configuration sources:')
     for (const [key, source] of Object.entries(sources)) {
       const valueStr = SENSITIVE_KEYS.includes(key) && merged[key]
         ? `${String(merged[key]).slice(0, 8)}...`
         : JSON.stringify(merged[key])
-      console.log(`  ${key.padEnd(16)} = ${valueStr.padEnd(24)} (${source})`)
+      log.info(`  ${key.padEnd(16)} = ${valueStr.padEnd(24)} (${source})`)
     }
-    console.log('')
   }
 
   return merged

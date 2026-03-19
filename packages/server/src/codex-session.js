@@ -2,6 +2,9 @@ import { spawn } from 'child_process'
 import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('codex')
 
 /**
  * Manages a Codex CLI session using `codex exec --json`.
@@ -170,7 +173,7 @@ export class CodexSession extends BaseSession {
       if (this._destroying) return
       const msg = chunk.toString().trim()
       if (msg && (msg.includes('ERROR') || msg.includes('WARN'))) {
-        console.error(`[codex] stderr: ${msg}`)
+        log.error(`stderr: ${msg}`)
       }
     })
 

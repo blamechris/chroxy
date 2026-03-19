@@ -1,6 +1,9 @@
 import { readdir, readFile, stat, realpath } from 'fs/promises'
 import { homedir } from 'os'
 import { join, resolve, normalize, relative } from 'path'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('ws')
 
 /**
  * Directory browsing, file listing, slash commands, and agent listing.
@@ -394,7 +397,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
               break
             }
           } catch (err) {
-            console.error(`[ws] Failed to read command file ${join(dir, entry.name)}:`, err.message)
+            log.error(`Failed to read command file ${join(dir, entry.name)}: ${err.message}`)
           }
 
           commands.push({ name, description, source })
@@ -442,7 +445,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
               break
             }
           } catch (err) {
-            console.error(`[ws] Failed to read agent file ${join(dir, entry.name)}:`, err.message)
+            log.error(`Failed to read agent file ${join(dir, entry.name)}: ${err.message}`)
           }
 
           agents.push({ name, description, source })

@@ -2,6 +2,9 @@ import { spawn } from 'child_process'
 import { BaseSession } from './base-session.js'
 import { createInterface } from 'readline'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('gemini')
 
 /**
  * Manages a Gemini CLI session using `gemini -p --output-format stream-json`.
@@ -129,7 +132,7 @@ export class GeminiSession extends BaseSession {
       if (this._destroying) return
       const msg = chunk.toString().trim()
       if (msg && !msg.includes('DeprecationWarning')) {
-        console.error(`[gemini] stderr: ${msg}`)
+        log.error(`stderr: ${msg}`)
       }
     })
 
