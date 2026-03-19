@@ -241,14 +241,33 @@ export class EnvironmentManager extends EventEmitter {
 
     log.info(`Restoring environment "${env.name}" from snapshot "${snap.name}"`)
 
-    await this._removeContainer(env.containerId)
+    const oldContainerId = env.containerId
 
+    // Start new container from snapshot BEFORE removing old one
     const containerId = await this._startContainer({
       cwd: env.cwd,
       image: snap.image,
       memoryLimit: env.memoryLimit || DEFAULT_MEMORY_LIMIT,
       cpuLimit: env.cpuLimit || DEFAULT_CPU_LIMIT,
     })
+
+    // Health check: verify the new container is running
+    let healthy = false
+    try {
+      healthy = await this._inspectContainer(containerId)
+    } catch (err) {
+      log.warn(`Restore health check inspect failed for container ${containerId.slice(0, 12)}: ${err.message}`)
+    }
+
+    if (!healthy) {
+      // New container failed — clean it up and preserve the old one
+      log.warn(`Restore health check failed for new container ${containerId.slice(0, 12)}, rolling back`)
+      await this._removeContainer(containerId)
+      throw new Error(`Restored container health check failed for environment "${env.name}"`)
+    }
+
+    // New container is healthy — remove the old one
+    await this._removeContainer(oldContainerId)
 
     env.containerId = containerId
     env.status = 'running'
@@ -673,6 +692,7 @@ export class EnvironmentManager extends EventEmitter {
         'compose', '-p', project, 'ps', '--format', 'json',
       ], { encoding: 'utf-8', timeout: 10_000 }, (err, stdout) => {
         if (err) {
+          log.warn(`Failed to list compose services for project "${project}": ${err.message}`)
           resolve([])
           return
         }
@@ -687,7 +707,8 @@ export class EnvironmentManager extends EventEmitter {
             }
           })
           resolve(services)
-        } catch {
+        } catch (parseErr) {
+          log.warn(`Failed to parse compose services for project "${project}": ${parseErr.message}`)
           resolve([])
         }
       })
