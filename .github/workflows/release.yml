@@ -58,12 +58,12 @@ jobs:
         working-directory: packages/app
 
       - name: Type check dashboard
-        run: npm run dashboard:typecheck
-        working-directory: packages/server
+        run: npm run typecheck
+        working-directory: packages/dashboard
 
       - name: Test dashboard
-        run: npm run dashboard:test
-        working-directory: packages/server
+        run: npm test
+        working-directory: packages/dashboard
 
   docker:
     name: Docker Image
