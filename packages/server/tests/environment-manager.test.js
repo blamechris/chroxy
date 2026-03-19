@@ -1330,7 +1330,7 @@ describe('EnvironmentManager.restore() error recovery', () => {
   })
 })
 
-describe('EnvironmentManager silent error logging', () => {
+describe('EnvironmentManager._composeServices() graceful degradation', () => {
   let tmpDir, statePath
 
   beforeEach(() => {
@@ -1342,31 +1342,19 @@ describe('EnvironmentManager silent error logging', () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it('_composeServices logs warning when docker compose ps fails', async () => {
-    const warnings = []
+  it('returns empty array when docker compose ps fails', async () => {
     const mockExec = createMockExecFile({
       errors: { compose: new Error('docker compose not found') },
     })
 
     const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
-
-    // Capture log.warn by monkey-patching
-    const { createLogger } = await import('../src/logger.js')
-    const origWarn = createLogger('environment-manager').warn
-    // Access internal logger — we need to intercept calls
-    const origLog = manager._log || null
-
-    // Intercept by wrapping _composeServices to capture behavior
-    // Instead, call _composeServices directly and verify it returns []
-    // but we can verify it logs by checking the return + ensuring no throw
     const services = await manager._composeServices('test-project')
     assert.deepEqual(services, [], 'should return empty array on failure')
   })
 
-  it('_composeServices logs warning when JSON parse fails', async () => {
+  it('returns empty array when compose ps returns invalid JSON', async () => {
     function mockExec(cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
-      // Return invalid JSON from compose ps
       cb(null, 'not-valid-json\n', '')
     }
     mockExec.calls = []

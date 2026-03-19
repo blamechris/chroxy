@@ -255,8 +255,8 @@ export class EnvironmentManager extends EventEmitter {
     let healthy = false
     try {
       healthy = await this._inspectContainer(containerId)
-    } catch {
-      // inspect failed — treat as unhealthy
+    } catch (err) {
+      log.warn(`Restore health check inspect failed for container ${containerId.slice(0, 12)}: ${err.message}`)
     }
 
     if (!healthy) {
