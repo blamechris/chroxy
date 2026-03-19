@@ -100,12 +100,16 @@ export class EnvironmentManager extends EventEmitter {
 
     log.info(`Creating environment "${name}" (id: ${id}, image: ${resolvedImage})`)
 
+    // Validate devcontainer mounts and env before passing to Docker
+    const validatedMounts = this._validateMounts(dcConfig.mounts, cwd)
+    const validatedEnv = this._sanitizeContainerEnv(dcConfig.containerEnv)
+
     const containerId = await this._startContainer({
       envId: id, cwd, image: resolvedImage, memoryLimit: resolvedMemory,
       cpuLimit: resolvedCpu,
-      containerEnv: dcConfig.containerEnv,
+      containerEnv: validatedEnv,
       forwardPorts: dcConfig.forwardPorts,
-      mounts: dcConfig.mounts,
+      mounts: validatedMounts,
     })
 
     let containerCliPath
@@ -702,6 +706,93 @@ export class EnvironmentManager extends EventEmitter {
     if (Array.isArray(raw.mounts)) config.mounts = raw.mounts.filter(m => typeof m === 'string')
 
     return config
+  }
+
+  /**
+   * Validate mount source paths. Only mounts whose source is inside the
+   * project directory (cwd) are allowed. Mounts outside cwd or targeting
+   * sensitive paths (~/.ssh, ~/.aws, /etc, etc.) are rejected and logged.
+   *
+   * Supports both short-form (`source:target`) and long-form
+   * (`source=...,target=...,type=bind`) mount strings.
+   *
+   * @param {string[]|undefined} mounts - Raw mount strings from devcontainer.json
+   * @param {string} cwd - Project directory (allowlist root)
+   * @returns {string[]} Filtered array of safe mounts
+   */
+  _validateMounts(mounts, cwd) {
+    if (!Array.isArray(mounts) || mounts.length === 0) return undefined
+
+    const resolvedCwd = cwd.endsWith('/') ? cwd : cwd + '/'
+    const home = homedir()
+
+    const allowed = []
+    for (const mount of mounts) {
+      const source = this._extractMountSource(mount)
+      if (!source) {
+        log.warn(`devcontainer mount rejected (unparseable): ${mount}`)
+        continue
+      }
+
+      // Expand ~ to home directory for comparison
+      const expandedSource = source.startsWith('~/')
+        ? join(home, source.slice(2))
+        : source.startsWith('~')
+          ? home
+          : source
+
+      // Source must be an absolute path inside the project directory
+      if (!expandedSource.startsWith(resolvedCwd) && expandedSource !== cwd) {
+        log.warn(`devcontainer mount rejected (outside project dir): ${source}`)
+        continue
+      }
+
+      allowed.push(mount)
+    }
+
+    return allowed.length > 0 ? allowed : undefined
+  }
+
+  /**
+   * Extract the source path from a mount string.
+   * Handles both `source:target[:opts]` and `source=path,target=path,type=bind`.
+   */
+  _extractMountSource(mount) {
+    // Long-form: source=...,target=...,type=bind
+    const sourceMatch = mount.match(/(?:^|,)source=([^,]+)/)
+    if (sourceMatch) return sourceMatch[1]
+
+    // Short-form: source:target[:opts]
+    const parts = mount.split(':')
+    if (parts.length >= 2) return parts[0]
+
+    return null
+  }
+
+  /**
+   * Sanitize containerEnv keys. Only keys matching [A-Za-z_][A-Za-z0-9_]*
+   * are allowed. Invalid keys are rejected and logged.
+   *
+   * @param {Object|undefined} containerEnv - Raw env vars from devcontainer.json
+   * @returns {Object|undefined} Filtered env object with only valid keys
+   */
+  _sanitizeContainerEnv(containerEnv) {
+    if (!containerEnv || typeof containerEnv !== 'object') return undefined
+
+    const VALID_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+    const sanitized = {}
+    let hasKeys = false
+
+    for (const [key, value] of Object.entries(containerEnv)) {
+      if (!VALID_ENV_KEY_RE.test(key)) {
+        log.warn(`devcontainer env key rejected (invalid characters): ${key}`)
+        continue
+      }
+      sanitized[key] = value
+      hasKeys = true
+    }
+
+    return hasKeys ? sanitized : undefined
   }
 
   /**
