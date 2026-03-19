@@ -53,12 +53,11 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | ToolResult | `src/tool-result.js` | Tool result processing and formatting |
 | TunnelCheck | `src/tunnel-check.js` | Tunnel health verification (DNS propagation) |
 | TunnelEvents | `src/tunnel-events.js` | Tunnel event wiring helpers |
-| TunnelManager | `src/tunnel.js` | Backward-compat shim re-exporting CloudflareTunnelAdapter |
 | TunnelRegistry | `src/tunnel/registry.js` | Tunnel adapter registry (`registerTunnel`/`getTunnel`/`parseTunnelArg`) |
 | WebTaskManager | `src/web-task-manager.js` | Claude Code Web cloud task management |
 | WsBroadcaster | `src/ws-broadcaster.js` | Message broadcast to session and global scopes |
 | WsClientManager | `src/ws-client-manager.js` | Client connection lifecycle management |
-| WsFileOps | `src/ws-file-ops.js` | File browsing/reading WS message handlers |
+| WsFileOps | `src/ws-file-ops/index.js` | File browsing/reading WS message handlers |
 | WsForwarding | `src/ws-forwarding.js` | Session event → WS broadcast wiring |
 | WsMessageHandlers | `src/ws-message-handlers.js` | WS message handler dispatch |
 | WsPermissions | `src/ws-permissions.js` | Permission request/response WS message handlers |
@@ -394,7 +393,6 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `supervisor.js` | Supervisor: tunnel owner + child auto-restart |
 | `token-manager.js` | API token rotation + expiry management |
 | `tool-result.js` | Tool result processing and formatting |
-| `tunnel.js` | Backward-compat shim (re-exports CloudflareTunnelAdapter) |
 | `tunnel-check.js` | Tunnel health verification (DNS propagation) |
 | `tunnel-events.js` | Tunnel event wiring helpers |
 | `tunnel/base.js` | BaseTunnelAdapter — shared recovery logic |
@@ -405,7 +403,11 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `ws-broadcaster.js` | Message broadcast to session and global scopes |
 | `ws-client-manager.js` | Client connection lifecycle management |
 | `ws-client-sender.js` | Message send/encrypt logic per client |
-| `ws-file-ops.js` | File browsing/reading WS message handlers |
+| `ws-file-ops/index.js` | File browsing/reading WS message handlers (entry point) |
+| `ws-file-ops/browser.js` | File/directory browsing handlers |
+| `ws-file-ops/reader.js` | File content reading handlers |
+| `ws-file-ops/git.js` | Git operation handlers (status, diff, stage, commit) |
+| `ws-file-ops/common.js` | Shared utilities for file operations |
 | `ws-forwarding.js` | Session event → WS broadcast wiring |
 | `ws-message-handlers.js` | WS message handler dispatch |
 | `ws-permissions.js` | Permission request/response WS handlers |
