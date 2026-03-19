@@ -29,7 +29,7 @@ const sidebarSrc = fs.readFileSync(
 
 // Server-side files
 const schemasSrc = fs.readFileSync(
-  path.resolve(__dirname, '../../../ws-schemas.js'),
+  path.resolve(__dirname, '../../../..', 'packages/server/src/ws-schemas.js'),
   'utf-8',
 )
 
@@ -91,7 +91,7 @@ describe('Provider picker in session creation (#1366)', () => {
 
   test('list_providers handler exists in settings-handlers', () => {
     const settingsHandlersSrc = fs.readFileSync(
-      path.resolve(__dirname, '../../../../src/handlers/settings-handlers.js'),
+      path.resolve(__dirname, '../../../..', 'packages/server/src/handlers/settings-handlers.js'),
       'utf-8'
     )
     expect(settingsHandlersSrc).toMatch(/list_providers/)

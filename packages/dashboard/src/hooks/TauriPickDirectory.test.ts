@@ -6,7 +6,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const libSrc = fs.readFileSync(
-  path.resolve(__dirname, '../../../../../', 'desktop/src-tauri/src/lib.rs'),
+  path.resolve(__dirname, '../../../..', 'packages/desktop/src-tauri/src/lib.rs'),
   'utf-8',
 )
 
