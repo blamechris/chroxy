@@ -33,8 +33,28 @@ export class EnvironmentManager extends EventEmitter {
     super()
     this._statePath = statePath || DEFAULT_STATE_PATH
     this._environments = new Map()
+    // Per-environment mutex: Map<envId, Promise> — serializes operations
+    this._locks = new Map()
     // Injected for testing — falls back to real execFile
     this._execFile = _execFile || execFile
+  }
+
+  /**
+   * Acquire a per-environment mutex. Returns a release function.
+   * All operations on the same envId serialize through this lock.
+   * Operations on different envIds run in parallel.
+   */
+  async _acquireLock(envId) {
+    while (this._locks.has(envId)) {
+      await this._locks.get(envId)
+    }
+    let release
+    const lock = new Promise(resolve => { release = resolve })
+    this._locks.set(envId, lock)
+    return () => {
+      this._locks.delete(envId)
+      release()
+    }
   }
 
   /**
@@ -195,30 +215,35 @@ export class EnvironmentManager extends EventEmitter {
     if (!env) throw new Error(`Environment not found: ${envId}`)
     if (env.status !== 'running') throw new Error(`Environment "${env.name}" is not running (status: ${env.status})`)
 
-    const snapshotId = 'snap-' + randomBytes(8).toString('hex')
-    const timestamp = Date.now()
-    const imageTag = `chroxy-env:${envId}-${timestamp}`
+    const release = await this._acquireLock(envId)
+    try {
+      const snapshotId = 'snap-' + randomBytes(8).toString('hex')
+      const timestamp = Date.now()
+      const imageTag = `chroxy-env:${envId}-${timestamp}`
 
-    log.info(`Creating snapshot "${name || snapshotId}" for environment "${env.name}"`)
+      log.info(`Creating snapshot "${name || snapshotId}" for environment "${env.name}"`)
 
-    await this._commitContainer(env.containerId, imageTag)
+      await this._commitContainer(env.containerId, imageTag)
 
-    const snap = {
-      id: snapshotId,
-      name: name || snapshotId,
-      image: imageTag,
-      createdAt: new Date().toISOString(),
+      const snap = {
+        id: snapshotId,
+        name: name || snapshotId,
+        image: imageTag,
+        createdAt: new Date().toISOString(),
+      }
+
+      if (!Array.isArray(env.snapshots)) {
+        env.snapshots = []
+      }
+      env.snapshots.push(snap)
+
+      this._persist()
+      this.emit('environment_snapshot', { envId, snapshot: snap })
+      log.info(`Snapshot "${snap.name}" created (image: ${imageTag})`)
+      return snap
+    } finally {
+      release()
     }
-
-    if (!Array.isArray(env.snapshots)) {
-      env.snapshots = []
-    }
-    env.snapshots.push(snap)
-
-    this._persist()
-    this.emit('environment_snapshot', { envId, snapshot: snap })
-    log.info(`Snapshot "${snap.name}" created (image: ${imageTag})`)
-    return snap
   }
 
   /**
@@ -239,43 +264,52 @@ export class EnvironmentManager extends EventEmitter {
     const snap = snapshots.find(s => s.id === snapshotId)
     if (!snap) throw new Error(`Snapshot not found: ${snapshotId}`)
 
-    log.info(`Restoring environment "${env.name}" from snapshot "${snap.name}"`)
-
-    const oldContainerId = env.containerId
-
-    // Start new container from snapshot BEFORE removing old one
-    const containerId = await this._startContainer({
-      cwd: env.cwd,
-      image: snap.image,
-      memoryLimit: env.memoryLimit || DEFAULT_MEMORY_LIMIT,
-      cpuLimit: env.cpuLimit || DEFAULT_CPU_LIMIT,
-    })
-
-    // Health check: verify the new container is running
-    let healthy = false
+    const release = await this._acquireLock(envId)
     try {
-      healthy = await this._inspectContainer(containerId)
-    } catch (err) {
-      log.warn(`Restore health check inspect failed for container ${containerId.slice(0, 12)}: ${err.message}`)
+      log.info(`Restoring environment "${env.name}" from snapshot "${snap.name}"`)
+
+      const oldContainerId = env.containerId
+
+      // Rename old container to avoid name conflict
+      await this._renameContainer(oldContainerId, `chroxy-env-${envId}-old`)
+
+      // Start new container from snapshot BEFORE removing old one
+      const containerId = await this._startContainer({
+        cwd: env.cwd,
+        image: snap.image,
+        memoryLimit: env.memoryLimit || DEFAULT_MEMORY_LIMIT,
+        cpuLimit: env.cpuLimit || DEFAULT_CPU_LIMIT,
+        envId,
+      })
+
+      // Health check: verify the new container is running
+      let healthy = false
+      try {
+        healthy = await this._inspectContainer(containerId)
+      } catch (err) {
+        log.warn(`Restore health check inspect failed for container ${containerId.slice(0, 12)}: ${err.message}`)
+      }
+
+      if (!healthy) {
+        // New container failed — clean it up and preserve the old one
+        log.warn(`Restore health check failed for new container ${containerId.slice(0, 12)}, rolling back`)
+        await this._removeContainer(containerId)
+        throw new Error(`Restored container health check failed for environment "${env.name}"`)
+      }
+
+      // New container is healthy — remove the old one
+      await this._removeContainer(oldContainerId)
+
+      env.containerId = containerId
+      env.status = 'running'
+
+      this._persist()
+      this.emit('environment_restored', { envId, snapshotId, containerId })
+      log.info(`Environment "${env.name}" restored (container: ${containerId.slice(0, 12)})`)
+      return env
+    } finally {
+      release()
     }
-
-    if (!healthy) {
-      // New container failed — clean it up and preserve the old one
-      log.warn(`Restore health check failed for new container ${containerId.slice(0, 12)}, rolling back`)
-      await this._removeContainer(containerId)
-      throw new Error(`Restored container health check failed for environment "${env.name}"`)
-    }
-
-    // New container is healthy — remove the old one
-    await this._removeContainer(oldContainerId)
-
-    env.containerId = containerId
-    env.status = 'running'
-
-    this._persist()
-    this.emit('environment_restored', { envId, snapshotId, containerId })
-    log.info(`Environment "${env.name}" restored (container: ${containerId.slice(0, 12)})`)
-    return env
   }
 
   /**
@@ -286,25 +320,30 @@ export class EnvironmentManager extends EventEmitter {
     const env = this._environments.get(envId)
     if (!env) throw new Error(`Environment not found: ${envId}`)
 
-    log.info(`Destroying environment "${env.name}" (${envId})`)
+    const release = await this._acquireLock(envId)
+    try {
+      log.info(`Destroying environment "${env.name}" (${envId})`)
 
-    if (env.compose && env.composeProject) {
-      await this._composeDown(env.compose, env.composeProject, env.cwd)
-    } else if (env.containerId && env.status === 'running') {
-      await this._removeContainer(env.containerId)
-    }
-
-    // Clean up snapshot images
-    if (Array.isArray(env.snapshots)) {
-      for (const snap of env.snapshots) {
-        await this._removeImage(snap.image)
+      if (env.compose && env.composeProject) {
+        await this._composeDown(env.compose, env.composeProject, env.cwd)
+      } else if (env.containerId && env.status === 'running') {
+        await this._removeContainer(env.containerId)
       }
-    }
 
-    this._environments.delete(envId)
-    this._persist()
-    this.emit('environment_destroyed', { id: envId, name: env.name })
-    log.info(`Environment "${env.name}" destroyed`)
+      // Clean up snapshot images
+      if (Array.isArray(env.snapshots)) {
+        for (const snap of env.snapshots) {
+          await this._removeImage(snap.image)
+        }
+      }
+
+      this._environments.delete(envId)
+      this._persist()
+      this.emit('environment_destroyed', { id: envId, name: env.name })
+      log.info(`Environment "${env.name}" destroyed`)
+    } finally {
+      release()
+    }
   }
 
   /**
@@ -400,6 +439,36 @@ export class EnvironmentManager extends EventEmitter {
 
     this._persist()
     this.emit('environments_reconnected', this.list())
+  }
+
+  /**
+   * Reconcile running containers against the registry.
+   * Enumerates all `chroxy-env-*` containers and stops any that are not
+   * tracked in the environment registry. Best-effort — failures are logged
+   * but do not throw.
+   */
+  async reconcile() {
+    let containerIds
+    try {
+      containerIds = await this._listChroxyContainers()
+    } catch (err) {
+      log.warn(`Reconcile: failed to list containers: ${err.message}`)
+      return
+    }
+
+    const knownIds = new Set()
+    for (const env of this._environments.values()) {
+      if (env.containerId) knownIds.add(env.containerId)
+    }
+
+    const orphans = containerIds.filter(id => !knownIds.has(id))
+    if (orphans.length === 0) return
+
+    log.info(`Reconcile: found ${orphans.length} orphaned container(s), removing`)
+    for (const id of orphans) {
+      log.info(`Reconcile: removing orphaned container ${id.slice(0, 12)}`)
+      await this._removeContainer(id)
+    }
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -517,6 +586,15 @@ export class EnvironmentManager extends EventEmitter {
     })
   }
 
+  _renameContainer(containerId, newName) {
+    return new Promise((resolve) => {
+      this._execFile('docker', ['rename', containerId, newName], { encoding: 'utf-8', timeout: 10_000 }, (err) => {
+        if (err) log.warn(`Failed to rename container ${containerId.slice(0, 12)}: ${err.message}`)
+        resolve()
+      })
+    })
+  }
+
   _removeContainer(containerId) {
     return new Promise((resolve) => {
       this._execFile('docker', ['rm', '-f', containerId], { stdio: 'ignore' }, (err) => {
@@ -545,6 +623,25 @@ export class EnvironmentManager extends EventEmitter {
           return
         }
         resolve(stdout.trim() === 'true')
+      })
+    })
+  }
+
+  /**
+   * List all running chroxy-env-* container IDs.
+   * Used by reconcile() to detect orphaned containers.
+   */
+  _listChroxyContainers() {
+    return new Promise((resolve, reject) => {
+      this._execFile('docker', [
+        'ps', '-q', '--filter', 'name=chroxy-env',
+      ], { encoding: 'utf-8', timeout: 10_000 }, (err, stdout) => {
+        if (err) {
+          reject(new Error(err.message))
+          return
+        }
+        const ids = stdout.trim().split('\n').filter(Boolean)
+        resolve(ids)
       })
     })
   }

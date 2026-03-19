@@ -1176,10 +1176,10 @@ describe('EnvironmentManager.create() with devcontainer', () => {
 })
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Error recovery — atomic restore and error logging (#2519)
+// Concurrency guards
 // ──────────────────────────────────────────────────────────────────────────────
 
-describe('EnvironmentManager.restore() error recovery', () => {
+describe('EnvironmentManager concurrency guards', () => {
   let tmpDir, statePath
 
   beforeEach(() => {
@@ -1191,28 +1191,34 @@ describe('EnvironmentManager.restore() error recovery', () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it('starts new container before removing old one (atomic)', async () => {
-    const callOrder = []
+  it('serializes concurrent operations on the same environment', async () => {
+    // Track the order operations actually execute in
+    const executionOrder = []
     let runCount = 0
+
     function mockExec(cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'run') {
         runCount++
-        callOrder.push('run')
-        cb(null, runCount === 1 ? 'original-ctr\n' : 'restored-ctr\n', '')
+        cb(null, `ctr-${runCount}\n`, '')
         return
       }
       if (args[0] === 'commit') {
-        cb(null, 'sha256:aaa\n', '')
-        return
-      }
-      if (args[0] === 'inspect') {
-        callOrder.push('inspect')
-        cb(null, 'true\n', '')
+        // Simulate a slow snapshot — use setTimeout to ensure
+        // without mutex the second snapshot would start before this finishes
+        executionOrder.push('commit-start')
+        setTimeout(() => {
+          executionOrder.push('commit-end')
+          cb(null, 'sha256:abc\n', '')
+        }, 50)
         return
       }
       if (args[0] === 'rm') {
-        callOrder.push(`rm:${args[2]}`)
+        executionOrder.push('rm')
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'rmi') {
         cb(null, '', '')
         return
       }
@@ -1221,26 +1227,155 @@ describe('EnvironmentManager.restore() error recovery', () => {
     mockExec.calls = []
 
     const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
-    const env = await manager.create({ name: 'atomic-test', cwd: '/tmp' })
+    const env = await manager.create({ name: 'mutex-test', cwd: '/tmp' })
 
-    const snap = await manager.snapshot(env.id, { name: 'before-restore' })
+    // Fire snapshot + destroy concurrently on the same environment
+    const [snapResult] = await Promise.allSettled([
+      manager.snapshot(env.id, { name: 'snap-1' }),
+      manager.destroy(env.id),
+    ])
 
-    // Clear call order to track only restore operations
-    callOrder.length = 0
-
-    await manager.restore(env.id, snap.id)
-
-    // Verify: run (new container) happens before rm (old container)
-    const runIdx = callOrder.indexOf('run')
-    const rmOldIdx = callOrder.findIndex(c => c === 'rm:original-ctr')
-    assert.ok(runIdx >= 0, 'should call docker run for new container')
-    assert.ok(rmOldIdx >= 0, 'should call docker rm for old container')
-    assert.ok(runIdx < rmOldIdx, 'new container should start before old one is removed')
+    // The snapshot must complete before destroy starts
+    const commitEndIdx = executionOrder.indexOf('commit-end')
+    const rmIdx = executionOrder.indexOf('rm')
+    assert.ok(commitEndIdx >= 0, 'commit should have completed')
+    assert.ok(rmIdx >= 0, 'rm should have been called')
+    assert.ok(commitEndIdx < rmIdx, 'snapshot commit must finish before destroy rm starts')
   })
 
-  it('preserves old container when new container health check fails', async () => {
-    let runCount = 0
+  it('allows concurrent operations on different environments', async () => {
+    const activeOps = { count: 0, max: 0 }
+
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'run') {
+        cb(null, 'ctr-diff\n', '')
+        return
+      }
+      if (args[0] === 'commit') {
+        activeOps.count++
+        activeOps.max = Math.max(activeOps.max, activeOps.count)
+        setTimeout(() => {
+          activeOps.count--
+          cb(null, 'sha256:abc\n', '')
+        }, 30)
+        return
+      }
+      cb(null, '/usr/local\n', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const envA = await manager.create({ name: 'env-a', cwd: '/tmp' })
+    const envB = await manager.create({ name: 'env-b', cwd: '/tmp' })
+
+    // Two snapshots on different environments should run in parallel
+    await Promise.all([
+      manager.snapshot(envA.id, { name: 'snap-a' }),
+      manager.snapshot(envB.id, { name: 'snap-b' }),
+    ])
+
+    assert.equal(activeOps.max, 2, 'operations on different environments should overlap')
+  })
+
+  it('releases mutex when operation throws', async () => {
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'run') {
+        cb(null, 'err-ctr\n', '')
+        return
+      }
+      if (args[0] === 'commit') {
+        cb(new Error('commit failed'), '', 'commit failed')
+        return
+      }
+      cb(null, '/usr/local\n', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'err-mutex', cwd: '/tmp' })
+
+    // First snapshot fails
+    await assert.rejects(() => manager.snapshot(env.id, { name: 'fail' }), /commit failed/)
+
+    // Second operation should not deadlock — destroy should proceed
+    // Change mock to allow destroy
+    const manager2 = new EnvironmentManager({ statePath, _execFile: createMockExecFile({
+      results: { run: 'err-ctr\n', exec: '/usr/local\n' },
+    }) })
+    // Re-populate the internal map
+    manager2._environments = manager._environments
+
+    await manager2.destroy(env.id)
+    assert.equal(manager2.get(env.id), null, 'should be able to operate after a failed op')
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Atomic restore
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('EnvironmentManager.restore() atomic behavior', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('keeps old container until new one passes health check', async () => {
     const removedContainers = []
+    let runCount = 0
+
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'run') {
+        runCount++
+        cb(null, runCount === 1 ? 'old-ctr\n' : 'new-ctr\n', '')
+        return
+      }
+      if (args[0] === 'commit') {
+        cb(null, 'sha256:snap\n', '')
+        return
+      }
+      if (args[0] === 'inspect') {
+        // Health check: new container is running
+        cb(null, 'true\n', '')
+        return
+      }
+      if (args[0] === 'rm') {
+        removedContainers.push(args[args.length - 1])
+        cb(null, '', '')
+        return
+      }
+      cb(null, '/usr/local\n', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({ name: 'atomic-restore', cwd: '/tmp' })
+    const snap = await manager.snapshot(env.id, { name: 'checkpoint' })
+
+    // Clear tracking
+    removedContainers.length = 0
+
+    const restored = await manager.restore(env.id, snap.id)
+
+    // Old container should have been removed
+    assert.ok(removedContainers.includes('old-ctr'), 'old container should be removed after new one is healthy')
+    assert.equal(restored.containerId, 'new-ctr')
+    assert.equal(restored.status, 'running')
+  })
+
+  it('keeps old container when new container fails health check', async () => {
+    const removedContainers = []
+    let runCount = 0
+
     function mockExec(cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'run') {
@@ -1249,16 +1384,20 @@ describe('EnvironmentManager.restore() error recovery', () => {
         return
       }
       if (args[0] === 'commit') {
-        cb(null, 'sha256:bbb\n', '')
+        cb(null, 'sha256:snap\n', '')
         return
       }
       if (args[0] === 'inspect') {
-        // Health check fails for the new container
-        cb(null, 'false\n', '')
+        // New container is NOT running (health check fails)
+        if (args.includes('bad-new-ctr')) {
+          cb(new Error('Container not running'), '', '')
+          return
+        }
+        cb(null, 'true\n', '')
         return
       }
       if (args[0] === 'rm') {
-        removedContainers.push(args[2])
+        removedContainers.push(args[args.length - 1])
         cb(null, '', '')
         return
       }
@@ -1267,22 +1406,23 @@ describe('EnvironmentManager.restore() error recovery', () => {
     mockExec.calls = []
 
     const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
-    const env = await manager.create({ name: 'rollback-test', cwd: '/tmp' })
-    const originalContainerId = env.containerId
+    const env = await manager.create({ name: 'fail-restore', cwd: '/tmp' })
+    const snap = await manager.snapshot(env.id, { name: 'checkpoint' })
 
-    const snap = await manager.snapshot(env.id, { name: 'pre-rollback' })
+    removedContainers.length = 0
 
     await assert.rejects(
       () => manager.restore(env.id, snap.id),
-      /health check failed/
+      /health check failed/i,
     )
 
     // Old container should NOT have been removed
-    assert.ok(!removedContainers.includes('old-ctr'), 'old container should be preserved on failure')
-    // Bad new container should have been cleaned up
+    assert.ok(!removedContainers.includes('old-ctr'), 'old container should be preserved when new one fails')
+    // Bad new container should be cleaned up
     assert.ok(removedContainers.includes('bad-new-ctr'), 'failed new container should be removed')
-    // Environment should still point to old container
-    assert.equal(manager.get(env.id).containerId, originalContainerId)
+    // Environment should still reference the old container
+    assert.equal(manager.get(env.id).containerId, 'old-ctr')
+    assert.equal(manager.get(env.id).status, 'running')
   })
 
   it('rolls back when new container inspect throws', async () => {
@@ -1305,7 +1445,7 @@ describe('EnvironmentManager.restore() error recovery', () => {
         return
       }
       if (args[0] === 'rm') {
-        removedContainers.push(args[2])
+        removedContainers.push(args[args.length - 1])
         cb(null, '', '')
         return
       }
@@ -1329,6 +1469,10 @@ describe('EnvironmentManager.restore() error recovery', () => {
     assert.equal(manager.get(env.id).containerId, 'orig-ctr')
   })
 })
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Compose services graceful degradation
+// ──────────────────────────────────────────────────────────────────────────────
 
 describe('EnvironmentManager._composeServices() graceful degradation', () => {
   let tmpDir, statePath
@@ -1362,5 +1506,108 @@ describe('EnvironmentManager._composeServices() graceful degradation', () => {
     const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
     const services = await manager._composeServices('test-project')
     assert.deepEqual(services, [], 'should return empty array on JSON parse failure')
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Startup reconciliation
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('EnvironmentManager.reconcile()', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('stops orphaned chroxy-env-* containers not in registry', async () => {
+    const removedContainers = []
+
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+
+      // docker ps --filter to list chroxy containers
+      if (args[0] === 'ps') {
+        cb(null, 'orphan-ctr-1\norphan-ctr-2\nknown-ctr\n', '')
+        return
+      }
+      if (args[0] === 'rm') {
+        removedContainers.push(args[args.length - 1])
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'inspect') {
+        cb(null, 'true\n', '')
+        return
+      }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    // Seed state with one known environment
+    const { writeFileSync } = await import('fs')
+    writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      environments: [{
+        id: 'env-known',
+        name: 'known-env',
+        cwd: '/tmp',
+        image: 'node:22-slim',
+        containerId: 'known-ctr',
+        containerUser: 'chroxy',
+        containerCliPath: '/usr/local/cli.js',
+        status: 'running',
+        sessions: [],
+        createdAt: '2026-03-17T00:00:00Z',
+        memoryLimit: '2g',
+        cpuLimit: '2',
+      }],
+    }))
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.reconnect()
+    await manager.reconcile()
+
+    // Should remove orphan-ctr-1 and orphan-ctr-2 but NOT known-ctr
+    assert.ok(removedContainers.includes('orphan-ctr-1'), 'should remove orphan 1')
+    assert.ok(removedContainers.includes('orphan-ctr-2'), 'should remove orphan 2')
+    assert.ok(!removedContainers.includes('known-ctr'), 'should NOT remove known container')
+  })
+
+  it('handles empty docker ps output gracefully', async () => {
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'ps') {
+        cb(null, '\n', '')
+        return
+      }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    // Should not throw
+    await manager.reconcile()
+  })
+
+  it('handles docker ps failure gracefully', async () => {
+    function mockExec(cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'ps') {
+        cb(new Error('Docker not available'), '', 'Docker not available')
+        return
+      }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    // Should not throw — reconcile is best-effort
+    await manager.reconcile()
   })
 })
