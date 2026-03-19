@@ -61,7 +61,7 @@ const log = createLogger('ws')
  *   - When bumping, update PROTOCOL_CHANGELOG below and coordinate with
  *     CLIENT_PROTOCOL_VERSION in:
  *       * packages/app/src/store/message-handler.ts
- *       * packages/server/src/dashboard-next/src/store/message-handler.ts
+ *       * packages/dashboard/src/store/message-handler.ts
  *
  *   - If a bump would break old clients, consider whether MIN_PROTOCOL_VERSION
  *     should also increase (rejecting clients that cannot speak the new protocol).
