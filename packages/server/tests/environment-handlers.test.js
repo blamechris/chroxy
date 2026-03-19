@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { environmentHandlers } from '../src/handlers/environment-handlers.js'
 import { waitFor } from './test-helpers.js'
