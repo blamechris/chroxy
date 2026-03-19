@@ -2,7 +2,7 @@ import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { existsSync, readFileSync, mkdirSync, renameSync, unlinkSync } from 'fs'
-import { dirname, join } from 'path'
+import { dirname, join, resolve } from 'path'
 import { homedir } from 'os'
 import { isWindows, writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
@@ -17,6 +17,7 @@ const DEFAULT_CONTAINER_USER = 'chroxy'
 const DEFAULT_CONTAINER_CLI_PATH = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'
 
 const VALID_USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/
+const VALID_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /**
  * Manages persistent container environments that outlive individual sessions.
@@ -741,8 +742,11 @@ export class EnvironmentManager extends EventEmitter {
           ? home
           : source
 
+      // Normalize to resolve any .. segments (path traversal defense)
+      const normalizedSource = resolve(expandedSource)
+
       // Source must be an absolute path inside the project directory
-      if (!expandedSource.startsWith(resolvedCwd) && expandedSource !== cwd) {
+      if (!normalizedSource.startsWith(resolvedCwd) && normalizedSource !== cwd) {
         log.warn(`devcontainer mount rejected (outside project dir): ${source}`)
         continue
       }
@@ -779,8 +783,7 @@ export class EnvironmentManager extends EventEmitter {
   _sanitizeContainerEnv(containerEnv) {
     if (!containerEnv || typeof containerEnv !== 'object') return undefined
 
-    const VALID_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
-    const sanitized = {}
+    const sanitized = Object.create(null)
     let hasKeys = false
 
     for (const [key, value] of Object.entries(containerEnv)) {

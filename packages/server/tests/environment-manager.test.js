@@ -1377,6 +1377,37 @@ describe('DevContainer mount validation', () => {
     assert.ok(!volumeArgs.some(v => v.includes('/etc/shadow')), 'rejected mount should not appear in docker args')
   })
 
+  it('rejects mounts using .. path traversal to escape project directory', async () => {
+    const { writeFileSync: writeFile } = await import('fs')
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      mounts: [
+        `${projectDir}/subdir/../../../../etc/passwd:/container/passwd`,
+        `source=${projectDir}/sub/../../../etc/shadow,target=/container/shadow,type=bind`,
+        `${projectDir}/subdir:/container/valid`,
+      ],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'mount-traversal-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'mount-traversal',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const volumeArgs = []
+    for (let i = 0; i < runCall.args.length - 1; i++) {
+      if (runCall.args[i] === '-v') volumeArgs.push(runCall.args[i + 1])
+    }
+    assert.ok(!volumeArgs.some(v => v.includes('/etc/passwd')), 'should reject .. traversal to /etc/passwd')
+    assert.ok(!volumeArgs.some(v => v.includes('/etc/shadow')), 'should reject .. traversal in --mount format')
+    assert.ok(volumeArgs.some(v => v.includes(projectDir + '/subdir')), 'should still include valid mount')
+  })
+
   it('handles docker-style --mount source=,target= format', async () => {
     const { writeFileSync: writeFile } = await import('fs')
     writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
