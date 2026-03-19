@@ -14,8 +14,8 @@ import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const cssPath = resolve(__dirname, '..', 'src', 'dashboard-next', 'src', 'theme', 'theme.css')
-const outPath = resolve(__dirname, '..', 'src', 'dashboard-next', 'src', 'theme', 'tokens.ts')
+const cssPath = resolve(__dirname, '..', 'src', 'theme', 'theme.css')
+const outPath = resolve(__dirname, '..', 'src', 'theme', 'tokens.ts')
 
 // Parse CSS custom properties from :root block
 const css = readFileSync(cssPath, 'utf-8')
