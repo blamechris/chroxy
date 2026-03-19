@@ -18,7 +18,7 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | ContentBlocks | `src/content-blocks.js` | Content block builder for structured output |
 | ConversationScanner | `src/conversation-scanner.js` | Conversation history file scanning (parallel) |
 | CostBudgetManager | `src/cost-budget-manager.js` | Per-session cost budget tracking and enforcement |
-| Crypto | `src/crypto.js` | ECDH key exchange + AES-GCM encryption |
+| Crypto | `src/crypto.js` | X25519 key exchange + XSalsa20-Poly1305 encryption (tweetnacl secretbox) |
 | DevPreview | `src/dev-preview.js` | Dev server preview tunnel management |
 | DiffParser | `src/diff-parser.js` | Unified diff parser for git output |
 | Doctor | `src/doctor.js` | Diagnostic command for troubleshooting |
@@ -361,7 +361,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `content-blocks.js` | Content block builder for structured output |
 | `conversation-scanner.js` | Conversation history file scanning (parallel) |
 | `cost-budget-manager.js` | Per-session cost budget tracking |
-| `crypto.js` | ECDH key exchange + AES-GCM encryption |
+| `crypto.js` | X25519 key exchange + XSalsa20-Poly1305 encryption (tweetnacl secretbox) |
 | `dev-preview.js` | Dev server preview tunnel management |
 | `diff-parser.js` | Unified diff parser for git output |
 | `docker-sdk-session.js` | Containerized SDK executor (extends SdkSession) |
@@ -517,7 +517,7 @@ The web dashboard is a React + Vite SPA served by the Node.js server. It shares 
 | `src/store/server-registry.ts` | Multi-server connection registry |
 | `src/store/commands.ts` | Command palette command registry |
 | `src/store/mru.ts` | Most-recently-used tracking |
-| `src/store/crypto.ts` | Client-side encryption (ECDH/AES-GCM) |
+| `src/store/crypto.ts` | Client-side encryption (X25519/XSalsa20-Poly1305) |
 | `src/store/token-crypto.ts` | Token encryption for secure storage |
 | `src/store/types.ts` | TypeScript type definitions |
 | `src/store/utils.ts` | Store utility functions |
