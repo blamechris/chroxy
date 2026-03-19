@@ -139,10 +139,10 @@ export class PushManager {
         this.tokens.add(token)
         this._persistToDisk()
       }
-      log.info(`Registered token: ${token.slice(0, 30)}...`)
+      log.info(`Registered push credential ${token.slice(0, 30)}...`)
       return true
     }
-    log.warn(`Rejected invalid token: ${String(token).slice(0, 40)}`)
+    log.warn(`Rejected invalid push credential: ${String(token).slice(0, 40)}`)
     return false
   }
 
@@ -163,10 +163,10 @@ export class PushManager {
         this._liveActivityTokens.add(token)
         this._persistToDisk()
       }
-      log.info(`Registered Live Activity token: ${token.slice(0, 30)}...`)
+      log.info(`Registered Live Activity credential ${token.slice(0, 30)}...`)
       return true
     }
-    log.warn(`Rejected invalid Live Activity token: ${String(token).slice(0, 40)}`)
+    log.warn(`Rejected invalid Live Activity credential: ${String(token).slice(0, 40)}`)
     return false
   }
 
@@ -272,7 +272,7 @@ export class PushManager {
           const ticket = result.data[i]
           if (ticket.status === 'error') {
             const token = messages[i].to
-            log.warn(`Removing invalid token: ${token.slice(0, 30)}... (${ticket.message})`)
+            log.warn(`Removing invalid push credential ${token.slice(0, 30)}... (${ticket.message})`)
             tokenSet.delete(token)
             pruned = true
           }

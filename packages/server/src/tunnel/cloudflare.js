@@ -121,7 +121,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`))
         } else {
           void this._handleUnexpectedExit(code, signal).catch((err) => {
-            log.error(`Error while handling unexpected cloudflared exit: ${err}`)
+            log.error(`Error while handling unexpected cloudflared exit: ${err.stack || err.message || err}`)
           })
         }
         this.process = null
@@ -188,7 +188,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`))
         } else {
           void this._handleUnexpectedExit(code, signal).catch((err) => {
-            log.error(`Error while handling unexpected cloudflared exit: ${err}`)
+            log.error(`Error while handling unexpected cloudflared exit: ${err.stack || err.message || err}`)
           })
         }
         this.process = null
