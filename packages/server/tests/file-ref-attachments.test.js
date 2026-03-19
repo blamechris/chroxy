@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { validateAttachments, resolveFileRefAttachments } from '../src/ws-message-handlers.js'
+import { validateAttachments, resolveFileRefAttachments } from '../src/handler-utils.js'
 
 // Create a temp dir for test files
 let testDir

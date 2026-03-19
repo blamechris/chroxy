@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, readFile, mkdir, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createFileOps } from '../src/ws-file-ops.js'
+import { createFileOps } from '../src/ws-file-ops/index.js'
 
 describe('writeFile handler', () => {
   let tmpDir

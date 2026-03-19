@@ -1,6 +1,7 @@
 node_modules/
 .expo/
 dist/
+coverage/
 web-build/
 *.jks
 *.p8

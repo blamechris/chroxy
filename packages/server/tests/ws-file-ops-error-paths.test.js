@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, realpathSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createFileOps } from '../src/ws-file-ops.js'
+import { createFileOps } from '../src/ws-file-ops/index.js'
 
 describe('ws-file-ops error paths', () => {
   let tmp

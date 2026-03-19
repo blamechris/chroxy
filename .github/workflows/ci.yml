@@ -33,8 +33,16 @@ jobs:
         run: npm run build
         working-directory: packages/protocol
 
-      - name: Run tests
+      - name: Run tests with coverage
         run: npm test
+
+      - name: Upload server coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-coverage
+          path: packages/server/coverage/
+          retention-days: 14
 
   server-lint:
     name: Server Lint
@@ -180,8 +188,19 @@ jobs:
         run: npm run build
         working-directory: packages/protocol
 
-      - name: Run tests
+      - name: Generate xterm bundle
+        run: npm run bundle-xterm
+
+      - name: Run tests with coverage
         run: npm test
+
+      - name: Upload app coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-coverage
+          path: packages/app/coverage/
+          retention-days: 14
 
   app-typecheck:
     name: App Type Check
