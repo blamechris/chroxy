@@ -660,11 +660,9 @@ describe('handler-utils constants', () => {
 describe('broadcastFocusChanged', () => {
   it('calls ctx.broadcast with correct message shape', () => {
     let capturedMsg = null
-    let capturedFilter = null
     const ctx = {
-      broadcast(msg, filter) {
+      broadcast(msg) {
         capturedMsg = msg
-        capturedFilter = filter
       }
     }
     const client = { id: 'client-1' }
@@ -679,7 +677,7 @@ describe('broadcastFocusChanged', () => {
   it('filter excludes the sending client', () => {
     let capturedFilter = null
     const ctx = {
-      broadcast(msg, filter) { capturedFilter = filter }
+      broadcast(_msg, filter) { capturedFilter = filter }
     }
     broadcastFocusChanged({ id: 'client-A' }, 'sess', ctx)
 

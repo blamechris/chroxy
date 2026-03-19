@@ -1200,7 +1200,7 @@ describe('DevContainer mount validation', () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
     statePath = join(tmpDir, 'environments.json')
     projectDir = mkdtempSync(join(tmpdir(), 'chroxy-dc-'))
-    const { mkdirSync: mkdir, writeFileSync: writeFile } = await import('fs')
+    const { mkdirSync: mkdir } = await import('fs')
     mkdir(join(projectDir, '.devcontainer'), { recursive: true })
     mkdir(join(projectDir, 'subdir'), { recursive: true })
   })
@@ -1221,7 +1221,7 @@ describe('DevContainer mount validation', () => {
     })
 
     const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
-    const env = await manager.create({
+    await manager.create({
       name: 'mount-allowed',
       cwd: projectDir,
       devcontainer: true,
@@ -1456,7 +1456,7 @@ describe('EnvironmentManager concurrency guards', () => {
     const executionOrder = []
     let runCount = 0
 
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'run') {
         runCount++
@@ -1490,7 +1490,7 @@ describe('EnvironmentManager concurrency guards', () => {
     const env = await manager.create({ name: 'mutex-test', cwd: '/tmp' })
 
     // Fire snapshot + destroy concurrently on the same environment
-    const [snapResult] = await Promise.allSettled([
+    const [/* snapResult */] = await Promise.allSettled([
       manager.snapshot(env.id, { name: 'snap-1' }),
       manager.destroy(env.id),
     ])
@@ -1506,7 +1506,7 @@ describe('EnvironmentManager concurrency guards', () => {
   it('allows concurrent operations on different environments', async () => {
     const activeOps = { count: 0, max: 0 }
 
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'run') {
         cb(null, 'ctr-diff\n', '')
@@ -1539,7 +1539,7 @@ describe('EnvironmentManager concurrency guards', () => {
   })
 
   it('releases mutex when operation throws', async () => {
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'run') {
         cb(null, 'err-ctr\n', '')
@@ -1592,7 +1592,7 @@ describe('EnvironmentManager.restore() atomic behavior', () => {
     const removedContainers = []
     let runCount = 0
 
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'run') {
         runCount++
@@ -1636,7 +1636,7 @@ describe('EnvironmentManager.restore() atomic behavior', () => {
     const removedContainers = []
     let runCount = 0
 
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'run') {
         runCount++
@@ -1688,7 +1688,7 @@ describe('EnvironmentManager.restore() atomic behavior', () => {
   it('rolls back when new container inspect throws', async () => {
     let runCount = 0
     const removedContainers = []
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'run') {
         runCount++
@@ -1757,7 +1757,7 @@ describe('EnvironmentManager._composeServices() graceful degradation', () => {
   })
 
   it('returns empty array when compose ps returns invalid JSON', async () => {
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, _args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       cb(null, 'not-valid-json\n', '')
     }
@@ -1788,7 +1788,7 @@ describe('EnvironmentManager.reconcile()', () => {
   it('stops orphaned chroxy-env-* containers not in registry', async () => {
     const removedContainers = []
 
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
 
       // docker ps --filter to list chroxy containers
@@ -1840,7 +1840,7 @@ describe('EnvironmentManager.reconcile()', () => {
   })
 
   it('handles empty docker ps output gracefully', async () => {
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'ps') {
         cb(null, '\n', '')
@@ -1856,7 +1856,7 @@ describe('EnvironmentManager.reconcile()', () => {
   })
 
   it('handles docker ps failure gracefully', async () => {
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'ps') {
         cb(new Error('Docker not available'), '', 'Docker not available')
