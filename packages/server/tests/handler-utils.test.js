@@ -107,11 +107,12 @@ describe('validateAttachments — path traversal prevention', () => {
     // The test documents this known platform behavior.
     if (process.platform === 'win32') {
       assert.ok(err, 'backslash traversal should be caught on Windows')
+    } else {
+      assert.strictEqual(err, null, 'backslash is a valid filename char on Unix — not traversal')
     }
-    // On macOS/Linux, this is a literal filename — no traversal concern
   })
 
-  it('rejects URL-encoded traversal at validation layer', () => {
+  it('treats URL-encoded %2e%2e as literal filename (not traversal)', () => {
     // validateAttachments checks the raw path string. %2e%2e/%2e%2e/ would need
     // to be decoded to be dangerous. Since split('/').includes('..') checks
     // literal '..', encoded variants pass validation here. However, resolve()
@@ -545,19 +546,13 @@ describe('validateCwdWithinHome', () => {
   })
 
   it('accepts subdirectory of home', () => {
-    const err = validateCwdWithinHome(testDir)
-    // testDir is in /tmp which may or may not be within home
-    // Use a directory we know is within home
-    const homeSubdir = join(homedir(), '.config')
+    // Create a temp dir within home so we have a guaranteed valid subdirectory
+    const homeSubdir = mkdtempSync(join(homedir(), '.chroxy-subdir-test-'))
     try {
-      realpathSync(homeSubdir)
-      const result = validateCwdWithinHome(homeSubdir)
-      // .config might not exist, so just ensure it doesn't say "outside home"
-      if (result) {
-        assert.match(result, /does not exist|Not a directory/)
-      }
-    } catch {
-      // .config doesn't exist — that's fine, skip this assertion
+      const err = validateCwdWithinHome(homeSubdir)
+      assert.strictEqual(err, null, `expected null for home subdirectory, got: ${err}`)
+    } finally {
+      rmSync(homeSubdir, { recursive: true, force: true })
     }
   })
 
