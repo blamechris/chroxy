@@ -7,9 +7,12 @@
 import { createKeyPair, deriveSharedKey } from './crypto.js'
 import { AuthSchema, KeyExchangeSchema, PairSchema } from './ws-schemas.js'
 import { createLogger } from './logger.js'
-import { MAX_AUTH_FAILURE_ENTRIES } from './ws-server.js'
 
 const log = createLogger('ws')
+
+/** Maximum number of IP entries tracked in the auth-failure rate-limit map.
+ *  When the cap is reached the oldest entry is evicted before inserting. */
+export const MAX_AUTH_FAILURE_ENTRIES = 10_000
 
 /** Evict the oldest entry from a Map if it has reached the size cap. */
 function evictOldestIfFull(map) {

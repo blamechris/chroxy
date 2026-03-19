@@ -72,10 +72,6 @@ export const SERVER_PROTOCOL_VERSION = 1
 /** Minimum protocol version this server can speak */
 export const MIN_PROTOCOL_VERSION = 1
 
-/** Maximum number of IP entries tracked in the auth-failure rate-limit map.
- *  When the cap is reached the oldest entry is evicted before inserting. */
-export const MAX_AUTH_FAILURE_ENTRIES = 10_000
-
 /**
  * PROTOCOL_CHANGELOG
  *

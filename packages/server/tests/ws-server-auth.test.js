@@ -1,7 +1,8 @@
 import { describe, it, before, beforeEach, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { once, EventEmitter } from 'node:events'
-import { WsServer as _WsServer, MIN_PROTOCOL_VERSION, SERVER_PROTOCOL_VERSION, MAX_AUTH_FAILURE_ENTRIES } from '../src/ws-server.js'
+import { WsServer as _WsServer, MIN_PROTOCOL_VERSION, SERVER_PROTOCOL_VERSION } from '../src/ws-server.js'
+import { MAX_AUTH_FAILURE_ENTRIES } from '../src/ws-auth.js'
 import { createMockSession, createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
 
