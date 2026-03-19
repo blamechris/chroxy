@@ -111,7 +111,6 @@ import {
   setStore,
   setConnectionContext,
   clearDeltaBuffers,
-  resetAllHandlerState,
   stopHeartbeat,
 } from '../src/store/message-handler';
 import type { ConnectionState } from '../src/store/types';
