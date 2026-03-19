@@ -8,7 +8,8 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "test": "jest",
+    "test": "jest --coverage",
+    "test:coverage": "jest --coverage --coverageReporters=text --coverageReporters=html",
     "bundle-xterm": "node scripts/bundle-xterm.js",
     "postinstall": "node scripts/bundle-xterm.js"
   },
@@ -23,7 +24,17 @@
     "moduleNameMapper": {
       "^@/(.*)$": "<rootDir>/src/$1",
       "^@chroxy/protocol$": "<rootDir>/../protocol/dist/index.js"
-    }
+    },
+    "collectCoverageFrom": [
+      "src/**/*.{ts,tsx}",
+      "!src/**/*.d.ts",
+      "!src/**/xterm-bundle.generated.ts"
+    ],
+    "coverageDirectory": "coverage",
+    "coverageReporters": [
+      "text-summary",
+      "html"
+    ]
   },
   "dependencies": {
     "@chroxy/protocol": "*",

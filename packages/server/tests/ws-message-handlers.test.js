@@ -1,13 +1,15 @@
 import { describe, it, mock, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  validateAttachments,
   handleSessionMessage,
   registerMessageHandler,
+} from '../src/ws-message-handlers.js'
+import {
+  validateAttachments,
   PERMISSION_MODES,
   ALLOWED_PERMISSION_MODE_IDS,
   MAX_ATTACHMENT_COUNT,
-} from '../src/ws-message-handlers.js'
+} from '../src/handler-utils.js'
 import { createMockSession } from './test-helpers.js'
 
 /**

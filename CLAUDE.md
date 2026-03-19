@@ -173,7 +173,7 @@ When `gh pr merge` fails with "not mergeable" or "base branch policy prohibits t
 Server streams through `ws-server.js` → Cloudflare tunnel → mobile app / desktop dashboard:
 
 - **Server:** `server-cli.js` → `sdk-session.js` (Agent SDK) or `cli-session.js` (legacy `claude -p`). Provider selected via `providers.js` registry.
-- **Shared:** `ws-server.js` (WebSocket + auth + E2E encryption), `tunnel.js` (Cloudflare), `session-manager.js`, `providers.js`, `config.js`, `push.js`
+- **Shared:** `ws-server.js` (WebSocket + auth + E2E encryption), `tunnel/` (Cloudflare), `session-manager.js`, `providers.js`, `config.js`, `push.js`
 - **Desktop:** Tauri tray app wrapping the web dashboard served by the server
 - **App:** ConnectScreen → SessionScreen (ChatView + TerminalView), Zustand store (`connection.ts`)
 
