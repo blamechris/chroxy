@@ -8,6 +8,7 @@
  * live in @chroxy/store-core and are re-exported here for convenience.
  */
 import type { SessionState } from './types';
+import { createEmptyBaseSessionState } from '@chroxy/store-core';
 
 export {
   stripAnsi,
@@ -19,25 +20,7 @@ export {
 /** Create a fresh empty SessionState */
 export function createEmptySessionState(): SessionState {
   return {
-    messages: [],
-    streamingMessageId: null,
-    claudeReady: false,
-    activeModel: null,
-    permissionMode: null,
-    contextUsage: null,
-    lastResultCost: null,
-    lastResultDuration: null,
-    sessionCost: null,
-    isIdle: true,
-    health: 'healthy',
-    activeAgents: [],
-    isPlanPending: false,
-    planAllowedPrompts: [],
-    primaryClientId: null,
-    conversationId: null,
-    sessionContext: null,
-    mcpServers: [],
-    devPreviews: [],
+    ...createEmptyBaseSessionState(),
     activityState: { state: 'idle', startedAt: Date.now() },
   };
 }

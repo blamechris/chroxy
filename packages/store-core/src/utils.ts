@@ -4,6 +4,8 @@
  * No platform dependencies — safe to import anywhere.
  */
 
+import type { BaseSessionState } from './types'
+
 /** Strip ANSI escape codes for plain text display */
 export function stripAnsi(str: string): string {
   return str.replace(
@@ -58,4 +60,29 @@ export function withJitter(delayMs: number): number {
 /** Filter out thinking placeholder messages (any message array with an id field) */
 export function filterThinking<T extends { id: string }>(messages: T[]): T[] {
   return messages.filter((m) => m.id !== 'thinking');
+}
+
+/** Create a fresh BaseSessionState with default values for all shared fields */
+export function createEmptyBaseSessionState(): BaseSessionState {
+  return {
+    messages: [],
+    streamingMessageId: null,
+    claudeReady: false,
+    activeModel: null,
+    permissionMode: null,
+    contextUsage: null,
+    lastResultCost: null,
+    lastResultDuration: null,
+    sessionCost: null,
+    isIdle: true,
+    health: 'healthy',
+    activeAgents: [],
+    isPlanPending: false,
+    planAllowedPrompts: [],
+    primaryClientId: null,
+    conversationId: null,
+    sessionContext: null,
+    mcpServers: [],
+    devPreviews: [],
+  };
 }
