@@ -393,7 +393,6 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `supervisor.js` | Supervisor: tunnel owner + child auto-restart |
 | `token-manager.js` | API token rotation + expiry management |
 | `tool-result.js` | Tool result processing and formatting |
-| `tunnel.js` | Backward-compat shim (re-exports CloudflareTunnelAdapter) |
 | `tunnel-check.js` | Tunnel health verification (DNS propagation) |
 | `tunnel-events.js` | Tunnel event wiring helpers |
 | `tunnel/base.js` | BaseTunnelAdapter — shared recovery logic |
@@ -404,7 +403,11 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `ws-broadcaster.js` | Message broadcast to session and global scopes |
 | `ws-client-manager.js` | Client connection lifecycle management |
 | `ws-client-sender.js` | Message send/encrypt logic per client |
-| `ws-file-ops.js` | File browsing/reading WS message handlers |
+| `ws-file-ops/index.js` | File browsing/reading WS message handlers (entry point) |
+| `ws-file-ops/browser.js` | File/directory browsing handlers |
+| `ws-file-ops/reader.js` | File content reading handlers |
+| `ws-file-ops/git.js` | Git operation handlers (status, diff, stage, commit) |
+| `ws-file-ops/common.js` | Shared utilities for file operations |
 | `ws-forwarding.js` | Session event → WS broadcast wiring |
 | `ws-message-handlers.js` | WS message handler dispatch |
 | `ws-permissions.js` | Permission request/response WS handlers |
