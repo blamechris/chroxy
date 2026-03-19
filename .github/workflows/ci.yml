@@ -85,7 +85,7 @@ jobs:
     timeout-minutes: 10
     defaults:
       run:
-        working-directory: packages/server
+        working-directory: packages/dashboard
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -106,13 +106,13 @@ jobs:
       - name: Check generated tokens are up-to-date
         run: |
           node scripts/generate-theme-tokens.mjs
-          git diff --exit-code src/dashboard-next/src/theme/tokens.ts || {
-            echo "::error::tokens.ts is stale. Run 'npm run dashboard:generate-tokens' and commit the result."
+          git diff --exit-code src/theme/tokens.ts || {
+            echo "::error::tokens.ts is stale. Run 'npm run generate-tokens' from packages/dashboard and commit the result."
             exit 1
           }
 
       - name: Run dashboard tests
-        run: npm run dashboard:test
+        run: npm test
 
   dashboard-typecheck:
     name: Dashboard Type Check
@@ -120,7 +120,7 @@ jobs:
     timeout-minutes: 5
     defaults:
       run:
-        working-directory: packages/server
+        working-directory: packages/dashboard
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -139,7 +139,7 @@ jobs:
         working-directory: packages/protocol
 
       - name: Type check dashboard
-        run: npm run dashboard:typecheck
+        run: npm run typecheck
 
   store-core-typecheck:
     name: Store Core Type Check

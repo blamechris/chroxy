@@ -17,6 +17,7 @@ ROOT_PKG="$ROOT/package.json"
 DESKTOP_PKG="$ROOT/packages/desktop/package.json"
 PROTOCOL_PKG="$ROOT/packages/protocol/package.json"
 STORE_CORE_PKG="$ROOT/packages/store-core/package.json"
+DASHBOARD_PKG="$ROOT/packages/dashboard/package.json"
 TAURI_CONF="$ROOT/packages/desktop/src-tauri/tauri.conf.json"
 CARGO_TOML="$ROOT/packages/desktop/src-tauri/Cargo.toml"
 
@@ -93,6 +94,14 @@ node -e "
   const pkg = JSON.parse(fs.readFileSync('$STORE_CORE_PKG', 'utf-8'));
   pkg.version = '$NEW_VERSION';
   fs.writeFileSync('$STORE_CORE_PKG', JSON.stringify(pkg, null, 2) + '\n');
+"
+
+# Update dashboard package.json
+node -e "
+  const fs = require('fs');
+  const pkg = JSON.parse(fs.readFileSync('$DASHBOARD_PKG', 'utf-8'));
+  pkg.version = '$NEW_VERSION';
+  fs.writeFileSync('$DASHBOARD_PKG', JSON.stringify(pkg, null, 2) + '\n');
 "
 
 # Update tauri.conf.json

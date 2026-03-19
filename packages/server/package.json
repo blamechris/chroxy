@@ -13,12 +13,7 @@
     "test": "c8 node --test --test-force-exit './tests/**/*.test.js'",
     "test:coverage": "c8 --reporter=text --reporter=html node --test --test-force-exit './tests/**/*.test.js'",
     "test:integration": "node --test ./tests/*.integration.test.js",
-    "lint": "eslint src/",
-    "dashboard:dev": "vite --config src/dashboard-next/vite.config.ts src/dashboard-next",
-    "dashboard:build": "vite build --config src/dashboard-next/vite.config.ts src/dashboard-next",
-    "dashboard:typecheck": "tsc --noEmit -p src/dashboard-next/tsconfig.json",
-    "dashboard:test": "vitest run --config src/dashboard-next/vite.config.ts",
-    "dashboard:generate-tokens": "node scripts/generate-theme-tokens.mjs"
+    "lint": "eslint src/"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",
