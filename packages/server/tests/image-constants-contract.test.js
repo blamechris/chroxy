@@ -5,7 +5,7 @@
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { MAX_ATTACHMENT_COUNT, MAX_IMAGE_SIZE, ALLOWED_IMAGE_TYPES } from '../src/ws-message-handlers.js'
+import { MAX_ATTACHMENT_COUNT, MAX_IMAGE_SIZE, ALLOWED_IMAGE_TYPES } from '../src/handler-utils.js'
 
 describe('image validation constants contract', () => {
   it('MAX_IMAGE_SIZE is 2MB', () => {
