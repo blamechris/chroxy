@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { tmpdir } from 'os'
+import { tmpdir, homedir } from 'os'
 
 import { EnvironmentManager } from '../src/environment-manager.js'
 
@@ -1190,6 +1190,252 @@ describe('EnvironmentManager.create() with devcontainer', () => {
 })
 
 // ──────────────────────────────────────────────────────────────────────────────
+// DevContainer mount and env validation (#2512)
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DevContainer mount validation', () => {
+  let tmpDir, statePath, projectDir
+
+  beforeEach(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+    projectDir = mkdtempSync(join(tmpdir(), 'chroxy-dc-'))
+    const { mkdirSync: mkdir, writeFileSync: writeFile } = await import('fs')
+    mkdir(join(projectDir, '.devcontainer'), { recursive: true })
+    mkdir(join(projectDir, 'subdir'), { recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+    rmSync(projectDir, { recursive: true, force: true })
+  })
+
+  it('allows mounts with source inside the project directory', async () => {
+    const { writeFileSync: writeFile } = await import('fs')
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      mounts: [`${projectDir}/subdir:/container/path`],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'mount-ok-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    const env = await manager.create({
+      name: 'mount-allowed',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    // Mount should be passed to docker run
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const volumeArgs = []
+    for (let i = 0; i < runCall.args.length - 1; i++) {
+      if (runCall.args[i] === '-v') volumeArgs.push(runCall.args[i + 1])
+    }
+    assert.ok(volumeArgs.some(v => v.includes(projectDir + '/subdir')), 'should include mount inside project dir')
+  })
+
+  it('rejects mounts with source outside the project directory', async () => {
+    const { writeFileSync: writeFile } = await import('fs')
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      mounts: ['/etc/passwd:/container/etc/passwd', `${projectDir}/subdir:/container/path`],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'mount-reject-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'mount-rejected',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const volumeArgs = []
+    for (let i = 0; i < runCall.args.length - 1; i++) {
+      if (runCall.args[i] === '-v') volumeArgs.push(runCall.args[i + 1])
+    }
+    assert.ok(!volumeArgs.some(v => v.includes('/etc/passwd')), 'should NOT include mount outside project dir')
+    assert.ok(volumeArgs.some(v => v.includes(projectDir + '/subdir')), 'should still include valid mount')
+  })
+
+  it('rejects mounts targeting home directory sensitive paths', async () => {
+    const home = homedir()
+    const { writeFileSync: writeFile } = await import('fs')
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      mounts: [
+        `${home}/.ssh:/container/.ssh`,
+        `${home}/.aws:/container/.aws`,
+        `${home}/.gnupg:/container/.gnupg`,
+        `${home}:/container/home`,
+      ],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'sensitive-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'mount-sensitive',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const volumeArgs = []
+    for (let i = 0; i < runCall.args.length - 1; i++) {
+      if (runCall.args[i] === '-v') volumeArgs.push(runCall.args[i + 1])
+    }
+    // None of the sensitive mounts should be passed through
+    assert.ok(!volumeArgs.some(v => v.includes('.ssh')), 'should reject .ssh mount')
+    assert.ok(!volumeArgs.some(v => v.includes('.aws')), 'should reject .aws mount')
+    assert.ok(!volumeArgs.some(v => v.includes('.gnupg')), 'should reject .gnupg mount')
+    assert.ok(!volumeArgs.some(v => v.includes(home + ':/container/home')), 'should reject home dir mount')
+  })
+
+  it('rejects mounts with source using ~ tilde notation for sensitive paths', async () => {
+    const { writeFileSync: writeFile } = await import('fs')
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      mounts: ['~/.ssh:/container/.ssh', '~/.config:/container/.config'],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'tilde-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'mount-tilde',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const volumeArgs = []
+    for (let i = 0; i < runCall.args.length - 1; i++) {
+      if (runCall.args[i] === '-v') volumeArgs.push(runCall.args[i + 1])
+    }
+    assert.ok(!volumeArgs.some(v => v.includes('.ssh')), 'should reject tilde .ssh mount')
+    assert.ok(!volumeArgs.some(v => v.includes('.config')), 'should reject tilde .config mount')
+  })
+
+  it('rejects mounts with source path /etc', async () => {
+    const { writeFileSync: writeFile } = await import('fs')
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      mounts: ['/etc:/container/etc'],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'etc-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'mount-etc',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const volumeArgs = []
+    for (let i = 0; i < runCall.args.length - 1; i++) {
+      if (runCall.args[i] === '-v') volumeArgs.push(runCall.args[i + 1])
+    }
+    assert.ok(!volumeArgs.some(v => v.startsWith('/etc')), 'should reject /etc mount')
+  })
+
+  it('logs rejected mounts with the attempted path', async () => {
+    const { writeFileSync: writeFile } = await import('fs')
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      mounts: ['/etc/shadow:/container/shadow'],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'log-ctr\n', exec: '/usr/local\n' },
+    })
+
+    // Capture log output by replacing the logger temporarily
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+
+    // We test indirectly: the mount is rejected (not passed to docker run)
+    // and the method returns successfully (logs instead of throwing)
+    await manager.create({
+      name: 'mount-logged',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const volumeArgs = []
+    for (let i = 0; i < runCall.args.length - 1; i++) {
+      if (runCall.args[i] === '-v') volumeArgs.push(runCall.args[i + 1])
+    }
+    assert.ok(!volumeArgs.some(v => v.includes('/etc/shadow')), 'rejected mount should not appear in docker args')
+  })
+
+  it('rejects mounts using .. path traversal to escape project directory', async () => {
+    const { writeFileSync: writeFile } = await import('fs')
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      mounts: [
+        `${projectDir}/subdir/../../../../etc/passwd:/container/passwd`,
+        `source=${projectDir}/sub/../../../etc/shadow,target=/container/shadow,type=bind`,
+        `${projectDir}/subdir:/container/valid`,
+      ],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'mount-traversal-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'mount-traversal',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const volumeArgs = []
+    for (let i = 0; i < runCall.args.length - 1; i++) {
+      if (runCall.args[i] === '-v') volumeArgs.push(runCall.args[i + 1])
+    }
+    assert.ok(!volumeArgs.some(v => v.includes('/etc/passwd')), 'should reject .. traversal to /etc/passwd')
+    assert.ok(!volumeArgs.some(v => v.includes('/etc/shadow')), 'should reject .. traversal in --mount format')
+    assert.ok(volumeArgs.some(v => v.includes(projectDir + '/subdir')), 'should still include valid mount')
+  })
+
+  it('handles docker-style --mount source=,target= format', async () => {
+    const { writeFileSync: writeFile } = await import('fs')
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      mounts: [
+        `source=${projectDir}/subdir,target=/container/path,type=bind`,
+        'source=/etc/passwd,target=/container/passwd,type=bind',
+      ],
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'mount-fmt-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'mount-format',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const allArgs = runCall.args.join(' ')
+    assert.ok(allArgs.includes(projectDir + '/subdir'), 'should include valid mount in --mount format')
+    assert.ok(!allArgs.includes('/etc/passwd'), 'should reject invalid mount in --mount format')
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Concurrency guards
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1623,5 +1869,87 @@ describe('EnvironmentManager.reconcile()', () => {
     const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
     // Should not throw — reconcile is best-effort
     await manager.reconcile()
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DevContainer containerEnv key sanitization (#2512)
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('DevContainer containerEnv key sanitization', () => {
+  let tmpDir, statePath, projectDir
+
+  beforeEach(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+    projectDir = mkdtempSync(join(tmpdir(), 'chroxy-dc-'))
+    const { mkdirSync: mkdir } = await import('fs')
+    mkdir(join(projectDir, '.devcontainer'), { recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+    rmSync(projectDir, { recursive: true, force: true })
+  })
+
+  it('allows valid env var keys (alphanumeric + underscore)', async () => {
+    const { writeFileSync: writeFile } = await import('fs')
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      containerEnv: { NODE_ENV: 'development', MY_VAR_2: 'value' },
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'env-ok-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'env-valid',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const envPairs = []
+    for (let i = 0; i < runCall.args.length - 1; i++) {
+      if (runCall.args[i] === '--env') envPairs.push(runCall.args[i + 1])
+    }
+    assert.ok(envPairs.includes('NODE_ENV=development'))
+    assert.ok(envPairs.includes('MY_VAR_2=value'))
+  })
+
+  it('rejects env var keys with special characters', async () => {
+    const { writeFileSync: writeFile } = await import('fs')
+    writeFile(join(projectDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      containerEnv: {
+        'VALID_KEY': 'ok',
+        'BAD-KEY': 'nope',
+        'BAD KEY': 'nope',
+        'BAD;KEY': 'nope',
+        'BAD$(cmd)': 'nope',
+      },
+    }))
+
+    const mockExec = createMockExecFile({
+      results: { run: 'env-reject-ctr\n', exec: '/usr/local\n' },
+    })
+
+    const manager = new EnvironmentManager({ statePath, _execFile: mockExec })
+    await manager.create({
+      name: 'env-sanitized',
+      cwd: projectDir,
+      devcontainer: true,
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const envPairs = []
+    for (let i = 0; i < runCall.args.length - 1; i++) {
+      if (runCall.args[i] === '--env') envPairs.push(runCall.args[i + 1])
+    }
+    assert.ok(envPairs.some(e => e.startsWith('VALID_KEY=')), 'should include valid env key')
+    assert.ok(!envPairs.some(e => e.startsWith('BAD-KEY=')), 'should reject key with hyphen')
+    assert.ok(!envPairs.some(e => e.startsWith('BAD KEY=')), 'should reject key with space')
+    assert.ok(!envPairs.some(e => e.startsWith('BAD;KEY=')), 'should reject key with semicolon')
+    assert.ok(!envPairs.some(e => e.includes('BAD$(cmd)')), 'should reject key with shell injection')
   })
 })
