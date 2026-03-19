@@ -21,7 +21,7 @@ import {
 } from '../utils/crypto';
 import { registerForPushNotifications } from '../notifications';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
-import { parseUserInputMessage } from '@chroxy/store-core';
+import { parseUserInputMessage, resolveStreamId } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
 import type {
@@ -1113,21 +1113,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (targetId && get().sessionStates[targetId]) {
         updateSession(targetId, (ss) => {
           const existing = ss.messages.find((m) => m.id === streamId);
+          const { resolvedId, remap } = resolveStreamId(existing, streamId);
           if (existing && existing.type === 'response') {
             // Reuse existing response message (reconnect replay dedup)
-            return { streamingMessageId: streamId };
+            return { streamingMessageId: resolvedId };
           }
-          // If the ID collides with a non-response message (e.g., tool_use),
-          // create a new response with a suffixed ID and remap future deltas.
-          const responseId = existing ? `${streamId}-response` : streamId;
-          if (existing) {
-            _ctx.deltaIdRemaps.set(streamId, responseId);
+          if (remap) {
+            _ctx.deltaIdRemaps.set(remap.from, remap.to);
           }
           return {
-            streamingMessageId: responseId,
+            streamingMessageId: resolvedId,
             messages: [
               ...filterThinking(ss.messages),
-              { id: responseId, type: 'response' as const, content: '', timestamp: Date.now() },
+              { id: resolvedId, type: 'response' as const, content: '', timestamp: Date.now() },
             ],
           };
         });

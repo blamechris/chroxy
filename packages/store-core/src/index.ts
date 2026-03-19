@@ -102,3 +102,11 @@ export {
   withJitter,
   filterThinking,
 } from './utils'
+
+export type {
+  StreamIdResult,
+} from './stream-id'
+
+export {
+  resolveStreamId,
+} from './stream-id'

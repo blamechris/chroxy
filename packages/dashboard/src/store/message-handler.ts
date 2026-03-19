@@ -12,7 +12,7 @@
  * Ported from packages/app/src/store/message-handler.ts for the web dashboard.
  * Connection persistence uses @chroxy/store-core adapters for DI.
  */
-import { consoleAlert, noopHaptic, noopPush, createStorageAdapter, parseUserInputMessage, type PlatformAdapters, type StorageAdapter } from '@chroxy/store-core'
+import { consoleAlert, noopHaptic, noopPush, createStorageAdapter, parseUserInputMessage, resolveStreamId, type PlatformAdapters, type StorageAdapter } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import {
   createKeyPair,
@@ -660,39 +660,37 @@ function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, (ss) => {
       const existing = ss.messages.find((m) => m.id === streamId);
+      const { resolvedId, remap } = resolveStreamId(existing, streamId);
       if (existing && existing.type === 'response') {
         // Reuse existing response message (reconnect replay dedup)
-        return { streamingMessageId: streamId };
+        return { streamingMessageId: resolvedId };
       }
-      // If the ID collides with a non-response message (e.g., tool_use),
-      // create a new response with a suffixed ID and remap future deltas.
-      const responseId = existing ? `${streamId}-response` : streamId;
-      if (existing) {
-        _deltaIdRemaps.set(streamId, responseId);
+      if (remap) {
+        _deltaIdRemaps.set(remap.from, remap.to);
       }
       return {
-        streamingMessageId: responseId,
+        streamingMessageId: resolvedId,
         messages: [
           ...filterThinking(ss.messages),
-          { id: responseId, type: 'response' as const, content: '', timestamp: Date.now() },
+          { id: resolvedId, type: 'response' as const, content: '', timestamp: Date.now() },
         ],
       };
     });
   } else {
     set((state: ConnectionState) => {
       const existing = state.messages.find((m) => m.id === streamId);
+      const { resolvedId, remap } = resolveStreamId(existing, streamId);
       if (existing && existing.type === 'response') {
-        return { streamingMessageId: streamId };
+        return { streamingMessageId: resolvedId };
       }
-      const responseId = existing ? `${streamId}-response` : streamId;
-      if (existing) {
-        _deltaIdRemaps.set(streamId, responseId);
+      if (remap) {
+        _deltaIdRemaps.set(remap.from, remap.to);
       }
       return {
-        streamingMessageId: responseId,
+        streamingMessageId: resolvedId,
         messages: [
           ...filterThinking(state.messages),
-          { id: responseId, type: 'response' as const, content: '', timestamp: Date.now() },
+          { id: resolvedId, type: 'response' as const, content: '', timestamp: Date.now() },
         ],
       };
     });
