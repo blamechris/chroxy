@@ -112,3 +112,24 @@ export type {
 export {
   resolveStreamId,
 } from './stream-id'
+
+export type {
+  SessionPatch,
+  PermissionMode,
+  ThinkingLevel,
+} from './handlers'
+
+export {
+  resolveSessionId,
+  handleModelChanged,
+  handlePermissionModeChanged,
+  handleAvailablePermissionModes,
+  handleSessionUpdated,
+  handleClaudeReady,
+  handleAgentIdle,
+  handleAgentBusy,
+  handleThinkingLevelChanged,
+  handleBudgetWarning,
+  handleBudgetExceeded,
+  handleBudgetResumed,
+} from './handlers'

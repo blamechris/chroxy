@@ -12,7 +12,23 @@
  * Ported from packages/app/src/store/message-handler.ts for the web dashboard.
  * Connection persistence uses @chroxy/store-core adapters for DI.
  */
-import { consoleAlert, noopHaptic, noopPush, createStorageAdapter, parseUserInputMessage, resolveStreamId, type PlatformAdapters, type StorageAdapter } from '@chroxy/store-core'
+import {
+  consoleAlert, noopHaptic, noopPush, createStorageAdapter, parseUserInputMessage,
+  resolveStreamId,
+  resolveSessionId,
+  handleModelChanged as sharedModelChanged,
+  handlePermissionModeChanged as sharedPermissionModeChanged,
+  handleAvailablePermissionModes as sharedAvailablePermissionModes,
+  handleSessionUpdated as sharedSessionUpdated,
+  handleClaudeReady as sharedClaudeReady,
+  handleAgentIdle as sharedAgentIdle,
+  handleAgentBusy as sharedAgentBusy,
+  handleThinkingLevelChanged as sharedThinkingLevelChanged,
+  handleBudgetWarning as sharedBudgetWarning,
+  handleBudgetExceeded as sharedBudgetExceeded,
+  handleBudgetResumed as sharedBudgetResumed,
+  type PlatformAdapters, type StorageAdapter,
+} from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import {
   createKeyPair,
@@ -532,8 +548,8 @@ function handleConversationsList(msg: Record<string, unknown>, _get: MsgGet, set
 }
 
 function handleModelChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const model = (typeof msg.model === 'string' && (msg.model as string).trim()) ? (msg.model as string).trim() : null;
-  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  const { model } = sharedModelChanged(msg);
+  const targetId = resolveSessionId(msg, get().activeSessionId);
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, () => ({ activeModel: model }));
   } else {
@@ -542,17 +558,16 @@ function handleModelChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgS
 }
 
 function handleThinkingLevelChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const raw = (typeof msg.level === 'string' && msg.level.trim()) ? msg.level.trim() : 'default';
-  const level = (['default', 'high', 'max'].includes(raw) ? raw : 'default') as ThinkingLevel;
-  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  const { level } = sharedThinkingLevelChanged(msg);
+  const targetId = resolveSessionId(msg, get().activeSessionId);
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, () => ({ thinkingLevel: level }));
   }
 }
 
 function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const mode = (typeof msg.mode === 'string' && (msg.mode as string).trim()) ? (msg.mode as string).trim() : null;
-  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  const { mode } = sharedPermissionModeChanged(msg);
+  const targetId = resolveSessionId(msg, get().activeSessionId);
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, () => ({ permissionMode: mode }));
   } else {
@@ -563,25 +578,16 @@ function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, 
 }
 
 function handleAvailablePermissionModes(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  if (Array.isArray(msg.modes)) {
-    const cleaned = (msg.modes as unknown[])
-      .filter((m): m is { id: string; label: string } =>
-        typeof m === 'object' && m !== null &&
-        typeof (m as { id: unknown }).id === 'string' &&
-        typeof (m as { label: unknown }).label === 'string'
-      );
-    set({ availablePermissionModes: cleaned });
+  const modes = sharedAvailablePermissionModes(msg);
+  if (modes) {
+    set({ availablePermissionModes: modes });
   }
 }
 
 function handleSessionUpdated(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const updatedId = msg.sessionId as string;
-  const updatedName = msg.name as string;
-  if (updatedId && updatedName) {
-    const sessions = get().sessions.map((s) =>
-      s.sessionId === updatedId ? { ...s, name: updatedName } : s,
-    );
-    set({ sessions });
+  const updated = sharedSessionUpdated(msg, get().sessions);
+  if (updated) {
+    set({ sessions: updated });
   }
 }
 
@@ -627,11 +633,12 @@ function handleSessionSwitched(msg: Record<string, unknown>, get: MsgGet, set: M
 }
 
 function handleClaudeReady(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const targetId = (msg.sessionId as string) || get().activeSessionId;
+  const patch = sharedClaudeReady();
+  const targetId = resolveSessionId(msg, get().activeSessionId);
   if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, () => ({ claudeReady: true }));
+    updateSession(targetId, () => patch);
   } else {
-    set({ claudeReady: true });
+    set(patch);
   }
   // Drain queued messages on reconnect
   const readySocket = get().socket;
@@ -641,16 +648,16 @@ function handleClaudeReady(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
 }
 
 function handleAgentIdle(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const idleTargetId = (msg.sessionId as string) || get().activeSessionId;
-  if (idleTargetId && get().sessionStates[idleTargetId]) {
-    updateSession(idleTargetId, () => ({ isIdle: true }));
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, () => sharedAgentIdle());
   }
 }
 
 function handleAgentBusy(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const busyTargetId = (msg.sessionId as string) || get().activeSessionId;
-  if (busyTargetId && get().sessionStates[busyTargetId]) {
-    updateSession(busyTargetId, () => ({ isIdle: false }));
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, () => sharedAgentBusy());
   }
 }
 
@@ -961,64 +968,52 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
 }
 
 function handleBudgetWarning(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const warningMessage = typeof msg.message === 'string' ? msg.message : 'Approaching cost budget limit';
+  const { warningMessage, systemMessage } = sharedBudgetWarning(msg);
   _adapters.alert.alert('Budget Warning', warningMessage);
-  const budgetWarnMsg: ChatMessage = {
-    id: nextMessageId('system'),
-    type: 'system',
-    content: warningMessage,
-    timestamp: Date.now(),
-  };
-  const budgetWarnTargetId = (msg.sessionId as string) || get().activeSessionId;
-  if (budgetWarnTargetId && get().sessionStates[budgetWarnTargetId]) {
-    updateSession(budgetWarnTargetId, (ss) => ({
-      messages: [...ss.messages, budgetWarnMsg],
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, (ss) => ({
+      messages: [...ss.messages, systemMessage],
     }));
   } else {
-    get().addMessage(budgetWarnMsg);
+    get().addMessage(systemMessage);
   }
 }
 
 function handleBudgetExceeded(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const exceededMessage = typeof msg.message === 'string' ? msg.message : 'Cost budget exceeded';
-  const budgetExceededTargetId = (msg.sessionId as string) || get().activeSessionId;
-  // Add system message BEFORE auto-resume so it's visible in the UI
-  const budgetExceededMsg: ChatMessage = {
-    id: nextMessageId('system'),
-    type: 'system',
-    content: `${exceededMessage} — session paused. Budget will auto-resume.`,
-    timestamp: Date.now(),
+  const { exceededMessage, systemMessage } = sharedBudgetExceeded(msg);
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  // Dashboard auto-resumes — append note to the system message
+  const dashboardMsg: ChatMessage = {
+    ...systemMessage,
+    content: `${systemMessage.content}. Budget will auto-resume.`,
   };
-  if (budgetExceededTargetId && get().sessionStates[budgetExceededTargetId]) {
-    updateSession(budgetExceededTargetId, (ss) => ({
-      messages: [...ss.messages, budgetExceededMsg],
+  // Add system message BEFORE auto-resume so it's visible in the UI
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, (ss) => ({
+      messages: [...ss.messages, dashboardMsg],
     }));
   } else {
-    get().addMessage(budgetExceededMsg);
+    get().addMessage(dashboardMsg);
   }
   // Show toast notification
   _adapters.alert.alert('Budget Exceeded', `${exceededMessage}\n\nNew messages are paused.`);
   // Auto-resume budget
   const socket = get().socket;
-  if (socket && budgetExceededTargetId) {
-    wsSend(socket, { type: 'resume_budget', sessionId: budgetExceededTargetId });
+  if (socket && targetId) {
+    wsSend(socket, { type: 'resume_budget', sessionId: targetId });
   }
 }
 
 function handleBudgetResumed(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const resumedSessionId = (msg.sessionId as string) || get().activeSessionId;
-  const resumedMsg: ChatMessage = {
-    id: nextMessageId('system'),
-    type: 'system',
-    content: 'Cost budget override — session resumed',
-    timestamp: Date.now(),
-  };
-  if (resumedSessionId && get().sessionStates[resumedSessionId]) {
-    updateSession(resumedSessionId, (ss) => ({
-      messages: [...ss.messages, resumedMsg],
+  const { systemMessage } = sharedBudgetResumed();
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, (ss) => ({
+      messages: [...ss.messages, systemMessage],
     }));
   } else {
-    get().addMessage(resumedMsg);
+    get().addMessage(systemMessage);
   }
 }
 

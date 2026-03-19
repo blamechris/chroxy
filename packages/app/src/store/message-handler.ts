@@ -21,7 +21,22 @@ import {
 } from '../utils/crypto';
 import { registerForPushNotifications } from '../notifications';
 import { stripAnsi, filterThinking, nextMessageId } from './utils';
-import { parseUserInputMessage, resolveStreamId } from '@chroxy/store-core';
+import {
+  parseUserInputMessage,
+  resolveStreamId,
+  resolveSessionId,
+  handleModelChanged as sharedModelChanged,
+  handlePermissionModeChanged as sharedPermissionModeChanged,
+  handleAvailablePermissionModes as sharedAvailablePermissionModes,
+  handleSessionUpdated as sharedSessionUpdated,
+  handleClaudeReady as sharedClaudeReady,
+  handleAgentIdle as sharedAgentIdle,
+  handleAgentBusy as sharedAgentBusy,
+  handleThinkingLevelChanged as sharedThinkingLevelChanged,
+  handleBudgetWarning as sharedBudgetWarning,
+  handleBudgetExceeded as sharedBudgetExceeded,
+  handleBudgetResumed as sharedBudgetResumed,
+} from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
 import type {
@@ -912,13 +927,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
 
     case 'session_updated': {
-      const updatedId = msg.sessionId as string;
-      const updatedName = msg.name as string;
-      if (updatedId && updatedName) {
-        const sessions = get().sessions.map((s) =>
-          s.sessionId === updatedId ? { ...s, name: updatedName } : s,
-        );
-        set({ sessions });
+      const updated = sharedSessionUpdated(msg, get().sessions);
+      if (updated) {
+        set({ sessions: updated });
       }
       break;
     }
@@ -1299,8 +1310,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'model_changed': {
-      const model = (typeof msg.model === 'string' && (msg.model as string).trim()) ? (msg.model as string).trim() : null;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      const { model } = sharedModelChanged(msg);
+      const targetId = resolveSessionId(msg, get().activeSessionId);
       {
         const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
         if (effectiveId && get().sessionStates[effectiveId]) {
@@ -1337,8 +1348,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
 
     case 'permission_mode_changed': {
-      const mode = (typeof msg.mode === 'string' && (msg.mode as string).trim()) ? (msg.mode as string).trim() : null;
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      const { mode } = sharedPermissionModeChanged(msg);
+      const targetId = resolveSessionId(msg, get().activeSessionId);
       {
         const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
         if (effectiveId && get().sessionStates[effectiveId]) {
@@ -1359,17 +1370,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'available_permission_modes':
-      if (Array.isArray(msg.modes)) {
-        const cleaned = (msg.modes as unknown[])
-          .filter((m): m is { id: string; label: string } =>
-            typeof m === 'object' && m !== null &&
-            typeof (m as { id: unknown }).id === 'string' &&
-            typeof (m as { label: unknown }).label === 'string'
-          );
-        set({ availablePermissionModes: cleaned });
+    case 'available_permission_modes': {
+      const modes = sharedAvailablePermissionModes(msg);
+      if (modes) {
+        set({ availablePermissionModes: modes });
       }
       break;
+    }
 
     case 'raw':
       get().appendTerminalData(msg.data as string);
@@ -1377,11 +1384,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
 
     case 'claude_ready': {
-      const targetId = (msg.sessionId as string) || get().activeSessionId;
+      const patch = sharedClaudeReady();
+      const targetId = resolveSessionId(msg, get().activeSessionId);
       {
         const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
         if (effectiveId && get().sessionStates[effectiveId]) {
-          updateSession(effectiveId, () => ({ claudeReady: true }));
+          updateSession(effectiveId, () => patch);
         }
       }
       // Drain queued messages on reconnect
@@ -1393,17 +1401,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'agent_idle': {
-      const idleTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (idleTargetId && get().sessionStates[idleTargetId]) {
-        updateSession(idleTargetId, () => ({ isIdle: true }));
+      const targetId = resolveSessionId(msg, get().activeSessionId);
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, () => sharedAgentIdle());
       }
       break;
     }
 
     case 'agent_busy': {
-      const busyTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (busyTargetId && get().sessionStates[busyTargetId]) {
-        updateSession(busyTargetId, () => ({ isIdle: false }));
+      const targetId = resolveSessionId(msg, get().activeSessionId);
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, () => sharedAgentBusy());
       }
       break;
     }
@@ -1969,28 +1977,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'budget_warning': {
-      const warningMessage = typeof msg.message === 'string' ? msg.message : 'Approaching cost budget limit';
+      const { warningMessage, systemMessage } = sharedBudgetWarning(msg);
       Alert.alert('Budget Warning', warningMessage);
-      const budgetWarnMsg: ChatMessage = {
-        id: nextMessageId('system'),
-        type: 'system',
-        content: warningMessage,
-        timestamp: Date.now(),
-      };
-      const budgetWarnTargetId = (msg.sessionId as string) || get().activeSessionId;
-      if (budgetWarnTargetId && get().sessionStates[budgetWarnTargetId]) {
-        updateSession(budgetWarnTargetId, (ss) => ({
-          messages: [...ss.messages, budgetWarnMsg],
+      const targetId = resolveSessionId(msg, get().activeSessionId);
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, (ss) => ({
+          messages: [...ss.messages, systemMessage],
         }));
       } else {
-        get().addMessage(budgetWarnMsg);
+        get().addMessage(systemMessage);
       }
       break;
     }
 
     case 'budget_exceeded': {
-      const exceededMessage = typeof msg.message === 'string' ? msg.message : 'Cost budget exceeded';
-      const budgetExceededTargetId = (msg.sessionId as string) || get().activeSessionId;
+      const { exceededMessage, systemMessage } = sharedBudgetExceeded(msg);
+      const targetId = resolveSessionId(msg, get().activeSessionId);
       // Show alert with "Resume" option to override the pause
       Alert.alert('Budget Exceeded', `${exceededMessage}\n\nNew messages are paused.`, [
         { text: 'OK', style: 'cancel' },
@@ -1998,42 +2000,31 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           text: 'Resume',
           onPress: () => {
             const socket = get().socket;
-            if (socket && budgetExceededTargetId) {
-              wsSend(socket, { type: 'resume_budget', sessionId: budgetExceededTargetId });
+            if (socket && targetId) {
+              wsSend(socket, { type: 'resume_budget', sessionId: targetId });
             }
           },
         },
       ]);
-      const budgetExceededMsg: ChatMessage = {
-        id: nextMessageId('system'),
-        type: 'system',
-        content: `${exceededMessage} — session paused`,
-        timestamp: Date.now(),
-      };
-      if (budgetExceededTargetId && get().sessionStates[budgetExceededTargetId]) {
-        updateSession(budgetExceededTargetId, (ss) => ({
-          messages: [...ss.messages, budgetExceededMsg],
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, (ss) => ({
+          messages: [...ss.messages, systemMessage],
         }));
       } else {
-        get().addMessage(budgetExceededMsg);
+        get().addMessage(systemMessage);
       }
       break;
     }
 
     case 'budget_resumed': {
-      const resumedSessionId = (msg.sessionId as string) || get().activeSessionId;
-      const resumedMsg: ChatMessage = {
-        id: nextMessageId('system'),
-        type: 'system',
-        content: 'Cost budget override — session resumed',
-        timestamp: Date.now(),
-      };
-      if (resumedSessionId && get().sessionStates[resumedSessionId]) {
-        updateSession(resumedSessionId, (ss) => ({
-          messages: [...ss.messages, resumedMsg],
+      const { systemMessage } = sharedBudgetResumed();
+      const targetId = resolveSessionId(msg, get().activeSessionId);
+      if (targetId && get().sessionStates[targetId]) {
+        updateSession(targetId, (ss) => ({
+          messages: [...ss.messages, systemMessage],
         }));
       } else {
-        get().addMessage(resumedMsg);
+        get().addMessage(systemMessage);
       }
       break;
     }
