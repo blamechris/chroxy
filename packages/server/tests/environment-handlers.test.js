@@ -1,6 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { environmentHandlers } from '../src/handlers/environment-handlers.js'
+import { waitFor } from './test-helpers.js'
 
 /**
  * Mock WebSocket that records sent messages.
@@ -86,8 +87,8 @@ describe('create_environment handler', () => {
     const handler = environmentHandlers.create_environment
     handler(ws, client, { type: 'create_environment', name: 'test-env', cwd: process.cwd() }, ctx)
 
-    // Handler is async (uses .then), wait for microtask
-    await new Promise(r => setTimeout(r, 10))
+    // Handler is async (uses .then), wait for response
+    await waitFor(() => ctx._sent.length >= 1, { label: 'environment_created response' })
 
     assert.equal(ctx._sent.length, 1)
     assert.equal(ctx._sent[0].type, 'environment_created')
@@ -153,7 +154,7 @@ describe('destroy_environment handler', () => {
       { type: 'destroy_environment', environmentId: 'env-del' }, ctx
     )
 
-    await new Promise(r => setTimeout(r, 10))
+    await waitFor(() => ctx._sent.length >= 1, { label: 'environment_destroyed response' })
 
     assert.equal(ctx._sent[0].type, 'environment_destroyed')
     assert.equal(ctx._sent[0].environmentId, 'env-del')
@@ -173,7 +174,7 @@ describe('destroy_environment handler', () => {
       createMockWs(), createMockClient(),
       { type: 'destroy_environment', environmentId: 'env-nope' }, ctx
     )
-    await new Promise(r => setTimeout(r, 10))
+    await waitFor(() => ctx._sent.length >= 1, { label: 'environment_error response' })
     assert.equal(ctx._sent[0].type, 'environment_error')
     assert.ok(ctx._sent[0].error.includes('not found'))
   })
