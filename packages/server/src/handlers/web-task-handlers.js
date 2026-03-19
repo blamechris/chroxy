@@ -5,6 +5,9 @@
  */
 import { WebTaskUnavailableError } from '../web-task-manager.js'
 import { validateCwdWithinHome } from '../handler-utils.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('ws')
 
 function handleLaunchWebTask(ws, client, msg, ctx) {
   if (msg.cwd) {
@@ -16,7 +19,7 @@ function handleLaunchWebTask(ws, client, msg, ctx) {
   }
   try {
     const { taskId } = ctx.webTaskManager.launchTask(msg.prompt, { cwd: msg.cwd })
-    console.log(`[ws] Web task launched: ${taskId} — "${msg.prompt.slice(0, 60)}"`)
+    log.info(`Web task launched: ${taskId} — "${msg.prompt.slice(0, 60)}"`)
   } catch (err) {
     const errorMsg = err instanceof WebTaskUnavailableError
       ? err.message
@@ -32,7 +35,7 @@ function handleListWebTasks(ws, client, msg, ctx) {
 
 function handleTeleportWebTask(ws, client, msg, ctx) {
   ctx.webTaskManager.teleportTask(msg.taskId).then(() => {
-    console.log(`[ws] Teleported task ${msg.taskId}`)
+    log.info(`Teleported task ${msg.taskId}`)
     ctx.send(ws, { type: 'server_status', message: `Task ${msg.taskId} teleported to local session` })
   }).catch(err => {
     ctx.send(ws, { type: 'web_task_error', taskId: msg.taskId, message: err.message })

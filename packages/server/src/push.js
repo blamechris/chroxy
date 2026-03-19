@@ -14,6 +14,9 @@
 import { readFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { writeFileRestricted } from './platform.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('push')
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send'
 
@@ -43,7 +46,7 @@ async function fetchWithRetry(url, options) {
       // 5xx — retry if attempts remain
       if (attempt < MAX_RETRIES) {
         const delay = BACKOFF_BASE_MS * Math.pow(2, attempt - 1)
-        console.warn(`[push] Expo API returned ${res.status}, retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`)
+        log.warn(`Expo API returned ${res.status}, retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`)
         await new Promise(r => setTimeout(r, delay))
         continue
       }
@@ -54,7 +57,7 @@ async function fetchWithRetry(url, options) {
 
       if (attempt < MAX_RETRIES) {
         const delay = BACKOFF_BASE_MS * Math.pow(2, attempt - 1)
-        console.warn(`[push] Fetch failed (${err.name}: ${err.message}), retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`)
+        log.warn(`Fetch failed (${err.name}: ${err.message}), retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`)
         await new Promise(r => setTimeout(r, delay))
         continue
       }
@@ -120,7 +123,7 @@ export class PushManager {
         liveActivityTokens: [...this._liveActivityTokens],
       }))
     } catch (err) {
-      console.error(`[push] Failed to persist tokens: ${err.message}`)
+      log.error(`Failed to persist tokens: ${err.message}`)
     }
   }
 
@@ -136,10 +139,10 @@ export class PushManager {
         this.tokens.add(token)
         this._persistToDisk()
       }
-      console.log(`[push] Registered token: ${token.slice(0, 30)}...`)
+      log.info(`Registered token: ${token.slice(0, 30)}...`)
       return true
     }
-    console.warn(`[push] Rejected invalid token: ${String(token).slice(0, 40)}`)
+    log.warn(`Rejected invalid token: ${String(token).slice(0, 40)}`)
     return false
   }
 
@@ -160,10 +163,10 @@ export class PushManager {
         this._liveActivityTokens.add(token)
         this._persistToDisk()
       }
-      console.log(`[push] Registered Live Activity token: ${token.slice(0, 30)}...`)
+      log.info(`Registered Live Activity token: ${token.slice(0, 30)}...`)
       return true
     }
-    console.warn(`[push] Rejected invalid Live Activity token: ${String(token).slice(0, 40)}`)
+    log.warn(`Rejected invalid Live Activity token: ${String(token).slice(0, 40)}`)
     return false
   }
 
@@ -256,7 +259,7 @@ export class PushManager {
       })
 
       if (!res.ok) {
-        console.error(`[push] Expo Push API returned ${res.status}`)
+        log.error(`Expo Push API returned ${res.status}`)
         return
       }
 
@@ -269,7 +272,7 @@ export class PushManager {
           const ticket = result.data[i]
           if (ticket.status === 'error') {
             const token = messages[i].to
-            console.warn(`[push] Removing invalid token: ${token.slice(0, 30)}... (${ticket.message})`)
+            log.warn(`Removing invalid token: ${token.slice(0, 30)}... (${ticket.message})`)
             tokenSet.delete(token)
             pruned = true
           }
@@ -277,9 +280,9 @@ export class PushManager {
       }
       if (pruned) this._persistToDisk()
 
-      console.log(`[push] Sent ${category} ${logLabel} to ${messages.length} device(s)`)
+      log.info(`Sent ${category} ${logLabel} to ${messages.length} device(s)`)
     } catch (err) {
-      console.error(`[push] Failed to send ${logLabel}:`, err.message)
+      log.error(`Failed to send ${logLabel}: ${err.message}`)
     }
   }
 }

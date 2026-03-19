@@ -16,6 +16,9 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { mergeConfig } from './config.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('child')
 
 const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
 
@@ -68,7 +71,7 @@ async function main() {
  * 5. Send drain_complete back to supervisor
  */
 async function handleDrain(timeout) {
-  console.log(`[child] Drain requested (timeout: ${timeout}ms)`)
+  log.info(`Drain requested (timeout: ${timeout}ms)`)
 
   // Broadcast structured shutdown event before draining
   // ETA: drain timeout (~30s) + ~5s for child startup
@@ -85,14 +88,14 @@ async function handleDrain(timeout) {
     }
 
     if (!_sessionManager.allIdle()) {
-      console.log('[child] Drain timeout reached with sessions still busy, proceeding anyway')
+      log.warn('Drain timeout reached with sessions still busy, proceeding anyway')
     }
 
     // Serialize session state
     try {
       _sessionManager.serializeState()
     } catch (err) {
-      console.error(`[child] Failed to serialize state: ${err.message}`)
+      log.error(`Failed to serialize state: ${err.message}`)
     }
   }
 
@@ -106,7 +109,7 @@ async function handleDrain(timeout) {
 if (process.send) {
   process.on('message', async (msg) => {
     if (msg.type === 'shutdown') {
-      console.log('[child] Shutdown requested by supervisor')
+      log.info('Shutdown requested by supervisor')
       process.exit(0)
     }
 
@@ -118,7 +121,7 @@ if (process.send) {
 }
 
 process.on('uncaughtException', (err) => {
-  console.error('[fatal] Uncaught exception:', err)
+  log.error(`Uncaught exception: ${err?.stack || err}`)
   try { if (_wsServer) _wsServer.broadcastShutdown('crash', 0) } catch {}
   try { if (_wsServer) _wsServer.close() } catch {}
   try { if (_sessionManager) _sessionManager.destroyAll() } catch {}
@@ -126,7 +129,7 @@ process.on('uncaughtException', (err) => {
 })
 
 process.on('unhandledRejection', (err) => {
-  console.error('[fatal] Unhandled rejection:', err)
+  log.error(`Unhandled rejection: ${err?.stack || err}`)
   try { if (_wsServer) _wsServer.broadcastShutdown('crash', 0) } catch {}
   try { if (_wsServer) _wsServer.close() } catch {}
   try { if (_sessionManager) _sessionManager.destroyAll() } catch {}
@@ -134,6 +137,6 @@ process.on('unhandledRejection', (err) => {
 })
 
 main().catch((err) => {
-  console.error('[child] Fatal error:', err)
+  log.error(`Fatal error: ${err?.stack || err}`)
   process.exit(1)
 })
