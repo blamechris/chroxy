@@ -1,4 +1,7 @@
 import { EventEmitter } from 'events'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('tunnel')
 
 /**
  * Base class for tunnel adapters.
@@ -81,7 +84,7 @@ export class BaseTunnelAdapter extends EventEmitter {
       this.process.kill()
       this.process = null
       this.url = null
-      console.log(`[tunnel] Tunnel closed`)
+      log.info('Tunnel closed')
     }
   }
 
@@ -91,12 +94,12 @@ export class BaseTunnelAdapter extends EventEmitter {
    */
   async _handleUnexpectedExit(code, signal) {
     if (this.intentionalShutdown) {
-      console.log(`[tunnel] Process exited cleanly (code ${code})`)
+      log.info(`Process exited cleanly (code ${code})`)
       return
     }
 
     const exitReason = signal ? `signal ${signal}` : `code ${code}`
-    console.log(`[tunnel] Process exited unexpectedly (${exitReason})`)
+    log.warn(`Process exited unexpectedly (${exitReason})`)
     this.emit('tunnel_lost', { code, signal })
 
     const oldUrl = this.url
@@ -105,8 +108,8 @@ export class BaseTunnelAdapter extends EventEmitter {
       const backoff = this.recoveryBackoffs[this.recoveryAttempt]
       this.recoveryAttempt++
 
-      console.log(
-        `[tunnel] Attempting recovery ${this.recoveryAttempt}/${this.maxRecoveryAttempts} in ${backoff}ms...`
+      log.info(
+        `Attempting recovery ${this.recoveryAttempt}/${this.maxRecoveryAttempts} in ${backoff}ms...`
       )
       this.emit('tunnel_recovering', {
         attempt: this.recoveryAttempt,
@@ -119,7 +122,7 @@ export class BaseTunnelAdapter extends EventEmitter {
 
       try {
         const { httpUrl, wsUrl } = await this._startTunnel()
-        console.log(`[tunnel] Recovery successful`)
+        log.info('Recovery successful')
         this.emit('tunnel_recovered', {
           httpUrl,
           wsUrl,
@@ -128,7 +131,7 @@ export class BaseTunnelAdapter extends EventEmitter {
         this.recoveryAttempt = 0
 
         if (oldUrl && httpUrl !== oldUrl) {
-          console.log(`[tunnel] URL changed from ${oldUrl} to ${httpUrl}`)
+          log.info(`URL changed from ${oldUrl} to ${httpUrl}`)
           this.emit('tunnel_url_changed', {
             oldUrl,
             newUrl: httpUrl,
@@ -137,15 +140,15 @@ export class BaseTunnelAdapter extends EventEmitter {
 
         return
       } catch (err) {
-        console.error(
-          `[tunnel] Recovery attempt ${this.recoveryAttempt} failed: ${err.message}`
+        log.error(
+          `Recovery attempt ${this.recoveryAttempt} failed: ${err.message}`
         )
       }
     }
 
     if (!this.intentionalShutdown && this.recoveryAttempt >= this.maxRecoveryAttempts) {
-      console.error(
-        `[tunnel] Recovery failed after ${this.maxRecoveryAttempts} attempts`
+      log.error(
+        `Recovery failed after ${this.maxRecoveryAttempts} attempts`
       )
       this.emit('tunnel_failed', {
         message: `Tunnel recovery failed after ${this.maxRecoveryAttempts} attempts`,

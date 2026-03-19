@@ -1,5 +1,8 @@
 import { spawn, execFileSync } from 'child_process'
 import { BaseTunnelAdapter } from './base.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('tunnel')
 
 /**
  * Cloudflare tunnel adapter.
@@ -98,9 +101,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           resolved = true
           this.url = httpUrl
 
-          console.log(`[tunnel] Named tunnel established:`)
-          console.log(`  HTTP:      ${httpUrl}`)
-          console.log(`  WebSocket: ${wsUrl}`)
+          log.info(`Named tunnel established: HTTP=${httpUrl} WebSocket=${wsUrl}`)
 
           resolve({ httpUrl, wsUrl })
         }
@@ -120,7 +121,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`))
         } else {
           void this._handleUnexpectedExit(code, signal).catch((err) => {
-            console.error('[tunnel] Error while handling unexpected cloudflared exit:', err)
+            log.error(`Error while handling unexpected cloudflared exit: ${err.stack || err.message || err}`)
           })
         }
         this.process = null
@@ -167,9 +168,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           this.url = match[0]
           const wsUrl = this.url.replace('https://', 'wss://')
 
-          console.log(`[tunnel] Cloudflare tunnel established:`)
-          console.log(`  HTTP:      ${this.url}`)
-          console.log(`  WebSocket: ${wsUrl}`)
+          log.info(`Cloudflare tunnel established: HTTP=${this.url} WebSocket=${wsUrl}`)
 
           resolve({ httpUrl: this.url, wsUrl })
         }
@@ -189,7 +188,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`))
         } else {
           void this._handleUnexpectedExit(code, signal).catch((err) => {
-            console.error('[tunnel] Error while handling unexpected cloudflared exit:', err)
+            log.error(`Error while handling unexpected cloudflared exit: ${err.stack || err.message || err}`)
           })
         }
         this.process = null

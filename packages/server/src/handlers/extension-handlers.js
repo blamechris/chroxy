@@ -7,6 +7,9 @@
  * bloating the core protocol. The session is responsible for
  * interpreting the provider + subtype combination.
  */
+import { createLogger } from '../logger.js'
+
+const log = createLogger('ws')
 
 function handleExtensionMessage(ws, client, msg, ctx) {
   const { provider, subtype, data } = msg
@@ -32,7 +35,7 @@ function handleExtensionMessage(ws, client, msg, ctx) {
   if (typeof entry.session.handleExtensionMessage === 'function') {
     entry.session.handleExtensionMessage({ provider, subtype, data })
   } else {
-    console.log(`[ws] extension_message (${provider}/${subtype}) received; session does not handle it`)
+    log.debug(`extension_message (${provider}/${subtype}) received; session does not handle it`)
   }
 }
 

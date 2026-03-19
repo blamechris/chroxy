@@ -8,7 +8,9 @@ import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import qrcode from 'qrcode-terminal'
-import { setJsonMode } from './logger.js'
+import { createLogger, setJsonMode } from './logger.js'
+
+const log = createLogger('cli')
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
@@ -27,9 +29,9 @@ const ACTIVITY_WRITE_TOOLS = ['Write', 'Edit', 'NotebookEdit']
 
 function checkNoAuthWarnings({ authRequired, tunnel }) {
   if (authRequired) return
-  console.warn('[SECURITY] --no-auth disables all authentication. Only safe on isolated networks!')
+  log.warn('--no-auth disables all authentication. Only safe on isolated networks!')
   if (tunnel && tunnel !== 'none') {
-    console.error('[SECURITY] --no-auth with tunnel exposes your server to the internet without authentication!')
+    log.error('--no-auth with tunnel exposes your server to the internet without authentication!')
   }
 }
 
@@ -42,19 +44,19 @@ function maskToken(token) {
 function wireTunnelEvents(tunnel, wsServer) {
   tunnel.on('tunnel_lost', ({ code, signal }) => {
     const exitReason = signal ? `signal ${signal}` : `code ${code}`
-    console.log(`\n[!] Tunnel lost (${exitReason})`)
+    log.warn(`Tunnel lost (${exitReason})`)
     wsServer.broadcastError('tunnel', `Tunnel connection lost (${exitReason}). Recovering...`, true)
   })
 
   tunnel.on('tunnel_recovering', ({ attempt, delayMs }) => {
-    console.log(`[!] Attempting tunnel recovery (attempt ${attempt}, waiting ${delayMs}ms)...`)
+    log.info(`Attempting tunnel recovery (attempt ${attempt}, waiting ${delayMs}ms)...`)
     wsServer.broadcastStatus('Tunnel recovering...')
   })
 
   tunnel.on('tunnel_failed', ({ message, lastExitCode, lastSignal }) => {
-    console.error(`\n[!] ${message}`)
-    console.error(`[!] Last exit: code=${lastExitCode} signal=${lastSignal}`)
-    console.error(`[!] Server will continue on localhost only. Remote connections will not work.`)
+    log.error(message)
+    log.error(`Last exit: code=${lastExitCode} signal=${lastSignal}`)
+    log.error('Server will continue on localhost only. Remote connections will not work.')
     wsServer.broadcastError('tunnel', 'Tunnel recovery failed. Remote connections will not work.', false)
   })
 }
@@ -92,11 +94,11 @@ export async function startCliServer(config) {
         if (cfg.apiToken) {
           delete cfg.apiToken
           writeFileRestricted(configFile, JSON.stringify(cfg, null, 2))
-          if (migrated) console.log('[keychain] API token migrated to OS keychain')
-          else console.log('[keychain] Removed redundant plaintext token from config')
+          if (migrated) log.info('API token migrated to OS keychain')
+          else log.info('Removed redundant plaintext token from config')
         }
       } catch (err) {
-        console.warn(`[keychain] Migration warning: ${err.message}`)
+        log.warn(`Keychain migration warning: ${err.message}`)
       }
       // Use keychain token as authoritative source
       API_TOKEN = keychainToken
@@ -104,7 +106,7 @@ export async function startCliServer(config) {
   }
 
   if (!NO_AUTH && !API_TOKEN) {
-    console.error('[!] No API token configured. Run \'npx chroxy init\' first.')
+    console.error('[!] No API token configured. Run \'npx chroxy init\' first.') // intentional user-facing output
     process.exit(1)
   }
 
@@ -132,7 +134,7 @@ export async function startCliServer(config) {
 
   // Prevent unencrypted traffic over public tunnels
   if (config.noEncrypt && config.tunnel && config.tunnel !== 'none') {
-    console.error('[!] Cannot use --no-encrypt with a tunnel. Unencrypted WebSocket')
+    console.error('[!] Cannot use --no-encrypt with a tunnel. Unencrypted WebSocket') // intentional user-facing output
     console.error('    traffic over a public tunnel exposes all session data in transit.')
     console.error('    Remove --no-encrypt or disable the tunnel (--tunnel none).')
     process.exit(1)
@@ -147,7 +149,7 @@ export async function startCliServer(config) {
     const { EnvironmentManager } = await import('./environment-manager.js')
     environmentManager = new EnvironmentManager()
     await environmentManager.reconnect()
-    console.log(`[env] EnvironmentManager ready (${environmentManager.list().length} environment(s))`)
+    log.info(`EnvironmentManager ready (${environmentManager.list().length} environment(s))`)
   }
 
   // 1. Create session manager
@@ -171,7 +173,7 @@ export async function startCliServer(config) {
   let defaultSessionId
   defaultSessionId = sessionManager.restoreState()
   if (defaultSessionId) {
-    console.log(`[cli] Restored sessions from previous server instance`)
+    log.info('Restored sessions from previous server instance')
   }
 
   // 3. Create default session if no restore
@@ -184,9 +186,9 @@ export async function startCliServer(config) {
   // Log events for debugging and forward critical errors
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     if (event === 'ready') {
-      console.log(`[cli] Session ${sessionId} ready: ${data.sessionId} (model: ${data.model})`)
+      log.info(`Session ${sessionId} ready: ${data.sessionId} (model: ${data.model})`)
     } else if (event === 'error') {
-      console.error(`[cli] Session ${sessionId} error: ${data.message}`)
+      log.error(`Session ${sessionId} error: ${data.message}`)
       // Forward session errors as server_error (in addition to the in-chat error message)
       const isFatal = /failed to stay alive|max respawn/i.test(data.message)
       if (wsServer) wsServer.broadcastError('session', data.message, !isFatal, sessionId)
@@ -201,7 +203,7 @@ export async function startCliServer(config) {
         })
       }
     } else if (event === 'result' && data.cost != null) {
-      console.log(`[cli] Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
+      log.info(`Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
       // Push notification for idle: fire when no clients connected OR when clients are
       // connected but none viewing this session (background session completed)
       if (pushManager.hasTokens && wsServer) {
@@ -217,12 +219,12 @@ export async function startCliServer(config) {
     } else if (event === 'result') {
       // result without cost (e.g. Gemini providers) — log duration if available
       if (data.duration != null) {
-        console.log(`[cli] Session ${sessionId} query completed in ${data.duration}ms`)
+        log.info(`Session ${sessionId} query completed in ${data.duration}ms`)
       }
     } else if (event === 'budget_warning') {
-      console.warn(`[cli] Budget warning: ${data.message}`)
+      log.warn(`Budget warning: ${data.message}`)
     } else if (event === 'budget_exceeded') {
-      console.warn(`[cli] Budget exceeded: ${data.message}`)
+      log.warn(`Budget exceeded: ${data.message}`)
     }
 
     // Activity update pushes for state transitions (#2085)
@@ -267,22 +269,22 @@ export async function startCliServer(config) {
   })
 
   sessionManager.on('session_created', ({ sessionId, name, cwd }) => {
-    console.log(`[cli] Session created: ${sessionId} (${name}) in ${cwd}`)
+    log.info(`Session created: ${sessionId} (${name}) in ${cwd}`)
   })
 
   sessionManager.on('session_destroyed', ({ sessionId }) => {
-    console.log(`[cli] Session destroyed: ${sessionId}`)
+    log.info(`Session destroyed: ${sessionId}`)
   })
 
   sessionManager.on('session_warning', ({ sessionId, name, reason, message, remainingMs }) => {
-    console.log(`[cli] Session warning: ${message}`)
+    log.warn(`Session warning: ${message}`)
     if (wsServer) {
       wsServer.broadcast({ type: 'session_warning', sessionId, name, reason, message, remainingMs })
     }
   })
 
   sessionManager.on('session_timeout', ({ sessionId, name, idleMs }) => {
-    console.log(`[cli] Session ${sessionId} (${name}) timed out after ${Math.round(idleMs / 1000)}s idle`)
+    log.info(`Session ${sessionId} (${name}) timed out after ${Math.round(idleMs / 1000)}s idle`)
     if (wsServer) {
       wsServer.broadcast({ type: 'session_timeout', sessionId, name, idleMs })
     }
@@ -316,7 +318,7 @@ export async function startCliServer(config) {
           persistToFile()
         }
       } catch (err) {
-        console.error(`[token-manager] Failed to persist token: ${err.message}`)
+        log.error(`Failed to persist token: ${err.message}`)
       }
     },
   })
@@ -361,9 +363,9 @@ export async function startCliServer(config) {
         port: PORT,
         txt: { version: SERVER_VERSION, auth: API_TOKEN ? 'token' : 'none' },
       })
-      console.log(`[mdns] Advertising _chroxy._tcp on port ${PORT}`)
+      log.info(`Advertising _chroxy._tcp on port ${PORT} via mDNS`)
     } catch (err) {
-      console.log(`[mdns] mDNS advertisement unavailable: ${err.message}`)
+      log.debug(`mDNS advertisement unavailable: ${err.message}`)
     }
   }
 
@@ -441,7 +443,7 @@ export async function startCliServer(config) {
     wireTunnelEvents(tunnel, wsServer)
 
     tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
-      console.log(`[✓] Tunnel recovered after ${attempt} attempt(s)`)
+      log.info(`Tunnel recovered after ${attempt} attempt(s)`)
 
       // Re-verify the new tunnel URL
       await waitForTunnel(newHttpUrl)
@@ -453,7 +455,7 @@ export async function startCliServer(config) {
         displayQr(newWsUrl, newHttpUrl, modeLabel)
         wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
       } else {
-        console.log(`[✓] Tunnel URL unchanged: ${newWsUrl}`)
+        log.info(`Tunnel URL unchanged: ${newWsUrl}`)
         wsServer.broadcastStatus('Tunnel connection recovered')
       }
     })
@@ -487,7 +489,7 @@ export async function startCliServer(config) {
       if (!currentWsUrl) return
       const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
       displayQr(currentWsUrl, httpBase, currentTunnelMode)
-      console.log('[pairing] QR code refreshed with new pairing ID.\n')
+      log.info('QR code refreshed with new pairing ID.')
     })
   }
 
@@ -506,7 +508,7 @@ export async function startCliServer(config) {
         const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
         displayQr(currentWsUrl, httpBase, currentTunnelMode)
       }
-      console.log(`[token] API token rotated. QR code updated.\n`)
+      log.info('API token rotated. QR code updated.')
     })
   }
 
@@ -514,7 +516,7 @@ export async function startCliServer(config) {
 
   // Graceful shutdown
   const shutdown = async (signal) => {
-    console.log(`\n[${signal}] Shutting down...`)
+    log.info(`[${signal}] Shutting down...`)
     // Notify connected clients (ETA 0 = not coming back unless supervised)
     wsServer.broadcastShutdown('shutdown', 0)
     if (mdnsService) {
@@ -538,7 +540,7 @@ export async function startCliServer(config) {
   process.on('SIGTERM', () => shutdown('SIGTERM'))
 
   process.on('uncaughtException', (err) => {
-    console.error('[fatal] Uncaught exception:', err)
+    log.error(`Uncaught exception: ${err?.stack || err}`)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
     // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
     try { sessionManager.destroyAll() } catch {}
@@ -549,7 +551,7 @@ export async function startCliServer(config) {
   })
 
   process.on('unhandledRejection', (err) => {
-    console.error('[fatal] Unhandled rejection:', err)
+    log.error(`Unhandled rejection: ${err?.stack || err}`)
     try { wsServer.broadcastShutdown('crash', 0) } catch {}
     // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
     try { sessionManager.destroyAll() } catch {}

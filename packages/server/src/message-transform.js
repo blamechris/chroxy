@@ -5,6 +5,9 @@
  * The pipeline is opt-in — if no transforms are configured, messages pass
  * through unchanged (zero behavior change for existing users).
  */
+import { createLogger } from './logger.js'
+
+const log = createLogger('message-transform')
 
 /**
  * Built-in transforms registry.
@@ -66,11 +69,11 @@ export class MessageTransformPipeline {
       if (fn) {
         this._transforms.push({ name, fn })
       } else {
-        console.warn(`[message-transform] Unknown transform: "${name}", skipping`)
+        log.warn(`Unknown transform: "${name}", skipping`)
       }
     }
     if (this._transforms.length > 0) {
-      console.log(`[message-transform] Pipeline: ${this._transforms.map(t => t.name).join(' → ')}`)
+      log.info(`Pipeline: ${this._transforms.map(t => t.name).join(' → ')}`)
     }
   }
 

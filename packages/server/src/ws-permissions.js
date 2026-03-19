@@ -1,4 +1,7 @@
 import { randomUUID } from 'crypto'
+import { createLogger } from './logger.js'
+
+const log = createLogger('ws')
 
 // -- Permission TTL --
 const PERMISSION_TTL_MS = 300_000 // 5 minutes
@@ -56,7 +59,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
   /** Handle POST /permission from the hook script */
   function handlePermissionRequest(req, res) {
     if (!_validateHookAuth(req, res)) {
-      console.warn('[ws] Rejected unauthenticated POST /permission')
+      log.warn('Rejected unauthenticated POST /permission')
       return
     }
 
@@ -88,7 +91,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
 
       const requestId = `perm-${randomUUID()}`
 
-      console.log(`[ws] Permission request ${requestId}: ${hookData.tool_name || 'unknown tool'}`)
+      log.info(`Permission request ${requestId}: ${hookData.tool_name || 'unknown tool'}`)
 
       const tool = hookData.tool_name || 'Unknown tool'
       const toolInput = hookData.tool_input || {}
@@ -124,7 +127,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       const onClose = () => {
         if (closed) return
         closed = true
-        console.log(`[ws] Permission ${requestId} connection closed by client`)
+        log.info(`Permission ${requestId} connection closed by client`)
         cleanup()
       }
 
@@ -134,7 +137,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       const timer = setTimeout(() => {
         if (closed) return
         closed = true
-        console.log(`[ws] Permission ${requestId} timed out, auto-denying`)
+        log.info(`Permission ${requestId} timed out, auto-denying`)
         cleanup()
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ decision: 'deny' }))
@@ -145,7 +148,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           if (closed) return
           closed = true
           cleanup()
-          console.log(`[ws] Permission ${requestId} resolved: ${decision}`)
+          log.info(`Permission ${requestId} resolved: ${decision}`)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ decision }))
         },
@@ -158,7 +161,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
   /** Handle POST /permission-response from iOS notification actions (HTTP fallback) */
   function handlePermissionResponseHttp(req, res) {
     if (!validateBearerAuth(req, res)) {
-      console.warn('[ws] Rejected unauthenticated POST /permission-response')
+      log.warn('Rejected unauthenticated POST /permission-response')
       return
     }
 
@@ -208,7 +211,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         if (entry && typeof entry.session.respondToPermission === 'function') {
           permissionSessionMap.delete(requestId)
           entry.session.respondToPermission(requestId, decision)
-          console.log(`[ws] Permission ${requestId} resolved via HTTP: ${decision} (SDK)`)
+          log.info(`Permission ${requestId} resolved via HTTP: ${decision} (SDK)`)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ ok: true }))
           return
@@ -220,7 +223,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       if (pending) {
         permissionSessionMap.delete(requestId)
         resolvePermission(requestId, decision)
-        console.log(`[ws] Permission ${requestId} resolved via HTTP: ${decision} (legacy)`)
+        log.info(`Permission ${requestId} resolved via HTTP: ${decision} (legacy)`)
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
       } else {
@@ -244,10 +247,10 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               const ttl = permData.remainingMs ?? PERMISSION_TTL_MS
               const remainingMs = Math.min(ttl, Math.max(0, ttl - elapsed))
               if (remainingMs <= 0) {
-                console.log(`[ws] Skipping expired permission ${requestId}`)
+                log.debug(`Skipping expired permission ${requestId}`)
                 continue
               }
-              console.log(`[ws] Re-sending pending permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
+              log.info(`Re-sending pending permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
               permissionSessionMap.set(requestId, sessionId)
               const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = permData
               sendFn(ws, { type: 'permission_request', ...clientPayload, remainingMs, sessionId })
@@ -264,10 +267,10 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         const ttl = pending.data.remainingMs ?? PERMISSION_TTL_MS
         const remainingMs = Math.min(ttl, Math.max(0, ttl - elapsed))
         if (remainingMs <= 0) {
-          console.log(`[ws] Skipping expired legacy permission ${requestId}`)
+          log.debug(`Skipping expired legacy permission ${requestId}`)
           continue
         }
-        console.log(`[ws] Re-sending pending legacy permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
+        log.info(`Re-sending pending legacy permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
         const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = pending.data
         sendFn(ws, { type: 'permission_request', ...clientPayload, remainingMs })
       }
@@ -280,7 +283,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     if (pending) {
       pending.resolve(decision)
     } else {
-      console.warn(`[ws] No pending permission for ${requestId}`)
+      log.warn(`No pending permission for ${requestId}`)
     }
   }
 

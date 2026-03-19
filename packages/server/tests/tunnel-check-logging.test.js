@@ -61,6 +61,7 @@ describe('waitForTunnel logging', () => {
   it('logs total attempts in final "giving up" message', async () => {
     const logs = []
     mock.method(console, 'log', (msg) => logs.push(msg))
+    mock.method(console, 'warn', (msg) => logs.push(msg))
     mock.method(globalThis, 'fetch', async () => { throw new Error('Network error') })
 
     await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 4, interval: 0 })

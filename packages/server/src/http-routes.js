@@ -3,6 +3,9 @@ import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import QRCode from 'qrcode'
 import { readConnectionInfo } from './connection-info.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('ws')
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -79,7 +82,7 @@ export function createHttpHandler(server) {
     // Version endpoint
     if (req.method === 'GET' && req.url === '/version') {
       if (!server._validateBearerAuth(req, res)) {
-        console.warn('[ws] Rejected unauthenticated GET /version')
+        log.warn('Rejected unauthenticated GET /version')
         return
       }
       res.writeHead(200, { 'Content-Type': 'application/json' })
