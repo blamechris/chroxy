@@ -146,18 +146,22 @@ export function SessionScreen() {
   // Pick the right message list for the current view
   const messages = viewMode === 'system' ? systemMessages : chatMessages;
 
-  // Track unread system message count per session
-  const lastSeenSystemCountRef = useRef<Map<string | null, number>>(new Map());
-  const lastSeenForSession = lastSeenSystemCountRef.current.get(activeSessionId ?? null) ?? 0;
-  const rawUnreadSystemCount = viewMode === 'system'
-    ? 0
-    : systemMessages.length - lastSeenForSession;
+  // Track unread system message count per session (keyed by sessionId, never null)
+  const lastSeenSystemCountRef = useRef<Map<string, number>>(new Map());
+  const lastSeenForSession =
+    activeSessionId ? lastSeenSystemCountRef.current.get(activeSessionId) ?? 0 : 0;
+  const rawUnreadSystemCount =
+    !activeSessionId || viewMode === 'system'
+      ? 0
+      : systemMessages.length - lastSeenForSession;
   const unreadSystemCount = rawUnreadSystemCount > 0 ? rawUnreadSystemCount : 0;
 
   // Update last-seen count when entering System tab; clamp when messages are trimmed
   useEffect(() => {
+    if (!activeSessionId) return;
+
     const map = lastSeenSystemCountRef.current;
-    const key = activeSessionId ?? null;
+    const key = activeSessionId;
     const previous = map.get(key) ?? 0;
 
     // Clamp if messages were trimmed below previously-seen count
@@ -373,7 +377,7 @@ export function SessionScreen() {
   const hasTerminal = !isCliMode || (activeSession?.hasTerminal ?? false);
 
   // Wire up terminal write callback when terminal view is visible (including split view)
-  const terminalVisible = (viewMode === 'terminal' || (layout.isSplitView && viewMode !== 'files')) && hasTerminal;
+  const terminalVisible = (viewMode === 'terminal' || (layout.isSplitView && viewMode !== 'files' && viewMode !== 'system')) && hasTerminal;
   useEffect(() => {
     if (!terminalVisible) return;
 
@@ -1096,6 +1100,9 @@ export function SessionScreen() {
               isSelectingRef={isSelectingRef}
               onToggleSelection={toggleSelection}
               streamingMessageId={null}
+              searchQuery={searchVisible ? inSessionSearchQuery : undefined}
+              searchMatchIds={searchVisible ? searchMatchIds : undefined}
+              currentMatchId={searchVisible ? currentMatchId : undefined}
             />
           </ErrorBoundary>
         ) : (
