@@ -222,6 +222,7 @@ export function SessionScreen() {
   const [showDiffViewer, setShowDiffViewer] = useState(false);
   const [showCheckpoints, setShowCheckpoints] = useState(false);
   const [showGitView, setShowGitView] = useState(false);
+  const [showMoreTools, setShowMoreTools] = useState(false);
   const [showSessionOverview, setShowSessionOverview] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
 
@@ -693,6 +694,24 @@ export function SessionScreen() {
               Files
             </Text>
           </TouchableOpacity>
+          <View style={{ flex: 1 }} />
+          <TouchableOpacity
+            style={styles.diffButton}
+            onPress={() => setShowMoreTools((prev) => !prev)}
+            accessibilityRole="button"
+            accessibilityLabel={showMoreTools ? 'Hide tools' : 'Show tools'}
+          >
+            <Icon name={showMoreTools ? 'chevronUp' : 'chevronDown'} size={16} color={COLORS.textMuted} />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')} accessibilityRole="button" accessibilityLabel="Open settings">
+            <Icon name="settings" size={16} color={COLORS.textMuted} />
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Secondary tools row (collapsed by default) */}
+      {showMoreTools && (
+        <View style={styles.secondaryToolsRow}>
           <TouchableOpacity style={styles.diffButton} onPress={() => setShowDiffViewer(true)} accessibilityRole="button" accessibilityLabel="View changes">
             <Icon name="diff" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
@@ -712,14 +731,8 @@ export function SessionScreen() {
               <Icon name="export" size={16} color={COLORS.textMuted} />
             </TouchableOpacity>
           )}
-          <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('History')} accessibilityRole="button" accessibilityLabel="Conversation history">
+          <TouchableOpacity style={styles.diffButton} onPress={() => navigation.navigate('History')} accessibilityRole="button" accessibilityLabel="Conversation history">
             <Icon name="clock" size={16} color={COLORS.textMuted} />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.settingsButton} onPress={() => navigation.navigate('Settings')} accessibilityRole="button" accessibilityLabel="Open settings">
-            <Icon name="settings" size={16} color={COLORS.textMuted} />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.disconnectButton} onPress={disconnect} accessibilityRole="button" accessibilityLabel="Disconnect">
-            <Icon name="close" size={16} color={COLORS.accentRed} />
           </TouchableOpacity>
         </View>
       )}
@@ -1156,13 +1169,25 @@ const styles = StyleSheet.create({
   },
   modeToggle: {
     flexDirection: 'row',
+    alignItems: 'center',
     padding: 8,
     backgroundColor: COLORS.backgroundSecondary,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.backgroundCard,
   },
+  secondaryToolsRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    backgroundColor: COLORS.backgroundSecondary,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.backgroundCard,
+  },
   modeButton: {
-    flex: 1,
+    flex: 0,
+    paddingHorizontal: 16,
     paddingVertical: 8,
     alignItems: 'center',
     borderRadius: 8,
