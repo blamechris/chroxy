@@ -30,6 +30,10 @@ import {
 
 const APP_VERSION = Constants.expoConfig?.version ?? 'unknown';
 
+// Stable reference for empty session rules — prevents Zustand selector from
+// returning a new [] on every render (which causes infinite re-render loops).
+const EMPTY_RULES: PermissionRule[] = [];
+
 const SPEECH_LANGUAGES = [
   { tag: 'en-US', label: 'English (US)' },
   { tag: 'en-GB', label: 'English (UK)' },
@@ -99,7 +103,8 @@ export function SettingsScreen() {
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
   const sessionRules = useConnectionStore((s) => {
     const id = s.activeSessionId;
-    return id && s.sessionStates[id] ? (s.sessionStates[id].sessionRules ?? []) : [];
+    if (!id || !s.sessionStates[id]) return EMPTY_RULES;
+    return s.sessionStates[id].sessionRules ?? EMPTY_RULES;
   });
 
   const serverVersion = useConnectionLifecycleStore((s) => s.serverVersion);
