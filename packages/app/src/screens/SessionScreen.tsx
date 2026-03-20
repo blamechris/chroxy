@@ -116,7 +116,7 @@ export function SessionScreen() {
 
   // Individual selectors for state values — avoids subscribing to every store change
   const viewMode = useConnectionStore((s) => s.viewMode);
-  const messages = useConnectionStore(selectMessages);
+  const allMessages = useConnectionStore(selectMessages);
   const inputSettings = useConnectionStore((s) => s.inputSettings);
   const claudeReady = useConnectionStore(selectClaudeReady);
   const serverMode = useConnectionLifecycleStore((s) => s.serverMode);
@@ -131,6 +131,48 @@ export function SessionScreen() {
   const contextUsage = useConnectionStore(selectContextUsage);
   const lastResultCost = useConnectionStore(selectLastResultCost);
   const lastResultDuration = useConnectionStore(selectLastResultDuration);
+  const activeSessionId = useConnectionStore((s) => s.activeSessionId);
+
+  // Filter system messages out of chat, collect them for the System tab
+  const chatMessages = useMemo(
+    () => allMessages.filter((m) => m.type !== 'system'),
+    [allMessages],
+  );
+  const systemMessages = useMemo(
+    () => allMessages.filter((m) => m.type === 'system'),
+    [allMessages],
+  );
+
+  // Pick the right message list for the current view
+  const messages = viewMode === 'system' ? systemMessages : chatMessages;
+
+  // Track unread system message count per session (keyed by sessionId, never null)
+  const lastSeenSystemCountRef = useRef<Map<string, number>>(new Map());
+  const lastSeenForSession =
+    activeSessionId ? lastSeenSystemCountRef.current.get(activeSessionId) ?? 0 : 0;
+  const rawUnreadSystemCount =
+    !activeSessionId || viewMode === 'system'
+      ? 0
+      : systemMessages.length - lastSeenForSession;
+  const unreadSystemCount = rawUnreadSystemCount > 0 ? rawUnreadSystemCount : 0;
+
+  // Update last-seen count when entering System tab; clamp when messages are trimmed
+  useEffect(() => {
+    if (!activeSessionId) return;
+
+    const map = lastSeenSystemCountRef.current;
+    const key = activeSessionId;
+    const previous = map.get(key) ?? 0;
+
+    // Clamp if messages were trimmed below previously-seen count
+    if (previous > systemMessages.length) {
+      map.set(key, systemMessages.length);
+    }
+
+    if (viewMode === 'system') {
+      map.set(key, systemMessages.length);
+    }
+  }, [viewMode, systemMessages.length, activeSessionId]);
 
   // Action functions — stable references, individual selectors to avoid omnibus subscription
   const setViewMode = useConnectionStore((s) => s.setViewMode);
@@ -149,7 +191,6 @@ export function SessionScreen() {
   const markPromptAnswered = useConnectionStore((s) => s.markPromptAnswered);
 
   const sessions = useConnectionStore((s) => s.sessions);
-  const activeSessionId = useConnectionStore((s) => s.activeSessionId);
   const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);
   const exitCachedSession = useConnectionStore((s) => s.exitCachedSession);
   const savedConnection = useConnectionLifecycleStore((s) => s.savedConnection);
@@ -336,7 +377,7 @@ export function SessionScreen() {
   const hasTerminal = !isCliMode || (activeSession?.hasTerminal ?? false);
 
   // Wire up terminal write callback when terminal view is visible (including split view)
-  const terminalVisible = (viewMode === 'terminal' || (layout.isSplitView && viewMode !== 'files')) && hasTerminal;
+  const terminalVisible = (viewMode === 'terminal' || (layout.isSplitView && viewMode !== 'files' && viewMode !== 'system')) && hasTerminal;
   useEffect(() => {
     if (!terminalVisible) return;
 
@@ -721,7 +762,7 @@ export function SessionScreen() {
           <TouchableOpacity style={styles.diffButton} onPress={() => setShowGitView(true)} accessibilityRole="button" accessibilityLabel="Git operations">
             <Icon name="gitBranch" size={16} color={COLORS.textMuted} />
           </TouchableOpacity>
-          {(viewMode === 'chat' || (layout.isSplitView && viewMode !== 'files')) && (
+          {(viewMode === 'chat' || viewMode === 'system' || (layout.isSplitView && viewMode !== 'files')) && (
             <TouchableOpacity style={styles.diffButton} onPress={handleSearchOpen} accessibilityRole="button" accessibilityLabel="Search messages">
               <Icon name="search" size={16} color={COLORS.textMuted} />
             </TouchableOpacity>
@@ -733,6 +774,19 @@ export function SessionScreen() {
           )}
           <TouchableOpacity style={styles.diffButton} onPress={() => navigation.navigate('History')} accessibilityRole="button" accessibilityLabel="Conversation history">
             <Icon name="clock" size={16} color={COLORS.textMuted} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.diffButton}
+            onPress={() => setViewMode('system')}
+            accessibilityRole="button"
+            accessibilityLabel="System messages"
+          >
+            <Icon name="terminal" size={16} color={viewMode === 'system' ? COLORS.accentBlue : COLORS.textMuted} />
+            {unreadSystemCount > 0 && (
+              <View style={styles.systemBadge}>
+                <Text style={styles.systemBadgeText}>{unreadSystemCount > 99 ? '99+' : unreadSystemCount}</Text>
+              </View>
+            )}
           </TouchableOpacity>
         </View>
       )}
@@ -977,12 +1031,12 @@ export function SessionScreen() {
 
       {/* Content area — split view on tablets in landscape */}
       {!showSessionOverview && (
-        layout.isSplitView && hasTerminal && viewMode !== 'files' ? (
+        layout.isSplitView && hasTerminal && viewMode !== 'files' && viewMode !== 'system' ? (
           <View style={styles.splitContainer}>
             <View style={styles.splitPane}>
               <ErrorBoundary fallbackTitle="Chat view error">
                 <ChatView
-                  messages={messages}
+                  messages={chatMessages}
                   scrollViewRef={scrollViewRef}
                   claudeReady={claudeReady}
                   onSelectOption={handleSelectOption}
@@ -1033,6 +1087,24 @@ export function SessionScreen() {
           </ErrorBoundary>
         ) : viewMode === 'files' ? (
           <FileBrowser />
+        ) : viewMode === 'system' ? (
+          <ErrorBoundary fallbackTitle="System view error">
+            <ChatView
+              messages={messages}
+              scrollViewRef={scrollViewRef}
+              claudeReady={claudeReady}
+              onSelectOption={handleSelectOption}
+              isCliMode={isCliMode}
+              selectedIds={selectedIds}
+              isSelecting={isSelecting}
+              isSelectingRef={isSelectingRef}
+              onToggleSelection={toggleSelection}
+              streamingMessageId={null}
+              searchQuery={searchVisible ? inSessionSearchQuery : undefined}
+              searchMatchIds={searchVisible ? searchMatchIds : undefined}
+              currentMatchId={searchVisible ? currentMatchId : undefined}
+            />
+          </ErrorBoundary>
         ) : (
           <ErrorBoundary fallbackTitle="Terminal error">
             <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
@@ -1210,6 +1282,23 @@ const styles = StyleSheet.create({
     minWidth: 44,
     minHeight: 44,
     alignItems: 'center',
+  },
+  systemBadge: {
+    position: 'absolute',
+    top: 4,
+    right: 0,
+    backgroundColor: COLORS.accentBlue,
+    borderRadius: 8,
+    minWidth: 16,
+    height: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+  },
+  systemBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
   },
   diffButtonText: {
     color: COLORS.textMuted,

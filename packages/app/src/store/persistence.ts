@@ -24,8 +24,11 @@ const MAX_MESSAGES = 100;
 const MAX_TERMINAL_SIZE = 50_000;
 
 /** Valid view modes — used to validate persisted values */
-const VALID_VIEW_MODES = ['chat', 'terminal', 'files'] as const;
+const VALID_VIEW_MODES = ['chat', 'terminal', 'files', 'system'] as const;
 type ViewMode = (typeof VALID_VIEW_MODES)[number];
+
+/** View modes that should not be restored on cold start (transient views) */
+const TRANSIENT_VIEW_MODES: ReadonlySet<string> = new Set(['system']);
 
 function sessionMessagesKey(sessionId: string): string {
   return `${KEY_PREFIX}messages_${sessionId}`;
@@ -175,10 +178,11 @@ export async function loadPersistedState(): Promise<PersistedState> {
       KEY_TERMINAL_BUFFER,
     ]);
     // Validate viewMode against allowed values (guards against stale/corrupt data)
+    // Transient views (e.g. 'system') reset to 'chat' on cold start
     const rawViewMode = viewMode[1];
     const validatedViewMode: ViewMode | null =
       rawViewMode && (VALID_VIEW_MODES as readonly string[]).includes(rawViewMode)
-        ? (rawViewMode as ViewMode)
+        ? TRANSIENT_VIEW_MODES.has(rawViewMode) ? 'chat' : (rawViewMode as ViewMode)
         : null;
     return {
       viewMode: validatedViewMode,

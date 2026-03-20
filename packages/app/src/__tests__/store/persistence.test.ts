@@ -65,6 +65,12 @@ describe('persistViewMode', () => {
       expect(state.viewMode).toBe(mode);
     }
   });
+
+  it('resets transient view modes to chat on load', async () => {
+    await persistViewMode('system');
+    const state = await loadPersistedState();
+    expect(state.viewMode).toBe('chat');
+  });
 });
 
 // ---------------------------------------------------------------------------
