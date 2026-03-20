@@ -226,6 +226,41 @@ async fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> 
     Ok(result)
 }
 
+/// Tile the main window to left/right half or maximize.
+/// Works around WKWebView consuming keyboard events before macOS WindowServer
+/// can process them as system tiling shortcuts (fn+ctrl+arrow).
+#[tauri::command]
+fn tile_window(window: tauri::Window, direction: String) -> Result<(), String> {
+    let monitor = window.current_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or("No monitor found")?;
+    let screen = monitor.size();
+    let pos = monitor.position();
+    let scale = monitor.scale_factor();
+
+    // Account for menu bar (~25 logical pixels on macOS)
+    let menu_bar_height = (25.0 * scale) as i32;
+    let usable_height = screen.height as i32 - menu_bar_height;
+    let half_width = screen.width / 2;
+
+    match direction.as_str() {
+        "left" => {
+            let _ = window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y + menu_bar_height));
+            let _ = window.set_size(tauri::PhysicalSize::new(half_width, usable_height as u32));
+        }
+        "right" => {
+            let _ = window.set_position(tauri::PhysicalPosition::new(pos.x + half_width as i32, pos.y + menu_bar_height));
+            let _ = window.set_size(tauri::PhysicalSize::new(half_width, usable_height as u32));
+        }
+        "maximize" => {
+            let _ = window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y + menu_bar_height));
+            let _ = window.set_size(tauri::PhysicalSize::new(screen.width, usable_height as u32));
+        }
+        _ => return Err(format!("Unknown direction: {}", direction)),
+    }
+    Ok(())
+}
+
 /// Reject an IPC call that did not originate from the `main` window.
 ///
 /// Voice commands interact with the system microphone. Restricting them to the
@@ -314,6 +349,7 @@ pub fn run() {
             start_voice_input,
             #[cfg(target_os = "macos")]
             stop_voice_input,
+            tile_window,
         ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
@@ -324,6 +360,69 @@ pub fn run() {
             { Mutex::new(()) }
         })
         .setup(|app| {
+            // App menu bar — required for macOS Sequoia window tiling keyboard shortcuts.
+            // macOS routes fn+ctrl+arrow through the Window menu's "Move & Resize" items.
+            // Without a Window submenu, those shortcuts silently do nothing.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::AboutMetadata;
+                let app_menu = SubmenuBuilder::new(app, "Chroxy")
+                    .about(Some(AboutMetadata::default()))
+                    .separator()
+                    .quit()
+                    .build()?;
+                let edit_menu = SubmenuBuilder::new(app, "Edit")
+                    .undo()
+                    .redo()
+                    .separator()
+                    .cut()
+                    .copy()
+                    .paste()
+                    .select_all()
+                    .build()?;
+                let window_menu = SubmenuBuilder::new(app, "Window")
+                    .minimize()
+                    .close_window()
+                    .build()?;
+                let menu = MenuBuilder::new(app)
+                    .item(&app_menu)
+                    .item(&edit_menu)
+                    .item(&window_menu)
+                    .build()?;
+                app.set_menu(menu)?;
+
+                // Workaround for Tauri bug #13605: Tauri's SubmenuBuilder doesn't
+                // register the Window submenu with NSApp.windowsMenu, so macOS
+                // never adds "Move & Resize" tiling items. We set it manually via
+                // the cocoa crate to enable fn+ctrl+arrow tiling shortcuts.
+                unsafe {
+                    use cocoa::base::{id, nil};
+                    use cocoa::appkit::NSApp;
+                    use objc::{msg_send, sel, sel_impl};
+
+                    let ns_app: id = NSApp();
+                    let main_menu: id = msg_send![ns_app, mainMenu];
+                    if main_menu != nil {
+                        let count: isize = msg_send![main_menu, numberOfItems];
+                        for i in 0..count {
+                            let item: id = msg_send![main_menu, itemAtIndex:i];
+                            if item != nil {
+                                let submenu: id = msg_send![item, submenu];
+                                if submenu != nil {
+                                    let title: id = msg_send![submenu, title];
+                                    let utf8: *const std::os::raw::c_char = msg_send![title, UTF8String];
+                                    let title_str = std::ffi::CStr::from_ptr(utf8)
+                                        .to_str().unwrap_or("");
+                                    if title_str == "Window" {
+                                        let _: () = msg_send![ns_app, setWindowsMenu:submenu];
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // First-run: generate config if needed
             let is_first_run = setup::ensure_config();
             IS_FIRST_RUN.store(is_first_run, Ordering::Relaxed);
