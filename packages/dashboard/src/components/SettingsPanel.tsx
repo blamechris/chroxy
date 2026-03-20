@@ -4,12 +4,14 @@
  * Triggered via gear icon in header or Cmd+,. Changes apply instantly
  * and persist to localStorage.
  */
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
+import { isTauri } from '../utils/tauri'
+import { getTunnelMode, setTunnelMode } from '../hooks/useTauriIPC'
 
 export interface SettingsPanelProps {
   isOpen: boolean
@@ -50,6 +52,32 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const updateInputSettings = useConnectionStore(s => s.updateInputSettings)
   const themes = getAvailableThemes()
+  const inTauri = isTauri()
+  const [tunnelMode, setTunnelModeState] = useState<string>('none')
+  const [tunnelError, setTunnelError] = useState<string | null>(null)
+
+  // Load tunnel mode from Tauri settings on open and clear stale errors
+  useEffect(() => {
+    if (!isOpen || !inTauri) return
+    setTunnelError(null)
+    getTunnelMode().then(mode => {
+      if (mode) setTunnelModeState(mode)
+    })
+  }, [isOpen, inTauri])
+
+  const handleTunnelModeChange = useCallback(async (mode: string) => {
+    setTunnelError(null)
+    const previousMode = tunnelMode
+    setTunnelModeState(mode)
+    try {
+      await setTunnelMode(mode)
+    } catch (err) {
+      // Revert to actual saved mode, or previous mode as fallback
+      const actual = await getTunnelMode()
+      setTunnelModeState(actual ?? previousMode)
+      setTunnelError(err instanceof Error ? err.message : String(err))
+    }
+  }, [tunnelMode])
 
   // Normalize: if persisted defaultProvider isn't in server's list, use first available
   const effectiveProvider = useMemo(() => {
@@ -191,6 +219,38 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                   checked={showConsoleTab ?? false}
                   onChange={(e) => onToggleConsoleTab(e.target.checked)}
                 />
+              </div>
+            </section>
+          )}
+
+          {inTauri && (
+            <section className="settings-section">
+              <h3>Network</h3>
+              <div className="settings-field">
+                <span id="tunnel-mode-label">Tunnel mode</span>
+                <div className="tunnel-mode-options" role="radiogroup" aria-labelledby="tunnel-mode-label">
+                  {([
+                    { value: 'none', label: 'Off', desc: 'LAN only' },
+                    { value: 'quick', label: 'Quick Tunnel', desc: 'Random Cloudflare URL' },
+                    { value: 'named', label: 'Named Tunnel', desc: 'Stable URL, requires setup' },
+                  ] as const).map(opt => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      role="radio"
+                      className={`tunnel-mode-option${tunnelMode === opt.value ? ' active' : ''}`}
+                      onClick={() => handleTunnelModeChange(opt.value)}
+                      aria-checked={tunnelMode === opt.value}
+                    >
+                      <span className="tunnel-mode-label">{opt.label}</span>
+                      <span className="tunnel-mode-desc">{opt.desc}</span>
+                    </button>
+                  ))}
+                </div>
+                {tunnelError && (
+                  <p className="tunnel-mode-error">{tunnelError}</p>
+                )}
+                <p className="tunnel-mode-note">Server restart required after change</p>
               </div>
             </section>
           )}

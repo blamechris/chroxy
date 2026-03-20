@@ -16,11 +16,11 @@ interface ServerInfo {
 }
 
 /** Invoke a Tauri command (returns null if not in Tauri context) */
-async function tauriInvoke<T>(cmd: string): Promise<T | null> {
+async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
   const invoke = getTauriInvoke()
   if (!invoke) return null
   try {
-    return await invoke(cmd) as T
+    return await invoke(cmd, args) as T
   } catch {
     return null
   }
@@ -40,4 +40,15 @@ export async function stopServer(): Promise<void> {
 
 export async function restartServer(): Promise<void> {
   await tauriInvoke('restart_server')
+}
+
+export async function getTunnelMode(): Promise<string | null> {
+  return tauriInvoke<string>('get_tunnel_mode')
+}
+
+/** Set tunnel mode. Throws on error (e.g., cloudflared not found). */
+export async function setTunnelMode(mode: string): Promise<void> {
+  const invoke = getTauriInvoke()
+  if (!invoke) return
+  await invoke('set_tunnel_mode', { mode })
 }

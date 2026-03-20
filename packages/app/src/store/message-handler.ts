@@ -1076,8 +1076,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // But allow user_input during full history sync (messages came from terminal)
       if (msgType === 'user_input' && !(_ctx.receivingHistoryReplay && _ctx.isSessionSwitchReplay)) break;
       const targetId = (msg.sessionId as string) || get().activeSessionId;
-      // During reconnect replay, skip if app already has messages (cache is fresh)
-      if (_ctx.receivingHistoryReplay && !_ctx.isSessionSwitchReplay && getSessionMessages(targetId).length > 0) break;
       // During any history replay, skip if an equivalent message is already in cache (dedup).
       // This prevents duplicates when the app already received messages via real-time
       // subscription before switching to the session (which triggers history replay).
@@ -1209,12 +1207,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'tool_start': {
       const targetId = (msg.sessionId as string) || get().activeSessionId;
-      // During reconnect replay, skip if app already has messages (cache is fresh)
-      if (_ctx.receivingHistoryReplay && !_ctx.isSessionSwitchReplay && getSessionMessages(targetId).length > 0) break;
       // Use server messageId as stable identifier for dedup (same ID on live + replay)
       const toolId = (msg.messageId as string) || nextMessageId('tool');
-      // During session-switch replay, skip if tool already in cache (dedup by stable ID)
-      if (_ctx.receivingHistoryReplay && _ctx.isSessionSwitchReplay) {
+      // During any history replay, skip if tool already in cache (dedup by stable ID)
+      if (_ctx.receivingHistoryReplay) {
         const cached = getSessionMessages(targetId);
         if (cached.some((m) => m.id === toolId)) break;
       }
