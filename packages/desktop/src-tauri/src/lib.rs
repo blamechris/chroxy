@@ -296,6 +296,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             get_server_info,
             get_server_logs,
@@ -369,6 +370,10 @@ pub fn run() {
                         let mut behavior = ns_win.collectionBehavior();
                         // FullScreenPrimary (1 << 7): enables green-button fullscreen + tiling
                         behavior |= cocoa::appkit::NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenPrimary;
+                        // FullScreenAllowsTiling (1 << 11): added in macOS 15 Sequoia
+                        // for keyboard-driven tiling (Fn+Ctrl+Arrow). Not in the cocoa
+                        // crate yet, so we use the raw bitmask.
+                        behavior |= cocoa::appkit::NSWindowCollectionBehavior::from_bits_truncate(1 << 11);
                         ns_win.setCollectionBehavior_(behavior);
                     }
                 }
