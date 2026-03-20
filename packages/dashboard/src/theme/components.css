@@ -669,6 +669,12 @@
   border-bottom: 1px solid var(--border-primary);
   flex-shrink: 0;
   gap: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.view-switch::-webkit-scrollbar {
+  display: none;
 }
 
 .view-tab {
@@ -680,6 +686,8 @@
   border-bottom: 2px solid transparent;
   cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .view-tab:hover {
