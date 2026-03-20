@@ -35,11 +35,13 @@ export type {
   ConnectionContext,
   QueuedMessage,
   Checkpoint,
+  BaseSessionState,
 } from '@chroxy/store-core';
 
 // Import for local use in SessionState/ConnectionState definitions below
 import type {
   AgentInfo,
+  BaseSessionState,
   ChatMessage,
   Checkpoint,
   ConnectedClient,
@@ -166,26 +168,7 @@ export interface PermissionRule {
   pattern?: string;
 }
 
-export interface SessionState {
-  messages: ChatMessage[];
-  streamingMessageId: string | null;
-  claudeReady: boolean;
-  activeModel: string | null;
-  permissionMode: string | null;
-  contextUsage: ContextUsage | null;
-  lastResultCost: number | null;
-  lastResultDuration: number | null;
-  sessionCost: number | null;
-  isIdle: boolean;
-  health: SessionHealth;
-  activeAgents: AgentInfo[];
-  isPlanPending: boolean;
-  planAllowedPrompts: { tool: string; prompt: string }[];
-  primaryClientId: string | null;
-  conversationId: string | null;
-  sessionContext: SessionContext | null;
-  mcpServers: McpServer[];
-  devPreviews: DevPreview[];
+export interface SessionState extends BaseSessionState {
   activityState: SessionActivity;
   sessionRules?: PermissionRule[];
 }
