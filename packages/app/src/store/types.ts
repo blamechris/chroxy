@@ -332,7 +332,7 @@ export interface ConnectionState {
 
   // Session actions
   switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => void;
-  createSession: (name: string, cwd?: string, worktree?: boolean) => void;
+  createSession: (name: string, cwd?: string, worktree?: boolean, provider?: string) => void;
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
   forgetSession: () => void;

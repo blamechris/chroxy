@@ -20,10 +20,17 @@ interface CreateSessionModalProps {
   onClose: () => void;
 }
 
+const PROVIDERS = [
+  { id: '', label: 'Default (SDK)' },
+  { id: 'claude-sdk', label: 'Claude SDK' },
+  { id: 'claude-cli', label: 'Claude CLI' },
+];
+
 export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps) {
   const [name, setName] = useState('');
   const [cwd, setCwd] = useState('');
   const [worktree, setWorktree] = useState(false);
+  const [provider, setProvider] = useState('');
   const createSession = useConnectionStore((s) => s.createSession);
   const sessions = useConnectionStore((s) => s.sessions);
   const [showBrowser, setShowBrowser] = useState(false);
@@ -33,16 +40,18 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
     if (visible) {
       setShowBrowser(false);
       setWorktree(false);
+      setProvider('');
     }
   }, [visible]);
 
   const handleCreate = () => {
     const sessionName = name.trim() || `Session ${sessions.length + 1}`;
     const sessionCwd = cwd.trim() || undefined;
-    createSession(sessionName, sessionCwd, worktree || undefined);
+    createSession(sessionName, sessionCwd, worktree || undefined, provider || undefined);
     setName('');
     setCwd('');
     setWorktree(false);
+    setProvider('');
     onClose();
   };
 
@@ -50,6 +59,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
     setName('');
     setCwd('');
     setWorktree(false);
+    setProvider('');
     onClose();
   };
 
@@ -129,6 +139,21 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
                 accessibilityLabel="Isolate filesystem in a git worktree"
                 accessibilityHint="When enabled, the session runs in an isolated git worktree"
               />
+            </View>
+
+            <Text style={styles.label}>Provider</Text>
+            <View style={styles.providerRow}>
+              {PROVIDERS.map((p) => (
+                <TouchableOpacity
+                  key={p.id}
+                  style={[styles.providerChip, provider === p.id && styles.providerChipActive]}
+                  onPress={() => setProvider(p.id)}
+                >
+                  <Text style={[styles.providerChipText, provider === p.id && styles.providerChipTextActive]}>
+                    {p.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
             </View>
 
             <View style={styles.buttons}>
@@ -252,6 +277,32 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 15,
     fontWeight: '600',
+  },
+  providerRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 16,
+    flexWrap: 'wrap',
+  },
+  providerChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: COLORS.backgroundInput,
+    borderWidth: 1,
+    borderColor: COLORS.borderPrimary,
+  },
+  providerChipActive: {
+    backgroundColor: COLORS.accentBlue,
+    borderColor: COLORS.accentBlue,
+  },
+  providerChipText: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  providerChipTextActive: {
+    color: COLORS.textPrimary,
   },
   createButton: {
     flex: 1,
