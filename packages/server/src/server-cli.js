@@ -189,9 +189,9 @@ export async function startCliServer(config) {
       log.info(`Session ${sessionId} ready: ${data.sessionId} (model: ${data.model})`)
     } else if (event === 'error') {
       log.error(`Session ${sessionId} error: ${data.message}`)
-      // Forward session errors as server_error (in addition to the in-chat error message)
-      const isFatal = /failed to stay alive|max respawn/i.test(data.message)
-      if (wsServer) wsServer.broadcastError('session', data.message, !isFatal, sessionId)
+      // Error is already broadcast as { type: 'message', messageType: 'error' } through
+      // the forwarding path (ws-forwarding.js → EventNormalizer). Don't also broadcastError()
+      // here — that produces a duplicate server_error message on every client.
       // Activity update: error (immediate)
       if (pushManager.hasTokens) {
         const sessionName = sessionManager.getSession(sessionId)?.name
