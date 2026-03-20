@@ -160,6 +160,19 @@ export function broadcastFocusChanged(client, sessionId, ctx) {
 }
 
 /**
+ * Auto-subscribe all other authenticated clients to a session.
+ * Call after creating a session so streaming messages reach every connected client
+ * (dashboard, other mobile clients, etc.) without requiring explicit subscribe_sessions.
+ */
+export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
+  for (const [clientWs, c] of ctx.clients) {
+    if (c.authenticated && clientWs !== excludeWs) {
+      c.subscribedSessionIds.add(sessionId)
+    }
+  }
+}
+
+/**
  * Resolve a session from a message and client context.
  * Prefers msg.sessionId, falls back to client.activeSessionId.
  * Returns the session entry, or null if not found.

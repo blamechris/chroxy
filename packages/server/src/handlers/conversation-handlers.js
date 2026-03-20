@@ -6,7 +6,7 @@
  */
 import { scanConversations } from '../conversation-scanner.js'
 import { searchConversations } from '../conversation-search.js'
-import { validateCwdWithinHome, broadcastFocusChanged, resolveSession } from '../handler-utils.js'
+import { validateCwdWithinHome, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
@@ -70,6 +70,7 @@ async function handleResumeConversation(ws, client, msg, ctx) {
     ctx.sendSessionInfo(ws, sessionId)
     ctx.replayHistory(ws, sessionId)
     ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+    autoSubscribeOtherClients(sessionId, ws, ctx)
     broadcastFocusChanged(client, sessionId, ctx)
   } catch (err) {
     ctx.send(ws, { type: 'session_error', message: err.message })

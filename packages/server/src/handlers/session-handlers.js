@@ -4,7 +4,7 @@
  * Handles: list_sessions, switch_session, create_session, destroy_session,
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
-import { validateCwdWithinHome, broadcastFocusChanged } from '../handler-utils.js'
+import { validateCwdWithinHome, broadcastFocusChanged, autoSubscribeOtherClients } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
@@ -85,13 +85,7 @@ function handleCreateSession(ws, client, msg, ctx) {
     ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
     ctx.sendSessionInfo(ws, sessionId)
     ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
-    // Auto-subscribe all other authenticated clients so they receive streaming
-    // messages for this session (dashboard, other mobile clients).
-    for (const [clientWs, c] of ctx.clients) {
-      if (c.authenticated && clientWs !== ws) {
-        c.subscribedSessionIds.add(sessionId)
-      }
-    }
+    autoSubscribeOtherClients(sessionId, ws, ctx)
     broadcastFocusChanged(client, sessionId, ctx)
   } catch (err) {
     ctx.send(ws, { type: 'session_error', message: err.message })
