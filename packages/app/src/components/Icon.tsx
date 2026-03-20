@@ -54,6 +54,10 @@ export const iconMap = {
   bullet: 'ellipse',
   square: 'square',
 
+  // Visibility
+  eye: 'eye-outline',
+  eyeOff: 'eye-off-outline',
+
   // Misc
   minus: 'remove',
   gitBranch: 'git-branch-outline',
