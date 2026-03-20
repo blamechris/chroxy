@@ -81,6 +81,7 @@ export function ConnectScreen() {
   const [url, setUrl] = useState('');
   const [token, setToken] = useState('');
   const [showManual, setShowManual] = useState(false);
+  const [showToken, setShowToken] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [autoConnecting, setAutoConnecting] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
@@ -481,18 +482,28 @@ export function ConnectScreen() {
           <Text style={styles.label}>
             API Token{isLocalUrl(url.trim() || 'ws://localhost:8765') ? ' (optional for localhost)' : ''}
           </Text>
-          <TextInput
-            style={styles.input}
-            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-            placeholderTextColor={COLORS.textDim}
-            value={token}
-            onChangeText={setToken}
-            onFocus={scrollToInput}
-            autoCapitalize="none"
-            autoCorrect={false}
-            secureTextEntry
-            accessibilityLabel="API Token"
-          />
+          <View style={styles.tokenInputRow}>
+            <TextInput
+              style={[styles.input, styles.tokenInput]}
+              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              placeholderTextColor={COLORS.textDim}
+              value={token}
+              onChangeText={setToken}
+              onFocus={scrollToInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry={!showToken}
+              accessibilityLabel="API Token"
+            />
+            <TouchableOpacity
+              style={styles.tokenEyeButton}
+              onPress={() => setShowToken((prev) => !prev)}
+              accessibilityRole="button"
+              accessibilityLabel={showToken ? 'Hide token' : 'Show token'}
+            >
+              <Icon name={showToken ? 'eyeOff' : 'eye'} size={20} color={COLORS.textMuted} />
+            </TouchableOpacity>
+          </View>
 
           <TouchableOpacity style={styles.connectButton} onPress={handleConnect} accessibilityRole="button" accessibilityLabel="Connect to server">
             <Text style={styles.connectButtonText}>Connect</Text>
@@ -644,6 +655,17 @@ const styles = StyleSheet.create({
     fontSize: 16,
     borderWidth: 1,
     borderColor: COLORS.backgroundCard,
+  },
+  tokenInputRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+  },
+  tokenInput: {
+    flex: 1,
+  },
+  tokenEyeButton: {
+    padding: 12,
+    marginLeft: -44,
   },
   connectButton: {
     backgroundColor: COLORS.accentGreen,
