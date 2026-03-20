@@ -517,6 +517,7 @@ dependencies = [
  "dirs 5.0.1",
  "image",
  "libc",
+ "objc",
  "qrcode",
  "serde",
  "serde_json",
