@@ -115,10 +115,10 @@ export default function App() {
               component={SessionScreenWithBoundary}
               options={{
                 title: sessionTitle,
-                headerLeft: () => (
+                headerRight: () => (
                   <TouchableOpacity
                     onPress={() => useConnectionStore.getState().disconnect()}
-                    style={{ paddingRight: 12 }}
+                    style={{ paddingLeft: 12 }}
                     accessibilityRole="button"
                     accessibilityLabel="Disconnect and go back"
                   >

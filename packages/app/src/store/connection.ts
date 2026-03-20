@@ -1104,13 +1104,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  createSession: (name: string, cwd?: string, worktree?: boolean) => {
+  createSession: (name: string, cwd?: string, worktree?: boolean, provider?: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, unknown> = { type: 'create_session' };
       if (name) msg.name = name;
       if (cwd) msg.cwd = cwd;
       if (worktree) msg.worktree = true;
+      if (provider) msg.provider = provider;
       wsSend(socket, msg);
     }
   },
