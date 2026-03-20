@@ -212,6 +212,47 @@ fn save_setup_config(
 }
 
 #[tauri::command]
+fn get_tunnel_mode(
+    settings_state: tauri::State<'_, Mutex<DesktopSettings>>,
+) -> String {
+    let settings = lock_or_recover(&settings_state);
+    settings.tunnel_mode.clone()
+}
+
+#[tauri::command]
+fn set_tunnel_mode(
+    app: tauri::AppHandle,
+    mode: String,
+) -> Result<(), String> {
+    // Validate mode
+    if !["none", "quick", "named"].contains(&mode.as_str()) {
+        return Err(format!("Invalid tunnel mode: {}. Must be none, quick, or named.", mode));
+    }
+
+    // Validate cloudflared for tunnel modes
+    if mode != "none" && !ServerManager::check_cloudflared() {
+        return Err("cloudflared not found. Install with: brew install cloudflared".to_string());
+    }
+
+    // Update settings
+    if let Some(settings_state) = app.try_state::<Mutex<DesktopSettings>>() {
+        let mut settings = lock_or_recover(&settings_state);
+        settings.tunnel_mode = mode.clone();
+        settings.save().map_err(|e| format!("Failed to save settings: {}", e))?;
+    }
+
+    // Update tray menu checkboxes
+    if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
+        let items = lock_or_recover(&items);
+        let _ = items.tunnel_quick.set_checked(mode == "quick");
+        let _ = items.tunnel_named.set_checked(mode == "named");
+        let _ = items.tunnel_none.set_checked(mode == "none");
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -343,6 +384,8 @@ pub fn run() {
             check_dependencies,
             get_setup_state,
             save_setup_config,
+            get_tunnel_mode,
+            set_tunnel_mode,
             #[cfg(target_os = "macos")]
             voice_available,
             #[cfg(target_os = "macos")]
