@@ -3,7 +3,7 @@ import { validateCwdWithinHome } from '../handler-utils.js'
 
 const log = createLogger('ws')
 
-function handleCreateEnvironment(ws, client, msg, ctx) {
+function handleCreateEnvironment(ws, _client, msg, ctx) {
   if (!ctx.environmentManager) {
     ctx.send(ws, { type: 'environment_error', error: 'Environment management is not enabled' })
     return
@@ -49,7 +49,7 @@ function handleCreateEnvironment(ws, client, msg, ctx) {
     })
 }
 
-function handleListEnvironments(ws, client, msg, ctx) {
+function handleListEnvironments(ws, _client, _msg, ctx) {
   if (!ctx.environmentManager) {
     ctx.send(ws, { type: 'environment_list', environments: [] })
     return
@@ -61,7 +61,7 @@ function handleListEnvironments(ws, client, msg, ctx) {
   })
 }
 
-function handleDestroyEnvironment(ws, client, msg, ctx) {
+function handleDestroyEnvironment(ws, _client, msg, ctx) {
   if (!ctx.environmentManager) {
     ctx.send(ws, { type: 'environment_error', error: 'Environment management is not enabled' })
     return
@@ -89,7 +89,7 @@ function handleDestroyEnvironment(ws, client, msg, ctx) {
     })
 }
 
-function handleGetEnvironment(ws, client, msg, ctx) {
+function handleGetEnvironment(ws, _client, msg, ctx) {
   if (!ctx.environmentManager) {
     ctx.send(ws, { type: 'environment_error', error: 'Environment management is not enabled' })
     return

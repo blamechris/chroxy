@@ -24,7 +24,7 @@ function createMockCtx({ environmentManager = null } = {}) {
   const sent = []
   const broadcasts = []
   return {
-    send: (ws, msg) => sent.push(msg),
+    send: (_ws, msg) => sent.push(msg),
     broadcast: (msg) => broadcasts.push(msg),
     environmentManager,
     _sent: sent,

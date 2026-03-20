@@ -169,7 +169,7 @@ describe('EnvironmentManager.create()', () => {
   it('cleans up container when setup fails after start', async () => {
     // docker run succeeds, but exec (setup) fails
     let callCount = 0
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       callCount++
       if (args[0] === 'run') {
@@ -614,7 +614,7 @@ describe('EnvironmentManager.create() with compose', () => {
   it('creates a compose environment with docker compose up', async () => {
     // Mock: compose -> up succeeds, ps returns JSON, exec succeeds (setup + install + prefix)
     let callCount = 0
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       callCount++
       if (args[0] === 'compose' && args.includes('up')) {
@@ -652,7 +652,7 @@ describe('EnvironmentManager.create() with compose', () => {
 
   it('tears down compose on primary container identification failure', async () => {
     let downCalled = false
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'compose' && args.includes('up')) {
         cb(null, '', '')
@@ -688,7 +688,7 @@ describe('EnvironmentManager.create() with compose', () => {
 
   it('tears down compose on setup failure', async () => {
     let downCalled = false
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'compose' && args.includes('up')) {
         cb(null, '', '')
@@ -740,7 +740,7 @@ describe('EnvironmentManager.destroy() with compose', () => {
   it('uses docker compose down for compose environments', async () => {
     let downCalled = false
     let downArgs = []
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'compose' && args.includes('up')) {
         cb(null, '', '')
@@ -779,7 +779,6 @@ describe('EnvironmentManager.destroy() with compose', () => {
   })
 
   it('does NOT use docker compose down for non-compose environments', async () => {
-    let rmCalled = false
     const mockExec = createMockExecFile({
       results: { run: 'rm-ctr\n', exec: '/usr/local\n' },
     })
@@ -924,7 +923,7 @@ describe('EnvironmentManager.restore()', () => {
 
   it('updates containerId after restore', async () => {
     let runCount = 0
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'run') {
         runCount++
@@ -1128,7 +1127,7 @@ describe('EnvironmentManager.create() with devcontainer', () => {
     }))
 
     let postCreateCalled = false
-    function mockExec(cmd, args, opts, cb) {
+    function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
       if (args[0] === 'run') { cb(null, 'post-ctr\n', ''); return }
       if (args[0] === 'exec' && args.includes('bash') && args.includes('npm install')) {

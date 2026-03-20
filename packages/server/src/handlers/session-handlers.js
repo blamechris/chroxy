@@ -9,7 +9,7 @@ import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
 
-function handleListSessions(ws, client, msg, ctx) {
+function handleListSessions(ws, _client, _msg, ctx) {
   ctx.send(ws, { type: 'session_list', sessions: ctx.sessionManager.listSessions() })
 }
 
@@ -92,7 +92,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   }
 }
 
-async function handleDestroySession(ws, client, msg, ctx) {
+async function handleDestroySession(ws, _client, msg, ctx) {
   const targetId = msg.sessionId
   if (!ctx.sessionManager.getSession(targetId)) {
     ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
@@ -134,7 +134,7 @@ async function handleDestroySession(ws, client, msg, ctx) {
   ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
 }
 
-function handleRenameSession(ws, client, msg, ctx) {
+function handleRenameSession(ws, _client, msg, ctx) {
   const targetId = msg.sessionId
   const newName = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : null
   if (!newName) {

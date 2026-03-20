@@ -494,9 +494,8 @@ export async function startCliServer(config) {
   }
 
   // Regenerate QR code and update connection info when token rotates
-  const serverStartedAt = new Date().toISOString()
   if (tokenManager) {
-    tokenManager.on('token_rotated', ({ newToken }) => {
+    tokenManager.on('token_rotated', () => {
       if (!currentWsUrl) return // no-auth or localhost-only — no QR to update
 
       // Refresh pairing ID when token rotates (old session tokens remain valid).
