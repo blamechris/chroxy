@@ -1125,12 +1125,13 @@ const styles = StyleSheet.create({
   },
   lanWarningBanner: {
     backgroundColor: '#7a4a00',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
   },
   lanWarningText: {
     color: '#ffcc80',
-    fontSize: 12,
+    fontSize: 13,
+    lineHeight: 18,
     textAlign: 'center' as const,
   },
   searchBar: {

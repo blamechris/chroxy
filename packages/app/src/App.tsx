@@ -47,6 +47,16 @@ export default function App() {
   const connectionPhase = useConnectionLifecycleStore((s) => s.connectionPhase);
   const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);
   const showSession = connectionPhase !== 'disconnected' || viewingCachedSession;
+  const sessionTitle = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    const session = id ? s.sessions.find((sess) => sess.sessionId === id) : null;
+    if (!session?.cwd) return 'Session';
+    // Shorten /Users/name/Projects → ~/Projects
+    const cwd = session.cwd.replace(/^\/Users\/[^/]+/, '~');
+    // Take last two path components for readability
+    const parts = cwd.split('/');
+    return parts.length > 2 ? parts.slice(-2).join('/') : cwd;
+  });
   const { isLocked, unlock } = useBiometricLock();
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null);
 
@@ -104,7 +114,7 @@ export default function App() {
               name="Session"
               component={SessionScreenWithBoundary}
               options={{
-                title: 'Session',
+                title: sessionTitle,
                 headerLeft: () => (
                   <TouchableOpacity
                     onPress={() => useConnectionStore.getState().disconnect()}
