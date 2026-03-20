@@ -511,12 +511,13 @@ dependencies = [
 
 [[package]]
 name = "chroxy-desktop"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "cocoa",
  "dirs 5.0.1",
  "image",
  "libc",
+ "objc",
  "qrcode",
  "serde",
  "serde_json",
