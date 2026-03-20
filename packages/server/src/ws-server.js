@@ -5,7 +5,7 @@ import { WebSocketServer } from 'ws'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
-import { encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from './crypto.js'
+import { decrypt, DIRECTION_CLIENT, safeTokenCompare } from './crypto.js'
 import { createClientSender } from './ws-client-sender.js'
 import { ClientMessageSchema, EncryptedEnvelopeSchema } from './ws-schemas.js'
 import { EventNormalizer } from './event-normalizer.js'
@@ -780,7 +780,6 @@ export class WsServer {
       if (err.code === 'EADDRINUSE') {
         log.error(`Port ${this.port} is already in use — is another Chroxy instance running?`)
         process.exit(1)
-        return
       }
       log.error(`HTTP server error: ${err.message}`)
     })
