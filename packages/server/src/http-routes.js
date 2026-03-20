@@ -256,10 +256,14 @@ export function createHttpHandler(server) {
         'X-Content-Type-Options': 'nosniff',
       }
 
-      const distDir = join(__dirname, '..', '..', 'dashboard', 'dist')
+      // Workspace layout: packages/dashboard/dist (dev)
+      // Tauri bundle layout: server/src/dashboard-next/dist (bundled)
+      const workspaceDist = join(__dirname, '..', '..', 'dashboard', 'dist')
+      const bundleDist = join(__dirname, 'dashboard-next', 'dist')
+      const distDir = existsSync(workspaceDist) ? workspaceDist : bundleDist
       if (!existsSync(distDir) && !createHttpHandler._distMissWarned) {
         createHttpHandler._distMissWarned = true
-        log.warn('Dashboard dist directory not found: %s — run "npm run dashboard:build"', distDir)
+        log.warn(`Dashboard dist directory not found: ${distDir} — run "npm run dashboard:build"`)
       }
       const relPath = dashUrl.pathname.replace(/^\/dashboard\/?/, '') || 'index.html'
 
