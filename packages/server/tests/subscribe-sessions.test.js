@@ -480,27 +480,41 @@ describe('subscribe_sessions', () => {
     const client1 = await createClient(port)
     const client2 = await createClient(port)
 
+    // Clear pre-auth messages so we only observe events from create_session
+    const client1Before = client1.messages.length
+    const client2Before = client2.messages.length
+
     // Client 1 creates a new session
-    send(client1.ws, { type: 'create_session', name: 'new-session', cwd: '/tmp' })
-    await waitForMessage(client1.messages, 'session_switched')
+    send(client1.ws, { type: 'create_session', name: 'new-session' })
 
-    // Client 2 should receive session_list with the new session
-    await waitForMessage(client2.messages, 'session_list')
-
-    const newSessionId = client1.messages.find(m => m.type === 'session_switched').sessionId
-
-    // Verify auto-subscription by querying client 2's subscriptions:
-    // send subscribe_sessions with the new session — if already subscribed,
-    // the subscriptions_updated reply will include it.
-    send(client2.ws, { type: 'subscribe_sessions', sessionIds: [newSessionId] })
-    const reply = await waitForMessage(client2.messages, 'subscriptions_updated')
-    assert.ok(
-      reply.subscribedSessionIds.includes(newSessionId),
-      'Client 2 should be auto-subscribed to the new session'
+    // Wait for the NEW session_switched (not the auth-time one)
+    await withTimeout(
+      (async () => {
+        while (!client1.messages.slice(client1Before).find(m => m.type === 'session_switched')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Timeout waiting for create_session session_switched'
     )
 
-    // Also verify session-scoped broadcasts reach client 2 by emitting an error
-    // event (error → normalized as { type: 'message', messageType: 'error' })
+    const newSessionId = client1.messages.slice(client1Before)
+      .find(m => m.type === 'session_switched').sessionId
+
+    // Client 2 should receive session_list with the new session
+    await withTimeout(
+      (async () => {
+        while (!client2.messages.slice(client2Before).find(m => m.type === 'session_list')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Timeout waiting for session_list on client 2'
+    )
+
+    // Verify auto-subscribe by emitting a session-scoped event — client 2 should
+    // receive it WITHOUT any explicit subscribe_sessions call. This proves the
+    // auto-subscribe in handleCreateSession is working.
     sm.emit('session_event', {
       sessionId: newSessionId,
       event: 'error',
