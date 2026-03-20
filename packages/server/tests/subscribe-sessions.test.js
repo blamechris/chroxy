@@ -462,4 +462,135 @@ describe('subscribe_sessions', () => {
 
     ws.close()
   })
+
+  it('create_session auto-subscribes all other authenticated clients', async () => {
+    const sm = createMockSessionManager()
+    // Seed one session so clients get past auth
+    sm.createSession({ name: 'initial' })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: sm,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Connect two clients
+    const client1 = await createClient(port)
+    const client2 = await createClient(port)
+
+    // Clear pre-auth messages so we only observe events from create_session
+    const client1Before = client1.messages.length
+    const client2Before = client2.messages.length
+
+    // Client 1 creates a new session
+    send(client1.ws, { type: 'create_session', name: 'new-session' })
+
+    // Wait for the NEW session_switched (not the auth-time one)
+    await withTimeout(
+      (async () => {
+        while (!client1.messages.slice(client1Before).find(m => m.type === 'session_switched')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Timeout waiting for create_session session_switched'
+    )
+
+    const newSessionId = client1.messages.slice(client1Before)
+      .find(m => m.type === 'session_switched').sessionId
+
+    // Client 2 should receive session_list with the new session
+    await withTimeout(
+      (async () => {
+        while (!client2.messages.slice(client2Before).find(m => m.type === 'session_list')) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Timeout waiting for session_list on client 2'
+    )
+
+    // Verify auto-subscribe by emitting a session-scoped event — client 2 should
+    // receive it WITHOUT any explicit subscribe_sessions call. This proves the
+    // auto-subscribe in handleCreateSession is working.
+    sm.emit('session_event', {
+      sessionId: newSessionId,
+      event: 'error',
+      data: { message: 'Test error for auto-subscribe verification' },
+    })
+
+    await withTimeout(
+      (async () => {
+        while (!client2.messages.find(m =>
+          m.sessionId === newSessionId && m.type === 'message' && m.messageType === 'error'
+        )) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Client 2 should receive session-scoped error message for the new session'
+    )
+
+    client1.ws.close()
+    client2.ws.close()
+  })
+
+  it('session error events are not double-broadcast', async () => {
+    const sm = createMockSessionManager()
+    const s1 = sm.createSession({ name: 'session-1' })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: sm,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    // Switch to s1 so we receive session-scoped messages
+    send(ws, { type: 'switch_session', sessionId: s1 })
+    await waitForMessage(messages, 'session_switched')
+
+    // Clear messages to count fresh
+    const beforeCount = messages.length
+
+    // Emit an error event for the session
+    sm.emit('session_event', {
+      sessionId: s1,
+      event: 'error',
+      data: { message: 'Test error: process crashed' },
+    })
+
+    // Wait for the error message to arrive
+    await withTimeout(
+      (async () => {
+        while (!messages.slice(beforeCount).find(m =>
+          m.type === 'message' && m.messageType === 'error'
+        )) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+      })(),
+      2000,
+      'Timeout waiting for error message'
+    )
+
+    // Give time for any duplicate to arrive
+    await new Promise(r => setTimeout(r, 200))
+
+    // Count error-related messages after the emit
+    const newMessages = messages.slice(beforeCount)
+    const errorMessages = newMessages.filter(m =>
+      (m.type === 'message' && m.messageType === 'error') ||
+      m.type === 'server_error'
+    )
+
+    assert.equal(errorMessages.length, 1, `Expected exactly 1 error message, got ${errorMessages.length}: ${JSON.stringify(errorMessages.map(m => m.type))}`)
+    assert.equal(errorMessages[0].type, 'message')
+    assert.equal(errorMessages[0].messageType, 'error')
+
+    ws.close()
+  })
 })
