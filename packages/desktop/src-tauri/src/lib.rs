@@ -372,8 +372,9 @@ pub fn run() {
                         behavior |= cocoa::appkit::NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenPrimary;
                         // FullScreenAllowsTiling (1 << 11): added in macOS 15 Sequoia
                         // for keyboard-driven tiling (Fn+Ctrl+Arrow). Not in the cocoa
-                        // crate yet, so we use the raw bitmask.
-                        behavior |= cocoa::appkit::NSWindowCollectionBehavior::from_bits_truncate(1 << 11);
+                        // crate yet, so we set the raw bit directly.
+                        let bits = behavior.bits() | (1 << 11);
+                        behavior = cocoa::appkit::NSWindowCollectionBehavior::from_bits_retain(bits);
                         ns_win.setCollectionBehavior_(behavior);
                     }
                 }
