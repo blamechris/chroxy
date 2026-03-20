@@ -58,7 +58,6 @@ import type {
   SessionNotification,
   SessionState,
   SlashCommand,
-  ThinkingLevel,
   FilePickerItem,
   LogEntry,
   ConversationSummary,
