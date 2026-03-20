@@ -1,6 +1,6 @@
 /**
- * ChatSettingsDropdown — consolidates Model, Permission Mode, and Thinking Level
- * into a single header dropdown (#2298).
+ * ChatSettingsDropdown — native <select> elements for Model, Permission Mode,
+ * and Thinking Level.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
@@ -40,151 +40,96 @@ function renderDropdown(overrides: Partial<ChatSettingsDropdownProps> = {}) {
 }
 
 describe('ChatSettingsDropdown', () => {
-  it('renders a trigger button', () => {
+  it('renders the model select', () => {
     renderDropdown()
     expect(screen.getByTestId('chat-settings-trigger')).toBeInTheDocument()
   })
 
-  it('shows current model and permission mode in trigger label', () => {
+  it('model select shows current model value', () => {
     renderDropdown()
-    const trigger = screen.getByTestId('chat-settings-trigger')
-    expect(trigger.textContent).toContain('Sonnet')
-    expect(trigger.textContent).toContain('Approve')
+    const modelSelect = screen.getByTestId('chat-settings-trigger') as HTMLSelectElement
+    expect(modelSelect.value).toBe('sonnet')
   })
 
-  it('dropdown panel is hidden by default', () => {
+  it('model select contains all model options', () => {
     renderDropdown()
-    expect(screen.queryByTestId('chat-settings-panel')).not.toBeInTheDocument()
-  })
-
-  it('opens panel on trigger click', () => {
-    renderDropdown()
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    expect(screen.getByTestId('chat-settings-panel')).toBeInTheDocument()
-  })
-
-  it('panel contains model select with all options', () => {
-    renderDropdown()
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    const modelSelect = screen.getByLabelText('Model')
-    expect(modelSelect).toBeInTheDocument()
+    const modelSelect = screen.getByTestId('chat-settings-trigger')
     expect(modelSelect.querySelectorAll('option').length).toBeGreaterThanOrEqual(3)
   })
 
-  it('panel contains permission mode select', () => {
+  it('renders permission mode select', () => {
     renderDropdown()
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    expect(screen.getByLabelText('Permission Mode')).toBeInTheDocument()
+    const selects = screen.getAllByRole('combobox')
+    // Model + Permission Mode = at least 2 selects
+    expect(selects.length).toBeGreaterThanOrEqual(2)
   })
 
   it('hides thinking level when showThinkingLevel is false', () => {
     renderDropdown({ showThinkingLevel: false })
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    expect(screen.queryByLabelText('Thinking Level')).not.toBeInTheDocument()
+    const selects = screen.getAllByRole('combobox')
+    // Model + Permission = 2, no thinking
+    expect(selects).toHaveLength(2)
   })
 
   it('shows thinking level when showThinkingLevel is true', () => {
     renderDropdown({ showThinkingLevel: true, thinkingLevel: 'default' })
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    expect(screen.getByLabelText('Thinking Level')).toBeInTheDocument()
+    const selects = screen.getAllByRole('combobox')
+    // Model + Permission + Thinking = 3
+    expect(selects).toHaveLength(3)
   })
 
   it('calls onModelChange when model is selected', () => {
     const onModelChange = vi.fn()
     renderDropdown({ onModelChange })
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'haiku' } })
+    fireEvent.change(screen.getByTestId('chat-settings-trigger'), { target: { value: 'haiku' } })
     expect(onModelChange).toHaveBeenCalledWith('haiku')
   })
 
   it('calls onPermissionModeChange when mode is selected', () => {
     const onPermissionModeChange = vi.fn()
     renderDropdown({ onPermissionModeChange })
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    fireEvent.change(screen.getByLabelText('Permission Mode'), { target: { value: 'auto' } })
+    const selects = screen.getAllByRole('combobox')
+    // Second select is permission mode
+    fireEvent.change(selects[1]!, { target: { value: 'auto' } })
     expect(onPermissionModeChange).toHaveBeenCalledWith('auto')
   })
 
-  it('closes panel on second trigger click', () => {
-    renderDropdown()
-    const trigger = screen.getByTestId('chat-settings-trigger')
-    fireEvent.click(trigger)
-    expect(screen.getByTestId('chat-settings-panel')).toBeInTheDocument()
-    fireEvent.click(trigger)
-    expect(screen.queryByTestId('chat-settings-panel')).not.toBeInTheDocument()
-  })
-
-  it('focuses first select when panel opens', () => {
-    renderDropdown()
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    expect(document.activeElement).toBe(screen.getByLabelText('Model'))
-  })
-
-  it('traps Tab within the panel', () => {
-    renderDropdown()
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    const panel = screen.getByTestId('chat-settings-panel')
-    const permSelect = screen.getByLabelText('Permission Mode')
-
-    // Focus the last focusable element, then Tab — should wrap to first
-    permSelect.focus()
-    fireEvent.keyDown(panel, { key: 'Tab', bubbles: true })
-    expect(document.activeElement).toBe(screen.getByLabelText('Model'))
-  })
-
-  it('traps Shift+Tab within the panel', () => {
-    renderDropdown()
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    const panel = screen.getByTestId('chat-settings-panel')
-    const modelSelect = screen.getByLabelText('Model')
-
-    // Focus first element, then Shift+Tab — should wrap to last
-    modelSelect.focus()
-    fireEvent.keyDown(panel, { key: 'Tab', shiftKey: true, bubbles: true })
-    expect(document.activeElement).toBe(screen.getByLabelText('Permission Mode'))
-  })
-
-  it('returns focus to trigger on Escape', () => {
-    renderDropdown()
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    expect(screen.getByTestId('chat-settings-panel')).toBeInTheDocument()
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(screen.queryByTestId('chat-settings-panel')).not.toBeInTheDocument()
-    expect(document.activeElement).toBe(screen.getByTestId('chat-settings-trigger'))
-  })
-
-  it('Tab wraps across all 3 selects when thinking level is visible', () => {
-    render(
-      <ChatSettingsDropdown
-        availableModels={MODELS}
-        activeModel="sonnet"
-        defaultModelId={null}
-        onModelChange={vi.fn()}
-        availablePermissionModes={PERMISSION_MODES}
-        permissionMode="approve"
-        onPermissionModeChange={vi.fn()}
-        showThinkingLevel={true}
-        thinkingLevel="default"
-        onThinkingLevelChange={vi.fn()}
-      />
-    )
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    const panel = screen.getByTestId('chat-settings-panel')
-    const thinkingSelect = screen.getByLabelText('Thinking Level')
-
-    // Focus last select (Thinking Level), Tab should wrap to Model
-    thinkingSelect.focus()
-    fireEvent.keyDown(panel, { key: 'Tab', bubbles: true })
-    expect(document.activeElement).toBe(screen.getByLabelText('Model'))
+  it('calls onThinkingLevelChange when level is selected', () => {
+    const onThinkingLevelChange = vi.fn()
+    renderDropdown({ showThinkingLevel: true, thinkingLevel: 'default', onThinkingLevelChange })
+    const selects = screen.getAllByRole('combobox')
+    // Third select is thinking level
+    fireEvent.change(selects[2]!, { target: { value: 'high' } })
+    expect(onThinkingLevelChange).toHaveBeenCalledWith('high')
   })
 
   it('shows Default option for model when defaultModelId is set', () => {
     renderDropdown({ defaultModelId: 'sonnet' })
-    fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-    const modelSelect = screen.getByLabelText('Model')
+    const modelSelect = screen.getByTestId('chat-settings-trigger')
     const options = modelSelect.querySelectorAll('option')
     const defaultOption = Array.from(options).find(o => o.value === '')
     expect(defaultOption).toBeDefined()
     expect(defaultOption!.textContent).toContain('Default')
+  })
+
+  it('selects empty value when activeModel matches defaultModelId', () => {
+    renderDropdown({ defaultModelId: 'sonnet', activeModel: 'sonnet' })
+    const modelSelect = screen.getByTestId('chat-settings-trigger') as HTMLSelectElement
+    expect(modelSelect.value).toBe('')
+  })
+
+  it('filters default model from non-default options', () => {
+    renderDropdown({ defaultModelId: 'sonnet' })
+    const modelSelect = screen.getByTestId('chat-settings-trigger')
+    const options = Array.from(modelSelect.querySelectorAll('option'))
+    const nonDefaultOptions = options.filter(o => o.value !== '')
+    expect(nonDefaultOptions.every(o => o.value !== 'sonnet')).toBe(true)
+  })
+
+  it('calls onModelChange with defaultModelId when Default option is selected', () => {
+    const onModelChange = vi.fn()
+    renderDropdown({ defaultModelId: 'sonnet', activeModel: 'haiku', onModelChange })
+    fireEvent.change(screen.getByTestId('chat-settings-trigger'), { target: { value: '' } })
+    expect(onModelChange).toHaveBeenCalledWith('sonnet')
   })
 })
