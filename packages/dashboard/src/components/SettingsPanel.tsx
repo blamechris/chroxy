@@ -56,9 +56,10 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const [tunnelMode, setTunnelModeState] = useState<string>('none')
   const [tunnelError, setTunnelError] = useState<string | null>(null)
 
-  // Load tunnel mode from Tauri settings on open
+  // Load tunnel mode from Tauri settings on open and clear stale errors
   useEffect(() => {
     if (!isOpen || !inTauri) return
+    setTunnelError(null)
     getTunnelMode().then(mode => {
       if (mode) setTunnelModeState(mode)
     })
@@ -66,16 +67,17 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
 
   const handleTunnelModeChange = useCallback(async (mode: string) => {
     setTunnelError(null)
+    const previousMode = tunnelMode
     setTunnelModeState(mode)
     try {
       await setTunnelMode(mode)
     } catch (err) {
-      // Revert to actual saved mode
+      // Revert to actual saved mode, or previous mode as fallback
       const actual = await getTunnelMode()
-      if (actual) setTunnelModeState(actual)
+      setTunnelModeState(actual ?? previousMode)
       setTunnelError(err instanceof Error ? err.message : String(err))
     }
-  }, [])
+  }, [tunnelMode])
 
   // Normalize: if persisted defaultProvider isn't in server's list, use first available
   const effectiveProvider = useMemo(() => {
@@ -225,8 +227,8 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
             <section className="settings-section">
               <h3>Network</h3>
               <div className="settings-field">
-                <label>Tunnel mode</label>
-                <div className="tunnel-mode-options">
+                <span id="tunnel-mode-label">Tunnel mode</span>
+                <div className="tunnel-mode-options" role="radiogroup" aria-labelledby="tunnel-mode-label">
                   {([
                     { value: 'none', label: 'Off', desc: 'LAN only' },
                     { value: 'quick', label: 'Quick Tunnel', desc: 'Random Cloudflare URL' },
@@ -235,9 +237,10 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                     <button
                       key={opt.value}
                       type="button"
+                      role="radio"
                       className={`tunnel-mode-option${tunnelMode === opt.value ? ' active' : ''}`}
                       onClick={() => handleTunnelModeChange(opt.value)}
-                      aria-pressed={tunnelMode === opt.value}
+                      aria-checked={tunnelMode === opt.value}
                     >
                       <span className="tunnel-mode-label">{opt.label}</span>
                       <span className="tunnel-mode-desc">{opt.desc}</span>

@@ -216,7 +216,10 @@ fn get_tunnel_mode(
     settings_state: tauri::State<'_, Mutex<DesktopSettings>>,
 ) -> String {
     let settings = lock_or_recover(&settings_state);
-    settings.tunnel_mode.clone()
+    match settings.tunnel_mode.as_str() {
+        "none" | "quick" | "named" => settings.tunnel_mode.clone(),
+        _ => "none".to_string(),
+    }
 }
 
 #[tauri::command]
