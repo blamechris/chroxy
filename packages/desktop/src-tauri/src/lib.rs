@@ -245,16 +245,16 @@ fn tile_window(window: tauri::Window, direction: String) -> Result<(), String> {
 
     match direction.as_str() {
         "left" => {
-            let _ = window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y + menu_bar_height));
-            let _ = window.set_size(tauri::PhysicalSize::new(half_width, usable_height as u32));
+            window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y + menu_bar_height)).map_err(|e| e.to_string())?;
+            window.set_size(tauri::PhysicalSize::new(half_width, usable_height as u32)).map_err(|e| e.to_string())?;
         }
         "right" => {
-            let _ = window.set_position(tauri::PhysicalPosition::new(pos.x + half_width as i32, pos.y + menu_bar_height));
-            let _ = window.set_size(tauri::PhysicalSize::new(half_width, usable_height as u32));
+            window.set_position(tauri::PhysicalPosition::new(pos.x + half_width as i32, pos.y + menu_bar_height)).map_err(|e| e.to_string())?;
+            window.set_size(tauri::PhysicalSize::new(half_width, usable_height as u32)).map_err(|e| e.to_string())?;
         }
         "maximize" => {
-            let _ = window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y + menu_bar_height));
-            let _ = window.set_size(tauri::PhysicalSize::new(screen.width, usable_height as u32));
+            window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y + menu_bar_height)).map_err(|e| e.to_string())?;
+            window.set_size(tauri::PhysicalSize::new(screen.width, usable_height as u32)).map_err(|e| e.to_string())?;
         }
         _ => return Err(format!("Unknown direction: {}", direction)),
     }
@@ -410,7 +410,9 @@ pub fn run() {
                                 let submenu: id = msg_send![item, submenu];
                                 if submenu != nil {
                                     let title: id = msg_send![submenu, title];
+                                    if title == nil { continue; }
                                     let utf8: *const std::os::raw::c_char = msg_send![title, UTF8String];
+                                    if utf8.is_null() { continue; }
                                     let title_str = std::ffi::CStr::from_ptr(utf8)
                                         .to_str().unwrap_or("");
                                     if title_str == "Window" {
