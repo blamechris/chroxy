@@ -34,6 +34,7 @@ export type {
   ConnectionContext,
   QueuedMessage,
   Checkpoint,
+  BaseSessionState,
 } from './types'
 
 export type {
@@ -101,6 +102,7 @@ export {
   nextMessageId,
   withJitter,
   filterThinking,
+  createEmptyBaseSessionState,
 } from './utils'
 
 export type {

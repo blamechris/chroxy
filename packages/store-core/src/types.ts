@@ -197,3 +197,32 @@ export interface Checkpoint {
   createdAt: number;
   hasGitSnapshot: boolean;
 }
+
+/**
+ * Base session state shared by both the mobile app and web dashboard.
+ *
+ * Each consumer extends this with platform-specific fields:
+ * - App adds: activityState, sessionRules
+ * - Dashboard adds: terminalRawBuffer, selectedFilePath, thinkingLevel
+ */
+export interface BaseSessionState {
+  messages: ChatMessage[];
+  streamingMessageId: string | null;
+  claudeReady: boolean;
+  activeModel: string | null;
+  permissionMode: string | null;
+  contextUsage: ContextUsage | null;
+  lastResultCost: number | null;
+  lastResultDuration: number | null;
+  sessionCost: number | null;
+  isIdle: boolean;
+  health: SessionHealth;
+  activeAgents: AgentInfo[];
+  isPlanPending: boolean;
+  planAllowedPrompts: { tool: string; prompt: string }[];
+  primaryClientId: string | null;
+  conversationId: string | null;
+  sessionContext: SessionContext | null;
+  mcpServers: McpServer[];
+  devPreviews: DevPreview[];
+}
