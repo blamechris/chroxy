@@ -11,8 +11,8 @@ import { resolve } from 'path'
 const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf-8')
 
 describe('Header overflow prevention (#2297)', () => {
-  it('#header has overflow: hidden', () => {
-    const match = css.match(/#header\s*\{[^}]*overflow:\s*hidden/s)
+  it('#header has overflow: visible (native selects render outside header bounds)', () => {
+    const match = css.match(/#header\s*\{[^}]*overflow:\s*visible/s)
     expect(match).toBeTruthy()
   })
 

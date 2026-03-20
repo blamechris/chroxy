@@ -253,9 +253,7 @@ describe('App', () => {
       const setModelFn = vi.fn()
       stateOverrides = { ...modelsState, setModel: setModelFn }
       render(<App />)
-      // Open the ChatSettingsDropdown, then change the model select
-      fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-      const select = screen.getByLabelText('Model')
+      const select = screen.getByTestId('chat-settings-trigger')
       fireEvent.change(select, { target: { value: 'claude-opus' } })
       expect(setModelFn).toHaveBeenCalledWith('claude-opus')
     })
@@ -278,9 +276,7 @@ describe('App', () => {
         }),
       }
       render(<App />)
-      // Open the ChatSettingsDropdown, then change the model select
-      fireEvent.click(screen.getByTestId('chat-settings-trigger'))
-      const select = screen.getByLabelText('Model')
+      const select = screen.getByTestId('chat-settings-trigger')
       fireEvent.change(select, { target: { value: '' } })
       expect(setModelFn).toHaveBeenCalledWith('claude-sonnet')
     })
