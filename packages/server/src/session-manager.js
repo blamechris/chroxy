@@ -820,11 +820,20 @@ export class SessionManager extends EventEmitter {
     const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'error', 'user_question']
     // Events that indicate meaningful activity (reset idle timeout)
     const ACTIVITY_EVENTS = new Set(['message', 'stream_start', 'tool_start', 'result', 'user_question'])
+    // Session-scoped logger — entries are tagged with sessionId for per-session routing
+    const sessionLog = log.withSession(sessionId)
+    // Events worth logging to the System tab (skip noisy delta/tool_result)
+    const LOGGED_EVENTS = new Set(['ready', 'stream_start', 'stream_end', 'result', 'error'])
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
         if (ACTIVITY_EVENTS.has(event)) this._timeoutManager.touchActivity(sessionId)
         this._recordHistory(sessionId, event, data)
         this.emit('session_event', { sessionId, event, data })
+        if (LOGGED_EVENTS.has(event)) {
+          const detail = event === 'error' ? `: ${data?.message || ''}` : ''
+          const logFn = event === 'error' ? sessionLog.error : sessionLog.info
+          logFn(`[${event}]${detail}`)
+        }
 
         // When SDK session reports ready, emit conversation_id if available
         if (event === 'ready' && session.resumeSessionId) {

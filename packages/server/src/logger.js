@@ -167,9 +167,10 @@ export function setLogLevel(level) {
 /**
  * Create a component logger. Backward-compatible with existing API.
  * @param {string} component - Component name for log prefix
- * @returns {{ debug: Function, info: Function, warn: Function, error: Function, log: Function }}
+ * @param {object} [context] - Optional context (e.g. { sessionId })
+ * @returns {{ debug: Function, info: Function, warn: Function, error: Function, log: Function, withSession: Function }}
  */
-export function createLogger(component) {
+export function createLogger(component, context = {}) {
   const write = (level, msg) => {
     if (LOG_LEVELS[level] < _logLevel) return
 
@@ -187,6 +188,7 @@ export function createLogger(component) {
     // Notify listeners (for WS broadcast to dashboard)
     if (_logListeners.size > 0) {
       const entry = { component, level, message: safeMsg, timestamp: Date.now() }
+      if (context.sessionId) entry.sessionId = context.sessionId
       for (const listener of _logListeners) {
         try {
           listener(entry)
@@ -218,5 +220,7 @@ export function createLogger(component) {
     error(msg) { write('error', msg) },
     // Backward compat alias
     log(msg) { write('info', msg) },
+    /** Create a child logger tagged with a session ID. */
+    withSession(sessionId) { return createLogger(component, { ...context, sessionId }) },
   }
 }
