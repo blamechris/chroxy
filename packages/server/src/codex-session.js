@@ -58,6 +58,9 @@ export class CodexSession extends BaseSession {
   }
 
   start() {
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error('OPENAI_API_KEY environment variable is not set')
+    }
     this._processReady = true
     process.nextTick(() => {
       this.emit('ready', { sessionId: null, model: this.model, tools: [] })
@@ -99,6 +102,7 @@ export class CodexSession extends BaseSession {
       args.push('-c', `model="${this.model}"`)
     }
 
+    let stderrBuf = ''
     const proc = spawn(CODEX, args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -172,7 +176,8 @@ export class CodexSession extends BaseSession {
     proc.stderr.on('data', (chunk) => {
       if (this._destroying) return
       const msg = chunk.toString().trim()
-      if (msg && (msg.includes('ERROR') || msg.includes('WARN'))) {
+      if (msg && (msg.includes('ERROR') || msg.includes('WARN') || msg.includes('error') || msg.includes('not set'))) {
+        if (stderrBuf.length < 1024) stderrBuf += (stderrBuf ? '\n' : '') + msg
         log.error(`stderr: ${msg}`)
       }
     })
@@ -185,7 +190,8 @@ export class CodexSession extends BaseSession {
         this.emit('stream_end', { messageId: this._currentMessageId })
       }
       if (code !== 0 && code !== null) {
-        this.emit('error', { message: `Codex process exited with code ${code}` })
+        const detail = stderrBuf ? `: ${stderrBuf.slice(0, 500)}` : ''
+        this.emit('error', { message: `Codex process exited with code ${code}${detail}` })
       }
       // Emit result only if turn.completed wasn't received
       if (!didEmitResult) {
