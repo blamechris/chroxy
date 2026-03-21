@@ -648,6 +648,9 @@ export function SessionScreen() {
     ? inputSettings.terminalEnterToSend
     : inputSettings.chatEnterToSend;
 
+  // Keyboard visibility for chat auto-scroll
+  const keyboardVisible = keyboardHeight > 0;
+
   // Bottom padding: when keyboard is up, use keyboard height + buffer for suggestion bar;
   // otherwise use safe area for Android nav buttons
   const suggestionBarBuffer = Platform.OS === 'android' ? 48 : 0;
@@ -1053,6 +1056,7 @@ export function SessionScreen() {
                   searchQuery={searchVisible ? inSessionSearchQuery : undefined}
                   searchMatchIds={searchVisible ? searchMatchIds : undefined}
                   currentMatchId={searchVisible ? currentMatchId : undefined}
+                  keyboardVisible={keyboardVisible}
                 />
               </ErrorBoundary>
             </View>
@@ -1083,6 +1087,7 @@ export function SessionScreen() {
               searchQuery={searchVisible ? inSessionSearchQuery : undefined}
               searchMatchIds={searchVisible ? searchMatchIds : undefined}
               currentMatchId={searchVisible ? currentMatchId : undefined}
+              keyboardVisible={keyboardVisible}
             />
           </ErrorBoundary>
         ) : viewMode === 'files' ? (
@@ -1103,6 +1108,7 @@ export function SessionScreen() {
               searchQuery={searchVisible ? inSessionSearchQuery : undefined}
               searchMatchIds={searchVisible ? searchMatchIds : undefined}
               currentMatchId={searchVisible ? currentMatchId : undefined}
+              keyboardVisible={keyboardVisible}
             />
           </ErrorBoundary>
         ) : (
