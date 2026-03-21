@@ -191,23 +191,26 @@ describe('PairingManager (#1836)', () => {
   })
 
   describe('extendCurrentId grace period (#2599)', () => {
-    it('extends current pairing ID expiry', () => {
-      const pm = new PairingManager({ ttlMs: 100 })
+    it('extends current pairing ID expiry past original TTL', async () => {
+      const pm = new PairingManager({ ttlMs: 50 })
       const id = pm.currentPairingId
-      // Extend to 60s — well beyond the original 100ms TTL
-      pm.extendCurrentId(60_000)
+      // Extend to 5s — well beyond the original 50ms TTL
+      pm.extendCurrentId(5000)
 
-      // The ID should still be valid (original 100ms TTL would have been too short)
+      // Wait past the original TTL — without extension this would expire
+      await delay(100)
+
+      // The ID should still be valid because we extended it
       const result = pm.validatePairing(id)
-      assert.equal(result.valid, true, 'extended ID should be valid')
+      assert.equal(result.valid, true, 'extended ID should survive past original TTL')
       pm.destroy()
     })
 
     it('extended ID still expires after grace period', async () => {
-      const pm = new PairingManager({ ttlMs: 100 })
+      const pm = new PairingManager({ ttlMs: 1 })
       const id = pm.currentPairingId
-      pm.extendCurrentId(1) // 1ms grace
-      await delay(10)
+      pm.extendCurrentId(5) // 5ms grace (clamped won't exceed this since TTL is 1ms)
+      await delay(30)
       const result = pm.validatePairing(id)
       assert.equal(result.valid, false, 'should expire after grace period')
       assert.equal(result.reason, 'expired')
@@ -234,13 +237,17 @@ describe('PairingManager (#1836)', () => {
       assert.equal(pm.currentPairingId, null)
     })
 
-    it('updates the _activePairings entry expiry', () => {
-      const pm = new PairingManager({ ttlMs: 100 })
+    it('updates the _activePairings entry expiry', async () => {
+      const pm = new PairingManager({ ttlMs: 50 })
       const id = pm.currentPairingId
-      pm.extendCurrentId(60_000)
-      // Validate the entry is accessible and has the extended expiry
+      pm.extendCurrentId(5000)
+
+      // Wait past the original TTL — the _activePairings entry must have
+      // the extended expiry for this validation to succeed
+      await delay(100)
+
       const result = pm.validatePairing(id)
-      assert.equal(result.valid, true)
+      assert.equal(result.valid, true, 'map entry should have extended expiry')
       assert.ok(result.sessionToken)
       pm.destroy()
     })

@@ -110,21 +110,23 @@ export class PairingManager extends EventEmitter {
   extendCurrentId(durationMs = DEFAULT_GRACE_PERIOD_MS) {
     if (this._destroyed || !this._current) return
 
-    // Extend the expiry of the current pairing entry
-    const newExpiry = Date.now() + durationMs
+    // Extend the expiry — never shorten below the existing remaining TTL
+    const requestedExpiry = Date.now() + durationMs
+    const newExpiry = Math.max(this._current.expiresAt, requestedExpiry)
     this._current.expiresAt = newExpiry
     const entry = this._activePairings.get(this._current.id)
     if (entry) entry.expiresAt = newExpiry
 
-    // Reschedule auto-refresh to fire after the grace period
+    // Reschedule auto-refresh to fire after the (possibly extended) grace period
     if (this._autoRefresh) {
       if (this._refreshTimer) clearTimeout(this._refreshTimer)
+      const delayMs = Math.max(0, newExpiry - Date.now())
       this._refreshTimer = setTimeout(() => {
         if (this._destroyed) return
         this._generatePairing()
         this.emit('pairing_refreshed', { pairingId: this._current.id })
         this._scheduleRefresh()
-      }, durationMs)
+      }, delayMs)
       this._refreshTimer.unref?.()
     }
   }
