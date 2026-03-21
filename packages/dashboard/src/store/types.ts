@@ -168,6 +168,7 @@ export interface LogEntry {
   level: 'debug' | 'info' | 'warn' | 'error';
   message: string;
   timestamp: number;
+  sessionId?: string;
 }
 
 export interface ServerError {
