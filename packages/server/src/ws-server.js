@@ -808,7 +808,11 @@ export class WsServer {
       if (inLogBroadcast) return
       inLogBroadcast = true
       try {
-        this._broadcast({ type: 'log_entry', ...entry })
+        if (entry.sessionId) {
+          this._broadcastToSession(entry.sessionId, { type: 'log_entry', ...entry })
+        } else {
+          this._broadcast({ type: 'log_entry', ...entry })
+        }
       } finally {
         inLogBroadcast = false
       }
