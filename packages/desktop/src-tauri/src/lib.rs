@@ -244,6 +244,12 @@ fn set_tunnel_mode(
         settings.save().map_err(|e| format!("Failed to save settings: {}", e))?;
     }
 
+    // Update ServerManager so next restart uses the new mode
+    if let Some(mgr_state) = app.try_state::<Mutex<ServerManager>>() {
+        let mut mgr = lock_or_recover(&mgr_state);
+        mgr.set_tunnel_mode(&mode);
+    }
+
     // Update tray menu checkboxes
     if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
         let items = lock_or_recover(&items);

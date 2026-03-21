@@ -10,6 +10,7 @@ declare const __APP_VERSION__: string
 
 export interface FooterBarProps {
   connectionPhase: string
+  tunnelReady?: boolean
   serverVersion?: string | null
   cwd?: string
   model?: string
@@ -36,6 +37,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 export function FooterBar({
   connectionPhase,
+  tunnelReady = true,
   serverVersion,
   cwd,
   model,
@@ -46,13 +48,17 @@ export function FooterBar({
   onShowQr,
 }: FooterBarProps) {
   const version = serverVersion ?? (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
-  const statusLabel = STATUS_LABELS[connectionPhase] ?? connectionPhase
+  const settingUpTunnel = connectionPhase === 'connected' && !tunnelReady
+  const statusLabel = settingUpTunnel
+    ? 'Setting up tunnel...'
+    : (STATUS_LABELS[connectionPhase] ?? connectionPhase)
+  const dotClass = settingUpTunnel ? 'connecting' : connectionPhase
 
   return (
     <footer className="footer-bar" data-testid="footer-bar">
       <div className="footer-left">
         <span className="footer-version">v{version}</span>
-        <span className={`footer-status-dot ${connectionPhase}`} />
+        <span className={`footer-status-dot ${dotClass}`} />
         <span className="footer-status-label">{statusLabel}</span>
         {cwd && (
           <span className="footer-cwd" title={cwd}>
