@@ -2151,17 +2151,34 @@ describe('encryption integration (end-to-end)', () => {
     })
     const port = await startServerAndGetPort(server)
 
+    // Suppress log_entry broadcasts — the raw _WsServer registers a log listener
+    // that broadcasts server log messages as encrypted messages, adding an
+    // unpredictable number of extra encrypted envelopes to the stream.
+    setLogListener(null)
+
     const { ws, messages, clientEncryption } = await connectWithEncryption(port)
 
-    // Wait for encrypted messages to arrive (history replay + post-auth info).
-    // setImmediate chunking means delivery timing varies across environments —
-    // use a generous timeout to avoid flakes on slow CI runners.
+    // Wait for the history_replay_end marker among decrypted messages.
+    // Previous approach waited for a fixed count of encrypted envelopes, then
+    // drained — but messages arrive asynchronously via the event loop, so
+    // draining too early missed later arrivals (the root cause of flakiness).
+    // Instead, poll-decrypt until we see the end-of-replay sentinel.
+    const decrypted = []
     await waitFor(
-      () => messages.filter(m => m.type === 'encrypted').length >= 5,
-      { timeoutMs: 5000, label: 'encrypted history messages' }
+      () => {
+        // Drain any newly arrived encrypted envelopes into decrypted[]
+        while (true) {
+          const idx = messages.findIndex(m => m.type === 'encrypted')
+          if (idx === -1) break
+          const envelope = messages.splice(idx, 1)[0]
+          const msg = decrypt(envelope, clientEncryption.sharedKey, clientEncryption.recvNonce, DIRECTION_SERVER)
+          clientEncryption.recvNonce++
+          decrypted.push(msg)
+        }
+        return decrypted.find(m => m.type === 'history_replay_end')
+      },
+      { timeoutMs: 5000, label: 'encrypted history_replay_end' }
     )
-
-    const decrypted = drainEncryptedMessages(messages, clientEncryption)
 
     // Find history replay messages among decrypted
     const replayStart = decrypted.find(m => m.type === 'history_replay_start')
