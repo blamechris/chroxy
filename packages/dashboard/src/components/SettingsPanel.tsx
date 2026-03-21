@@ -11,7 +11,7 @@ import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
 import { isTauri } from '../utils/tauri'
-import { getTunnelMode, setTunnelMode, restartServer } from '../hooks/useTauriIPC'
+import { getTunnelMode, setTunnelMode, restartServer, getServerInfo } from '../hooks/useTauriIPC'
 
 export interface SettingsPanelProps {
   isOpen: boolean
@@ -58,16 +58,18 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const [serverTunnelMode, setServerTunnelMode] = useState<string>('none')
   const [restarting, setRestarting] = useState(false)
 
-  // Load tunnel mode from Tauri settings on open and clear stale errors
+  // Load tunnel mode from Tauri settings and running server on open
   useEffect(() => {
     if (!isOpen || !inTauri) return
     setTunnelError(null)
     setRestarting(false)
+    // Read saved setting (what user selected)
     getTunnelMode().then(mode => {
-      if (mode) {
-        setTunnelModeState(mode)
-        setServerTunnelMode(mode)
-      }
+      if (mode) setTunnelModeState(mode)
+    })
+    // Read running server's actual mode (may differ if not restarted)
+    getServerInfo().then(info => {
+      if (info?.tunnelMode) setServerTunnelMode(info.tunnelMode)
     })
   }, [isOpen, inTauri])
 
