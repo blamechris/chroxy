@@ -91,13 +91,14 @@ export function FooterBar({
                 <span
                   className={`footer-context-bar${contextPercent >= 80 ? ' high' : contextPercent >= 50 ? ' medium' : ''}`}
                   role="progressbar"
-                  aria-valuenow={Math.round(contextPercent)}
+                  aria-label="Context window usage"
+                  aria-valuenow={Math.min(Math.round(contextPercent), 100)}
                   aria-valuemin={0}
                   aria-valuemax={100}
                 >
                   <span className="footer-context-fill" style={{ width: `${Math.min(contextPercent, 100)}%` }} />
                 </span>
-                <span className="footer-context-label">{Math.round(contextPercent)}%</span>
+                <span className="footer-context-label">{Math.min(Math.round(contextPercent), 100)}%</span>
               </>
             ) : context}
           </span>

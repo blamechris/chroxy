@@ -196,7 +196,7 @@ export function SettingsBar({
     if (total > 0) {
       const mInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
       const cw = mInfo?.contextWindow ?? 200_000;
-      summaryParts.push(`${Math.round((total / cw) * 100)}%`);
+      summaryParts.push(`${Math.min(Math.round((total / cw) * 100), 100)}%`);
     }
   }
 
@@ -325,7 +325,7 @@ export function SettingsBar({
                     return (
                       <>
                         <Text style={styles.contextText}>
-                          {formatTokenCount(total)} ({Math.round(pct)}%)
+                          {formatTokenCount(total)} ({Math.min(Math.round(pct), 100)}%)
                         </Text>
                         <View style={styles.contextBarContainer}>
                           <View style={[styles.contextBarFill, { width: `${Math.min(100, pct)}%` as `${number}%`, backgroundColor: barColor }]} />

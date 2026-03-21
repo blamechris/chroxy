@@ -7,11 +7,24 @@ describe('MODELS (default)', () => {
     assert.ok(MODELS.length >= 4)
   })
 
-  it('each entry has id, label, and fullId', () => {
+  it('each entry has id, label, fullId, and contextWindow', () => {
     for (const m of MODELS) {
       assert.ok(m.id, `Missing id on model ${JSON.stringify(m)}`)
       assert.ok(m.label, `Missing label on model ${JSON.stringify(m)}`)
       assert.ok(m.fullId, `Missing fullId on model ${JSON.stringify(m)}`)
+      assert.ok(typeof m.contextWindow === 'number' && m.contextWindow > 0, `Missing or invalid contextWindow on model ${m.id}`)
+    }
+  })
+
+  it('opus 4.6 has 1M context window', () => {
+    const opus46 = MODELS.find(m => m.id === 'opus46')
+    assert.equal(opus46.contextWindow, 1_000_000)
+  })
+
+  it('non-opus-4.6 models have 200k context window', () => {
+    const others = MODELS.filter(m => m.id !== 'opus46')
+    for (const m of others) {
+      assert.equal(m.contextWindow, 200_000, `${m.id} should have 200k context window`)
     }
   })
 
@@ -107,6 +120,8 @@ describe('updateModels', () => {
     assert.equal(result[1].id, 'opus-4-6')
     assert.equal(result[1].label, 'Opus 4.6')
     assert.equal(result[1].fullId, 'claude-opus-4-6')
+    assert.equal(result[0].contextWindow, 200_000)
+    assert.equal(result[1].contextWindow, 1_000_000)
 
     const models = getModels()
     assert.deepEqual(models, result)
