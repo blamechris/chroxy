@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { writeFileSync, unlinkSync, existsSync } from 'fs'
@@ -168,6 +168,16 @@ class ShimmedCodexSession extends CodexSession {
 // ---------------------------------------------------------------------------
 
 describe('CodexSession', () => {
+  let savedApiKey
+  before(() => {
+    savedApiKey = process.env.OPENAI_API_KEY
+    process.env.OPENAI_API_KEY = 'test-key'
+  })
+  after(() => {
+    if (savedApiKey !== undefined) process.env.OPENAI_API_KEY = savedApiKey
+    else delete process.env.OPENAI_API_KEY
+  })
+
   describe('capabilities', () => {
     it('exposes correct static capabilities', () => {
       const caps = CodexSession.capabilities
@@ -627,6 +637,27 @@ describe('CodexSession', () => {
 
       assert.equal(readyEvents.length, 1)
       assert.equal(readyEvents[0].model, 'o3')
+    })
+  })
+
+  describe('start() API key validation', () => {
+    afterEach(() => {
+      process.env.OPENAI_API_KEY = 'test-key'
+    })
+
+    it('throws when OPENAI_API_KEY is not set', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      delete process.env.OPENAI_API_KEY
+      assert.throws(() => session.start(), {
+        message: /OPENAI_API_KEY.*not set/,
+      })
+    })
+
+    it('succeeds when OPENAI_API_KEY is set', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      session.start()
+      assert.equal(session._processReady, true)
+      session.destroy()
     })
   })
 })
