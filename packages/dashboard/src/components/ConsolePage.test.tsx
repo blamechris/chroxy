@@ -7,6 +7,12 @@ vi.mock('./LogPanel', () => ({
   LogPanel: () => <div data-testid="log-panel-mock" />,
 }))
 
+// Mock useConnectionStore — ConsolePage reads serverPhase and tunnelProgress
+vi.mock('../store/connection', () => ({
+  useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) =>
+    selector({ serverPhase: null, tunnelProgress: null }),
+}))
+
 // Mock fetch globally
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)
