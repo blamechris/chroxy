@@ -10,7 +10,7 @@ export function LogPanel() {
   const logEntries = useConnectionStore((state) => state.logEntries)
   const clearLogEntries = useConnectionStore((state) => state.clearLogEntries)
   const activeSessionId = useConnectionStore((state) => state.activeSessionId)
-  const sessionCount = useConnectionStore((state) => Object.keys(state.sessionStates).length)
+  const sessionCount = useConnectionStore((state) => state.sessions.length)
 
   const [filter, setFilter] = useState<Set<LogLevel>>(new Set(['info', 'warn', 'error']))
   const [sessionFilter, setSessionFilter] = useState(true) // filter by active session when multi-session

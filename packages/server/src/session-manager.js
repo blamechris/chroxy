@@ -831,7 +831,8 @@ export class SessionManager extends EventEmitter {
         this.emit('session_event', { sessionId, event, data })
         if (LOGGED_EVENTS.has(event)) {
           const detail = event === 'error' ? `: ${data?.message || ''}` : ''
-          sessionLog.info(`[${event}]${detail}`)
+          const logFn = event === 'error' ? sessionLog.error : sessionLog.info
+          logFn(`[${event}]${detail}`)
         }
 
         // When SDK session reports ready, emit conversation_id if available

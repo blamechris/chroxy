@@ -6,12 +6,16 @@ let mockLogEntries: LogEntry[] = []
 const mockClearLogEntries = vi.fn()
 
 // Mock the connection store
+let mockActiveSessionId: string | null = null
+let mockSessions: unknown[] = []
+
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => {
     const store = {
       logEntries: mockLogEntries,
       clearLogEntries: mockClearLogEntries,
-      activeSessionId: null,
+      activeSessionId: mockActiveSessionId,
+      sessions: mockSessions,
       sessionStates: {},
     }
     return selector(store)
@@ -42,6 +46,8 @@ describe('LogPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockLogEntries = []
+    mockActiveSessionId = null
+    mockSessions = []
   })
 
   afterEach(() => {
@@ -179,5 +185,20 @@ describe('LogPanel', () => {
     expect(logList).toHaveAttribute('role', 'log')
     expect(logList).toHaveAttribute('aria-live', 'polite')
     expect(logList).toHaveAttribute('aria-label', 'Log entries')
+  })
+
+  it('shows "This session" toggle only in multi-session mode', () => {
+    mockSessions = [{ sessionId: 'a' }, { sessionId: 'b' }]
+    mockActiveSessionId = 'a'
+    mockLogEntries = [makeEntry({ id: '1' })]
+    render(<LogPanel />)
+    expect(screen.getByTestId('log-session-filter')).toBeDefined()
+  })
+
+  it('hides "This session" toggle in single-session mode', () => {
+    mockSessions = [{ sessionId: 'a' }]
+    mockLogEntries = [makeEntry({ id: '1' })]
+    render(<LogPanel />)
+    expect(screen.queryByTestId('log-session-filter')).toBeNull()
   })
 })
