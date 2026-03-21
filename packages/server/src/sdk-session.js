@@ -57,6 +57,28 @@ export class SdkSession extends BaseSession {
   /** Token budgets for thinking levels. null = adaptive (SDK default). */
   static THINKING_BUDGETS = { default: null, high: 32000, max: 128000 }
 
+  /** Error patterns mapped to user-friendly messages. */
+  static _ERROR_PATTERNS = [
+    { test: /credit|billing|quota|usage.limit/i,
+      msg: 'Insufficient API credits or billing limit reached. Check your API provider dashboard.' },
+    { test: /rate.limit|too many requests|429/i,
+      msg: 'API rate limit exceeded. Please wait a moment and try again.' },
+    { test: /authentication|invalid.api.key|401|unauthorized/i,
+      msg: 'API authentication failed. Check your API key configuration.' },
+    { test: /overloaded|503|529|temporarily unavailable/i,
+      msg: 'The API is temporarily overloaded. Please try again in a few minutes.' },
+    { test: /SIGABRT|SIGKILL|SIGSEGV|terminated by signal/i,
+      msg: 'Claude Code process crashed. This is often caused by API errors (insufficient credits, invalid key, or rate limits). Check your API provider dashboard.' },
+  ]
+
+  static _enrichErrorMessage(raw) {
+    if (!raw) return 'Unknown error'
+    for (const { test, msg } of SdkSession._ERROR_PATTERNS) {
+      if (test.test(raw)) return msg
+    }
+    return raw
+  }
+
   get thinkingLevel() { return this._thinkingLevel }
 
   constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox } = {}) {
@@ -330,7 +352,7 @@ export class SdkSession extends BaseSession {
       }
       if (!this._destroying) {
         log.error(`Query error: ${err.message}`)
-        this.emit('error', { message: err.message })
+        this.emit('error', { message: SdkSession._enrichErrorMessage(err.message) })
       }
       this._clearMessageState()
     } finally {
