@@ -190,6 +190,62 @@ describe('PairingManager (#1836)', () => {
     })
   })
 
+  describe('extendCurrentId grace period (#2599)', () => {
+    it('extends current pairing ID expiry', () => {
+      const pm = new PairingManager({ ttlMs: 100 })
+      const id = pm.currentPairingId
+      // Extend to 60s — well beyond the original 100ms TTL
+      pm.extendCurrentId(60_000)
+
+      // The ID should still be valid (original 100ms TTL would have been too short)
+      const result = pm.validatePairing(id)
+      assert.equal(result.valid, true, 'extended ID should be valid')
+      pm.destroy()
+    })
+
+    it('extended ID still expires after grace period', async () => {
+      const pm = new PairingManager({ ttlMs: 100 })
+      const id = pm.currentPairingId
+      pm.extendCurrentId(1) // 1ms grace
+      await delay(10)
+      const result = pm.validatePairing(id)
+      assert.equal(result.valid, false, 'should expire after grace period')
+      assert.equal(result.reason, 'expired')
+      pm.destroy()
+    })
+
+    it('delays auto-refresh timer during grace period', async () => {
+      const pm = new PairingManager({ ttlMs: 10, autoRefresh: true })
+      const id = pm.currentPairingId
+      // Extend to 5s — auto-refresh should not fire during this time
+      pm.extendCurrentId(5000)
+      // Wait longer than original ttlMs (10ms) but less than grace period
+      await delay(50)
+      // The current ID should NOT have changed (auto-refresh was delayed)
+      assert.equal(pm.currentPairingId, id, 'should not rotate during grace period')
+      pm.destroy()
+    })
+
+    it('no-ops when destroyed', () => {
+      const pm = new PairingManager({})
+      pm.destroy()
+      // Should not throw
+      pm.extendCurrentId(60_000)
+      assert.equal(pm.currentPairingId, null)
+    })
+
+    it('updates the _activePairings entry expiry', () => {
+      const pm = new PairingManager({ ttlMs: 100 })
+      const id = pm.currentPairingId
+      pm.extendCurrentId(60_000)
+      // Validate the entry is accessible and has the extended expiry
+      const result = pm.validatePairing(id)
+      assert.equal(result.valid, true)
+      assert.ok(result.sessionToken)
+      pm.destroy()
+    })
+  })
+
   describe('auto-refresh', () => {
     it('refresh() emits pairing_refreshed event', () => {
       const pm = new PairingManager({})

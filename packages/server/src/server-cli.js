@@ -411,6 +411,11 @@ export async function startCliServer(config) {
       startedAt: new Date().toISOString(),
       pid: process.pid,
     })
+
+    // After first QR display, extend the pairing ID validity to give the user
+    // time to scan. Without this, slow tunnel setup (60-80s) can consume most
+    // of the default 60s TTL, causing rotation before the user can scan (#2599).
+    if (pairingManager) pairingManager.extendCurrentId()
   }
 
   // External URL mode: reverse proxy / custom domain (skip tunnel entirely)
