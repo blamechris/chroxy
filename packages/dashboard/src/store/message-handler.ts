@@ -309,25 +309,43 @@ function flushPendingDeltas(): void {
   for (const [sessionId, deltas] of bySession) {
     if (sessionId && newSessionStates[sessionId]) {
       const sessionState = newSessionStates[sessionId];
+      const matched = new Set<string>();
       const updatedMessages = sessionState.messages.map((m) => {
         const d = deltas.get(m.id);
+        if (d) matched.add(m.id);
         return d ? { ...m, content: m.content + d } : m;
       });
+      // Safety net: create response messages for orphaned deltas (#2611)
+      const finalMessages = updatedMessages;
+      for (const [msgId, delta] of deltas) {
+        if (!matched.has(msgId)) {
+          finalMessages.push({ id: msgId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
+        }
+      }
       newSessionStates = {
         ...newSessionStates,
-        [sessionId]: { ...sessionState, messages: updatedMessages },
+        [sessionId]: { ...sessionState, messages: finalMessages },
       };
       if (sessionId === state.activeSessionId) {
-        getStore().setState({ sessionStates: newSessionStates, messages: updatedMessages });
+        getStore().setState({ sessionStates: newSessionStates, messages: finalMessages });
         flatUpdated = true;
       }
     } else {
-      getStore().setState((s) => ({
-        messages: s.messages.map((m) => {
+      getStore().setState((s) => {
+        const matched2 = new Set<string>();
+        const updated = s.messages.map((m) => {
           const d = deltas.get(m.id);
+          if (d) matched2.add(m.id);
           return d ? { ...m, content: m.content + d } : m;
-        }),
-      }));
+        });
+        // Safety net: create response messages for orphaned deltas (#2611)
+        for (const [msgId, delta] of deltas) {
+          if (!matched2.has(msgId)) {
+            updated.push({ id: msgId, type: 'response' as const, content: delta, timestamp: Date.now() } as ChatMessage);
+          }
+        }
+        return { messages: updated };
+      });
       flatUpdated = true;
     }
   }
