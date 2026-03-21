@@ -6,6 +6,7 @@
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useShallow } from 'zustand/react/shallow'
+import { DEFAULT_CONTEXT_WINDOW } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
 import type { ChatMessage } from './store/connection'
 import type { ChatViewMessage } from './components/ChatView'
@@ -856,7 +857,7 @@ export function App() {
     const total = contextUsage.inputTokens + contextUsage.outputTokens
     if (total === 0) return null
     const modelInfo = availableModels.find(m => m.id === activeModel || m.fullId === activeModel)
-    const contextWindow = modelInfo?.contextWindow ?? 200_000
+    const contextWindow = modelInfo?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
     return (total / contextWindow) * 100
   }, [contextUsage, activeModel, availableModels])
 

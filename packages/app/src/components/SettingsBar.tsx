@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
+import { DEFAULT_CONTEXT_WINDOW } from '@chroxy/store-core';
 import { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
@@ -195,7 +196,7 @@ export function SettingsBar({
     const total = contextUsage.inputTokens + contextUsage.outputTokens;
     if (total > 0) {
       const mInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
-      const cw = mInfo?.contextWindow ?? 200_000;
+      const cw = mInfo?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
       summaryParts.push(`${Math.min(Math.round((total / cw) * 100), 100)}%`);
     }
   }
@@ -319,7 +320,7 @@ export function SettingsBar({
                     const total = contextUsage.inputTokens + contextUsage.outputTokens;
                     if (total === 0) return null;
                     const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
-                    const contextWindow = modelInfo?.contextWindow ?? 200_000;
+                    const contextWindow = modelInfo?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
                     const pct = (total / contextWindow) * 100;
                     const barColor = pct >= 80 ? COLORS.accentRed : pct >= 50 ? COLORS.accentOrange : COLORS.accentGreen;
                     return (
