@@ -5,7 +5,7 @@
  * with a mock Zustand store.
  */
 import { Alert } from 'react-native';
-import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION, SUBSCRIBE_SESSIONS_CHUNK_SIZE, clearPermissionSplits, clearDeltaBuffers } from '../../store/message-handler';
+import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION, SUBSCRIBE_SESSIONS_CHUNK_SIZE, clearPermissionSplits, clearDeltaBuffers, resetReplayFlags } from '../../store/message-handler';
 import { createEmptySessionState } from '../../store/utils';
 import { clearPersistedSession } from '../../store/persistence';
 import { setCallback, clearAllCallbacks } from '../../store/imperative-callbacks';
@@ -1327,6 +1327,10 @@ describe('reconnect replay dedup', () => {
     _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
     return store;
   }
+
+  afterEach(() => {
+    resetReplayFlags();
+  });
 
   it('message handler: preserves new response messages during reconnect', () => {
     const store = setupReconnectReplay([
