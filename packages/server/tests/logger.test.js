@@ -535,3 +535,31 @@ describe('redactSensitive (#1849)', () => {
     setLogListener(null)
   })
 })
+
+describe('withSession', () => {
+  it('creates a child logger that tags entries with sessionId', () => {
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = createLogger('test').withSession('sess-123')
+    log.info('Session event')
+
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].sessionId, 'sess-123')
+    assert.equal(entries[0].component, 'test')
+    assert.equal(entries[0].message, 'Session event')
+    setLogListener(null)
+  })
+
+  it('parent logger entries have no sessionId', () => {
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = createLogger('test')
+    log.info('Global event')
+
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].sessionId, undefined)
+    setLogListener(null)
+  })
+})

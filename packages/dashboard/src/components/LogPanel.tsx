@@ -9,14 +9,25 @@ const LEVELS: LogLevel[] = ['debug', 'info', 'warn', 'error']
 export function LogPanel() {
   const logEntries = useConnectionStore((state) => state.logEntries)
   const clearLogEntries = useConnectionStore((state) => state.clearLogEntries)
+  const activeSessionId = useConnectionStore((state) => state.activeSessionId)
+  const sessionCount = useConnectionStore((state) => Object.keys(state.sessionStates).length)
 
   const [filter, setFilter] = useState<Set<LogLevel>>(new Set(['info', 'warn', 'error']))
+  const [sessionFilter, setSessionFilter] = useState(true) // filter by active session when multi-session
   const [autoScroll, setAutoScroll] = useState(true)
   const [copied, setCopied] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const filtered = logEntries.filter((e) => filter.has(e.level))
+  const isMultiSession = sessionCount > 1
+  const filtered = logEntries.filter((e) => {
+    if (!filter.has(e.level)) return false
+    // In multi-session mode with session filter on, show only active session + global logs
+    if (isMultiSession && sessionFilter && activeSessionId) {
+      return !e.sessionId || e.sessionId === activeSessionId
+    }
+    return true
+  })
   const lastFilteredId = filtered.length > 0 ? filtered[filtered.length - 1]!.id : null
 
   // Auto-scroll to bottom on new entries. Use last entry's id instead of
@@ -78,6 +89,16 @@ export function LogPanel() {
           ))}
         </div>
         <div className="log-actions">
+          {isMultiSession && (
+            <label className="log-autoscroll" data-testid="log-session-filter">
+              <input
+                type="checkbox"
+                checked={sessionFilter}
+                onChange={(e) => setSessionFilter(e.target.checked)}
+              />
+              This session
+            </label>
+          )}
           <label className="log-autoscroll" data-testid="log-autoscroll">
             <input
               type="checkbox"

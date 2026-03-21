@@ -11,6 +11,8 @@ vi.mock('../store/connection', () => ({
     const store = {
       logEntries: mockLogEntries,
       clearLogEntries: mockClearLogEntries,
+      activeSessionId: null,
+      sessionStates: {},
     }
     return selector(store)
   },
