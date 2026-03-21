@@ -56,6 +56,9 @@ export class GeminiSession extends BaseSession {
   }
 
   start() {
+    if (!process.env.GEMINI_API_KEY) {
+      throw new Error('GEMINI_API_KEY environment variable is not set. Set it with: export GEMINI_API_KEY=your_key')
+    }
     this._processReady = true
     process.nextTick(() => {
       this.emit('ready', { sessionId: null, model: this.model, tools: [] })
@@ -97,6 +100,7 @@ export class GeminiSession extends BaseSession {
       args.push('-m', this.model)
     }
 
+    let stderrBuf = ''
     const proc = spawn(GEMINI, args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -132,6 +136,7 @@ export class GeminiSession extends BaseSession {
       if (this._destroying) return
       const msg = chunk.toString().trim()
       if (msg && !msg.includes('DeprecationWarning')) {
+        stderrBuf += (stderrBuf ? '\n' : '') + msg
         log.error(`stderr: ${msg}`)
       }
     })
@@ -145,7 +150,8 @@ export class GeminiSession extends BaseSession {
         this.emit('stream_end', { messageId: this._currentMessageId })
       }
       if (code !== 0 && code !== null) {
-        this.emit('error', { message: `Gemini process exited with code ${code}` })
+        const detail = stderrBuf ? `: ${stderrBuf.slice(0, 500)}` : ''
+        this.emit('error', { message: `Gemini process exited with code ${code}${detail}` })
       }
       // Emit result so clients transition from busy to idle
       this.emit('result', {
