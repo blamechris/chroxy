@@ -9,6 +9,8 @@
  * storage) is injected via the PlatformAdapters interface.
  */
 
+export { DEFAULT_CONTEXT_WINDOW } from './types'
+
 export type {
   MessageAttachment,
   ToolResultImage,

@@ -2105,12 +2105,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         : 'info';
       const logMessage = typeof msg.message === 'string' ? stripAnsi(msg.message as string) : '';
       const timestamp = typeof msg.timestamp === 'number' ? msg.timestamp : Date.now();
+      const logSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : undefined;
       const entry: LogEntry = {
         id: nextMessageId('log'),
         component,
         level,
         message: logMessage,
         timestamp,
+        ...(logSessionId && { sessionId: logSessionId }),
       };
       set((state: ConnectionState) => ({
         logEntries: [...state.logEntries, entry].slice(-500),
