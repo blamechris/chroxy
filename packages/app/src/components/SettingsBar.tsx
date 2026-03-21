@@ -193,9 +193,11 @@ export function SettingsBar({
   }
   if (contextUsage) {
     const total = contextUsage.inputTokens + contextUsage.outputTokens;
-    if (total >= 1_000_000) summaryParts.push(`${(total / 1_000_000).toFixed(1)}M`);
-    else if (total >= 1_000) summaryParts.push(`${(total / 1_000).toFixed(1)}k`);
-    else summaryParts.push(`${total}`);
+    if (total > 0) {
+      const mInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
+      const cw = mInfo?.contextWindow ?? 200_000;
+      summaryParts.push(`${Math.round((total / cw) * 100)}%`);
+    }
   }
 
   return (
@@ -313,11 +315,24 @@ export function SettingsBar({
                       {lastResultDuration != null ? ` \u00B7 ${(lastResultDuration / 1000).toFixed(1)}s` : ''}
                     </Text>
                   ) : null}
-                  {contextUsage && (
-                    <Text style={styles.contextText}>
-                      {formatTokenCount(contextUsage.inputTokens + contextUsage.outputTokens)}
-                    </Text>
-                  )}
+                  {contextUsage && (() => {
+                    const total = contextUsage.inputTokens + contextUsage.outputTokens;
+                    if (total === 0) return null;
+                    const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
+                    const contextWindow = modelInfo?.contextWindow ?? 200_000;
+                    const pct = (total / contextWindow) * 100;
+                    const barColor = pct >= 80 ? COLORS.accentRed : pct >= 50 ? COLORS.accentOrange : COLORS.accentGreen;
+                    return (
+                      <>
+                        <Text style={styles.contextText}>
+                          {formatTokenCount(total)} ({Math.round(pct)}%)
+                        </Text>
+                        <View style={styles.contextBarContainer}>
+                          <View style={[styles.contextBarFill, { width: `${Math.min(100, pct)}%` as `${number}%`, backgroundColor: barColor }]} />
+                        </View>
+                      </>
+                    );
+                  })()}
                 </View>
               )}
               {costBudget != null && sessionCost != null && (
@@ -539,6 +554,17 @@ const styles = StyleSheet.create({
   budgetBarFill: {
     height: 3,
     borderRadius: 1.5,
+  },
+  contextBarContainer: {
+    height: 4,
+    backgroundColor: COLORS.backgroundCard,
+    borderRadius: 2,
+    overflow: 'hidden' as const,
+    marginTop: 4,
+  },
+  contextBarFill: {
+    height: 4,
+    borderRadius: 2,
   },
   deviceBadge: {
     backgroundColor: COLORS.accentBlueSubtle,

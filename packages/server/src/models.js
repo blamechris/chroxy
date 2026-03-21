@@ -1,11 +1,14 @@
 // Single source of truth for supported models. Each entry has a short id
 // (used in set_model messages), a display label, and the full Claude model ID.
 export const MODELS = [
-  { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-235-20250421' },
-  { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-20250514' },
-  { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-20250514' },
-  { id: 'opus46', label: 'Opus 4.6', fullId: 'claude-opus-4-6' },
+  { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-235-20250421', contextWindow: 200_000 },
+  { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-20250514', contextWindow: 200_000 },
+  { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-20250514', contextWindow: 200_000 },
+  { id: 'opus46', label: 'Opus 4.6', fullId: 'claude-opus-4-6', contextWindow: 1_000_000 },
 ]
+
+/** Default context window for unknown models */
+export const DEFAULT_CONTEXT_WINDOW = 200_000
 
 /**
  * Derive a human-readable label from a stripped model ID.
@@ -19,6 +22,15 @@ function humanizeModelId(id) {
   const family = parts[0].charAt(0).toUpperCase() + parts[0].slice(1)
   const version = parts.slice(1).join('.')
   return version ? `${family} ${version}` : family
+}
+
+/**
+ * Resolve context window size for a model ID.
+ * Opus 4.6 has 1M context; most other Claude models have 200k.
+ */
+function resolveContextWindow(fullId) {
+  if (fullId.includes('opus-4-6') || fullId.includes('opus-4.6')) return 1_000_000
+  return DEFAULT_CONTEXT_WINDOW
 }
 
 /**
@@ -72,7 +84,9 @@ export function createModelsRegistry() {
           if (!label || /^recommended$/i.test(label)) {
             label = humanizeModelId(id)
           }
-          return { id, label, fullId }
+          // Infer context window from model ID
+          const contextWindow = resolveContextWindow(fullId)
+          return { id, label, fullId, contextWindow }
         })
 
       if (converted.length === 0) return converted

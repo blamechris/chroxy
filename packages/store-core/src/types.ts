@@ -66,6 +66,7 @@ export interface ModelInfo {
   id: string;
   label: string;
   fullId: string;
+  contextWindow?: number;
 }
 
 export interface SessionInfo {
