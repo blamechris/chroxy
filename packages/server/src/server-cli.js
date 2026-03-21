@@ -461,12 +461,23 @@ export async function startCliServer(config) {
     })
 
     // 6. Wait for tunnel to be fully routable (DNS propagation)
-    await waitForTunnel(httpUrl)
+    wsServer.broadcast({ type: 'server_status', phase: 'tunnel_verifying', tunnelMode: tunnelArg.mode, message: 'Verifying tunnel reachability...' })
+    await waitForTunnel(httpUrl, {
+      onAttempt: (attempt, maxAttempts) => {
+        wsServer.broadcast({ type: 'server_status', phase: 'tunnel_verifying', tunnelMode: tunnelArg.mode, attempt, maxAttempts, message: `Verifying tunnel reachability... (${attempt}/${maxAttempts})` })
+      },
+    })
+    wsServer.broadcast({ type: 'server_status', phase: 'ready', tunnelUrl: httpUrl, message: 'Tunnel is ready' })
 
     // 7. Generate connection info
     const modeLabel = `cloudflare:${tunnelArg.mode}`
     currentTunnelMode = modeLabel
     displayQr(wsUrl, httpUrl, modeLabel)
+
+    // Extend the pairing ID validity after first QR display to give the user
+    // time to scan. Without this, slow tunnel setup (60-80s) can consume most
+    // of the default 60s TTL, causing rotation before the user can scan (#2599).
+    if (pairingManager) pairingManager.extendCurrentId()
 
   } else if (externalUrl) {
     // Ready message already printed above

@@ -190,6 +190,69 @@ describe('PairingManager (#1836)', () => {
     })
   })
 
+  describe('extendCurrentId grace period (#2599)', () => {
+    it('extends current pairing ID expiry past original TTL', async () => {
+      const pm = new PairingManager({ ttlMs: 50 })
+      const id = pm.currentPairingId
+      // Extend to 5s — well beyond the original 50ms TTL
+      pm.extendCurrentId(5000)
+
+      // Wait past the original TTL — without extension this would expire
+      await delay(100)
+
+      // The ID should still be valid because we extended it
+      const result = pm.validatePairing(id)
+      assert.equal(result.valid, true, 'extended ID should survive past original TTL')
+      pm.destroy()
+    })
+
+    it('extended ID still expires after grace period', async () => {
+      const pm = new PairingManager({ ttlMs: 1 })
+      const id = pm.currentPairingId
+      pm.extendCurrentId(5) // 5ms grace (clamped won't exceed this since TTL is 1ms)
+      await delay(30)
+      const result = pm.validatePairing(id)
+      assert.equal(result.valid, false, 'should expire after grace period')
+      assert.equal(result.reason, 'expired')
+      pm.destroy()
+    })
+
+    it('delays auto-refresh timer during grace period', async () => {
+      const pm = new PairingManager({ ttlMs: 10, autoRefresh: true })
+      const id = pm.currentPairingId
+      // Extend to 5s — auto-refresh should not fire during this time
+      pm.extendCurrentId(5000)
+      // Wait longer than original ttlMs (10ms) but less than grace period
+      await delay(50)
+      // The current ID should NOT have changed (auto-refresh was delayed)
+      assert.equal(pm.currentPairingId, id, 'should not rotate during grace period')
+      pm.destroy()
+    })
+
+    it('no-ops when destroyed', () => {
+      const pm = new PairingManager({})
+      pm.destroy()
+      // Should not throw
+      pm.extendCurrentId(60_000)
+      assert.equal(pm.currentPairingId, null)
+    })
+
+    it('updates the _activePairings entry expiry', async () => {
+      const pm = new PairingManager({ ttlMs: 50 })
+      const id = pm.currentPairingId
+      pm.extendCurrentId(5000)
+
+      // Wait past the original TTL — the _activePairings entry must have
+      // the extended expiry for this validation to succeed
+      await delay(100)
+
+      const result = pm.validatePairing(id)
+      assert.equal(result.valid, true, 'map entry should have extended expiry')
+      assert.ok(result.sessionToken)
+      pm.destroy()
+    })
+  })
+
   describe('auto-refresh', () => {
     it('refresh() emits pairing_refreshed event', () => {
       const pm = new PairingManager({})

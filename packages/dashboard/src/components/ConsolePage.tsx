@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import DOMPurify from 'dompurify'
 import { getAuthToken } from '../utils/auth'
+import { useConnectionStore } from '../store/connection'
 import { LogPanel } from './LogPanel'
 
 interface ConnectionInfo {
@@ -19,6 +20,13 @@ export function ConsolePage() {
   const [tokenRevealed, setTokenRevealed] = useState(false)
   const [qrSvg, setQrSvg] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
+
+  // Read server startup phase from the store (pushed via WebSocket)
+  const serverPhase = useConnectionStore((s) => s.serverPhase)
+  const tunnelProgress = useConnectionStore((s) => s.tunnelProgress)
+
+  // WS-driven tunnel setup takes priority over polling-based state
+  const isTunnelVerifying = serverPhase === 'tunnel_verifying'
 
   // Fetch connection info on mount, retry while tunnel is being set up
   useEffect(() => {
@@ -79,6 +87,40 @@ export function ConsolePage() {
     return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer) }
   }, [])
 
+  // When server phase transitions to ready, re-fetch connection info
+  useEffect(() => {
+    if (serverPhase !== 'ready' || connInfo) return
+    const token = getAuthToken()
+    if (!token) return
+    let cancelled = false
+    async function refetch() {
+      try {
+        const res = await fetch('/connect', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (res.ok) {
+          const data = await res.json()
+          if (!cancelled) {
+            setConnInfo(data)
+            setSettingUpTunnel(false)
+          }
+        }
+      } catch { /* ignore */ }
+      // Also fetch QR
+      try {
+        const qrRes = await fetch('/qr', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (qrRes.ok) {
+          const svg = await qrRes.text()
+          if (!cancelled) setQrSvg(svg)
+        }
+      } catch { /* ignore */ }
+    }
+    refetch()
+    return () => { cancelled = true }
+  }, [serverPhase, connInfo])
+
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Clear copy feedback timer on unmount
@@ -118,13 +160,19 @@ export function ConsolePage() {
   }
 
   if (!connInfo) {
+    // Show tunnel setup status from WS events (preferred) or polling fallback
+    const showTunnelSetup = isTunnelVerifying || settingUpTunnel
+    const progressLabel = tunnelProgress
+      ? `Setting up Cloudflare tunnel... (attempt ${tunnelProgress.attempt}/${tunnelProgress.maxAttempts})`
+      : 'Setting up Cloudflare tunnel...'
+
     return (
       <div className="console-page">
         <h2>Connection Info</h2>
-        {settingUpTunnel ? (
+        {showTunnelSetup ? (
           <div className="console-tunnel-setup">
             <div className="console-tunnel-spinner" />
-            <span>Setting up Cloudflare tunnel...</span>
+            <span>{progressLabel}</span>
           </div>
         ) : (
           <div className="console-error">No connection info available</div>

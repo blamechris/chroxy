@@ -1674,6 +1674,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'server_status': {
+      // Ignore structured startup phase events (phase field) — only the dashboard uses these
+      if (typeof msg.phase === 'string') break;
+
       const statusMessage: string =
         typeof msg.message === 'string' && (msg.message as string).trim().length > 0
           ? stripAnsi(msg.message as string)

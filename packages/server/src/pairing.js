@@ -11,6 +11,7 @@ import { EventEmitter } from 'events'
 import { randomBytes, timingSafeEqual } from 'crypto'
 
 const DEFAULT_TTL_MS = 60_000
+const DEFAULT_GRACE_PERIOD_MS = 3 * 60_000 // 3 minutes after first QR display
 const DEFAULT_SESSION_TOKEN_TTL_MS = 24 * 60 * 60_000 // 24 hours
 const SESSION_TOKEN_BYTES = 32
 const MAX_SESSION_TOKENS = 100
@@ -99,6 +100,35 @@ export class PairingManager extends EventEmitter {
       }
     }
     return false
+  }
+
+  /**
+   * Extend the current pairing ID's validity and pause auto-refresh for a grace period.
+   * Call after displaying the QR code to give the user time to scan before rotation.
+   * @param {number} [durationMs] - Grace period in ms (default 3 minutes)
+   */
+  extendCurrentId(durationMs = DEFAULT_GRACE_PERIOD_MS) {
+    if (this._destroyed || !this._current) return
+
+    // Extend the expiry — never shorten below the existing remaining TTL
+    const requestedExpiry = Date.now() + durationMs
+    const newExpiry = Math.max(this._current.expiresAt, requestedExpiry)
+    this._current.expiresAt = newExpiry
+    const entry = this._activePairings.get(this._current.id)
+    if (entry) entry.expiresAt = newExpiry
+
+    // Reschedule auto-refresh to fire after the (possibly extended) grace period
+    if (this._autoRefresh) {
+      if (this._refreshTimer) clearTimeout(this._refreshTimer)
+      const delayMs = Math.max(0, newExpiry - Date.now())
+      this._refreshTimer = setTimeout(() => {
+        if (this._destroyed) return
+        this._generatePairing()
+        this.emit('pairing_refreshed', { pairingId: this._current.id })
+        this._scheduleRefresh()
+      }, delayMs)
+      this._refreshTimer.unref?.()
+    }
   }
 
   /**
