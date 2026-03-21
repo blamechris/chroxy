@@ -190,6 +190,16 @@ impl ServerManager {
 
     /// Check whether `cloudflared` is available on PATH.
     pub fn check_cloudflared() -> bool {
+        // Check common well-known paths first — macOS GUI apps have a
+        // minimal PATH that excludes Homebrew and user-local bins.
+        #[cfg(target_os = "macos")]
+        for path in &["/opt/homebrew/bin/cloudflared", "/usr/local/bin/cloudflared"] {
+            if std::path::Path::new(path).exists() {
+                return true;
+            }
+        }
+
+        // Fall back to PATH-based lookup
         #[cfg(unix)]
         let cmd = "which";
         #[cfg(windows)]
