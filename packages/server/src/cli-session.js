@@ -298,7 +298,7 @@ export class CliSession extends BaseSession {
     this._isBusy = true
     this._messageCounter++
     this._currentMessageId = `msg-${this._messageCounter}`
-    this._currentCtx = { hasStreamStarted: false, didStreamText: false, currentContentBlockType: null, currentToolName: null, currentToolUseId: null, toolInputChunks: '', toolInputBytes: 0, toolInputOverflow: false }
+    this._currentCtx = { hasStreamStarted: false, didStreamText: false, assistantTextSeen: 0, currentContentBlockType: null, currentToolName: null, currentToolUseId: null, toolInputChunks: '', toolInputBytes: 0, toolInputOverflow: false }
 
     const content = buildContentBlocks(transformedPrompt, attachments)
 
@@ -499,22 +499,30 @@ export class CliSession extends BaseSession {
       }
 
       case 'assistant': {
-        // The assistant event fires repeatedly with --include-partial-messages.
-        // Text is only emitted here as a fallback for non-streamed responses.
-        // If streaming has started (hasStreamStarted), text arrives via deltas —
-        // emitting it here too would create duplicate/fragmented response bubbles.
-        // Only emit when ctx exists (i.e., when processing a user request) to
-        // filter out startup hints that arrive before the first message.
+        // The assistant event fires repeatedly with --include-partial-messages,
+        // delivering incrementally growing text content. When stream_event events
+        // provide real-time deltas, we skip assistant text (didStreamText guard).
+        // Otherwise, derive streaming from the incremental assistant text growth
+        // so the dashboard shows real-time token-by-token rendering.
         const ctx = this._currentCtx
         const content = data.message?.content
         if (Array.isArray(content) && ctx) {
           for (const block of content) {
-            if (block.type === 'text' && ctx && !ctx.didStreamText && !ctx.hasStreamStarted) {
-              this.emit('message', {
-                type: 'response',
-                content: block.text,
-                timestamp: Date.now(),
-              })
+            if (block.type !== 'text' || !block.text) continue
+            // If stream_event deltas already drove streaming, skip assistant text
+            if (ctx.didStreamText) continue
+
+            const messageId = this._currentMessageId
+            const newText = block.text
+            const prevLen = ctx.assistantTextSeen
+
+            if (newText.length > prevLen) {
+              if (!ctx.hasStreamStarted) {
+                ctx.hasStreamStarted = true
+                this.emit('stream_start', { messageId })
+              }
+              this.emit('stream_delta', { messageId, delta: newText.slice(prevLen) })
+              ctx.assistantTextSeen = newText.length
             }
             // tool_use blocks are handled by content_block_start → tool_start event;
             // emitting them here too would create duplicate tool messages in the app
