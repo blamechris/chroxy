@@ -25,7 +25,6 @@ const packageJson = JSON.parse(readFileSync(join(__dirname, '../package.json'), 
 const SERVER_VERSION = packageJson.version
 
 // Tools that indicate a "writing" activity state for push notifications (#2085)
-const ACTIVITY_WRITE_TOOLS = ['Write', 'Edit', 'NotebookEdit']
 
 function checkNoAuthWarnings({ authRequired, tunnel }) {
   if (authRequired) return
@@ -227,34 +226,23 @@ export async function startCliServer(config) {
       log.warn(`Budget exceeded: ${data.message}`)
     }
 
-    // Activity update pushes for state transitions (#2085)
+    // Push notifications for actionable events only (#2612)
+    // Intermediate events (stream_start, tool_start) no longer trigger pushes.
     if (pushManager.hasTokens) {
       if (event === 'result') {
-        // Activity update: idle — fires for all result events regardless of cost
-        const sessionName = sessionManager.getSession(sessionId)?.name
-        pushManager.send('activity_update', 'Session idle', 'Claude finished responding', {
-          sessionId,
-          sessionName,
-          state: 'idle',
-          ...(data.duration != null && { elapsed: data.duration }),
-        })
-      } else if (event === 'stream_start') {
-        const sessionName = sessionManager.getSession(sessionId)?.name
-        pushManager.send('activity_update', 'Session active', 'Claude is thinking', {
-          sessionId,
-          sessionName,
-          state: 'thinking',
-        })
-      } else if (event === 'tool_start' && data.tool) {
-        if (ACTIVITY_WRITE_TOOLS.includes(data.tool)) {
-          const sessionName = sessionManager.getSession(sessionId)?.name
-          const detail = data.input?.file_path || data.tool
-          pushManager.send('activity_update', 'Session active', `Claude is writing: ${detail}`, {
-            sessionId,
-            sessionName,
-            state: 'writing',
-            detail,
-          })
+        // Activity update: idle — only when no one is actively watching
+        if (wsServer) {
+          const noClients = wsServer.authenticatedClientCount === 0
+          const noActiveViewers = !noClients && !wsServer.hasActiveViewersForSession(sessionId)
+          if (noClients || noActiveViewers) {
+            const sessionName = sessionManager.getSession(sessionId)?.name
+            pushManager.send('activity_update', 'Claude finished', 'Response ready', {
+              sessionId,
+              sessionName,
+              state: 'idle',
+              ...(data.duration != null && { elapsed: data.duration }),
+            })
+          }
         }
       } else if (event === 'permission_request') {
         const sessionName = sessionManager.getSession(sessionId)?.name
@@ -263,6 +251,13 @@ export async function startCliServer(config) {
           sessionName,
           state: 'waiting',
           detail: data.tool,
+        })
+      } else if (event === 'user_question') {
+        const sessionName = sessionManager.getSession(sessionId)?.name
+        pushManager.send('activity_waiting', 'Input needed', 'Claude has a question', {
+          sessionId,
+          sessionName,
+          state: 'waiting',
         })
       }
     }
