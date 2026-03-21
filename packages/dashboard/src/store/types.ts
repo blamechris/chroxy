@@ -309,6 +309,10 @@ export interface ConnectionState {
   webFeatures: WebFeatureStatus;
   webTasks: WebTask[];
 
+  // Server startup phase (from server_status events)
+  serverPhase: 'tunnel_verifying' | 'ready' | null;
+  tunnelProgress: { attempt: number; maxAttempts: number } | null;
+
   // Shutdown state (reason + ETA for restarting banner countdown)
   shutdownReason: 'restart' | 'shutdown' | 'crash' | null;
   restartEtaMs: number | null;

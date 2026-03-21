@@ -11,6 +11,8 @@ declare const __APP_VERSION__: string
 export interface FooterBarProps {
   connectionPhase: string
   tunnelReady?: boolean
+  serverPhase?: 'tunnel_verifying' | 'ready' | null
+  tunnelProgress?: { attempt: number; maxAttempts: number } | null
   serverVersion?: string | null
   cwd?: string
   model?: string
@@ -38,6 +40,8 @@ const STATUS_LABELS: Record<string, string> = {
 export function FooterBar({
   connectionPhase,
   tunnelReady = true,
+  serverPhase,
+  tunnelProgress,
   serverVersion,
   cwd,
   model,
@@ -48,10 +52,18 @@ export function FooterBar({
   onShowQr,
 }: FooterBarProps) {
   const version = serverVersion ?? (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
-  const settingUpTunnel = connectionPhase === 'connected' && !tunnelReady
-  const statusLabel = settingUpTunnel
-    ? 'Setting up tunnel...'
-    : (STATUS_LABELS[connectionPhase] ?? connectionPhase)
+
+  // Prefer WS-driven serverPhase over polling-based tunnelReady
+  const settingUpTunnel = serverPhase === 'tunnel_verifying'
+    || (connectionPhase === 'connected' && !tunnelReady && serverPhase == null)
+  let statusLabel: string
+  if (settingUpTunnel) {
+    statusLabel = tunnelProgress
+      ? `Setting up tunnel... (${tunnelProgress.attempt}/${tunnelProgress.maxAttempts})`
+      : 'Setting up tunnel...'
+  } else {
+    statusLabel = STATUS_LABELS[connectionPhase] ?? connectionPhase
+  }
   const dotClass = settingUpTunnel ? 'connecting' : connectionPhase
 
   return (

@@ -7,12 +7,13 @@ const log = createLogger('tunnel')
  * New tunnel URLs need time for DNS propagation — Quick Tunnels can take
  * 30+ seconds. Uses linear backoff: 1s, 2s, 3s, 4s, 5s (cap), ...
  */
-export async function waitForTunnel(httpUrl, { maxAttempts = 20, initialInterval = 1000 } = {}) {
+export async function waitForTunnel(httpUrl, { maxAttempts = 20, initialInterval = 1000, onAttempt } = {}) {
   log.info('Verifying tunnel is routable...')
   const startTime = Date.now()
 
   for (let i = 0; i < maxAttempts; i++) {
     const attempt = i + 1
+    if (typeof onAttempt === 'function') onAttempt(attempt, maxAttempts)
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 5000)
     try {

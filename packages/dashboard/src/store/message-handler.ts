@@ -1214,7 +1214,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         connectedClients: clients,
         connectionError: null as string | null,
         connectionRetryCount: 0,
-        // Clear shutdown state on successful connect
+        // Clear shutdown / startup state on successful connect
+        serverPhase: null,
+        tunnelProgress: null,
         shutdownReason: null,
         restartEtaMs: null,
         restartingSince: null,
@@ -1726,6 +1728,26 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'server_status': {
+      // Handle structured startup phase events (phase field present)
+      const phase = msg.phase as string | undefined;
+      if (phase === 'tunnel_verifying') {
+        const attempt = typeof msg.attempt === 'number' ? msg.attempt : null;
+        const maxAttempts = typeof msg.maxAttempts === 'number' ? msg.maxAttempts : null;
+        set({
+          serverPhase: 'tunnel_verifying',
+          tunnelProgress: attempt != null && maxAttempts != null ? { attempt, maxAttempts } : null,
+        } as Partial<ConnectionState>);
+        break;
+      }
+      if (phase === 'ready') {
+        set({
+          serverPhase: 'ready',
+          tunnelProgress: null,
+        } as Partial<ConnectionState>);
+        break;
+      }
+
+      // Legacy plain-message server_status (no phase field)
       const statusMessage: string =
         typeof msg.message === 'string' && (msg.message as string).trim().length > 0
           ? stripAnsi(msg.message as string)
