@@ -90,13 +90,15 @@ function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
   }
 }
 
-/** Scrollable tab bar with fade edges and arrow buttons when overflowing */
+type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments'
+
+/** Scrollable tab bar with arrow buttons when overflowing */
 function ViewSwitcher({
   viewMode, setViewMode, splitMode, setSplitMode, persistSplitMode,
   showConsoleTab, unreadSystemCount, checkpointsOpen, setCheckpointsOpen,
 }: {
   viewMode: string
-  setViewMode: (m: string) => void
+  setViewMode: (m: ViewMode) => void
   splitMode: SplitDirection | null
   setSplitMode: (m: SplitDirection | null) => void
   persistSplitMode: (m: SplitDirection | null) => void
@@ -130,7 +132,7 @@ function ViewSwitcher({
     }
     el.addEventListener('scroll', updateArrows, { passive: true })
     return () => { ro?.disconnect(); el.removeEventListener('scroll', updateArrows) }
-  }, [updateArrows, showConsoleTab])
+  }, [updateArrows, showConsoleTab, unreadSystemCount])
 
   const scroll = useCallback((dir: number) => {
     const el = scrollRef.current
@@ -142,8 +144,8 @@ function ViewSwitcher({
 
   // Drag-to-scroll handlers
   const onPointerDown = useCallback((e: React.PointerEvent) => {
-    // Only drag on the container background, not on buttons
-    if ((e.target as HTMLElement).tagName === 'BUTTON') return
+    // Only drag on the container background, not on buttons or their children
+    if ((e.target as HTMLElement).closest('button')) return
     const el = scrollRef.current
     if (!el) return
     dragState.current = { isDragging: true, startX: e.clientX, scrollLeft: el.scrollLeft }

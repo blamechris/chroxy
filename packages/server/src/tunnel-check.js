@@ -5,7 +5,7 @@ const log = createLogger('tunnel')
 /**
  * Verify a Cloudflare tunnel is fully routable before exposing it to users.
  * New tunnel URLs need time for DNS propagation — Quick Tunnels can take
- * 30+ seconds. Uses exponential backoff: 1s, 2s, 3s, 4s, 5s, 5s, ...
+ * 30+ seconds. Uses linear backoff: 1s, 2s, 3s, 4s, 5s (cap), ...
  */
 export async function waitForTunnel(httpUrl, { maxAttempts = 20, initialInterval = 1000 } = {}) {
   log.info('Verifying tunnel is routable...')

@@ -705,6 +705,11 @@
   color: var(--text-primary);
 }
 
+.view-switch-arrow:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
 .view-switch-arrow-left {
   border-right: 1px solid var(--border-primary);
 }
