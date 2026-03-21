@@ -11,7 +11,7 @@ import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
 import { isTauri } from '../utils/tauri'
-import { getTunnelMode, setTunnelMode } from '../hooks/useTauriIPC'
+import { getTunnelMode, setTunnelMode, restartServer } from '../hooks/useTauriIPC'
 
 export interface SettingsPanelProps {
   isOpen: boolean
@@ -55,13 +55,19 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const inTauri = isTauri()
   const [tunnelMode, setTunnelModeState] = useState<string>('none')
   const [tunnelError, setTunnelError] = useState<string | null>(null)
+  const [serverTunnelMode, setServerTunnelMode] = useState<string>('none')
+  const [restarting, setRestarting] = useState(false)
 
   // Load tunnel mode from Tauri settings on open and clear stale errors
   useEffect(() => {
     if (!isOpen || !inTauri) return
     setTunnelError(null)
+    setRestarting(false)
     getTunnelMode().then(mode => {
-      if (mode) setTunnelModeState(mode)
+      if (mode) {
+        setTunnelModeState(mode)
+        setServerTunnelMode(mode)
+      }
     })
   }, [isOpen, inTauri])
 
@@ -250,7 +256,23 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 {tunnelError && (
                   <p className="tunnel-mode-error">{tunnelError}</p>
                 )}
-                <p className="tunnel-mode-note">Server restart required after change</p>
+                {tunnelMode !== serverTunnelMode ? (
+                  <button
+                    type="button"
+                    className="tunnel-restart-btn"
+                    disabled={restarting}
+                    onClick={async () => {
+                      setRestarting(true)
+                      await restartServer()
+                      setServerTunnelMode(tunnelMode)
+                      setTimeout(() => setRestarting(false), 3000)
+                    }}
+                  >
+                    {restarting ? 'Restarting...' : 'Restart Server to Apply'}
+                  </button>
+                ) : (
+                  <p className="tunnel-mode-note">Server restart required after change</p>
+                )}
               </div>
             </section>
           )}

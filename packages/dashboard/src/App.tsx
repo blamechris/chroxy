@@ -133,7 +133,11 @@ function ViewSwitcher({
   }, [updateArrows, showConsoleTab])
 
   const scroll = useCallback((dir: number) => {
-    scrollRef.current?.scrollBy({ left: dir * 120, behavior: 'smooth' })
+    const el = scrollRef.current
+    if (!el) return
+    // Scroll by one tab width (use the first tab's width as reference)
+    const tabWidth = el.querySelector('.view-tab')?.getBoundingClientRect().width ?? 100
+    el.scrollBy({ left: dir * (tabWidth + 8), behavior: 'smooth' })
   }, [])
 
   // Drag-to-scroll handlers
