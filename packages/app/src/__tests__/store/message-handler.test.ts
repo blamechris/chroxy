@@ -1390,18 +1390,34 @@ describe('reconnect replay dedup', () => {
     expect(msgs[1].content).toBe('output');
   });
 
-  it('message handler: deduplicates non-response messages by content', () => {
+  it('message handler: deduplicates non-response messages by content and timestamp', () => {
     const store = setupReconnectReplay([
-      { id: 'sys-1', type: 'system', content: 'hook started', tool: null, options: null, timestamp: 1 },
+      { id: 'sys-1', type: 'system', content: 'hook started', tool: null, options: null, timestamp: 1000 },
     ]);
 
+    // Server replays non-response messages with the original timestamp
     _testMessageHandler.handle({
       type: 'message', messageType: 'system', content: 'hook started',
-      sessionId: 's1', timestamp: 9999,
+      sessionId: 's1', timestamp: 1000,
     });
 
     const msgs = store.getState().sessionStates.s1.messages;
     expect(msgs).toHaveLength(1);
+  });
+
+  it('message handler: allows non-response messages with different timestamps', () => {
+    const store = setupReconnectReplay([
+      { id: 'sys-1', type: 'system', content: 'hook started', tool: null, options: null, timestamp: 1000 },
+    ]);
+
+    // Different timestamp = different message occurrence, should be preserved
+    _testMessageHandler.handle({
+      type: 'message', messageType: 'system', content: 'hook started',
+      sessionId: 's1', timestamp: 2000,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(2);
   });
 
   it('tool_start handler: deduplicates by stable messageId during reconnect', () => {

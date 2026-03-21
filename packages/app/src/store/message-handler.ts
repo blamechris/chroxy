@@ -1089,6 +1089,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         } else {
           const isDuplicate = cached.some((m) => {
             if (m.type !== msgType || m.content !== msg.content) return false;
+            if ((m.timestamp ?? null) !== ((msg.timestamp as number | undefined) ?? null)) return false;
             if ((m.tool ?? null) !== (msg.tool ?? null)) return false;
             return JSON.stringify(m.options ?? null) === JSON.stringify(msg.options ?? null);
           });
