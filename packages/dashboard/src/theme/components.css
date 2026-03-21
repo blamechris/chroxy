@@ -662,12 +662,20 @@
 }
 
 /* ---- View Switcher ---- */
-.view-switch {
+.view-switch-wrapper {
   display: flex;
-  padding: 0 16px;
+  align-items: stretch;
+  position: relative;
   background: var(--bg-session-bar);
   border-bottom: 1px solid var(--border-primary);
   flex-shrink: 0;
+}
+
+.view-switch {
+  display: flex;
+  padding: 0 4px;
+  flex: 1;
+  min-width: 0;
   gap: 0;
   overflow-x: auto;
   scrollbar-width: none;
@@ -675,6 +683,34 @@
 
 .view-switch::-webkit-scrollbar {
   display: none;
+}
+
+.view-switch-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  flex-shrink: 0;
+  background: var(--bg-session-bar);
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  z-index: 2;
+  padding: 0;
+  transition: color 0.15s;
+}
+
+.view-switch-arrow:hover {
+  color: var(--text-primary);
+}
+
+.view-switch-arrow-left {
+  border-right: 1px solid var(--border-primary);
+}
+
+.view-switch-arrow-right {
+  border-left: 1px solid var(--border-primary);
 }
 
 .view-tab {

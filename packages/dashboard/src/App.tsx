@@ -90,6 +90,119 @@ function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
   }
 }
 
+/** Scrollable tab bar with fade edges and arrow buttons when overflowing */
+function ViewSwitcher({
+  viewMode, setViewMode, splitMode, setSplitMode, persistSplitMode,
+  showConsoleTab, unreadSystemCount, checkpointsOpen, setCheckpointsOpen,
+}: {
+  viewMode: string
+  setViewMode: (m: string) => void
+  splitMode: SplitDirection | null
+  setSplitMode: (m: SplitDirection | null) => void
+  persistSplitMode: (m: SplitDirection | null) => void
+  showConsoleTab: boolean
+  unreadSystemCount: number
+  checkpointsOpen: boolean
+  setCheckpointsOpen: (fn: (prev: boolean) => boolean) => void
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [canScrollLeft, setCanScrollLeft] = useState(false)
+  const [canScrollRight, setCanScrollRight] = useState(false)
+  const dragState = useRef<{ isDragging: boolean; startX: number; scrollLeft: number }>({
+    isDragging: false, startX: 0, scrollLeft: 0,
+  })
+
+  const updateArrows = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    setCanScrollLeft(el.scrollLeft > 1)
+    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 1)
+  }, [])
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    updateArrows()
+    let ro: ResizeObserver | undefined
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(updateArrows)
+      ro.observe(el)
+    }
+    el.addEventListener('scroll', updateArrows, { passive: true })
+    return () => { ro?.disconnect(); el.removeEventListener('scroll', updateArrows) }
+  }, [updateArrows, showConsoleTab])
+
+  const scroll = useCallback((dir: number) => {
+    scrollRef.current?.scrollBy({ left: dir * 120, behavior: 'smooth' })
+  }, [])
+
+  // Drag-to-scroll handlers
+  const onPointerDown = useCallback((e: React.PointerEvent) => {
+    // Only drag on the container background, not on buttons
+    if ((e.target as HTMLElement).tagName === 'BUTTON') return
+    const el = scrollRef.current
+    if (!el) return
+    dragState.current = { isDragging: true, startX: e.clientX, scrollLeft: el.scrollLeft }
+    el.setPointerCapture(e.pointerId)
+    el.style.cursor = 'grabbing'
+  }, [])
+
+  const onPointerMove = useCallback((e: React.PointerEvent) => {
+    if (!dragState.current.isDragging) return
+    const el = scrollRef.current
+    if (!el) return
+    const dx = e.clientX - dragState.current.startX
+    el.scrollLeft = dragState.current.scrollLeft - dx
+  }, [])
+
+  const onPointerUp = useCallback((e: React.PointerEvent) => {
+    if (!dragState.current.isDragging) return
+    dragState.current.isDragging = false
+    const el = scrollRef.current
+    if (!el) return
+    el.releasePointerCapture(e.pointerId)
+    el.style.cursor = ''
+  }, [])
+
+  return (
+    <div className="view-switch-wrapper">
+      {canScrollLeft && (
+        <button className="view-switch-arrow view-switch-arrow-left" onClick={() => scroll(-1)} type="button" aria-label="Scroll tabs left">‹</button>
+      )}
+      <div
+        className="view-switch"
+        ref={scrollRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+      >
+        <button className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }} type="button">Chat</button>
+        <button className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }} type="button">Output</button>
+        <button
+          className={`view-tab${splitMode ? ' active' : ''}`}
+          onClick={() => { const next: SplitDirection | null = splitMode ? null : 'horizontal'; setSplitMode(next); persistSplitMode(next) }}
+          type="button" title="Split view (Cmd+\)"
+        >Split</button>
+        <button className={`view-tab${viewMode === 'files' ? ' active' : ''}`} onClick={() => setViewMode('files')} type="button">Files</button>
+        <button className={`view-tab${viewMode === 'system' ? ' active' : ''}`} onClick={() => { setViewMode('system'); setSplitMode(null); persistSplitMode(null) }} type="button">
+          System{unreadSystemCount > 0 && <span className="system-badge">{unreadSystemCount}</span>}
+        </button>
+        {showConsoleTab && (
+          <button className={`view-tab${viewMode === 'console' ? ' active' : ''}`} onClick={() => { setViewMode('console'); setSplitMode(null); persistSplitMode(null) }} type="button">Console</button>
+        )}
+        <button className={`view-tab${viewMode === 'environments' ? ' active' : ''}`} onClick={() => { setViewMode('environments'); setSplitMode(null); persistSplitMode(null) }} type="button">Envs</button>
+        <div className="view-switch-spacer" />
+        <button className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`} onClick={() => setCheckpointsOpen(prev => !prev)} type="button" title="Toggle checkpoint timeline">Checkpoints</button>
+        <button className={`view-tab${viewMode === 'diff' ? ' active' : ''}`} onClick={() => setViewMode('diff')} type="button">Diff</button>
+      </div>
+      {canScrollRight && (
+        <button className="view-switch-arrow view-switch-arrow-right" onClick={() => scroll(1)} type="button" aria-label="Scroll tabs right">›</button>
+      )}
+    </div>
+  )
+}
+
 export function App() {
   // Store selectors — subscribe to specific slices to avoid re-renders
   const connectionPhase = useConnectionStore(s => s.connectionPhase)
@@ -920,83 +1033,17 @@ export function App() {
         {!showWelcome && (
           <>
             {/* View switcher */}
-            <div className="view-switch">
-              <button
-                className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`}
-                onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }}
-                type="button"
-              >
-                Chat
-              </button>
-              <button
-                className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`}
-                onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }}
-                type="button"
-              >
-                Output
-              </button>
-              <button
-                className={`view-tab${splitMode ? ' active' : ''}`}
-                onClick={() => {
-                  const next: SplitDirection | null = splitMode ? null : 'horizontal'
-                  setSplitMode(next)
-                  persistSplitMode(next)
-                }}
-                type="button"
-                title="Split view (Cmd+\)"
-              >
-                Split
-              </button>
-              <button
-                className={`view-tab${viewMode === 'files' ? ' active' : ''}`}
-                onClick={() => setViewMode('files')}
-                type="button"
-              >
-                Files
-              </button>
-              <button
-                className={`view-tab${viewMode === 'system' ? ' active' : ''}`}
-                onClick={() => { setViewMode('system'); setSplitMode(null); persistSplitMode(null) }}
-                type="button"
-              >
-                System
-                {unreadSystemCount > 0 && (
-                  <span className="system-badge">{unreadSystemCount}</span>
-                )}
-              </button>
-              {showConsoleTab && (
-                <button
-                  className={`view-tab${viewMode === 'console' ? ' active' : ''}`}
-                  onClick={() => { setViewMode('console'); setSplitMode(null); persistSplitMode(null) }}
-                  type="button"
-                >
-                  Console
-                </button>
-              )}
-              <button
-                className={`view-tab${viewMode === 'environments' ? ' active' : ''}`}
-                onClick={() => { setViewMode('environments'); setSplitMode(null); persistSplitMode(null) }}
-                type="button"
-              >
-                Envs
-              </button>
-              <div className="view-switch-spacer" />
-              <button
-                className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`}
-                onClick={() => setCheckpointsOpen(prev => !prev)}
-                type="button"
-                title="Toggle checkpoint timeline"
-              >
-                Checkpoints
-              </button>
-              <button
-                className={`view-tab${viewMode === 'diff' ? ' active' : ''}`}
-                onClick={() => setViewMode('diff')}
-                type="button"
-              >
-                Diff
-              </button>
-            </div>
+            <ViewSwitcher
+              viewMode={viewMode}
+              setViewMode={setViewMode}
+              splitMode={splitMode}
+              setSplitMode={setSplitMode}
+              persistSplitMode={persistSplitMode}
+              showConsoleTab={showConsoleTab}
+              unreadSystemCount={unreadSystemCount}
+              checkpointsOpen={checkpointsOpen}
+              setCheckpointsOpen={setCheckpointsOpen}
+            />
 
             {/* Main content */}
             <div className={`main-content${checkpointsOpen ? ' with-checkpoint-panel' : ''}`}>
