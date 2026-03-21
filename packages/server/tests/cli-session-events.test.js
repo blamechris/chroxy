@@ -19,6 +19,7 @@ function createSession() {
   session._currentCtx = {
     hasStreamStarted: false,
     didStreamText: false,
+    assistantTextSeen: 0,
     currentContentBlockType: null,
     currentToolName: null,
     currentToolUseId: null,
@@ -455,6 +456,161 @@ describe('CliSession stream-event handling', () => {
 
       const parsed = JSON.parse(child._stdinData[0].replace(/\n$/, ''))
       assert.equal(parsed.message.content[0].text, 'um fix the bug')
+
+      session.destroy()
+    })
+  })
+
+  describe('assistant event streaming fallback', () => {
+    it('derives streaming from incremental assistant text', () => {
+      const session = createSession()
+      const events = []
+      session.on('stream_start', (d) => events.push({ type: 'stream_start', ...d }))
+      session.on('stream_delta', (d) => events.push({ type: 'stream_delta', ...d }))
+
+      // First assistant event — partial text
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Hello' }] },
+      })
+
+      assert.equal(events.length, 2)
+      assert.equal(events[0].type, 'stream_start')
+      assert.equal(events[0].messageId, 'msg-1')
+      assert.equal(events[1].type, 'stream_delta')
+      assert.equal(events[1].delta, 'Hello')
+
+      // Second assistant event — more text
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Hello world' }] },
+      })
+
+      assert.equal(events.length, 3)
+      assert.equal(events[2].type, 'stream_delta')
+      assert.equal(events[2].delta, ' world')
+
+      session.destroy()
+    })
+
+    it('skips assistant text when stream_event deltas already active', () => {
+      const session = createSession()
+      const messages = []
+      session.on('stream_delta', (d) => messages.push(d))
+
+      // Simulate stream_event already set didStreamText
+      session._currentCtx.didStreamText = true
+      session._currentCtx.hasStreamStarted = true
+
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Hello world' }] },
+      })
+
+      // No delta should be emitted from assistant event
+      assert.equal(messages.length, 0)
+
+      session.destroy()
+    })
+
+    it('does not emit for empty or missing text blocks', () => {
+      const session = createSession()
+      const events = []
+      session.on('stream_start', () => events.push('start'))
+      session.on('stream_delta', () => events.push('delta'))
+
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: '' }] },
+      })
+
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Bash' }] },
+      })
+
+      assert.equal(events.length, 0)
+
+      session.destroy()
+    })
+
+    it('emits only the new portion on each incremental update', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('stream_delta', (d) => deltas.push(d.delta))
+
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'A' }] },
+      })
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'AB' }] },
+      })
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'ABC' }] },
+      })
+
+      assert.deepEqual(deltas, ['A', 'B', 'C'])
+
+      session.destroy()
+    })
+
+    it('emits stream_start only once across multiple assistant events', () => {
+      const session = createSession()
+      const starts = []
+      session.on('stream_start', () => starts.push(true))
+
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Hi' }] },
+      })
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Hi there' }] },
+      })
+
+      assert.equal(starts.length, 1)
+
+      session.destroy()
+    })
+
+    it('handles multiple text blocks in a single assistant event', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('stream_delta', (d) => deltas.push(d.delta))
+
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [
+          { type: 'text', text: 'Hello' },
+          { type: 'tool_use', name: 'Bash' },
+          { type: 'text', text: ' world' },
+        ] },
+      })
+
+      // Both text blocks concatenated: "Hello world" (11 chars)
+      assert.equal(deltas.length, 1)
+      assert.equal(deltas[0], 'Hello world')
+      assert.equal(session._currentCtx.assistantTextSeen, 11)
+
+      session.destroy()
+    })
+
+    it('does not emit when messageId is null', () => {
+      const session = createSession()
+      session._currentMessageId = null
+      const events = []
+      session.on('stream_start', () => events.push('start'))
+      session.on('stream_delta', () => events.push('delta'))
+
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Hello' }] },
+      })
+
+      assert.equal(events.length, 0)
 
       session.destroy()
     })
