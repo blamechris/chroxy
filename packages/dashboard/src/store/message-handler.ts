@@ -515,10 +515,19 @@ function handleRawBackground(msg: Record<string, unknown>, get: MsgGet, _set: Ms
   get().appendTerminalData(msg.data as string);
 }
 
-function handleTokenRotated(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  // Token was rotated on the server — the new token is NOT sent over the wire.
-  // The client must re-authenticate (re-scan QR or re-enter token).
-  console.log('[ws] Server token rotated — re-authentication required');
+function handleTokenRotated(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const newToken = typeof msg.token === 'string' ? msg.token : null;
+  if (newToken) {
+    // Server sent the new token — update URL query param for reconnection
+    console.log('[ws] Server token rotated — updating stored token');
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('token', newToken);
+      window.history.replaceState(null, '', url.toString());
+    } catch { /* non-critical */ }
+  } else {
+    console.log('[ws] Server token rotated — re-authentication required');
+  }
 }
 
 function handleCheckpointRestored(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {

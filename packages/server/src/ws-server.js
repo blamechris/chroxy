@@ -506,10 +506,11 @@ export class WsServer {
       this._tokenRotatedHandler = ({ newToken, expiresAt }) => {
         // Update our reference so subsequent auth checks use the new token
         this.apiToken = newToken
-        // Notify clients that a rotation occurred — do NOT broadcast the new token.
-        // Clients must re-authenticate (re-scan QR or re-enter token).
-        this._broadcast({ type: 'token_rotated', expiresAt })
-        log.info(`Broadcasted token_rotated notification to all clients`)
+        // Send the new token to all authenticated clients so they can update
+        // their stored token and reconnect seamlessly if the connection drops.
+        // This is safe: clients already proved they have a valid token.
+        this._broadcast({ type: 'token_rotated', token: newToken, expiresAt })
+        log.info(`Broadcasted token_rotated with new token to all authenticated clients`)
       }
       this._tokenManager.on('token_rotated', this._tokenRotatedHandler)
     }
