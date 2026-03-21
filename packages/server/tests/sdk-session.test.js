@@ -674,6 +674,105 @@ describe('SdkSession', () => {
     })
   })
 
+  // -- Query error enrichment --
+
+  describe('query error enrichment', () => {
+    async function queryWithError(s, errorMessage) {
+      s._processReady = true
+      const errors = []
+      s.on('error', (data) => errors.push(data))
+
+      s._callQuery = () => {
+        return (async function* () {
+          throw new Error(errorMessage)
+        })()
+      }
+
+      await s.sendMessage('hello')
+      return errors
+    }
+
+    it('enriches SIGABRT error with helpful context', async () => {
+      const s = createSession()
+      const errors = await queryWithError(s, 'Claude Code process terminated by signal SIGABRT')
+      s.destroy()
+
+      assert.equal(errors.length, 1)
+      assert.ok(errors[0].message.includes('crashed'))
+      assert.ok(errors[0].message.includes('API'))
+      assert.ok(!errors[0].message.includes('SIGABRT'))
+    })
+
+    it('enriches rate limit errors', async () => {
+      const s = createSession()
+      const errors = await queryWithError(s, 'rate_limit_error: too many requests')
+      s.destroy()
+
+      assert.equal(errors.length, 1)
+      assert.ok(errors[0].message.toLowerCase().includes('rate limit'))
+    })
+
+    it('enriches authentication errors', async () => {
+      const s = createSession()
+      const errors = await queryWithError(s, 'authentication_error: invalid api key')
+      s.destroy()
+
+      assert.equal(errors.length, 1)
+      assert.ok(errors[0].message.toLowerCase().includes('api key'))
+    })
+
+    it('enriches billing/credit errors', async () => {
+      const s = createSession()
+      const errors = await queryWithError(s, 'Your account has insufficient credits')
+      s.destroy()
+
+      assert.equal(errors.length, 1)
+      assert.ok(errors[0].message.toLowerCase().includes('credit'))
+    })
+
+    it('enriches overloaded errors', async () => {
+      const s = createSession()
+      const errors = await queryWithError(s, 'overloaded_error: the API is temporarily overloaded')
+      s.destroy()
+
+      assert.equal(errors.length, 1)
+      assert.ok(errors[0].message.toLowerCase().includes('overloaded'))
+    })
+
+    it('passes through unknown errors unchanged', async () => {
+      const s = createSession()
+      const errors = await queryWithError(s, 'Something completely unknown went wrong')
+      s.destroy()
+
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].message, 'Something completely unknown went wrong')
+    })
+
+    it('emits stream_end when error occurs after streaming started', async () => {
+      const s = createSession()
+      s._processReady = true
+      const streamEnds = []
+      const errors = []
+      s.on('stream_end', (data) => streamEnds.push(data))
+      s.on('error', (data) => errors.push(data))
+
+      s._callQuery = () => {
+        return (async function* () {
+          yield { type: 'assistant', message: { id: 'msg-1', content: [], model: 'test', role: 'assistant' } }
+          yield { type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'text' } } }
+          throw new Error('process terminated by signal SIGABRT')
+        })()
+      }
+
+      await s.sendMessage('hello')
+      s.destroy()
+
+      assert.equal(streamEnds.length, 1)
+      assert.equal(errors.length, 1)
+      assert.ok(errors[0].message.includes('crashed'))
+    })
+  })
+
   describe('getters', () => {
     it('isRunning reflects _isBusy', () => {
       assert.equal(session.isRunning, false)
