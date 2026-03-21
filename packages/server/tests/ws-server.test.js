@@ -2167,14 +2167,8 @@ describe('encryption integration (end-to-end)', () => {
     await waitFor(
       () => {
         // Drain any newly arrived encrypted envelopes into decrypted[]
-        while (true) {
-          const idx = messages.findIndex(m => m.type === 'encrypted')
-          if (idx === -1) break
-          const envelope = messages.splice(idx, 1)[0]
-          const msg = decrypt(envelope, clientEncryption.sharedKey, clientEncryption.recvNonce, DIRECTION_SERVER)
-          clientEncryption.recvNonce++
-          decrypted.push(msg)
-        }
+        const newlyDecrypted = drainEncryptedMessages(messages, clientEncryption)
+        decrypted.push(...newlyDecrypted)
         return decrypted.find(m => m.type === 'history_replay_end')
       },
       { timeoutMs: 5000, label: 'encrypted history_replay_end' }
