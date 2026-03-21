@@ -59,7 +59,7 @@ export class CodexSession extends BaseSession {
 
   start() {
     if (!process.env.OPENAI_API_KEY) {
-      throw new Error('OPENAI_API_KEY environment variable is not set. Set it with: export OPENAI_API_KEY=your_key')
+      throw new Error('OPENAI_API_KEY environment variable is not set')
     }
     this._processReady = true
     process.nextTick(() => {
@@ -176,8 +176,8 @@ export class CodexSession extends BaseSession {
     proc.stderr.on('data', (chunk) => {
       if (this._destroying) return
       const msg = chunk.toString().trim()
-      if (msg) {
-        stderrBuf += (stderrBuf ? '\n' : '') + msg
+      if (msg && (msg.includes('ERROR') || msg.includes('WARN') || msg.includes('error') || msg.includes('not set'))) {
+        if (stderrBuf.length < 1024) stderrBuf += (stderrBuf ? '\n' : '') + msg
         log.error(`stderr: ${msg}`)
       }
     })

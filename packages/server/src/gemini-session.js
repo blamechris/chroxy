@@ -57,7 +57,7 @@ export class GeminiSession extends BaseSession {
 
   start() {
     if (!process.env.GEMINI_API_KEY) {
-      throw new Error('GEMINI_API_KEY environment variable is not set. Set it with: export GEMINI_API_KEY=your_key')
+      throw new Error('GEMINI_API_KEY environment variable is not set')
     }
     this._processReady = true
     process.nextTick(() => {
@@ -136,7 +136,7 @@ export class GeminiSession extends BaseSession {
       if (this._destroying) return
       const msg = chunk.toString().trim()
       if (msg && !msg.includes('DeprecationWarning')) {
-        stderrBuf += (stderrBuf ? '\n' : '') + msg
+        if (stderrBuf.length < 1024) stderrBuf += (stderrBuf ? '\n' : '') + msg
         log.error(`stderr: ${msg}`)
       }
     })

@@ -164,8 +164,6 @@ describe('GeminiSession', () => {
       assert.throws(() => session.start(), {
         message: /GEMINI_API_KEY.*not set/,
       })
-      // Restore for afterEach
-      process.env.GEMINI_API_KEY = 'test-key'
     })
 
     it('succeeds when GEMINI_API_KEY is set', () => {

@@ -641,14 +641,16 @@ describe('CodexSession', () => {
   })
 
   describe('start() API key validation', () => {
+    afterEach(() => {
+      process.env.OPENAI_API_KEY = 'test-key'
+    })
+
     it('throws when OPENAI_API_KEY is not set', () => {
       const session = new CodexSession({ cwd: '/tmp' })
       delete process.env.OPENAI_API_KEY
       assert.throws(() => session.start(), {
         message: /OPENAI_API_KEY.*not set/,
       })
-      // Restore for after hook
-      process.env.OPENAI_API_KEY = 'test-key'
     })
 
     it('succeeds when OPENAI_API_KEY is set', () => {
