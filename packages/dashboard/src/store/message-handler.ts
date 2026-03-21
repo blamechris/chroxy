@@ -1584,13 +1584,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const cleaned = (msg.models as unknown[])
           .map((m: unknown): ModelInfo | null => {
             if (typeof m === 'object' && m !== null) {
-              const { id, label, fullId } = m as ModelInfo;
+              const { id, label, fullId, contextWindow } = m as ModelInfo;
               if (
                 typeof id === 'string' && id.trim() !== '' &&
                 typeof label === 'string' && label.trim() !== '' &&
                 typeof fullId === 'string' && fullId.trim() !== ''
               ) {
-                return { id, label, fullId };
+                const info: ModelInfo = { id, label, fullId };
+                if (typeof contextWindow === 'number' && contextWindow > 0) info.contextWindow = contextWindow;
+                return info;
               }
             }
             if (typeof m === 'string' && m.trim().length > 0) {

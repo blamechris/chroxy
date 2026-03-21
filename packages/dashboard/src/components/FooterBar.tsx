@@ -18,6 +18,7 @@ export interface FooterBarProps {
   model?: string
   cost?: number
   context?: string
+  contextPercent?: number | null
   isBusy?: boolean
   agentCount?: number
   onShowQr?: () => void
@@ -47,6 +48,7 @@ export function FooterBar({
   model,
   cost,
   context,
+  contextPercent,
   isBusy,
   agentCount,
   onShowQr,
@@ -94,7 +96,25 @@ export function FooterBar({
         {cost != null && (
           <span className="footer-cost">${cost.toFixed(4)}</span>
         )}
-        {context && <span className="footer-context">{context}</span>}
+        {context && (
+          <span className="footer-context" title={context}>
+            {contextPercent != null ? (
+              <>
+                <span
+                  className={`footer-context-bar${contextPercent >= 80 ? ' high' : contextPercent >= 50 ? ' medium' : ''}`}
+                  role="progressbar"
+                  aria-label="Context window usage"
+                  aria-valuenow={Math.min(Math.round(contextPercent), 100)}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <span className="footer-context-fill" style={{ width: `${Math.min(contextPercent, 100)}%` }} />
+                </span>
+                <span className="footer-context-label">{Math.min(Math.round(contextPercent), 100)}%</span>
+              </>
+            ) : context}
+          </span>
+        )}
       </div>
     </footer>
   )

@@ -50,9 +50,39 @@ describe('FooterBar', () => {
     expect(screen.getByText('$0.0123')).toBeInTheDocument()
   })
 
-  it('shows context token info', () => {
+  it('shows context token info as plain text when no percent', () => {
     render(<FooterBar {...baseProps} context="45K / 200K" />)
     expect(screen.getByText('45K / 200K')).toBeInTheDocument()
+  })
+
+  it('shows context usage progress bar with percentage', () => {
+    const { container } = render(<FooterBar {...baseProps} context="90k tokens" contextPercent={45} />)
+    const bar = container.querySelector('.footer-context-bar')
+    expect(bar).toBeInTheDocument()
+    expect(bar).toHaveAttribute('role', 'progressbar')
+    expect(bar).toHaveAttribute('aria-label', 'Context window usage')
+    expect(bar).toHaveAttribute('aria-valuenow', '45')
+    expect(bar).toHaveAttribute('aria-valuemax', '100')
+    expect(screen.getByText('45%')).toBeInTheDocument()
+  })
+
+  it('clamps context percentage display at 100%', () => {
+    const { container } = render(<FooterBar {...baseProps} context="250k tokens" contextPercent={134} />)
+    const bar = container.querySelector('.footer-context-bar')
+    expect(bar).toHaveAttribute('aria-valuenow', '100')
+    expect(screen.getByText('100%')).toBeInTheDocument()
+  })
+
+  it('applies medium class for context usage 50-80%', () => {
+    const { container } = render(<FooterBar {...baseProps} context="120k tokens" contextPercent={60} />)
+    const bar = container.querySelector('.footer-context-bar')
+    expect(bar?.classList.contains('medium')).toBe(true)
+  })
+
+  it('applies high class for context usage >= 80%', () => {
+    const { container } = render(<FooterBar {...baseProps} context="180k tokens" contextPercent={90} />)
+    const bar = container.querySelector('.footer-context-bar')
+    expect(bar?.classList.contains('high')).toBe(true)
   })
 
   it('shows busy indicator when isBusy', () => {

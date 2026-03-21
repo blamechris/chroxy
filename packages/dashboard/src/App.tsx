@@ -850,6 +850,16 @@ export function App() {
     { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
   ], [])
 
+  // Compute context window usage percentage from active model metadata
+  const contextPercent = useMemo(() => {
+    if (!contextUsage) return null
+    const total = contextUsage.inputTokens + contextUsage.outputTokens
+    if (total === 0) return null
+    const modelInfo = availableModels.find(m => m.id === activeModel || m.fullId === activeModel)
+    const contextWindow = modelInfo?.contextWindow ?? 200_000
+    return (total / contextWindow) * 100
+  }, [contextUsage, activeModel, availableModels])
+
   const isConnected = connectionPhase === 'connected'
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
   const isStartupError = connectionPhase === 'disconnected' && !!connectionError && sessions.length === 0
@@ -1204,6 +1214,7 @@ export function App() {
         model={activeModel || undefined}
         cost={sessionCost ?? undefined}
         context={formatContext(contextUsage)}
+        contextPercent={contextPercent}
         isBusy={!isIdle}
         agentCount={activeAgents.length}
         onShowQr={isConnected ? handleShowQr : undefined}

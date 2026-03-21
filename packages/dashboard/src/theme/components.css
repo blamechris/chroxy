@@ -2243,8 +2243,40 @@
 }
 
 .footer-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--text-muted);
   font-family: var(--font-mono);
+}
+
+.footer-context-bar {
+  display: inline-block;
+  width: 60px;
+  height: 8px;
+  background: var(--bg-tertiary, #1a1a2e);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.footer-context-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent-green, #48bb78);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.footer-context-bar.medium .footer-context-fill {
+  background: var(--accent-yellow, #ecc94b);
+}
+
+.footer-context-bar.high .footer-context-fill {
+  background: var(--accent-red, #e53e3e);
+}
+
+.footer-context-label {
+  font-size: 11px;
 }
 
 .footer-agents {
