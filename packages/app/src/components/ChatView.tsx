@@ -44,6 +44,8 @@ export interface ChatViewProps {
   searchMatchIds?: Set<string>;
   /** ID of the currently focused search match (for scroll-into-view) */
   currentMatchId?: string | null;
+  /** Whether the keyboard is currently visible (triggers scroll-to-bottom) */
+  keyboardVisible?: boolean;
 }
 
 // -- Plan Approval Card --
@@ -112,6 +114,7 @@ export function ChatView({
   searchQuery,
   searchMatchIds,
   currentMatchId,
+  keyboardVisible,
 }: ChatViewProps) {
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
@@ -146,6 +149,17 @@ export function ChatView({
     () => messages.some((m) => m.type === 'prompt' && !m.answered),
     [messages],
   );
+
+  // Auto-scroll when keyboard opens (keep latest message visible)
+  useEffect(() => {
+    if (keyboardVisible && !isSelectingRef.current && !showScrollToBottomRef.current) {
+      const timer = setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef, isSelectingRef, and showScrollToBottomRef are stable refs
+  }, [keyboardVisible]);
 
   // Auto-scroll when plan approval card appears
   useEffect(() => {

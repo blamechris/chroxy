@@ -849,14 +849,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const targetSid = notifMatch?.sessionId
       ?? Object.entries(sessionStates).find(([, ss]) => ss.messages.some((m) => m.requestId === requestId))?.[0];
     if (targetSid && targetSid !== activeSessionId) get().switchSession(targetSid, { haptic: false });
-    // For allowSession: send set_permission_rules to register auto-approval for this tool
+    // For allowSession: send set_permission_rules to register auto-approval for this tool.
+    // Skip tools that the server won't accept as auto-allow rules (code execution, network).
+    const RULE_ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']);
     if (decision === 'allowSession' && socket && socket.readyState === WebSocket.OPEN) {
       const sessionId = targetSid ?? activeSessionId;
       if (sessionId) {
         const ss = sessionStates[sessionId];
         const permMsg = ss?.messages.find((m) => m.requestId === requestId && m.type === 'prompt');
         const permissionTool = permMsg?.tool;
-        if (permissionTool) {
+        if (permissionTool && RULE_ELIGIBLE_TOOLS.has(permissionTool)) {
           const currentRules = ss?.sessionRules ?? [];
           wsSend(socket, {
             type: 'set_permission_rules',
