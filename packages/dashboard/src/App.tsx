@@ -225,6 +225,8 @@ export function App() {
   const serverErrors = useConnectionStore(s => s.serverErrors)
   const infoNotifications = useConnectionStore(s => s.infoNotifications ?? [])
   const connectionError = useConnectionStore(s => s.connectionError)
+  const serverPhase = useConnectionStore(s => s.serverPhase)
+  const tunnelProgress = useConnectionStore(s => s.tunnelProgress)
   const serverStartupLogs = useConnectionStore(s => s.serverStartupLogs)
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
@@ -916,7 +918,7 @@ export function App() {
         <div className="header-left">
           <span className="logo">Chroxy</span>
           <span className="version-badge">v{serverVersion ?? __APP_VERSION__}</span>
-          <span className={`status-dot ${isConnected && !tunnelReady ? 'connecting' : connectionPhase}`} />
+          <span className={`status-dot ${serverPhase === 'tunnel_verifying' || (isConnected && !tunnelReady && serverPhase == null) ? 'connecting' : connectionPhase}`} />
         </div>
         <div className="header-center">
           <ChatSettingsDropdown
@@ -1195,6 +1197,8 @@ export function App() {
       <FooterBar
         connectionPhase={connectionPhase}
         tunnelReady={tunnelReady}
+        serverPhase={serverPhase}
+        tunnelProgress={tunnelProgress}
         serverVersion={serverVersion}
         cwd={sessionCwd ?? undefined}
         model={activeModel || undefined}

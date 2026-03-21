@@ -461,7 +461,13 @@ export async function startCliServer(config) {
     })
 
     // 6. Wait for tunnel to be fully routable (DNS propagation)
-    await waitForTunnel(httpUrl)
+    wsServer.broadcast({ type: 'server_status', phase: 'tunnel_verifying', tunnelMode: tunnelArg.mode })
+    await waitForTunnel(httpUrl, {
+      onAttempt: (attempt, maxAttempts) => {
+        wsServer.broadcast({ type: 'server_status', phase: 'tunnel_verifying', tunnelMode: tunnelArg.mode, attempt, maxAttempts })
+      },
+    })
+    wsServer.broadcast({ type: 'server_status', phase: 'ready', tunnelUrl: httpUrl })
 
     // 7. Generate connection info
     const modeLabel = `cloudflare:${tunnelArg.mode}`
