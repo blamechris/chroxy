@@ -575,5 +575,44 @@ describe('CliSession stream-event handling', () => {
 
       session.destroy()
     })
+
+    it('handles multiple text blocks in a single assistant event', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('stream_delta', (d) => deltas.push(d.delta))
+
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [
+          { type: 'text', text: 'Hello' },
+          { type: 'tool_use', name: 'Bash' },
+          { type: 'text', text: ' world' },
+        ] },
+      })
+
+      // Both text blocks concatenated: "Hello world" (11 chars)
+      assert.equal(deltas.length, 1)
+      assert.equal(deltas[0], 'Hello world')
+      assert.equal(session._currentCtx.assistantTextSeen, 11)
+
+      session.destroy()
+    })
+
+    it('does not emit when messageId is null', () => {
+      const session = createSession()
+      session._currentMessageId = null
+      const events = []
+      session.on('stream_start', () => events.push('start'))
+      session.on('stream_delta', () => events.push('delta'))
+
+      session._handleEvent({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Hello' }] },
+      })
+
+      assert.equal(events.length, 0)
+
+      session.destroy()
+    })
   })
 })

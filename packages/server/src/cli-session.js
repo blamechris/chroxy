@@ -505,28 +505,29 @@ export class CliSession extends BaseSession {
         // Otherwise, derive streaming from the incremental assistant text growth
         // so the dashboard shows real-time token-by-token rendering.
         const ctx = this._currentCtx
+        const messageId = this._currentMessageId
         const content = data.message?.content
-        if (Array.isArray(content) && ctx) {
+        if (Array.isArray(content) && ctx && messageId) {
+          // If stream_event deltas already drove streaming, skip assistant text
+          if (ctx.didStreamText) break
+
+          // Concatenate all text blocks to handle multi-block content safely
+          let fullText = ''
           for (const block of content) {
-            if (block.type !== 'text' || !block.text) continue
-            // If stream_event deltas already drove streaming, skip assistant text
-            if (ctx.didStreamText) continue
-
-            const messageId = this._currentMessageId
-            const newText = block.text
-            const prevLen = ctx.assistantTextSeen
-
-            if (newText.length > prevLen) {
-              if (!ctx.hasStreamStarted) {
-                ctx.hasStreamStarted = true
-                this.emit('stream_start', { messageId })
-              }
-              this.emit('stream_delta', { messageId, delta: newText.slice(prevLen) })
-              ctx.assistantTextSeen = newText.length
-            }
-            // tool_use blocks are handled by content_block_start → tool_start event;
-            // emitting them here too would create duplicate tool messages in the app
+            if (block.type === 'text' && block.text) fullText += block.text
           }
+
+          const prevLen = ctx.assistantTextSeen
+          if (fullText.length > prevLen) {
+            if (!ctx.hasStreamStarted) {
+              ctx.hasStreamStarted = true
+              this.emit('stream_start', { messageId })
+            }
+            this.emit('stream_delta', { messageId, delta: fullText.slice(prevLen) })
+            ctx.assistantTextSeen = fullText.length
+          }
+          // tool_use blocks are handled by content_block_start → tool_start event;
+          // emitting them here too would create duplicate tool messages in the app
         }
         break
       }
