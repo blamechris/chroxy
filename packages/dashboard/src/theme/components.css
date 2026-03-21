@@ -4595,6 +4595,28 @@
   padding: 20px 0;
 }
 
+.console-tunnel-setup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.console-tunnel-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-primary);
+  border-top-color: var(--accent-blue);
+  border-radius: 50%;
+  animation: tunnel-spin 0.8s linear infinite;
+}
+
+@keyframes tunnel-spin {
+  to { transform: rotate(360deg); }
+}
+
 .console-qr-section {
   text-align: center;
   margin-top: 16px;

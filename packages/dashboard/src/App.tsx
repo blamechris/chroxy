@@ -851,6 +851,34 @@ export function App() {
   const isStartupError = connectionPhase === 'disconnected' && !!connectionError && sessions.length === 0
   const showWelcome = isConnected && sessions.length === 0
 
+  // Track whether a configured tunnel is fully ready (connection info available)
+  const [tunnelReady, setTunnelReady] = useState(true)
+  useEffect(() => {
+    if (!isConnected) { setTunnelReady(true); return }
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    async function checkTunnel() {
+      try {
+        const { getServerInfo } = await import('./hooks/useTauriIPC')
+        const info = await getServerInfo()
+        // Only track tunnel readiness if tunnel mode is configured
+        if (!info || info.tunnelMode === 'none') { setTunnelReady(true); return }
+      } catch {
+        // Not in Tauri — check /connect directly
+      }
+      try {
+        const { getAuthToken } = await import('./utils/auth')
+        const token = getAuthToken()
+        if (!token) return
+        const res = await fetch('/connect', { headers: { Authorization: `Bearer ${token}` } })
+        if (res.ok) { if (!cancelled) setTunnelReady(true); return }
+      } catch { /* ignore */ }
+      if (!cancelled) { setTunnelReady(false); timer = setTimeout(checkTunnel, 3000) }
+    }
+    checkTunnel()
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+  }, [isConnected])
+
   // Fetch conversation history when welcome screen is shown
   useEffect(() => {
     if (showWelcome) fetchConversationHistory()
@@ -886,7 +914,7 @@ export function App() {
         <div className="header-left">
           <span className="logo">Chroxy</span>
           <span className="version-badge">v{serverVersion ?? __APP_VERSION__}</span>
-          <span className={`status-dot ${connectionPhase}`} />
+          <span className={`status-dot ${isConnected && !tunnelReady ? 'connecting' : connectionPhase}`} />
         </div>
         <div className="header-center">
           <ChatSettingsDropdown
@@ -1164,6 +1192,7 @@ export function App() {
       {/* Footer bar */}
       <FooterBar
         connectionPhase={connectionPhase}
+        tunnelReady={tunnelReady}
         serverVersion={serverVersion}
         cwd={sessionCwd ?? undefined}
         model={activeModel || undefined}

@@ -15,11 +15,12 @@ export function ConsolePage() {
   const [connInfo, setConnInfo] = useState<ConnectionInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [settingUpTunnel, setSettingUpTunnel] = useState(false)
   const [tokenRevealed, setTokenRevealed] = useState(false)
   const [qrSvg, setQrSvg] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
 
-  // Fetch connection info on mount
+  // Fetch connection info on mount, retry while tunnel is being set up
   useEffect(() => {
     const token = getAuthToken()
     if (!token) {
@@ -29,6 +30,7 @@ export function ConsolePage() {
     }
 
     let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
 
     async function fetchData() {
       try {
@@ -37,10 +39,21 @@ export function ConsolePage() {
         })
         if (!res.ok) {
           const body = await res.json().catch(() => ({ error: 'Request failed' }))
-          if (!cancelled) setError(body.error || `HTTP ${res.status}`)
+          const errMsg = body.error || `HTTP ${res.status}`
+          // If connection info isn't available yet, keep polling (tunnel still setting up)
+          if (res.status === 404 && !cancelled) {
+            setSettingUpTunnel(true)
+            setLoading(false)
+            retryTimer = setTimeout(fetchData, 3000)
+            return
+          }
+          if (!cancelled) setError(errMsg)
         } else {
           const data = await res.json()
-          if (!cancelled) setConnInfo(data)
+          if (!cancelled) {
+            setConnInfo(data)
+            setSettingUpTunnel(false)
+          }
         }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to fetch')
@@ -63,7 +76,7 @@ export function ConsolePage() {
     }
 
     fetchData()
-    return () => { cancelled = true }
+    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer) }
   }, [])
 
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -108,7 +121,16 @@ export function ConsolePage() {
     return (
       <div className="console-page">
         <h2>Connection Info</h2>
-        <div className="console-error">No connection info available</div>
+        {settingUpTunnel ? (
+          <div className="console-tunnel-setup">
+            <div className="console-tunnel-spinner" />
+            <span>Setting up Cloudflare tunnel...</span>
+          </div>
+        ) : (
+          <div className="console-error">No connection info available</div>
+        )}
+        <h2>Server Logs</h2>
+        <LogPanel />
       </div>
     )
   }
