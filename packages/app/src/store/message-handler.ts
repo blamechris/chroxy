@@ -1085,7 +1085,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // (timestamps differ between client stream_start and server stream_end)
         const serverId = msg.messageId as string | undefined;
         if (serverId && msgType === 'response') {
-          if (cached.some((m) => m.id === serverId || m.id === `${serverId}-response`)) break;
+          if (cached.some((m) => (m.id === serverId && m.type === 'response') || m.id === `${serverId}-response`)) break;
         } else {
           const isDuplicate = cached.some((m) => {
             if (m.type !== msgType || m.content !== msg.content) return false;

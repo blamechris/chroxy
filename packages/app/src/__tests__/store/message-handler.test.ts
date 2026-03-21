@@ -1373,6 +1373,23 @@ describe('reconnect replay dedup', () => {
     expect(msgs).toHaveLength(2);
   });
 
+  it('message handler: preserves response when only tool_use exists with same ID (collision without response)', () => {
+    const store = setupReconnectReplay([
+      { id: 'msg-1', type: 'tool_use', content: 'Bash', timestamp: 1 },
+      // No 'msg-1-response' yet — app crashed before stream_end
+    ]);
+
+    _testMessageHandler.handle({
+      type: 'message', messageType: 'response', content: 'output',
+      messageId: 'msg-1', sessionId: 's1', timestamp: 9999,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(2);
+    expect(msgs[1].type).toBe('response');
+    expect(msgs[1].content).toBe('output');
+  });
+
   it('message handler: deduplicates non-response messages by content', () => {
     const store = setupReconnectReplay([
       { id: 'sys-1', type: 'system', content: 'hook started', tool: null, options: null, timestamp: 1 },
