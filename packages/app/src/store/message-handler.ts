@@ -1081,13 +1081,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // subscription before switching to the session (which triggers history replay).
       if (_ctx.receivingHistoryReplay) {
         const cached = getSessionMessages(targetId);
-        const isDuplicate = cached.some((m) => {
-          if (m.type !== msgType || m.content !== msg.content) return false;
-          if (m.timestamp !== msg.timestamp) return false;
-          if ((m.tool ?? null) !== (msg.tool ?? null)) return false;
-          return JSON.stringify(m.options ?? null) === JSON.stringify(msg.options ?? null);
-        });
-        if (isDuplicate) break;
+        // For response messages with a stable server messageId, use ID-based dedup
+        // (timestamps differ between client stream_start and server stream_end)
+        const serverId = msg.messageId as string | undefined;
+        if (serverId && msgType === 'response') {
+          if (cached.some((m) => (m.id === serverId && m.type === 'response') || m.id === `${serverId}-response`)) break;
+        } else {
+          const isDuplicate = cached.some((m) => {
+            if (m.type !== msgType || m.content !== msg.content) return false;
+            if ((m.timestamp ?? null) !== ((msg.timestamp as number | undefined) ?? null)) return false;
+            if ((m.tool ?? null) !== (msg.tool ?? null)) return false;
+            return JSON.stringify(m.options ?? null) === JSON.stringify(msg.options ?? null);
+          });
+          if (isDuplicate) break;
+        }
       }
       const newMsg: ChatMessage = {
         id: nextMessageId(msgType),

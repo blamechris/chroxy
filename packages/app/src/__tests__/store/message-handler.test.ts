@@ -5,7 +5,7 @@
  * with a mock Zustand store.
  */
 import { Alert } from 'react-native';
-import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION, SUBSCRIBE_SESSIONS_CHUNK_SIZE, clearPermissionSplits, clearDeltaBuffers } from '../../store/message-handler';
+import { _testMessageHandler, setStore, CLIENT_PROTOCOL_VERSION, SUBSCRIBE_SESSIONS_CHUNK_SIZE, clearPermissionSplits, clearDeltaBuffers, resetReplayFlags } from '../../store/message-handler';
 import { createEmptySessionState } from '../../store/utils';
 import { clearPersistedSession } from '../../store/persistence';
 import { setCallback, clearAllCallbacks } from '../../store/imperative-callbacks';
@@ -1311,6 +1311,146 @@ describe('stream_start handler', () => {
     // Original tool_use message untouched
     expect(ss.messages[0].id).toBe('msg-1');
     expect(ss.messages[0].type).toBe('tool_use');
+  });
+});
+
+describe('reconnect replay dedup', () => {
+  function setupReconnectReplay(messages: any[]) {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages, streamingMessageId: null } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    // Enter reconnect replay mode (no fullHistory = not a session switch)
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+    return store;
+  }
+
+  afterEach(() => {
+    resetReplayFlags();
+  });
+
+  it('message handler: preserves new response messages during reconnect', () => {
+    const store = setupReconnectReplay([
+      { id: 'msg-1', type: 'user_input', content: 'hello', timestamp: 1 },
+    ]);
+
+    _testMessageHandler.handle({
+      type: 'message', messageType: 'response', content: 'world',
+      messageId: 'resp-1', sessionId: 's1', timestamp: 999,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(2);
+    expect(msgs[1].type).toBe('response');
+    expect(msgs[1].content).toBe('world');
+  });
+
+  it('message handler: deduplicates response by messageId during reconnect', () => {
+    const store = setupReconnectReplay([
+      { id: 'resp-1', type: 'response', content: 'existing response', timestamp: 1 },
+    ]);
+
+    _testMessageHandler.handle({
+      type: 'message', messageType: 'response', content: 'existing response',
+      messageId: 'resp-1', sessionId: 's1', timestamp: 9999,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+  });
+
+  it('message handler: deduplicates response with suffixed ID (tool_start collision)', () => {
+    const store = setupReconnectReplay([
+      { id: 'msg-1', type: 'tool_use', content: 'Bash', timestamp: 1 },
+      { id: 'msg-1-response', type: 'response', content: 'done', timestamp: 2 },
+    ]);
+
+    _testMessageHandler.handle({
+      type: 'message', messageType: 'response', content: 'done',
+      messageId: 'msg-1', sessionId: 's1', timestamp: 9999,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(2);
+  });
+
+  it('message handler: preserves response when only tool_use exists with same ID (collision without response)', () => {
+    const store = setupReconnectReplay([
+      { id: 'msg-1', type: 'tool_use', content: 'Bash', timestamp: 1 },
+      // No 'msg-1-response' yet — app crashed before stream_end
+    ]);
+
+    _testMessageHandler.handle({
+      type: 'message', messageType: 'response', content: 'output',
+      messageId: 'msg-1', sessionId: 's1', timestamp: 9999,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(2);
+    expect(msgs[1].type).toBe('response');
+    expect(msgs[1].content).toBe('output');
+  });
+
+  it('message handler: deduplicates non-response messages by content and timestamp', () => {
+    const store = setupReconnectReplay([
+      { id: 'sys-1', type: 'system', content: 'hook started', tool: null, options: null, timestamp: 1000 },
+    ]);
+
+    // Server replays non-response messages with the original timestamp
+    _testMessageHandler.handle({
+      type: 'message', messageType: 'system', content: 'hook started',
+      sessionId: 's1', timestamp: 1000,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+  });
+
+  it('message handler: allows non-response messages with different timestamps', () => {
+    const store = setupReconnectReplay([
+      { id: 'sys-1', type: 'system', content: 'hook started', tool: null, options: null, timestamp: 1000 },
+    ]);
+
+    // Different timestamp = different message occurrence, should be preserved
+    _testMessageHandler.handle({
+      type: 'message', messageType: 'system', content: 'hook started',
+      sessionId: 's1', timestamp: 2000,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(2);
+  });
+
+  it('tool_start handler: deduplicates by stable messageId during reconnect', () => {
+    const store = setupReconnectReplay([
+      { id: 'tool-1', type: 'tool_use', content: 'Bash: ls', timestamp: 1 },
+    ]);
+
+    _testMessageHandler.handle({
+      type: 'tool_start', messageId: 'tool-1', tool: 'Bash',
+      input: 'ls', sessionId: 's1',
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+  });
+
+  it('tool_start handler: allows new tools during reconnect', () => {
+    const store = setupReconnectReplay([
+      { id: 'tool-1', type: 'tool_use', content: 'Bash: ls', timestamp: 1 },
+    ]);
+
+    _testMessageHandler.handle({
+      type: 'tool_start', messageId: 'tool-2', tool: 'Read',
+      input: 'file.ts', sessionId: 's1',
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(2);
+    expect(msgs[1].id).toBe('tool-2');
   });
 });
 
