@@ -1,8 +1,18 @@
-import { describe, it } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { GeminiSession } from '../src/gemini-session.js'
 
 describe('GeminiSession', () => {
+  let savedApiKey
+  beforeEach(() => {
+    savedApiKey = process.env.GEMINI_API_KEY
+    process.env.GEMINI_API_KEY = 'test-key'
+  })
+  afterEach(() => {
+    if (savedApiKey !== undefined) process.env.GEMINI_API_KEY = savedApiKey
+    else delete process.env.GEMINI_API_KEY
+  })
+
   it('exposes correct capabilities', () => {
     const caps = GeminiSession.capabilities
     assert.equal(caps.permissions, false)
@@ -144,6 +154,23 @@ describe('GeminiSession', () => {
 
       assert.equal(events.length, 1)
       assert.equal(events[0].tool, 'read_file')
+    })
+  })
+
+  describe('start() API key validation', () => {
+    it('throws when GEMINI_API_KEY is not set', () => {
+      const session = new GeminiSession({ cwd: '/tmp' })
+      delete process.env.GEMINI_API_KEY
+      assert.throws(() => session.start(), {
+        message: /GEMINI_API_KEY.*not set/,
+      })
+    })
+
+    it('succeeds when GEMINI_API_KEY is set', () => {
+      const session = new GeminiSession({ cwd: '/tmp' })
+      session.start()
+      assert.equal(session._processReady, true)
+      session.destroy()
     })
   })
 })
