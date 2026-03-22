@@ -1557,14 +1557,23 @@ useConnectionStore.subscribe((state) => {
   }
 });
 
-// Reconnect on tab/window visibility change (equivalent to app resume from background)
+// Reconnect or refresh on tab/window visibility change
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
-      const { socket, connectionPhase, wsUrl, apiToken } = useConnectionStore.getState();
+      const state = useConnectionStore.getState();
+      const { socket, connectionPhase, wsUrl, apiToken, activeSessionId, sessionStates } = state;
       if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
         console.log('[ws] Tab became visible, socket stale — reconnecting');
-        useConnectionStore.getState().connect(wsUrl, apiToken);
+        state.connect(wsUrl, apiToken);
+      } else if (connectionPhase === 'connected' && activeSessionId && sessionStates[activeSessionId]) {
+        // Force messages array reference bump so React re-renders any
+        // content that accumulated while the tab was in the background.
+        // Chrome throttles setTimeout in hidden tabs, so delta flushes
+        // may have been delayed — the data is in the store but the UI
+        // may show stale DOM.
+        const ss = sessionStates[activeSessionId];
+        useConnectionStore.setState({ messages: [...ss.messages] });
       }
     }
   });

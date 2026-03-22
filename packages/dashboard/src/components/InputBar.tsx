@@ -42,6 +42,10 @@ export interface InputBarProps {
   imageAttachments?: ImageAttachment[]
   onRemoveImage?: (index: number) => void
   onFileAttach?: (path: string) => void
+  /** Controlled value for per-session draft persistence */
+  controlledValue?: string
+  /** Called when text changes (for per-session draft persistence) */
+  onValueChange?: (value: string) => void
   /** When true, bare Enter sends; when false (default), Cmd/Ctrl+Enter sends. */
   sendOnEnter?: boolean
   /** Voice input state (from useVoiceInput hook) */
@@ -54,8 +58,10 @@ export interface InputBarProps {
   }
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, sendOnEnter, voiceInput }: InputBarProps) {
-  const [value, setValue] = useState('')
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput }: InputBarProps) {
+  const [internalValue, setInternalValue] = useState('')
+  const value = controlledValue !== undefined ? controlledValue : internalValue
+  const setValue = onValueChange || setInternalValue
   const dictationStartRef = useRef(0)
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
