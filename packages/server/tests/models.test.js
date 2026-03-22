@@ -55,7 +55,7 @@ describe('ALLOWED_MODEL_IDS', () => {
 describe('resolveModelId', () => {
   it('resolves short id to full id', () => {
     assert.equal(resolveModelId('sonnet'), 'claude-sonnet-4-20250514')
-    assert.equal(resolveModelId('haiku'), 'claude-haiku-235-20250421')
+    assert.equal(resolveModelId('haiku'), 'claude-haiku-4-5-20251001')
     assert.equal(resolveModelId('opus'), 'claude-opus-4-20250514')
     assert.equal(resolveModelId('opus46'), 'claude-opus-4-6')
   })
@@ -73,7 +73,7 @@ describe('resolveModelId', () => {
 describe('toShortModelId', () => {
   it('resolves full id to short id', () => {
     assert.equal(toShortModelId('claude-sonnet-4-20250514'), 'sonnet')
-    assert.equal(toShortModelId('claude-haiku-235-20250421'), 'haiku')
+    assert.equal(toShortModelId('claude-haiku-4-5-20251001'), 'haiku')
     assert.equal(toShortModelId('claude-opus-4-20250514'), 'opus')
     assert.equal(toShortModelId('claude-opus-4-6'), 'opus46')
   })
