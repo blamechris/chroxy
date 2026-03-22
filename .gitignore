@@ -7,6 +7,10 @@ node_modules/
 
 # Build outputs
 dist/
+!packages/store-core/dist/
+packages/store-core/dist/*
+!packages/store-core/dist/crypto.js
+!packages/store-core/dist/crypto.d.ts
 build/
 
 # Auto-generated xterm bundle (rebuilt by postinstall)
