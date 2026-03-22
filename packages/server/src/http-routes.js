@@ -166,7 +166,9 @@ export function createHttpHandler(server) {
       if (!server._validateBearerAuth(req, res)) return
       const qrCors = matchAllowedOrigin(req.headers['origin'])
 
-      // Prefer live pairing URL from PairingManager (always current)
+      // Prefer live pairing URL from PairingManager (always current).
+      // Extend the grace period since someone is actively viewing the QR.
+      if (server._pairingManager) server._pairingManager.extendCurrentId()
       let qrData = server._pairingManager?.currentPairingUrl
       if (!qrData) {
         // Fall back to connection info file

@@ -119,6 +119,8 @@ function formatTime(ts: number): string {
 export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
+  const programmaticScrollRef = useRef(false)
+  const prevStreamingRef = useRef(isStreaming)
 
   // Deduplicate by id — keep first occurrence
   const dedupedMessages = useMemo(() => {
@@ -134,27 +136,62 @@ export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatV
     const el = containerRef.current
     if (!el) return
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD
+    // During programmatic scrolls, only update if we're at bottom (don't falsely set scrolledUp)
+    if (programmaticScrollRef.current && atBottom) return
     setUserScrolledUp(!atBottom)
   }, [])
 
   const scrollToBottom = useCallback(() => {
     const el = containerRef.current
     if (!el) return
+    programmaticScrollRef.current = true
     el.scrollTop = el.scrollHeight
     setUserScrolledUp(false)
+    requestAnimationFrame(() => { programmaticScrollRef.current = false })
   }, [])
 
-  // Auto-scroll: on new messages (count change), during streaming (content growth),
-  // or when busy state changes (ThinkingDots appear/disappear).
-  // When streaming, include messages reference so content growth triggers scroll.
-  // When idle, only message count changes matter (avoids needless DOM writes).
-  const scrollTrigger = isStreaming ? messages : dedupedMessages.length
+  // Reset userScrolledUp when streaming ends — show the final response
   useEffect(() => {
-    if (!userScrolledUp) {
-      const el = containerRef.current
-      if (el) el.scrollTop = el.scrollHeight
+    if (prevStreamingRef.current && !isStreaming) {
+      setUserScrolledUp(false)
     }
-  }, [scrollTrigger, userScrolledUp, isBusy])
+    prevStreamingRef.current = isStreaming
+  }, [isStreaming])
+
+  // Auto-scroll on new messages or busy state change (stable count-based trigger).
+  const prevCountRef = useRef(dedupedMessages.length)
+  useEffect(() => {
+    const countChanged = dedupedMessages.length !== prevCountRef.current
+    prevCountRef.current = dedupedMessages.length
+    if (countChanged) {
+      setUserScrolledUp(false)
+      requestAnimationFrame(() => {
+        const el = containerRef.current
+        if (el) {
+          programmaticScrollRef.current = true
+          el.scrollTop = el.scrollHeight
+          requestAnimationFrame(() => { programmaticScrollRef.current = false })
+        }
+      })
+    }
+  }, [dedupedMessages.length, userScrolledUp, isBusy])
+
+  // During streaming, continuously scroll to bottom via RAF
+  useEffect(() => {
+    if (!isStreaming || userScrolledUp) return
+    let rafId: number
+    const tick = () => {
+      const el = containerRef.current
+      if (el) {
+        programmaticScrollRef.current = true
+        el.scrollTop = el.scrollHeight
+        programmaticScrollRef.current = false
+      }
+      rafId = requestAnimationFrame(tick)
+    }
+    rafId = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafId)
+  }, [isStreaming, userScrolledUp])
 
   return (
     <div className="chat-view" data-testid="chat-view">

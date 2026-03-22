@@ -1,8 +1,8 @@
 /**
  * ChatView + ThinkingDots tests (#1156)
  */
-import { describe, it, expect, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { describe, it, expect, afterEach, vi } from 'vitest'
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import { ChatView, type ChatViewMessage } from './ChatView'
 import { ThinkingDots } from './ThinkingDots'
 
@@ -102,7 +102,8 @@ describe('ChatView', () => {
     expect(screen.getByText('Hello Claude')).toBeInTheDocument()
   })
 
-  it('skips auto-scroll on idle rerender with same message count (#1180)', () => {
+  it('skips auto-scroll on idle rerender with same message count (#1180)', async () => {
+    vi.useFakeTimers()
     const messages = makeMessages(3)
     const { rerender } = render(<ChatView messages={messages} isStreaming={false} />)
     const container = screen.getByTestId('chat-messages')
@@ -112,21 +113,29 @@ describe('ChatView', () => {
     Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
     Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
 
-    // Reset scrollTop to detect auto-scroll
-    container.scrollTop = 500
+    // Let initial RAF settle
+    await act(() => { vi.advanceTimersByTime(50) })
 
-    // Rerender with same message count when not streaming — no scroll
+    // Simulate user scrolling up — set scrollTop away from bottom and fire scroll
+    container.scrollTop = 200
+    await act(() => { fireEvent.scroll(container) })
+
+    // Rerender with same message count when not streaming — no scroll (user scrolled up)
     const sameCountMessages = makeMessages(3)
     rerender(<ChatView messages={sameCountMessages} isStreaming={false} />)
-    expect(container.scrollTop).toBe(500)
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(200)
 
-    // Now add a new message — auto-scroll SHOULD fire
+    // Now add a new message — auto-scroll SHOULD fire (new count resets)
     const moreMessages = makeMessages(4)
     rerender(<ChatView messages={moreMessages} isStreaming={false} />)
+    await act(() => { vi.advanceTimersByTime(50) })
     expect(container.scrollTop).toBe(1000)
+    vi.useRealTimers()
   })
 
-  it('auto-scrolls during streaming even with same message count (#1180)', () => {
+  it('auto-scrolls during streaming even with same message count (#1180)', async () => {
+    vi.useFakeTimers()
     const messages = makeMessages(3)
     const { rerender } = render(<ChatView messages={messages} isStreaming />)
     const container = screen.getByTestId('chat-messages')
@@ -137,10 +146,12 @@ describe('ChatView', () => {
 
     container.scrollTop = 500
 
-    // Rerender with new content (same count) during streaming — SHOULD scroll
+    // Rerender with new content (same count) during streaming — SHOULD scroll via RAF loop
     const updatedMessages = makeMessages(3)
     rerender(<ChatView messages={updatedMessages} isStreaming />)
+    await act(() => { vi.advanceTimersByTime(50) })
     expect(container.scrollTop).toBe(1000)
+    vi.useRealTimers()
   })
 
   it('deduplicates messages by id', () => {
