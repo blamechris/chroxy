@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { safeTokenCompare } from '../../src/crypto.js'
+import { safeTokenCompare } from '../../src/token-compare.js'
 import { ClientMessageSchema } from '../../src/ws-schemas.js'
 import { RateLimiter } from '../../src/rate-limiter.js'
 

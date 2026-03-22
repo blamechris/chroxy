@@ -1,6 +1,6 @@
 import { randomBytes } from 'crypto'
 import { EventEmitter } from 'events'
-import { safeTokenCompare } from './crypto.js'
+import { safeTokenCompare } from './token-compare.js'
 import { parseDuration } from './duration.js'
 import { createLogger } from './logger.js'
 
