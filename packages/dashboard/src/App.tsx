@@ -653,6 +653,20 @@ export function App() {
     [serverErrors, infoNotifications, activeSessionId],
   )
 
+  // Per-session input draft persistence
+  const inputDraftsRef = useRef<Map<string, string>>(new Map())
+  const [inputDraftValue, setInputDraftValue] = useState('')
+  const handleDraftChange = useCallback((text: string) => {
+    setInputDraftValue(text)
+    if (activeSessionId) inputDraftsRef.current.set(activeSessionId, text)
+  }, [activeSessionId])
+  // Restore draft when switching sessions
+  useEffect(() => {
+    if (activeSessionId) {
+      setInputDraftValue(inputDraftsRef.current.get(activeSessionId) ?? '')
+    }
+  }, [activeSessionId])
+
   // Handlers
   const handleSend = useCallback((text: string, files?: FileAttachment[]) => {
     const allFiles = files || fileAttachments
@@ -663,7 +677,10 @@ export function App() {
     sendInput(text, wire.length > 0 ? wire : undefined)
     setFileAttachments([])
     setImageAttachments([])
-  }, [sendInput, fileAttachments, imageAttachments])
+    // Clear draft for the session that sent the message
+    if (activeSessionId) inputDraftsRef.current.delete(activeSessionId)
+    setInputDraftValue('')
+  }, [sendInput, fileAttachments, imageAttachments, activeSessionId])
 
   const handleInterrupt = useCallback(() => {
     sendInterrupt()
@@ -1186,6 +1203,8 @@ export function App() {
               isBusy={!isIdle}
               isStreaming={streamingMessageId !== null}
               placeholder={isConnected ? `Type a message... (${inputSettings.chatEnterToSend ? 'Enter' : 'Cmd+Enter'} to send)` : 'Connecting...'}
+              controlledValue={inputDraftValue}
+              onValueChange={handleDraftChange}
               filePickerFiles={filePickerFiles}
               onFileTrigger={fetchFileList}
               attachments={fileAttachments}
