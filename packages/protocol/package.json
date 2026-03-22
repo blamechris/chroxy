@@ -18,6 +18,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
     "test": "node --import tsx/esm --test tests/*.test.js"
   },
   "dependencies": {
