@@ -38,6 +38,8 @@ done
 # Built dashboard from @chroxy/dashboard workspace package.
 # Copied to src/dashboard-next/dist/ so http-routes.js __dirname-relative path resolves.
 if [ -d "$DASHBOARD_DIR/dist" ]; then
+  # rm -rf first — cp -r merges directories, leaving stale hashed files
+  rm -rf "$STAGING/src/dashboard-next/dist"
   mkdir -p "$STAGING/src/dashboard-next"
   cp -r "$DASHBOARD_DIR/dist" "$STAGING/src/dashboard-next/dist"
 else
