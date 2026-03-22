@@ -1,0 +1,5 @@
+# Keep dist/crypto.* (compiled for server Node.js import)
+# Ignore everything else in dist/
+dist/*
+!dist/crypto.js
+!dist/crypto.d.ts

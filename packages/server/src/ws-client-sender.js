@@ -1,4 +1,4 @@
-import { encrypt, DIRECTION_SERVER } from './crypto.js'
+import { encrypt, DIRECTION_SERVER } from '@chroxy/store-core/crypto'
 
 /** Backpressure thresholds (bytes) */
 const WARN_THRESHOLD = 64 * 1024    // 64KB — log warning
