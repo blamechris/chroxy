@@ -17,9 +17,10 @@ describe('InputBar busy/thinking state', () => {
     expect(src).toMatch(/isBusy[\s\S]*?thinking|thinking[\s\S]*?isBusy/)
   })
 
-  test('disables textarea when busy', () => {
-    // disabled should include isBusy
-    expect(src).toMatch(/disabled=\{.*isBusy|disabled.*\|\|.*isBusy/)
+  test('textarea is enabled when busy (allows follow-up input)', () => {
+    // textarea should NOT be disabled by isBusy — users can type follow-ups (#2631)
+    // disabled should only check the `disabled` prop (connection state), not isBusy
+    expect(src).toMatch(/disabled=\{disabled\}/)
   })
 
   test('shows stop button when streaming (existing behavior)', () => {
