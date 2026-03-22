@@ -4,7 +4,7 @@
  * Extracted from ws-server.js _handleMessage to separate auth/encryption
  * concerns from message routing.
  */
-import { createKeyPair, deriveSharedKey } from './crypto.js'
+import { createKeyPair, deriveSharedKey } from '@chroxy/store-core/crypto'
 import { AuthSchema, KeyExchangeSchema, PairSchema } from './ws-schemas.js'
 import { createLogger } from './logger.js'
 

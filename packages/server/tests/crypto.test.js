@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createKeyPair, deriveSharedKey, encrypt, decrypt, nonceFromCounter, DIRECTION_SERVER, DIRECTION_CLIENT, safeTokenCompare } from '../src/crypto.js'
+import { createKeyPair, deriveSharedKey, encrypt, decrypt, nonceFromCounter, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
+import { safeTokenCompare } from '../src/token-compare.js'
 
 describe('crypto', () => {
   it('round-trip encrypt/decrypt', () => {

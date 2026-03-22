@@ -6,7 +6,7 @@
  */
 import WebSocket from "ws";
 import "dotenv/config";
-import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from "./crypto.js";
+import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from "@chroxy/store-core/crypto";
 
 const url = process.argv[2];
 const token = process.env.API_TOKEN;
