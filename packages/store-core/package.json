@@ -7,7 +7,10 @@
   "main": "src/index.ts",
   "types": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts",
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    },
     "./crypto": {
       "import": "./dist/crypto.js",
       "types": "./dist/crypto.d.ts"
@@ -15,7 +18,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build:crypto": "tsc src/crypto.ts --outDir dist --module ESNext --target ES2022 --declaration --moduleResolution node --esModuleInterop --skipLibCheck",
+    "build:crypto": "tsc src/crypto.ts --outDir dist --module ESNext --target ES2022 --declaration --moduleResolution node --esModuleInterop --skipLibCheck && sed -i '' \"s/import { encodeBase64, decodeBase64 } from 'tweetnacl-util';/import naclUtil from 'tweetnacl-util';\\nconst { encodeBase64, decodeBase64 } = naclUtil;/\" dist/crypto.js",
+    "pretest": "npm run build:crypto",
     "test": "vitest run"
   },
   "dependencies": {
