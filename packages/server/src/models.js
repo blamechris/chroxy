@@ -1,7 +1,7 @@
 // Single source of truth for supported models. Each entry has a short id
 // (used in set_model messages), a display label, and the full Claude model ID.
 export const MODELS = [
-  { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-235-20250421', contextWindow: 200_000 },
+  { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5-20251001', contextWindow: 200_000 },
   { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-20250514', contextWindow: 200_000 },
   { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-20250514', contextWindow: 200_000 },
   { id: 'opus46', label: 'Opus 4.6', fullId: 'claude-opus-4-6', contextWindow: 1_000_000 },

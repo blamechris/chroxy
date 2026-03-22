@@ -773,6 +773,32 @@ describe('SdkSession', () => {
     })
   })
 
+  describe('result timeout resets on activity', () => {
+    it('resets timeout on each SDK event (no false timeout during active work)', async () => {
+      const s = createSession()
+      s._processReady = true
+      const errors = []
+      s.on('error', (data) => errors.push(data))
+
+      // Simulate a long-running query with many tool events
+      s._callQuery = () => {
+        return (async function* () {
+          // Yield events spread over time — each should reset the timeout
+          yield { type: 'assistant', message: { id: 'msg-1', content: [], model: 'test', role: 'assistant' } }
+          yield { type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 't1', name: 'Read' } } }
+          yield { type: 'result', session_id: 'test-123', total_cost_usd: 0, duration_ms: 100, usage: {} }
+        })()
+      }
+
+      await s.sendMessage('hello')
+
+      // Should complete without timeout error
+      assert.equal(errors.length, 0)
+      assert.equal(s._resultTimeout, null) // cleared in finally
+      s.destroy()
+    })
+  })
+
   describe('getters', () => {
     it('isRunning reflects _isBusy', () => {
       assert.equal(session.isRunning, false)

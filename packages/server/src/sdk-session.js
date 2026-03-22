@@ -191,17 +191,24 @@ export class SdkSession extends BaseSession {
       options.resume = this._sdkSessionId
     }
 
-    // Safety timeout: force-clear if result never arrives (5 min)
-    this._resultTimeout = setTimeout(() => {
-      if (this._isBusy) {
-        log.warn('Result timeout (5 min) — force-clearing busy state')
-        if (hasStreamStarted) {
-          this.emit('stream_end', { messageId })
+    // Safety timeout: force-clear if result never arrives.
+    // Resets on every SDK event (tool calls, streaming, etc.) so long-running
+    // agent tasks with many tool calls don't get falsely timed out.
+    const RESULT_TIMEOUT_MS = 300_000 // 5 min of inactivity
+    const resetResultTimeout = () => {
+      if (this._resultTimeout) clearTimeout(this._resultTimeout)
+      this._resultTimeout = setTimeout(() => {
+        if (this._isBusy) {
+          log.warn('Result timeout (5 min inactivity) — force-clearing busy state')
+          if (hasStreamStarted) {
+            this.emit('stream_end', { messageId })
+          }
+          this._clearMessageState()
+          this.emit('error', { message: 'Response timed out after 5 minutes of inactivity' })
         }
-        this._clearMessageState()
-        this.emit('error', { message: 'Response timed out after 5 minutes' })
-      }
-    }, 300_000)
+      }, RESULT_TIMEOUT_MS)
+    }
+    resetResultTimeout()
 
     try {
       // Allow subclasses to augment query options (e.g. DockerSdkSession
@@ -217,6 +224,7 @@ export class SdkSession extends BaseSession {
 
       for await (const msg of this._query) {
         if (this._destroying) break
+        resetResultTimeout() // Any SDK event = activity, reset inactivity timer
 
         switch (msg.type) {
           case 'system': {
