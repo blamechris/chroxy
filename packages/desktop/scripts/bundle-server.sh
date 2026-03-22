@@ -75,6 +75,15 @@ if [ -d "$PROTOCOL_DIR/dist" ]; then
   echo "[bundle-server] Copied @chroxy/protocol workspace package"
 fi
 
+STORECORE_DIR="$REPO_ROOT/packages/store-core"
+if [ -d "$STORECORE_DIR/dist" ]; then
+  mkdir -p "$STAGING/node_modules/@chroxy/store-core/dist"
+  cp "$STORECORE_DIR/package.json" "$STAGING/node_modules/@chroxy/store-core/"
+  cp -r "$STORECORE_DIR/dist/crypto.js" "$STAGING/node_modules/@chroxy/store-core/dist/"
+  cp -r "$STORECORE_DIR/dist/crypto.d.ts" "$STAGING/node_modules/@chroxy/store-core/dist/"
+  echo "[bundle-server] Copied @chroxy/store-core workspace package (crypto)"
+fi
+
 echo "[bundle-server] Bundle complete."
 du -sh "$STAGING" 2>/dev/null || true
 du -sh "$STAGING/node_modules" 2>/dev/null || true
