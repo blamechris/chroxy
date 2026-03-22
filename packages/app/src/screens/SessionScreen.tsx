@@ -133,10 +133,26 @@ export function SessionScreen() {
   const lastResultDuration = useConnectionStore(selectLastResultDuration);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
 
-  // Filter system messages out of chat, collect them for the System tab
+  // Chat filter: 'all' shows everything, 'compact' hides tool_use and thinking
+  const [chatFilterCompact, setChatFilterCompact] = useState(false);
+
+  // Reset compact filter when switching sessions
+  const prevSessionRef = React.useRef(activeSessionId);
+  React.useEffect(() => {
+    if (activeSessionId !== prevSessionRef.current) {
+      prevSessionRef.current = activeSessionId;
+      setChatFilterCompact(false);
+    }
+  }, [activeSessionId]);
+
+  // Filter messages: exclude system (separate tab) and optionally tool_use/thinking (compact mode)
   const chatMessages = useMemo(
-    () => allMessages.filter((m) => m.type !== 'system'),
-    [allMessages],
+    () => allMessages.filter((m) => {
+      if (m.type === 'system') return false;
+      if (chatFilterCompact && (m.type === 'tool_use' || m.type === 'thinking')) return false;
+      return true;
+    }),
+    [allMessages, chatFilterCompact],
   );
   const systemMessages = useMemo(
     () => allMessages.filter((m) => m.type === 'system'),
@@ -716,6 +732,18 @@ export function SessionScreen() {
               Chat
             </Text>
           </TouchableOpacity>
+          {viewMode === 'chat' && (
+            <TouchableOpacity
+              style={[styles.modeButton, chatFilterCompact && styles.modeButtonActive]}
+              onPress={() => { setChatFilterCompact((v) => !v); clearSelection(); }}
+              accessibilityRole="button"
+              accessibilityLabel={chatFilterCompact ? 'Show all messages' : 'Show chat only'}
+            >
+              <Text style={[styles.modeButtonText, chatFilterCompact && styles.modeButtonTextActive]}>
+                {chatFilterCompact ? 'Compact' : 'All'}
+              </Text>
+            </TouchableOpacity>
+          )}
           {hasTerminal && (
             <TouchableOpacity
               style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
