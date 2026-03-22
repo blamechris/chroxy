@@ -430,8 +430,8 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         onChange={handleChange}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
-        disabled={disabled || isBusy}
-        placeholder={isBusy ? 'Claude is processing...' : placeholder}
+        disabled={disabled}
+        placeholder={isBusy ? 'Type to send follow-up...' : placeholder}
         aria-label="Message input"
         aria-describedby={shortcutsId}
         rows={1}
@@ -442,7 +442,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
             data-testid="mic-button"
             className={`btn-mic${voiceInput.isRecording ? ' recording' : ''}`}
             onClick={handleMicPress}
-            disabled={disabled || isBusy}
+            disabled={disabled}
             type="button"
             aria-label={voiceInput.isRecording ? 'Stop recording' : 'Start voice input'}
           >
@@ -459,7 +459,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
             )}
           </button>
         )}
-        {(isStreaming || isBusy) ? (
+        {(isStreaming || isBusy) && !value.trim() ? (
           <button
             data-testid="interrupt-button"
             className="btn-interrupt"
@@ -476,7 +476,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
             onClick={send}
             disabled={disabled}
             type="button"
-            aria-label="Send message"
+            aria-label={isBusy ? 'Send follow-up' : 'Send message'}
           >
             Send
           </button>
