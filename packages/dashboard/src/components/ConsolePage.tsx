@@ -121,6 +121,29 @@ export function ConsolePage() {
     return () => { cancelled = true }
   }, [serverPhase, connInfo])
 
+  // Auto-refresh QR on tab focus and periodically (pairing IDs rotate every 60s)
+  useEffect(() => {
+    const token = getAuthToken()
+    if (!token) return
+    const fetchQr = async () => {
+      try {
+        const res = await fetch('/qr', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (res.ok) setQrSvg(await res.text())
+      } catch { /* QR is optional */ }
+    }
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') fetchQr()
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    const interval = setInterval(fetchQr, 50_000) // refresh at ~83% of 60s TTL
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility)
+      clearInterval(interval)
+    }
+  }, [])
+
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Clear copy feedback timer on unmount
