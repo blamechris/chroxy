@@ -457,14 +457,23 @@ describe('SdkSession', () => {
   // -- sendMessage while busy --
 
   describe('sendMessage while busy', () => {
-    it('emits error when already processing', () => {
+    it('queues message when already processing', () => {
       session._isBusy = true
       const errors = []
       session.on('error', (data) => errors.push(data))
 
-      session.sendMessage('hi')
-      assert.equal(errors.length, 1)
-      assert.ok(errors[0].message.includes('Already processing'))
+      session.sendMessage('follow-up message')
+      assert.equal(errors.length, 0)
+      assert.equal(session._pendingInput.length, 1)
+      assert.equal(session._pendingInput[0].prompt, 'follow-up message')
+    })
+
+    it('clears pending queue on destroy', () => {
+      session._isBusy = true
+      session.sendMessage('queued')
+      assert.equal(session._pendingInput.length, 1)
+      session.destroy()
+      assert.equal(session._pendingInput.length, 0)
     })
   })
 

@@ -91,6 +91,7 @@ export class SdkSession extends BaseSession {
     this._sessionId = null
     this._query = null
     this._thinkingLevel = null
+    this._pendingInput = []
 
     // Permission handling — delegated to PermissionManager
     this._permissions = new PermissionManager({ log })
@@ -128,7 +129,10 @@ export class SdkSession extends BaseSession {
    */
   async sendMessage(prompt, attachments, sendOptions = {}) {
     if (this._isBusy) {
-      this.emit('error', { message: 'Already processing a message' })
+      // Queue the message — it will be sent after the current turn completes
+      if (!this._pendingInput) this._pendingInput = []
+      this._pendingInput.push({ prompt, attachments, sendOptions })
+      log.info(`Queued follow-up message (${this._pendingInput.length} pending)`)
       return
     }
 
@@ -365,6 +369,17 @@ export class SdkSession extends BaseSession {
       this._clearMessageState()
     } finally {
       this._query = null
+      // Dequeue any follow-up messages that arrived while busy
+      if (this._pendingInput?.length && !this._destroying) {
+        const next = this._pendingInput.shift()
+        log.info(`Dequeuing follow-up message (${this._pendingInput.length} remaining)`)
+        // Use setImmediate/nextTick to avoid stack depth issues
+        process.nextTick(() => {
+          if (!this._destroying) {
+            this.sendMessage(next.prompt, next.attachments, next.sendOptions)
+          }
+        })
+      }
     }
   }
 
@@ -566,6 +581,7 @@ export class SdkSession extends BaseSession {
    */
   destroy() {
     this._destroying = true
+    this._pendingInput = []
 
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
