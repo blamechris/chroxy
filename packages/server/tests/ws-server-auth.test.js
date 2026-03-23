@@ -1212,11 +1212,11 @@ describe('WsServer with TokenManager', () => {
     send(ws, { type: 'auth', token: 'initial-token' })
     await waitForMessage(messages, 'auth_ok')
 
-    // Rotate — should broadcast notification without the new token
+    // Rotate — unencrypted clients must NOT receive the raw token
     tokenManager.rotate()
     const rotated = await waitForMessage(messages, 'token_rotated')
     assert.ok(rotated, 'Should receive token_rotated message')
-    assert.equal(rotated.newToken, undefined, 'newToken must NOT be broadcast')
+    assert.equal(rotated.token, undefined, 'token must NOT be sent to unencrypted clients')
     assert.ok(typeof rotated.expiresAt === 'number' || rotated.expiresAt === null)
 
     ws.close()
