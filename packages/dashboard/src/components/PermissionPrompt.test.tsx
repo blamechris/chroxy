@@ -87,7 +87,7 @@ describe('PermissionPrompt', () => {
     expect(screen.getByTestId('perm-countdown')).toHaveTextContent('Timed out')
   })
 
-  it('hides buttons when expired', () => {
+  it('hides buttons when expired and shows expired info', () => {
     const onRespond = vi.fn()
     render(
       <PermissionPrompt
@@ -102,6 +102,25 @@ describe('PermissionPrompt', () => {
     act(() => { vi.advanceTimersByTime(3000) })
     expect(screen.queryByText('Allow')).not.toBeInTheDocument()
     expect(screen.queryByText('Deny')).not.toBeInTheDocument()
+    expect(screen.getByTestId('perm-expired-info')).toBeInTheDocument()
+    expect(screen.getByText(/Permission expired/)).toBeInTheDocument()
+    expect(screen.getByText('Dismiss')).toBeInTheDocument()
+  })
+
+  it('removes prompt entirely when Dismiss is clicked after expiry', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={2000}
+        onRespond={onRespond}
+      />
+    )
+    act(() => { vi.advanceTimersByTime(3000) })
+    fireEvent.click(screen.getByText('Dismiss'))
+    expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
   })
 
   it('shows expired immediately when remainingMs is 0', () => {
