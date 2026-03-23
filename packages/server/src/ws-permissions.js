@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { createLogger } from './logger.js'
+import { RateLimiter } from './rate-limiter.js'
 
 const log = createLogger('ws')
 
@@ -53,11 +54,27 @@ function sanitizeToolInput(input) {
 export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager }) {
   let _permissionCounter = 0
 
+  // Rate limiter for HTTP permission requests (per source IP)
+  const _httpPermissionLimiter = new RateLimiter({ windowMs: 60_000, maxMessages: 30, burst: 10 })
+
   // Fall back to validateBearerAuth if validateHookAuth is not provided (backwards compat for tests)
   const _validateHookAuth = validateHookAuth || validateBearerAuth
 
   /** Handle POST /permission from the hook script */
   function handlePermissionRequest(req, res) {
+    // Rate limit by source IP
+    const clientIp = req.socket.remoteAddress || 'unknown'
+    const { allowed, retryAfterMs } = _httpPermissionLimiter.check(clientIp)
+    if (!allowed) {
+      log.warn(`Rate limited POST /permission from ${clientIp}`)
+      res.writeHead(429, {
+        'Content-Type': 'application/json',
+        'Retry-After': Math.ceil(retryAfterMs / 1000),
+      })
+      res.end(JSON.stringify({ error: 'rate limited', retryAfterMs }))
+      return
+    }
+
     if (!_validateHookAuth(req, res)) {
       log.warn('Rejected unauthenticated POST /permission')
       return
