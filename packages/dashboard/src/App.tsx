@@ -1004,10 +1004,7 @@ export function App() {
           clientCount={connectedClients.length}
           onFilterChange={setSidebarFilter}
           onSessionClick={handleSwitchSession}
-          onResumeSession={(convId) => {
-            /* Will be wired in #1107 */
-            console.log('Resume session:', convId)
-          }}
+          onResumeSession={resumeConversation}
           onNewSession={(cwd) => {
             setPendingCwd(cwd || null)
             setShowCreateSession(true)

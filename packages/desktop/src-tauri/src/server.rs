@@ -152,7 +152,19 @@ impl ServerManager {
             let pids = String::from_utf8_lossy(&output.stdout);
             for pid_str in pids.split_whitespace() {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    unsafe { libc::kill(pid, libc::SIGTERM); }
+                    // Verify the process belongs to Chroxy/node before killing
+                    if let Ok(ps_output) = Command::new("ps")
+                        .args(["-p", pid_str.trim(), "-o", "comm="])
+                        .output()
+                    {
+                        let comm = String::from_utf8_lossy(&ps_output.stdout)
+                            .trim()
+                            .to_lowercase()
+                            .to_string();
+                        if comm.contains("node") || comm.contains("chroxy") {
+                            unsafe { libc::kill(pid, libc::SIGTERM); }
+                        }
+                    }
                 }
             }
             if !pids.trim().is_empty() {
