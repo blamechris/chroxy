@@ -14,29 +14,30 @@ export class SessionLockManager {
   /**
    * Acquire an exclusive lock for a session. Returns a release function.
    * If the session is already locked, waits for the previous operation to finish.
+   * Uses a FIFO promise-chain to avoid race windows between await and Map.set.
    *
    * @param {string} sessionId
    * @returns {Promise<() => void>} release function
    */
   async acquire(sessionId) {
-    // Wait for any existing lock to release
-    while (this._locks.has(sessionId)) {
-      try {
-        await this._locks.get(sessionId)
-      } catch {
-        // Previous holder errored — that's fine, we can proceed
-      }
-    }
+    const prev = this._locks.get(sessionId) || Promise.resolve()
 
     let release
-    const lockPromise = new Promise((resolve) => {
+    const next = new Promise((resolve) => {
       release = resolve
     })
 
-    this._locks.set(sessionId, lockPromise)
+    // Chain onto the existing promise immediately (no await gap)
+    this._locks.set(sessionId, next)
+
+    // Wait for the previous holder to finish
+    await prev
 
     return () => {
-      this._locks.delete(sessionId)
+      // Only delete if we're still the tail of the chain
+      if (this._locks.get(sessionId) === next) {
+        this._locks.delete(sessionId)
+      }
       release()
     }
   }
