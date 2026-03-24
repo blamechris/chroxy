@@ -9,7 +9,6 @@ import { join } from 'path'
 import { homedir } from 'os'
 import readline from 'readline'
 import { validateConfig, mergeConfig } from '../config.js'
-import { defaultShell } from '../platform.js'
 
 export const CONFIG_DIR = join(homedir(), '.chroxy')
 export const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -126,7 +125,6 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
 
   const defaults = {
     port: 8765,
-    shell: defaultShell(),
     noAuth: false,
   }
 
@@ -152,7 +150,6 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
 
   if (config.apiToken) process.env.API_TOKEN = config.apiToken
   if (config.port) process.env.PORT = String(config.port)
-  if (config.shell) process.env.SHELL_CMD = config.shell
 
   return config
 }

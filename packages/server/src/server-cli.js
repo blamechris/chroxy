@@ -7,7 +7,7 @@ import { hostname, homedir } from 'os'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
-import qrcode from 'qrcode-terminal'
+import QRCode from 'qrcode'
 import { createLogger, setJsonMode } from './logger.js'
 
 const log = createLogger('cli')
@@ -378,12 +378,13 @@ export async function startCliServer(config) {
 
   // Helper: display QR code and connection info
   const SHOW_TOKEN = !!config.showToken || process.env.CHROXY_SHOW_TOKEN === '1'
-  const displayQr = (wsUrlStr, httpUrlStr, modeLabel) => {
+  const displayQr = async (wsUrlStr, httpUrlStr, modeLabel) => {
     const pairingUrl = buildPairingUrl(wsUrlStr)
     if (pairingUrl) {
       console.log(`\n[✓] Server ready! (CLI headless mode, ${modeLabel})\n`)
       console.log('📱 Scan this QR code with the Chroxy app:\n')
-      qrcode.generate(pairingUrl, { small: true })
+      const qrText = await QRCode.toString(pairingUrl, { type: 'terminal', small: true })
+      process.stdout.write(qrText)
       const displayToken = SHOW_TOKEN ? API_TOKEN : maskToken(API_TOKEN)
       console.log(`\nOr connect manually:`)
       console.log(`   URL:   ${wsUrlStr}`)
@@ -415,7 +416,7 @@ export async function startCliServer(config) {
     currentWsUrl = wsUrl
     currentTunnelMode = 'external'
     const httpUrl = externalUrl.replace(/^wss?:\/\//, 'https://')
-    displayQr(wsUrl, httpUrl, 'external')
+    await displayQr(wsUrl, httpUrl, 'external')
   }
 
   // Determine tunnel mode
@@ -447,7 +448,7 @@ export async function startCliServer(config) {
       if (newWsUrl !== currentWsUrl) {
         currentWsUrl = newWsUrl
         if (pairingManager) pairingManager.refresh()
-        displayQr(newWsUrl, newHttpUrl, modeLabel)
+        await displayQr(newWsUrl, newHttpUrl, modeLabel)
         wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
       } else {
         log.info(`Tunnel URL unchanged: ${newWsUrl}`)
@@ -467,7 +468,7 @@ export async function startCliServer(config) {
     // 7. Generate connection info
     const modeLabel = `cloudflare:${tunnelArg.mode}`
     currentTunnelMode = modeLabel
-    displayQr(wsUrl, httpUrl, modeLabel)
+    await displayQr(wsUrl, httpUrl, modeLabel)
 
     // Extend the pairing ID validity after first QR display to give the user
     // time to scan. Without this, slow tunnel setup (60-80s) can consume most
@@ -480,7 +481,7 @@ export async function startCliServer(config) {
     const lanIp = getLanIp()
     const host = lanIp || 'localhost'
     currentWsUrl = `ws://${host}:${PORT}`
-    displayQr(`ws://${host}:${PORT}`, `http://${host}:${PORT}`, 'none')
+    await displayQr(`ws://${host}:${PORT}`, `http://${host}:${PORT}`, 'none')
   } else if (!NO_AUTH) {
     // tunnelArg is set but SKIP_TUNNEL is true due to externalUrl — already handled above
   } else {
@@ -491,17 +492,17 @@ export async function startCliServer(config) {
 
   // Re-render QR code when pairing auto-refreshes (keeps terminal QR scannable)
   if (pairingManager) {
-    pairingManager.on('pairing_refreshed', () => {
+    pairingManager.on('pairing_refreshed', async () => {
       if (!currentWsUrl) return
       const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
-      displayQr(currentWsUrl, httpBase, currentTunnelMode)
+      await displayQr(currentWsUrl, httpBase, currentTunnelMode)
       log.info('QR code refreshed with new pairing ID.')
     })
   }
 
   // Regenerate QR code and update connection info when token rotates
   if (tokenManager) {
-    tokenManager.on('token_rotated', () => {
+    tokenManager.on('token_rotated', async () => {
       if (!currentWsUrl) return // no-auth or localhost-only — no QR to update
 
       // Refresh pairing ID when token rotates (old session tokens remain valid).
@@ -511,7 +512,7 @@ export async function startCliServer(config) {
         pairingManager.refresh()
       } else {
         const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
-        displayQr(currentWsUrl, httpBase, currentTunnelMode)
+        await displayQr(currentWsUrl, httpBase, currentTunnelMode)
       }
       log.info('API token rotated. QR code updated.')
     })
