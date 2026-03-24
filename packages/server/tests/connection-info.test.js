@@ -36,7 +36,7 @@ describe('connection-info', () => {
       connectionUrl: 'chroxy://example.com?token=test-token-123',
       tunnelMode: 'cloudflare:quick',
       startedAt: '2026-02-22T00:00:00.000Z',
-      pid: 12345,
+      pid: process.pid,
     }
     writeConnectionInfo(info)
 
