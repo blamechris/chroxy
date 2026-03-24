@@ -604,7 +604,11 @@ export class WsServer {
       return false
     }
     if (this._hookSecrets.size > 0) {
-      if (!this._hookSecrets.has(token)) {
+      let valid = false
+      for (const secret of this._hookSecrets) {
+        if (safeTokenCompare(token, secret)) { valid = true; break }
+      }
+      if (!valid) {
         res.writeHead(403, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'unauthorized' }))
         return false
