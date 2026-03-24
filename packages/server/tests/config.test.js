@@ -10,7 +10,6 @@ describe('validateConfig', () => {
     const config = {
       apiToken: 'abc123',
       port: 8765,
-      shell: '/bin/bash',
       cwd: '/home/user',
       model: 'sonnet',
       allowedTools: ['bash', 'read'],
@@ -141,7 +140,7 @@ describe('validateConfig', () => {
 
 describe('mergeConfig', () => {
   let originalEnv
-  const envKeys = ['API_TOKEN', 'PORT', 'SHELL_CMD', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_NO_AUTH', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME', 'CHROXY_LEGACY_CLI', 'CHROXY_PROVIDER', 'CHROXY_SHOW_TOKEN', 'CHROXY_REPOS']
+  const envKeys = ['API_TOKEN', 'PORT', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_NO_AUTH', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME', 'CHROXY_LEGACY_CLI', 'CHROXY_PROVIDER', 'CHROXY_SHOW_TOKEN', 'CHROXY_REPOS']
 
   beforeEach(() => {
     originalEnv = {}
@@ -194,11 +193,11 @@ describe('mergeConfig', () => {
   })
 
   it('precedence order: CLI > ENV > file > defaults', () => {
-    process.env.SHELL_CMD = '/bin/zsh'
+    process.env.CHROXY_CWD = '/tmp/env-cwd'
     const defaults = {
       port: 8765,
       apiToken: 'default-token',
-      shell: '/bin/bash',
+      cwd: '/home/user',
     }
     const fileConfig = {
       port: 9000,
@@ -213,7 +212,7 @@ describe('mergeConfig', () => {
 
     assert.equal(merged.port, 5555)
     assert.equal(merged.apiToken, 'cli-token')
-    assert.equal(merged.shell, '/bin/zsh')
+    assert.equal(merged.cwd, '/tmp/env-cwd')
   })
 
   it('parses environment variable types correctly', () => {
@@ -254,7 +253,7 @@ describe('mergeConfig', () => {
 
     assert.equal(merged.port, 8765)
     assert.equal(merged.apiToken, 'token')
-    assert.equal(merged.shell, undefined)
+    assert.equal(merged.cwd, undefined)
   })
 
   it('merges tunnel config from file', () => {

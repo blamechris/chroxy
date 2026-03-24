@@ -256,6 +256,7 @@ export function createHttpHandler(server) {
         'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*; img-src 'self' data:; font-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         'X-Frame-Options': 'DENY',
         'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
       }
 
       // Workspace layout: packages/dashboard/dist (dev)
@@ -306,7 +307,8 @@ export function createHttpHandler(server) {
       const indexPath = join(distDir, 'index.html')
       if (existsSync(indexPath)) {
         let html = readFileSync(indexPath, 'utf-8')
-        const configMeta = `<meta name="chroxy-config" content='${JSON.stringify({port: server.port, noEncrypt: !server._encryptionEnabled})}'>`
+        const escaped = JSON.stringify({port: server.port, noEncrypt: !server._encryptionEnabled}).replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        const configMeta = `<meta name="chroxy-config" content='${escaped}'>`
         html = html.replace('</head>', `${configMeta}\n</head>`)
         res.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8',

@@ -77,17 +77,18 @@ const PLATFORM_SPECIFIC = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function extractServerMessageTypes(protocolSrc) {
-  // Match the ServerMessageType object literal
-  const block = protocolSrc.match(
-    /export const ServerMessageType\s*=\s*\{([\s\S]*?)\}\s*as\s*const/,
-  )
-  assert.ok(block, 'Should find ServerMessageType in protocol source')
+function extractServerMessageTypes(wsServerSrc) {
+  // Extract server message types from the Server -> Client doc comment in ws-server.js
+  const serverSection = wsServerSrc.match(/\* Server -> Client:\n([\s\S]*?)\n \*\n \* Encrypted envelope/)?.[1]
+  assert.ok(serverSection, 'Should find Server -> Client section in ws-server.js')
 
-  // Extract all string values (the 'snake_case' literals)
-  const types = [...block[1].matchAll(/'([a-z_]+)'/g)].map(m => m[1])
-  assert.ok(types.length > 0, 'Should find ServerMessageType values')
-  return new Set(types)
+  const types = [...serverSection.matchAll(/type: '(\w+)'/g)].map(m => m[1])
+  assert.ok(types.length > 0, 'Should find server message types')
+
+  // 'encrypted' is documented in the Encrypted envelope section (bidirectional)
+  const result = new Set(types)
+  result.add('encrypted')
+  return result
 }
 
 function extractAppHandlerTypes(appSrc) {
@@ -123,15 +124,15 @@ function extractDashboardHandlerTypes(dashSrc) {
 
 describe('handler coverage contract', () => {
   // Load all source files once
-  const protocolPath = resolve(import.meta.dirname, '../src/index.ts')
+  const wsServerPath = resolve(import.meta.dirname, '../../server/src/ws-server.js')
   const appHandlerPath = resolve(import.meta.dirname, '../../app/src/store/message-handler.ts')
   const dashHandlerPath = resolve(import.meta.dirname, '../../dashboard/src/store/message-handler.ts')
 
-  const protocolSrc = readFileSync(protocolPath, 'utf-8')
+  const wsServerSrc = readFileSync(wsServerPath, 'utf-8')
   const appSrc = readFileSync(appHandlerPath, 'utf-8')
   const dashSrc = readFileSync(dashHandlerPath, 'utf-8')
 
-  const allServerTypes = extractServerMessageTypes(protocolSrc)
+  const allServerTypes = extractServerMessageTypes(wsServerSrc)
   const appTypes = extractAppHandlerTypes(appSrc)
   const dashTypes = extractDashboardHandlerTypes(dashSrc)
 
