@@ -4,9 +4,10 @@
  * Ports plan_ready handler from dashboard-app.js (lines 1655-1662, 1811-1820).
  * Renders plan content and wires Approve/Feedback buttons to the provided callbacks.
  */
+import DOMPurify from 'dompurify'
 
 export interface PlanApprovalProps {
-  /** Pre-sanitized HTML (rendered via dangerouslySetInnerHTML). Caller must sanitize. */
+  /** Plan HTML content (sanitized before rendering). */
   planHtml: string
   onApprove: () => void
   onFeedback: () => void
@@ -20,7 +21,7 @@ export function PlanApproval({ planHtml, onApprove, onFeedback }: PlanApprovalPr
       <div
         className="plan-content"
         data-testid="plan-content"
-        dangerouslySetInnerHTML={{ __html: planHtml }}
+        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(planHtml) }}
       />
       <div className="plan-buttons">
         <button className="btn-plan-approve" onClick={onApprove} type="button">
