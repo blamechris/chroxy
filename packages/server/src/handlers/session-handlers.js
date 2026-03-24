@@ -125,6 +125,7 @@ async function handleDestroySession(ws, _client, msg, ctx) {
       if (entry) {
         ctx.send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
         ctx.sendSessionInfo(clientWs, firstId)
+        ctx.replayHistory(clientWs, firstId)
       }
       broadcastFocusChanged(c, firstId, ctx)
     }
