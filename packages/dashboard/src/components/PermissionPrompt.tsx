@@ -79,6 +79,9 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   const isExpired = remaining <= 0
   const isUrgent = remaining > 0 && remaining <= 30000
   const showButtons = !answered && !isExpired
+  const [dismissed, setDismissed] = useState(false)
+
+  if (dismissed) return null
 
   return (
     <div className={`permission-prompt${answered ? ' answered' : ''}`} data-testid="permission-prompt">
@@ -102,6 +105,15 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
           </button>
           <button className="btn-deny" onClick={() => respond('deny')} type="button" aria-label={`Deny ${tool}`}>
             Deny
+          </button>
+        </div>
+      )}
+
+      {isExpired && !answered && (
+        <div className="perm-expired-info" data-testid="perm-expired-info">
+          <span className="perm-expired-msg">Permission expired — Claude will continue without this tool</span>
+          <button className="btn-dismiss" onClick={() => setDismissed(true)} type="button" aria-label="Dismiss expired permission">
+            Dismiss
           </button>
         </div>
       )}

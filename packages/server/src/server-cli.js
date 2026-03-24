@@ -534,7 +534,9 @@ export async function startCliServer(config) {
     if (tokenManager) tokenManager.destroy()
     if (pairingManager) pairingManager.destroy()
     // Persist sessions before destroying (enables restore on restart)
-    try { sessionManager.serializeState() } catch {}
+    try { sessionManager.serializeState() } catch (err) {
+      log.error(`Failed to serialize session state: ${err?.message || err}`)
+    }
     sessionManager.destroyAll()
     wsServer.close()
     if (tunnel) await tunnel.stop()
@@ -542,8 +544,8 @@ export async function startCliServer(config) {
     process.exit(0)
   }
 
-  process.on('SIGINT', () => shutdown('SIGINT'))
-  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  process.on('SIGINT', () => { shutdown('SIGINT').catch(() => process.exit(1)) })
+  process.on('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(1)) })
 
   process.on('uncaughtException', (err) => {
     log.error(`Uncaught exception: ${err?.stack || err}`)

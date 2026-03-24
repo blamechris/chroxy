@@ -36,7 +36,7 @@ describe('connection-info', () => {
       connectionUrl: 'chroxy://example.com?token=test-token-123',
       tunnelMode: 'cloudflare:quick',
       startedAt: '2026-02-22T00:00:00.000Z',
-      pid: 12345,
+      pid: process.pid,
     }
     writeConnectionInfo(info)
 
@@ -58,7 +58,7 @@ describe('connection-info', () => {
       connectionUrl: 'chroxy://test.example.com?token=tok-read-test',
       tunnelMode: 'cloudflare:named',
       startedAt: '2026-02-22T12:00:00.000Z',
-      pid: 99999,
+      pid: process.pid, // use current PID so liveness check passes
     }
     writeConnectionInfo(info)
 
@@ -98,7 +98,7 @@ describe('connection-info', () => {
       connectionUrl: 'chroxy://roundtrip.example.com?token=tok-roundtrip-abc123',
       tunnelMode: 'cloudflare:quick',
       startedAt: '2026-02-22T08:30:00.000Z',
-      pid: 54321,
+      pid: process.pid, // use current PID so liveness check passes
     }
 
     writeConnectionInfo(info)
@@ -111,6 +111,41 @@ describe('connection-info', () => {
     assert.equal(result.tunnelMode, info.tunnelMode)
     assert.equal(result.startedAt, info.startedAt)
     assert.equal(result.pid, info.pid)
+    cleanup()
+  })
+
+  it('readConnectionInfo() returns null and cleans up when PID is dead (stale file)', () => {
+    cleanup()
+    const info = {
+      wsUrl: 'wss://stale.example.com',
+      httpUrl: 'https://stale.example.com',
+      apiToken: 'tok-stale',
+      connectionUrl: 'chroxy://stale.example.com?token=tok-stale',
+      tunnelMode: 'cloudflare:quick',
+      startedAt: '2026-02-22T00:00:00.000Z',
+      pid: 99999, // non-existent process
+    }
+    writeConnectionInfo(info)
+
+    const filePath = getConnectionInfoPath()
+    assert.ok(existsSync(filePath), 'file should exist before read')
+
+    const result = readConnectionInfo()
+    assert.equal(result, null, 'should return null for dead PID')
+    assert.ok(!existsSync(filePath), 'stale file should be removed')
+  })
+
+  it('readConnectionInfo() returns info when no pid field is present', () => {
+    cleanup()
+    const info = {
+      wsUrl: 'wss://nopid.example.com',
+      httpUrl: 'https://nopid.example.com',
+      apiToken: 'tok-nopid',
+    }
+    writeConnectionInfo(info)
+
+    const result = readConnectionInfo()
+    assert.deepEqual(result, info)
     cleanup()
   })
 

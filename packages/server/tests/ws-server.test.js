@@ -2287,7 +2287,7 @@ describe('WsServer GET /connect endpoint', () => {
       connectionUrl: 'chroxy://connect-test.example.com?token=tok-connect-test',
       tunnelMode: 'cloudflare:quick',
       startedAt: '2026-02-22T00:00:00.000Z',
-      pid: 12345,
+      pid: process.pid,
     }
     writeConnectionInfo(info)
 
@@ -2375,7 +2375,7 @@ describe('WsServer GET /connect redacts apiToken in no-auth mode (#742)', () => 
       connectionUrl: 'chroxy://noauth-test.example.com?token=secret-token-abc123',
       tunnelMode: 'cloudflare:quick',
       startedAt: '2026-02-22T00:00:00.000Z',
-      pid: 99999,
+      pid: process.pid,
     })
 
     server = new WsServer({
@@ -2867,7 +2867,7 @@ describe('GET /connect redacts connectionUrl in no-auth mode (#753)', () => {
       connectionUrl: 'chroxy://redact-url-test.example.com?token=secret-tok-753',
       tunnelMode: 'cloudflare:quick',
       startedAt: '2026-02-22T00:00:00.000Z',
-      pid: 55555,
+      pid: process.pid,
     })
 
     server = new WsServer({
