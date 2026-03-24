@@ -2,6 +2,7 @@ import nacl from 'tweetnacl';
 import naclUtil from 'tweetnacl-util';
 const { encodeBase64, decodeBase64 } = naclUtil;
 const NONCE_LENGTH = 24;
+const MAX_NONCE_COUNTER = 2 ** 48;
 /** Direction byte for nonce construction — prevents nonce reuse across send directions */
 export const DIRECTION_SERVER = 0x00;
 export const DIRECTION_CLIENT = 0x01;
@@ -50,6 +51,9 @@ export function deriveSharedKey(theirPubBase64, mySecretKey) {
  * Byte 0 is direction (0=server, 1=client), bytes 1-8 are counter (little-endian).
  */
 export function nonceFromCounter(n, direction) {
+    if (n > MAX_NONCE_COUNTER) {
+        throw new Error('Nonce counter exhausted — reconnect required for new key exchange');
+    }
     const nonce = new Uint8Array(NONCE_LENGTH);
     nonce[0] = direction;
     let val = n;
