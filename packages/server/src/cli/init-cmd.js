@@ -4,7 +4,7 @@
 import { existsSync, mkdirSync } from 'fs'
 import { randomBytes } from 'crypto'
 import { CONFIG_DIR, CONFIG_FILE, prompt } from './shared.js'
-import { defaultShell, writeFileRestricted } from '../platform.js'
+import { writeFileRestricted } from '../platform.js'
 import { setToken, isKeychainAvailable } from '../keychain.js'
 
 export function registerInitCommand(program) {
@@ -38,7 +38,6 @@ export function registerInitCommand(program) {
 
       const config = {
         port,
-        shell: defaultShell(),
       }
 
       // Store token in OS keychain if available, otherwise in config file
