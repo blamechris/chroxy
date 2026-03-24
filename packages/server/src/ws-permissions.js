@@ -63,7 +63,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
   /** Handle POST /permission from the hook script */
   function handlePermissionRequest(req, res) {
     // Rate limit by source IP
-    const clientIp = req.socket.remoteAddress || 'unknown'
+    const clientIp = req.socket?.remoteAddress || 'unknown'
     const { allowed, retryAfterMs } = _httpPermissionLimiter.check(clientIp)
     if (!allowed) {
       log.warn(`Rate limited POST /permission from ${clientIp}`)
