@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { extensionHandlers } from '../../src/handlers/extension-handlers.js'
+import { miscHandlers as extensionHandlers } from '../../src/handlers/misc-handlers.js'
 import { createSpy, createMockSession } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
