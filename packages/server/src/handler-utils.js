@@ -198,6 +198,6 @@ export function resolveSession(ctx, msg, client) {
  * @param {string} message - Human-readable error description
  */
 export function sendError(ws, requestId, code, message) {
-  if (!ws || ws.readyState !== ws.OPEN) return
+  if (!ws || ws.readyState !== 1) return
   ws.send(JSON.stringify({ type: 'error', requestId: requestId ?? null, code, message }))
 }

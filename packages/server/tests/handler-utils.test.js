@@ -698,7 +698,7 @@ describe('broadcastFocusChanged', () => {
 describe('sendError', () => {
   it('sends a well-formed error message when socket is open', () => {
     const sent = []
-    const ws = { readyState: 1, OPEN: 1, send: (data) => sent.push(JSON.parse(data)) }
+    const ws = { readyState: 1, send: (data) => sent.push(JSON.parse(data)) }
     sendError(ws, 'req-1', 'HANDLER_ERROR', 'something went wrong')
     assert.strictEqual(sent.length, 1)
     assert.strictEqual(sent[0].type, 'error')
@@ -709,14 +709,14 @@ describe('sendError', () => {
 
   it('sets requestId to null when not provided', () => {
     const sent = []
-    const ws = { readyState: 1, OPEN: 1, send: (data) => sent.push(JSON.parse(data)) }
+    const ws = { readyState: 1, send: (data) => sent.push(JSON.parse(data)) }
     sendError(ws, undefined, 'HANDLER_ERROR', 'oops')
     assert.strictEqual(sent[0].requestId, null)
   })
 
   it('does nothing when socket is closed', () => {
     const sent = []
-    const ws = { readyState: 3, OPEN: 1, send: (data) => sent.push(data) }
+    const ws = { readyState: 3, send: (data) => sent.push(data) }
     sendError(ws, 'req-2', 'HANDLER_ERROR', 'too late')
     assert.strictEqual(sent.length, 0)
   })
