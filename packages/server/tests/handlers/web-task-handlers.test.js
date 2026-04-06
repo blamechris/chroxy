@@ -50,7 +50,6 @@ describe('web-task-handlers', () => {
       webTaskHandlers.launch_web_task(makeWs(), makeClient(), { prompt: 'Do something' }, ctx)
 
       assert.equal(ctx._sent[0].type, 'web_task_error')
-      assert.equal(ctx._sent[0].type, 'web_task_error')
       assert.ok(ctx._sent[0].message.length > 0)
     })
 

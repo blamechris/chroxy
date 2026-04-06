@@ -109,11 +109,17 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
 
     // If the client is bound to a specific session (via session token), enforce
     // that they can only view that session regardless of the server default.
+    // Fail closed: if the bound session no longer exists, clear the active
+    // session rather than silently falling back to a different session.
     if (client.boundSessionId) {
       const boundEntry = sessionManager.getSession(client.boundSessionId)
       if (boundEntry) {
         activeId = client.boundSessionId
         entry = boundEntry
+      } else {
+        log.warn(`Bound session ${client.boundSessionId} not found for client ${client.id} — clearing active session`)
+        activeId = null
+        entry = null
       }
     }
 
