@@ -128,41 +128,42 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
 
   const prevOpenRef = useRef(false)
   useEffect(() => {
-    if (open) {
-      const cwdValue = initialCwd || ''
-      setCwd(cwdValue)
-      cwdValRef.current = cwdValue
-      setNameManuallyEdited(false)
-      // Only clear error when modal freshly opens (not on every effect run)
-      if (!prevOpenRef.current) {
-        setNameError('')
-      }
-      // Normalize provider: if server has responded with available providers and
-      // the persisted default isn't in the list, fall back to first available
-      if (availableProviders.length > 0 && !availableProviders.some(p => p.name === defaultProvider)) {
-        setProvider(availableProviders[0]!.name)
-      } else {
-        setProvider(defaultProvider)
-      }
-      setShowAdvanced(false)
-      setPermissionMode('')
-      setWorktree(false)
-      setShowSuggestions(false)
-      setSelectedSuggestion(-1)
-      setBrowsing(false)
-      setBrowseEntries([])
-      setDirectoryListingCallback(null)
-      if (cwdValue) {
-        const generated = generateDefaultName(cwdValue, existingNames)
-        setName(generated)
-        nameValRef.current = generated
-      } else {
-        setName('')
-        nameValRef.current = ''
-      }
-    }
+    // Only reset form state on fresh open (closed → open transition).
+    // Without this guard, store updates to existingNames or availableProviders
+    // while the modal is already open would wipe the user's in-progress edits.
+    const freshOpen = open && !prevOpenRef.current
     prevOpenRef.current = open
-  }, [open, initialCwd, existingNames])
+    if (!freshOpen) return
+
+    const cwdValue = initialCwd || ''
+    setCwd(cwdValue)
+    cwdValRef.current = cwdValue
+    setNameManuallyEdited(false)
+    setNameError('')
+    // Normalize provider: if server has responded with available providers and
+    // the persisted default isn't in the list, fall back to first available
+    if (availableProviders.length > 0 && !availableProviders.some(p => p.name === defaultProvider)) {
+      setProvider(availableProviders[0]!.name)
+    } else {
+      setProvider(defaultProvider)
+    }
+    setShowAdvanced(false)
+    setPermissionMode('')
+    setWorktree(false)
+    setShowSuggestions(false)
+    setSelectedSuggestion(-1)
+    setBrowsing(false)
+    setBrowseEntries([])
+    setDirectoryListingCallback(null)
+    if (cwdValue) {
+      const generated = generateDefaultName(cwdValue, existingNames)
+      setName(generated)
+      nameValRef.current = generated
+    } else {
+      setName('')
+      nameValRef.current = ''
+    }
+  }, [open, initialCwd, existingNames, availableProviders, defaultProvider])
 
   const submit = useCallback(() => {
     const trimmed = nameValRef.current.trim()
