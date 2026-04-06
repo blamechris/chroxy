@@ -1629,6 +1629,43 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'permission_timeout': {
+      const timeoutRequestId = msg.requestId as string;
+      const timeoutTool = (msg.tool as string) || 'permission';
+      // Mark matching prompt as timed-out in the session messages
+      if (timeoutRequestId) {
+        const timeoutTargetId = (msg.sessionId as string) || get().activeSessionId;
+        if (timeoutTargetId && get().sessionStates[timeoutTargetId]) {
+          updateSession(timeoutTargetId, (ss) => ({
+            messages: ss.messages.map((m) =>
+              m.requestId === timeoutRequestId && m.type === 'prompt'
+                ? { ...m, content: `${m.content}\n(Auto-denied — permission timed out)`, options: undefined }
+                : m
+            ),
+          }));
+        }
+        // Auto-dismiss matching notification banner
+        set((s) => ({
+          sessionNotifications: (s.sessionNotifications ?? []).filter(
+            (n) => n.requestId !== timeoutRequestId
+          ),
+        }));
+      }
+      // Show a dismissible server error banner so users know the permission was auto-denied
+      const timeoutError: ServerError = {
+        id: nextMessageId('permission_timeout'),
+        category: 'permission',
+        message: `Permission for "${timeoutTool}" was auto-denied (timed out)`,
+        recoverable: true,
+        timestamp: Date.now(),
+      };
+      set((state: ConnectionState) => ({
+        serverErrors: [...state.serverErrors, timeoutError].slice(-10),
+      }));
+      useNotificationStore.getState().addServerError(timeoutError);
+      break;
+    }
+
     case 'permission_rules_updated': {
       const rulesSessionId = (msg.sessionId as string) || get().activeSessionId;
       const rules = Array.isArray(msg.rules)

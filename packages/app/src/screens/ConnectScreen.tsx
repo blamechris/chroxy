@@ -140,7 +140,31 @@ export function ConnectScreen() {
   };
 
   const handleConnect = () => {
-    let wsUrl = url.trim() || 'ws://localhost:8765';
+    const rawUrl = url.trim() || 'ws://localhost:8765';
+
+    // If user pasted a chroxy:// URL into the manual entry field, parse it properly
+    if (rawUrl.startsWith('chroxy://')) {
+      const parsed = parseChroxyUrl(rawUrl);
+      if (parsed.ok) {
+        Keyboard.dismiss();
+        if ('pairingId' in parsed && parsed.pairingId) {
+          setPendingPairingId(parsed.pairingId);
+          connect(parsed.wsUrl, '');
+        } else {
+          connect(parsed.wsUrl, parsed.token || token.trim());
+        }
+        return;
+      }
+      if (parsed.reason === 'missing_token') {
+        Alert.alert(
+          'Missing Token',
+          `Include your token in the URL:\n\nchroxy://HOSTNAME?token=YOUR_TOKEN\n\nOr enter the server URL and token separately below.`,
+        );
+        return;
+      }
+    }
+
+    let wsUrl = rawUrl;
     if (!wsUrl.startsWith('wss://') && !wsUrl.startsWith('ws://')) {
       wsUrl = `wss://${wsUrl}`;
     }
@@ -148,7 +172,10 @@ export function ConnectScreen() {
     // Token is optional for localhost connections (--no-auth mode)
     const trimmedToken = token.trim();
     if (!trimmedToken && !isLocalUrl(wsUrl)) {
-      Alert.alert('Missing Token', 'API token is required for remote connections');
+      Alert.alert(
+        'Missing Token',
+        `An API token is required for remote connections.\n\nYou can find your token in the QR code URL:\nchroxy://HOSTNAME?token=YOUR_TOKEN`,
+      );
       return;
     }
 

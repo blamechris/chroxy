@@ -17,6 +17,7 @@ import Constants from 'expo-constants';
 import * as Clipboard from 'expo-clipboard';
 import { useConnectionStore } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
+import { useNotificationStore } from '../store/notifications';
 import { COLORS } from '../constants/colors';
 import type { PermissionRule } from '../store/types';
 import type { RootStackParamList } from '../App';
@@ -106,6 +107,12 @@ export function SettingsScreen() {
     if (!id || !s.sessionStates[id]) return EMPTY_RULES;
     return s.sessionStates[id].sessionRules ?? EMPTY_RULES;
   });
+
+  const sessionNotifications = useNotificationStore((s) => s.sessionNotifications);
+  const serverErrors = useNotificationStore((s) => s.serverErrors);
+  const dismissSessionNotification = useNotificationStore((s) => s.dismissSessionNotification);
+  const dismissServerError = useNotificationStore((s) => s.dismissServerError);
+  const totalActiveNotifications = sessionNotifications.length + serverErrors.length;
 
   const serverVersion = useConnectionLifecycleStore((s) => s.serverVersion);
   const latestVersion = useConnectionLifecycleStore((s) => s.latestVersion);
@@ -326,6 +333,31 @@ export function SettingsScreen() {
           </View>
         </>
       )}
+
+      {/* NOTIFICATIONS */}
+      <Text style={styles.sectionHeader}>NOTIFICATIONS</Text>
+      <View style={styles.section}>
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>Active Banners</Text>
+          <Text style={styles.rowValue}>
+            {totalActiveNotifications === 0 ? 'None' : `${totalActiveNotifications} pending`}
+          </Text>
+        </View>
+        {totalActiveNotifications > 0 && (
+          <>
+            <View style={styles.separator} />
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => {
+                sessionNotifications.forEach((n) => dismissSessionNotification(n.id));
+                serverErrors.forEach((e) => dismissServerError(e.id));
+              }}
+            >
+              <Text style={styles.actionText}>Dismiss All</Text>
+            </TouchableOpacity>
+          </>
+        )}
+      </View>
 
       {/* PORTABILITY */}
       {conversationId != null && (

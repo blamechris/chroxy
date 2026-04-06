@@ -2068,6 +2068,129 @@ describe('permission_rules_updated handler', () => {
   });
 });
 
+describe('permission_timeout handler', () => {
+  it('adds a server error banner when permission times out', () => {
+    const promptMsg = {
+      id: 'p1',
+      type: 'prompt' as const,
+      content: 'Allow Read file?',
+      requestId: 'req-123',
+      timestamp: 1,
+    };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [promptMsg] },
+      },
+      serverErrors: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_timeout',
+      requestId: 'req-123',
+      tool: 'Read',
+      sessionId: 's1',
+    });
+
+    const state = store.getState();
+    expect(state.serverErrors).toHaveLength(1);
+    expect(state.serverErrors[0].category).toBe('permission');
+    expect(state.serverErrors[0].recoverable).toBe(true);
+    expect(state.serverErrors[0].message).toMatch(/auto-denied/i);
+    expect(state.serverErrors[0].message).toMatch(/Read/);
+  });
+
+  it('marks prompt message as timed out in session messages', () => {
+    const promptMsg = {
+      id: 'p1',
+      type: 'prompt' as const,
+      content: 'Allow Write file?',
+      requestId: 'req-456',
+      options: [{ label: 'Allow', value: 'allow' }],
+      timestamp: 1,
+    };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [promptMsg] },
+      },
+      serverErrors: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_timeout',
+      requestId: 'req-456',
+      tool: 'Write',
+      sessionId: 's1',
+    });
+
+    const state = store.getState();
+    const updatedMsg = state.sessionStates.s1.messages.find((m: any) => m.id === 'p1');
+    expect(updatedMsg).toBeDefined();
+    expect(updatedMsg!.content).toMatch(/Auto-denied/);
+    expect(updatedMsg!.options).toBeUndefined();
+  });
+
+  it('dismisses matching session notification banner when permission times out', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      serverErrors: [],
+      sessionNotifications: [
+        {
+          id: 'notif-1',
+          sessionId: 's2',
+          sessionName: 'S2',
+          eventType: 'permission' as const,
+          message: 'permission needed',
+          requestId: 'req-789',
+          timestamp: 1,
+        },
+      ],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'permission_timeout',
+      requestId: 'req-789',
+      tool: 'Bash',
+      sessionId: 's1',
+    });
+
+    const state = store.getState();
+    expect(state.sessionNotifications).toHaveLength(0);
+  });
+
+  it('does not crash when requestId is missing', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      serverErrors: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    expect(() => {
+      _testMessageHandler.handle({
+        type: 'permission_timeout',
+        tool: 'Read',
+      });
+    }).not.toThrow();
+
+    // Should still add a server error even without requestId
+    expect(store.getState().serverErrors).toHaveLength(1);
+  });
+});
+
 describe('error handler', () => {
   it('does not throw when receiving an error message', () => {
     const store = createMockStore({
