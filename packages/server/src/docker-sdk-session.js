@@ -1,6 +1,7 @@
 import { spawn, execFile } from 'child_process'
 import { SdkSession } from './sdk-session.js'
 import { createLogger } from './logger.js'
+import { classifyDockerError } from './docker-session.js'
 
 const log = createLogger('docker-sdk')
 
@@ -90,7 +91,9 @@ export class DockerSdkSession extends SdkSession {
       // External container — verify it's reachable, then discover CLI path if needed
       this._verifyContainer((err) => {
         if (err) {
-          this.emit('error', { message: `External container not reachable: ${err.message}` })
+          const classified = classifyDockerError(err)
+          log.warn(`External container verification failed [${classified.code}]: ${classified.message}`)
+          this.emit('error', { code: classified.code, message: classified.message })
           this.destroy()
           return
         }
@@ -111,7 +114,7 @@ export class DockerSdkSession extends SdkSession {
 
     this._startContainer((err) => {
       if (err) {
-        this.emit('error', { message: `Failed to start Docker container: ${err.message}` })
+        this.emit('error', { code: err.code || 'docker_error', message: `Failed to start Docker container: ${err.message}` })
         this.destroy()
         return
       }
@@ -126,9 +129,11 @@ export class DockerSdkSession extends SdkSession {
   _verifyContainer(callback) {
     execFile('docker', [
       'exec', this._containerId, 'true',
-    ], { encoding: 'utf-8', timeout: 10_000 }, (err) => {
+    ], { encoding: 'utf-8', timeout: 10_000 }, (err, _stdout, stderr) => {
       if (err) {
-        callback(new Error(`Container ${this._containerId.slice(0, 12)} is not running or not reachable`))
+        // Attach stderr so classifyDockerError can inspect it
+        err.stderr = stderr || ''
+        callback(err)
       } else {
         callback(null)
       }
@@ -187,7 +192,11 @@ export class DockerSdkSession extends SdkSession {
 
     execFile('docker', runArgs, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
       if (err) {
-        callback(new Error(stderr ? stderr.trim() : err.message))
+        const classified = classifyDockerError(err, stderr)
+        log.warn(`Docker start failed [${classified.code}]: ${classified.message}`)
+        const error = new Error(classified.message)
+        error.code = classified.code
+        callback(error)
         return
       }
       this._containerId = stdout.trim()
