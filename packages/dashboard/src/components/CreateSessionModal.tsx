@@ -165,6 +165,16 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     }
   }, [open, initialCwd, existingNames, availableProviders, defaultProvider])
 
+  // Keep provider in sync while modal is open: if availableProviders changes
+  // and the current provider is no longer valid, fall back to first available.
+  // This runs independently of the fresh-open guard above (#2679).
+  useEffect(() => {
+    if (!open || availableProviders.length === 0) return
+    if (!availableProviders.some(p => p.name === provider)) {
+      setProvider(availableProviders[0]!.name)
+    }
+  }, [open, availableProviders, provider])
+
   const submit = useCallback(() => {
     const trimmed = nameValRef.current.trim()
     if (!trimmed) {
