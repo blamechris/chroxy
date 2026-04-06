@@ -6,6 +6,44 @@ import { createLogger } from './logger.js'
 const log = createLogger('docker-session')
 
 /**
+ * Classify a Docker error into a structured error with a specific code.
+ *
+ * Returns an object with `code` and `message` fields so callers can surface
+ * actionable errors to clients instead of raw spawn/exec messages.
+ *
+ * @param {Error} err - The error from execFile or spawn
+ * @param {string} [stderrText] - Optional stderr output to include in classification
+ * @returns {{ code: string, message: string }}
+ */
+export function classifyDockerError(err, stderrText = '') {
+  const msg = (err.message || '').toLowerCase()
+  const stderr = (stderrText || err.stderr || '').toLowerCase()
+  const combined = msg + ' ' + stderr
+
+  if (
+    combined.includes('cannot connect to the docker daemon') ||
+    combined.includes('is the docker daemon running') ||
+    (combined.includes('connection refused') && combined.includes('docker'))
+  ) {
+    return { code: 'docker_not_running', message: 'Docker is not running. Start Docker Desktop and try again.' }
+  }
+  if (
+    combined.includes('no such image') ||
+    combined.includes('manifest unknown') ||
+    (combined.includes('not found') && combined.includes('image'))
+  ) {
+    return { code: 'docker_image_not_found', message: 'Docker image not found. Run: docker pull <image>' }
+  }
+  if (
+    combined.includes('permission denied') ||
+    combined.includes('access denied')
+  ) {
+    return { code: 'docker_permission_denied', message: 'Permission denied connecting to Docker. Check your Docker group membership.' }
+  }
+  return { code: 'docker_error', message: err.message }
+}
+
+/**
  * Env vars explicitly forwarded into the Docker container.
  * Only vars needed for Claude Code operation — never forward the full host env.
  *
@@ -73,7 +111,7 @@ export class DockerSession extends CliSession {
     // Start container async to avoid blocking the event loop
     this._startContainer((err) => {
       if (err) {
-        this.emit('error', { message: `Failed to start Docker container: ${err.message}` })
+        this.emit('error', { code: err.code || 'docker_error', message: `Failed to start Docker container: ${err.message}` })
         // Self-destruct so SessionManager doesn't keep a phantom entry
         this.destroy()
         return
@@ -118,8 +156,11 @@ export class DockerSession extends CliSession {
 
     execFile('docker', args, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
       if (err) {
-        const msg = stderr ? stderr.trim() : err.message
-        callback(new Error(msg))
+        const classified = classifyDockerError(err, stderr)
+        log.warn(`Docker start failed [${classified.code}]: ${classified.message}`)
+        const error = new Error(classified.message)
+        error.code = classified.code
+        callback(error)
         return
       }
       this._containerId = stdout.trim()
@@ -210,7 +251,9 @@ export class DockerSession extends CliSession {
       this._cleanupReadlines()
       this._processReady = false
       this._child = null
-      this.emit('error', { message: `Failed to exec into container: ${err.message}` })
+      const classified = classifyDockerError(err)
+      log.warn(`Docker exec failed [${classified.code}]: ${classified.message}`)
+      this.emit('error', { code: classified.code, message: classified.message })
       this._scheduleRespawn()
     })
 
