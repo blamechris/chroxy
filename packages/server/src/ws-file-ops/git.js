@@ -2,6 +2,7 @@ import { normalize, resolve } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { GIT } from '../git.js'
+import { validateGitPath } from './common.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -11,9 +12,10 @@ const execFileAsync = promisify(execFileCb)
  * @param {Function} sendFn - (ws, message) => void
  * @param {Function} resolveSessionCwd - shared CWD resolver
  * @param {Function} validatePathWithinCwd - shared path validator
+ * @param {string} workspaceRoot - workspace root directory; git ops are restricted to paths within it
  * @returns {Object} git operation methods
  */
-export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
+export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, workspaceRoot) {
 
   /** Get git status (branch, staged, unstaged, untracked) for a session CWD */
   async function gitStatus(ws, sessionCwd) {
@@ -30,6 +32,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
     }
 
     try {
+      await validateGitPath(sessionCwd, workspaceRoot)
       const cwdReal = await resolveSessionCwd(sessionCwd)
 
       // Get current branch
@@ -121,6 +124,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
     }
 
     try {
+      await validateGitPath(sessionCwd, workspaceRoot)
       const cwdReal = await resolveSessionCwd(sessionCwd)
 
       // Get all branches
@@ -184,6 +188,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
     }
 
     try {
+      await validateGitPath(sessionCwd, workspaceRoot)
       const cwdReal = await resolveSessionCwd(sessionCwd)
       // Validate each file path is within session CWD (prevents path traversal)
       const validatedFiles = []
@@ -219,6 +224,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
     }
 
     try {
+      await validateGitPath(sessionCwd, workspaceRoot)
       const cwdReal = await resolveSessionCwd(sessionCwd)
       // Validate each file path is within session CWD (prevents path traversal)
       const validatedFiles = []
@@ -254,6 +260,7 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
     }
 
     try {
+      await validateGitPath(sessionCwd, workspaceRoot)
       const cwdReal = await resolveSessionCwd(sessionCwd)
       const { stdout } = await execFileAsync(GIT, ['commit', '-m', message.trim()], {
         cwd: cwdReal,

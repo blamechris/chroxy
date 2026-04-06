@@ -16,7 +16,8 @@ describe('git status handler', () => {
 
   before(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'chroxy-git-'))
-    fileOps = createFileOps(mockSend)
+    // Pass tmpDir as workspaceRoot so git ops within it are allowed
+    fileOps = createFileOps(mockSend, tmpDir)
     // Init a git repo in tmpDir
     execFileSync(GIT, ['init'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tmpDir })
@@ -110,7 +111,8 @@ describe('git branches handler', () => {
 
   before(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'chroxy-git-br-'))
-    fileOps = createFileOps(mockSend)
+    // Pass tmpDir as workspaceRoot so git ops within it are allowed
+    fileOps = createFileOps(mockSend, tmpDir)
     execFileSync(GIT, ['init'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: tmpDir })

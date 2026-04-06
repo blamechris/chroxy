@@ -16,7 +16,7 @@ describe('git stage handler', () => {
 
   before(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'chroxy-git-stage-'))
-    fileOps = createFileOps(mockSend)
+    fileOps = createFileOps(mockSend, tmpDir)
     execFileSync(GIT, ['init'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: tmpDir })
@@ -74,7 +74,7 @@ describe('git unstage handler', () => {
 
   before(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'chroxy-git-unstage-'))
-    fileOps = createFileOps(mockSend)
+    fileOps = createFileOps(mockSend, tmpDir)
     execFileSync(GIT, ['init'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: tmpDir })
@@ -125,7 +125,7 @@ describe('git commit handler', () => {
 
   before(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'chroxy-git-commit-'))
-    fileOps = createFileOps(mockSend)
+    fileOps = createFileOps(mockSend, tmpDir)
     execFileSync(GIT, ['init'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: tmpDir })
