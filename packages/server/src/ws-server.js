@@ -776,9 +776,9 @@ export class WsServer {
         if (client?.authenticated) {
           this._handleClientDeparture(client)
         }
-        if (client?.id) {
-          this._rateLimiter.remove(client.id)
-          this._permissionRateLimiter.remove(client.id)
+        if (client?.ip) {
+          this._rateLimiter.remove(client.ip)
+          this._permissionRateLimiter.remove(client.ip)
         }
         this._clientManager.removeClient(ws)
       })
@@ -913,16 +913,18 @@ export class WsServer {
       return
     }
 
-    // Rate limiting — permission/question responses use a relaxed separate limiter (60/min)
+    // Rate limiting — permission/question responses use a relaxed separate limiter (60/min).
+    // Use client.ip (prefers CF-Connecting-IP) so that all connections from the same real
+    // IP share a single bucket, even when arriving through the Cloudflare tunnel loopback.
     if (msg.type === 'permission_response' || msg.type === 'user_question_response') {
-      const { allowed, retryAfterMs } = this._permissionRateLimiter.check(client.id)
+      const { allowed, retryAfterMs } = this._permissionRateLimiter.check(client.ip)
       if (!allowed) {
         const label = msg.type === 'user_question_response' ? 'question responses' : 'permission responses'
         this._send(ws, { type: 'rate_limited', retryAfterMs, message: `Too many ${label}. Please slow down.` })
         return
       }
     } else {
-      const { allowed, retryAfterMs } = this._rateLimiter.check(client.id)
+      const { allowed, retryAfterMs } = this._rateLimiter.check(client.ip)
       if (!allowed) {
         this._send(ws, { type: 'rate_limited', retryAfterMs, message: 'Too many messages. Please slow down.' })
         return

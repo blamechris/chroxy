@@ -3,6 +3,29 @@
  * Tracks per-client message timestamps to enforce rate limits.
  */
 
+/**
+ * Extract the real client IP from an HTTP request.
+ * Prefers the CF-Connecting-IP header set by Cloudflare tunnels, which carry
+ * the original client IP even though the tunnel loopback address is 127.0.0.1.
+ * Falls back to X-Forwarded-For (first entry), then the raw socket address.
+ *
+ * SECURITY NOTE: CF-Connecting-IP and X-Forwarded-For are used here only for
+ * rate limiting, not for security decisions such as auth or encryption bypass.
+ * Those decisions must use req.socket.remoteAddress exclusively, which cannot
+ * be spoofed over the network.
+ *
+ * @param {object} req - Node.js IncomingMessage
+ * @returns {string}
+ */
+export function getClientIp(req) {
+  return (
+    req.headers['cf-connecting-ip'] ||
+    req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+    req.socket?.remoteAddress ||
+    'unknown'
+  )
+}
+
 const DEFAULT_WINDOW_MS = 60_000   // 1 minute window
 const DEFAULT_MAX_MESSAGES = 100   // max messages per window
 const DEFAULT_BURST = 20           // burst allowance above max

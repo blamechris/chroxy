@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { RateLimiter } from '../src/rate-limiter.js'
+import { RateLimiter, getClientIp } from '../src/rate-limiter.js'
 
 describe('RateLimiter (#1828)', () => {
   it('allows messages under the limit', () => {
@@ -64,5 +64,47 @@ describe('RateLimiter (#1828)', () => {
       assert.equal(limiter.check('client-1').allowed, true)
     }
     assert.equal(limiter.check('client-1').allowed, false)
+  })
+})
+
+describe('getClientIp (#2688)', () => {
+  it('uses CF-Connecting-IP header when present', () => {
+    const req = {
+      headers: { 'cf-connecting-ip': '203.0.113.42' },
+      socket: { remoteAddress: '127.0.0.1' },
+    }
+    assert.equal(getClientIp(req), '203.0.113.42')
+  })
+
+  it('falls back to X-Forwarded-For when CF header is absent', () => {
+    const req = {
+      headers: { 'x-forwarded-for': '198.51.100.7, 10.0.0.1' },
+      socket: { remoteAddress: '127.0.0.1' },
+    }
+    assert.equal(getClientIp(req), '198.51.100.7')
+  })
+
+  it('falls back to socket remoteAddress when proxy headers are absent', () => {
+    const req = {
+      headers: {},
+      socket: { remoteAddress: '10.0.0.1' },
+    }
+    assert.equal(getClientIp(req), '10.0.0.1')
+  })
+
+  it('returns unknown when all sources are missing', () => {
+    const req = { headers: {}, socket: {} }
+    assert.equal(getClientIp(req), 'unknown')
+  })
+
+  it('prefers CF-Connecting-IP over X-Forwarded-For', () => {
+    const req = {
+      headers: {
+        'cf-connecting-ip': '203.0.113.42',
+        'x-forwarded-for': '198.51.100.7',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    }
+    assert.equal(getClientIp(req), '203.0.113.42')
   })
 })
