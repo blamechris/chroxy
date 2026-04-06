@@ -42,8 +42,8 @@ async function startServerAndGetPort(server) {
   return server.httpServer.address().port
 }
 
-async function createClient(port) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+async function createClient(port, headers = {}) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}`, { headers })
   const messages = []
 
   ws.on('message', (data) => {
@@ -297,5 +297,92 @@ describe('WsServer permission_response rate limiting (#2324)', () => {
     assert.equal(rateLimited2, undefined, 'Normal messages within limit should not be rate-limited')
 
     ws.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CF-Connecting-IP rate limiting (#2688)
+// ---------------------------------------------------------------------------
+
+describe('WsServer rate limiting via CF-Connecting-IP (#2688)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('rate limits based on CF-Connecting-IP not the tunnel loopback address', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+
+    // Tight limiter: 2 messages per minute, no burst
+    server._rateLimiter = new RateLimiter({ windowMs: 60_000, maxMessages: 2, burst: 0 })
+
+    const port = await startServerAndGetPort(server)
+
+    const cfIp = '203.0.113.42'
+
+    // First connection from CF IP — exhaust its bucket
+    const { ws: ws1 } = await createClient(port, { 'cf-connecting-ip': cfIp })
+    send(ws1, { type: 'get_session_list' })
+    send(ws1, { type: 'get_session_list' })
+    await new Promise(r => setTimeout(r, 100))
+
+    // Second connection from SAME CF IP (same 127.0.0.1 loopback) should be rate-limited
+    const { ws: ws2, messages: msgs2 } = await createClient(port, { 'cf-connecting-ip': cfIp })
+    send(ws2, { type: 'get_session_list' })
+
+    const rateLimited = await waitForMessage(
+      msgs2,
+      m => m.type === 'rate_limited',
+      2000,
+      'rate_limited from second connection with same CF IP'
+    )
+
+    assert.ok(rateLimited, 'Second connection from same CF IP should be rate-limited')
+    assert.ok(rateLimited.retryAfterMs > 0, 'retryAfterMs should be positive')
+
+    ws1.close()
+    ws2.close()
+  })
+
+  it('does not rate-limit a different CF IP when one IP is exhausted', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+
+    // Tight limiter: 2 messages per minute
+    server._rateLimiter = new RateLimiter({ windowMs: 60_000, maxMessages: 2, burst: 0 })
+
+    const port = await startServerAndGetPort(server)
+
+    // Exhaust bucket for IP A
+    const { ws: wsA } = await createClient(port, { 'cf-connecting-ip': '203.0.113.1' })
+    send(wsA, { type: 'get_session_list' })
+    send(wsA, { type: 'get_session_list' })
+    await new Promise(r => setTimeout(r, 100))
+
+    // IP B should not be affected
+    const { ws: wsB, messages: msgsB } = await createClient(port, { 'cf-connecting-ip': '203.0.113.2' })
+    send(wsB, { type: 'get_session_list' })
+    await new Promise(r => setTimeout(r, 100))
+
+    const rateLimited = msgsB.find(m => m.type === 'rate_limited')
+    assert.equal(rateLimited, undefined, 'Different CF IP should not be rate-limited')
+
+    wsA.close()
+    wsB.close()
   })
 })

@@ -20,7 +20,7 @@ import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
-import { RateLimiter } from './rate-limiter.js'
+import { RateLimiter, getClientIp, getRateLimitKey } from './rate-limiter.js'
 import { createLogger, addLogListener, removeLogListener } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
@@ -672,19 +672,18 @@ export class WsServer {
 
     this.wss.on('connection', (ws, req) => {
       const clientId = randomUUID().slice(0, 8)
-      // Best-effort client IP for logging and rate limiting.
-      // Prefers Cloudflare's cf-connecting-ip (set by the tunnel proxy),
-      // then x-forwarded-for, then the raw socket address.
-      const ip = req.headers['cf-connecting-ip']
-        || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-        || req.socket.remoteAddress
-        || 'unknown'
+      // Best-effort client IP for logging — prefers CF-Connecting-IP / X-Forwarded-For.
+      const ip = getClientIp(req)
       // SECURITY: For localhost bypass decisions (e.g. skipping encryption),
       // use ONLY the raw TCP socket address. Proxy headers like x-forwarded-for
       // and cf-connecting-ip can be spoofed by an attacker to fake a localhost
       // origin and bypass encryption. req.socket.remoteAddress is set by the
       // kernel and cannot be forged over the network.
       const socketIp = req.socket.remoteAddress || 'unknown'
+      // Rate-limit key: trusts proxy headers only when the TCP peer is loopback
+      // (cloudflared or local proxy). Direct connections use socketIp to prevent
+      // header spoofing that could exhaust another IP's rate-limit bucket.
+      const rateLimitKey = getRateLimitKey(socketIp, req)
       this._clientManager.addClient(ws, {
         id: clientId,
         authenticated: false,
@@ -695,6 +694,7 @@ export class WsServer {
         deviceInfo: null,
         ip,
         socketIp,
+        rateLimitKey,
         _seq: 0,                  // monotonic sequence number for outbound messages
         encryptionState: null,    // { sharedKey, sendNonce, recvNonce } when active
         encryptionPending: false, // true while waiting for key_exchange
@@ -776,10 +776,9 @@ export class WsServer {
         if (client?.authenticated) {
           this._handleClientDeparture(client)
         }
-        if (client?.id) {
-          this._rateLimiter.remove(client.id)
-          this._permissionRateLimiter.remove(client.id)
-        }
+        // Do not remove rate limiter entries on disconnect — the limiter keys by IP,
+        // so removing on disconnect would reset the shared bucket for all connections
+        // from the same real IP. The sliding window's natural expiry cleans up entries.
         this._clientManager.removeClient(ws)
       })
 
@@ -913,16 +912,18 @@ export class WsServer {
       return
     }
 
-    // Rate limiting — permission/question responses use a relaxed separate limiter (60/min)
+    // Rate limiting — permission/question responses use a relaxed separate limiter (60/min).
+    // client.rateLimitKey is the trusted rate-limit identity: CF-Connecting-IP when the
+    // connection arrived via the loopback (cloudflared), otherwise the raw socket address.
     if (msg.type === 'permission_response' || msg.type === 'user_question_response') {
-      const { allowed, retryAfterMs } = this._permissionRateLimiter.check(client.id)
+      const { allowed, retryAfterMs } = this._permissionRateLimiter.check(client.rateLimitKey)
       if (!allowed) {
         const label = msg.type === 'user_question_response' ? 'question responses' : 'permission responses'
         this._send(ws, { type: 'rate_limited', retryAfterMs, message: `Too many ${label}. Please slow down.` })
         return
       }
     } else {
-      const { allowed, retryAfterMs } = this._rateLimiter.check(client.id)
+      const { allowed, retryAfterMs } = this._rateLimiter.check(client.rateLimitKey)
       if (!allowed) {
         this._send(ws, { type: 'rate_limited', retryAfterMs, message: 'Too many messages. Please slow down.' })
         return
