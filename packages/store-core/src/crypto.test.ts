@@ -3,6 +3,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import nacl from 'tweetnacl'
+import { encodeBase64, decodeBase64 } from 'tweetnacl-util'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -13,6 +14,13 @@ import {
   DIRECTION_CLIENT,
 } from './crypto'
 import type { EncryptedEnvelope } from './crypto'
+
+/** Shared helper: derive a symmetric key from an ephemeral DH exchange. */
+function makeSharedKey(): Uint8Array {
+  const alice = createKeyPair()
+  const bob = createKeyPair()
+  return deriveSharedKey(bob.publicKey, alice.secretKey)
+}
 
 describe('createKeyPair', () => {
   it('returns publicKey as a base64 string', () => {
@@ -129,12 +137,6 @@ describe('nonceFromCounter', () => {
 })
 
 describe('encrypt / decrypt round-trip', () => {
-  function makeSharedKey(): Uint8Array {
-    const alice = createKeyPair()
-    const bob = createKeyPair()
-    return deriveSharedKey(bob.publicKey, alice.secretKey)
-  }
-
   it('basic round-trip works', () => {
     const key = makeSharedKey()
     const original = { hello: 'world', count: 42 }
@@ -166,17 +168,19 @@ describe('encrypt / decrypt round-trip', () => {
     )
   })
 
-  it('decrypt with tampered ciphertext fails', () => {
+  it('decrypt with tampered ciphertext fails (MAC integrity)', () => {
     const key = makeSharedKey()
     const envelope = encrypt(JSON.stringify({ data: 'safe' }), key, 0, DIRECTION_SERVER)
 
-    // Tamper with the ciphertext by flipping a character
-    const tampered: EncryptedEnvelope = {
-      ...envelope,
-      d: envelope.d.slice(0, -2) + (envelope.d.endsWith('AA') ? 'BB' : 'AA'),
-    }
+    // Flip a byte inside the ciphertext (not in base64 padding) to reliably
+    // exercise the Poly1305 MAC check rather than a base64 decode error.
+    const bytes = decodeBase64(envelope.d)
+    bytes[bytes.length - 1] ^= 0xff
+    const tampered: EncryptedEnvelope = { ...envelope, d: encodeBase64(bytes) }
 
-    expect(() => decrypt(tampered, key, 0, DIRECTION_SERVER)).toThrow()
+    expect(() => decrypt(tampered, key, 0, DIRECTION_SERVER)).toThrow(
+      'Decryption failed: message tampered or wrong key'
+    )
   })
 
   it('handles large payloads', () => {
@@ -197,12 +201,6 @@ describe('encrypt / decrypt round-trip', () => {
 })
 
 describe('decrypt error handling', () => {
-  function makeSharedKey(): Uint8Array {
-    const alice = createKeyPair()
-    const bob = createKeyPair()
-    return deriveSharedKey(bob.publicKey, alice.secretKey)
-  }
-
   it('throws when envelope.d is not a string', () => {
     const key = makeSharedKey()
     const badEnvelope = { type: 'encrypted' as const, d: 123 as unknown as string, n: 0 }
