@@ -119,9 +119,13 @@ export function encrypt(jsonString: string, sharedKey: Uint8Array, nonceCounter:
  * @param envelope      - The received encrypted frame.
  * @param sharedKey     - Symmetric key derived from the X25519 key exchange.
  * @param expectedNonce - The next counter value the receiver expects. Must be
- *                        exactly `envelope.n`; any deviation throws 'Unexpected nonce'.
+ *                        exactly `envelope.n`; any deviation throws an Error whose
+ *                        message starts with `'Unexpected nonce: got <n>, expected <e>'`.
  * @param direction     - Directional byte (DIRECTION_SERVER or DIRECTION_CLIENT)
  *                        used to namespace the nonce and prevent cross-direction replays.
+ * @throws {Error} `'Unexpected nonce: got <n>, expected <e>'` when `envelope.n !== expectedNonce`
+ * @throws {Error} `'Decryption failed: message tampered or wrong key'` when MAC verification fails
+ * @throws {TypeError} `'decrypt: envelope.d must be a base64 string'` / `'decrypt: envelope.n must be a number'`
  */
 export function decrypt(envelope: EncryptedEnvelope, sharedKey: Uint8Array, expectedNonce: number, direction: number): Record<string, unknown> {
   if (typeof envelope.d !== 'string') {

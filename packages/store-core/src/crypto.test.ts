@@ -262,19 +262,19 @@ describe('nonceFromCounter overflow guard', () => {
 })
 
 describe('replay protection', () => {
-  it('rejects a frame with a lower nonce (past replay)', () => {
+  it('rejects a replayed frame with a lower nonce (past replay)', () => {
     const key = makeSharedKey()
+    // Envelope carries nonce=5 (an old frame). Receiver has already advanced to expectedNonce=6.
+    // envelope.n (5) < expectedNonce (6) — this is a true past replay.
     const envelope = encrypt(JSON.stringify({ data: 'secret' }), key, 5, DIRECTION_SERVER)
-
-    // Counter has advanced past 5 — replaying it with expectedNonce=4 must fail
-    expect(() => decrypt(envelope, key, 4, DIRECTION_SERVER)).toThrow('Unexpected nonce')
+    expect(() => decrypt(envelope, key, 6, DIRECTION_SERVER)).toThrow('Unexpected nonce')
   })
 
-  it('rejects a frame with a higher nonce (future replay / skip)', () => {
+  it('rejects a frame with a higher nonce (future frame / skip)', () => {
     const key = makeSharedKey()
+    // Envelope carries nonce=7. Receiver only expects nonce=5.
+    // envelope.n (7) > expectedNonce (5) — frame is ahead of sequence (skip/injection).
     const envelope = encrypt(JSON.stringify({ data: 'secret' }), key, 7, DIRECTION_SERVER)
-
-    // Receiver still expects counter 5 — frame from counter 7 must be rejected
     expect(() => decrypt(envelope, key, 5, DIRECTION_SERVER)).toThrow('Unexpected nonce')
   })
 
