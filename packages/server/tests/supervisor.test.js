@@ -284,11 +284,16 @@ describe('Supervisor', () => {
       // restartCount is now 1, which is not > maxRestarts (1)
       assert.equal(maxExceeded, false)
 
+      // Clear the pending restart timer from the first crash before manually
+      // triggering the second crash — prevents the timer from firing during the
+      // test and spawning unexpected extra mock children.
+      if (supervisor._restartTimer) { clearTimeout(supervisor._restartTimer); supervisor._restartTimer = null }
+
       // Manually start and crash again (simulating the setTimeout restart)
       // The exit handler is async (push notification), so await the test_exit event
       supervisor.startChild()
       await new Promise((resolve) => {
-        supervisor.on('test_exit', resolve)
+        supervisor.once('test_exit', resolve)
         supervisor.lastChild.simulateExit(1, null)
       })
 
@@ -300,21 +305,21 @@ describe('Supervisor', () => {
     it('sends push notification before exiting after max restarts', async () => {
       const { supervisor } = setup({ maxRestarts: 1 })
 
-      let exitFired = false
-      supervisor.on('test_exit', () => { exitFired = true })
-
       supervisor.startChild()
       supervisor.lastChild.simulateExit(1, null)
 
       // First crash: restartCount=1, not yet > maxRestarts(1) — no push
       assert.equal(supervisor._pushCalls.length, 0)
 
+      // Clear the pending restart timer before manually triggering the second crash
+      if (supervisor._restartTimer) { clearTimeout(supervisor._restartTimer); supervisor._restartTimer = null }
+
       // Second crash via manual startChild (simulates the setTimeout restart)
       supervisor.startChild()
 
       // Wait for async exit handler to complete
       await new Promise((resolve) => {
-        supervisor.on('test_exit', resolve)
+        supervisor.once('test_exit', resolve)
         supervisor.lastChild.simulateExit(1, null)
       })
 
@@ -332,10 +337,12 @@ describe('Supervisor', () => {
       supervisor.startChild()
       supervisor.lastChild.simulateExit(1, null)
 
+      if (supervisor._restartTimer) { clearTimeout(supervisor._restartTimer); supervisor._restartTimer = null }
+
       supervisor.startChild()
 
       await new Promise((resolve) => {
-        supervisor.on('test_exit', resolve)
+        supervisor.once('test_exit', resolve)
         supervisor.lastChild.simulateExit(1, null)
       })
 
