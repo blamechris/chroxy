@@ -2067,3 +2067,59 @@ describe('permission_rules_updated handler', () => {
     expect(store.getState().sessionStates.s1.sessionRules).toEqual([]);
   });
 });
+
+describe('error handler', () => {
+  it('does not throw when receiving an error message', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    expect(() => {
+      _testMessageHandler.handle({
+        type: 'error',
+        requestId: 'req-abc',
+        code: 'HANDLER_ERROR',
+        message: 'Something went wrong on the server',
+      });
+    }).not.toThrow();
+  });
+
+  it('shows an alert with the error message', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'error',
+      requestId: null,
+      code: 'HANDLER_ERROR',
+      message: 'Checkpoint creation failed',
+    });
+
+    expect(Alert.alert).toHaveBeenCalledWith('Server Error', 'Checkpoint creation failed');
+  });
+
+  it('handles error message with missing fields gracefully', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    expect(() => {
+      _testMessageHandler.handle({ type: 'error' });
+    }).not.toThrow();
+
+    expect(Alert.alert).toHaveBeenCalledWith('Server Error', 'An unexpected server error occurred');
+  });
+});
