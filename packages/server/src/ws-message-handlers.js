@@ -14,10 +14,8 @@ import { settingsHandlers } from './handlers/settings-handlers.js'
 import { fileHandlers } from './handlers/file-handlers.js'
 import { conversationHandlers } from './handlers/conversation-handlers.js'
 import { checkpointHandlers } from './handlers/checkpoint-handlers.js'
-import { webTaskHandlers } from './handlers/web-task-handlers.js'
 import { repoHandlers } from './handlers/repo-handlers.js'
-import { extensionHandlers } from './handlers/extension-handlers.js'
-import { environmentHandlers } from './handlers/environment-handlers.js'
+import { miscHandlers } from './handlers/misc-handlers.js'
 
 const log = createLogger('ws')
 
@@ -29,10 +27,8 @@ const handlerRegistry = new Map([
   ...Object.entries(fileHandlers),
   ...Object.entries(conversationHandlers),
   ...Object.entries(checkpointHandlers),
-  ...Object.entries(webTaskHandlers),
   ...Object.entries(repoHandlers),
-  ...Object.entries(extensionHandlers),
-  ...Object.entries(environmentHandlers),
+  ...Object.entries(miscHandlers),
 ])
 
 /**

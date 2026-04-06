@@ -1,7 +1,93 @@
+/**
+ * Miscellaneous handlers: extension messages, web tasks, dev preview, environments.
+ *
+ * Handles: extension_message, launch_web_task, list_web_tasks, teleport_web_task,
+ *          close_dev_preview, create_environment, list_environments,
+ *          destroy_environment, get_environment
+ *
+ * These handlers were previously split across extension-handlers.js,
+ * web-task-handlers.js, and environment-handlers.js. Consolidated here to
+ * reduce file fragmentation (each file had 1–4 small functions).
+ */
 import { createLogger } from '../logger.js'
 import { validateCwdWithinHome } from '../handler-utils.js'
+import { WebTaskUnavailableError } from '../web-task-manager.js'
 
 const log = createLogger('ws')
+
+// -- Extension message --
+
+function handleExtensionMessage(ws, client, msg, ctx) {
+  const { provider, subtype, data } = msg
+  if (typeof provider !== 'string' || !provider) {
+    ctx.send(ws, { type: 'session_error', message: 'extension_message requires a non-empty provider field' })
+    return
+  }
+  if (typeof subtype !== 'string' || !subtype) {
+    ctx.send(ws, { type: 'session_error', message: 'extension_message requires a non-empty subtype field' })
+    return
+  }
+
+  const targetSessionId = msg.sessionId || client.activeSessionId
+  const entry = ctx.sessionManager.getSession(targetSessionId)
+  if (!entry) {
+    const message = msg.sessionId
+      ? `Session not found: ${msg.sessionId}`
+      : 'No active session'
+    ctx.send(ws, { type: 'session_error', message })
+    return
+  }
+
+  if (typeof entry.session.handleExtensionMessage === 'function') {
+    entry.session.handleExtensionMessage({ provider, subtype, data })
+  } else {
+    log.debug(`extension_message (${provider}/${subtype}) received; session does not handle it`)
+  }
+}
+
+// -- Web task and dev preview --
+
+function handleLaunchWebTask(ws, client, msg, ctx) {
+  if (msg.cwd) {
+    const cwdError = validateCwdWithinHome(msg.cwd)
+    if (cwdError) {
+      ctx.send(ws, { type: 'web_task_error', taskId: null, message: cwdError })
+      return
+    }
+  }
+  try {
+    const { taskId } = ctx.webTaskManager.launchTask(msg.prompt, { cwd: msg.cwd })
+    log.info(`Web task launched: ${taskId} — "${msg.prompt.slice(0, 60)}"`)
+  } catch (err) {
+    const errorMsg = err instanceof WebTaskUnavailableError
+      ? err.message
+      : `Failed to launch web task: ${err.message}`
+    ctx.send(ws, { type: 'web_task_error', taskId: null, message: errorMsg })
+  }
+}
+
+function handleListWebTasks(ws, client, msg, ctx) {
+  const tasks = ctx.webTaskManager.listTasks()
+  ctx.send(ws, { type: 'web_task_list', tasks })
+}
+
+function handleTeleportWebTask(ws, client, msg, ctx) {
+  ctx.webTaskManager.teleportTask(msg.taskId).then(() => {
+    log.info(`Teleported task ${msg.taskId}`)
+    ctx.send(ws, { type: 'server_status', message: `Task ${msg.taskId} teleported to local session` })
+  }).catch(err => {
+    ctx.send(ws, { type: 'web_task_error', taskId: msg.taskId, message: err.message })
+  })
+}
+
+function handleCloseDevPreview(ws, client, msg, ctx) {
+  const previewSessionId = msg.sessionId || client.activeSessionId
+  if (previewSessionId && typeof msg.port === 'number') {
+    ctx.devPreview.closePreview(previewSessionId, msg.port)
+  }
+}
+
+// -- Environment management --
 
 function handleCreateEnvironment(ws, _client, msg, ctx) {
   if (!ctx.environmentManager) {
@@ -112,7 +198,12 @@ function handleGetEnvironment(ws, _client, msg, ctx) {
   ctx.send(ws, { type: 'environment_info', environment: env })
 }
 
-export const environmentHandlers = {
+export const miscHandlers = {
+  extension_message: handleExtensionMessage,
+  launch_web_task: handleLaunchWebTask,
+  list_web_tasks: handleListWebTasks,
+  teleport_web_task: handleTeleportWebTask,
+  close_dev_preview: handleCloseDevPreview,
   create_environment: handleCreateEnvironment,
   list_environments: handleListEnvironments,
   destroy_environment: handleDestroyEnvironment,
