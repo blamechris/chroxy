@@ -71,6 +71,7 @@ function makeAuthCtx({
   ws = makeMockWs(),
   onAuthSuccess = createSpy(),
   authFailures = new Map(),
+  pairingManager = null,
 } = {}) {
   const clients = new Map([[ws, client]])
   const send = createSpy((socket, msg) => socket.send(JSON.stringify(msg)))
@@ -84,6 +85,7 @@ function makeAuthCtx({
       onAuthSuccess,
       minProtocolVersion,
       serverProtocolVersion,
+      pairingManager,
     },
     ws,
     client,
@@ -103,6 +105,7 @@ function makePairCtx({
   ws = makeMockWs(),
   onAuthSuccess = createSpy(),
   authFailures = new Map(),
+  activeSessionId = null,
 } = {}) {
   const clients = new Map([[ws, client]])
   const send = createSpy((socket, msg) => socket.send(JSON.stringify(msg)))
@@ -115,6 +118,7 @@ function makePairCtx({
       onAuthSuccess,
       minProtocolVersion,
       serverProtocolVersion,
+      activeSessionId,
     },
     ws,
     client,
@@ -556,6 +560,47 @@ describe('handleAuthMessage', () => {
       }
     })
   })
+
+  describe('session token binding (#2693)', () => {
+    it('sets boundSessionId when pairingManager returns a session binding', () => {
+      const pairingManager = {
+        getSessionIdForToken: (token) => token === 'paired-tok' ? 'session-123' : null,
+      }
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+        pairingManager,
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'paired-tok' })
+      assert.equal(client.authenticated, true)
+      assert.equal(client.boundSessionId, 'session-123')
+    })
+
+    it('does not set boundSessionId when token has no session binding', () => {
+      const pairingManager = {
+        getSessionIdForToken: () => null,
+      }
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+        pairingManager,
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'api-tok' })
+      assert.equal(client.authenticated, true)
+      assert.equal(client.boundSessionId, undefined)
+    })
+
+    it('does not set boundSessionId when no pairingManager is provided', () => {
+      // makeAuthCtx defaults pairingManager to null — simulates API-token-only setup
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'api-tok' })
+      assert.equal(client.authenticated, true)
+      assert.equal(client.boundSessionId, undefined)
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -732,6 +777,26 @@ describe('handlePairMessage', () => {
         assert.equal(authFailures.get(ips[i]).count, 1)
       }
       assert.equal(authFailures.size, 3, 'should have one failure entry per IP')
+    })
+  })
+
+  describe('session binding (#2693)', () => {
+    it('passes activeSessionId to validatePairing', () => {
+      const validateSpy = createSpy(() => ({ valid: true, sessionToken: 'tok' }))
+      const pairingManager = { validatePairing: validateSpy }
+      const { ctx, ws } = makePairCtx({ pairingManager, activeSessionId: 'session-xyz' })
+      handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'valid-id' })
+      assert.equal(validateSpy.callCount, 1)
+      // Second argument should be the activeSessionId
+      assert.equal(validateSpy.lastCall[1], 'session-xyz')
+    })
+
+    it('passes null activeSessionId when ctx has no active session', () => {
+      const validateSpy = createSpy(() => ({ valid: true, sessionToken: 'tok' }))
+      const pairingManager = { validatePairing: validateSpy }
+      const { ctx, ws } = makePairCtx({ pairingManager, activeSessionId: null })
+      handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'valid-id' })
+      assert.equal(validateSpy.lastCall[1], null)
     })
   })
 })

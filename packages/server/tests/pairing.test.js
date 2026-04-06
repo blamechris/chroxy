@@ -274,4 +274,64 @@ describe('PairingManager (#1836)', () => {
       assert.equal(pm.currentPairingId, null)
     })
   })
+
+  describe('session token binding (#2693)', () => {
+    it('validatePairing stores session binding when sessionId is provided', () => {
+      const pm = new PairingManager({})
+      const id = pm.currentPairingId
+      const result = pm.validatePairing(id, 'session-abc')
+      assert.equal(result.valid, true)
+      assert.ok(result.sessionToken)
+      assert.equal(pm.getSessionIdForToken(result.sessionToken), 'session-abc')
+      pm.destroy()
+    })
+
+    it('validatePairing without sessionId stores null binding', () => {
+      const pm = new PairingManager({})
+      const id = pm.currentPairingId
+      const result = pm.validatePairing(id)
+      assert.equal(result.valid, true)
+      assert.equal(pm.getSessionIdForToken(result.sessionToken), null)
+      pm.destroy()
+    })
+
+    it('getSessionIdForToken returns null for unknown token', () => {
+      const pm = new PairingManager({})
+      assert.equal(pm.getSessionIdForToken('not-a-real-token'), null)
+      pm.destroy()
+    })
+
+    it('getSessionIdForToken returns null for null/undefined input', () => {
+      const pm = new PairingManager({})
+      assert.equal(pm.getSessionIdForToken(null), null)
+      assert.equal(pm.getSessionIdForToken(undefined), null)
+      assert.equal(pm.getSessionIdForToken(''), null)
+      pm.destroy()
+    })
+
+    it('getSessionIdForToken returns null after token TTL expires', async () => {
+      const pm = new PairingManager({ sessionTokenTtlMs: 5 })
+      const id = pm.currentPairingId
+      const result = pm.validatePairing(id, 'session-xyz')
+      assert.equal(result.valid, true)
+      // Wait for expiry
+      await delay(20)
+      assert.equal(pm.getSessionIdForToken(result.sessionToken), null)
+      pm.destroy()
+    })
+
+    it('different pairings can bind to different sessions', () => {
+      const pm = new PairingManager({ ttlMs: 60_000 })
+      const id1 = pm.currentPairingId
+      pm.refresh()
+      const id2 = pm.currentPairingId
+
+      const r1 = pm.validatePairing(id1, 'session-1')
+      const r2 = pm.validatePairing(id2, 'session-2')
+
+      assert.equal(pm.getSessionIdForToken(r1.sessionToken), 'session-1')
+      assert.equal(pm.getSessionIdForToken(r2.sessionToken), 'session-2')
+      pm.destroy()
+    })
+  })
 })

@@ -49,9 +49,10 @@ export class PairingManager extends EventEmitter {
    * Validate a pairing ID and issue a session token if valid.
    * Accepts any active pairing ID (current or recently-refreshed within TTL).
    * @param {string} pairingId
+   * @param {string|null} [sessionId] - Session ID to bind to the issued token
    * @returns {{ valid: boolean, sessionToken?: string, reason?: string }}
    */
-  validatePairing(pairingId) {
+  validatePairing(pairingId, sessionId = null) {
     // Look up in active pairings (includes current + grace period entries)
     const entry = this._activePairings.get(pairingId)
     if (!entry) {
@@ -75,7 +76,7 @@ export class PairingManager extends EventEmitter {
       const oldest = this._sessionTokens.keys().next().value
       this._sessionTokens.delete(oldest)
     }
-    this._sessionTokens.set(sessionToken, { createdAt: Date.now() })
+    this._sessionTokens.set(sessionToken, { createdAt: Date.now(), sessionId: sessionId || null })
 
     return { valid: true, sessionToken }
   }
@@ -100,6 +101,30 @@ export class PairingManager extends EventEmitter {
       }
     }
     return false
+  }
+
+  /**
+   * Return the session ID bound to a session token, or null if the token is
+   * invalid / expired / not bound to any session.
+   * Uses constant-time comparison to prevent timing attacks.
+   * @param {string} token
+   * @returns {string|null}
+   */
+  getSessionIdForToken(token) {
+    if (!token) return null
+    const now = Date.now()
+    const tokenBuf = Buffer.from(token)
+    for (const [stored, meta] of this._sessionTokens.entries()) {
+      if (now - meta.createdAt > this._sessionTokenTtlMs) {
+        this._sessionTokens.delete(stored)
+        continue
+      }
+      const storedBuf = Buffer.from(stored)
+      if (tokenBuf.length === storedBuf.length && timingSafeEqual(tokenBuf, storedBuf)) {
+        return meta.sessionId || null
+      }
+    }
+    return null
   }
 
   /**

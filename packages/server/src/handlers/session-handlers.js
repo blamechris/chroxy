@@ -15,6 +15,16 @@ function handleListSessions(ws, _client, _msg, ctx) {
 
 function handleSwitchSession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
+
+  // Enforce session token binding: if this client authenticated with a
+  // pairing-issued session token that was bound to a specific session,
+  // prevent them from switching to any other session.
+  if (client.boundSessionId && client.boundSessionId !== targetId) {
+    log.warn(`Client ${client.id} attempted to switch to session ${targetId} but is bound to ${client.boundSessionId}`)
+    ctx.send(ws, { type: 'session_error', message: 'Not authorized to access this session', code: 'SESSION_TOKEN_MISMATCH' })
+    return
+  }
+
   const entry = ctx.sessionManager.getSession(targetId)
   if (!entry) {
     ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
