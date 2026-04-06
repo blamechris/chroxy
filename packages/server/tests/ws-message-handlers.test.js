@@ -48,6 +48,7 @@ function makeCtx(overrides = {}) {
     send: mock.fn(),
     broadcast: mock.fn(),
     broadcastToSession: mock.fn(),
+    broadcastSessionList: mock.fn(),
     sendSessionInfo: mock.fn(),
     primaryClients: new Map(),
     updatePrimary: mock.fn(),

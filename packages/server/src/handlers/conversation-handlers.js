@@ -78,7 +78,7 @@ async function handleResumeConversation(ws, client, msg, ctx) {
     ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
     ctx.sendSessionInfo(ws, sessionId)
     ctx.replayHistory(ws, sessionId)
-    ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+    ctx.broadcastSessionList()
     autoSubscribeOtherClients(sessionId, ws, ctx)
     broadcastFocusChanged(client, sessionId, ctx)
   } catch (err) {

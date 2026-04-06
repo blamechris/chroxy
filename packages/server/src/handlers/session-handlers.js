@@ -108,7 +108,7 @@ function handleCreateSession(ws, client, msg, ctx) {
     const entry = ctx.sessionManager.getSession(sessionId)
     ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
     ctx.sendSessionInfo(ws, sessionId)
-    ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+    ctx.broadcastSessionList()
     autoSubscribeOtherClients(sessionId, ws, ctx)
     broadcastFocusChanged(client, sessionId, ctx)
   } catch (err) {
@@ -162,7 +162,7 @@ async function handleDestroySession(ws, client, msg, ctx) {
   }
 
   ctx.broadcast({ type: 'session_destroyed', sessionId: targetId })
-  ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+  ctx.broadcastSessionList()
 }
 
 function handleRenameSession(ws, client, msg, ctx) {
@@ -189,7 +189,7 @@ function handleRenameSession(ws, client, msg, ctx) {
 
   doRename().then(success => {
     if (success) {
-      ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+      ctx.broadcastSessionList()
     } else {
       ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
     }
