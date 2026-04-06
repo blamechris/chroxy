@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, readFile, mkdir, writeFile } from 'fs/promises'
+import { mkdtemp, rm, readFile, mkdir, writeFile, symlink } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
@@ -95,5 +95,56 @@ describe('writeFile handler', () => {
     assert.equal(responses[0].error, null)
     const content = await readFile(join(tmpDir, 'new/deep/dir/file.txt'), 'utf-8')
     assert.equal(content, 'deep content')
+  })
+
+  it('blocks writing through a symlink that points outside CWD', async () => {
+    responses.length = 0
+    // Create a symlink inside tmpDir that points to /tmp (outside CWD)
+    const outsideDir = await mkdtemp(join(tmpdir(), 'chroxy-outside-'))
+    const escapePath = join(tmpDir, 'escape-link.txt')
+    const outsideFile = join(outsideDir, 'target.txt')
+    await writeFile(outsideFile, 'original', 'utf-8')
+    await symlink(outsideFile, escapePath)
+
+    await fileOps.writeFile(mockWs, 'escape-link.txt', 'pwned', tmpDir)
+
+    assert.equal(responses.length, 1)
+    assert.ok(responses[0].error)
+    assert.match(responses[0].error, /denied|restricted/i)
+
+    // Verify the target file was NOT modified
+    const targetContent = await readFile(outsideFile, 'utf-8')
+    assert.equal(targetContent, 'original')
+
+    await rm(outsideDir, { recursive: true, force: true })
+  })
+
+  it('allows writing through a symlink that resolves within CWD', async () => {
+    responses.length = 0
+    // Internal symlink: points to a file within CWD — realpath resolves it,
+    // validation passes, and O_NOFOLLOW writes to the resolved real file.
+    const realFile = join(tmpDir, 'real-target.txt')
+    await writeFile(realFile, 'real content', 'utf-8')
+    const linkPath = join(tmpDir, 'internal-link.txt')
+    await symlink(realFile, linkPath)
+
+    await fileOps.writeFile(mockWs, 'internal-link.txt', 'via symlink', tmpDir)
+
+    assert.equal(responses.length, 1)
+    assert.equal(responses[0].error, null)
+    // Content was written to the real file (resolved through realpath)
+    const content = await readFile(realFile, 'utf-8')
+    assert.equal(content, 'via symlink')
+  })
+
+  it('overwrites an existing file successfully', async () => {
+    responses.length = 0
+    await writeFile(join(tmpDir, 'overwrite-me.txt'), 'old content', 'utf-8')
+    await fileOps.writeFile(mockWs, 'overwrite-me.txt', 'new content', tmpDir)
+
+    assert.equal(responses.length, 1)
+    assert.equal(responses[0].error, null)
+    const content = await readFile(join(tmpDir, 'overwrite-me.txt'), 'utf-8')
+    assert.equal(content, 'new content')
   })
 })
