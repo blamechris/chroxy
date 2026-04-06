@@ -16,6 +16,11 @@ function handleListSessions(ws, _client, _msg, ctx) {
 function handleSwitchSession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
 
+  if (!targetId) {
+    ctx.send(ws, { type: 'session_error', message: 'sessionId is required' })
+    return
+  }
+
   // Enforce session token binding: if this client authenticated with a
   // pairing-issued session token that was bound to a specific session,
   // prevent them from switching to any other session.
