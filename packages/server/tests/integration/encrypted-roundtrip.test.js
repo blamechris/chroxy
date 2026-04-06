@@ -15,6 +15,8 @@ import { createMockSession, waitFor } from '../test-helpers.js'
 import {
   createKeyPair,
   deriveSharedKey,
+  deriveConnectionKey,
+  generateConnectionSalt,
   encrypt,
   decrypt,
   DIRECTION_CLIENT,
@@ -90,23 +92,27 @@ async function waitForType(messages, type, timeoutMs = 3000) {
  * Perform the full auth → key_exchange handshake on `ws`.
  *
  * Returns { sharedKey } so the caller can encrypt/decrypt.
+ * Sends a per-connection salt and derives a sub-key via deriveConnectionKey.
  */
 async function doKeyExchange(ws, messages, token = 'test-token') {
   // 1. Authenticate
   send(ws, { type: 'auth', token })
   await waitForType(messages, 'auth_ok')
 
-  // 2. Generate client keypair and send key_exchange
+  // 2. Generate client keypair + connection salt and send key_exchange
   const clientKp = createKeyPair()
-  send(ws, { type: 'key_exchange', publicKey: clientKp.publicKey })
+  const salt = generateConnectionSalt()
+  send(ws, { type: 'key_exchange', publicKey: clientKp.publicKey, salt })
 
   // 3. Wait for server's key_exchange_ok
   const keOk = await waitForType(messages, 'key_exchange_ok')
   assert.ok(typeof keOk.publicKey === 'string' && keOk.publicKey.length > 0,
     'key_exchange_ok must carry server public key')
 
-  // 4. Derive shared key from server's public key + client's secret key
-  const sharedKey = deriveSharedKey(keOk.publicKey, clientKp.secretKey)
+  // 4. Derive shared key from server's public key + client's secret key,
+  //    then derive per-connection sub-key using the salt
+  const rawSharedKey = deriveSharedKey(keOk.publicKey, clientKp.secretKey)
+  const sharedKey = deriveConnectionKey(rawSharedKey, salt)
 
   return { sharedKey }
 }

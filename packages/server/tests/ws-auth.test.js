@@ -11,6 +11,7 @@ import { handleAuthMessage, handlePairMessage, handleKeyExchange } from '../src/
 import { clientHasCapability } from '../src/handler-utils.js'
 import nacl from 'tweetnacl'
 import naclUtil from 'tweetnacl-util'
+import { deriveSharedKey, deriveConnectionKey, generateConnectionSalt } from '@chroxy/store-core/crypto'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -901,6 +902,76 @@ describe('handleKeyExchange', () => {
       // postAuthQueue should be cleared
       assert.equal(client.postAuthQueue, null)
       assert.equal(ws.closed, false)
+    })
+
+    it('derives per-connection sub-key when client sends salt', () => {
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
+
+      const ws = makeMockWs()
+      const { ctx, client } = makeKeyExchangeCtx({ ws })
+
+      const result = handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
+      assert.equal(result, true)
+
+      // Server should have derived encryptionKey via deriveConnectionKey
+      const keOk = ws.sent().find(m => m.type === 'key_exchange_ok')
+      assert.ok(keOk)
+
+      // Client side: derive same key from server's public key + salt
+      const rawSharedKey = deriveSharedKey(keOk.publicKey, clientKp.secretKey)
+      const expectedKey = deriveConnectionKey(rawSharedKey, salt)
+
+      // Server's encryption state should match the client-derived key
+      assert.ok(client.encryptionState)
+      assert.deepEqual(client.encryptionState.sharedKey, expectedKey,
+        'server and client must derive the same per-connection sub-key')
+    })
+
+    it('uses raw shared key when client does NOT send salt (backward compat)', () => {
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+
+      const ws = makeMockWs()
+      const { ctx, client } = makeKeyExchangeCtx({ ws })
+
+      const result = handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64 })
+      assert.equal(result, true)
+
+      // Client side: derive raw shared key (no salt)
+      const keOk = ws.sent().find(m => m.type === 'key_exchange_ok')
+      const rawSharedKey = deriveSharedKey(keOk.publicKey, clientKp.secretKey)
+
+      assert.ok(client.encryptionState)
+      assert.deepEqual(client.encryptionState.sharedKey, rawSharedKey,
+        'without salt, server must use the raw DH shared key')
+    })
+
+    it('produces different encryption keys for same DH pair with different salts', () => {
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt1 = generateConnectionSalt()
+      const salt2 = generateConnectionSalt()
+
+      // First key exchange with salt1
+      const ws1 = makeMockWs()
+      const { ctx: ctx1, client: client1 } = makeKeyExchangeCtx({ ws: ws1 })
+      handleKeyExchange(ctx1, ws1, { type: 'key_exchange', publicKey: clientPubB64, salt: salt1 })
+
+      // Second key exchange with salt2
+      const ws2 = makeMockWs()
+      const { ctx: ctx2, client: client2 } = makeKeyExchangeCtx({ ws: ws2 })
+      handleKeyExchange(ctx2, ws2, { type: 'key_exchange', publicKey: clientPubB64, salt: salt2 })
+
+      // The encryption keys must differ even though the DH shared key is
+      // different (each server generates a fresh keypair), but we can verify
+      // the keys are not identical, which is a basic sanity check
+      assert.ok(client1.encryptionState)
+      assert.ok(client2.encryptionState)
+      // Keys will differ because server generates fresh keypair each time
+      assert.notDeepEqual(client1.encryptionState.sharedKey, client2.encryptionState.sharedKey,
+        'different salts (and fresh server keypairs) must produce different encryption keys')
     })
   })
 

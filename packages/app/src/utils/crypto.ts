@@ -17,6 +17,8 @@ export {
   DIRECTION_CLIENT,
   createKeyPair,
   deriveSharedKey,
+  deriveConnectionKey,
+  generateConnectionSalt,
   nonceFromCounter,
   encrypt,
   decrypt,

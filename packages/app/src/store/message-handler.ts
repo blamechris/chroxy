@@ -13,6 +13,8 @@ import { Alert } from 'react-native';
 import {
   createKeyPair,
   deriveSharedKey,
+  deriveConnectionKey,
+  generateConnectionSalt,
   DIRECTION_CLIENT,
   DIRECTION_SERVER,
   type EncryptionState,
@@ -116,6 +118,7 @@ interface MessageHandlerContext {
   // E2E encryption
   encryptionState: EncryptionState | null;
   pendingKeyPair: KeyPair | null;
+  pendingSalt: string | null;
 
   // History replay
   receivingHistoryReplay: boolean;
@@ -148,6 +151,7 @@ function createDefaultContext(): MessageHandlerContext {
   return {
     encryptionState: null,
     pendingKeyPair: null,
+    pendingSalt: null,
     receivingHistoryReplay: false,
     isSessionSwitchReplay: false,
     pendingSwitchSessionId: null,
@@ -759,8 +763,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Initiate key exchange if server requires encryption
       if (msg.encryption === 'required') {
         _ctx.pendingKeyPair = createKeyPair();
+        _ctx.pendingSalt = generateConnectionSalt();
         // Send key_exchange plaintext (before encryption is active)
-        ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _ctx.pendingKeyPair.publicKey }));
+        ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _ctx.pendingKeyPair.publicKey, salt: _ctx.pendingSalt }));
         // Post-auth messages will be sent after key_exchange_ok arrives
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: true });
       } else {
@@ -785,11 +790,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           set({ socket: null });
           useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
           _ctx.pendingKeyPair = null;
+          _ctx.pendingSalt = null;
           break;
         }
-        const sharedKey = deriveSharedKey(msg.publicKey, _ctx.pendingKeyPair.secretKey);
-        _ctx.encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 };
+        const rawSharedKey = deriveSharedKey(msg.publicKey, _ctx.pendingKeyPair.secretKey);
+        const encryptionKey = _ctx.pendingSalt
+          ? deriveConnectionKey(rawSharedKey, _ctx.pendingSalt)
+          : rawSharedKey;
+        _ctx.encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 };
         _ctx.pendingKeyPair = null;
+        _ctx.pendingSalt = null;
         console.log('[crypto] E2E encryption established');
         // Now send the post-auth messages that were deferred
         wsSend(ctx.socket, { type: 'list_slash_commands' });
