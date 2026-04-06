@@ -12,6 +12,7 @@ import { waitForTunnel } from './tunnel-check.js'
 import { createLogger } from './logger.js'
 import QRCode from 'qrcode'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
+import { PushManager } from './push.js'
 
 function maskToken(token) {
   if (!token) return ''
@@ -85,6 +86,8 @@ export class Supervisor extends EventEmitter {
       lastExitReason: null,
       lastBackoffMs: 0,
     }
+
+    this._pushStoragePath = config.pushStoragePath || join(homedir(), '.chroxy', 'push-tokens.json')
   }
 
   /** Override point: fork a child process */
@@ -115,6 +118,15 @@ export class Supervisor extends EventEmitter {
   /** Override point: exit the process */
   _exit(code) {
     process.exit(code)
+  }
+
+  /** Override point: send a push notification */
+  async _sendPushNotification(category, title, body) {
+    // Create a fresh PushManager each time to reload tokens from disk.
+    // The child process writes tokens after clients connect, so the supervisor
+    // must re-read the file to pick up any tokens registered since startup.
+    const push = new PushManager({ storagePath: this._pushStoragePath })
+    await push.send(category, title, body)
   }
 
   /** Override point: display QR code */
@@ -327,62 +339,84 @@ export class Supervisor extends EventEmitter {
     })
 
     this._child.on('exit', (code, signal) => {
-      stdoutRl?.close()
-      stderrRl?.close()
-      if (deployResetTimer) { clearTimeout(deployResetTimer); deployResetTimer = null }
-      const childUptimeMs = this._metrics.childStartedAt ? Date.now() - this._metrics.childStartedAt : 0
-      this._child = null
-      this._childReady = false
-      if (this._shuttingDown) return
+      // Use a non-async outer listener with a guarded inner async IIFE so that
+      // any uncaught throw in the handler is logged rather than becoming an
+      // unhandled promise rejection (EventEmitter does not observe returned promises).
+      void (async () => {
+        stdoutRl?.close()
+        stderrRl?.close()
+        if (deployResetTimer) { clearTimeout(deployResetTimer); deployResetTimer = null }
+        const childUptimeMs = this._metrics.childStartedAt ? Date.now() - this._metrics.childStartedAt : 0
+        this._child = null
+        this._childReady = false
+        if (this._shuttingDown) return
 
-      this._log.info(`Server child exited (code ${code}, signal ${signal})`)
-      this._restartCount++
-      this._metrics.totalRestarts++
-      this._metrics.consecutiveRestarts = this._restartCount
-      this._metrics.lastExitReason = { code, signal }
-      this._metrics.childStartedAt = null
-      this.emit('child_exit', { code, signal })
+        this._log.info(`Server child exited (code ${code}, signal ${signal})`)
+        this._restartCount++
+        this._metrics.totalRestarts++
+        this._metrics.consecutiveRestarts = this._restartCount
+        this._metrics.lastExitReason = { code, signal }
+        this._metrics.childStartedAt = null
+        this.emit('child_exit', { code, signal })
 
-      // Deploy crash detection
-      const timeSinceDeploy = Date.now() - this._lastDeployTimestamp
-      if (this._lastDeployTimestamp > 0 && timeSinceDeploy < DEPLOY_CRASH_WINDOW) {
-        this._deployFailureCount++
-        this._log.error(`Deploy crash detected (${this._deployFailureCount}/${MAX_DEPLOY_FAILURES}) — child lasted ${Math.round(childUptimeMs / 1000)}s`)
+        // Deploy crash detection
+        const timeSinceDeploy = Date.now() - this._lastDeployTimestamp
+        if (this._lastDeployTimestamp > 0 && timeSinceDeploy < DEPLOY_CRASH_WINDOW) {
+          this._deployFailureCount++
+          this._log.error(`Deploy crash detected (${this._deployFailureCount}/${MAX_DEPLOY_FAILURES}) — child lasted ${Math.round(childUptimeMs / 1000)}s`)
 
-        if (this._deployFailureCount >= MAX_DEPLOY_FAILURES) {
-          this._log.error('Max deploy failures reached, attempting rollback')
-          if (this._rollbackToKnownGood()) {
-            this._deployFailureCount = 0
-            this._lastDeployTimestamp = 0
-            this._restartCount = 0
-            this._startStandbyServer()
-            this._restartScheduledAt = Date.now()
-            this._restartDelayMs = 2000
-            this._restartTimer = setTimeout(() => this.startChild(), 2000)
+          if (this._deployFailureCount >= MAX_DEPLOY_FAILURES) {
+            this._log.error('Max deploy failures reached, attempting rollback')
+            if (this._rollbackToKnownGood()) {
+              this._deployFailureCount = 0
+              this._lastDeployTimestamp = 0
+              this._restartCount = 0
+              this._startStandbyServer()
+              this._restartScheduledAt = Date.now()
+              this._restartDelayMs = 2000
+              this._restartTimer = setTimeout(() => this.startChild(), 2000)
+              return
+            }
+            this._log.error('Rollback failed — exiting to prevent crash loop')
+            this._exit(1)
             return
           }
-          this._log.error('Rollback failed — exiting to prevent crash loop')
+        }
+
+        if (this._restartCount > this._maxRestarts) {
+          this._log.error(`Max restarts (${this._maxRestarts}) exceeded, giving up`)
+          this.emit('max_restarts_exceeded')
+          try {
+            // Cap the push wait at 5s so a slow network cannot delay process exit
+            // meaningfully. The notification is best-effort.
+            const pushTimeout = new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('push notification timed out')), 5000)
+            )
+            await Promise.race([
+              this._sendPushNotification(
+                'activity_error',
+                'Chroxy server is down',
+                'Maximum restart attempts exceeded. Restart the Chroxy daemon.',
+              ),
+              pushTimeout,
+            ])
+          } catch (pushErr) {
+            this._log.error(`Failed to send push notification on supervisor exit: ${pushErr.message}`)
+          }
           this._exit(1)
           return
         }
-      }
 
-      if (this._restartCount > this._maxRestarts) {
-        this._log.error(`Max restarts (${this._maxRestarts}) exceeded, giving up`)
-        this.emit('max_restarts_exceeded')
-        this._exit(1)
-        return
-      }
+        // Start standby health check server while child is down
+        this._startStandbyServer()
 
-      // Start standby health check server while child is down
-      this._startStandbyServer()
-
-      const delay = RESTART_BACKOFFS[Math.min(this._restartCount - 1, RESTART_BACKOFFS.length - 1)]
-      this._metrics.lastBackoffMs = delay
-      this._restartScheduledAt = Date.now()
-      this._restartDelayMs = delay
-      this._log.info(`Child ran for ${Math.round(childUptimeMs / 1000)}s | total restarts: ${this._metrics.totalRestarts} | next backoff: ${delay}ms`)
-      this._restartTimer = setTimeout(() => this.startChild(), delay)
+        const delay = RESTART_BACKOFFS[Math.min(this._restartCount - 1, RESTART_BACKOFFS.length - 1)]
+        this._metrics.lastBackoffMs = delay
+        this._restartScheduledAt = Date.now()
+        this._restartDelayMs = delay
+        this._log.info(`Child ran for ${Math.round(childUptimeMs / 1000)}s | total restarts: ${this._metrics.totalRestarts} | next backoff: ${delay}ms`)
+        this._restartTimer = setTimeout(() => this.startChild(), delay)
+      })().catch((err) => this._log.error(`Unexpected error in child exit handler: ${err.message}`))
     })
 
     this._child.on('error', (err) => {
