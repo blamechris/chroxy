@@ -12,6 +12,7 @@ import { waitForTunnel } from './tunnel-check.js'
 import { createLogger } from './logger.js'
 import QRCode from 'qrcode'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
+import { PushManager } from './push.js'
 
 function maskToken(token) {
   if (!token) return ''
@@ -85,6 +86,9 @@ export class Supervisor extends EventEmitter {
       lastExitReason: null,
       lastBackoffMs: 0,
     }
+
+    const pushStoragePath = config.pushStoragePath || join(homedir(), '.chroxy', 'push-tokens.json')
+    this._push = new PushManager({ storagePath: pushStoragePath })
   }
 
   /** Override point: fork a child process */
@@ -115,6 +119,11 @@ export class Supervisor extends EventEmitter {
   /** Override point: exit the process */
   _exit(code) {
     process.exit(code)
+  }
+
+  /** Override point: send a push notification */
+  async _sendPushNotification(category, title, body) {
+    await this._push.send(category, title, body)
   }
 
   /** Override point: display QR code */
@@ -326,7 +335,7 @@ export class Supervisor extends EventEmitter {
       }
     })
 
-    this._child.on('exit', (code, signal) => {
+    this._child.on('exit', async (code, signal) => {
       stdoutRl?.close()
       stderrRl?.close()
       if (deployResetTimer) { clearTimeout(deployResetTimer); deployResetTimer = null }
@@ -370,6 +379,15 @@ export class Supervisor extends EventEmitter {
       if (this._restartCount > this._maxRestarts) {
         this._log.error(`Max restarts (${this._maxRestarts}) exceeded, giving up`)
         this.emit('max_restarts_exceeded')
+        try {
+          await this._sendPushNotification(
+            'activity_error',
+            'Chroxy server is down',
+            'Maximum restart attempts exceeded. Restart the Chroxy daemon.',
+          )
+        } catch (pushErr) {
+          this._log.error(`Failed to send push notification on supervisor exit: ${pushErr.message}`)
+        }
         this._exit(1)
         return
       }

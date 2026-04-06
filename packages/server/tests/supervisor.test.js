@@ -59,6 +59,8 @@ class TestSupervisor extends Supervisor {
     this._exitCalled = null
     this._rollbackCalls = []
     this._rollbackResult = false
+    this._pushCalls = []
+    this._pushShouldThrow = false
   }
 
   _fork(script, args, opts) {
@@ -92,6 +94,13 @@ class TestSupervisor extends Supervisor {
   _rollbackToKnownGood() {
     this._rollbackCalls.push(Date.now())
     return this._rollbackResult
+  }
+
+  async _sendPushNotification(category, title, body) {
+    this._pushCalls.push({ category, title, body })
+    if (this._pushShouldThrow) {
+      throw new Error('push send failed')
+    }
   }
 
   /** Get the most recently spawned mock child */
@@ -276,11 +285,61 @@ describe('Supervisor', () => {
       assert.equal(maxExceeded, false)
 
       // Manually start and crash again (simulating the setTimeout restart)
+      // The exit handler is async (push notification), so await the test_exit event
       supervisor.startChild()
-      supervisor.lastChild.simulateExit(1, null)
+      await new Promise((resolve) => {
+        supervisor.on('test_exit', resolve)
+        supervisor.lastChild.simulateExit(1, null)
+      })
 
       // restartCount is now 2, which IS > maxRestarts (1)
       assert.ok(maxExceeded)
+      assert.equal(supervisor._exitCalled, 1)
+    })
+
+    it('sends push notification before exiting after max restarts', async () => {
+      const { supervisor } = setup({ maxRestarts: 1 })
+
+      let exitFired = false
+      supervisor.on('test_exit', () => { exitFired = true })
+
+      supervisor.startChild()
+      supervisor.lastChild.simulateExit(1, null)
+
+      // First crash: restartCount=1, not yet > maxRestarts(1) — no push
+      assert.equal(supervisor._pushCalls.length, 0)
+
+      // Second crash via manual startChild (simulates the setTimeout restart)
+      supervisor.startChild()
+
+      // Wait for async exit handler to complete
+      await new Promise((resolve) => {
+        supervisor.on('test_exit', resolve)
+        supervisor.lastChild.simulateExit(1, null)
+      })
+
+      assert.equal(supervisor._pushCalls.length, 1)
+      assert.equal(supervisor._pushCalls[0].category, 'activity_error')
+      assert.ok(supervisor._pushCalls[0].title.length > 0, 'title should be non-empty')
+      assert.ok(supervisor._pushCalls[0].body.length > 0, 'body should be non-empty')
+      assert.equal(supervisor._exitCalled, 1)
+    })
+
+    it('exits cleanly even if push notification fails', async () => {
+      const { supervisor } = setup({ maxRestarts: 1 })
+      supervisor._pushShouldThrow = true
+
+      supervisor.startChild()
+      supervisor.lastChild.simulateExit(1, null)
+
+      supervisor.startChild()
+
+      await new Promise((resolve) => {
+        supervisor.on('test_exit', resolve)
+        supervisor.lastChild.simulateExit(1, null)
+      })
+
+      // Should still exit even though push threw
       assert.equal(supervisor._exitCalled, 1)
     })
 
