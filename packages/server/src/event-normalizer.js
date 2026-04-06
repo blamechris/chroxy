@@ -187,16 +187,16 @@ Object.assign(EVENT_MAP, {
     }],
   }),
 
-  error: (data) => ({
-    messages: [{
-      msg: {
-        type: 'message',
-        messageType: 'error',
-        content: data.message,
-        timestamp: Date.now(),
-      },
-    }],
-  }),
+  error: (data) => {
+    const msg = {
+      type: 'message',
+      messageType: 'error',
+      content: data.message,
+      timestamp: Date.now(),
+    }
+    if (data.code) msg.code = data.code
+    return { messages: [{ msg }] }
+  },
 
 })
 

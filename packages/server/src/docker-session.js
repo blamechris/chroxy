@@ -30,9 +30,16 @@ export function classifyDockerError(err, stderrText = '') {
   if (
     combined.includes('no such image') ||
     combined.includes('manifest unknown') ||
+    combined.includes('pull access denied') ||
+    combined.includes('repository does not exist') ||
     (combined.includes('not found') && combined.includes('image'))
   ) {
-    return { code: 'docker_image_not_found', message: 'Docker image not found. Run: docker pull <image>' }
+    const imageMatch = combined.match(/(?:no such image:\s*|pull access denied for\s+)['"]?([a-z0-9][a-z0-9._\/-]*(?::[a-z0-9._-]+)?)/)
+    const imageName = imageMatch ? imageMatch[1] : null
+    const message = imageName
+      ? `Docker image '${imageName}' not found. Run: docker pull ${imageName}`
+      : 'Docker image not found. Run: docker pull <image>'
+    return { code: 'docker_image_not_found', message }
   }
   if (
     combined.includes('permission denied') ||
