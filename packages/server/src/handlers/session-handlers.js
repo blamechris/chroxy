@@ -4,7 +4,7 @@
  * Handles: list_sessions, switch_session, create_session, destroy_session,
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
-import { validateCwdWithinHome, broadcastFocusChanged, autoSubscribeOtherClients, enforceBoundSession } from '../handler-utils.js'
+import { validateCwdWithinHome, broadcastFocusChanged, autoSubscribeOtherClients } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
