@@ -188,6 +188,46 @@ describe('Provider Interface Validation', () => {
       )
     }
   })
+
+  it('throws a friendly error for non-constructable functions (arrow functions)', () => {
+    const arrowFn = () => {}
+    assert.throws(
+      () => validateProviderClass(arrowFn, 'arrow'),
+      /must be a constructable class/
+    )
+  })
+
+  it('requires respondToPermission and respondToQuestion when inProcessPermissions is true', () => {
+    class InProcessProvider {
+      sendMessage() {}
+      interrupt() {}
+      setModel() {}
+      setPermissionMode() {}
+      start() {}
+      destroy() {}
+      // missing respondToPermission and respondToQuestion
+      static get capabilities() { return { inProcessPermissions: true } }
+    }
+    assert.throws(
+      () => validateProviderClass(InProcessProvider, 'in-process'),
+      /inProcessPermissions=true but is missing required method/
+    )
+  })
+
+  it('accepts an inProcessPermissions provider that has all required methods', () => {
+    class FullInProcessProvider {
+      sendMessage() {}
+      interrupt() {}
+      setModel() {}
+      setPermissionMode() {}
+      start() {}
+      destroy() {}
+      respondToPermission() {}
+      respondToQuestion() {}
+      static get capabilities() { return { inProcessPermissions: true } }
+    }
+    assert.doesNotThrow(() => validateProviderClass(FullInProcessProvider, 'full-in-process'))
+  })
 })
 
 describe('Provider Capabilities', () => {

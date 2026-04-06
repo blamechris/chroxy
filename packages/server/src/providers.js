@@ -73,28 +73,45 @@
  *   - Implement `static get capabilities()` returning ProviderCapabilities
  *
  * @typedef {Object} ProviderSession
- * @property {function(string, any=, Object=): void} sendMessage - Send a message to the AI
- * @property {function(): void} interrupt - Interrupt the current operation
- * @property {function(string): void} setModel - Set the AI model
- * @property {function(string): void} setPermissionMode - Set permission mode
- * @property {function(): void} start - Start the session process
+ * @property {function(string, Array=, Object=): Promise<void>} sendMessage - Send a message to the AI
+ * @property {function(): void|Promise<void>} interrupt - Interrupt the current operation
+ * @property {function(string): boolean} setModel - Set the AI model; returns true if changed
+ * @property {function(string): boolean} setPermissionMode - Set permission mode; returns true if changed
+ * @property {function(): void} start - Start the session process (must be synchronous)
  * @property {function(): void} destroy - Clean up and destroy the session
+ * @property {function(string, string): void} [respondToPermission] - Required when capabilities.inProcessPermissions is true
+ * @property {function(string, string=): void} [respondToQuestion] - Required when capabilities.inProcessPermissions is true
  */
 
 /** Required methods every provider class prototype must expose. */
 const REQUIRED_METHODS = ['sendMessage', 'interrupt', 'setModel', 'setPermissionMode', 'start', 'destroy']
 
+/** Methods required when the provider handles permissions in-process. */
+const IN_PROCESS_PERMISSION_METHODS = ['respondToPermission', 'respondToQuestion']
+
 /**
  * Validates that a provider class implements the ProviderSession interface.
  * Checks the class prototype so no instance is created during registration.
+ * When `ProviderClass.capabilities.inProcessPermissions` is true, also validates
+ * that `respondToPermission` and `respondToQuestion` are present.
  * @param {Function} ProviderClass - Session class to validate
  * @param {string} name - Provider name for error messages
  * @throws {Error} If any required method is missing from the prototype
  */
 export function validateProviderClass(ProviderClass, name) {
+  if (typeof ProviderClass !== 'function' || !ProviderClass.prototype) {
+    throw new Error(`Provider '${name}' must be a constructable class`)
+  }
   for (const method of REQUIRED_METHODS) {
     if (typeof ProviderClass.prototype[method] !== 'function') {
       throw new Error(`Provider '${name}' missing required method: ${method}`)
+    }
+  }
+  if (ProviderClass.capabilities?.inProcessPermissions) {
+    for (const method of IN_PROCESS_PERMISSION_METHODS) {
+      if (typeof ProviderClass.prototype[method] !== 'function') {
+        throw new Error(`Provider '${name}' has inProcessPermissions=true but is missing required method: ${method}`)
+      }
     }
   }
 }
