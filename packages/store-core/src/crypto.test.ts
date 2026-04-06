@@ -1,7 +1,7 @@
 /**
  * Tests for the crypto module (E2E encryption primitives).
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
 import nacl from 'tweetnacl'
 import { encodeBase64, decodeBase64 } from 'tweetnacl-util'
 import {
@@ -292,6 +292,16 @@ describe('decrypt overflow guard', () => {
 })
 
 describe('initPRNG', () => {
+  // Restore a non-deterministic PRNG after each test so that a mid-test assertion
+  // failure cannot leave the process running on a fixed-value PRNG for subsequent tests.
+  afterEach(() => {
+    initPRNG((n: number): Uint8Array => {
+      const buf = new Uint8Array(n)
+      for (let i = 0; i < n; i++) buf[i] = Math.floor(Math.random() * 256)
+      return buf
+    })
+  })
+
   it('accepts a valid getRandomBytes function and does not throw', () => {
     const mockGetRandomBytes = (n: number): Uint8Array => {
       return new Uint8Array(n).fill(0xab)
@@ -321,14 +331,7 @@ describe('initPRNG', () => {
     const kp2 = createKeyPair()
     expect(kp1.publicKey).toBe(kp2.publicKey)
     expect(callCount).toBeGreaterThan(0)
-
-    // Restore a real PRNG so subsequent tests are not affected
-    initPRNG((n: number): Uint8Array => {
-      const buf = new Uint8Array(n)
-      // Use Math.random as a basic fallback — sufficient for test cleanup
-      for (let i = 0; i < n; i++) buf[i] = Math.floor(Math.random() * 256)
-      return buf
-    })
+    // afterEach restores a non-deterministic PRNG unconditionally
   })
 })
 
@@ -355,7 +358,10 @@ describe('nonceFromCounter invalid input guard', () => {
   })
 
   it('rejects Infinity counter', () => {
-    expect(() => nonceFromCounter(Infinity, DIRECTION_SERVER)).toThrow()
+    expect(() => nonceFromCounter(Infinity, DIRECTION_SERVER)).toThrow(RangeError)
+    expect(() => nonceFromCounter(Infinity, DIRECTION_SERVER)).toThrow(
+      'Nonce counter must be a non-negative integer'
+    )
   })
 
   it('rejects -Infinity counter', () => {
