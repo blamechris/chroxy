@@ -1147,4 +1147,74 @@ describe('server_error toast scope filtering', () => {
     _testMessageHandler.clearContext();
     useConnectionStore.setState({ activeSessionId: null, messages: [], sessionStates: {} });
   });
+
+  it('error message is handled without throwing', async () => {
+    const { _testMessageHandler } = await import('./message-handler');
+
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    expect(() => {
+      _testMessageHandler.handle({
+        type: 'error',
+        requestId: 'req-abc',
+        code: 'HANDLER_ERROR',
+        message: 'Checkpoint creation failed',
+      });
+    }).not.toThrow();
+
+    _testMessageHandler.clearContext();
+  });
+
+  it('error message surfaces via addServerError', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({ serverErrors: [] });
+
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    _testMessageHandler.handle({
+      type: 'error',
+      requestId: null,
+      code: 'HANDLER_ERROR',
+      message: 'Something failed on the server',
+    });
+
+    const { serverErrors } = useConnectionStore.getState();
+    expect(serverErrors.length).toBeGreaterThanOrEqual(1);
+    expect(serverErrors.some((e: { message: string }) => e.message === 'Something failed on the server')).toBe(true);
+
+    _testMessageHandler.clearContext();
+    useConnectionStore.setState({ serverErrors: [] });
+  });
+
+  it('error message with missing fields is handled gracefully', async () => {
+    const { _testMessageHandler } = await import('./message-handler');
+
+    _testMessageHandler.setContext({
+      url: 'ws://localhost:3000',
+      token: 'test-token',
+      isReconnect: false,
+      silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+
+    expect(() => {
+      _testMessageHandler.handle({ type: 'error' });
+    }).not.toThrow();
+
+    _testMessageHandler.clearContext();
+  });
 });

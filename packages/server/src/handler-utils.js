@@ -186,3 +186,18 @@ export function resolveSession(ctx, msg, client) {
   const sid = msg.sessionId || client?.activeSessionId
   return ctx.sessionManager?.getSession(sid) ?? null
 }
+
+/**
+ * Send a structured error response to a WebSocket client.
+ * Use in handler catch blocks so the client can clear loading state
+ * and surface a user-facing message instead of silently spinning.
+ *
+ * @param {WebSocket} ws - Target WebSocket connection
+ * @param {string|null} requestId - Correlating request ID (may be null)
+ * @param {string} code - Machine-readable error code (e.g. 'HANDLER_ERROR')
+ * @param {string} message - Human-readable error description
+ */
+export function sendError(ws, requestId, code, message) {
+  if (!ws || ws.readyState !== ws.OPEN) return
+  ws.send(JSON.stringify({ type: 'error', requestId: requestId ?? null, code, message }))
+}

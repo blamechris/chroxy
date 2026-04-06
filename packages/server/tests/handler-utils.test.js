@@ -25,6 +25,7 @@ import {
   ALLOWED_IMAGE_TYPES,
   broadcastFocusChanged,
   resolveSession,
+  sendError,
 } from '../src/handler-utils.js'
 
 // -- Temp directory setup --
@@ -689,6 +690,46 @@ describe('broadcastFocusChanged', () => {
 // ============================================================
 // resolveSession
 // ============================================================
+
+// ============================================================
+// sendError
+// ============================================================
+
+describe('sendError', () => {
+  it('sends a well-formed error message when socket is open', () => {
+    const sent = []
+    const ws = { readyState: 1, OPEN: 1, send: (data) => sent.push(JSON.parse(data)) }
+    sendError(ws, 'req-1', 'HANDLER_ERROR', 'something went wrong')
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].type, 'error')
+    assert.strictEqual(sent[0].requestId, 'req-1')
+    assert.strictEqual(sent[0].code, 'HANDLER_ERROR')
+    assert.strictEqual(sent[0].message, 'something went wrong')
+  })
+
+  it('sets requestId to null when not provided', () => {
+    const sent = []
+    const ws = { readyState: 1, OPEN: 1, send: (data) => sent.push(JSON.parse(data)) }
+    sendError(ws, undefined, 'HANDLER_ERROR', 'oops')
+    assert.strictEqual(sent[0].requestId, null)
+  })
+
+  it('does nothing when socket is closed', () => {
+    const sent = []
+    const ws = { readyState: 3, OPEN: 1, send: (data) => sent.push(data) }
+    sendError(ws, 'req-2', 'HANDLER_ERROR', 'too late')
+    assert.strictEqual(sent.length, 0)
+  })
+
+  it('does nothing when ws is null', () => {
+    // Should not throw
+    assert.doesNotThrow(() => sendError(null, 'req-3', 'HANDLER_ERROR', 'no socket'))
+  })
+
+  it('does nothing when ws is undefined', () => {
+    assert.doesNotThrow(() => sendError(undefined, 'req-4', 'HANDLER_ERROR', 'no socket'))
+  })
+})
 
 describe('resolveSession', () => {
   it('returns session by msg.sessionId', () => {

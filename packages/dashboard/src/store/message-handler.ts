@@ -2235,6 +2235,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'error': {
+      // Structured error response from a handler catch block.
+      // Log it and surface it as a server error notification.
+      const errCode = typeof msg.code === 'string' ? msg.code : 'UNKNOWN';
+      const errMsg = typeof msg.message === 'string'
+        ? stripAnsi(msg.message as string)
+        : 'An unexpected server error occurred';
+      console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
+      get().addServerError(errMsg);
+      break;
+    }
+
     default: {
       // Log unknown message types when server protocol is newer (likely new features)
       const serverPV = getStore().getState().serverProtocolVersion;
