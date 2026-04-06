@@ -38,7 +38,7 @@ const SYNTHETIC_TYPES = new Set([
 const INTENTIONALLY_UNHANDLED = new Set([
   'encrypted',          // unwrapped at connection layer before dispatch to handleMessage
   'status',             // legacy/unused — server_status is the active equivalent
-  'error',              // generic error envelope — server_error is the typed equivalent
+  // 'error' removed — both handlers now implement case 'error': (PR #2742)
   'session_created',    // ack handled via session_list refresh, no dedicated case needed
   'session_destroyed',  // ack handled via session_list refresh, no dedicated case needed
   'session_activity',   // server-side session activity tracking, not displayed in handlers
