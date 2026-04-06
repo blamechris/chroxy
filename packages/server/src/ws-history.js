@@ -38,6 +38,16 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       activeId = sessionManager.firstSessionId
       entry = activeId ? sessionManager.getSession(activeId) : null
     }
+    // If client is bound to a specific session, use that session's cwd
+    // instead of the server default to avoid leaking unrelated session info.
+    if (client.boundSessionId) {
+      const boundEntry = sessionManager.getSession(client.boundSessionId)
+      if (boundEntry) {
+        entry = boundEntry
+      } else {
+        entry = null
+      }
+    }
     if (entry) {
       sessionInfo.cwd = entry.cwd
     }
