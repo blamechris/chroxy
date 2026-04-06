@@ -639,10 +639,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
-        const closeMsg = getWsCloseMessage(event.code) ?? 'Connection lost';
+        const closeMsg = getWsCloseMessage(event.code);
         console.log(`[ws] Connection closed (code ${event.code}), auto-reconnecting...`);
         useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
-        useConnectionLifecycleStore.getState().setConnectionError(closeMsg, 0);
+        // Only set an error when the close code indicates a real problem (null = normal close)
+        if (closeMsg !== null) {
+          useConnectionLifecycleStore.getState().setConnectionError(closeMsg, 0);
+        }
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
