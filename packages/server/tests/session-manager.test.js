@@ -924,6 +924,7 @@ describe('createSession failure cleanup (FM-03)', () => {
       static get capabilities() { return {} }
       start() { throw new Error('binary not found') }
       destroy() {}
+      interrupt() {}
       sendMessage() {}
       setModel() {}
       setPermissionMode() {}
@@ -958,6 +959,7 @@ describe('createSession failure cleanup (FM-03)', () => {
       static get capabilities() { return {} }
       start() { throw new Error('spawn failed') }
       destroy() {}
+      interrupt() {}
       sendMessage() {}
       setModel() {}
       setPermissionMode() {}
@@ -989,6 +991,7 @@ describe('createSession failure cleanup (FM-03)', () => {
       start() { throw new Error('init crashed') }
       destroy() { destroyCalled = true }
       sendMessage() {}
+      interrupt() {}
       setModel() {}
       setPermissionMode() {}
     }
@@ -1034,6 +1037,7 @@ describe('#1204 — _cleanupSessionMaps helper cleans all maps', () => {
         throw new Error('polluted start')
       }
       destroy() {}
+      interrupt() {}
       sendMessage() {}
       setModel() {}
       setPermissionMode() {}
@@ -1076,6 +1080,7 @@ describe('#1202 — guard session.destroy() with try-catch', () => {
       start() { throw new Error('start exploded') }
       destroy() { throw new Error('destroy exploded') }
       sendMessage() {}
+      interrupt() {}
       setModel() {}
       setPermissionMode() {}
     }
@@ -1108,6 +1113,7 @@ describe('#1202 — guard session.destroy() with try-catch', () => {
       start() { return Promise.reject(new Error('async start exploded')) }
       destroy() { throw new Error('async destroy exploded') }
       sendMessage() {}
+      interrupt() {}
       setModel() {}
       setPermissionMode() {}
     }
@@ -1233,6 +1239,7 @@ describe('#1141 — async start() rejection guard', () => {
       start() { return Promise.reject(new Error('async init failed')) }
       destroy() { destroyCalled = true }
       sendMessage() {}
+      interrupt() {}
       setModel() {}
       setPermissionMode() {}
     }
@@ -1333,6 +1340,7 @@ describe('Session ID generation (#1856)', () => {
       static get capabilities() { return {} }
       start() {}
       destroy() {}
+      interrupt() {}
       sendMessage() {}
       setModel() {}
       setPermissionMode() {}

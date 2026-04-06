@@ -48,6 +48,7 @@ before(async () => {
     start() {}
     destroy() {}
     sendMessage() {}
+    interrupt() {}
     setModel(m) { this.model = m }
     setPermissionMode(m) { this.permissionMode = m }
   }
