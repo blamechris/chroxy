@@ -97,7 +97,7 @@ describe('Permission hook stdin-only parameter passing (#2685)', () => {
       session_id: 'test',
     })
 
-    const result = spawnSync('/bin/bash', [hookPath], {
+    const { status, stderr } = spawnSync('/bin/bash', [hookPath], {
       input: maliciousJson,
       encoding: 'utf-8',
       timeout: 5000,
@@ -111,7 +111,7 @@ describe('Permission hook stdin-only parameter passing (#2685)', () => {
 
     assert.ok(
       !existsSync(INJECTION_SENTINEL),
-      'Shell injection via tool_name must not execute (sentinel file must not exist)'
+      `Shell injection via tool_name must not execute (exit ${status}, stderr: ${stderr})`
     )
   })
 
@@ -122,7 +122,7 @@ describe('Permission hook stdin-only parameter passing (#2685)', () => {
       session_id: 'test',
     })
 
-    const result = spawnSync('/bin/bash', [hookPath], {
+    const { status, stderr } = spawnSync('/bin/bash', [hookPath], {
       input: maliciousJson,
       encoding: 'utf-8',
       timeout: 5000,
@@ -135,7 +135,7 @@ describe('Permission hook stdin-only parameter passing (#2685)', () => {
 
     assert.ok(
       !existsSync(INJECTION_SENTINEL),
-      'Shell injection via $() in tool_name must not execute'
+      `Shell injection via $() in tool_name must not execute (exit ${status}, stderr: ${stderr})`
     )
   })
 
@@ -155,7 +155,7 @@ describe('Permission hook stdin-only parameter passing (#2685)', () => {
     })
 
     // Run in approve mode (the default) — this exercises REQUEST=$(cat -) and the curl call
-    const result = spawnSync('/bin/bash', [hookPath], {
+    const { status, stderr } = spawnSync('/bin/bash', [hookPath], {
       input: maliciousJson,
       encoding: 'utf-8',
       timeout: 5000,
@@ -169,7 +169,7 @@ describe('Permission hook stdin-only parameter passing (#2685)', () => {
 
     assert.ok(
       !existsSync(INJECTION_SENTINEL),
-      'Shell injection via tool_input in stdin must not execute in approve mode'
+      `Shell injection via tool_input in stdin must not execute in approve mode (exit ${status}, stderr: ${stderr})`
     )
   })
 })
