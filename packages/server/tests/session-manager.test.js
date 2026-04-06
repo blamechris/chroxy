@@ -1383,3 +1383,83 @@ describe('Configurable magic numbers (#1848)', () => {
     assert.equal(mgr.maxSessions, 5)
   })
 })
+
+describe('#2692 — session destroy race: getSession rejects mid-destroy sessions', () => {
+  it('sets _destroying flag at start of destroySession()', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    let destroyingDuringCall = null
+    session.destroy = () => {
+      // Capture the flag value while destroy() is executing
+      const entry = mgr._sessions.get('s1')
+      destroyingDuringCall = entry ? entry._destroying : null
+    }
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+
+    mgr.destroySession('s1')
+
+    assert.equal(destroyingDuringCall, true,
+      '_destroying should be true on the entry while destroy() executes')
+  })
+
+  it('getSession returns null for a session with _destroying flag set', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp', _destroying: true })
+
+    assert.equal(mgr.getSession('s1'), null,
+      'getSession should return null when _destroying is set on the entry')
+  })
+
+  it('getSession returns null during destroySession()', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    let getSessionResultDuringDestroy = 'NOT_CALLED'
+    session.destroy = () => {
+      // Simulate reconnecting client calling getSession mid-destroy
+      getSessionResultDuringDestroy = mgr.getSession('s1')
+    }
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+
+    // Confirm it's visible before destroy
+    assert.ok(mgr.getSession('s1'), 'getSession should return entry before destroy')
+
+    mgr.destroySession('s1')
+
+    assert.equal(getSessionResultDuringDestroy, null,
+      'getSession should return null while destroy() is executing')
+    assert.equal(mgr.getSession('s1'), null,
+      'getSession should return null after destroy completes')
+  })
+
+  it('destroySessionLocked sets _destroying before acquiring lock', async () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Test', cwd: '/tmp' })
+
+    // Start the locked destroy but check before it finishes
+    const destroyPromise = mgr.destroySessionLocked('s1')
+
+    // The _destroying flag should be set synchronously before lock acquisition
+    // (lock.acquire() is async but flag is set before await)
+    const entry = mgr._sessions.get('s1')
+    assert.equal(entry ? entry._destroying : 'ENTRY_GONE', true,
+      '_destroying should be set synchronously at the start of destroySessionLocked()')
+
+    // getSession should return null immediately after destroySessionLocked() is called
+    assert.equal(mgr.getSession('s1'), null,
+      'getSession should return null once destroySessionLocked() starts')
+
+    await destroyPromise
+
+    // After completion, session should be fully removed from _sessions
+    assert.equal(mgr._sessions.has('s1'), false,
+      'session should be removed from _sessions after destroySessionLocked() completes')
+  })
+})

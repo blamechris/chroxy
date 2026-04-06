@@ -430,10 +430,13 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Get a session entry by ID.
+   * Returns null if the session does not exist or is currently being destroyed.
    * @returns {{ session: object, name: string, cwd: string, createdAt: number } | null}
    */
   getSession(sessionId) {
-    return this._sessions.get(sessionId) || null
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry._destroying) return null
+    return entry
   }
 
   /**
@@ -511,9 +514,13 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Destroy a session with mutation lock.
+   * Sets _destroying immediately (before lock acquisition) so concurrent
+   * getSession() calls see the session as unavailable right away.
    * @returns {Promise<boolean>}
    */
   async destroySessionLocked(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (entry) entry._destroying = true
     const release = await this._locks.acquire(sessionId)
     try {
       return this.destroySession(sessionId)
@@ -541,6 +548,8 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Destroy a specific session.
+   * Sets _destroying = true at the start so concurrent getSession() calls
+   * treat the session as unavailable while cleanup is in progress.
    * @returns {boolean}
    */
   destroySession(sessionId) {
@@ -549,6 +558,8 @@ export class SessionManager extends EventEmitter {
       log.error(`Cannot destroy: session ${sessionId} not found`)
       return false
     }
+    // Mark as destroying immediately — getSession() will return null from here on
+    entry._destroying = true
     // Detach listeners BEFORE destroy to prevent orphaned events (FM-04)
     entry.session.removeAllListeners()
     // Prevent unhandled 'error' throw if session emits error during destroy
