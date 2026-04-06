@@ -581,6 +581,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               token,
               protocolVersion: CLIENT_PROTOCOL_VERSION,
               deviceInfo: { deviceId, ...info },
+              capabilities: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity'],
             }));
           }
         }

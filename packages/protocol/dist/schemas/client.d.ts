@@ -20,6 +20,7 @@ export declare const AuthSchema: z.ZodObject<{
         }>>;
         platform: z.ZodOptional<z.ZodString>;
     }, z.core.$loose>>;
+    capabilities: z.ZodDefault<z.ZodCatch<z.ZodOptional<z.ZodArray<z.ZodString>>>>;
 }, z.core.$loose>;
 export declare const PairSchema: z.ZodObject<{
     type: z.ZodLiteral<"pair">;
@@ -36,6 +37,7 @@ export declare const PairSchema: z.ZodObject<{
         }>>;
         platform: z.ZodOptional<z.ZodString>;
     }, z.core.$loose>>;
+    capabilities: z.ZodDefault<z.ZodCatch<z.ZodOptional<z.ZodArray<z.ZodString>>>>;
 }, z.core.$loose>;
 export declare const InputSchema: z.ZodObject<{
     type: z.ZodLiteral<"input">;

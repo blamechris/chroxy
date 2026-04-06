@@ -151,6 +151,17 @@ export function validateCwdWithinHome(cwd) {
   return null
 }
 
+/**
+ * Check whether a connected WS client declared a specific capability during auth.
+ *
+ * @param {WebSocket} ws - The WebSocket connection object
+ * @param {string} capability - The capability string to check
+ * @returns {boolean} true if the client declared the capability, false otherwise
+ */
+export function clientHasCapability(ws, capability) {
+  return ws.clientCapabilities?.has(capability) ?? false
+}
+
 /** Broadcast client_focus_changed to other clients when a client's active session changes */
 export function broadcastFocusChanged(client, sessionId, ctx) {
   ctx.broadcast(

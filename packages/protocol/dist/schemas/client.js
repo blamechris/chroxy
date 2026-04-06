@@ -31,12 +31,14 @@ export const AuthSchema = z.object({
     token: z.string().max(512),
     protocolVersion: z.number().int().min(0).optional(),
     deviceInfo: DeviceInfoSchema.optional(),
+    capabilities: z.array(z.string()).optional().catch([]).default([]),
 }).passthrough();
 export const PairSchema = z.object({
     type: z.literal('pair'),
     pairingId: z.string().min(1).max(256),
     protocolVersion: z.number().int().min(0).optional(),
     deviceInfo: DeviceInfoSchema.optional(),
+    capabilities: z.array(z.string()).optional().catch([]).default([]),
 }).passthrough();
 export const InputSchema = z.object({
     type: z.literal('input'),

@@ -548,6 +548,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           token,
           protocolVersion: CLIENT_PROTOCOL_VERSION,
           deviceInfo: { deviceId, ...info },
+          capabilities: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input'],
         }));
       }
     };
