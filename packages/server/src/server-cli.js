@@ -165,7 +165,7 @@ export async function startCliServer(config) {
     sessionTimeout: config.sessionTimeout || null,
     sandbox: config.sandbox || null,
     costBudget: config.costBudget || null,
-    maxHistory: config.maxMessages || config.maxHistory || null,
+    maxMessages: config.maxMessages || config.maxHistory || null,
   })
 
   // 2. Try restoring session state from a previous instance

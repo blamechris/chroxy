@@ -86,21 +86,7 @@ export class PairingManager extends EventEmitter {
    * Uses constant-time comparison to prevent timing attacks.
    */
   isSessionTokenValid(token) {
-    if (!token) return false
-    const now = Date.now()
-    const tokenBuf = Buffer.from(token)
-    for (const [stored, meta] of this._sessionTokens.entries()) {
-      // Prune expired tokens on access
-      if (now - meta.createdAt > this._sessionTokenTtlMs) {
-        this._sessionTokens.delete(stored)
-        continue
-      }
-      const storedBuf = Buffer.from(stored)
-      if (tokenBuf.length === storedBuf.length && timingSafeEqual(tokenBuf, storedBuf)) {
-        return true
-      }
-    }
-    return false
+    return this._lookupToken(token) !== null
   }
 
   /**
@@ -111,6 +97,17 @@ export class PairingManager extends EventEmitter {
    * @returns {string|null}
    */
   getSessionIdForToken(token) {
+    const meta = this._lookupToken(token)
+    return meta ? (meta.sessionId || null) : null
+  }
+
+  /**
+   * Look up a session token using constant-time comparison.
+   * Prunes expired tokens on access.
+   * @param {string} token
+   * @returns {object|null} Token metadata if found, null otherwise
+   */
+  _lookupToken(token) {
     if (!token) return null
     const now = Date.now()
     const tokenBuf = Buffer.from(token)
@@ -121,7 +118,7 @@ export class PairingManager extends EventEmitter {
       }
       const storedBuf = Buffer.from(stored)
       if (tokenBuf.length === storedBuf.length && timingSafeEqual(tokenBuf, storedBuf)) {
-        return meta.sessionId || null
+        return meta
       }
     }
     return null

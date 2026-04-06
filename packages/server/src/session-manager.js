@@ -111,7 +111,8 @@ export { formatIdleDuration }
  * @property {number}  [persistDebounceMs=2000]  - Debounce interval for state file writes
  *
  * Message history
- * @property {number}  [maxHistory=500]          - Max history entries per session
+ * @property {number}  [maxMessages=1000]        - Max history messages per session (alias: maxHistory)
+ * @property {number}  [maxHistory]              - Legacy alias for maxMessages
  */
 export class SessionManager extends EventEmitter {
   /**
@@ -142,6 +143,7 @@ export class SessionManager extends EventEmitter {
     persistDebounceMs = 2000,
 
     // Message history
+    maxMessages,
     maxHistory,
   } = {}) {
     super()
@@ -181,7 +183,7 @@ export class SessionManager extends EventEmitter {
     })
 
     // Message history (delegated to SessionMessageHistory)
-    this._history = new SessionMessageHistory({ maxHistory, maxToolInput })
+    this._history = new SessionMessageHistory({ maxMessages: maxMessages ?? maxHistory, maxToolInput })
     // Backward-compatible accessors for tests that reference internal state
     this._maxHistory = this._history.maxHistory
     this._messageHistory = this._history._messageHistory
@@ -446,6 +448,7 @@ export class SessionManager extends EventEmitter {
   listSessions() {
     const list = []
     for (const [sessionId, entry] of this._sessions) {
+      if (entry._destroying) continue
       const ProviderClass = entry.session.constructor
       list.push({
         sessionId,
@@ -619,12 +622,22 @@ export class SessionManager extends EventEmitter {
    * @returns {string | null}
    */
   get firstSessionId() {
-    const first = this._sessions.keys().next()
-    return first.done ? null : first.value
+    for (const [id, entry] of this._sessions) {
+      if (!entry._destroying) return id
+    }
+    return null
   }
 
   get defaultCwd() {
     return this._defaultCwd
+  }
+
+  /**
+   * Current max messages per session (from SessionMessageHistory).
+   * @returns {number}
+   */
+  get maxMessages() {
+    return this._history.maxMessages
   }
 
   /**
@@ -765,7 +778,7 @@ export class SessionManager extends EventEmitter {
    */
   async getFullHistoryAsync(sessionId) {
     const entry = this._sessions.get(sessionId)
-    if (!entry) return []
+    if (!entry || entry._destroying) return []
 
     const conversationId = entry.session.resumeSessionId
     if (conversationId) {
