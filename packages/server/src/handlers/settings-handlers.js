@@ -5,7 +5,7 @@
  *          query_permission_audit, list_providers, set_permission_rules
  */
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
-import { ALLOWED_PERMISSION_MODE_IDS, resolveSession } from '../handler-utils.js'
+import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError } from '../handler-utils.js'
 import { listProviders } from '../providers.js'
 import { createLogger } from '../logger.js'
 
@@ -32,6 +32,7 @@ function handleSetModel(ws, client, msg, ctx) {
     }
   } else {
     log.warn(`Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
+    sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`)
   }
 }
 
@@ -76,6 +77,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
     }
   } else {
     log.warn(`Rejected invalid permission mode from ${client.id}: ${JSON.stringify(msg.mode)}`)
+    sendError(ws, msg?.requestId, 'INVALID_PERMISSION_MODE', `Invalid permission mode: ${msg.mode}`)
   }
 }
 

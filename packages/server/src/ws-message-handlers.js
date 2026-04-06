@@ -8,6 +8,7 @@
  * (or create a new one) and add the import here.
  */
 import { createLogger } from './logger.js'
+import { sendError } from './handler-utils.js'
 import { inputHandlers } from './handlers/input-handlers.js'
 import { sessionHandlers } from './handlers/session-handlers.js'
 import { settingsHandlers } from './handlers/settings-handlers.js'
@@ -85,7 +86,12 @@ export function registerMessageHandler(type, handlerFn) {
 export async function handleSessionMessage(ws, client, msg, ctx) {
   const handler = handlerRegistry.get(msg.type)
   if (handler) {
-    await handler(ws, client, msg, ctx)
+    try {
+      await handler(ws, client, msg, ctx)
+    } catch (err) {
+      log.error(`Handler error for ${msg.type}: ${err.message}`)
+      sendError(ws, msg?.requestId, 'HANDLER_ERROR', err.message)
+    }
   } else {
     log.debug(`Unknown message type: ${msg.type}`)
   }
