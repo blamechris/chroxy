@@ -98,7 +98,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
 
   // Multi-session mode
   if (sessionManager) {
-    send(ws, { type: 'session_list', sessions: sessionManager.listSessions() })
+    let sessions = sessionManager.listSessions()
+    if (client.boundSessionId) {
+      sessions = sessions.filter(s => s.sessionId === client.boundSessionId)
+    }
+    send(ws, { type: 'session_list', sessions })
 
     let activeId = defaultSessionId
     let entry = activeId ? sessionManager.getSession(activeId) : null

@@ -115,6 +115,10 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
   const questionSessionId = (msg.toolUseId && ctx.questionSessionMap.get(msg.toolUseId))
     || client.activeSessionId
   if (msg.toolUseId) ctx.questionSessionMap.delete(msg.toolUseId)
+
+  // Enforce session binding
+  if (client.boundSessionId && client.boundSessionId !== questionSessionId) return
+
   const entry = ctx.sessionManager.getSession(questionSessionId)
   if (entry && typeof entry.session.respondToQuestion === 'function' && typeof msg.answer === 'string') {
     entry.session.respondToQuestion(msg.answer, msg.answers)

@@ -4,13 +4,17 @@
  * Handles: list_sessions, switch_session, create_session, destroy_session,
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
-import { validateCwdWithinHome, broadcastFocusChanged, autoSubscribeOtherClients } from '../handler-utils.js'
+import { validateCwdWithinHome, broadcastFocusChanged, autoSubscribeOtherClients, enforceBoundSession } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
 
-function handleListSessions(ws, _client, _msg, ctx) {
-  ctx.send(ws, { type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+function handleListSessions(ws, client, _msg, ctx) {
+  let sessions = ctx.sessionManager.listSessions()
+  if (client.boundSessionId) {
+    sessions = sessions.filter(s => s.sessionId === client.boundSessionId)
+  }
+  ctx.send(ws, { type: 'session_list', sessions })
 }
 
 function handleSwitchSession(ws, client, msg, ctx) {
@@ -45,6 +49,11 @@ function handleSwitchSession(ws, client, msg, ctx) {
 }
 
 function handleCreateSession(ws, client, msg, ctx) {
+  if (client.boundSessionId) {
+    ctx.send(ws, { type: 'session_error', message: 'Not authorized: client is bound to a specific session', code: 'SESSION_TOKEN_MISMATCH' })
+    return
+  }
+
   const name = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : undefined
   const cwd = (typeof msg.cwd === 'string' && msg.cwd.trim()) ? msg.cwd.trim() : undefined
   const provider = (typeof msg.provider === 'string' && msg.provider.trim()) ? msg.provider.trim() : undefined
@@ -107,8 +116,14 @@ function handleCreateSession(ws, client, msg, ctx) {
   }
 }
 
-async function handleDestroySession(ws, _client, msg, ctx) {
+async function handleDestroySession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
+
+  if (client.boundSessionId && client.boundSessionId !== targetId) {
+    ctx.send(ws, { type: 'session_error', message: 'Not authorized to access this session', code: 'SESSION_TOKEN_MISMATCH' })
+    return
+  }
+
   if (!ctx.sessionManager.getSession(targetId)) {
     ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
     return
@@ -150,8 +165,14 @@ async function handleDestroySession(ws, _client, msg, ctx) {
   ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
 }
 
-function handleRenameSession(ws, _client, msg, ctx) {
+function handleRenameSession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
+
+  if (client.boundSessionId && client.boundSessionId !== targetId) {
+    ctx.send(ws, { type: 'session_error', message: 'Not authorized to access this session', code: 'SESSION_TOKEN_MISMATCH' })
+    return
+  }
+
   const newName = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : null
   if (!newName) {
     ctx.send(ws, { type: 'session_error', message: 'Name is required' })
@@ -180,6 +201,8 @@ function handleRenameSession(ws, _client, msg, ctx) {
 function handleSubscribeSessions(ws, client, msg, ctx) {
   const newlySubscribed = []
   for (const sid of msg.sessionIds) {
+    // Bound clients can only subscribe to their bound session
+    if (client.boundSessionId && client.boundSessionId !== sid) continue
     if (ctx.sessionManager.getSession(sid)) {
       if (!client.subscribedSessionIds.has(sid)) {
         newlySubscribed.push(sid)
