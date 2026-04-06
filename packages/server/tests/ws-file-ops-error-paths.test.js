@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, realpathSync } from 'fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, chmodSync, realpathSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
@@ -55,7 +55,9 @@ describe('ws-file-ops error paths', () => {
   })
 
   it('readFile rejects path traversal outside session CWD', async () => {
-    await ops.readFile(ws, '../../../etc/passwd', tmp)
+    // Use an absolute path to a real file outside the workspace so that
+    // realpath() succeeds but the path-within-CWD check still fires.
+    await ops.readFile(ws, '/etc/passwd', tmp)
     assert.equal(sent.length, 1)
     assert.equal(sent[0].type, 'file_content')
     assert.match(sent[0].error, /Access denied/)
@@ -67,5 +69,49 @@ describe('ws-file-ops error paths', () => {
     assert.equal(sent.length, 1)
     assert.equal(sent[0].type, 'write_file_result')
     assert.match(sent[0].error, /Access denied/)
+  })
+
+  it('readFile reads a valid file within the workspace root', async () => {
+    const filePath = join(tmp, 'hello.txt')
+    writeFileSync(filePath, 'hello world')
+
+    await ops.readFile(ws, 'hello.txt', tmp)
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].type, 'file_content')
+    assert.equal(sent[0].error, null)
+    assert.equal(sent[0].content, 'hello world')
+  })
+
+  it('readFile rejects a symlink pointing outside the workspace root', async () => {
+    // Create a file outside the workspace
+    const outsideDir = realpathSync(mkdtempSync(join(tmpdir(), 'fileops-outside-')))
+    const outsideFile = join(outsideDir, 'secret.txt')
+    writeFileSync(outsideFile, 'secret contents')
+
+    // Create a symlink inside the workspace pointing to the outside file
+    const symlinkPath = join(tmp, 'escape.txt')
+    symlinkSync(outsideFile, symlinkPath)
+
+    try {
+      await ops.readFile(ws, 'escape.txt', tmp)
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].type, 'file_content')
+      assert.match(sent[0].error, /Access denied/)
+      assert.equal(sent[0].content, null)
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true })
+    }
+  })
+
+  it('readFile returns File not found for a dangling symlink', async () => {
+    // Create a symlink pointing to a nonexistent target
+    const symlinkPath = join(tmp, 'dangling.txt')
+    symlinkSync(join(tmp, 'nonexistent-target.txt'), symlinkPath)
+
+    await ops.readFile(ws, 'dangling.txt', tmp)
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].type, 'file_content')
+    assert.equal(sent[0].error, 'File not found')
+    assert.equal(sent[0].content, null)
   })
 })

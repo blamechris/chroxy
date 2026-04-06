@@ -1,4 +1,4 @@
-import { readFile, writeFile as fsWriteFile, stat, mkdir } from 'fs/promises'
+import { readFile, writeFile as fsWriteFile, stat, mkdir, realpath } from 'fs/promises'
 import { resolve, normalize, extname } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
@@ -60,7 +60,30 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
     try {
       absPath = normalize(resolve(sessionCwd, requestedPath.trim()))
 
-      const { valid, realPath: realAbsPath } = await validatePathWithinCwd(absPath, sessionCwd)
+      // Resolve symlinks before validation to prevent TOCTOU attacks.
+      // realpath() is called here so both the validation and the subsequent read
+      // use the same canonical path — a symlink swapped between calls cannot
+      // redirect the read outside the workspace.
+      let resolvedAbsPath
+      try {
+        resolvedAbsPath = await realpath(absPath)
+      } catch (err) {
+        if (err.code === 'ENOENT') {
+          sendFn(ws, {
+            type: 'file_content',
+            path: absPath,
+            content: null,
+            language: null,
+            size: null,
+            truncated: false,
+            error: 'File not found',
+          })
+          return
+        }
+        throw err
+      }
+
+      const { valid } = await validatePathWithinCwd(resolvedAbsPath, sessionCwd)
       if (!valid) {
         sendFn(ws, {
           type: 'file_content',
@@ -74,7 +97,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         return
       }
 
-      const fileStat = await stat(realAbsPath)
+      const fileStat = await stat(resolvedAbsPath)
       if (fileStat.isDirectory()) {
         sendFn(ws, {
           type: 'file_content',
@@ -101,7 +124,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         return
       }
 
-      const buf = await readFile(realAbsPath)
+      const buf = await readFile(resolvedAbsPath)
       const ext = extname(absPath).slice(1).toLowerCase()
 
       // Image files: send as base64 data URL for preview
