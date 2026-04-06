@@ -44,6 +44,7 @@
  *   start() { ... }
  *   destroy() { ... }
  *   sendMessage(text) { ... }
+ *   interrupt() { ... }
  *   setModel(model) { ... }
  *   setPermissionMode(mode) { ... }
  * }
@@ -64,7 +65,7 @@
  * Provider classes must:
  *   - Extend EventEmitter
  *   - Accept a config object in constructor: { cwd, model, permissionMode, ... }
- *   - Expose: start(), destroy(), sendMessage(text), setModel(model), setPermissionMode(mode)
+ *   - Expose: start(), destroy(), sendMessage(text), interrupt(), setModel(model), setPermissionMode(mode)
  *   - start() MUST be synchronous (throw on failure, don't return a rejected promise)
  *   - Expose properties: model, permissionMode, isRunning, resumeSessionId
  *   - Emit events: ready, stream_start, stream_delta, stream_end, message,
