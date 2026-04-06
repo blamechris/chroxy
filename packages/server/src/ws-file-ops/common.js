@@ -45,3 +45,33 @@ export async function validatePathWithinCwd(absPath, sessionCwd, cwdRealCache, c
   const valid = realAbsPath.startsWith(cwdReal + '/') || realAbsPath === cwdReal
   return { valid, realPath: realAbsPath, cwdReal }
 }
+
+/**
+ * Validate that a git repo path is within the workspace root.
+ * Uses realpath() to resolve symlinks, preventing symlink traversal outside the root.
+ *
+ * @param {string} repoPath - The directory path for the git operation
+ * @param {string} workspaceRoot - The allowed workspace root directory
+ * @throws {Error} If repoPath resolves outside the workspace root
+ * @returns {Promise<string>} The resolved real path of repoPath
+ */
+export async function validateGitPath(repoPath, workspaceRoot) {
+  const resolvedRoot = await realpath(workspaceRoot)
+  let resolvedRepo
+  try {
+    resolvedRepo = await realpath(repoPath)
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      resolvedRepo = resolve(repoPath)
+    } else {
+      throw err
+    }
+  }
+  if (!resolvedRepo.startsWith(resolvedRoot + '/') && resolvedRepo !== resolvedRoot) {
+    throw Object.assign(
+      new Error(`Access denied: git operations are restricted to the workspace directory`),
+      { code: 'EACCES' }
+    )
+  }
+  return resolvedRepo
+}

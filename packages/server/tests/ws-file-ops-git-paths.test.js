@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { mkdtemp, rm, mkdir, writeFile, symlink } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFile as execFileCb } from 'child_process'
@@ -24,7 +24,8 @@ describe('gitStage/gitUnstage path validation (#1958)', () => {
     await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: tmpDir })
     // Create a file inside the repo so git has something to work with
     await writeFile(join(tmpDir, 'valid.txt'), 'hello')
-    fileOps = createFileOps(mockSend)
+    // Pass tmpDir as workspaceRoot so operations within it are allowed
+    fileOps = createFileOps(mockSend, tmpDir)
   })
 
   after(async () => {
@@ -82,5 +83,165 @@ describe('gitStage/gitUnstage path validation (#1958)', () => {
     assert.equal(lastMessage.type, 'git_stage_result')
     assert.ok(lastMessage.error && lastMessage.error.includes('Access denied'),
       'should reject the batch when any file is outside CWD')
+  })
+})
+
+describe('git ops workspace root validation (#2690)', () => {
+  let workspaceDir
+  let outsideDir
+  let fileOps
+  let lastMessage
+
+  const mockSend = (_ws, msg) => { lastMessage = msg }
+  const ws = {}
+
+  before(async () => {
+    // Create workspace root and a separate directory outside of it
+    workspaceDir = await mkdtemp(join(tmpdir(), 'chroxy-workspace-'))
+    outsideDir = await mkdtemp(join(tmpdir(), 'chroxy-outside-'))
+
+    // Init git in workspace dir
+    await execFileAsync('git', ['init'], { cwd: workspaceDir })
+    await execFileAsync('git', ['config', 'user.email', 'test@test.com'], { cwd: workspaceDir })
+    await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: workspaceDir })
+    await writeFile(join(workspaceDir, 'file.txt'), 'hello')
+
+    // Init git in outside dir so git commands would succeed if path check were absent
+    await execFileAsync('git', ['init'], { cwd: outsideDir })
+    await execFileAsync('git', ['config', 'user.email', 'test@test.com'], { cwd: outsideDir })
+    await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: outsideDir })
+
+    // File ops restricted to workspaceDir
+    fileOps = createFileOps(mockSend, workspaceDir)
+  })
+
+  after(async () => {
+    if (workspaceDir) await rm(workspaceDir, { recursive: true, force: true })
+    if (outsideDir) await rm(outsideDir, { recursive: true, force: true })
+  })
+
+  it('gitStatus rejects a path outside workspace root', async () => {
+    lastMessage = null
+    await fileOps.gitStatus(ws, outsideDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_status_result')
+    assert.ok(
+      lastMessage.error && lastMessage.error.includes('Access denied'),
+      `expected Access denied error, got: ${lastMessage.error}`
+    )
+  })
+
+  it('gitBranches rejects a path outside workspace root', async () => {
+    lastMessage = null
+    await fileOps.gitBranches(ws, outsideDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_branches_result')
+    assert.ok(
+      lastMessage.error && lastMessage.error.includes('Access denied'),
+      `expected Access denied error, got: ${lastMessage.error}`
+    )
+  })
+
+  it('gitStage rejects a sessionCwd outside workspace root', async () => {
+    lastMessage = null
+    await fileOps.gitStage(ws, ['file.txt'], outsideDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.ok(
+      lastMessage.error && lastMessage.error.includes('Access denied'),
+      `expected Access denied error, got: ${lastMessage.error}`
+    )
+  })
+
+  it('gitUnstage rejects a sessionCwd outside workspace root', async () => {
+    lastMessage = null
+    await fileOps.gitUnstage(ws, ['file.txt'], outsideDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_unstage_result')
+    assert.ok(
+      lastMessage.error && lastMessage.error.includes('Access denied'),
+      `expected Access denied error, got: ${lastMessage.error}`
+    )
+  })
+
+  it('gitCommit rejects a sessionCwd outside workspace root', async () => {
+    lastMessage = null
+    await fileOps.gitCommit(ws, 'test commit', outsideDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_commit_result')
+    assert.ok(
+      lastMessage.error && lastMessage.error.includes('Access denied'),
+      `expected Access denied error, got: ${lastMessage.error}`
+    )
+  })
+
+  it('gitStatus rejects a symlink pointing outside workspace root', async (t) => {
+    // Create a symlink inside workspace that points outside
+    const symlinkPath = join(workspaceDir, 'outside-link')
+    let created = false
+
+    try {
+      await symlink(outsideDir, symlinkPath)
+      created = true
+    } catch (err) {
+      if (err.code === 'EEXIST') {
+        created = true // symlink from a previous run still exists — fine
+      } else if (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'ENOTSUP') {
+        t.skip(`symlinks not supported in this environment: ${err.code}`)
+        return
+      } else {
+        throw err
+      }
+    }
+
+    try {
+      lastMessage = null
+      await fileOps.gitStatus(ws, symlinkPath)
+      assert.ok(lastMessage, 'should send a response')
+      assert.equal(lastMessage.type, 'git_status_result')
+      assert.ok(
+        lastMessage.error && lastMessage.error.includes('Access denied'),
+        `expected Access denied error for symlink pointing outside, got: ${lastMessage.error}`
+      )
+    } finally {
+      if (created) await rm(symlinkPath, { force: true })
+    }
+  })
+
+  it('gitStatus allows a valid path within workspace root', async () => {
+    lastMessage = null
+    await fileOps.gitStatus(ws, workspaceDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_status_result')
+    // Should succeed (no Access denied), though may error if no commits yet
+    assert.ok(
+      !lastMessage.error || !lastMessage.error.includes('Access denied'),
+      `should not get Access denied error, got: ${lastMessage.error}`
+    )
+  })
+
+  it('gitBranches allows a valid path within workspace root', async () => {
+    lastMessage = null
+    await fileOps.gitBranches(ws, workspaceDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_branches_result')
+    assert.ok(
+      !lastMessage.error || !lastMessage.error.includes('Access denied'),
+      `should not get Access denied error, got: ${lastMessage.error}`
+    )
+  })
+
+  it('gitStatus allows a subdirectory within workspace root', async () => {
+    const subDir = join(workspaceDir, 'subdir')
+    await mkdir(subDir, { recursive: true })
+
+    lastMessage = null
+    await fileOps.gitStatus(ws, subDir)
+    assert.ok(lastMessage, 'should send a response')
+    assert.equal(lastMessage.type, 'git_status_result')
+    assert.ok(
+      !lastMessage.error || !lastMessage.error.includes('Access denied'),
+      `should not get Access denied error for subdirectory, got: ${lastMessage.error}`
+    )
   })
 })
