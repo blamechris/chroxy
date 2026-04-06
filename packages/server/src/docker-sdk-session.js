@@ -92,7 +92,8 @@ export class DockerSdkSession extends SdkSession {
       this._verifyContainer((err) => {
         if (err) {
           const classified = classifyDockerError(err)
-          this.emit('error', { code: classified.code, message: `External container not reachable: ${err.message}` })
+          log.warn(`External container verification failed [${classified.code}]: ${classified.message}`)
+          this.emit('error', { code: classified.code, message: classified.message })
           this.destroy()
           return
         }
@@ -128,9 +129,11 @@ export class DockerSdkSession extends SdkSession {
   _verifyContainer(callback) {
     execFile('docker', [
       'exec', this._containerId, 'true',
-    ], { encoding: 'utf-8', timeout: 10_000 }, (err) => {
+    ], { encoding: 'utf-8', timeout: 10_000 }, (err, _stdout, stderr) => {
       if (err) {
-        callback(new Error(`Container ${this._containerId.slice(0, 12)} is not running or not reachable`))
+        // Attach stderr so classifyDockerError can inspect it
+        err.stderr = stderr || ''
+        callback(err)
       } else {
         callback(null)
       }
