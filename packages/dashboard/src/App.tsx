@@ -346,6 +346,11 @@ export function App() {
     switchSession(sessionId)
   }, [switchSession, activeSessionId])
 
+  const handleCloseSession = useCallback((sessionId: string) => {
+    if (!window.confirm('Close this session? The Claude process will be terminated.')) return
+    destroySession(sessionId)
+  }, [destroySession])
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Prevent Backspace from triggering browser/webview "back" navigation
@@ -400,7 +405,7 @@ export function App() {
       if (isTauri() && (e.metaKey || e.ctrlKey) && e.key === 'w' && !e.shiftKey) {
         if (activeSessionId && sessions.length > 1) {
           e.preventDefault()
-          destroySession(activeSessionId)
+          handleCloseSession(activeSessionId)
         }
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
@@ -473,7 +478,7 @@ export function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, handleSwitchSession, destroySession, viewMode, setViewMode, sendInterrupt])
+  }, [sessions, activeSessionId, handleSwitchSession, handleCloseSession, viewMode, setViewMode, sendInterrupt])
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
@@ -999,10 +1004,7 @@ export function App() {
           clientCount={connectedClients.length}
           onFilterChange={setSidebarFilter}
           onSessionClick={handleSwitchSession}
-          onResumeSession={(convId) => {
-            /* Will be wired in #1107 */
-            console.log('Resume session:', convId)
-          }}
+          onResumeSession={resumeConversation}
           onNewSession={(cwd) => {
             setPendingCwd(cwd || null)
             setShowCreateSession(true)
@@ -1027,7 +1029,7 @@ export function App() {
           <SessionBar
             sessions={sessionTabs}
             onSwitch={handleSwitchSession}
-            onClose={destroySession}
+            onClose={handleCloseSession}
             onRename={renameSession}
             onNewSession={handleNewSession}
           />

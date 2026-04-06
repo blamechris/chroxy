@@ -2,7 +2,7 @@
   "expo": {
     "name": "Chroxy",
     "slug": "chroxy",
-    "version": "0.6.6",
+    "version": "0.6.8",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",

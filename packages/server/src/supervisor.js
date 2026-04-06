@@ -10,7 +10,7 @@ import { EventEmitter } from 'events'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 import { waitForTunnel } from './tunnel-check.js'
 import { createLogger } from './logger.js'
-import qrcode from 'qrcode-terminal'
+import QRCode from 'qrcode'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 
 function maskToken(token) {
@@ -118,8 +118,9 @@ export class Supervisor extends EventEmitter {
   }
 
   /** Override point: display QR code */
-  _displayQr(url) {
-    qrcode.generate(url, { small: true })
+  async _displayQr(url) {
+    const qrText = await QRCode.toString(url, { type: 'terminal', small: true })
+    process.stdout.write(qrText)
   }
 
   /** Override point: register process signal handlers */
@@ -181,7 +182,7 @@ export class Supervisor extends EventEmitter {
         this._currentWsUrl = newWsUrl
         const connectionUrl = `chroxy://${newWsUrl.replace('wss://', '')}?token=${this._apiToken}`
         process.stdout.write('\nNew tunnel URL:\n\n')
-        this._displayQr(connectionUrl)
+        await this._displayQr(connectionUrl)
         process.stdout.write(`\n   URL:   ${newWsUrl}\n`)
         process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
         process.stdout.write('\n')
@@ -211,7 +212,7 @@ export class Supervisor extends EventEmitter {
 
     this._log.info(`${this._modeLabel} ready`)
     process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
-    this._displayQr(connectionUrl)
+    await this._displayQr(connectionUrl)
     process.stdout.write('\nOr connect manually:\n')
     process.stdout.write(`   URL:   ${wsUrl}\n`)
     process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)

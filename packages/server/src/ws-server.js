@@ -507,11 +507,21 @@ export class WsServer {
       this._tokenRotatedHandler = ({ newToken, expiresAt }) => {
         // Update our reference so subsequent auth checks use the new token
         this.apiToken = newToken
-        // Send the new token to all authenticated clients so they can update
-        // their stored token and reconnect seamlessly if the connection drops.
-        // This is safe: clients already proved they have a valid token.
-        this._broadcast({ type: 'token_rotated', token: newToken, expiresAt })
-        log.info(`Broadcasted token_rotated with new token to all authenticated clients`)
+        // Send the new token to encrypted clients (they need it for reconnection).
+        // Unencrypted clients (e.g. localhost dashboard) get the event without the
+        // raw token to avoid leaking credentials over plaintext connections.
+        let encrypted = 0, unencrypted = 0
+        for (const [ws, client] of this.clients) {
+          if (!client.authenticated || ws.readyState !== 1) continue
+          if (client.encryptionState) {
+            this._send(ws, { type: 'token_rotated', token: newToken, expiresAt })
+            encrypted++
+          } else {
+            this._send(ws, { type: 'token_rotated', expiresAt })
+            unencrypted++
+          }
+        }
+        log.info(`Broadcasted token_rotated to ${encrypted} encrypted + ${unencrypted} unencrypted clients`)
       }
       this._tokenManager.on('token_rotated', this._tokenRotatedHandler)
     }
@@ -594,7 +604,11 @@ export class WsServer {
       return false
     }
     if (this._hookSecrets.size > 0) {
-      if (!this._hookSecrets.has(token)) {
+      let valid = false
+      for (const secret of this._hookSecrets) {
+        if (safeTokenCompare(token, secret)) { valid = true; break }
+      }
+      if (!valid) {
         res.writeHead(403, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'unauthorized' }))
         return false

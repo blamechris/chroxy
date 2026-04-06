@@ -23,7 +23,6 @@ const log = createLogger('config')
 const CONFIG_SCHEMA = {
   apiToken: 'string',
   port: 'number',
-  shell: 'string',
   cwd: 'string',
   model: 'string',
   allowedTools: 'array',
@@ -223,7 +222,6 @@ function envKeyForConfig(key) {
   const envMap = {
     apiToken: 'API_TOKEN',
     port: 'PORT',
-    shell: 'SHELL_CMD',
     cwd: 'CHROXY_CWD',
     model: 'CHROXY_MODEL',
     allowedTools: 'CHROXY_ALLOWED_TOOLS',
