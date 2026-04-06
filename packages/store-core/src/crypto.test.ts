@@ -1,10 +1,11 @@
 /**
  * Tests for the crypto module (E2E encryption primitives).
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
 import nacl from 'tweetnacl'
 import { encodeBase64, decodeBase64 } from 'tweetnacl-util'
 import {
+  initPRNG,
   createKeyPair,
   deriveSharedKey,
   nonceFromCounter,
@@ -332,5 +333,96 @@ describe('decrypt overflow guard', () => {
     expect(() =>
       decrypt(overflowEnvelope, sharedKey, MAX_NONCE_COUNTER + 1, DIRECTION_SERVER)
     ).toThrow('Nonce counter exhausted')
+  })
+})
+
+describe('initPRNG', () => {
+  // Restore a cryptographically strong PRNG after each test so that a mid-test
+  // assertion failure cannot leave the process running on a fixed-value PRNG for
+  // subsequent tests. Uses globalThis.crypto.getRandomValues (available in Node 22+
+  // and all modern browser runtimes used by Expo/React Native).
+  afterEach(() => {
+    initPRNG((n: number): Uint8Array => {
+      const buf = new Uint8Array(n)
+      globalThis.crypto.getRandomValues(buf)
+      return buf
+    })
+  })
+
+  it('accepts a valid getRandomBytes function and does not throw', () => {
+    const mockGetRandomBytes = (n: number): Uint8Array => {
+      return new Uint8Array(n).fill(0xab)
+    }
+    expect(() => initPRNG(mockGetRandomBytes)).not.toThrow()
+  })
+
+  it('subsequent calls do not throw (idempotent registration)', () => {
+    const mockGetRandomBytes = (n: number): Uint8Array => new Uint8Array(n).fill(0xcd)
+    expect(() => {
+      initPRNG(mockGetRandomBytes)
+      initPRNG(mockGetRandomBytes)
+    }).not.toThrow()
+  })
+
+  it('installed PRNG is used by createKeyPair (custom entropy flows through)', () => {
+    // After initPRNG with a deterministic source, two keypairs should be identical
+    // because they draw from the same fixed-value PRNG.
+    // This verifies that the PRNG registration actually takes effect.
+    let callCount = 0
+    const deterministicPRNG = (n: number): Uint8Array => {
+      callCount++
+      return new Uint8Array(n).fill(0x42)
+    }
+    initPRNG(deterministicPRNG)
+    const kp1 = createKeyPair()
+    const kp2 = createKeyPair()
+    expect(kp1.publicKey).toBe(kp2.publicKey)
+    expect(callCount).toBeGreaterThan(0)
+    // afterEach restores a non-deterministic PRNG unconditionally
+  })
+})
+
+describe('nonceFromCounter invalid input guard', () => {
+  it('rejects negative counter', () => {
+    expect(() => nonceFromCounter(-1, DIRECTION_SERVER)).toThrow(RangeError)
+    expect(() => nonceFromCounter(-1, DIRECTION_SERVER)).toThrow(
+      'Nonce counter must be a non-negative integer'
+    )
+  })
+
+  it('rejects non-integer counter (float)', () => {
+    expect(() => nonceFromCounter(1.5, DIRECTION_SERVER)).toThrow(RangeError)
+    expect(() => nonceFromCounter(1.5, DIRECTION_SERVER)).toThrow(
+      'Nonce counter must be a non-negative integer'
+    )
+  })
+
+  it('rejects NaN counter', () => {
+    expect(() => nonceFromCounter(NaN, DIRECTION_SERVER)).toThrow(RangeError)
+    expect(() => nonceFromCounter(NaN, DIRECTION_SERVER)).toThrow(
+      'Nonce counter must be a non-negative integer'
+    )
+  })
+
+  it('rejects Infinity counter', () => {
+    expect(() => nonceFromCounter(Infinity, DIRECTION_SERVER)).toThrow(RangeError)
+    expect(() => nonceFromCounter(Infinity, DIRECTION_SERVER)).toThrow(
+      'Nonce counter must be a non-negative integer'
+    )
+  })
+
+  it('rejects -Infinity counter', () => {
+    expect(() => nonceFromCounter(-Infinity, DIRECTION_SERVER)).toThrow(RangeError)
+    expect(() => nonceFromCounter(-Infinity, DIRECTION_SERVER)).toThrow(
+      'Nonce counter must be a non-negative integer'
+    )
+  })
+
+  it('accepts zero (valid boundary)', () => {
+    expect(() => nonceFromCounter(0, DIRECTION_SERVER)).not.toThrow()
+  })
+
+  it('accepts exactly MAX_NONCE_COUNTER (2^48)', () => {
+    expect(() => nonceFromCounter(MAX_NONCE_COUNTER, DIRECTION_CLIENT)).not.toThrow()
   })
 })

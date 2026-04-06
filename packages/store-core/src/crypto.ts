@@ -72,6 +72,9 @@ export function deriveSharedKey(theirPubBase64: string, mySecretKey: Uint8Array)
  * Byte 0 is direction (0=server, 1=client), bytes 1-8 are counter (little-endian).
  */
 export function nonceFromCounter(n: number, direction: number): Uint8Array {
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+    throw new RangeError('Nonce counter must be a non-negative integer')
+  }
   if (n > MAX_NONCE_COUNTER) {
     throw new Error('Nonce counter exhausted — reconnect required for new key exchange')
   }
