@@ -36,6 +36,7 @@ export function handleAuthMessage(ctx, ws, msg) {
     clients, authRequired, isTokenValid,
     authFailures, send, onAuthSuccess,
     minProtocolVersion, serverProtocolVersion,
+    pairingManager,
   } = ctx
   const client = clients.get(ws)
   if (!client || client.authenticated) return false
@@ -86,6 +87,16 @@ export function handleAuthMessage(ctx, ws, msg) {
       }
     }
 
+    // If this token was issued via pairing, bind the client to the session
+    // that was active at pairing time (if any). This prevents a valid
+    // session token from being used to attach to an unrelated session.
+    if (pairingManager && msg.token) {
+      const boundSessionId = pairingManager.getSessionIdForToken(msg.token)
+      if (boundSessionId) {
+        client.boundSessionId = boundSessionId
+      }
+    }
+
     onAuthSuccess(ws, client)
     log.info(`Client ${client.id} authenticated`)
     return true
@@ -119,6 +130,7 @@ export function handlePairMessage(ctx, ws, msg) {
   const {
     clients, pairingManager, send, onAuthSuccess,
     authFailures, minProtocolVersion, serverProtocolVersion,
+    activeSessionId,
   } = ctx
   const client = clients.get(ws)
   if (!client || client.authenticated) return false
@@ -147,7 +159,8 @@ export function handlePairMessage(ctx, ws, msg) {
     return true
   }
 
-  const result = pairingManager.validatePairing(msg.pairingId)
+  // Pass the current active session ID so the issued token is bound to that session.
+  const result = pairingManager.validatePairing(msg.pairingId, activeSessionId || null)
   if (result.valid) {
     // Check protocol version BEFORE marking authenticated
     const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)

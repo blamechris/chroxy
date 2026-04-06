@@ -406,6 +406,13 @@ export class WsServer {
       isTokenValid: (token) => self._isTokenValid(token),
       get authFailures() { return self._authFailures },
       get pairingManager() { return self._pairingManager },
+      get activeSessionId() {
+        // Provide the server's default/first session ID so pairing can bind
+        // the issued token to the session that was active at pairing time.
+        if (self.defaultSessionId) return self.defaultSessionId
+        if (self.sessionManager) return self.sessionManager.firstSessionId || null
+        return null
+      },
       send: sendFn,
       onAuthSuccess: (ws, client) => {
         // If paired, include sessionToken in auth_ok response
