@@ -350,8 +350,20 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           if (openErr.code === 'EEXIST') {
             // Race: file was created between our existence check and O_EXCL open.
             // Retry once using the existing-file path (O_TRUNC without O_EXCL).
-            fh = await open(absPath, fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_TRUNC, 0o666)
-            await fh.writeFile(data)
+            try {
+              fh = await open(absPath, fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_TRUNC, 0o666)
+              await fh.writeFile(data)
+            } catch (retryErr) {
+              if (retryErr.code === 'ELOOP') {
+                sendFn(ws, {
+                  type: 'write_file_result',
+                  path: requestedPath,
+                  error: 'Access denied: file writing is restricted to the project directory',
+                })
+                return
+              }
+              throw retryErr
+            }
           } else {
             throw openErr
           }
