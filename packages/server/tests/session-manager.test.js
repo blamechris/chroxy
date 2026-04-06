@@ -568,13 +568,13 @@ describe('SessionManager.serializeState includes conversationId', () => {
 })
 
 describe('SessionManager ring buffer size', () => {
-  it('defaults to 500 max history entries', () => {
+  it('defaults to 1000 max history entries', () => {
     const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
-    assert.equal(mgr._maxHistory, 500)
+    assert.equal(mgr._maxHistory, 1000)
   })
 
-  it('trims history when exceeding 500 entries', () => {
-    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
+  it('trims history when exceeding the default limit', () => {
+    const mgr = new SessionManager({ maxHistory: 500, maxSessions: 5, stateFilePath: tmpStateFile() })
     mgr._messageHistory.set('s1', [])
     const history = mgr._messageHistory.get('s1')
 
@@ -589,7 +589,7 @@ describe('SessionManager ring buffer size', () => {
   })
 
   it('sets truncation flag via sessionId parameter without reverse lookup (#1928)', () => {
-    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
+    const mgr = new SessionManager({ maxHistory: 500, maxSessions: 5, stateFilePath: tmpStateFile() })
     // Create history for s1 but do NOT register it in _messageHistory
     // This proves _pushHistory uses the sessionId param directly,
     // not a reverse-lookup scan of _messageHistory
@@ -629,12 +629,12 @@ describe('SessionManager.isHistoryTruncated', () => {
   })
 
   it('returns true after ring buffer drops messages', () => {
-    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
+    const mgr = new SessionManager({ maxSessions: 5, maxHistory: 10, stateFilePath: tmpStateFile() })
     mgr._messageHistory.set('s1', [])
     const history = mgr._messageHistory.get('s1')
 
     // Fill beyond capacity to trigger truncation
-    for (let i = 0; i < 501; i++) {
+    for (let i = 0; i < 11; i++) {
       mgr._pushHistory(history, { type: 'message', content: `msg-${i}`, timestamp: i }, 's1')
     }
 
@@ -1363,14 +1363,14 @@ describe('SessionManager.defaultCwd getter (#1475)', () => {
 })
 
 describe('Configurable magic numbers (#1848)', () => {
-  it('maxHistory defaults to 500', () => {
+  it('maxHistory defaults to 1000', () => {
     const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
-    assert.equal(mgr._maxHistory, 500)
+    assert.equal(mgr._maxHistory, 1000)
   })
 
   it('maxHistory can be configured', () => {
-    const mgr = new SessionManager({ maxSessions: 5, maxHistory: 1000, stateFilePath: tmpStateFile() })
-    assert.equal(mgr._maxHistory, 1000)
+    const mgr = new SessionManager({ maxSessions: 5, maxHistory: 500, stateFilePath: tmpStateFile() })
+    assert.equal(mgr._maxHistory, 500)
   })
 
   it('maxSessions can be configured', () => {
