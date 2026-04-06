@@ -102,6 +102,30 @@ export function encrypt(jsonString: string, sharedKey: Uint8Array, nonceCounter:
 
 /**
  * Decrypt an encrypted envelope and return the parsed JSON object.
+ *
+ * **Replay protection contract:**
+ * This function enforces strict equality between `envelope.n` and `expectedNonce`,
+ * which prevents replay attacks when the caller advances `expectedNonce` by one after
+ * each successful decryption. The replay protection guarantee holds only if:
+ *
+ * 1. The caller increments `expectedNonce` (e.g. `recvNonce++`) immediately after
+ *    each successful `decrypt()` call.
+ * 2. `expectedNonce` is never reset to a value ≤ a previously accepted counter
+ *    without also rotating the shared key (i.e. performing a new key exchange).
+ *
+ * Violating rule 1 allows a captured frame to be replayed. Violating rule 2 opens
+ * a counter-reset attack after a reconnect.
+ *
+ * @param envelope      - The received encrypted frame.
+ * @param sharedKey     - Symmetric key derived from the X25519 key exchange.
+ * @param expectedNonce - The next counter value the receiver expects. Must be
+ *                        exactly `envelope.n`; any deviation throws an Error whose
+ *                        message starts with `'Unexpected nonce: got <n>, expected <e>'`.
+ * @param direction     - Directional byte (DIRECTION_SERVER or DIRECTION_CLIENT)
+ *                        used to namespace the nonce and prevent cross-direction replays.
+ * @throws {Error} `'Unexpected nonce: got <n>, expected <e>'` when `envelope.n !== expectedNonce`
+ * @throws {Error} `'Decryption failed: message tampered or wrong key'` when MAC verification fails
+ * @throws {TypeError} `'decrypt: envelope.d must be a base64 string'` / `'decrypt: envelope.n must be a number'`
  */
 export function decrypt(envelope: EncryptedEnvelope, sharedKey: Uint8Array, expectedNonce: number, direction: number): Record<string, unknown> {
   if (typeof envelope.d !== 'string') {

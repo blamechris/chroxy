@@ -261,6 +261,51 @@ describe('nonceFromCounter overflow guard', () => {
   })
 })
 
+describe('replay protection', () => {
+  it('rejects a replayed frame with a lower nonce (past replay)', () => {
+    const key = makeSharedKey()
+    // Envelope carries nonce=5 (an old frame). Receiver has already advanced to expectedNonce=6.
+    // envelope.n (5) < expectedNonce (6) — this is a true past replay.
+    const envelope = encrypt(JSON.stringify({ data: 'secret' }), key, 5, DIRECTION_SERVER)
+    expect(() => decrypt(envelope, key, 6, DIRECTION_SERVER)).toThrow('Unexpected nonce')
+  })
+
+  it('rejects a frame with a higher nonce (future frame / skip)', () => {
+    const key = makeSharedKey()
+    // Envelope carries nonce=7. Receiver only expects nonce=5.
+    // envelope.n (7) > expectedNonce (5) — frame is ahead of sequence (skip/injection).
+    const envelope = encrypt(JSON.stringify({ data: 'secret' }), key, 7, DIRECTION_SERVER)
+    expect(() => decrypt(envelope, key, 5, DIRECTION_SERVER)).toThrow('Unexpected nonce')
+  })
+
+  it('caller advancing counter prevents replay of an earlier frame', () => {
+    const key = makeSharedKey()
+    let counter = 0
+
+    const env1 = encrypt(JSON.stringify({ seq: 1 }), key, counter, DIRECTION_SERVER)
+    decrypt(env1, key, counter, DIRECTION_SERVER)
+    counter++ // caller MUST advance counter after each successful decrypt
+
+    const env2 = encrypt(JSON.stringify({ seq: 2 }), key, counter, DIRECTION_SERVER)
+    decrypt(env2, key, counter, DIRECTION_SERVER)
+    counter++
+
+    // Replaying env1 now fails because counter has moved past 0
+    expect(() => decrypt(env1, key, counter, DIRECTION_SERVER)).toThrow('Unexpected nonce')
+  })
+
+  it('direction byte prevents cross-direction replay', () => {
+    const key = makeSharedKey()
+    // Server encrypts at counter 0 with DIRECTION_SERVER
+    const serverEnv = encrypt(JSON.stringify({ cmd: 'do-thing' }), key, 0, DIRECTION_SERVER)
+
+    // Replaying as a client-direction frame with DIRECTION_CLIENT must fail (wrong key stream)
+    expect(() => decrypt(serverEnv, key, 0, DIRECTION_CLIENT)).toThrow(
+      'Decryption failed: message tampered or wrong key'
+    )
+  })
+})
+
 describe('encrypt overflow guard', () => {
   it('throws when nonce counter exceeds 2^48', () => {
     const kp = createKeyPair()
