@@ -20,7 +20,7 @@ import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
-import { RateLimiter } from './rate-limiter.js'
+import { RateLimiter, getClientIp } from './rate-limiter.js'
 import { createLogger, addLogListener, removeLogListener } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
@@ -673,12 +673,9 @@ export class WsServer {
     this.wss.on('connection', (ws, req) => {
       const clientId = randomUUID().slice(0, 8)
       // Best-effort client IP for logging and rate limiting.
-      // Prefers Cloudflare's cf-connecting-ip (set by the tunnel proxy),
-      // then x-forwarded-for, then the raw socket address.
-      const ip = req.headers['cf-connecting-ip']
-        || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-        || req.socket.remoteAddress
-        || 'unknown'
+      // getClientIp() prefers CF-Connecting-IP (Cloudflare tunnel), then
+      // X-Forwarded-For, then the raw socket address. See rate-limiter.js.
+      const ip = getClientIp(req)
       // SECURITY: For localhost bypass decisions (e.g. skipping encryption),
       // use ONLY the raw TCP socket address. Proxy headers like x-forwarded-for
       // and cf-connecting-ip can be spoofed by an attacker to fake a localhost
@@ -776,10 +773,9 @@ export class WsServer {
         if (client?.authenticated) {
           this._handleClientDeparture(client)
         }
-        if (client?.ip) {
-          this._rateLimiter.remove(client.ip)
-          this._permissionRateLimiter.remove(client.ip)
-        }
+        // Do not remove rate limiter entries on disconnect — the limiter keys by IP,
+        // so removing on disconnect would reset the shared bucket for all connections
+        // from the same real IP. The sliding window's natural expiry cleans up entries.
         this._clientManager.removeClient(ws)
       })
 

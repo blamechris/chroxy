@@ -331,7 +331,7 @@ describe('WsServer rate limiting via CF-Connecting-IP (#2688)', () => {
     const cfIp = '203.0.113.42'
 
     // First connection from CF IP — exhaust its bucket
-    const { ws: ws1, messages: msgs1 } = await createClient(port, { 'cf-connecting-ip': cfIp })
+    const { ws: ws1 } = await createClient(port, { 'cf-connecting-ip': cfIp })
     send(ws1, { type: 'get_session_list' })
     send(ws1, { type: 'get_session_list' })
     await new Promise(r => setTimeout(r, 100))
@@ -369,7 +369,7 @@ describe('WsServer rate limiting via CF-Connecting-IP (#2688)', () => {
     const port = await startServerAndGetPort(server)
 
     // Exhaust bucket for IP A
-    const { ws: wsA, messages: msgsA } = await createClient(port, { 'cf-connecting-ip': '203.0.113.1' })
+    const { ws: wsA } = await createClient(port, { 'cf-connecting-ip': '203.0.113.1' })
     send(wsA, { type: 'get_session_list' })
     send(wsA, { type: 'get_session_list' })
     await new Promise(r => setTimeout(r, 100))
