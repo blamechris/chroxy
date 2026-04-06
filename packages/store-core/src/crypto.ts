@@ -36,6 +36,16 @@ export interface EncryptionState {
 export function initPRNG(getRandomBytes: (n: number) => Uint8Array): void {
   nacl.setPRNG((x: Uint8Array, n: number) => {
     const bytes = getRandomBytes(n)
+    // Guard against a short-read from the platform PRNG: tweetnacl consumers
+    // assume the full `n` bytes were filled. If the underlying generator
+    // returned fewer (or more) bytes, fail loudly rather than silently leaving
+    // uninitialised memory in the nonce / key buffer.
+    if (!(bytes instanceof Uint8Array)) {
+      throw new Error(`initPRNG: getRandomBytes must return a Uint8Array, got ${typeof bytes}`)
+    }
+    if (bytes.length !== n) {
+      throw new Error(`initPRNG: getRandomBytes returned ${bytes.length} bytes, expected ${n}`)
+    }
     x.set(bytes)
   })
 }

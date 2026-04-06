@@ -366,6 +366,28 @@ describe('initPRNG', () => {
     }).not.toThrow()
   })
 
+  it('throws if getRandomBytes returns fewer bytes than requested (#2775)', () => {
+    // A broken platform PRNG that returns a short buffer would leave the tail
+    // of the nonce / key buffer uninitialised — a catastrophic crypto failure.
+    // initPRNG must detect and fail loudly.
+    const shortPRNG = (n: number): Uint8Array => new Uint8Array(Math.max(0, n - 1))
+    initPRNG(shortPRNG)
+    expect(() => createKeyPair()).toThrow(/returned \d+ bytes, expected \d+/)
+  })
+
+  it('throws if getRandomBytes returns more bytes than requested (#2775)', () => {
+    const longPRNG = (n: number): Uint8Array => new Uint8Array(n + 4)
+    initPRNG(longPRNG)
+    expect(() => createKeyPair()).toThrow(/returned \d+ bytes, expected \d+/)
+  })
+
+  it('throws if getRandomBytes returns a non-Uint8Array (#2775)', () => {
+    // Some buggy polyfills return Buffer/Array — detect and reject.
+    const brokenPRNG = (_n: number): Uint8Array => ([1, 2, 3] as unknown as Uint8Array)
+    initPRNG(brokenPRNG)
+    expect(() => createKeyPair()).toThrow(/getRandomBytes must return a Uint8Array/)
+  })
+
   it('installed PRNG is used by createKeyPair (custom entropy flows through)', () => {
     // After initPRNG with a deterministic source, two keypairs should be identical
     // because they draw from the same fixed-value PRNG.
@@ -543,6 +565,71 @@ describe('deriveConnectionKey', () => {
     const env1 = encrypt(msg, key1, 0, DIRECTION_SERVER)
     const env2 = encrypt(msg, key2, 0, DIRECTION_SERVER)
     expect(env1.d).not.toBe(env2.d)
+  })
+
+  it('reconnect with fresh salt + reset nonce counters produces different ciphertext (#2761)', () => {
+    // Stronger nonce-reset isolation: simulate a reconnect flow where both
+    // sides derive a NEW per-connection key from a fresh salt and reset
+    // recvNonce/sendNonce counters back to 0. Even though the plaintext and
+    // counter are identical, the ciphertext MUST differ because the derived
+    // key is different. This protects against two-time-pad attacks after
+    // reconnect even if the replay guard is bypassed.
+    const sharedKey = makeSharedKey()
+    const plaintext = JSON.stringify({ type: 'user_input', text: 'hello world' })
+
+    // Connection #1
+    const salt1 = generateConnectionSalt()
+    const k1 = deriveConnectionKey(sharedKey, salt1)
+    const state1 = { sharedKey: k1, sendNonce: 0, recvNonce: 0 }
+    const env1 = encrypt(plaintext, state1.sharedKey, state1.sendNonce, DIRECTION_CLIENT)
+    state1.sendNonce++
+
+    // Reconnect — state reset on both sides, new salt exchanged
+    const salt2 = generateConnectionSalt()
+    expect(salt2).not.toBe(salt1)
+    const k2 = deriveConnectionKey(sharedKey, salt2)
+    expect(k2).not.toEqual(k1)
+    const state2 = { sharedKey: k2, sendNonce: 0, recvNonce: 0 }
+    const env2 = encrypt(plaintext, state2.sharedKey, state2.sendNonce, DIRECTION_CLIENT)
+
+    // Nonce counters are identical (both 0), directions identical, plaintext
+    // identical — only the key differs. Ciphertext MUST still differ.
+    expect(env1.n).toBe(env2.n)
+    expect(env1.d).not.toBe(env2.d)
+
+    // And a frame from conn1 must not decrypt under conn2's key.
+    expect(() => decrypt(env1, k2, 0, DIRECTION_CLIENT)).toThrow(
+      'Decryption failed: message tampered or wrong key'
+    )
+  })
+
+  it('recvNonce reset is safe ONLY when paired with a fresh derived key (#2749)', () => {
+    // Regression/audit test: documents that resetting recvNonce back to 0 on
+    // reconnect is only safe if the key has ALSO changed. This test would
+    // catch a regression where the client/server reuses the same derived key
+    // across reconnects but resets recvNonce — which would open a replay /
+    // two-time-pad window.
+    const sharedKey = makeSharedKey()
+    const salt = generateConnectionSalt()
+    const derivedKey = deriveConnectionKey(sharedKey, salt)
+
+    // Server-to-client frame at counter 0 on "connection 1"
+    const msg = JSON.stringify({ type: 'welcome' })
+    const frameConn1 = encrypt(msg, derivedKey, 0, DIRECTION_SERVER)
+
+    // If we erroneously reset recvNonce to 0 WITHOUT re-deriving the key
+    // (i.e. reused the same derivedKey), a captured frameConn1 would replay
+    // successfully — the replay guard would accept it because counter matches.
+    const replayedPlaintext = decrypt(frameConn1, derivedKey, 0, DIRECTION_SERVER)
+    expect(replayedPlaintext).toEqual({ type: 'welcome' })
+
+    // With a properly fresh key (new salt ⇒ new derived key), the same bytes
+    // no longer decrypt — replay is prevented even at counter 0.
+    const salt2 = generateConnectionSalt()
+    const derivedKey2 = deriveConnectionKey(sharedKey, salt2)
+    expect(() => decrypt(frameConn1, derivedKey2, 0, DIRECTION_SERVER)).toThrow(
+      'Decryption failed: message tampered or wrong key'
+    )
   })
 
   it('same salt allows the other side to derive the same key and decrypt', () => {
