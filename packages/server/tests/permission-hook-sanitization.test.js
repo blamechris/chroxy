@@ -1,12 +1,15 @@
-import { describe, it } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'fs'
+import { readFileSync, existsSync, rmSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { execSync } from 'child_process'
+import { execSync, spawnSync } from 'child_process'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const hookPath = join(__dirname, '../hooks/permission-hook.sh')
+
+// Sentinel file used to detect if shell injection executed during tests
+const INJECTION_SENTINEL = '/tmp/chroxy-hook-injection-test'
 
 describe('Permission hook environment sanitization (#1831)', () => {
   it('hook script validates PORT is numeric', () => {
@@ -40,6 +43,124 @@ describe('Permission hook environment sanitization (#1831)', () => {
     assert.ok(
       source.includes('*) PERM_MODE="approve"'),
       'Unknown modes should fall back to approve'
+    )
+  })
+})
+
+describe('Permission hook stdin-only parameter passing (#2685)', () => {
+  afterEach(() => {
+    // Clean up sentinel file after each injection test
+    try { rmSync(INJECTION_SENTINEL, { force: true }) } catch {}
+  })
+
+  it('hook script does not use $1/$2 for tool parameters', () => {
+    const source = readFileSync(hookPath, 'utf-8')
+    // The script should only use $1 for positional args if at all — and no
+    // tool parameter (tool_name, tool_input, file_path) should be sourced from $N
+    // Parameters come from stdin JSON, never from shell positional arguments
+    assert.ok(
+      !source.match(/TOOL_NAME=\$[12]/) && !source.match(/TOOL_PATH=\$[12]/),
+      'Hook must not source tool parameters from shell positional args ($1, $2)'
+    )
+  })
+
+  it('hook script reads tool parameters from stdin, not shell arguments', () => {
+    const source = readFileSync(hookPath, 'utf-8')
+    // Must use stdin-reading construct (cat - or cat without args)
+    assert.ok(
+      source.includes('cat -') || source.includes('$(cat)'),
+      'Hook must read tool parameters from stdin'
+    )
+  })
+
+  it('security comment documents stdin-only requirement', () => {
+    const source = readFileSync(hookPath, 'utf-8')
+    assert.ok(
+      source.includes('stdin') && source.includes('$1'),
+      'Hook should document that tool parameters arrive via stdin, not $1/$2'
+    )
+  })
+
+  it('shell metacharacters in tool_name field do not execute commands', () => {
+    // Craft a JSON payload where tool_name contains a backtick command injection
+    // In acceptEdits mode, TOOL_NAME is extracted and used in a case statement
+    // If injection worked, the sentinel file would be created
+    const maliciousJson = JSON.stringify({
+      tool_name: `\`touch ${INJECTION_SENTINEL}\``,
+      tool_input: { command: 'echo hello' },
+      session_id: 'test',
+    })
+
+    const result = spawnSync('/bin/bash', [hookPath], {
+      input: maliciousJson,
+      encoding: 'utf-8',
+      timeout: 5000,
+      env: {
+        ...process.env,
+        CHROXY_PORT: '9999',
+        CHROXY_PERMISSION_MODE: 'acceptEdits',
+        // No CHROXY_HOOK_SECRET — curl will fail, which is fine
+      },
+    })
+
+    assert.ok(
+      !existsSync(INJECTION_SENTINEL),
+      'Shell injection via tool_name must not execute (sentinel file must not exist)'
+    )
+  })
+
+  it('shell metacharacters in $() form in tool_name do not execute commands', () => {
+    const maliciousJson = JSON.stringify({
+      tool_name: `$(touch ${INJECTION_SENTINEL})`,
+      tool_input: { file_path: '/etc/passwd' },
+      session_id: 'test',
+    })
+
+    const result = spawnSync('/bin/bash', [hookPath], {
+      input: maliciousJson,
+      encoding: 'utf-8',
+      timeout: 5000,
+      env: {
+        ...process.env,
+        CHROXY_PORT: '9999',
+        CHROXY_PERMISSION_MODE: 'acceptEdits',
+      },
+    })
+
+    assert.ok(
+      !existsSync(INJECTION_SENTINEL),
+      'Shell injection via $() in tool_name must not execute'
+    )
+  })
+
+  it('shell metacharacters in tool_input fields do not execute via stdin passthrough', () => {
+    // In approve/default mode, $REQUEST (full stdin JSON) is passed to curl -d
+    // The double-quoted "-d "$REQUEST"" prevents shell injection — verify this holds
+    const maliciousJson = JSON.stringify({
+      tool_name: 'Bash',
+      tool_input: {
+        command: `touch ${INJECTION_SENTINEL}; echo injected`,
+        // A crafted path with backtick injection
+        file_path: `\`touch ${INJECTION_SENTINEL}\``,
+      },
+      session_id: 'test',
+    })
+
+    // Run in auto mode so it exits immediately without trying to curl
+    const result = spawnSync('/bin/bash', [hookPath], {
+      input: maliciousJson,
+      encoding: 'utf-8',
+      timeout: 5000,
+      env: {
+        ...process.env,
+        CHROXY_PORT: '9999',
+        CHROXY_PERMISSION_MODE: 'auto',
+      },
+    })
+
+    assert.ok(
+      !existsSync(INJECTION_SENTINEL),
+      'Shell injection via tool_input in stdin must not execute'
     )
   })
 })

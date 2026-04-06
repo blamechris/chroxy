@@ -11,6 +11,11 @@
 #
 # Non-Chroxy Claude sessions don't have CHROXY_PORT set, so the hook immediately
 # falls through to Claude's normal permission prompt.
+#
+# SECURITY: All tool parameters arrive via stdin as JSON (never as shell arguments).
+# Claude Code's hooks mechanism always passes hook data through stdin, not positional
+# args. Do NOT use $1/$2/etc for tool parameters — they are untrusted and could
+# contain shell metacharacters that execute arbitrary commands.
 
 # If CHROXY_PORT is not set, this isn't a Chroxy session — exit silently
 # so Claude Code uses its normal permission flow without showing a hook prompt.
