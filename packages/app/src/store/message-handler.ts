@@ -1629,6 +1629,52 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'permission_timeout': {
+      const timeoutRequestId = msg.requestId as string;
+      const timeoutTool = typeof msg.tool === 'string' ? msg.tool : 'permission';
+      // Mark matching prompt as timed-out — scan all session states (the prompt may have
+      // been stored in any session, mirroring the permission_resolved all-sessions search)
+      if (timeoutRequestId) {
+        const timeoutUpdater = (ss: { messages: ChatMessage[] }) => ({
+          messages: ss.messages.map((m) =>
+            m.requestId === timeoutRequestId && m.type === 'prompt'
+              ? { ...m, content: `${m.content}\n(Auto-denied — permission timed out)`, options: undefined }
+              : m
+          ),
+        });
+        const allStates = get().sessionStates;
+        for (const sid of Object.keys(allStates)) {
+          if (allStates[sid]?.messages.some((m) => m.requestId === timeoutRequestId)) {
+            updateSession(sid, timeoutUpdater);
+            break;
+          }
+        }
+        // Auto-dismiss matching notification banner from both stores
+        set((s) => ({
+          sessionNotifications: (s.sessionNotifications ?? []).filter(
+            (n) => n.requestId !== timeoutRequestId
+          ),
+        }));
+        const notifState = useNotificationStore.getState();
+        notifState.sessionNotifications
+          .filter((n) => n.requestId === timeoutRequestId)
+          .forEach((n) => notifState.dismissSessionNotification(n.id));
+      }
+      // Show a dismissible server error banner so users know the permission was auto-denied
+      const timeoutError: ServerError = {
+        id: nextMessageId('permission_timeout'),
+        category: 'permission',
+        message: `Permission for "${timeoutTool}" was auto-denied (timed out)`,
+        recoverable: true,
+        timestamp: Date.now(),
+      };
+      set((state: ConnectionState) => ({
+        serverErrors: [...state.serverErrors, timeoutError].slice(-10),
+      }));
+      useNotificationStore.getState().addServerError(timeoutError);
+      break;
+    }
+
     case 'permission_rules_updated': {
       const rulesSessionId = (msg.sessionId as string) || get().activeSessionId;
       const rules = Array.isArray(msg.rules)

@@ -107,6 +107,14 @@ export function SettingsScreen() {
     return s.sessionStates[id].sessionRules ?? EMPTY_RULES;
   });
 
+  // Use the connection store as source of truth — same store SessionScreen and
+  // SessionNotificationBanner read from, so counts and dismissals stay in sync.
+  const sessionNotifications = useConnectionStore((s) => s.sessionNotifications);
+  const serverErrors = useConnectionStore((s) => s.serverErrors);
+  const dismissSessionNotification = useConnectionStore((s) => s.dismissSessionNotification);
+  const dismissServerError = useConnectionStore((s) => s.dismissServerError);
+  const totalActiveNotifications = sessionNotifications.length + serverErrors.length;
+
   const serverVersion = useConnectionLifecycleStore((s) => s.serverVersion);
   const latestVersion = useConnectionLifecycleStore((s) => s.latestVersion);
   const serverMode = useConnectionLifecycleStore((s) => s.serverMode);
@@ -326,6 +334,31 @@ export function SettingsScreen() {
           </View>
         </>
       )}
+
+      {/* NOTIFICATIONS */}
+      <Text style={styles.sectionHeader}>NOTIFICATIONS</Text>
+      <View style={styles.section}>
+        <View style={styles.row}>
+          <Text style={styles.rowLabel}>Active Banners</Text>
+          <Text style={styles.rowValue}>
+            {totalActiveNotifications === 0 ? 'None' : `${totalActiveNotifications} pending`}
+          </Text>
+        </View>
+        {totalActiveNotifications > 0 && (
+          <>
+            <View style={styles.separator} />
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => {
+                sessionNotifications.forEach((n) => dismissSessionNotification(n.id));
+                serverErrors.forEach((e) => dismissServerError(e.id));
+              }}
+            >
+              <Text style={styles.actionText}>Dismiss All</Text>
+            </TouchableOpacity>
+          </>
+        )}
+      </View>
 
       {/* PORTABILITY */}
       {conversationId != null && (

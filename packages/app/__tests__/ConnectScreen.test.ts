@@ -52,6 +52,20 @@ describe('ConnectScreen component structure', () => {
     expect(src).toMatch(/parseChroxyUrl/)
   })
 
+  test('handleConnect handles chroxy:// URL pasted into manual entry', () => {
+    expect(src).toMatch(/rawUrl\.startsWith\(['"]chroxy:\/\/['"]\)/)
+    expect(src).toMatch(/parseChroxyUrl\(rawUrl\)/)
+  })
+
+  test('handleConnect shows helpful error when chroxy:// URL missing token', () => {
+    expect(src).toMatch(/missing_token/)
+    expect(src).toMatch(/Include your token in the URL/)
+  })
+
+  test('handleConnect shows improved error when token missing for remote URL', () => {
+    expect(src).toMatch(/You can find your token in the QR code URL/)
+  })
+
   test('shows auto-connect spinner with cancel option', () => {
     expect(src).toMatch(/autoConnecting/)
     expect(src).toMatch(/Cancel connection attempt/)
