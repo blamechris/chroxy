@@ -280,23 +280,85 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // (e.g. macOS /var → /private/var)
       const absInCwd = normalize(resolve(cwdReal, requestedPath.trim()))
 
-      // Path traversal check: target must be within session CWD
-      const { valid: writeValid } = await validatePathWithinCwd(absInCwd, sessionCwd)
-      if (!writeValid) {
-        sendFn(ws, {
-          type: 'write_file_result',
-          path: requestedPath,
-          error: 'Access denied: file writing is restricted to the project directory',
-        })
-        return
+      // Determine whether the target file already exists so we can choose
+      // between O_NOFOLLOW (existing) and parent-validated creation (new).
+      let resolvedTarget
+      let fileExists = false
+      try {
+        resolvedTarget = await realpath(absInCwd)
+        fileExists = true
+      } catch (err) {
+        if (err.code === 'ENOENT') {
+          // File doesn't exist yet — validate parent directory instead.
+          // Use the lexical path for the new-file case.
+          resolvedTarget = absInCwd
+        } else {
+          throw err
+        }
       }
-      absPath = absInCwd
+
+      if (fileExists) {
+        // Existing file: validate the resolved (symlink-followed) path
+        const { valid: writeValid } = await validatePathWithinCwd(resolvedTarget, sessionCwd)
+        if (!writeValid) {
+          sendFn(ws, {
+            type: 'write_file_result',
+            path: requestedPath,
+            error: 'Access denied: file writing is restricted to the project directory',
+          })
+          return
+        }
+      } else {
+        // New file: validate the lexical path is within CWD
+        const { valid: writeValid } = await validatePathWithinCwd(absInCwd, sessionCwd)
+        if (!writeValid) {
+          sendFn(ws, {
+            type: 'write_file_result',
+            path: requestedPath,
+            error: 'Access denied: file writing is restricted to the project directory',
+          })
+          return
+        }
+      }
+      absPath = fileExists ? resolvedTarget : absInCwd
 
       // Create parent directories if needed
       await mkdir(resolve(absPath, '..'), { recursive: true })
 
-      // Write the file
-      await fsWriteFile(absPath, content || '', 'utf-8')
+      // Write the file using O_NOFOLLOW to close the post-validation TOCTOU
+      // window: if a symlink is swapped in at absPath between validation and
+      // this open(), the kernel rejects it with ELOOP.
+      const data = Buffer.from(content || '', 'utf-8')
+      {
+        let fh
+        try {
+          const flags = fileExists
+            ? fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_TRUNC
+            : fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_CREAT | fsConstants.O_EXCL
+          fh = await open(absPath, flags, 0o666)
+          await fh.writeFile(data)
+        } catch (openErr) {
+          if (openErr.code === 'ELOOP') {
+            // Symlink appeared at the target path after validation — reject
+            sendFn(ws, {
+              type: 'write_file_result',
+              path: requestedPath,
+              error: 'Access denied: file writing is restricted to the project directory',
+            })
+            return
+          }
+          if (openErr.code === 'EEXIST') {
+            // Race: file was created between our existence check and O_EXCL open.
+            // Retry once using the existing-file path (O_TRUNC without O_EXCL).
+            fh = await open(absPath, fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_TRUNC, 0o666)
+            await fh.writeFile(data)
+          } else {
+            throw openErr
+          }
+        } finally {
+          await fh?.close()
+        }
+      }
 
       sendFn(ws, {
         type: 'write_file_result',
