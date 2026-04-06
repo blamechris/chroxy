@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, before, after } from 'node:test'
+import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { writeFileSync, unlinkSync, existsSync } from 'fs'
