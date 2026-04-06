@@ -3,7 +3,33 @@ import assert from 'node:assert/strict'
 import { readFileSync, existsSync, rmSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { execSync, spawnSync } from 'child_process'
+import { execSync, spawnSync, spawn } from 'child_process'
+import { createServer } from 'http'
+
+/**
+ * Async wrapper around spawn() — unlike spawnSync, this does NOT block the
+ * Node event loop, so the in-process mock HTTP server can actually accept
+ * the incoming curl request from the hook script.
+ */
+function spawnAsync(cmd, args, { input, env, timeout } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { env })
+    let stdout = ''
+    let stderr = ''
+    let timer = null
+    child.stdout.on('data', (c) => { stdout += c.toString() })
+    child.stderr.on('data', (c) => { stderr += c.toString() })
+    child.on('close', (status, signal) => {
+      if (timer) clearTimeout(timer)
+      resolve({ status, signal, stdout, stderr })
+    })
+    if (timeout) {
+      timer = setTimeout(() => { child.kill('SIGKILL') }, timeout)
+    }
+    if (input != null) child.stdin.write(input)
+    child.stdin.end()
+  })
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const hookPath = join(__dirname, '../hooks/permission-hook.sh')
@@ -171,6 +197,149 @@ describe('Permission hook stdin-only parameter passing (#2685)', () => {
       !existsSync(INJECTION_SENTINEL),
       `Shell injection via tool_input in stdin must not execute in approve mode (exit ${status}, stderr: ${stderr})`
     )
+  })
+})
+
+/**
+ * Spin up a tiny HTTP server that captures POSTs to /permission and replies
+ * with the decision supplied by the test. Returns { url, port, close, received }.
+ */
+async function startMockPermissionServer({ decision = 'allow', expectAuthHeader = null } = {}) {
+  const received = { body: null, headers: null, path: null, method: null }
+  const server = createServer((req, res) => {
+    received.method = req.method
+    received.path = req.url
+    received.headers = req.headers
+    let body = ''
+    req.on('data', (chunk) => { body += chunk })
+    req.on('end', () => {
+      received.body = body
+      if (expectAuthHeader && req.headers.authorization !== expectAuthHeader) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ decision }))
+    })
+  })
+  // Bind without an explicit host so both IPv4 (127.0.0.1) and IPv6 (::1) are
+  // accepted — curl's `localhost` resolution may prefer ::1 on some systems.
+  await new Promise((resolve) => server.listen(0, resolve))
+  const port = server.address().port
+  return {
+    port,
+    received,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  }
+}
+
+describe('Permission hook approve-mode curl passthrough (#2717)', () => {
+  it('POSTs stdin JSON to /permission and maps allow decision to hookSpecificOutput', async () => {
+    const mock = await startMockPermissionServer({ decision: 'allow' })
+    try {
+      const payload = JSON.stringify({
+        tool_name: 'Bash',
+        tool_input: { command: 'ls -la' },
+        session_id: 'test-session-1',
+      })
+      const { stdout, status } = await spawnAsync('/bin/bash', [hookPath], {
+        input: payload,
+        timeout: 10000,
+        env: {
+          ...process.env,
+          CHROXY_PORT: String(mock.port),
+          CHROXY_HOOK_SECRET: 'test-secret-abc',
+          CHROXY_PERMISSION_MODE: 'approve',
+        },
+      })
+      assert.equal(status, 0, 'hook should exit 0')
+
+      // Hook must have POSTed the exact stdin payload to /permission
+      assert.equal(mock.received.method, 'POST')
+      assert.equal(mock.received.path, '/permission')
+      assert.equal(mock.received.body, payload, 'hook should forward stdin JSON verbatim')
+      assert.equal(
+        mock.received.headers.authorization,
+        'Bearer test-secret-abc',
+        'hook should forward the hook secret as a Bearer token'
+      )
+
+      // And map the server's allow decision to the Claude Code hookSpecificOutput shape
+      const out = JSON.parse(stdout)
+      assert.equal(out.hookSpecificOutput.hookEventName, 'PreToolUse')
+      assert.equal(out.hookSpecificOutput.permissionDecision, 'allow')
+    } finally {
+      await mock.close()
+    }
+  })
+
+  it('maps deny decision to hookSpecificOutput with reason', async () => {
+    const mock = await startMockPermissionServer({ decision: 'deny' })
+    try {
+      const payload = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'rm -rf /' } })
+      const { stdout, status } = await spawnAsync('/bin/bash', [hookPath], {
+        input: payload,
+        timeout: 10000,
+        env: {
+          ...process.env,
+          CHROXY_PORT: String(mock.port),
+          CHROXY_HOOK_SECRET: 'test-secret-xyz',
+          CHROXY_PERMISSION_MODE: 'approve',
+        },
+      })
+      assert.equal(status, 0)
+      const out = JSON.parse(stdout)
+      assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
+      assert.ok(
+        typeof out.hookSpecificOutput.permissionDecisionReason === 'string' &&
+          out.hookSpecificOutput.permissionDecisionReason.length > 0,
+        'deny response should include a reason'
+      )
+    } finally {
+      await mock.close()
+    }
+  })
+
+  it('maps allowAlways decision to allow (same as allow)', async () => {
+    const mock = await startMockPermissionServer({ decision: 'allowAlways' })
+    try {
+      const payload = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      const { stdout, status } = await spawnAsync('/bin/bash', [hookPath], {
+        input: payload,
+        timeout: 10000,
+        env: {
+          ...process.env,
+          CHROXY_PORT: String(mock.port),
+          CHROXY_HOOK_SECRET: 'secret',
+          CHROXY_PERMISSION_MODE: 'approve',
+        },
+      })
+      assert.equal(status, 0)
+      const out = JSON.parse(stdout)
+      assert.equal(out.hookSpecificOutput.permissionDecision, 'allow')
+    } finally {
+      await mock.close()
+    }
+  })
+
+  it('falls back to ask when curl fails (server unreachable)', () => {
+    // No mock server — curl will fail. Hook must default to "ask".
+    const payload = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+    const { stdout, status } = spawnSync('/bin/bash', [hookPath], {
+      input: payload,
+      encoding: 'utf-8',
+      timeout: 10000,
+      env: {
+        ...process.env,
+        CHROXY_PORT: '1', // port 1 should be unreachable
+        CHROXY_HOOK_SECRET: 'secret',
+        CHROXY_PERMISSION_MODE: 'approve',
+      },
+    })
+    assert.equal(status, 0)
+    const out = JSON.parse(stdout)
+    assert.equal(out.hookSpecificOutput.permissionDecision, 'ask')
   })
 })
 

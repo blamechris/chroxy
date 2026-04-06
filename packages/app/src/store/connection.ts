@@ -653,6 +653,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           get().connect(url, token);
         }, AUTO_RECONNECT_DELAY);
       } else {
+        // Connection dropped before it ever reached "connected" state. Previously
+        // we silently marked as disconnected, swallowing the real close reason
+        // (auth_fail, 1008 policy violation, etc.) when the UI was waiting on a
+        // banner. Surface the close code error if one is available (#2772).
+        if (disconnectedAttemptId !== myAttemptId) {
+          const closeMsg = getWsCloseMessage(event.code);
+          if (closeMsg !== null) {
+            useConnectionLifecycleStore.getState().setConnectionError(closeMsg, 0);
+          }
+        }
         useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       }
     };

@@ -798,14 +798,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'auth_fail':
+    case 'auth_fail': {
       ctx.socket.close();
       set({ socket: null });
       useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+      // Surface the failure reason so the banner appears even on silent
+      // (auto-)reconnect attempts where no Alert is shown (#2770).
+      const authFailReason = (msg.reason as string) || 'Invalid token';
+      useConnectionLifecycleStore.getState().setConnectionError(`Auth failed: ${authFailReason}`, 0);
       if (!ctx.silent) {
-        Alert.alert('Auth Failed', (msg.reason as string) || 'Invalid token');
+        Alert.alert('Auth Failed', authFailReason);
       }
       break;
+    }
 
     case 'pair_fail': {
       ctx.socket.close();

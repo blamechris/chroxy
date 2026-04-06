@@ -17,6 +17,16 @@ export const DIRECTION_CLIENT = 0x01;
 export function initPRNG(getRandomBytes) {
     nacl.setPRNG((x, n) => {
         const bytes = getRandomBytes(n);
+        // Guard against a short-read from the platform PRNG: tweetnacl consumers
+        // assume the full `n` bytes were filled. If the underlying generator
+        // returned fewer (or more) bytes, fail loudly rather than silently leaving
+        // uninitialised memory in the nonce / key buffer.
+        if (!(bytes instanceof Uint8Array)) {
+            throw new Error(`initPRNG: getRandomBytes must return a Uint8Array, got ${typeof bytes}`);
+        }
+        if (bytes.length !== n) {
+            throw new Error(`initPRNG: getRandomBytes returned ${bytes.length} bytes, expected ${n}`);
+        }
         x.set(bytes);
     });
 }
@@ -52,6 +62,9 @@ export function deriveSharedKey(theirPubBase64, mySecretKey) {
  * Byte 0 is direction (0=server, 1=client), bytes 1-8 are counter (little-endian).
  */
 export function nonceFromCounter(n, direction) {
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+        throw new RangeError('Nonce counter must be a non-negative integer');
+    }
     if (n > MAX_NONCE_COUNTER) {
         throw new Error('Nonce counter exhausted — reconnect required for new key exchange');
     }
@@ -80,6 +93,30 @@ export function encrypt(jsonString, sharedKey, nonceCounter, direction) {
 }
 /**
  * Decrypt an encrypted envelope and return the parsed JSON object.
+ *
+ * **Replay protection contract:**
+ * This function enforces strict equality between `envelope.n` and `expectedNonce`,
+ * which prevents replay attacks when the caller advances `expectedNonce` by one after
+ * each successful decryption. The replay protection guarantee holds only if:
+ *
+ * 1. The caller increments `expectedNonce` (e.g. `recvNonce++`) immediately after
+ *    each successful `decrypt()` call.
+ * 2. `expectedNonce` is never reset to a value ≤ a previously accepted counter
+ *    without also rotating the shared key (i.e. performing a new key exchange).
+ *
+ * Violating rule 1 allows a captured frame to be replayed. Violating rule 2 opens
+ * a counter-reset attack after a reconnect.
+ *
+ * @param envelope      - The received encrypted frame.
+ * @param sharedKey     - Symmetric key derived from the X25519 key exchange.
+ * @param expectedNonce - The next counter value the receiver expects. Must be
+ *                        exactly `envelope.n`; any deviation throws an Error whose
+ *                        message starts with `'Unexpected nonce: got <n>, expected <e>'`.
+ * @param direction     - Directional byte (DIRECTION_SERVER or DIRECTION_CLIENT)
+ *                        used to namespace the nonce and prevent cross-direction replays.
+ * @throws {Error} `'Unexpected nonce: got <n>, expected <e>'` when `envelope.n !== expectedNonce`
+ * @throws {Error} `'Decryption failed: message tampered or wrong key'` when MAC verification fails
+ * @throws {TypeError} `'decrypt: envelope.d must be a base64 string'` / `'decrypt: envelope.n must be a number'`
  */
 export function decrypt(envelope, sharedKey, expectedNonce, direction) {
     if (typeof envelope.d !== 'string') {
