@@ -175,25 +175,37 @@ describe('git ops workspace root validation (#2690)', () => {
     )
   })
 
-  it('gitStatus rejects a symlink pointing outside workspace root', async () => {
+  it('gitStatus rejects a symlink pointing outside workspace root', async (t) => {
     // Create a symlink inside workspace that points outside
     const symlinkPath = join(workspaceDir, 'outside-link')
+    let created = false
+
     try {
       await symlink(outsideDir, symlinkPath)
-    } catch {
-      // symlink may already exist
+      created = true
+    } catch (err) {
+      if (err.code === 'EEXIST') {
+        created = true // symlink from a previous run still exists — fine
+      } else if (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'ENOTSUP') {
+        t.skip(`symlinks not supported in this environment: ${err.code}`)
+        return
+      } else {
+        throw err
+      }
     }
 
-    lastMessage = null
-    await fileOps.gitStatus(ws, symlinkPath)
-    assert.ok(lastMessage, 'should send a response')
-    assert.equal(lastMessage.type, 'git_status_result')
-    assert.ok(
-      lastMessage.error && lastMessage.error.includes('Access denied'),
-      `expected Access denied error for symlink pointing outside, got: ${lastMessage.error}`
-    )
-
-    await rm(symlinkPath, { force: true })
+    try {
+      lastMessage = null
+      await fileOps.gitStatus(ws, symlinkPath)
+      assert.ok(lastMessage, 'should send a response')
+      assert.equal(lastMessage.type, 'git_status_result')
+      assert.ok(
+        lastMessage.error && lastMessage.error.includes('Access denied'),
+        `expected Access denied error for symlink pointing outside, got: ${lastMessage.error}`
+      )
+    } finally {
+      if (created) await rm(symlinkPath, { force: true })
+    }
   })
 
   it('gitStatus allows a valid path within workspace root', async () => {
