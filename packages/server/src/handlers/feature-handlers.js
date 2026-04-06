@@ -1,5 +1,5 @@
 /**
- * Miscellaneous handlers: extension messages, web tasks, dev preview, environments.
+ * Feature handlers: extension messages, web tasks, dev preview, environments.
  *
  * Handles: extension_message, launch_web_task, list_web_tasks, teleport_web_task,
  *          close_dev_preview, create_environment, list_environments,
@@ -198,7 +198,7 @@ function handleGetEnvironment(ws, _client, msg, ctx) {
   ctx.send(ws, { type: 'environment_info', environment: env })
 }
 
-export const miscHandlers = {
+export const featureHandlers = {
   extension_message: handleExtensionMessage,
   launch_web_task: handleLaunchWebTask,
   list_web_tasks: handleListWebTasks,

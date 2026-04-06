@@ -114,6 +114,7 @@ import {
   drainMessageQueue,
   CLIENT_PROTOCOL_VERSION,
 } from './message-handler';
+import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
@@ -581,7 +582,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               token,
               protocolVersion: CLIENT_PROTOCOL_VERSION,
               deviceInfo: { deviceId, ...info },
-              capabilities: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity'],
+              capabilities: CLIENT_CAPABILITIES.mobile,
             }));
           }
         }

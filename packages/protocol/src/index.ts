@@ -9,6 +9,15 @@
 export const PROTOCOL_VERSION = 1
 
 /**
+ * Client capability sets advertised in the `auth` handshake.
+ * Single source of truth so app and dashboard stay in sync with the server.
+ */
+export const CLIENT_CAPABILITIES = {
+  desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input'] as const,
+  mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity'] as const,
+} as const
+
+/**
  * Minimum protocol version the server will accept from clients.
  * Clients below this version are rejected during auth.
  */

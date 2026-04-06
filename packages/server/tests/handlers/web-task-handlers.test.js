@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { miscHandlers as webTaskHandlers } from '../../src/handlers/misc-handlers.js'
+import { featureHandlers as webTaskHandlers } from '../../src/handlers/feature-handlers.js'
 import { createSpy } from '../test-helpers.js'
 import { WebTaskUnavailableError } from '../../src/web-task-manager.js'
 

@@ -341,7 +341,10 @@ export class WsServer {
       backpressureMaxDrops: this._backpressureMaxDrops,
     })
     const broadcastFn = (msg, filter) => self._broadcast(msg, filter)
-    this._fileOps = createFileOps(sendFn)
+    // Pass explicit workspace root so file ops resolve paths against the
+    // session manager's default cwd instead of falling back to homedir.
+    const workspaceRoot = sessionManager?.defaultCwd || process.cwd()
+    this._fileOps = createFileOps(sendFn, workspaceRoot)
     this._permissions = createPermissionHandler({
       sendFn,
       broadcastFn,

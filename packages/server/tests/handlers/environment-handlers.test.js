@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { miscHandlers as environmentHandlers } from '../../src/handlers/misc-handlers.js'
+import { featureHandlers as environmentHandlers } from '../../src/handlers/feature-handlers.js'
 import { createSpy } from '../test-helpers.js'
 
 function makeCtx(overrides = {}) {
