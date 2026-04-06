@@ -1,4 +1,4 @@
-import { describe, it, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync, rmSync } from 'fs'
 import { join, dirname } from 'path'
@@ -48,6 +48,12 @@ describe('Permission hook environment sanitization (#1831)', () => {
 })
 
 describe('Permission hook stdin-only parameter passing (#2685)', () => {
+  beforeEach(() => {
+    // Ensure sentinel does not exist before each test (guards against stale files
+    // left by a previous test run that crashed before afterEach could clean up)
+    try { rmSync(INJECTION_SENTINEL, { force: true }) } catch {}
+  })
+
   afterEach(() => {
     // Clean up sentinel file after each injection test
     try { rmSync(INJECTION_SENTINEL, { force: true }) } catch {}
@@ -134,8 +140,10 @@ describe('Permission hook stdin-only parameter passing (#2685)', () => {
   })
 
   it('shell metacharacters in tool_input fields do not execute via stdin passthrough', () => {
-    // In approve/default mode, $REQUEST (full stdin JSON) is passed to curl -d
-    // The double-quoted "-d "$REQUEST"" prevents shell injection — verify this holds
+    // In approve/default mode, $REQUEST (full stdin JSON) is passed to curl -d "$REQUEST".
+    // The double-quoting prevents shell expansion. Curl will fail (no server running on
+    // port 9999) but the hook must not execute any commands embedded in the JSON before
+    // or during the curl call. Verify by checking that the sentinel is not created.
     const maliciousJson = JSON.stringify({
       tool_name: 'Bash',
       tool_input: {
@@ -146,7 +154,7 @@ describe('Permission hook stdin-only parameter passing (#2685)', () => {
       session_id: 'test',
     })
 
-    // Run in auto mode so it exits immediately without trying to curl
+    // Run in approve mode (the default) — this exercises REQUEST=$(cat -) and the curl call
     const result = spawnSync('/bin/bash', [hookPath], {
       input: maliciousJson,
       encoding: 'utf-8',
@@ -154,13 +162,14 @@ describe('Permission hook stdin-only parameter passing (#2685)', () => {
       env: {
         ...process.env,
         CHROXY_PORT: '9999',
-        CHROXY_PERMISSION_MODE: 'auto',
+        // No CHROXY_PERMISSION_MODE — defaults to approve, reads stdin and calls curl
+        // No CHROXY_HOOK_SECRET — curl will fail (connection refused), which is expected
       },
     })
 
     assert.ok(
       !existsSync(INJECTION_SENTINEL),
-      'Shell injection via tool_input in stdin must not execute'
+      'Shell injection via tool_input in stdin must not execute in approve mode'
     )
   })
 })
