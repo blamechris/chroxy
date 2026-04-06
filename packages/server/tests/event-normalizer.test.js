@@ -305,6 +305,19 @@ describe('EventNormalizer', () => {
       assert.equal(result.messages[0].msg.messageType, 'error')
       assert.equal(result.messages[0].msg.content, 'Something went wrong')
     })
+
+    it('forwards error code when present', () => {
+      const data = { code: 'docker_not_running', message: 'Docker is not running.' }
+      const result = normalizer.normalize('error', data, makeCtx())
+      assert.equal(result.messages[0].msg.code, 'docker_not_running')
+      assert.equal(result.messages[0].msg.messageType, 'error')
+    })
+
+    it('omits code field when not present in error data', () => {
+      const data = { message: 'Generic error' }
+      const result = normalizer.normalize('error', data, makeCtx())
+      assert.equal(result.messages[0].msg.code, undefined)
+    })
   })
 
   // ---- Delta buffering ----
