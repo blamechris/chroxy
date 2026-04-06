@@ -294,6 +294,111 @@ describe('Supervisor', () => {
     })
   })
 
+  describe('max restart enforcement', () => {
+    /**
+     * Helper: crash the current child N times without triggering the automatic
+     * restart timer. Between crashes we manually call startChild() to simulate
+     * what the timer would do, and we clear any pending timer immediately so it
+     * cannot fire and create unexpected extra mock children.
+     */
+    async function crashNTimes(supervisor, n, { waitForExit = false } = {}) {
+      for (let i = 0; i < n; i++) {
+        const isLast = i === n - 1
+        supervisor.startChild()
+        const child = supervisor.lastChild
+
+        if (isLast && waitForExit) {
+          // The exit handler is async (push notification) — await test_exit so
+          // the promise resolves only after _exit() has been called.
+          await new Promise((resolve) => {
+            supervisor.once('test_exit', resolve)
+            child.simulateExit(1, null)
+          })
+        } else {
+          child.simulateExit(1, null)
+          // Cancel any restart timer queued by this crash so subsequent manual
+          // startChild() calls are the sole source of new children.
+          if (supervisor._restartTimer) {
+            clearTimeout(supervisor._restartTimer)
+            supervisor._restartTimer = null
+          }
+        }
+      }
+    }
+
+    it('exits after exactly maxRestarts crashes', async () => {
+      // maxRestarts=3: exits when restartCount becomes 4 (> 3).
+      // Crash sequence: crash#1 → restartCount=1, crash#2 → 2, crash#3 → 3,
+      // crash#4 → 4 > 3 → exit.
+      const { supervisor } = setup({ maxRestarts: 3 })
+      let exitCount = 0
+      supervisor.on('test_exit', () => { exitCount++ })
+
+      // First 3 crashes: restartCount goes 1, 2, 3 — should NOT exit yet
+      await crashNTimes(supervisor, 3)
+      assert.equal(supervisor._exitCalled, null, 'should not exit before max is exceeded')
+      assert.equal(supervisor._restartCount, 3)
+
+      // 4th crash: restartCount becomes 4 > maxRestarts(3) → exit
+      await crashNTimes(supervisor, 1, { waitForExit: true })
+
+      assert.equal(supervisor._exitCalled, 1, 'should exit with code 1')
+      assert.equal(exitCount, 1, 'exit should be called exactly once')
+    })
+
+    it('records exactly maxRestarts restart attempts before exiting', async () => {
+      const maxRestarts = 3
+      const { supervisor } = setup({ maxRestarts })
+
+      // Drive all crashes: 3 that survive + 1 that triggers exit
+      await crashNTimes(supervisor, maxRestarts)
+      assert.equal(supervisor._restartCount, maxRestarts, 'restart count should equal maxRestarts before the fatal crash')
+
+      // One more crash should push restartCount over the limit
+      await crashNTimes(supervisor, 1, { waitForExit: true })
+
+      assert.equal(supervisor._restartCount, maxRestarts + 1, 'final restart count should be maxRestarts + 1')
+      assert.equal(supervisor._metrics.totalRestarts, maxRestarts + 1, 'metrics.totalRestarts should match')
+      assert.equal(supervisor._exitCalled, 1)
+    })
+
+    it('does not exit before maxRestarts is reached', async () => {
+      const maxRestarts = 3
+      const { supervisor } = setup({ maxRestarts })
+
+      // Crash maxRestarts-1 times — supervisor must still be alive
+      await crashNTimes(supervisor, maxRestarts - 1)
+      assert.equal(supervisor._exitCalled, null, `should not exit after ${maxRestarts - 1} crashes`)
+      assert.equal(supervisor._restartCount, maxRestarts - 1)
+
+      // One more crash (the maxRestarts-th) — still alive because count === limit, not > limit
+      await crashNTimes(supervisor, 1)
+      assert.equal(supervisor._exitCalled, null, `should not exit after exactly ${maxRestarts} crashes (count must exceed, not equal, limit)`)
+      assert.equal(supervisor._restartCount, maxRestarts)
+
+      // Cancel any pending timer from the last crash before the final fatal one
+      if (supervisor._restartTimer) { clearTimeout(supervisor._restartTimer); supervisor._restartTimer = null }
+
+      // The next crash pushes restartCount to maxRestarts+1, which is > maxRestarts → exit
+      await crashNTimes(supervisor, 1, { waitForExit: true })
+      assert.equal(supervisor._exitCalled, 1, 'should exit after maxRestarts+1 crashes')
+    })
+
+    it('emits max_restarts_exceeded exactly once', async () => {
+      const { supervisor } = setup({ maxRestarts: 2 })
+      let exceededCount = 0
+      supervisor.on('max_restarts_exceeded', () => { exceededCount++ })
+
+      // 2 safe crashes (restartCount reaches 2, not > 2)
+      await crashNTimes(supervisor, 2)
+      assert.equal(exceededCount, 0, 'event must not fire before limit is exceeded')
+
+      // 1 fatal crash
+      await crashNTimes(supervisor, 1, { waitForExit: true })
+      assert.equal(exceededCount, 1, 'event should fire exactly once on the fatal crash')
+    })
+  })
+
   describe('graceful restart (drain)', () => {
     it('sends drain message to child', () => {
       const { supervisor } = setup()
