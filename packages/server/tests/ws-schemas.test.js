@@ -17,6 +17,7 @@ import {
   ListDirectorySchema,
   BrowseFilesSchema,
   ReadFileSchema,
+  WriteFileSchema,
   ListFilesSchema,
   ListSlashCommandsSchema,
   ListAgentsSchema,
@@ -26,6 +27,8 @@ import {
   PingSchema,
   RequestSessionContextSchema,
   GetDiffSchema,
+  GitStageSchema,
+  GitCommitSchema,
   ResumeBudgetSchema,
   ListCheckpointsSchema,
   RestoreCheckpointSchema,
@@ -602,6 +605,87 @@ describe('server web task schemas', () => {
     assert.equal(result.data.tasks.length, 1)
     assert.ok(ServerWebTaskListSchema.safeParse({ type: 'web_task_list', tasks: [] }).success)
     assert.ok(!ServerWebTaskListSchema.safeParse({ type: 'web_task_list' }).success)
+  })
+})
+
+// ============================================================
+// Max-length constraints (#2694) — OOM DoS prevention
+// ============================================================
+
+describe('max-length constraints (#2694)', () => {
+  it('rejects auth token exceeding 512 characters', () => {
+    assert.ok(!AuthSchema.safeParse({ type: 'auth', token: 'a'.repeat(513) }).success)
+  })
+
+  it('accepts auth token at the limit', () => {
+    assert.ok(AuthSchema.safeParse({ type: 'auth', token: 'a'.repeat(512) }).success)
+  })
+
+  it('rejects path fields exceeding 4096 characters', () => {
+    const longPath = 'a'.repeat(4097)
+    assert.ok(!ListDirectorySchema.safeParse({ type: 'list_directory', path: longPath }).success)
+    assert.ok(!BrowseFilesSchema.safeParse({ type: 'browse_files', path: longPath }).success)
+    assert.ok(!ReadFileSchema.safeParse({ type: 'read_file', path: longPath }).success)
+    assert.ok(!WriteFileSchema.safeParse({ type: 'write_file', path: longPath, content: 'data' }).success)
+    assert.ok(!AddRepoSchema.safeParse({ type: 'add_repo', path: longPath }).success)
+    assert.ok(!RemoveRepoSchema.safeParse({ type: 'remove_repo', path: longPath }).success)
+    assert.ok(!LaunchWebTaskSchema.safeParse({ type: 'launch_web_task', prompt: 'test', cwd: longPath }).success)
+  })
+
+  it('accepts path fields at the limit', () => {
+    const path = 'a'.repeat(4096)
+    assert.ok(ReadFileSchema.safeParse({ type: 'read_file', path }).success)
+    assert.ok(WriteFileSchema.safeParse({ type: 'write_file', path, content: 'data' }).success)
+  })
+
+  it('rejects write_file content exceeding 10MB', () => {
+    const result = WriteFileSchema.safeParse({ type: 'write_file', path: '/tmp/f', content: 'x'.repeat(10_000_001) })
+    assert.ok(!result.success)
+  })
+
+  it('accepts write_file content at the 10MB limit', () => {
+    const result = WriteFileSchema.safeParse({ type: 'write_file', path: '/tmp/f', content: 'x'.repeat(10_000_000) })
+    assert.ok(result.success)
+  })
+
+  it('rejects list_files query exceeding 1000 characters', () => {
+    assert.ok(!ListFilesSchema.safeParse({ type: 'list_files', query: 'q'.repeat(1001) }).success)
+  })
+
+  it('accepts list_files query at the limit', () => {
+    assert.ok(ListFilesSchema.safeParse({ type: 'list_files', query: 'q'.repeat(1000) }).success)
+  })
+
+  it('rejects git_stage file path exceeding 4096 characters', () => {
+    assert.ok(!GitStageSchema.safeParse({ type: 'git_stage', files: ['a'.repeat(4097)] }).success)
+  })
+
+  it('rejects git_commit message exceeding 10000 characters', () => {
+    assert.ok(!GitCommitSchema.safeParse({ type: 'git_commit', message: 'm'.repeat(10_001) }).success)
+  })
+
+  it('accepts git_commit message at the limit', () => {
+    assert.ok(GitCommitSchema.safeParse({ type: 'git_commit', message: 'm'.repeat(10_000) }).success)
+  })
+
+  it('rejects register_push_token token exceeding 512 characters', () => {
+    assert.ok(!RegisterPushTokenSchema.safeParse({ type: 'register_push_token', token: 't'.repeat(513) }).success)
+  })
+
+  it('rejects encrypted envelope ciphertext exceeding 10MB', () => {
+    assert.ok(!EncryptedEnvelopeSchema.safeParse({ type: 'encrypted', d: 'x'.repeat(10_000_001), n: 1 }).success)
+  })
+
+  it('accepts encrypted envelope ciphertext at the 10MB limit', () => {
+    assert.ok(EncryptedEnvelopeSchema.safeParse({ type: 'encrypted', d: 'x'.repeat(10_000_000), n: 1 }).success)
+  })
+
+  it('rejects create_session cwd path exceeding 4096 characters', () => {
+    assert.ok(!CreateSessionSchema.safeParse({ type: 'create_session', cwd: 'a'.repeat(4097) }).success)
+  })
+
+  it('rejects teleport_web_task taskId exceeding 256 characters', () => {
+    assert.ok(!TeleportWebTaskSchema.safeParse({ type: 'teleport_web_task', taskId: 'x'.repeat(257) }).success)
   })
 })
 

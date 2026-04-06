@@ -9,39 +9,39 @@ import { z } from 'zod'
 // -- Attachment schema (reusable) --
 const BinaryAttachmentSchema = z.object({
   type: z.enum(['image', 'document']),
-  mediaType: z.string(),
-  data: z.string(),
-  name: z.string(),
+  mediaType: z.string().max(256),
+  data: z.string().max(10_000_000),
+  name: z.string().max(256),
 })
 
 const FileRefAttachmentSchema = z.object({
   type: z.literal('file_ref'),
-  path: z.string(),
-  name: z.string().optional(),
+  path: z.string().max(4096),
+  name: z.string().max(256).optional(),
 })
 
 const AttachmentSchema = z.union([BinaryAttachmentSchema, FileRefAttachmentSchema])
 
 // -- Device info (optional in auth) --
 const DeviceInfoSchema = z.object({
-  deviceId: z.string().optional(),
-  deviceName: z.string().optional(),
+  deviceId: z.string().max(256).optional(),
+  deviceName: z.string().max(256).optional(),
   deviceType: z.enum(['phone', 'tablet', 'desktop', 'unknown']).optional(),
-  platform: z.string().optional(),
+  platform: z.string().max(256).optional(),
 }).passthrough()
 
 // -- Individual message schemas --
 
 export const AuthSchema = z.object({
   type: z.literal('auth'),
-  token: z.string(),
+  token: z.string().max(512),
   protocolVersion: z.number().int().min(0).optional(),
   deviceInfo: DeviceInfoSchema.optional(),
 }).passthrough()
 
 export const PairSchema = z.object({
   type: z.literal('pair'),
-  pairingId: z.string().min(1),
+  pairingId: z.string().min(1).max(256),
   protocolVersion: z.number().int().min(0).optional(),
   deviceInfo: DeviceInfoSchema.optional(),
 }).passthrough()
@@ -59,7 +59,7 @@ export const InterruptSchema = z.object({
 
 export const SetModelSchema = z.object({
   type: z.literal('set_model'),
-  model: z.string(),
+  model: z.string().max(256),
 }).passthrough()
 
 export const SetPermissionModeSchema = z.object({
@@ -71,29 +71,29 @@ export const SetPermissionModeSchema = z.object({
 export const SetThinkingLevelSchema = z.object({
   type: z.literal('set_thinking_level'),
   level: z.enum(['default', 'high', 'max']),
-  sessionId: z.string().optional(),
+  sessionId: z.string().max(256).optional(),
 }).passthrough()
 
 export const PermissionRuleSchema = z.object({
-  tool: z.string().min(1),
+  tool: z.string().min(1).max(256),
   decision: z.enum(['allow', 'deny']),
 })
 
 export const SetPermissionRulesSchema = z.object({
   type: z.literal('set_permission_rules'),
   rules: z.array(PermissionRuleSchema),
-  sessionId: z.string().optional(),
+  sessionId: z.string().max(256).optional(),
 })
 
 export const PermissionResponseSchema = z.object({
   type: z.literal('permission_response'),
-  requestId: z.string().min(1),
+  requestId: z.string().min(1).max(256),
   decision: z.enum(['allow', 'allowAlways', 'deny']),
 })
 
 export const QueryPermissionAuditSchema = z.object({
   type: z.literal('query_permission_audit'),
-  sessionId: z.string().optional(),
+  sessionId: z.string().max(256).optional(),
   auditType: z.enum(['mode_change', 'decision']).optional(),
   since: z.number().optional(),
   limit: z.number().optional(),
@@ -105,7 +105,7 @@ export const ListSessionsSchema = z.object({
 
 export const SwitchSessionSchema = z.object({
   type: z.literal('switch_session'),
-  sessionId: z.string(),
+  sessionId: z.string().max(256),
 })
 
 // -- Sandbox settings schema (mirrors SDK SandboxSettings) --
@@ -113,14 +113,14 @@ export const SwitchSessionSchema = z.object({
 // silently stripping fields added by newer SDK versions.
 export const SandboxSchema = z.object({
   network: z.object({
-    allowedDomains: z.array(z.string()).optional(),
+    allowedDomains: z.array(z.string().max(256)).optional(),
   }).passthrough().optional(),
   filesystem: z.object({
-    allowedPaths: z.array(z.string()).optional(),
-    deniedPaths: z.array(z.string()).optional(),
+    allowedPaths: z.array(z.string().max(4096)).optional(),
+    deniedPaths: z.array(z.string().max(4096)).optional(),
   }).passthrough().optional(),
   bash: z.object({
-    allowedCommands: z.array(z.string()).optional(),
+    allowedCommands: z.array(z.string().max(256)).optional(),
   }).passthrough().optional(),
   autoAllowBashIfSandboxed: z.boolean().optional(),
 }).passthrough()
@@ -128,63 +128,63 @@ export const SandboxSchema = z.object({
 export const CreateSessionSchema = z.object({
   type: z.literal('create_session'),
   name: z.string().max(200).optional(),
-  cwd: z.string().optional(),
-  provider: z.string().optional(),
-  model: z.string().optional(),
+  cwd: z.string().max(4096).optional(),
+  provider: z.string().max(256).optional(),
+  model: z.string().max(256).optional(),
   permissionMode: z.enum(['approve', 'acceptEdits', 'auto', 'plan']).optional(),
   worktree: z.boolean().optional(),
   sandbox: SandboxSchema.optional(),
   isolation: z.enum(['none', 'worktree', 'sandbox', 'container']).optional(),
-  environmentId: z.string().optional(),
+  environmentId: z.string().max(256).optional(),
 })
 
 export const DestroySessionSchema = z.object({
   type: z.literal('destroy_session'),
-  sessionId: z.string(),
+  sessionId: z.string().max(256),
 })
 
 export const RenameSessionSchema = z.object({
   type: z.literal('rename_session'),
-  sessionId: z.string(),
+  sessionId: z.string().max(256),
   name: z.string().max(200),
 })
 
 export const RegisterPushTokenSchema = z.object({
   type: z.literal('register_push_token'),
-  token: z.string().min(1),
+  token: z.string().min(1).max(512),
 })
 
 export const UserQuestionResponseSchema = z.object({
   type: z.literal('user_question_response'),
-  answer: z.string(),
-  answers: z.record(z.string(), z.string()).optional(),
-  toolUseId: z.string().optional(),
+  answer: z.string().max(100_000),
+  answers: z.record(z.string(), z.string().max(100_000)).optional(),
+  toolUseId: z.string().max(256).optional(),
 })
 
 export const ListDirectorySchema = z.object({
   type: z.literal('list_directory'),
-  path: z.string().optional(),
+  path: z.string().max(4096).optional(),
 })
 
 export const BrowseFilesSchema = z.object({
   type: z.literal('browse_files'),
-  path: z.string().nullable().optional(),
+  path: z.string().max(4096).nullable().optional(),
 }).passthrough()
 
 export const ReadFileSchema = z.object({
   type: z.literal('read_file'),
-  path: z.string(),
+  path: z.string().max(4096),
 }).passthrough()
 
 export const WriteFileSchema = z.object({
   type: z.literal('write_file'),
-  path: z.string(),
-  content: z.string(),
+  path: z.string().max(4096),
+  content: z.string().max(10_000_000),
 }).passthrough()
 
 export const ListFilesSchema = z.object({
   type: z.literal('list_files'),
-  query: z.string().optional(),
+  query: z.string().max(1000).optional(),
 }).passthrough()
 
 export const ListSlashCommandsSchema = z.object({
@@ -197,12 +197,12 @@ export const ListAgentsSchema = z.object({
 
 export const RequestFullHistorySchema = z.object({
   type: z.literal('request_full_history'),
-  sessionId: z.string().optional(),
+  sessionId: z.string().max(256).optional(),
 })
 
 export const KeyExchangeSchema = z.object({
   type: z.literal('key_exchange'),
-  publicKey: z.string(),
+  publicKey: z.string().max(512),
 })
 
 export const PingSchema = z.object({
@@ -211,7 +211,7 @@ export const PingSchema = z.object({
 
 export const RequestSessionContextSchema = z.object({
   type: z.literal('request_session_context'),
-  sessionId: z.string().optional(),
+  sessionId: z.string().max(256).optional(),
 })
 
 export const GetDiffSchema = z.object({
@@ -228,22 +228,22 @@ export const GitBranchesSchema = z.object({
 
 export const GitStageSchema = z.object({
   type: z.literal('git_stage'),
-  files: z.array(z.string()).min(1),
+  files: z.array(z.string().max(4096)).min(1),
 }).passthrough()
 
 export const GitUnstageSchema = z.object({
   type: z.literal('git_unstage'),
-  files: z.array(z.string()).min(1),
+  files: z.array(z.string().max(4096)).min(1),
 }).passthrough()
 
 export const GitCommitSchema = z.object({
   type: z.literal('git_commit'),
-  message: z.string().min(1),
+  message: z.string().min(1).max(10_000),
 }).passthrough()
 
 export const ResumeBudgetSchema = z.object({
   type: z.literal('resume_budget'),
-  sessionId: z.string().optional(),
+  sessionId: z.string().max(256).optional(),
 })
 
 export const ListCheckpointsSchema = z.object({
@@ -252,24 +252,24 @@ export const ListCheckpointsSchema = z.object({
 
 export const RestoreCheckpointSchema = z.object({
   type: z.literal('restore_checkpoint'),
-  checkpointId: z.string(),
+  checkpointId: z.string().max(256),
 })
 
 export const CreateCheckpointSchema = z.object({
   type: z.literal('create_checkpoint'),
-  name: z.string().optional(),
-  description: z.string().optional(),
+  name: z.string().max(256).optional(),
+  description: z.string().max(1000).optional(),
 })
 
 export const DeleteCheckpointSchema = z.object({
   type: z.literal('delete_checkpoint'),
-  checkpointId: z.string(),
+  checkpointId: z.string().max(256),
 })
 
 export const CloseDevPreviewSchema = z.object({
   type: z.literal('close_dev_preview'),
   port: z.number().int(),
-  sessionId: z.string().optional(),
+  sessionId: z.string().max(256).optional(),
 })
 
 // -- Web task schemas --
@@ -277,7 +277,7 @@ export const CloseDevPreviewSchema = z.object({
 export const LaunchWebTaskSchema = z.object({
   type: z.literal('launch_web_task'),
   prompt: z.string().min(1).max(10_000),
-  cwd: z.string().optional(),
+  cwd: z.string().max(4096).optional(),
 })
 
 export const ListWebTasksSchema = z.object({
@@ -286,7 +286,7 @@ export const ListWebTasksSchema = z.object({
 
 export const TeleportWebTaskSchema = z.object({
   type: z.literal('teleport_web_task'),
-  taskId: z.string().min(1),
+  taskId: z.string().min(1).max(256),
 })
 
 // -- Conversation history schemas --
@@ -297,8 +297,8 @@ export const ListConversationsSchema = z.object({
 
 export const ResumeConversationSchema = z.object({
   type: z.literal('resume_conversation'),
-  conversationId: z.string(),
-  cwd: z.string().optional(),
+  conversationId: z.string().max(256),
+  cwd: z.string().max(4096).optional(),
   name: z.string().max(200).optional(),
 })
 
@@ -316,12 +316,12 @@ export const RequestCostSummarySchema = z.object({
 
 export const SubscribeSessionsSchema = z.object({
   type: z.literal('subscribe_sessions'),
-  sessionIds: z.array(z.string()).min(1).max(20),
+  sessionIds: z.array(z.string().max(256)).min(1).max(20),
 })
 
 export const UnsubscribeSessionsSchema = z.object({
   type: z.literal('unsubscribe_sessions'),
-  sessionIds: z.array(z.string()).min(1).max(20),
+  sessionIds: z.array(z.string().max(256)).min(1).max(20),
 })
 
 // -- Repo management schemas --
@@ -336,23 +336,23 @@ export const ListReposSchema = z.object({
 
 export const AddRepoSchema = z.object({
   type: z.literal('add_repo'),
-  path: z.string().min(1),
-  name: z.string().optional(),
+  path: z.string().min(1).max(4096),
+  name: z.string().max(256).optional(),
 })
 
 export const RemoveRepoSchema = z.object({
   type: z.literal('remove_repo'),
-  path: z.string().min(1),
+  path: z.string().min(1).max(4096),
 })
 
 // -- Extension message --
 
 export const ExtensionMessageSchema = z.object({
   type: z.literal('extension_message'),
-  provider: z.string().min(1),
-  subtype: z.string().min(1),
+  provider: z.string().min(1).max(256),
+  subtype: z.string().min(1).max(256),
   data: z.unknown(),
-  sessionId: z.string().optional(),
+  sessionId: z.string().max(256).optional(),
 })
 
 // -- Environment management --
@@ -360,10 +360,10 @@ export const ExtensionMessageSchema = z.object({
 export const CreateEnvironmentSchema = z.object({
   type: z.literal('create_environment'),
   name: z.string().max(200),
-  cwd: z.string(),
-  image: z.string().optional(),
-  memoryLimit: z.string().optional(),
-  cpuLimit: z.string().optional(),
+  cwd: z.string().max(4096),
+  image: z.string().max(256).optional(),
+  memoryLimit: z.string().max(64).optional(),
+  cpuLimit: z.string().max(64).optional(),
 })
 
 export const ListEnvironmentsSchema = z.object({
@@ -372,19 +372,19 @@ export const ListEnvironmentsSchema = z.object({
 
 export const DestroyEnvironmentSchema = z.object({
   type: z.literal('destroy_environment'),
-  environmentId: z.string(),
+  environmentId: z.string().max(256),
 })
 
 export const GetEnvironmentSchema = z.object({
   type: z.literal('get_environment'),
-  environmentId: z.string(),
+  environmentId: z.string().max(256),
 })
 
 // -- Encrypted envelope --
 
 export const EncryptedEnvelopeSchema = z.object({
   type: z.literal('encrypted'),
-  d: z.string(),
+  d: z.string().max(10_000_000),
   n: z.number().int().nonnegative(),
 })
 
