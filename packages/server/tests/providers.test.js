@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { registerProvider, getProvider, listProviders, registerDockerProvider } from '../src/providers.js'
+import { registerProvider, getProvider, listProviders, registerDockerProvider, validateProviderClass } from '../src/providers.js'
 import { CliSession } from '../src/cli-session.js'
 import { SdkSession } from '../src/sdk-session.js'
 
@@ -39,7 +39,14 @@ describe('Provider Registry', () => {
   })
 
   it('registerProvider + getProvider round-trip', () => {
-    class TestProvider {}
+    class TestProvider {
+      sendMessage() {}
+      interrupt() {}
+      setModel() {}
+      setPermissionMode() {}
+      start() {}
+      destroy() {}
+    }
     registerProvider('test-roundtrip', TestProvider)
     assert.equal(getProvider('test-roundtrip'), TestProvider)
   })
@@ -107,6 +114,119 @@ describe('Docker Provider Naming (#2475)', () => {
   it('docker-sdk has containerized capability', async () => {
     const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
     assert.equal(DockerSdkSession.capabilities.containerized, true)
+  })
+})
+
+describe('Provider Interface Validation', () => {
+  const ALL_METHODS = ['sendMessage', 'interrupt', 'setModel', 'setPermissionMode', 'start', 'destroy']
+
+  function makeValidClass() {
+    class ValidProvider {
+      sendMessage() {}
+      interrupt() {}
+      setModel() {}
+      setPermissionMode() {}
+      start() {}
+      destroy() {}
+    }
+    return ValidProvider
+  }
+
+  it('validates a complete provider without throwing', () => {
+    assert.doesNotThrow(() => validateProviderClass(makeValidClass(), 'valid'))
+  })
+
+  it('throws when a required method is missing', () => {
+    class BadProvider {
+      interrupt() {}
+      setModel() {}
+      setPermissionMode() {}
+      start() {}
+      destroy() {}
+      // sendMessage intentionally omitted
+    }
+    assert.throws(
+      () => validateProviderClass(BadProvider, 'bad'),
+      /Provider 'bad' missing required method: sendMessage/
+    )
+  })
+
+  it('throws on the first missing method for an empty class', () => {
+    class EmptyProvider {}
+    assert.throws(
+      () => validateProviderClass(EmptyProvider, 'empty'),
+      /missing required method/
+    )
+  })
+
+  it('registerProvider rejects a class missing required methods', () => {
+    class IncompleteProvider {
+      sendMessage() {}
+      // missing interrupt, setModel, setPermissionMode, start, destroy
+    }
+    assert.throws(
+      () => registerProvider('incomplete-' + Date.now(), IncompleteProvider),
+      /missing required method/
+    )
+  })
+
+  it('registerProvider accepts a class with all required methods', () => {
+    const ValidClass = makeValidClass()
+    const name = 'valid-iface-' + Date.now()
+    assert.doesNotThrow(() => registerProvider(name, ValidClass))
+    assert.equal(getProvider(name), ValidClass)
+  })
+
+  it('all required methods are checked', () => {
+    for (const method of ALL_METHODS) {
+      const ValidClass = makeValidClass()
+      delete ValidClass.prototype[method]
+      assert.throws(
+        () => validateProviderClass(ValidClass, 'partial'),
+        new RegExp(`missing required method: ${method}`),
+        `should throw for missing ${method}`
+      )
+    }
+  })
+
+  it('throws a friendly error for non-constructable functions (arrow functions)', () => {
+    const arrowFn = () => {}
+    assert.throws(
+      () => validateProviderClass(arrowFn, 'arrow'),
+      /must be a constructable class/
+    )
+  })
+
+  it('requires respondToPermission and respondToQuestion when inProcessPermissions is true', () => {
+    class InProcessProvider {
+      sendMessage() {}
+      interrupt() {}
+      setModel() {}
+      setPermissionMode() {}
+      start() {}
+      destroy() {}
+      // missing respondToPermission and respondToQuestion
+      static get capabilities() { return { inProcessPermissions: true } }
+    }
+    assert.throws(
+      () => validateProviderClass(InProcessProvider, 'in-process'),
+      /inProcessPermissions=true but is missing required method/
+    )
+  })
+
+  it('accepts an inProcessPermissions provider that has all required methods', () => {
+    class FullInProcessProvider {
+      sendMessage() {}
+      interrupt() {}
+      setModel() {}
+      setPermissionMode() {}
+      start() {}
+      destroy() {}
+      respondToPermission() {}
+      respondToQuestion() {}
+      static get capabilities() { return { inProcessPermissions: true } }
+    }
+    assert.doesNotThrow(() => validateProviderClass(FullInProcessProvider, 'full-in-process'))
   })
 })
 

@@ -15,6 +15,10 @@ class StubSession extends EventEmitter {
   }
   start() {}
   destroy() {}
+  sendMessage() {}
+  interrupt() {}
+  setModel() {}
+  setPermissionMode() {}
 }
 StubSession.capabilities = {}
 

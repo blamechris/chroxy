@@ -33,6 +33,7 @@ before(async () => {
     start() {}
     destroy() {}
     sendMessage() {}
+    interrupt() {}
     setModel() {}
     setPermissionMode() {}
   }

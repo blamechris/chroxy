@@ -46,10 +46,8 @@ export const registeredMessageTypes = Object.freeze([
   ...Object.keys(fileHandlers),
   ...Object.keys(conversationHandlers),
   ...Object.keys(checkpointHandlers),
-  ...Object.keys(webTaskHandlers),
   ...Object.keys(repoHandlers),
-  ...Object.keys(extensionHandlers),
-  ...Object.keys(environmentHandlers),
+  ...Object.keys(miscHandlers),
 ].sort())
 
 /**
