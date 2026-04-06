@@ -5,6 +5,7 @@
  * Command implementations live in cli/ modules. This file only
  * sets up Commander, registers commands, and calls parse().
  */
+import './version-check.js'
 import { Command } from 'commander'
 import { createRequire } from 'module'
 
