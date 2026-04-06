@@ -6,7 +6,7 @@
  */
 import { scanConversations } from '../conversation-scanner.js'
 import { searchConversations } from '../conversation-search.js'
-import { validateCwdWithinHome, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients } from '../handler-utils.js'
+import { validateCwdWithinHome, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, sendError } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
@@ -16,8 +16,8 @@ async function handleListConversations(ws, client, msg, ctx) {
     const conversations = await scanConversations()
     ctx.send(ws, { type: 'conversations_list', conversations })
   } catch (err) {
-    log.warn(`Failed to scan conversations: ${err.message}`)
-    ctx.send(ws, { type: 'conversations_list', conversations: [] })
+    log.error(`Failed to scan conversations: ${err.message}`)
+    sendError(ws, msg.requestId, 'HANDLER_ERROR', err.message)
   }
 }
 
@@ -27,8 +27,8 @@ async function handleSearchConversations(ws, client, msg, ctx) {
     const results = await searchConversations(query, { maxResults })
     ctx.send(ws, { type: 'search_results', query, results })
   } catch (err) {
-    log.warn(`Failed to search conversations: ${err.message}`)
-    ctx.send(ws, { type: 'search_results', query, results: [] })
+    log.error(`Failed to search conversations: ${err.message}`)
+    sendError(ws, msg.requestId, 'HANDLER_ERROR', err.message)
   }
 }
 
@@ -86,23 +86,28 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
     ctx.send(ws, { type: 'session_error', message })
     return
   }
-  const fullHistory = await ctx.sessionManager.getFullHistoryAsync(targetId)
-  ctx.send(ws, { type: 'history_replay_start', sessionId: targetId, fullHistory: true })
-  for (const entry of fullHistory) {
-    if (entry.type === 'user_input' || entry.type === 'response' || entry.type === 'tool_use') {
-      ctx.send(ws, {
-        type: 'message',
-        messageType: entry.type,
-        content: entry.content,
-        tool: entry.tool,
-        timestamp: entry.timestamp,
-        sessionId: targetId,
-      })
-    } else {
-      ctx.send(ws, { ...entry, sessionId: targetId })
+  try {
+    const fullHistory = await ctx.sessionManager.getFullHistoryAsync(targetId)
+    ctx.send(ws, { type: 'history_replay_start', sessionId: targetId, fullHistory: true })
+    for (const entry of fullHistory) {
+      if (entry.type === 'user_input' || entry.type === 'response' || entry.type === 'tool_use') {
+        ctx.send(ws, {
+          type: 'message',
+          messageType: entry.type,
+          content: entry.content,
+          tool: entry.tool,
+          timestamp: entry.timestamp,
+          sessionId: targetId,
+        })
+      } else {
+        ctx.send(ws, { ...entry, sessionId: targetId })
+      }
     }
+    ctx.send(ws, { type: 'history_replay_end', sessionId: targetId })
+  } catch (err) {
+    log.error(`Failed to replay full history for session ${targetId}: ${err.message}`)
+    sendError(ws, msg.requestId, 'HANDLER_ERROR', err.message)
   }
-  ctx.send(ws, { type: 'history_replay_end', sessionId: targetId })
 }
 
 async function handleRequestSessionContext(ws, client, msg, ctx) {
@@ -119,27 +124,32 @@ async function handleRequestSessionContext(ws, client, msg, ctx) {
       ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
     }
   } catch (err) {
-    log.warn(`Failed to read session context: ${err.message}`)
-    ctx.send(ws, { type: 'session_error', message: `Failed to read session context: ${err.message}` })
+    log.error(`Failed to read session context: ${err.message}`)
+    sendError(ws, msg.requestId, 'HANDLER_ERROR', err.message)
   }
 }
 
 function handleRequestCostSummary(ws, client, msg, ctx) {
-  const costSessions = ctx.sessionManager.listSessions()
-  const sessionCosts = costSessions.map(s => ({
-    sessionId: s.sessionId,
-    name: s.name,
-    cost: ctx.sessionManager.getSessionCost(s.sessionId),
-    model: s.model || null,
-  }))
-  ctx.send(ws, {
-    type: 'cost_summary',
-    totalCost: ctx.sessionManager.getTotalCost(),
-    budget: ctx.sessionManager.getCostBudget(),
-    sessions: sessionCosts,
-    costByModel: ctx.sessionManager.getCostByModel(),
-    spendRate: ctx.sessionManager.getSpendRate(),
-  })
+  try {
+    const costSessions = ctx.sessionManager.listSessions()
+    const sessionCosts = costSessions.map(s => ({
+      sessionId: s.sessionId,
+      name: s.name,
+      cost: ctx.sessionManager.getSessionCost(s.sessionId),
+      model: s.model || null,
+    }))
+    ctx.send(ws, {
+      type: 'cost_summary',
+      totalCost: ctx.sessionManager.getTotalCost(),
+      budget: ctx.sessionManager.getCostBudget(),
+      sessions: sessionCosts,
+      costByModel: ctx.sessionManager.getCostByModel(),
+      spendRate: ctx.sessionManager.getSpendRate(),
+    })
+  } catch (err) {
+    log.error(`Failed to build cost summary: ${err.message}`)
+    sendError(ws, msg.requestId, 'HANDLER_ERROR', err.message)
+  }
 }
 
 export const conversationHandlers = {

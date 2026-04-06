@@ -186,3 +186,22 @@ export function resolveSession(ctx, msg, client) {
   const sid = msg.sessionId || client?.activeSessionId
   return ctx.sessionManager?.getSession(sid) ?? null
 }
+
+/**
+ * Send a structured error response to a WebSocket client.
+ * Does nothing if the socket is not open.
+ *
+ * @param {WebSocket} ws - The target WebSocket connection
+ * @param {string|null} requestId - The request ID from the original message, or null
+ * @param {string} code - Machine-readable error code (e.g. 'HANDLER_ERROR', 'SESSION_NOT_FOUND')
+ * @param {string} message - Human-readable error message (err.message only — no stack traces)
+ */
+export function sendError(ws, requestId, code, message) {
+  if (!ws || ws.readyState !== ws.OPEN) return
+  ws.send(JSON.stringify({
+    type: 'error',
+    requestId: requestId ?? null,
+    code,
+    message,
+  }))
+}

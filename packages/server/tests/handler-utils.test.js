@@ -25,6 +25,7 @@ import {
   ALLOWED_IMAGE_TYPES,
   broadcastFocusChanged,
   resolveSession,
+  sendError,
 } from '../src/handler-utils.js'
 
 // -- Temp directory setup --
@@ -750,5 +751,85 @@ describe('resolveSession', () => {
     }
     const result = resolveSession(ctx, {}, null)
     assert.strictEqual(result, null)
+  })
+})
+
+// ============================================================
+// sendError
+// ============================================================
+
+describe('sendError', () => {
+  it('sends a structured error message to an open WebSocket', () => {
+    const sent = []
+    const ws = {
+      readyState: 1, // OPEN
+      OPEN: 1,
+      send(data) { sent.push(JSON.parse(data)) },
+    }
+
+    sendError(ws, 'req-123', 'HANDLER_ERROR', 'something went wrong')
+
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].type, 'error')
+    assert.strictEqual(sent[0].requestId, 'req-123')
+    assert.strictEqual(sent[0].code, 'HANDLER_ERROR')
+    assert.strictEqual(sent[0].message, 'something went wrong')
+  })
+
+  it('sets requestId to null when not provided', () => {
+    const sent = []
+    const ws = {
+      readyState: 1,
+      OPEN: 1,
+      send(data) { sent.push(JSON.parse(data)) },
+    }
+
+    sendError(ws, undefined, 'HANDLER_ERROR', 'oops')
+
+    assert.strictEqual(sent[0].requestId, null)
+  })
+
+  it('does nothing when ws is not open', () => {
+    const sent = []
+    const ws = {
+      readyState: 3, // CLOSED
+      OPEN: 1,
+      send(data) { sent.push(data) },
+    }
+
+    sendError(ws, null, 'HANDLER_ERROR', 'will not send')
+
+    assert.strictEqual(sent.length, 0)
+  })
+
+  it('does nothing when ws is connecting (readyState 0)', () => {
+    const sent = []
+    const ws = {
+      readyState: 0, // CONNECTING
+      OPEN: 1,
+      send(data) { sent.push(data) },
+    }
+
+    sendError(ws, null, 'HANDLER_ERROR', 'not open yet')
+
+    assert.strictEqual(sent.length, 0)
+  })
+
+  it('does nothing when ws is null', () => {
+    // Must not throw
+    assert.doesNotThrow(() => sendError(null, 'req-1', 'HANDLER_ERROR', 'msg'))
+  })
+
+  it('does nothing when ws is undefined', () => {
+    assert.doesNotThrow(() => sendError(undefined, null, 'HANDLER_ERROR', 'msg'))
+  })
+
+  it('preserves the exact error code provided', () => {
+    const sent = []
+    const ws = { readyState: 1, OPEN: 1, send(data) { sent.push(JSON.parse(data)) } }
+
+    sendError(ws, null, 'SESSION_NOT_FOUND', 'session missing')
+
+    assert.strictEqual(sent[0].code, 'SESSION_NOT_FOUND')
   })
 })
