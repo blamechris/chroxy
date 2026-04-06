@@ -14,4 +14,6 @@ export {
   nonceFromCounter,
   encrypt,
   decrypt,
+  generateConnectionSalt,
+  deriveConnectionKey,
 } from '@chroxy/store-core'

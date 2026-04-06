@@ -44,3 +44,25 @@ export declare function encrypt(jsonString: string, sharedKey: Uint8Array, nonce
  * Decrypt an encrypted envelope and return the parsed JSON object.
  */
 export declare function decrypt(envelope: EncryptedEnvelope, sharedKey: Uint8Array, expectedNonce: number, direction: number): Record<string, unknown>;
+/**
+ * Generate a fresh 32-byte random salt for a new connection.
+ * The salt must be exchanged during the handshake so both sides can derive
+ * the same per-connection sub-key via deriveConnectionKey().
+ *
+ * @returns base64-encoded 32 random bytes
+ */
+export declare function generateConnectionSalt(): string;
+/**
+ * Derive a per-connection sub-key from the long-lived DH shared key and a
+ * fresh random salt.  Uses SHA-512(sharedKey ∥ saltBytes) and takes the
+ * first 32 bytes as the XSalsa20-Poly1305 key.
+ *
+ * Because each connection uses a unique salt, the nonce counter can safely
+ * start at 0 for every connection without risking nonce reuse under the
+ * same key.
+ *
+ * @param sharedKey  - 32-byte DH shared key from deriveSharedKey()
+ * @param saltBase64 - base64-encoded 32-byte salt from generateConnectionSalt()
+ * @returns 32-byte derived key (first half of SHA-512 output)
+ */
+export declare function deriveConnectionKey(sharedKey: Uint8Array, saltBase64: string): Uint8Array;
