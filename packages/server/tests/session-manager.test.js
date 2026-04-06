@@ -1471,3 +1471,73 @@ describe('#2692 — session destroy race: getSession rejects mid-destroy session
       'session should be removed from _sessions after destroySessionLocked() completes')
   })
 })
+
+describe('SessionManager._destroying filter (#2728)', () => {
+  function makeMgr() {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
+    const mkSession = () => {
+      const s = new EventEmitter()
+      s.isRunning = false
+      s.model = null
+      s.permissionMode = 'approve'
+      s.resumeSessionId = null
+      s.destroy = () => {}
+      return s
+    }
+    mgr._sessions.set('s1', { session: mkSession(), name: 'S1', cwd: '/tmp', createdAt: 1, _destroying: true })
+    mgr._sessions.set('s2', { session: mkSession(), name: 'S2', cwd: '/tmp', createdAt: 2 })
+    return mgr
+  }
+
+  it('listSessions() excludes entries marked _destroying', () => {
+    const mgr = makeMgr()
+    const list = mgr.listSessions()
+    assert.equal(list.length, 1)
+    assert.equal(list[0].sessionId, 's2')
+    assert.equal(list[0].name, 'S2')
+  })
+
+  it('firstSessionId returns the first non-destroying session even if a destroying entry comes first', () => {
+    const mgr = makeMgr()
+    assert.equal(mgr.firstSessionId, 's2')
+  })
+
+  it('firstSessionId returns null when all sessions are destroying', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
+    const s = new EventEmitter()
+    s.isRunning = false
+    s.destroy = () => {}
+    mgr._sessions.set('s1', { session: s, name: 'S1', cwd: '/tmp', createdAt: 1, _destroying: true })
+    assert.equal(mgr.firstSessionId, null)
+  })
+
+  it('getFullHistoryAsync() returns [] for entries marked _destroying without reading JSONL', async () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    // Set a resumeSessionId so the JSONL path would normally be attempted
+    session.resumeSessionId = 'fake-conv-id'
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', createdAt: 1, _destroying: true })
+
+    const history = await mgr.getFullHistoryAsync('s1')
+    assert.deepEqual(history, [])
+  })
+})
+
+describe('SessionManager.maxMessages option (#2735)', () => {
+  it('accepts maxMessages and exposes it via getter', () => {
+    const mgr = new SessionManager({ maxSessions: 5, maxMessages: 250, stateFilePath: tmpStateFile() })
+    assert.equal(mgr.maxMessages, 250)
+  })
+
+  it('falls back to maxHistory alias when maxMessages is not provided', () => {
+    const mgr = new SessionManager({ maxSessions: 5, maxHistory: 175, stateFilePath: tmpStateFile() })
+    assert.equal(mgr.maxMessages, 175)
+  })
+
+  it('maxMessages takes precedence over maxHistory when both are provided', () => {
+    const mgr = new SessionManager({ maxSessions: 5, maxMessages: 300, maxHistory: 100, stateFilePath: tmpStateFile() })
+    assert.equal(mgr.maxMessages, 300)
+  })
+})

@@ -60,10 +60,12 @@ const _workspaceRootCache = new Map()
  * @returns {Promise<string>} The resolved real path of repoPath
  */
 export async function validateGitPath(repoPath, workspaceRoot) {
-  let resolvedRoot = _workspaceRootCache.get(workspaceRoot)
+  // Normalize cache key so relative paths and trailing-slash variants don't create duplicates
+  const cacheKey = resolve(workspaceRoot)
+  let resolvedRoot = _workspaceRootCache.get(cacheKey)
   if (!resolvedRoot) {
     resolvedRoot = await realpath(workspaceRoot)
-    _workspaceRootCache.set(workspaceRoot, resolvedRoot)
+    _workspaceRootCache.set(cacheKey, resolvedRoot)
   }
   let resolvedRepo
   try {
