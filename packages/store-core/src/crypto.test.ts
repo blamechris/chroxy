@@ -261,6 +261,51 @@ describe('nonceFromCounter overflow guard', () => {
   })
 })
 
+describe('replay protection', () => {
+  it('rejects a frame with a lower nonce (past replay)', () => {
+    const key = makeSharedKey()
+    const envelope = encrypt(JSON.stringify({ data: 'secret' }), key, 5, DIRECTION_SERVER)
+
+    // Counter has advanced past 5 — replaying it with expectedNonce=4 must fail
+    expect(() => decrypt(envelope, key, 4, DIRECTION_SERVER)).toThrow('Unexpected nonce')
+  })
+
+  it('rejects a frame with a higher nonce (future replay / skip)', () => {
+    const key = makeSharedKey()
+    const envelope = encrypt(JSON.stringify({ data: 'secret' }), key, 7, DIRECTION_SERVER)
+
+    // Receiver still expects counter 5 — frame from counter 7 must be rejected
+    expect(() => decrypt(envelope, key, 5, DIRECTION_SERVER)).toThrow('Unexpected nonce')
+  })
+
+  it('caller advancing counter prevents replay of an earlier frame', () => {
+    const key = makeSharedKey()
+    let counter = 0
+
+    const env1 = encrypt(JSON.stringify({ seq: 1 }), key, counter, DIRECTION_SERVER)
+    decrypt(env1, key, counter, DIRECTION_SERVER)
+    counter++ // caller MUST advance counter after each successful decrypt
+
+    const env2 = encrypt(JSON.stringify({ seq: 2 }), key, counter, DIRECTION_SERVER)
+    decrypt(env2, key, counter, DIRECTION_SERVER)
+    counter++
+
+    // Replaying env1 now fails because counter has moved past 0
+    expect(() => decrypt(env1, key, counter, DIRECTION_SERVER)).toThrow('Unexpected nonce')
+  })
+
+  it('direction byte prevents cross-direction replay', () => {
+    const key = makeSharedKey()
+    // Server encrypts at counter 0 with DIRECTION_SERVER
+    const serverEnv = encrypt(JSON.stringify({ cmd: 'do-thing' }), key, 0, DIRECTION_SERVER)
+
+    // Replaying as a client-direction frame with DIRECTION_CLIENT must fail (wrong key stream)
+    expect(() => decrypt(serverEnv, key, 0, DIRECTION_CLIENT)).toThrow(
+      'Decryption failed: message tampered or wrong key'
+    )
+  })
+})
+
 describe('encrypt overflow guard', () => {
   it('throws when nonce counter exceeds 2^48', () => {
     const kp = createKeyPair()
