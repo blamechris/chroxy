@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { writeFileSync, mkdtempSync, rmSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { validateConfig, mergeConfig, readReposFromConfig, writeReposToConfig } from '../src/config.js'
+import { validateConfig, mergeConfig, readReposFromConfig, writeReposToConfig, sanitizeConfig } from '../src/config.js'
 
 describe('validateConfig', () => {
   it('accepts valid config with all known keys', () => {
@@ -438,5 +438,59 @@ describe('writeReposToConfig', () => {
     writeReposToConfig([{ path: '/tmp' }], configPath)
     const result = JSON.parse(readFileSync(configPath, 'utf-8'))
     assert.deepEqual(result.repos, [{ path: '/tmp' }])
+  })
+})
+
+describe('sanitizeConfig', () => {
+  it('masks apiToken with ***', () => {
+    const config = { apiToken: 'secret-token-123', port: 8765 }
+    const safe = sanitizeConfig(config)
+    assert.equal(safe.apiToken, '***')
+    assert.equal(safe.port, 8765)
+  })
+
+  it('masks pushToken with ***', () => {
+    const config = { pushToken: 'push-secret-abc', port: 8765 }
+    const safe = sanitizeConfig(config)
+    assert.equal(safe.pushToken, '***')
+    assert.equal(safe.port, 8765)
+  })
+
+  it('masks both apiToken and pushToken when both present', () => {
+    const config = { apiToken: 'api-secret', pushToken: 'push-secret', model: 'sonnet' }
+    const safe = sanitizeConfig(config)
+    assert.equal(safe.apiToken, '***')
+    assert.equal(safe.pushToken, '***')
+    assert.equal(safe.model, 'sonnet')
+  })
+
+  it('does not modify the original config object', () => {
+    const config = { apiToken: 'secret-token-123', pushToken: 'push-secret' }
+    sanitizeConfig(config)
+    assert.equal(config.apiToken, 'secret-token-123')
+    assert.equal(config.pushToken, 'push-secret')
+  })
+
+  it('leaves non-sensitive fields unchanged', () => {
+    const config = { port: 8765, model: 'claude-3', noAuth: false, cwd: '/tmp' }
+    const safe = sanitizeConfig(config)
+    assert.deepEqual(safe, config)
+  })
+
+  it('handles config with no sensitive fields', () => {
+    const config = { port: 9000, model: 'sonnet' }
+    const safe = sanitizeConfig(config)
+    assert.deepEqual(safe, config)
+  })
+
+  it('skips masking when apiToken is falsy', () => {
+    const config = { apiToken: '', port: 8765 }
+    const safe = sanitizeConfig(config)
+    assert.equal(safe.apiToken, '')
+  })
+
+  it('handles empty config object', () => {
+    const safe = sanitizeConfig({})
+    assert.deepEqual(safe, {})
   })
 })

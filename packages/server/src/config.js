@@ -52,9 +52,24 @@ const CONFIG_SCHEMA = {
 }
 
 /**
- * Config keys that should be masked in verbose output.
+ * Config keys that should be masked in verbose output and sanitized logs.
  */
-const SENSITIVE_KEYS = ['apiToken']
+const SENSITIVE_KEYS = ['apiToken', 'pushToken']
+
+/**
+ * Return a copy of config with sensitive fields replaced by '***'.
+ * Use this whenever the config object is serialized to logs or debug output.
+ *
+ * @param {object} config - Config object to sanitize
+ * @returns {object} Shallow copy with sensitive fields masked
+ */
+export function sanitizeConfig(config) {
+  const safe = { ...config }
+  for (const key of SENSITIVE_KEYS) {
+    if (safe[key]) safe[key] = '***'
+  }
+  return safe
+}
 
 /**
  * Validate config object against schema.
