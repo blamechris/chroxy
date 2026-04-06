@@ -70,7 +70,33 @@
  *   - Emit events: ready, stream_start, stream_delta, stream_end, message,
  *     tool_start, result, error, user_question, agent_spawned, agent_completed
  *   - Implement `static get capabilities()` returning ProviderCapabilities
+ *
+ * @typedef {Object} ProviderSession
+ * @property {function(string, any=, Object=): void} sendMessage - Send a message to the AI
+ * @property {function(): void} interrupt - Interrupt the current operation
+ * @property {function(string): void} setModel - Set the AI model
+ * @property {function(string): void} setPermissionMode - Set permission mode
+ * @property {function(): void} start - Start the session process
+ * @property {function(): void} destroy - Clean up and destroy the session
  */
+
+/** Required methods every provider class prototype must expose. */
+const REQUIRED_METHODS = ['sendMessage', 'interrupt', 'setModel', 'setPermissionMode', 'start', 'destroy']
+
+/**
+ * Validates that a provider class implements the ProviderSession interface.
+ * Checks the class prototype so no instance is created during registration.
+ * @param {Function} ProviderClass - Session class to validate
+ * @param {string} name - Provider name for error messages
+ * @throws {Error} If any required method is missing from the prototype
+ */
+export function validateProviderClass(ProviderClass, name) {
+  for (const method of REQUIRED_METHODS) {
+    if (typeof ProviderClass.prototype[method] !== 'function') {
+      throw new Error(`Provider '${name}' missing required method: ${method}`)
+    }
+  }
+}
 
 const providers = new Map()
 const aliases = new Set()
@@ -88,6 +114,7 @@ export function registerProvider(name, ProviderClass, opts) {
   if (typeof ProviderClass !== 'function') {
     throw new Error(`Provider "${name}" must be a class/constructor`)
   }
+  validateProviderClass(ProviderClass, name)
   providers.set(name, ProviderClass)
   if (opts?.alias) aliases.add(name)
 }
