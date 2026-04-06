@@ -88,7 +88,7 @@ describe('connect() health check', () => {
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
     await flushPromises();
 
-    expect(useConnectionLifecycleStore.getState().connectionError).toBe('Server not responding');
+    expect(useConnectionLifecycleStore.getState().connectionError).toBe('Server not responding — check your network');
   });
 
   it('sets connectionError on HTTP 500', async () => {
@@ -97,7 +97,7 @@ describe('connect() health check', () => {
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
     await flushPromises();
 
-    expect(useConnectionLifecycleStore.getState().connectionError).toBe('HTTP 500');
+    expect(useConnectionLifecycleStore.getState().connectionError).toBe('Server error — the server may be restarting');
   });
 
   it('sets connectionError on network error', async () => {
@@ -106,7 +106,7 @@ describe('connect() health check', () => {
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
     await flushPromises();
 
-    expect(useConnectionLifecycleStore.getState().connectionError).toBe('Network error');
+    expect(useConnectionLifecycleStore.getState().connectionError).toBe('Could not reach server — check your network');
   });
 
   it('transitions to server_restarting on restart response', async () => {
