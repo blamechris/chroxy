@@ -100,6 +100,7 @@ export function ConnectScreen() {
   const connect = useConnectionStore((state) => state.connect);
   const connectionPhase = useConnectionLifecycleStore((state) => state.connectionPhase);
   const connectionError = useConnectionLifecycleStore((state) => state.connectionError);
+  const connectionErrorSuggestion = useConnectionLifecycleStore((state) => state.connectionErrorSuggestion);
   const connectionRetryCount = useConnectionLifecycleStore((state) => state.connectionRetryCount);
   const savedConnection = useConnectionLifecycleStore((state) => state.savedConnection);
   const loadSavedConnection = useConnectionStore((state) => state.loadSavedConnection);
@@ -349,6 +350,9 @@ export function ConnectScreen() {
       {connectionError && connectionPhase === 'disconnected' && (
         <View style={styles.errorBanner}>
           <Text style={styles.errorBannerText}>{connectionError}</Text>
+          {connectionErrorSuggestion ? (
+            <Text style={styles.errorBannerSuggestion}>{connectionErrorSuggestion}</Text>
+          ) : null}
         </View>
       )}
 
@@ -555,6 +559,12 @@ const styles = StyleSheet.create({
     color: COLORS.accentRed,
     fontSize: 14,
     fontWeight: '600',
+  },
+  errorBannerSuggestion: {
+    color: COLORS.accentRed,
+    fontSize: 13,
+    marginTop: 4,
+    opacity: 0.8,
   },
   // Saved connection / reconnect
   savedSection: {

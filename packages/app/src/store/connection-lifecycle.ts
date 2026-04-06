@@ -61,6 +61,7 @@ interface ConnectionLifecycleState {
   latencyMs: number | null;
   connectionQuality: 'good' | 'fair' | 'poor' | null;
   connectionError: string | null;
+  connectionErrorSuggestion: string | null;
   connectionRetryCount: number;
 
   // Saved connection for quick reconnect
@@ -73,7 +74,7 @@ interface ConnectionLifecycleState {
   setConnectionDetails: (url: string, token: string) => void;
   setServerInfo: (info: ServerInfo) => void;
   setConnectionQuality: (latencyMs: number | null, quality: 'good' | 'fair' | 'poor' | null) => void;
-  setConnectionError: (error: string | null, retryCount: number) => void;
+  setConnectionError: (error: string | null, retryCount: number, suggestion?: string | null) => void;
   setSavedConnection: (connection: SavedConnection | null) => void;
   setUserDisconnected: (disconnected: boolean) => void;
   reset: () => void;
@@ -93,6 +94,7 @@ const initialState = {
   latencyMs: null as number | null,
   connectionQuality: null as 'good' | 'fair' | 'poor' | null,
   connectionError: null as string | null,
+  connectionErrorSuggestion: null as string | null,
   connectionRetryCount: 0,
   savedConnection: null as SavedConnection | null,
   userDisconnected: false,
@@ -121,7 +123,11 @@ export const useConnectionLifecycleStore = create<ConnectionLifecycleState>((set
 
   setConnectionQuality: (latencyMs, quality) => set({ latencyMs, connectionQuality: quality }),
 
-  setConnectionError: (error, retryCount) => set({ connectionError: error, connectionRetryCount: retryCount }),
+  setConnectionError: (error, retryCount, suggestion) => set({
+    connectionError: error,
+    connectionErrorSuggestion: suggestion !== undefined ? suggestion : null,
+    connectionRetryCount: retryCount,
+  }),
 
   setSavedConnection: (connection) => set({ savedConnection: connection }),
 

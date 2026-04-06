@@ -267,6 +267,7 @@ export function SessionScreen() {
   const latencyMs = useConnectionLifecycleStore((s) => s.latencyMs);
   const connectionQuality = useConnectionLifecycleStore((s) => s.connectionQuality);
   const connectionError = useConnectionLifecycleStore((s) => s.connectionError);
+  const connectionErrorSuggestion = useConnectionLifecycleStore((s) => s.connectionErrorSuggestion);
   const connectionRetryCount = useConnectionLifecycleStore((s) => s.connectionRetryCount);
   const shutdownReason = useConnectionStore((s) => s.shutdownReason);
   const restartEtaMs = useConnectionStore((s) => s.restartEtaMs);
@@ -949,7 +950,7 @@ export function SessionScreen() {
             <Text style={styles.reconnectingDetail}>Recovering from crash</Text>
           )}
           {connectionPhase === 'reconnecting' && connectionError && (
-            <Text style={styles.reconnectingDetail}>{connectionError}</Text>
+            <Text style={styles.reconnectingDetail}>{connectionError}{connectionErrorSuggestion ? ` — ${connectionErrorSuggestion}` : ''}</Text>
           )}
         </View>
       )}

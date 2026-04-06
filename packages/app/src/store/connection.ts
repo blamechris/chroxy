@@ -80,6 +80,7 @@ import type {
   SessionState,
 } from './types';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
+import { getConnectionErrorMessage } from '../utils/connection-errors';
 import {
   setStore,
   wsSend,
@@ -459,10 +460,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               }, delay);
             } else {
               useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
-              useConnectionLifecycleStore.getState().setConnectionError('Server restart timed out', _retryCount);
+              useConnectionLifecycleStore.getState().setConnectionError('Server restart timed out', _retryCount, 'Try again later.');
               if (!silent) {
                 Alert.alert(
-                  'Connection Failed',
+                  'Server Restarting',
                   'The server is still restarting. Try again later.',
                   [
                     { text: 'OK' },
@@ -483,10 +484,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       .catch((err) => {
         if (myAttemptId !== connectionAttemptId) return;
         console.log(`[ws] Health check failed: ${err.message}`);
-        const reason = err.name === 'AbortError' ? 'Server not responding'
-          : err.message?.startsWith('HTTP ') ? err.message
-          : 'Network error';
-        useConnectionLifecycleStore.getState().setConnectionError(reason, _retryCount);
+        const rawReason = err.name === 'AbortError' ? 'timeout'
+          : err.message ?? '';
+        const errMsg = getConnectionErrorMessage(undefined, rawReason);
+        useConnectionLifecycleStore.getState().setConnectionError(errMsg.title, _retryCount, errMsg.suggestion);
         if (_retryCount < MAX_RETRIES) {
           const delay = withJitter(RETRY_DELAYS[_retryCount]);
           console.log(`[ws] Retrying in ${delay}ms...`);
@@ -495,12 +496,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
           }, delay);
         } else {
+          const finalMsg = getConnectionErrorMessage(undefined, rawReason);
           useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
-          useConnectionLifecycleStore.getState().setConnectionError('Could not reach server', _retryCount);
+          useConnectionLifecycleStore.getState().setConnectionError(finalMsg.title, _retryCount, finalMsg.suggestion);
           if (!silent) {
             Alert.alert(
-              'Connection Failed',
-              'Could not reach the Chroxy server. Make sure it\'s running.',
+              finalMsg.title,
+              finalMsg.suggestion,
               [
                 { text: 'OK' },
                 { text: 'Forget Server', style: 'destructive', onPress: () => { void get().clearSavedConnection(); } },
@@ -573,7 +575,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       handleMessage(msg, socketCtx);
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       stopHeartbeat();
 
       // Stale socket from a previous connection attempt — ignore
@@ -594,17 +596,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         return Object.keys(patch).length > 0 ? patch : {};
       });
 
+      // Map close code to user-readable message
+      const closeReason = event.reason || undefined;
+      const errMsg = getConnectionErrorMessage(event.code, closeReason);
+
+      // Auth failures (4001) and policy violations (1008) should not auto-reconnect
+      const isFatalClose = event.code === 4001 || event.code === 1008;
+
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
-      if (wasConnected && disconnectedAttemptId !== myAttemptId) {
+      if (wasConnected && disconnectedAttemptId !== myAttemptId && !isFatalClose) {
         console.log('[ws] Connection lost, auto-reconnecting...');
         useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
-        useConnectionLifecycleStore.getState().setConnectionError('Connection lost', 0);
+        useConnectionLifecycleStore.getState().setConnectionError(errMsg.title, 0, errMsg.suggestion);
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
         }, AUTO_RECONNECT_DELAY);
       } else {
         useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+        if (isFatalClose) {
+          useConnectionLifecycleStore.getState().setConnectionError(errMsg.title, 0, errMsg.suggestion);
+        }
       }
     };
 
@@ -617,8 +629,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Auto-reconnect on unexpected WS error
       if (disconnectedAttemptId !== myAttemptId) {
         console.log('[ws] WebSocket error, reconnecting...');
+        const errMsg = getConnectionErrorMessage(1006);
         useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
-        useConnectionLifecycleStore.getState().setConnectionError('Connection error', 0);
+        useConnectionLifecycleStore.getState().setConnectionError(errMsg.title, 0, errMsg.suggestion);
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
