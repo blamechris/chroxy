@@ -10,13 +10,24 @@ describe('SessionMessageHistory', () => {
   })
 
   describe('constructor', () => {
-    it('defaults maxHistory to 500', () => {
+    it('defaults maxMessages to 1000', () => {
       const h = new SessionMessageHistory()
-      assert.equal(h.maxHistory, 500)
+      assert.equal(h.maxMessages, 1000)
+      assert.equal(h.maxHistory, 1000)
     })
 
-    it('accepts custom maxHistory', () => {
+    it('accepts custom maxMessages option', () => {
+      const h = new SessionMessageHistory({ maxMessages: 50 })
+      assert.equal(h.maxMessages, 50)
+    })
+
+    it('accepts custom maxHistory option (legacy alias)', () => {
       assert.equal(history.maxHistory, 10)
+    })
+
+    it('maxMessages takes precedence over maxHistory when both provided', () => {
+      const h = new SessionMessageHistory({ maxMessages: 200, maxHistory: 100 })
+      assert.equal(h.maxMessages, 200)
     })
   })
 
@@ -66,6 +77,35 @@ describe('SessionMessageHistory', () => {
 
     it('returns false for unknown session truncation', () => {
       assert.equal(history.isHistoryTruncated('nonexistent'), false)
+    })
+
+    it('evicts oldest message when maxMessages is exceeded', () => {
+      const h = new SessionMessageHistory({ maxMessages: 3 })
+      h.recordHistory('s1', 'message', { type: 'user_input', content: 'a', timestamp: 1 })
+      h.recordHistory('s1', 'message', { type: 'user_input', content: 'b', timestamp: 2 })
+      h.recordHistory('s1', 'message', { type: 'user_input', content: 'c', timestamp: 3 })
+      h.recordHistory('s1', 'message', { type: 'user_input', content: 'd', timestamp: 4 }) // evicts 'a'
+
+      const msgs = h.getHistory('s1')
+      assert.equal(msgs.length, 3)
+      assert.equal(msgs[0].content, 'b') // oldest remaining
+      assert.equal(msgs[2].content, 'd')
+    })
+
+    it('uses default maxMessages of 1000', () => {
+      const h = new SessionMessageHistory()
+      for (let i = 0; i < 1001; i++) {
+        h.recordHistory('s1', 'message', { type: 'user_input', content: `msg-${i}`, timestamp: i })
+      }
+      assert.equal(h.getHistoryCount('s1'), 1000)
+      assert.equal(h.getHistory('s1')[0].content, 'msg-1') // msg-0 evicted
+    })
+
+    it('does not evict when below the limit', () => {
+      const h = new SessionMessageHistory({ maxMessages: 100 })
+      h.recordHistory('s1', 'message', { type: 'user_input', content: 'first', timestamp: 1 })
+      h.recordHistory('s1', 'message', { type: 'user_input', content: 'second', timestamp: 2 })
+      assert.equal(h.getHistoryCount('s1'), 2)
     })
   })
 

@@ -16,12 +16,13 @@ const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
 export class SessionMessageHistory extends EventEmitter {
   /**
    * @param {object} [opts]
-   * @param {number} [opts.maxHistory=500]   - Max history entries per session
+   * @param {number} [opts.maxMessages=1000] - Max messages per session (FIFO eviction when exceeded)
+   * @param {number} [opts.maxHistory]       - Alias for maxMessages (legacy option name)
    * @param {number} [opts.maxToolInput]     - Max characters for tool input (unused here, reserved)
    */
-  constructor({ maxHistory = 500, maxToolInput } = {}) {
+  constructor({ maxMessages, maxHistory, maxToolInput } = {}) {
     super()
-    this._maxHistory = maxHistory
+    this._maxHistory = maxMessages ?? maxHistory ?? 1000
     this._maxToolInput = maxToolInput || null
     this._messageHistory = new Map()    // sessionId -> Array<{ type, ...data }>
     this._pendingStreams = new Map()     // sessionId:messageId -> accumulated delta text
@@ -29,7 +30,15 @@ export class SessionMessageHistory extends EventEmitter {
   }
 
   /**
-   * Get the max history size.
+   * Get the max message count (FIFO cap).
+   * @returns {number}
+   */
+  get maxMessages() {
+    return this._maxHistory
+  }
+
+  /**
+   * Get the max history size (alias for maxMessages).
    * @returns {number}
    */
   get maxHistory() {
