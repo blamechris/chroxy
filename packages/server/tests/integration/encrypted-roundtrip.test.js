@@ -161,22 +161,27 @@ describe('integration: encrypted WebSocket roundtrip', () => {
     const envelope = encrypt(plainMsg, sharedKey, 0, DIRECTION_CLIENT)
     send(ws, envelope)
 
-    // Wait for a new encrypted envelope to arrive after our request
-    const encryptedReply = await waitFor(
-      () => messages.filter(m => m.type === 'encrypted').length > preCount
-        ? messages.filter(m => m.type === 'encrypted').slice(preCount)[0]
-        : null,
+    // Wait for an encrypted envelope containing a 'pong' to arrive after our request.
+    // The server may send other encrypted messages (e.g. server_mode) before the pong,
+    // so we decrypt each new envelope and check for the pong specifically.
+    const pongReply = await waitFor(
+      () => {
+        const newMsgs = messages.filter(m => m.type === 'encrypted').slice(preCount)
+        for (const msg of newMsgs) {
+          try {
+            const decrypted = decrypt(msg, sharedKey, msg.n, DIRECTION_SERVER)
+            if (decrypted && decrypted.type === 'pong') return { msg, decrypted }
+          } catch { /* skip non-decryptable or non-pong messages */ }
+        }
+        return null
+      },
       { timeoutMs: 3000, label: 'encrypted pong reply' }
     )
 
-    assert.equal(encryptedReply.type, 'encrypted', 'reply must be an encrypted envelope')
-    assert.ok(typeof encryptedReply.d === 'string', 'encrypted reply must have ciphertext field d')
-    assert.ok(typeof encryptedReply.n === 'number', 'encrypted reply must have nonce counter n')
-
-    // Decrypt using DIRECTION_SERVER (server encrypts with server direction)
-    const decrypted = decrypt(encryptedReply, sharedKey, encryptedReply.n, DIRECTION_SERVER)
-    assert.ok(decrypted && typeof decrypted === 'object', 'decrypted payload must be an object')
-    assert.equal(decrypted.type, 'pong', `expected pong, got ${decrypted.type}`)
+    assert.equal(pongReply.msg.type, 'encrypted', 'reply must be an encrypted envelope')
+    assert.ok(typeof pongReply.msg.d === 'string', 'encrypted reply must have ciphertext field d')
+    assert.ok(typeof pongReply.msg.n === 'number', 'encrypted reply must have nonce counter n')
+    assert.equal(pongReply.decrypted.type, 'pong', `expected pong, got ${pongReply.decrypted.type}`)
 
     ws.close()
   })
