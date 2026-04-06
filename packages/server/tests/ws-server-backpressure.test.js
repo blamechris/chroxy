@@ -4,10 +4,12 @@ import { EventEmitter } from 'node:events'
 
 describe('WsServer backpressure handling (#1948)', () => {
   let WsServer
+  let WsBroadcaster
   let server
 
   before(async () => {
     ;({ WsServer } = await import('../src/ws-server.js'))
+    ;({ WsBroadcaster } = await import('../src/ws-broadcaster.js'))
   })
 
   afterEach(() => {
@@ -102,5 +104,66 @@ describe('WsServer backpressure handling (#1948)', () => {
 
     assert.equal(client._backpressureDrops, 8, 'should have 8 total drops')
     assert.equal(ws._closeMock.mock.callCount(), 0, 'should not close before reaching max drops')
+  })
+
+  it('preserves message order after backpressure drain', () => {
+    // Build a broadcaster directly so we can control bufferedAmount between sends
+    const received = []
+    const clients = new Map()
+
+    const broadcaster = new WsBroadcaster({
+      clients,
+      sendFn: (_ws, msg) => received.push(msg),
+      backpressureThreshold: 100,
+      backpressureMaxDrops: 50,
+    })
+
+    // ws whose bufferedAmount we can change between sends
+    const ws = { readyState: 1, bufferedAmount: 0, close: mock.fn() }
+    const client = { id: 'order-test', authenticated: true, _backpressureDrops: 0, subscribedSessionIds: new Set() }
+    clients.set(ws, client)
+
+    const TOTAL = 50
+
+    // Phase 1: send seq 0–19 with bufferedAmount below threshold → delivered
+    for (let i = 0; i < 20; i++) {
+      ws.bufferedAmount = 0
+      broadcaster._broadcast({ type: 'test', seq: i })
+    }
+
+    // Phase 2: simulate backpressure — seq 20–34 are dropped (bufferedAmount high)
+    for (let i = 20; i < 35; i++) {
+      ws.bufferedAmount = 200
+      broadcaster._broadcast({ type: 'test', seq: i })
+    }
+
+    // Phase 3: drain — bufferedAmount falls back below threshold; seq 35–49 delivered
+    for (let i = 35; i < TOTAL; i++) {
+      ws.bufferedAmount = 0
+      broadcaster._broadcast({ type: 'test', seq: i })
+    }
+
+    // Messages that arrived should be exactly those sent during phases 1 and 3
+    const expectedDelivered = [
+      ...Array.from({ length: 20 }, (_, i) => i),       // 0–19
+      ...Array.from({ length: 15 }, (_, i) => i + 35),  // 35–49
+    ]
+
+    assert.equal(received.length, expectedDelivered.length, 'all non-dropped messages must arrive')
+
+    // Verify ordering: each received message must carry the correct seq, in order
+    for (let i = 0; i < received.length; i++) {
+      assert.equal(
+        received[i].seq,
+        expectedDelivered[i],
+        `message at position ${i} must have seq=${expectedDelivered[i]}, got seq=${received[i].seq}`
+      )
+    }
+
+    // The dropped range (20–34) must not appear in received
+    const receivedSeqs = new Set(received.map((m) => m.seq))
+    for (let i = 20; i < 35; i++) {
+      assert.equal(receivedSeqs.has(i), false, `dropped seq=${i} must not appear in received messages`)
+    }
   })
 })
