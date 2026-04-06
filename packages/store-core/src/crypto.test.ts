@@ -484,6 +484,21 @@ describe('deriveConnectionKey', () => {
     expect(key1).not.toEqual(key2)
   })
 
+  it('throws on wrong-length sharedKey', () => {
+    const shortKey = new Uint8Array(16) // 16 bytes — wrong (expects 32)
+    const salt = generateConnectionSalt()
+    expect(() => deriveConnectionKey(shortKey, salt)).toThrow(
+      /Invalid shared key: expected 32-byte Uint8Array, got 16/
+    )
+  })
+
+  it('throws on non-Uint8Array sharedKey', () => {
+    const salt = generateConnectionSalt()
+    expect(() => deriveConnectionKey('not-a-key' as unknown as Uint8Array, salt)).toThrow(
+      /Invalid shared key: expected 32-byte Uint8Array, got string/
+    )
+  })
+
   it('throws on empty salt string', () => {
     const sharedKey = makeSharedKey()
     expect(() => deriveConnectionKey(sharedKey, '')).toThrow(

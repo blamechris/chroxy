@@ -175,6 +175,9 @@ export function generateConnectionSalt(): string {
  * @returns 32-byte derived key (first half of SHA-512 output)
  */
 export function deriveConnectionKey(sharedKey: Uint8Array, saltBase64: string): Uint8Array {
+  if (!(sharedKey instanceof Uint8Array) || sharedKey.length !== nacl.secretbox.keyLength) {
+    throw new Error(`Invalid shared key: expected ${nacl.secretbox.keyLength}-byte Uint8Array, got ${sharedKey instanceof Uint8Array ? sharedKey.length : typeof sharedKey}`)
+  }
   if (typeof saltBase64 !== 'string' || saltBase64.trim().length === 0) {
     throw new Error('Invalid connection salt: expected a non-empty base64 string')
   }
