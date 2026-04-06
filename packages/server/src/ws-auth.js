@@ -151,6 +151,7 @@ export function handlePairMessage(ctx, ws, msg) {
     ws.close()
     return true
   }
+  const pairData = pairParsed.data
 
   // Check rate limit
   const ip = client.socketIp
@@ -192,6 +193,8 @@ export function handlePairMessage(ctx, ws, msg) {
         platform: typeof msg.deviceInfo.platform === 'string' ? msg.deviceInfo.platform : 'unknown',
       }
     }
+
+    client.clientCapabilities = new Set(pairData.capabilities ?? [])
 
     // Attach sessionToken so onAuthSuccess can include it in the auth_ok payload
     // (client stores this for future reconnections)

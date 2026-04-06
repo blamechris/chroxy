@@ -45,6 +45,7 @@ export const PairSchema = z.object({
   pairingId: z.string().min(1).max(256),
   protocolVersion: z.number().int().min(0).optional(),
   deviceInfo: DeviceInfoSchema.optional(),
+  capabilities: z.array(z.string()).optional().catch([]).default([]),
 }).passthrough()
 
 export const InputSchema = z.object({

@@ -986,6 +986,30 @@ describe('clientCapabilities', () => {
     })
   })
 
+  describe('handlePairMessage capability storage', () => {
+    it('stores capabilities from pair message on client as a Set', () => {
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })) }
+      const { ctx, ws, client } = makePairCtx({ pairingManager })
+      handlePairMessage(ctx, ws, {
+        type: 'pair',
+        pairingId: 'pair-id-1',
+        capabilities: ['push_notifications', 'live_activity'],
+      })
+      assert.ok(client.clientCapabilities instanceof Set)
+      assert.ok(client.clientCapabilities.has('push_notifications'))
+      assert.ok(client.clientCapabilities.has('live_activity'))
+      assert.equal(client.clientCapabilities.size, 2)
+    })
+
+    it('defaults to empty Set when capabilities absent in pair message', () => {
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'st' })) }
+      const { ctx, ws, client } = makePairCtx({ pairingManager })
+      handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'pair-id-2' })
+      assert.ok(client.clientCapabilities instanceof Set)
+      assert.equal(client.clientCapabilities.size, 0)
+    })
+  })
+
   describe('clientHasCapability helper', () => {
     it('returns true for a declared capability', () => {
       const ws = { clientCapabilities: new Set(['console', 'voice_input']) }
