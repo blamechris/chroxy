@@ -45,6 +45,7 @@ export function addServerOptions(cmd) {
     .option('--tunnel-hostname <host>', 'Named tunnel hostname (e.g., chroxy.example.com)')
     .option('--legacy-cli', 'Use legacy CLI process mode instead of Agent SDK')
     .option('--provider <name>', 'Session provider to use (e.g. claude-sdk, claude-cli)')
+    .option('--max-messages <count>', 'Max messages retained per session (FIFO eviction, default: 1000)')
     .option('--max-payload <bytes>', 'WebSocket max message size in bytes (default: 1048576)')
     .option('--max-tool-input <bytes>', 'Maximum tool input size in bytes (default: 262144)')
     .option('--session-timeout <duration>', 'Idle session timeout (e.g. 2h, 30m). Disabled by default')
@@ -59,6 +60,10 @@ export function addServerOptions(cmd) {
  */
 export function parseExtraOverrides(options) {
   const extra = {}
+  if (options.maxMessages !== undefined) {
+    const parsed = parseInt(options.maxMessages, 10)
+    extra.maxMessages = Number.isNaN(parsed) ? options.maxMessages : parsed
+  }
   if (options.maxPayload !== undefined) {
     const parsed = parseInt(options.maxPayload, 10)
     extra.maxPayload = Number.isNaN(parsed) ? options.maxPayload : parsed

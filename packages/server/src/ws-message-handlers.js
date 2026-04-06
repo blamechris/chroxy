@@ -15,7 +15,7 @@ import { fileHandlers } from './handlers/file-handlers.js'
 import { conversationHandlers } from './handlers/conversation-handlers.js'
 import { checkpointHandlers } from './handlers/checkpoint-handlers.js'
 import { repoHandlers } from './handlers/repo-handlers.js'
-import { miscHandlers } from './handlers/misc-handlers.js'
+import { featureHandlers } from './handlers/feature-handlers.js'
 
 const log = createLogger('ws')
 
@@ -28,7 +28,7 @@ const handlerRegistry = new Map([
   ...Object.entries(conversationHandlers),
   ...Object.entries(checkpointHandlers),
   ...Object.entries(repoHandlers),
-  ...Object.entries(miscHandlers),
+  ...Object.entries(featureHandlers),
 ])
 
 /**
@@ -47,7 +47,7 @@ export const registeredMessageTypes = Object.freeze([
   ...Object.keys(conversationHandlers),
   ...Object.keys(checkpointHandlers),
   ...Object.keys(repoHandlers),
-  ...Object.keys(miscHandlers),
+  ...Object.keys(featureHandlers),
 ].sort())
 
 /**

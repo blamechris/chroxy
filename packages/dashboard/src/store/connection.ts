@@ -100,6 +100,7 @@ import {
   loadConnection,
   CLIENT_PROTOCOL_VERSION,
 } from './message-handler';
+import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 import {
   loadPersistedState,
@@ -548,7 +549,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           token,
           protocolVersion: CLIENT_PROTOCOL_VERSION,
           deviceInfo: { deviceId, ...info },
-          capabilities: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input'],
+          capabilities: CLIENT_CAPABILITIES.desktop,
         }));
       }
     };
