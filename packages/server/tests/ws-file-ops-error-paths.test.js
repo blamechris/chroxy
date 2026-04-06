@@ -114,4 +114,14 @@ describe('ws-file-ops error paths', () => {
     assert.equal(sent[0].error, 'File not found')
     assert.equal(sent[0].content, null)
   })
+
+  it('readFile returns Access denied for a nonexistent path outside the workspace root', async () => {
+    // A nonexistent outside-root path must not leak existence information —
+    // it should return Access denied, not File not found.
+    await ops.readFile(ws, '/etc/this-file-does-not-exist-xyzzy', tmp)
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].type, 'file_content')
+    assert.match(sent[0].error, /Access denied/)
+    assert.equal(sent[0].content, null)
+  })
 })

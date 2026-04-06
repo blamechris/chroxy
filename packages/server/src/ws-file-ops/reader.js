@@ -1,4 +1,5 @@
-import { readFile, writeFile as fsWriteFile, stat, mkdir, realpath } from 'fs/promises'
+import { readFile, writeFile as fsWriteFile, stat, mkdir, realpath, open } from 'fs/promises'
+import { constants as fsConstants } from 'fs'
 import { resolve, normalize, extname } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
@@ -69,6 +70,23 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         resolvedAbsPath = await realpath(absPath)
       } catch (err) {
         if (err.code === 'ENOENT') {
+          // Before surfacing "File not found", enforce workspace boundary.
+          // A nonexistent path outside the root must return Access denied to
+          // avoid leaking filesystem existence information as an oracle.
+          const cwdReal = await resolveSessionCwd(sessionCwd)
+          const lexicallyWithinCwd = absPath.startsWith(cwdReal + '/') || absPath === cwdReal
+          if (!lexicallyWithinCwd) {
+            sendFn(ws, {
+              type: 'file_content',
+              path: absPath,
+              content: null,
+              language: null,
+              size: null,
+              truncated: false,
+              error: 'Access denied: file reading is restricted to the project directory',
+            })
+            return
+          }
           sendFn(ws, {
             type: 'file_content',
             path: absPath,
@@ -124,7 +142,34 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         return
       }
 
-      const buf = await readFile(resolvedAbsPath)
+      // Open with O_NOFOLLOW to close the post-validation TOCTOU window:
+      // if the file at resolvedAbsPath was replaced with a symlink between
+      // validatePathWithinCwd() and this open(), the kernel rejects it (ELOOP).
+      let buf
+      {
+        let fh
+        try {
+          fh = await open(resolvedAbsPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+          buf = await fh.readFile()
+        } catch (openErr) {
+          if (openErr.code === 'ELOOP') {
+            // Symlink appeared at the canonical path after validation — reject
+            sendFn(ws, {
+              type: 'file_content',
+              path: absPath,
+              content: null,
+              language: null,
+              size: null,
+              truncated: false,
+              error: 'Access denied: file reading is restricted to the project directory',
+            })
+            return
+          }
+          throw openErr
+        } finally {
+          await fh?.close()
+        }
+      }
       const ext = extname(absPath).slice(1).toLowerCase()
 
       // Image files: send as base64 data URL for preview
