@@ -227,6 +227,7 @@ export declare const RequestFullHistorySchema: z.ZodObject<{
 export declare const KeyExchangeSchema: z.ZodObject<{
     type: z.ZodLiteral<"key_exchange">;
     publicKey: z.ZodString;
+    salt: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const PingSchema: z.ZodObject<{
     type: z.ZodLiteral<"ping">;

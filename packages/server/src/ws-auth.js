@@ -4,7 +4,7 @@
  * Extracted from ws-server.js _handleMessage to separate auth/encryption
  * concerns from message routing.
  */
-import { createKeyPair, deriveSharedKey } from '@chroxy/store-core/crypto'
+import { createKeyPair, deriveSharedKey, deriveConnectionKey } from '@chroxy/store-core/crypto'
 import { AuthSchema, KeyExchangeSchema, PairSchema } from './ws-schemas.js'
 import { createLogger } from './logger.js'
 
@@ -248,8 +248,14 @@ export function handleKeyExchange(ctx, ws, msg) {
       return true
     }
     const serverKp = createKeyPair()
-    const sharedKey = deriveSharedKey(msg.publicKey, serverKp.secretKey)
-    client.encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 }
+    const rawSharedKey = deriveSharedKey(msg.publicKey, serverKp.secretKey)
+    // If the client sent a salt, derive a per-connection sub-key so the nonce
+    // counter can safely restart at 0 on each reconnect.  Old clients that
+    // omit the salt fall back to the raw DH shared key (backward compat).
+    const encryptionKey = msg.salt
+      ? deriveConnectionKey(rawSharedKey, msg.salt)
+      : rawSharedKey
+    client.encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 }
     client.encryptionPending = false
     try {
       ws.send(JSON.stringify({ type: 'key_exchange_ok', publicKey: serverKp.publicKey }))

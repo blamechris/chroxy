@@ -172,6 +172,7 @@ export const RequestFullHistorySchema = z.object({
 export const KeyExchangeSchema = z.object({
     type: z.literal('key_exchange'),
     publicKey: z.string().max(512),
+    salt: z.string().max(512).optional(), // base64-encoded 32-byte connection salt for per-connection key derivation
 });
 export const PingSchema = z.object({
     type: z.literal('ping'),

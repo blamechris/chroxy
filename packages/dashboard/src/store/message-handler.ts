@@ -33,6 +33,8 @@ import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import {
   createKeyPair,
   deriveSharedKey,
+  deriveConnectionKey,
+  generateConnectionSalt,
   DIRECTION_CLIENT,
   type EncryptionState,
   type KeyPair,
@@ -96,6 +98,7 @@ function getStore(): StoreApi {
 // ---------------------------------------------------------------------------
 let _encryptionState: EncryptionState | null = null;
 let _pendingKeyPair: KeyPair | null = null;
+let _pendingSalt: string | null = null;
 
 /**
  * Send a JSON message over WebSocket, encrypting if E2E encryption is active.
@@ -1269,8 +1272,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Initiate key exchange if server requires encryption
       if (msg.encryption === 'required') {
         _pendingKeyPair = createKeyPair();
+        _pendingSalt = generateConnectionSalt();
         // Send key_exchange plaintext (before encryption is active)
-        ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _pendingKeyPair.publicKey }));
+        ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _pendingKeyPair.publicKey, salt: _pendingSalt }));
         // Post-auth messages will be sent after key_exchange_ok arrives
       } else {
         // No encryption — send post-auth messages immediately
@@ -1291,11 +1295,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           ctx.socket.close();
           set({ connectionPhase: 'disconnected', socket: null });
           _pendingKeyPair = null;
+          _pendingSalt = null;
           break;
         }
-        const sharedKey = deriveSharedKey(msg.publicKey, _pendingKeyPair.secretKey);
-        _encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 };
+        const rawSharedKey = deriveSharedKey(msg.publicKey, _pendingKeyPair.secretKey);
+        const encryptionKey = _pendingSalt
+          ? deriveConnectionKey(rawSharedKey, _pendingSalt)
+          : rawSharedKey;
+        _encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 };
         _pendingKeyPair = null;
+        _pendingSalt = null;
         console.log('[crypto] E2E encryption established');
         // Now send the post-auth messages that were deferred
         wsSend(ctx.socket, { type: 'list_providers' });
