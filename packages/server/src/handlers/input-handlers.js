@@ -114,10 +114,13 @@ function handleRegisterPushToken(ws, client, msg, ctx) {
 function handleUserQuestionResponse(ws, client, msg, ctx) {
   const questionSessionId = (msg.toolUseId && ctx.questionSessionMap.get(msg.toolUseId))
     || client.activeSessionId
-  if (msg.toolUseId) ctx.questionSessionMap.delete(msg.toolUseId)
 
-  // Enforce session binding
+  // Enforce session binding before consuming the mapping — if the client
+  // is bound to a different session, leave the mapping intact so the
+  // correct client can still respond.
   if (client.boundSessionId && client.boundSessionId !== questionSessionId) return
+
+  if (msg.toolUseId) ctx.questionSessionMap.delete(msg.toolUseId)
 
   const entry = ctx.sessionManager.getSession(questionSessionId)
   if (entry && typeof entry.session.respondToQuestion === 'function' && typeof msg.answer === 'string') {
