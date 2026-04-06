@@ -2254,9 +2254,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'error': {
       // Structured error response from a handler catch block.
-      // Log it and surface a non-blocking alert so the user knows something failed.
+      // Log it and surface a modal alert so the user knows something failed.
       const errCode = typeof msg.code === 'string' ? msg.code : 'UNKNOWN';
-      const errMsg = typeof msg.message === 'string' ? (msg.message as string) : 'An unexpected server error occurred';
+      const errMsg = typeof msg.message === 'string'
+        ? (stripAnsi(msg.message as string).trim() || 'An unexpected server error occurred')
+        : 'An unexpected server error occurred';
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
       Alert.alert('Server Error', errMsg);
       break;
