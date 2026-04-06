@@ -28,6 +28,7 @@ const SYNTHETIC_TYPES = new Set([
   'search_results',        // legacy alias for search response
   'budget_resumed',        // budget resume ack (server-internal)
   'thinking_level_changed', // thinking level change ack (server-internal)
+  'permission_timeout',     // app-side handler for future permission timeout event (not yet in protocol)
 ])
 
 // ---------------------------------------------------------------------------
