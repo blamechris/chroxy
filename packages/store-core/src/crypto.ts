@@ -3,6 +3,7 @@ import { encodeBase64, decodeBase64 } from 'tweetnacl-util'
 
 const NONCE_LENGTH = 24
 const MAX_NONCE_COUNTER = 2 ** 48
+const CONNECTION_SALT_BYTES = 32
 
 /** Direction byte for nonce construction — prevents nonce reuse across send directions */
 export const DIRECTION_SERVER = 0x00
@@ -147,4 +148,53 @@ export function decrypt(envelope: EncryptedEnvelope, sharedKey: Uint8Array, expe
     throw new Error('Decryption failed: message tampered or wrong key')
   }
   return JSON.parse(new TextDecoder().decode(plaintext))
+}
+
+/**
+ * Generate a fresh 32-byte random salt for a new connection.
+ * The salt must be exchanged during the handshake so both sides can derive
+ * the same per-connection sub-key via deriveConnectionKey().
+ *
+ * @returns base64-encoded 32 random bytes
+ */
+export function generateConnectionSalt(): string {
+  return encodeBase64(nacl.randomBytes(CONNECTION_SALT_BYTES))
+}
+
+/**
+ * Derive a per-connection sub-key from the long-lived DH shared key and a
+ * fresh random salt.  Uses SHA-512(sharedKey ∥ saltBytes) and takes the
+ * first 32 bytes as the XSalsa20-Poly1305 key.
+ *
+ * Because each connection uses a unique salt, the nonce counter can safely
+ * start at 0 for every connection without risking nonce reuse under the
+ * same key.
+ *
+ * @param sharedKey  - 32-byte DH shared key from deriveSharedKey()
+ * @param saltBase64 - base64-encoded 32-byte salt from generateConnectionSalt()
+ * @returns 32-byte derived key (first half of SHA-512 output)
+ */
+export function deriveConnectionKey(sharedKey: Uint8Array, saltBase64: string): Uint8Array {
+  if (!(sharedKey instanceof Uint8Array) || sharedKey.length !== nacl.secretbox.keyLength) {
+    throw new Error(`Invalid shared key: expected ${nacl.secretbox.keyLength}-byte Uint8Array, got ${sharedKey instanceof Uint8Array ? sharedKey.length : typeof sharedKey}`)
+  }
+  if (typeof saltBase64 !== 'string' || saltBase64.trim().length === 0) {
+    throw new Error('Invalid connection salt: expected a non-empty base64 string')
+  }
+  let saltBytes: Uint8Array
+  try {
+    saltBytes = decodeBase64(saltBase64)
+  } catch {
+    throw new Error('Invalid connection salt: not valid base64')
+  }
+  if (saltBytes.length !== CONNECTION_SALT_BYTES) {
+    throw new Error(`Invalid connection salt: expected ${CONNECTION_SALT_BYTES} bytes, got ${saltBytes.length}`)
+  }
+  // Concatenate sharedKey ∥ saltBytes and hash with SHA-512.
+  const input = new Uint8Array(sharedKey.length + saltBytes.length)
+  input.set(sharedKey, 0)
+  input.set(saltBytes, sharedKey.length)
+  const hash = nacl.hash(input)
+  // Return the first 32 bytes as the sub-key.
+  return hash.slice(0, nacl.secretbox.keyLength)
 }

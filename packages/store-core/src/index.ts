@@ -97,6 +97,8 @@ export {
   nonceFromCounter,
   encrypt,
   decrypt,
+  generateConnectionSalt,
+  deriveConnectionKey,
 } from './crypto'
 
 export {
