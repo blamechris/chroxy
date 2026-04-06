@@ -17,7 +17,6 @@ import Constants from 'expo-constants';
 import * as Clipboard from 'expo-clipboard';
 import { useConnectionStore } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
-import { useNotificationStore } from '../store/notifications';
 import { COLORS } from '../constants/colors';
 import type { PermissionRule } from '../store/types';
 import type { RootStackParamList } from '../App';
@@ -108,10 +107,12 @@ export function SettingsScreen() {
     return s.sessionStates[id].sessionRules ?? EMPTY_RULES;
   });
 
-  const sessionNotifications = useNotificationStore((s) => s.sessionNotifications);
-  const serverErrors = useNotificationStore((s) => s.serverErrors);
-  const dismissSessionNotification = useNotificationStore((s) => s.dismissSessionNotification);
-  const dismissServerError = useNotificationStore((s) => s.dismissServerError);
+  // Use the connection store as source of truth — same store SessionScreen and
+  // SessionNotificationBanner read from, so counts and dismissals stay in sync.
+  const sessionNotifications = useConnectionStore((s) => s.sessionNotifications);
+  const serverErrors = useConnectionStore((s) => s.serverErrors);
+  const dismissSessionNotification = useConnectionStore((s) => s.dismissSessionNotification);
+  const dismissServerError = useConnectionStore((s) => s.dismissServerError);
   const totalActiveNotifications = sessionNotifications.length + serverErrors.length;
 
   const serverVersion = useConnectionLifecycleStore((s) => s.serverVersion);

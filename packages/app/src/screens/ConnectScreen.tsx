@@ -162,6 +162,13 @@ export function ConnectScreen() {
         );
         return;
       }
+      // invalid_url: malformed chroxy:// string — show an error rather than
+      // falling through to produce a malformed wss://chroxy://... URL
+      Alert.alert(
+        'Invalid URL',
+        `Could not parse this Chroxy URL. Expected format:\n\nchroxy://HOSTNAME?token=YOUR_TOKEN`,
+      );
+      return;
     }
 
     let wsUrl = rawUrl;
