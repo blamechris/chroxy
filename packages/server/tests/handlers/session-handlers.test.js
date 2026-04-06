@@ -1,7 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { sessionHandlers } from '../../src/handlers/session-handlers.js'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, waitFor } from '../test-helpers.js'
 
 function makeSent() {
   const sent = []
@@ -231,10 +231,11 @@ describe('session-handlers', () => {
     it('sends session_error when name is missing', async () => {
       const ctx = makeCtx()
       sessionHandlers.rename_session(makeWs(), makeClient(), { sessionId: 'x', name: '' }, ctx)
-      // wait for async promise
-      await new Promise(r => setTimeout(r, 10))
-      const [, sent] = ctx.send.lastCall
-      assert.equal(sent.type, 'session_error')
+      // Poll for the session_error response rather than a fixed sleep.
+      const sent = await waitFor(
+        () => ctx._sent.find(m => m.type === 'session_error'),
+        { label: 'rename_session error' }
+      )
       assert.match(sent.message, /required/)
     })
 
@@ -242,9 +243,10 @@ describe('session-handlers', () => {
       const ctx = makeCtx()
       ctx.sessionManager.renameSession = createSpy(async () => true)
       sessionHandlers.rename_session(makeWs(), makeClient(), { sessionId: 'x', name: 'NewName' }, ctx)
-      await new Promise(r => setTimeout(r, 20))
-
-      const listBroadcast = ctx._broadcasts.find(m => m.type === 'session_list')
+      const listBroadcast = await waitFor(
+        () => ctx._broadcasts.find(m => m.type === 'session_list'),
+        { label: 'session_list broadcast after rename' }
+      )
       assert.ok(listBroadcast, 'session_list not broadcast after rename')
     })
   })

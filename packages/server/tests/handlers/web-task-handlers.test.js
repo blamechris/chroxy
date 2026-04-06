@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { featureHandlers as webTaskHandlers } from '../../src/handlers/feature-handlers.js'
-import { createSpy } from '../test-helpers.js'
+import { createSpy, waitFor } from '../test-helpers.js'
 import { WebTaskUnavailableError } from '../../src/web-task-manager.js'
 
 function makeCtx(overrides = {}) {
@@ -85,7 +85,7 @@ describe('web-task-handlers', () => {
       const ctx = makeCtx()
 
       webTaskHandlers.teleport_web_task(makeWs(), makeClient(), { taskId: 'task-1' }, ctx)
-      await new Promise(r => setTimeout(r, 10))
+      await waitFor(() => ctx._sent[0], { label: 'teleport_web_task success response' })
 
       assert.equal(ctx._sent[0].type, 'server_status')
     })
@@ -97,7 +97,7 @@ describe('web-task-handlers', () => {
       })
 
       webTaskHandlers.teleport_web_task(makeWs(), makeClient(), { taskId: 'task-x' }, ctx)
-      await new Promise(r => setTimeout(r, 10))
+      await waitFor(() => ctx._sent[0], { label: 'teleport_web_task failure response' })
 
       assert.equal(ctx._sent[0].type, 'web_task_error')
       assert.match(ctx._sent[0].message, /task not found/)

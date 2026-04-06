@@ -7,7 +7,7 @@ import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { WsServer as _WsServer } from '../../src/ws-server.js'
 import { setLogListener } from '../../src/logger.js'
-import { createMockSession, createMockSessionManager, waitFor } from '../test-helpers.js'
+import { createMockSession, createMockSessionManager, waitFor, waitForType } from '../test-helpers.js'
 import WebSocket from 'ws'
 
 // Wrapper that defaults noEncrypt: true for all tests
@@ -51,9 +51,8 @@ async function createClient(port, expectAuth = true) {
 
 function send(ws, msg) { ws.send(JSON.stringify(msg)) }
 
-async function waitForMessage(messages, type, timeout = 2000) {
-  return waitFor(() => messages.find(m => m.type === type), { timeoutMs: timeout, label: `message type: ${type}` })
-}
+// Local alias for backwards compat with existing call sites; delegates to shared waitForType.
+const waitForMessage = (messages, type, timeoutMs = 2000) => waitForType(messages, type, { timeoutMs })
 
 describe('integration: full WS roundtrip', () => {
   let server

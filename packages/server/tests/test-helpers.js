@@ -21,13 +21,33 @@ export { GIT } from '../src/git.js'
 export async function waitFor(predicate, { timeoutMs = 2000, intervalMs = 10, label = 'waitFor condition' } = {}) {
   const start = Date.now()
   while (true) {
-    const result = predicate()
+    const result = await predicate()
     if (result) return result
     if (Date.now() - start >= timeoutMs) {
       throw new Error(`Timeout after ${timeoutMs}ms: ${label}`)
     }
     await new Promise(r => setTimeout(r, intervalMs))
   }
+}
+
+/**
+ * Wait until a message of the given `type` appears in `messages`, then return it.
+ * Thin wrapper around waitFor for the common WS integration pattern.
+ *
+ * Usage:
+ *   const authOk = await waitForType(messages, 'auth_ok')
+ *
+ * @param {Array<{type: string}>} messages - Array of received messages (mutated by ws.on('message'))
+ * @param {string} type - Message type to wait for
+ * @param {{timeoutMs?: number, intervalMs?: number}} [options]
+ * @returns {Promise<object>} the matching message
+ */
+export async function waitForType(messages, type, { timeoutMs = 3000, intervalMs = 10 } = {}) {
+  return waitFor(() => messages.find(m => m.type === type), {
+    timeoutMs,
+    intervalMs,
+    label: `message type: ${type}`,
+  })
 }
 
 /**

@@ -1,4 +1,4 @@
-import { describe, it, mock } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { conversationHandlers } from '../../src/handlers/conversation-handlers.js'
 import { createSpy, createMockSession } from '../test-helpers.js'
@@ -11,6 +11,9 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     broadcastToSession: createSpy(),
     sendSessionInfo: createSpy(),
     replayHistory: createSpy(),
+    // Default test stubs — never touch real ~/.claude/projects
+    scanConversations: createSpy(async () => []),
+    searchConversations: createSpy(async () => []),
     sessionManager: {
       getSession: createSpy((id) => sessions.get(id)),
       createSession: createSpy(() => 'new-id'),
@@ -41,26 +44,58 @@ function makeWs() { return {} }
 
 describe('conversation-handlers', () => {
   describe('list_conversations', () => {
-    it('sends conversations_list on success', async () => {
-      // Mock the module-level scanConversations — use module mocking via import
-      // The handler imports scanConversations; we test via side-effects on ctx
+    it('sends conversations_list with the array returned by the injected scanner', async () => {
+      const fakeConvs = [
+        { id: 'conv-1', cwd: '/tmp/repo', timestamp: 1 },
+        { id: 'conv-2', cwd: '/tmp/repo', timestamp: 2 },
+      ]
       const ctx = makeCtx()
-      // Since we can't easily mock the imported scanConversations without a mock framework,
-      // we verify the handler calls ctx.send with either results or empty array on error.
-      // This test exercises the error path by expecting the handler to not throw.
+      ctx.scanConversations = createSpy(async () => fakeConvs)
+
       await conversationHandlers.list_conversations(makeWs(), makeClient(), {}, ctx)
+
       assert.equal(ctx._sent.length, 1)
       assert.equal(ctx._sent[0].type, 'conversations_list')
+      assert.deepEqual(ctx._sent[0].conversations, fakeConvs)
+      assert.equal(ctx.scanConversations.callCount, 1)
+    })
+
+    it('sends an empty conversations_list when the scanner throws', async () => {
+      const ctx = makeCtx()
+      ctx.scanConversations = createSpy(async () => { throw new Error('disk read error') })
+
+      await conversationHandlers.list_conversations(makeWs(), makeClient(), {}, ctx)
+
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'conversations_list')
+      assert.deepEqual(ctx._sent[0].conversations, [])
     })
   })
 
   describe('search_conversations', () => {
-    it('sends search_results on completion', async () => {
+    it('sends search_results with the array returned by the injected searcher', async () => {
+      const fakeResults = [{ id: 'conv-1', snippet: 'hello world', score: 0.9 }]
       const ctx = makeCtx()
+      ctx.searchConversations = createSpy(async () => fakeResults)
+
       await conversationHandlers.search_conversations(makeWs(), makeClient(), { query: 'hello', maxResults: 5 }, ctx)
+
       assert.equal(ctx._sent.length, 1)
       assert.equal(ctx._sent[0].type, 'search_results')
       assert.equal(ctx._sent[0].query, 'hello')
+      assert.deepEqual(ctx._sent[0].results, fakeResults)
+      assert.equal(ctx.searchConversations.callCount, 1)
+      assert.equal(ctx.searchConversations.lastCall[0], 'hello')
+    })
+
+    it('sends empty search_results when the searcher throws', async () => {
+      const ctx = makeCtx()
+      ctx.searchConversations = createSpy(async () => { throw new Error('index missing') })
+
+      await conversationHandlers.search_conversations(makeWs(), makeClient(), { query: 'hello' }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'search_results')
+      assert.deepEqual(ctx._sent[0].results, [])
     })
   })
 
