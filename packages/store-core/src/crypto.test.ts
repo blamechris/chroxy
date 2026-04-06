@@ -292,12 +292,14 @@ describe('decrypt overflow guard', () => {
 })
 
 describe('initPRNG', () => {
-  // Restore a non-deterministic PRNG after each test so that a mid-test assertion
-  // failure cannot leave the process running on a fixed-value PRNG for subsequent tests.
+  // Restore a cryptographically strong PRNG after each test so that a mid-test
+  // assertion failure cannot leave the process running on a fixed-value PRNG for
+  // subsequent tests. Uses globalThis.crypto.getRandomValues (available in Node 22+
+  // and all modern browser runtimes used by Expo/React Native).
   afterEach(() => {
     initPRNG((n: number): Uint8Array => {
       const buf = new Uint8Array(n)
-      for (let i = 0; i < n; i++) buf[i] = Math.floor(Math.random() * 256)
+      globalThis.crypto.getRandomValues(buf)
       return buf
     })
   })
