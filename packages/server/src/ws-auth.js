@@ -49,6 +49,7 @@ export function handleAuthMessage(ctx, ws, msg) {
     ws.close()
     return true
   }
+  const authData = authParsed.data
 
   // Check rate limit before processing auth
   const ip = client.socketIp
@@ -96,6 +97,8 @@ export function handleAuthMessage(ctx, ws, msg) {
         client.boundSessionId = boundSessionId
       }
     }
+
+    client.clientCapabilities = new Set(authData.capabilities ?? [])
 
     onAuthSuccess(ws, client)
     log.info(`Client ${client.id} authenticated`)

@@ -8,6 +8,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createSpy } from './test-helpers.js'
 import { handleAuthMessage, handlePairMessage, handleKeyExchange } from '../src/ws-auth.js'
+import { clientHasCapability } from '../src/handler-utils.js'
 import nacl from 'tweetnacl'
 import naclUtil from 'tweetnacl-util'
 
@@ -938,6 +939,73 @@ describe('handleKeyExchange', () => {
       handleKeyExchange(ctx, ws, { type: 'ping' })
       assert.equal(ws.closed, true)
       clearTimeout(client._keyExchangeTimeout)  // cleanup dangling timer
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// clientCapabilities — storage and helper
+// ---------------------------------------------------------------------------
+
+describe('clientCapabilities', () => {
+  describe('handleAuthMessage capability storage', () => {
+    it('stores capabilities from auth message on client as a Set', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+      })
+      handleAuthMessage(ctx, ws, {
+        type: 'auth',
+        token: 'good-token',
+        capabilities: ['console', 'voice_input'],
+      })
+      assert.ok(client.clientCapabilities instanceof Set)
+      assert.ok(client.clientCapabilities.has('console'))
+      assert.ok(client.clientCapabilities.has('voice_input'))
+      assert.equal(client.clientCapabilities.size, 2)
+    })
+
+    it('defaults to empty Set when capabilities field is absent', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token' })
+      assert.ok(client.clientCapabilities instanceof Set)
+      assert.equal(client.clientCapabilities.size, 0)
+    })
+
+    it('defaults to empty Set when capabilities is not an array', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token', capabilities: 'bad' })
+      assert.ok(client.clientCapabilities instanceof Set)
+      assert.equal(client.clientCapabilities.size, 0)
+    })
+  })
+
+  describe('clientHasCapability helper', () => {
+    it('returns true for a declared capability', () => {
+      const ws = { clientCapabilities: new Set(['console', 'voice_input']) }
+      assert.equal(clientHasCapability(ws, 'console'), true)
+      assert.equal(clientHasCapability(ws, 'voice_input'), true)
+    })
+
+    it('returns false for an undeclared capability', () => {
+      const ws = { clientCapabilities: new Set(['console']) }
+      assert.equal(clientHasCapability(ws, 'voice_input'), false)
+    })
+
+    it('returns false when clientCapabilities is missing', () => {
+      const ws = {}
+      assert.equal(clientHasCapability(ws, 'console'), false)
+    })
+
+    it('returns false when clientCapabilities is undefined', () => {
+      const ws = { clientCapabilities: undefined }
+      assert.equal(clientHasCapability(ws, 'console'), false)
     })
   })
 })
