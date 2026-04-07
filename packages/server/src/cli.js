@@ -18,6 +18,7 @@ import { registerDeployCommand } from './cli/deploy-cmd.js'
 import { registerSessionCommands } from './cli/session-cmd.js'
 import { registerServiceCommand } from './cli/service-cmd.js'
 import { registerUpdateCommand } from './cli/update-cmd.js'
+import { registerStatusCommand } from './cli/status-cmd.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../package.json')
@@ -38,5 +39,6 @@ registerDeployCommand(program)
 registerSessionCommands(program)
 registerServiceCommand(program)
 registerUpdateCommand(program)
+registerStatusCommand(program)
 
 program.parse()
