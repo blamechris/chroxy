@@ -194,7 +194,44 @@ export interface SessionNotification {
   inputPreview?: string;
 }
 
+/**
+ * ConnectionState — Zustand store shape for the mobile app's connection layer.
+ *
+ * NOTE (issue #2662, phase 1): This interface is a god object with ~90 members.
+ * Phase 1 of the decomposition is documentation-only: the logical groups below
+ * are called out so future phases can extract them into sub-interfaces /
+ * Zustand slices without re-reading the whole file to find boundaries.
+ *
+ * Logical groups:
+ *  1. Connection & socket          — `socket` (lifecycle phase/url/token live
+ *                                     in useConnectionLifecycleStore)
+ *  2. Sessions & multi-client      — sessions, activeSessionId, sessionStates,
+ *                                     myClientId, connectedClients,
+ *                                     primaryClientId, followMode
+ *  3. Models & permissions         — availableModels, defaultModelId,
+ *                                     availablePermissionModes,
+ *                                     pendingPermissionConfirm
+ *  4. Cost & budget                — totalCost, costBudget
+ *  5. Server events & notifications — serverErrors, sessionNotifications,
+ *                                     shutdownReason/restartEtaMs/restartingSince,
+ *                                     timeoutWarning
+ *  6. Discovery data from server   — slashCommands, customAgents,
+ *                                     conversationHistory*, searchResults*,
+ *                                     checkpoints, webFeatures, webTasks
+ *  7. UI & view state              — viewMode, viewingCachedSession,
+ *                                     inputSettings, terminalBuffer,
+ *                                     terminalRawBuffer
+ *  8. Actions                      — connect/disconnect, send*, request*,
+ *                                     session lifecycle, checkpoint/plan/git/
+ *                                     file/diff callbacks and requests
+ *
+ * Encryption state (sharedKey, nonces, pendingKeyPair, pendingSalt) lives on
+ * the connection context in connection-lifecycle.ts, not on this interface.
+ * A matching `EncryptionState` sub-interface will be extracted there in a
+ * follow-up phase.
+ */
 export interface ConnectionState {
+  // --- Group 1: Connection & socket ---------------------------------------
   // Connection socket (lifecycle fields live in useConnectionLifecycleStore)
   socket: WebSocket | null;
 
