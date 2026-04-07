@@ -338,11 +338,11 @@ describe('session-handlers', () => {
       const ctx = makeCtx()
       ctx.sessionManager.renameSession = createSpy(async () => true)
       sessionHandlers.rename_session(makeWs(), makeClient(), { sessionId: 'x', name: 'NewName' }, ctx)
-      const listBroadcast = await waitFor(
-        () => ctx._broadcasts.find(m => m.type === 'session_list'),
-        { label: 'session_list broadcast after rename' }
+      await waitFor(
+        () => ctx.broadcastSessionList.callCount > 0,
+        { label: 'broadcastSessionList after rename' }
       )
-      assert.ok(listBroadcast, 'session_list not broadcast after rename')
+      assert.ok(ctx.broadcastSessionList.callCount > 0, 'broadcastSessionList not called after rename')
     })
   })
 
