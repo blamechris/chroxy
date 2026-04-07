@@ -63,6 +63,7 @@ export declare const ServerMessageSchema: z.ZodObject<{
     tool: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     options: z.ZodOptional<z.ZodAny>;
     timestamp: z.ZodNumber;
+    code: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ServerToolStartSchema: z.ZodObject<{
     type: z.ZodLiteral<"tool_start">;
