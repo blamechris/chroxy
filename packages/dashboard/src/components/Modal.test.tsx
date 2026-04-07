@@ -121,6 +121,64 @@ describe('Modal', () => {
     expect(overlay).toHaveAttribute('data-modal-overlay')
   })
 
+  it('focuses first focusable element when opened (#2659)', () => {
+    render(
+      <Modal open onClose={vi.fn()} title="Focus Trap">
+        <button>First</button>
+        <button>Second</button>
+      </Modal>
+    )
+    expect(document.activeElement).toBe(screen.getByText('First'))
+  })
+
+  it('Tab from last focusable wraps to first (#2659)', () => {
+    render(
+      <Modal open onClose={vi.fn()} title="Focus Trap">
+        <button>First</button>
+        <button>Last</button>
+      </Modal>
+    )
+    const last = screen.getByText('Last')
+    last.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(document.activeElement).toBe(screen.getByText('First'))
+  })
+
+  it('Shift+Tab from first focusable wraps to last (#2659)', () => {
+    render(
+      <Modal open onClose={vi.fn()} title="Focus Trap">
+        <button>First</button>
+        <button>Last</button>
+      </Modal>
+    )
+    const first = screen.getByText('First')
+    first.focus()
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(screen.getByText('Last'))
+  })
+
+  it('restores focus to previously-focused element on close (#2659)', () => {
+    const trigger = document.createElement('button')
+    trigger.textContent = 'Trigger'
+    document.body.appendChild(trigger)
+    trigger.focus()
+    expect(document.activeElement).toBe(trigger)
+
+    const { rerender } = render(
+      <Modal open onClose={vi.fn()} title="Restore">
+        <button>Inside</button>
+      </Modal>
+    )
+    expect(document.activeElement).toBe(screen.getByText('Inside'))
+    rerender(
+      <Modal open={false} onClose={vi.fn()} title="Restore">
+        <button>Inside</button>
+      </Modal>
+    )
+    expect(document.activeElement).toBe(trigger)
+    document.body.removeChild(trigger)
+  })
+
   it('single modal Escape behavior unchanged after nested fix (#1179)', () => {
     const onClose = vi.fn()
     render(
