@@ -148,4 +148,40 @@ describe('@chroxy/protocol schemas', () => {
       }
     }
   })
+
+  it('accepts ServerMessageSchema with optional code field for structured errors', async () => {
+    const { ServerMessageSchema } = await import('../src/schemas/server.ts')
+    const result = ServerMessageSchema.safeParse({
+      type: 'message',
+      messageType: 'error',
+      content: 'Docker is not running.',
+      timestamp: Date.now(),
+      code: 'docker_not_running',
+    })
+    assert.ok(result.success, 'Should validate message with code field')
+    assert.equal(result.data.code, 'docker_not_running')
+  })
+
+  it('accepts ServerMessageSchema without code field (backward compatible)', async () => {
+    const { ServerMessageSchema } = await import('../src/schemas/server.ts')
+    const result = ServerMessageSchema.safeParse({
+      type: 'message',
+      messageType: 'assistant',
+      content: 'hello',
+      timestamp: Date.now(),
+    })
+    assert.ok(result.success, 'Should validate message without code field')
+  })
+
+  it('rejects ServerMessageSchema with code exceeding 64 chars', async () => {
+    const { ServerMessageSchema } = await import('../src/schemas/server.ts')
+    const result = ServerMessageSchema.safeParse({
+      type: 'message',
+      messageType: 'error',
+      content: 'err',
+      timestamp: Date.now(),
+      code: 'x'.repeat(65),
+    })
+    assert.ok(!result.success, 'Should reject code longer than 64 chars')
+  })
 })

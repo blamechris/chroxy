@@ -56,6 +56,7 @@ export const ServerMessageSchema = z.object({
     tool: z.string().nullable().optional(),
     options: z.any().optional(),
     timestamp: z.number(),
+    code: z.string().max(64).optional(),
 });
 export const ServerToolStartSchema = z.object({
     type: z.literal('tool_start'),
