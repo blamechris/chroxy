@@ -301,6 +301,42 @@ function _isSecureRequest(req) {
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
  *   { type: 'encrypted', d: '<base64 ciphertext>', n: <nonce counter> }
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Error response taxonomy (see docs/error-taxonomy.md for the full contract)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * The server emits three distinct error message types. Clients must handle all
+ * three, and handlers must pick the type that best matches the failure class.
+ * Do NOT rename or remove these types — existing clients depend on them.
+ *
+ *   1. { type: 'error', code, message, requestId?, correlationId?, details? }
+ *        Transport / protocol / validation errors. Client-caused.
+ *        Emitted for: invalid JSON, schema validation failures, auth failures.
+ *        Sent by: ws-auth.js, ws-server._handleMessage (schema path), handler-utils.sendError.
+ *        Client behavior: surface message, do not retry automatically.
+ *
+ *   2. { type: 'server_error', message, recoverable, correlationId?, category?, sessionId? }
+ *        Server-side handler failure or unhandled exception. Not the client's fault.
+ *        Emitted for: unhandled errors in _handleMessage, ws-broadcaster failures,
+ *        repo listing failures, encryption key-exchange timeouts.
+ *        `recoverable: true`  — client may retry the request.
+ *        `recoverable: false` — client should reconnect (fatal connection state).
+ *        Sent by: ws-server._handleMessage (catch path), ws-history.js, ws-auth.js,
+ *        ws-broadcaster.js, repo-handlers.js.
+ *
+ *   3. { type: 'session_error', message, sessionId?, code?, category?, recoverable? }
+ *        Session-scoped operation error. Tied to a specific session or to the
+ *        client's active session context (may be null when no session exists).
+ *        Emitted for: session not found, session-token mismatch, input while paused,
+ *        provider does not support feature, invalid session operation arguments,
+ *        checkpoint/conversation/environment operation failures.
+ *        Sent by: handlers/*-handlers.js via ctx.send.
+ *        Client behavior: surface message, clear loading state for the session.
+ *
+ * Rule of thumb for handler authors:
+ *   - The WS message was malformed or failed schema validation → `error`
+ *   - The handler threw an unexpected exception → `server_error` (handled by outer catch)
+ *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
   constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager } = {}) {
