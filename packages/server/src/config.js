@@ -217,12 +217,10 @@ export function mergeConfig({ fileConfig = {}, cliOverrides = {}, defaults = {},
 
   // Log sources in verbose mode (after mapping so provider is included)
   if (verbose) {
+    const safe = sanitizeConfig(merged)
     log.info('Configuration sources:')
     for (const [key, source] of Object.entries(sources)) {
-      const valueStr = SENSITIVE_KEYS.includes(key) && merged[key]
-        ? `${String(merged[key]).slice(0, 8)}...`
-        : JSON.stringify(merged[key])
-      log.info(`  ${key.padEnd(16)} = ${valueStr.padEnd(24)} (${source})`)
+      log.info(`  ${key.padEnd(16)} = ${JSON.stringify(safe[key]).padEnd(24)} (${source})`)
     }
   }
 

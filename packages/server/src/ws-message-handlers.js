@@ -36,19 +36,13 @@ const handlerRegistry = new Map([
  * at module load time (i.e. the built-in handler set, before any runtime
  * registrations via registerMessageHandler).
  *
+ * Derived directly from handlerRegistry to prevent drift between the registry
+ * and this exported list.
+ *
  * Used by the schema-coverage test to assert that every built-in handler type
  * has a corresponding Zod schema in @chroxy/protocol.
  */
-export const registeredMessageTypes = Object.freeze([
-  ...Object.keys(inputHandlers),
-  ...Object.keys(sessionHandlers),
-  ...Object.keys(settingsHandlers),
-  ...Object.keys(fileHandlers),
-  ...Object.keys(conversationHandlers),
-  ...Object.keys(checkpointHandlers),
-  ...Object.keys(repoHandlers),
-  ...Object.keys(featureHandlers),
-].sort())
+export const registeredMessageTypes = Object.freeze([...handlerRegistry.keys()].sort())
 
 /**
  * Register a custom message handler at runtime.

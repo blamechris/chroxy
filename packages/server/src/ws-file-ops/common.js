@@ -46,9 +46,13 @@ export async function validatePathWithinCwd(absPath, sessionCwd, cwdRealCache, c
   return { valid, realPath: realAbsPath, cwdReal }
 }
 
+/** Cache for resolved workspaceRoot realpaths (key: raw path, value: resolved) */
+const _workspaceRootCache = new Map()
+
 /**
  * Validate that a git repo path is within the workspace root.
  * Uses realpath() to resolve symlinks, preventing symlink traversal outside the root.
+ * Caches the workspaceRoot realpath since it doesn't change during a server's lifetime.
  *
  * @param {string} repoPath - The directory path for the git operation
  * @param {string} workspaceRoot - The allowed workspace root directory
@@ -56,7 +60,13 @@ export async function validatePathWithinCwd(absPath, sessionCwd, cwdRealCache, c
  * @returns {Promise<string>} The resolved real path of repoPath
  */
 export async function validateGitPath(repoPath, workspaceRoot) {
-  const resolvedRoot = await realpath(workspaceRoot)
+  // Normalize cache key so relative paths and trailing-slash variants don't create duplicates
+  const cacheKey = resolve(workspaceRoot)
+  let resolvedRoot = _workspaceRootCache.get(cacheKey)
+  if (!resolvedRoot) {
+    resolvedRoot = await realpath(workspaceRoot)
+    _workspaceRootCache.set(cacheKey, resolvedRoot)
+  }
   let resolvedRepo
   try {
     resolvedRepo = await realpath(repoPath)
