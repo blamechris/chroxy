@@ -1,6 +1,13 @@
 /**
  * Tracks cumulative costs per session and enforces budget thresholds.
  *
+ * Budget scope: PER-SESSION. The configured budget is applied independently
+ * to each session's cumulative cost — it is NOT an aggregate limit across
+ * all sessions. A warning fires at 80% of a single session's spend and the
+ * session is paused at 100%. Creating a second session gives it its own
+ * fresh budget of the same dollar amount; the limit does not stack or share.
+ * Use `getTotalCost()` if you need the aggregate across sessions for display.
+ *
  * Extracted from session-manager.js to separate cost tracking concerns
  * from session lifecycle management.
  */
@@ -8,7 +15,8 @@
 export class CostBudgetManager {
   /**
    * @param {object} options
-   * @param {number|null} [options.budget] - Cost budget in dollars, or null for no limit
+   * @param {number|null} [options.budget] - Per-session cost budget in dollars
+   *   (applied independently to each session), or null for no limit.
    */
   constructor({ budget = null } = {}) {
     this._budget = typeof budget === 'number' && budget > 0 ? budget : null

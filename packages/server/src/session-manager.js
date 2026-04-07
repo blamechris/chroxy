@@ -103,7 +103,8 @@ export { formatIdleDuration }
  * @property {number}  [maxToolInput]            - Max characters for tool input display
  * @property {Array}   [transforms=[]]           - Message transform functions
  * @property {object}  [sandbox]                 - SDK sandbox settings for lightweight isolation
- * @property {string}  [costBudget]              - Cost budget string (e.g. '$5.00')
+ * @property {number}  [costBudget]              - Per-session cost budget in dollars (e.g. 5.00).
+ *                                                  Applied independently to each session; not a shared/global pool.
  *
  * State persistence
  * @property {string}  [stateFilePath]           - Path to session state JSON file (default: ~/.chroxy/session-state.json)
