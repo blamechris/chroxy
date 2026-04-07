@@ -15,6 +15,8 @@ jest.mock('../src/utils/crypto', () => ({
   deriveSharedKey: jest.fn(),
   encrypt: jest.fn(),
   decrypt: jest.fn(),
+  generateConnectionSalt: jest.fn(() => 'mock-salt'),
+  deriveConnectionKey: jest.fn(() => new Uint8Array(32)),
   DIRECTION_CLIENT: 0,
   DIRECTION_SERVER: 1,
 }));

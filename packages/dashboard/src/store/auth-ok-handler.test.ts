@@ -14,6 +14,8 @@ vi.mock('./crypto', () => ({
   deriveSharedKey: vi.fn(),
   encrypt: vi.fn(),
   decrypt: vi.fn(),
+  generateConnectionSalt: vi.fn(() => 'mock-salt'),
+  deriveConnectionKey: vi.fn(() => new Uint8Array(32)),
   DIRECTION_CLIENT: 0,
   DIRECTION_SERVER: 1,
 }))
