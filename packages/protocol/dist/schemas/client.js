@@ -69,7 +69,7 @@ export const PermissionRuleSchema = z.object({
 });
 export const SetPermissionRulesSchema = z.object({
     type: z.literal('set_permission_rules'),
-    rules: z.array(PermissionRuleSchema),
+    rules: z.array(PermissionRuleSchema).max(1000),
     sessionId: z.string().max(256).optional(),
 });
 export const PermissionResponseSchema = z.object({
@@ -82,7 +82,7 @@ export const QueryPermissionAuditSchema = z.object({
     sessionId: z.string().max(256).optional(),
     auditType: z.enum(['mode_change', 'decision']).optional(),
     since: z.number().optional(),
-    limit: z.number().optional(),
+    limit: z.number().int().min(1).max(10_000).optional(),
 });
 export const ListSessionsSchema = z.object({
     type: z.literal('list_sessions'),
@@ -96,14 +96,14 @@ export const SwitchSessionSchema = z.object({
 // silently stripping fields added by newer SDK versions.
 export const SandboxSchema = z.object({
     network: z.object({
-        allowedDomains: z.array(z.string().max(256)).optional(),
+        allowedDomains: z.array(z.string().max(256)).max(256).optional(),
     }).passthrough().optional(),
     filesystem: z.object({
-        allowedPaths: z.array(z.string().max(4096)).optional(),
-        deniedPaths: z.array(z.string().max(4096)).optional(),
+        allowedPaths: z.array(z.string().max(4096)).max(256).optional(),
+        deniedPaths: z.array(z.string().max(4096)).max(256).optional(),
     }).passthrough().optional(),
     bash: z.object({
-        allowedCommands: z.array(z.string().max(256)).optional(),
+        allowedCommands: z.array(z.string().max(256)).max(256).optional(),
     }).passthrough().optional(),
     autoAllowBashIfSandboxed: z.boolean().optional(),
 }).passthrough();
@@ -135,7 +135,7 @@ export const RegisterPushTokenSchema = z.object({
 export const UserQuestionResponseSchema = z.object({
     type: z.literal('user_question_response'),
     answer: z.string().max(100_000),
-    answers: z.record(z.string(), z.string().max(100_000)).optional(),
+    answers: z.record(z.string(), z.string().max(100_000)).refine((obj) => Object.keys(obj).length <= 100, { message: 'Too many answers (max 100)' }).optional(),
     toolUseId: z.string().max(256).optional(),
 });
 export const ListDirectorySchema = z.object({
