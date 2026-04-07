@@ -223,7 +223,7 @@ describe('auth_ok handler', () => {
         (c: unknown[]) => JSON.parse(c[0] as string)
       )
       const keyExchange = sends.find((s: Record<string, unknown>) => s.type === 'key_exchange')
-      expect(keyExchange).toEqual({ type: 'key_exchange', publicKey: 'mock-pub' })
+      expect(keyExchange).toEqual({ type: 'key_exchange', publicKey: 'mock-pub', salt: 'mock-salt' })
     })
   })
 
