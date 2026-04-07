@@ -5,18 +5,23 @@
  */
 import { statSync, realpathSync } from 'fs'
 import { basename } from 'path'
-import { scanConversations, groupConversationsByRepo } from '../conversation-scanner.js'
-import { readReposFromConfig, writeReposToConfig } from '../config.js'
+import { scanConversations as defaultScanConversations, groupConversationsByRepo } from '../conversation-scanner.js'
+import { readReposFromConfig as defaultReadRepos, writeReposToConfig as defaultWriteRepos } from '../config.js'
 import { validateCwdWithinHome } from '../handler-utils.js'
 
 /**
  * Build merged repo list from auto-discovered and manual repos.
  * Manual repos come first, auto-discovered repos are deduplicated.
+ *
+ * Tests may pass `ctx` overrides for `scanConversations` / `readReposFromConfig` to
+ * avoid touching the real filesystem.
  */
-async function buildRepoList() {
-  const conversations = await scanConversations()
+async function buildRepoList(ctx = {}) {
+  const scan = ctx.scanConversations || defaultScanConversations
+  const readRepos = ctx.readReposFromConfig || defaultReadRepos
+  const conversations = await scan()
   const autoRepos = groupConversationsByRepo(conversations)
-  const manualRepos = readReposFromConfig()
+  const manualRepos = readRepos()
   const seen = new Set()
   const repos = []
 
@@ -40,7 +45,7 @@ async function buildRepoList() {
 
 async function handleListRepos(ws, client, msg, ctx) {
   try {
-    const repos = await buildRepoList()
+    const repos = await buildRepoList(ctx)
     ctx.send(ws, { type: 'repo_list', repos })
   } catch (err) {
     ctx.send(ws, { type: 'server_error', message: `Failed to list repos: ${err.message}`, recoverable: true })
@@ -55,14 +60,16 @@ async function handleAddRepo(ws, client, msg, ctx) {
     return
   }
 
+  const readRepos = ctx.readReposFromConfig || defaultReadRepos
+  const writeRepos = ctx.writeReposToConfig || defaultWriteRepos
   try {
     const resolvedPath = realpathSync(repoPath)
-    const existing = readReposFromConfig()
+    const existing = readRepos()
     if (!existing.some(r => r.path === resolvedPath)) {
       existing.push({ path: resolvedPath, name: msg.name || basename(resolvedPath) })
-      writeReposToConfig(existing)
+      writeRepos(existing)
     }
-    const repos = await buildRepoList()
+    const repos = await buildRepoList(ctx)
     ctx.send(ws, { type: 'repo_list', repos })
   } catch (err) {
     ctx.send(ws, { type: 'session_error', message: `Failed to add repo: ${err.message}` })
@@ -72,12 +79,14 @@ async function handleAddRepo(ws, client, msg, ctx) {
 async function handleRemoveRepo(ws, client, msg, ctx) {
   let targetPath = msg.path
   try { targetPath = realpathSync(msg.path) } catch { /* fall back to raw path */ }
-  const existing = readReposFromConfig()
+  const readRepos = ctx.readReposFromConfig || defaultReadRepos
+  const writeRepos = ctx.writeReposToConfig || defaultWriteRepos
+  const existing = readRepos()
   const filtered = existing.filter(r => r.path !== targetPath)
-  writeReposToConfig(filtered)
+  writeRepos(filtered)
 
   try {
-    const repos = await buildRepoList()
+    const repos = await buildRepoList(ctx)
     ctx.send(ws, { type: 'repo_list', repos })
   } catch (err) {
     ctx.send(ws, { type: 'server_error', message: `Failed to list repos: ${err.message}`, recoverable: true })

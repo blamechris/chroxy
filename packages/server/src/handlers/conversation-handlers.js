@@ -4,16 +4,18 @@
  * Handles: list_conversations, search_conversations, resume_conversation,
  *          request_full_history, request_session_context, request_cost_summary
  */
-import { scanConversations } from '../conversation-scanner.js'
-import { searchConversations } from '../conversation-search.js'
+import { scanConversations as defaultScanConversations } from '../conversation-scanner.js'
+import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
 import { validateCwdWithinHome, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
 
 async function handleListConversations(ws, client, msg, ctx) {
+  // ctx.scanConversations override allows tests to inject a stub and skip real fs.
+  const scan = ctx.scanConversations || defaultScanConversations
   try {
-    const conversations = await scanConversations()
+    const conversations = await scan()
     ctx.send(ws, { type: 'conversations_list', conversations })
   } catch (err) {
     log.warn(`Failed to scan conversations: ${err.message}`)
@@ -23,8 +25,9 @@ async function handleListConversations(ws, client, msg, ctx) {
 
 async function handleSearchConversations(ws, client, msg, ctx) {
   const { query, maxResults } = msg
+  const search = ctx.searchConversations || defaultSearchConversations
   try {
-    const results = await searchConversations(query, { maxResults })
+    const results = await search(query, { maxResults })
     ctx.send(ws, { type: 'search_results', query, results })
   } catch (err) {
     log.warn(`Failed to search conversations: ${err.message}`)

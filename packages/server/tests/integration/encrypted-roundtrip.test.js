@@ -11,7 +11,7 @@ import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { WsServer as _WsServer } from '../../src/ws-server.js'
 import { addLogListener, removeLogListener } from '../../src/logger.js'
-import { createMockSession, waitFor } from '../test-helpers.js'
+import { createMockSession, waitFor, waitForType } from '../test-helpers.js'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -81,12 +81,13 @@ async function openRawClient(port) {
 
 function send(ws, msg) { ws.send(JSON.stringify(msg)) }
 
-async function waitForType(messages, type, timeoutMs = 3000) {
-  return waitFor(() => messages.find(m => m.type === type), {
-    timeoutMs,
-    label: `message type: ${type}`,
-  })
-}
+/**
+ * Number of encrypted messages the server flushes immediately after key_exchange_ok
+ * (post-auth queue: typically server_mode + initial state). Tests wait until at least
+ * this many encrypted envelopes have arrived before sending their own ping, so the
+ * nonce counter is in a known position.
+ */
+const EXPECTED_POST_AUTH_FLUSH = 1
 
 /**
  * Perform the full auth → key_exchange handshake on `ws`.
@@ -204,8 +205,12 @@ describe('integration: encrypted WebSocket roundtrip', () => {
     const { ws, messages } = await openRawClient(port)
     const { sharedKey } = await doKeyExchange(ws, messages)
 
-    // Wait for the post-auth queue flush to settle so the nonce counter is stable
-    await new Promise(r => setTimeout(r, 50))
+    // Wait for the post-auth queue flush to settle so the nonce counter is stable.
+    // Poll-based wait — replaces a fixed setTimeout that flaked under CI load.
+    await waitFor(
+      () => messages.filter(m => m.type === 'encrypted').length >= EXPECTED_POST_AUTH_FLUSH,
+      { timeoutMs: 3000, label: 'post-auth encrypted flush' }
+    )
     const preCount = messages.filter(m => m.type === 'encrypted').length
 
     // First ping (nonce 0)
@@ -258,7 +263,10 @@ describe('integration: encrypted WebSocket roundtrip', () => {
     const conn1 = await openRawClient(port)
     const { sharedKey: sharedKey1 } = await doKeyExchange(conn1.ws, conn1.messages)
     // Wait for post-auth queue to flush, then snapshot count
-    await new Promise(r => setTimeout(r, 50))
+    await waitFor(
+      () => conn1.messages.filter(m => m.type === 'encrypted').length >= EXPECTED_POST_AUTH_FLUSH,
+      { timeoutMs: 3000, label: 'conn1 post-auth encrypted flush' }
+    )
     const preCount1 = conn1.messages.filter(m => m.type === 'encrypted').length
     send(conn1.ws, encrypt(JSON.stringify({ type: 'ping' }), sharedKey1, 0, DIRECTION_CLIENT))
     const encReply1 = await waitFor(
@@ -269,13 +277,19 @@ describe('integration: encrypted WebSocket roundtrip', () => {
     )
     conn1.ws.close()
 
-    // Wait for clean disconnect before reconnecting
-    await new Promise(r => setTimeout(r, 100))
+    // Wait for clean disconnect before reconnecting (poll on readyState rather than fixed sleep)
+    await waitFor(
+      () => conn1.ws.readyState === conn1.ws.CLOSED,
+      { timeoutMs: 2000, label: 'conn1 closed' }
+    )
 
     // --- Second connection (fresh key pair, different shared key) ---
     const conn2 = await openRawClient(port)
     const { sharedKey: sharedKey2 } = await doKeyExchange(conn2.ws, conn2.messages)
-    await new Promise(r => setTimeout(r, 50))
+    await waitFor(
+      () => conn2.messages.filter(m => m.type === 'encrypted').length >= EXPECTED_POST_AUTH_FLUSH,
+      { timeoutMs: 3000, label: 'conn2 post-auth encrypted flush' }
+    )
     const preCount2 = conn2.messages.filter(m => m.type === 'encrypted').length
     send(conn2.ws, encrypt(JSON.stringify({ type: 'ping' }), sharedKey2, 0, DIRECTION_CLIENT))
     const encReply2 = await waitFor(

@@ -179,6 +179,49 @@ describe('createClientSender', () => {
       assert.equal(client._flushOverflow[0].type, 'existing')
       assert.equal(client._flushOverflow[1].type, 'new')
     })
+
+    it('drains _flushOverflow in order with strictly ascending _seq stamps (#2745)', () => {
+      // End-to-end ordering check that exercises createClientSender's monotonic
+      // _seq counter through the full flush-overflow path. Replays the production
+      // sequence: messages arrive while _flushing=true (queued into _flushOverflow),
+      // then ws-history-style drain re-sends them with _flushing=false so each gets
+      // a stamped _seq.
+      const sent = []
+      const ws = { send: (data) => sent.push(data) }
+      const client = { _seq: 0, _flushing: true }
+
+      // Phase 1: enqueue 5 messages while flushing — they land in _flushOverflow,
+      // _seq stays 0, nothing is written to the wire.
+      const enqueued = [
+        { type: 'msg', n: 1 },
+        { type: 'msg', n: 2 },
+        { type: 'msg', n: 3 },
+        { type: 'msg', n: 4 },
+        { type: 'msg', n: 5 },
+      ]
+      for (const m of enqueued) send(ws, client, m)
+      assert.equal(sent.length, 0, 'no messages sent while _flushing=true')
+      assert.equal(client._flushOverflow.length, 5)
+      assert.equal(client._seq, 0, '_seq not advanced while buffered')
+
+      // Phase 2: drain the overflow exactly the way ws-history.js does — clear the
+      // flushing flag, snapshot+empty the queue, then re-feed each message through
+      // the same sender so each one picks up its monotonic seq.
+      const drained = client._flushOverflow.slice()
+      client._flushOverflow = []
+      client._flushing = false
+      for (const m of drained) send(ws, client, m)
+
+      // All 5 messages reached the wire in original order.
+      assert.equal(sent.length, 5)
+      const parsed = sent.map(s => JSON.parse(s))
+      assert.deepEqual(parsed.map(p => p.n), [1, 2, 3, 4, 5], 'enqueue order preserved')
+
+      // _seq is strictly ascending and matches the drain order.
+      const seqs = parsed.map(p => p.seq)
+      assert.deepEqual(seqs, [1, 2, 3, 4, 5], '_seq stamps strictly ascending from 1')
+      assert.equal(client._seq, 5, 'client._seq advanced for each drained message')
+    })
   })
 
   describe('error handling', () => {
