@@ -36,6 +36,12 @@ async function handleSearchConversations(ws, client, msg, ctx) {
 }
 
 async function handleResumeConversation(ws, client, msg, ctx) {
+  // Bound clients cannot create new sessions via resume
+  if (client.boundSessionId) {
+    ctx.send(ws, { type: 'session_error', message: 'Not authorized: client is bound to a specific session', code: 'SESSION_TOKEN_MISMATCH' })
+    return
+  }
+
   // Check resume capability on the active session's provider
   const activeEntry = client.activeSessionId && ctx.sessionManager.getSession(client.activeSessionId)
   if (activeEntry && !activeEntry.session.constructor.capabilities?.resume) {
@@ -72,7 +78,7 @@ async function handleResumeConversation(ws, client, msg, ctx) {
     ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
     ctx.sendSessionInfo(ws, sessionId)
     ctx.replayHistory(ws, sessionId)
-    ctx.broadcast({ type: 'session_list', sessions: ctx.sessionManager.listSessions() })
+    ctx.broadcastSessionList()
     autoSubscribeOtherClients(sessionId, ws, ctx)
     broadcastFocusChanged(client, sessionId, ctx)
   } catch (err) {
@@ -114,6 +120,13 @@ async function handleRequestSessionContext(ws, client, msg, ctx) {
     ctx.send(ws, { type: 'session_error', message: 'No active session' })
     return
   }
+
+  // Enforce session binding
+  if (client.boundSessionId && client.boundSessionId !== targetId) {
+    ctx.send(ws, { type: 'session_error', message: 'Not authorized to access this session', code: 'SESSION_TOKEN_MISMATCH' })
+    return
+  }
+
   try {
     const sessionCtx = await ctx.sessionManager.getSessionContext(targetId)
     if (sessionCtx) {

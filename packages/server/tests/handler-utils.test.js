@@ -25,6 +25,7 @@ import {
   ALLOWED_IMAGE_TYPES,
   broadcastFocusChanged,
   resolveSession,
+  enforceBoundSession,
   sendError,
 } from '../src/handler-utils.js'
 
@@ -791,5 +792,61 @@ describe('resolveSession', () => {
     }
     const result = resolveSession(ctx, {}, null)
     assert.strictEqual(result, null)
+  })
+
+  it('returns null when client is bound to a different session', () => {
+    const session = { id: 'sess-1', name: 'test' }
+    const ctx = {
+      sessionManager: {
+        getSession(id) { return id === 'sess-1' ? session : null }
+      }
+    }
+    const client = { activeSessionId: 'sess-1', boundSessionId: 'sess-other' }
+    const result = resolveSession(ctx, { sessionId: 'sess-1' }, client)
+    assert.strictEqual(result, null)
+  })
+
+  it('returns session when client is bound to the same session', () => {
+    const session = { id: 'sess-1', name: 'test' }
+    const ctx = {
+      sessionManager: {
+        getSession(id) { return id === 'sess-1' ? session : null }
+      }
+    }
+    const client = { activeSessionId: 'sess-1', boundSessionId: 'sess-1' }
+    const result = resolveSession(ctx, { sessionId: 'sess-1' }, client)
+    assert.deepStrictEqual(result, session)
+  })
+
+  it('returns session when client has no bound session', () => {
+    const session = { id: 'sess-1', name: 'test' }
+    const ctx = {
+      sessionManager: {
+        getSession(id) { return id === 'sess-1' ? session : null }
+      }
+    }
+    const client = { activeSessionId: 'sess-1', boundSessionId: null }
+    const result = resolveSession(ctx, { sessionId: 'sess-1' }, client)
+    assert.deepStrictEqual(result, session)
+  })
+})
+
+describe('enforceBoundSession', () => {
+  it('does not throw when client has no bound session', () => {
+    assert.doesNotThrow(() => enforceBoundSession({ boundSessionId: null }, 'any-session'))
+  })
+
+  it('does not throw when bound session matches target', () => {
+    assert.doesNotThrow(() => enforceBoundSession({ boundSessionId: 'sess-1' }, 'sess-1'))
+  })
+
+  it('throws with SESSION_TOKEN_MISMATCH when bound session differs', () => {
+    try {
+      enforceBoundSession({ boundSessionId: 'sess-1' }, 'sess-2')
+      assert.fail('Expected an error to be thrown')
+    } catch (err) {
+      assert.equal(err.code, 'SESSION_TOKEN_MISMATCH')
+      assert.match(err.message, /bound to a different session/)
+    }
   })
 })

@@ -183,12 +183,16 @@ function setupCliForwarding(normalizer, ctx) {
 /** Execute side effect descriptors returned by the normalizer */
 function executeSideEffects(sideEffects, sessionId, ctx) {
   if (!sideEffects) return
-  const { normalizer, sessionManager, pushManager, broadcast, broadcastToSession } = ctx
+  const { normalizer, sessionManager, pushManager, broadcast, broadcastToSession, broadcastSessionList } = ctx
   for (const effect of sideEffects) {
     switch (effect.type) {
       case 'session_list':
         if (sessionManager) {
-          broadcast({ type: 'session_list', sessions: sessionManager.listSessions() })
+          if (broadcastSessionList) {
+            broadcastSessionList()
+          } else {
+            broadcast({ type: 'session_list', sessions: sessionManager.listSessions() })
+          }
         }
         break
       case 'refresh_context':

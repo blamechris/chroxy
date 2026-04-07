@@ -29,6 +29,13 @@ function handleExtensionMessage(ws, client, msg, ctx) {
   }
 
   const targetSessionId = msg.sessionId || client.activeSessionId
+
+  // Enforce session binding
+  if (client.boundSessionId && client.boundSessionId !== targetSessionId) {
+    ctx.send(ws, { type: 'session_error', message: 'Not authorized to access this session', code: 'SESSION_TOKEN_MISMATCH' })
+    return
+  }
+
   const entry = ctx.sessionManager.getSession(targetSessionId)
   if (!entry) {
     const message = msg.sessionId
@@ -82,6 +89,8 @@ function handleTeleportWebTask(ws, client, msg, ctx) {
 
 function handleCloseDevPreview(ws, client, msg, ctx) {
   const previewSessionId = msg.sessionId || client.activeSessionId
+  // Enforce session binding
+  if (client.boundSessionId && client.boundSessionId !== previewSessionId) return
   if (previewSessionId && typeof msg.port === 'number') {
     ctx.devPreview.closePreview(previewSessionId, msg.port)
   }

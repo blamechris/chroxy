@@ -360,7 +360,17 @@ export class WsServer {
       send: sendFn,
       broadcast: broadcastFn,
       broadcastToSession: (sid, msg, filter) => self._broadcastToSession(sid, msg, filter),
-      broadcastSessionList: () => self._broadcast({ type: 'session_list', sessions: self.sessionManager.listSessions() }),
+      broadcastSessionList: () => {
+        const allSessions = self.sessionManager.listSessions()
+        for (const [ws, c] of self.clients) {
+          if (c.authenticated && ws.readyState === 1) {
+            const sessions = c.boundSessionId
+              ? allSessions.filter(s => s.sessionId === c.boundSessionId)
+              : allSessions
+            sendFn(ws, { type: 'session_list', sessions })
+          }
+        }
+      },
       get sessionManager() { return self.sessionManager },
       get cliSession() { return self.cliSession },
       get pushManager() { return self.pushManager },
@@ -855,6 +865,7 @@ export class WsServer {
       questionSessionMap: this._questionSessionMap,
       broadcast: (msg, filter) => this._broadcast(msg, filter),
       broadcastToSession: (sid, msg, filter) => this._broadcastToSession(sid, msg, filter),
+      broadcastSessionList: () => this._handlerCtx.broadcastSessionList(),
     })
 
     // Ping all authenticated clients every 30s to keep connections alive through

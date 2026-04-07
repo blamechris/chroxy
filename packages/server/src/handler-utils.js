@@ -184,9 +184,28 @@ export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
 }
 
 /**
+ * Enforce that a bound client is only accessing its bound session.
+ * Throws if the client has a boundSessionId that doesn't match the target.
+ *
+ * @param {object} client - Connected client state
+ * @param {string} targetSessionId - The session ID being accessed
+ * @throws {Error} if the client is bound to a different session
+ */
+export function enforceBoundSession(client, targetSessionId) {
+  if (client.boundSessionId && client.boundSessionId !== targetSessionId) {
+    const err = new Error('Access denied: client is bound to a different session')
+    err.code = 'SESSION_TOKEN_MISMATCH'
+    throw err
+  }
+}
+
+/**
  * Resolve a session from a message and client context.
  * Prefers msg.sessionId, falls back to client.activeSessionId.
  * Returns the session entry, or null if not found.
+ *
+ * If the client has a boundSessionId, enforces that the resolved session
+ * matches the binding. Returns null if the binding is violated.
  *
  * @param {object} ctx - Handler context with sessionManager
  * @param {object} msg - Incoming WebSocket message
@@ -195,6 +214,15 @@ export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
  */
 export function resolveSession(ctx, msg, client) {
   const sid = msg.sessionId || client?.activeSessionId
+
+  // Enforce session token binding: a bound client can only resolve its own
+  // session. If a specific sid was requested and it doesn't match, reject.
+  if (sid && client?.boundSessionId && client.boundSessionId !== sid) {
+    return null
+  }
+
+  // Delegate to sessionManager — its getSession handles null/undefined sid
+  // (real SessionManager returns null, cliSession adapter returns default entry).
   return ctx.sessionManager?.getSession(sid) ?? null
 }
 

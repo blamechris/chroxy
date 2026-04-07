@@ -263,8 +263,7 @@ describe('destroy_session handler', () => {
     assert.ok(destroyedMsg, 'should broadcast session_destroyed')
     assert.equal(destroyedMsg[0].sessionId, 'sess-2')
 
-    const listMsg = broadcastCalls.find(c => c[0].type === 'session_list')
-    assert.ok(listMsg, 'should broadcast session_list')
+    assert.ok(ctx.broadcastSessionList.callCount > 0, 'should broadcast session_list')
   })
 
   it('refuses to destroy last session', async () => {
@@ -318,9 +317,8 @@ describe('rename_session handler', () => {
     assert.equal(ctx.sessionManager.renameSession.callCount, 1)
     assert.deepEqual(ctx.sessionManager.renameSession.lastCall, ['sess-1', 'New Name'])
 
-    const broadcastCalls = ctx._spies.broadcast.calls
-    const listMsg = broadcastCalls.find(c => c[0].type === 'session_list')
-    assert.ok(listMsg, 'should broadcast session_list')
+    await new Promise(r => setTimeout(r, 20))
+    assert.ok(ctx.broadcastSessionList.callCount > 0, 'should broadcast session_list')
   })
 
   it('sends error when name is empty', async () => {

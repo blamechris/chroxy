@@ -176,6 +176,101 @@ describe('session-handlers', () => {
     })
   })
 
+  describe('destroy_session — boundSessionId enforcement', () => {
+    it('rejects destroy when client is bound to a different session', async () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sess-a', { session: createMockSession(), name: 'A', cwd: '/tmp' })
+      ctx._sessions.set('sess-b', { session: createMockSession(), name: 'B', cwd: '/tmp' })
+      ctx.sessionManager.listSessions = createSpy(() => [
+        { sessionId: 'sess-a' }, { sessionId: 'sess-b' },
+      ])
+      const client = makeClient({ boundSessionId: 'sess-a' })
+
+      await sessionHandlers.destroy_session(makeWs(), client, { sessionId: 'sess-b' }, ctx)
+
+      const [, sent] = ctx.send.lastCall
+      assert.equal(sent.type, 'session_error')
+      assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx.sessionManager.destroySession.callCount, 0)
+    })
+  })
+
+  describe('rename_session — boundSessionId enforcement', () => {
+    it('rejects rename when client is bound to a different session', async () => {
+      const ctx = makeCtx()
+      const client = makeClient({ boundSessionId: 'sess-a' })
+
+      sessionHandlers.rename_session(makeWs(), client, { sessionId: 'sess-b', name: 'NewName' }, ctx)
+      await new Promise(r => setTimeout(r, 10))
+
+      const [, sent] = ctx.send.lastCall
+      assert.equal(sent.type, 'session_error')
+      assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+    })
+  })
+
+  describe('list_sessions — boundSessionId filtering', () => {
+    it('filters session list for bound clients', () => {
+      const ctx = makeCtx()
+      ctx.sessionManager.listSessions = createSpy(() => [
+        { sessionId: 'sess-a', name: 'A' },
+        { sessionId: 'sess-b', name: 'B' },
+        { sessionId: 'sess-c', name: 'C' },
+      ])
+      const client = makeClient({ boundSessionId: 'sess-b' })
+
+      sessionHandlers.list_sessions(makeWs(), client, {}, ctx)
+
+      const [, sent] = ctx.send.lastCall
+      assert.equal(sent.type, 'session_list')
+      assert.equal(sent.sessions.length, 1)
+      assert.equal(sent.sessions[0].sessionId, 'sess-b')
+    })
+
+    it('returns all sessions for unbound clients', () => {
+      const ctx = makeCtx()
+      ctx.sessionManager.listSessions = createSpy(() => [
+        { sessionId: 'sess-a', name: 'A' },
+        { sessionId: 'sess-b', name: 'B' },
+      ])
+      const client = makeClient({ boundSessionId: null })
+
+      sessionHandlers.list_sessions(makeWs(), client, {}, ctx)
+
+      const [, sent] = ctx.send.lastCall
+      assert.equal(sent.type, 'session_list')
+      assert.equal(sent.sessions.length, 2)
+    })
+  })
+
+  describe('create_session — boundSessionId enforcement', () => {
+    it('rejects create_session when client is bound', () => {
+      const ctx = makeCtx()
+      const client = makeClient({ boundSessionId: 'sess-a' })
+
+      sessionHandlers.create_session(makeWs(), client, { name: 'New' }, ctx)
+
+      const [, sent] = ctx.send.lastCall
+      assert.equal(sent.type, 'session_error')
+      assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx.sessionManager.createSession.callCount, 0)
+    })
+  })
+
+  describe('subscribe_sessions — boundSessionId enforcement', () => {
+    it('skips non-bound sessions when client is bound', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sess-a', { session: createMockSession(), name: 'A', cwd: '/tmp' })
+      ctx._sessions.set('sess-b', { session: createMockSession(), name: 'B', cwd: '/tmp' })
+      const client = makeClient({ boundSessionId: 'sess-a' })
+
+      sessionHandlers.subscribe_sessions(makeWs(), client, { sessionIds: ['sess-a', 'sess-b'] }, ctx)
+
+      assert.ok(client.subscribedSessionIds.has('sess-a'))
+      assert.ok(!client.subscribedSessionIds.has('sess-b'))
+    })
+  })
+
   describe('destroy_session', () => {
     it('sends session_error when session not found', async () => {
       const ctx = makeCtx()
@@ -243,11 +338,11 @@ describe('session-handlers', () => {
       const ctx = makeCtx()
       ctx.sessionManager.renameSession = createSpy(async () => true)
       sessionHandlers.rename_session(makeWs(), makeClient(), { sessionId: 'x', name: 'NewName' }, ctx)
-      const listBroadcast = await waitFor(
-        () => ctx._broadcasts.find(m => m.type === 'session_list'),
-        { label: 'session_list broadcast after rename' }
+      await waitFor(
+        () => ctx.broadcastSessionList.callCount > 0,
+        { label: 'broadcastSessionList after rename' }
       )
-      assert.ok(listBroadcast, 'session_list not broadcast after rename')
+      assert.ok(ctx.broadcastSessionList.callCount > 0, 'broadcastSessionList not called after rename')
     })
   })
 
