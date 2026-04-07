@@ -15,6 +15,8 @@ jest.mock('../src/utils/crypto', () => ({
   deriveSharedKey: jest.fn(),
   encrypt: jest.fn(),
   decrypt: jest.fn(),
+  generateConnectionSalt: jest.fn(() => 'mock-salt'),
+  deriveConnectionKey: jest.fn(() => new Uint8Array(32)),
   DIRECTION_CLIENT: 0,
   DIRECTION_SERVER: 1,
 }));
@@ -359,7 +361,7 @@ describe('auth_ok handler', () => {
         (c: unknown[]) => JSON.parse(c[0] as string)
       );
       const keyExchange = sends.find((s: Record<string, unknown>) => s.type === 'key_exchange');
-      expect(keyExchange).toEqual({ type: 'key_exchange', publicKey: 'mock-pub' });
+      expect(keyExchange).toEqual({ type: 'key_exchange', publicKey: 'mock-pub', salt: 'mock-salt' });
     });
   });
 
