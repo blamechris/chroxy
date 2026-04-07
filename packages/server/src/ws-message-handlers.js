@@ -8,7 +8,6 @@
  * (or create a new one) and add the import here.
  */
 import { createLogger } from './logger.js'
-import { sendError } from './handler-utils.js'
 import { inputHandlers } from './handlers/input-handlers.js'
 import { sessionHandlers } from './handlers/session-handlers.js'
 import { settingsHandlers } from './handlers/settings-handlers.js'
@@ -86,12 +85,9 @@ export function registerMessageHandler(type, handlerFn) {
 export async function handleSessionMessage(ws, client, msg, ctx) {
   const handler = handlerRegistry.get(msg.type)
   if (handler) {
-    try {
-      await handler(ws, client, msg, ctx)
-    } catch (err) {
-      log.error(`Handler error for ${msg.type}: ${err.message}`)
-      sendError(ws, msg?.requestId, 'HANDLER_ERROR', err.message)
-    }
+    // Errors propagate to _handleMessage in ws-server.js, which emits a
+    // server_error with correlationId. Do NOT add an inner try/catch here.
+    await handler(ws, client, msg, ctx)
   } else {
     log.debug(`Unknown message type: ${msg.type}`)
   }
