@@ -214,13 +214,15 @@ export function enforceBoundSession(client, targetSessionId) {
  */
 export function resolveSession(ctx, msg, client) {
   const sid = msg.sessionId || client?.activeSessionId
-  if (!sid) return null
 
-  // Enforce session token binding
-  if (client?.boundSessionId && client.boundSessionId !== sid) {
+  // Enforce session token binding: a bound client can only resolve its own
+  // session. If a specific sid was requested and it doesn't match, reject.
+  if (sid && client?.boundSessionId && client.boundSessionId !== sid) {
     return null
   }
 
+  // Delegate to sessionManager — its getSession handles null/undefined sid
+  // (real SessionManager returns null, cliSession adapter returns default entry).
   return ctx.sessionManager?.getSession(sid) ?? null
 }
 
