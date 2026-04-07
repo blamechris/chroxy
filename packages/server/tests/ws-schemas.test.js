@@ -709,6 +709,37 @@ describe('dead code removal', () => {
     assert.equal(typeof mod.CodexSession, 'function', 'CodexSession should be a class/constructor')
   })
 
+  it('SetPermissionRulesSchema rejects more than 1000 rules', async () => {
+    const { SetPermissionRulesSchema } = await import('../src/ws-schemas.js')
+    const makeRules = (n) => Array.from({ length: n }, () => ({ tool: 'Bash', decision: 'allow' }))
+    assert.equal(SetPermissionRulesSchema.safeParse({ type: 'set_permission_rules', rules: makeRules(1000) }).success, true)
+    assert.equal(SetPermissionRulesSchema.safeParse({ type: 'set_permission_rules', rules: makeRules(1001) }).success, false)
+  })
+
+  it('UserQuestionResponseSchema rejects more than 100 answer entries', async () => {
+    const { UserQuestionResponseSchema } = await import('../src/ws-schemas.js')
+    const mkAnswers = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, 'v']))
+    assert.equal(UserQuestionResponseSchema.safeParse({ type: 'user_question_response', answer: 'a', answers: mkAnswers(100) }).success, true)
+    assert.equal(UserQuestionResponseSchema.safeParse({ type: 'user_question_response', answer: 'a', answers: mkAnswers(101) }).success, false)
+  })
+
+  it('SandboxSchema rejects arrays larger than 256', async () => {
+    const { SandboxSchema } = await import('@chroxy/protocol')
+    const mk = (n) => Array.from({ length: n }, (_, i) => `item${i}`)
+    assert.equal(SandboxSchema.safeParse({ network: { allowedDomains: mk(256) } }).success, true)
+    assert.equal(SandboxSchema.safeParse({ network: { allowedDomains: mk(257) } }).success, false)
+    assert.equal(SandboxSchema.safeParse({ filesystem: { allowedPaths: mk(257) } }).success, false)
+    assert.equal(SandboxSchema.safeParse({ filesystem: { deniedPaths: mk(257) } }).success, false)
+    assert.equal(SandboxSchema.safeParse({ bash: { allowedCommands: mk(257) } }).success, false)
+  })
+
+  it('QueryPermissionAuditSchema bounds limit to 1..10000', async () => {
+    const { QueryPermissionAuditSchema } = await import('../src/ws-schemas.js')
+    assert.equal(QueryPermissionAuditSchema.safeParse({ type: 'query_permission_audit', limit: 10_000 }).success, true)
+    assert.equal(QueryPermissionAuditSchema.safeParse({ type: 'query_permission_audit', limit: 10_001 }).success, false)
+    assert.equal(QueryPermissionAuditSchema.safeParse({ type: 'query_permission_audit', limit: 0 }).success, false)
+  })
+
   it('session-db.js does not exist', async () => {
     try {
       await import('../src/session-db.js')
