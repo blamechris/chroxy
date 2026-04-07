@@ -24,6 +24,7 @@ Configuration values are resolved in the following order (highest priority first
 | `allowedTools` | array | `--allowed-tools <list>` | `CHROXY_ALLOWED_TOOLS` | Auto-approved tools (CLI mode) |
 | `resume` | boolean | `--resume` / `-r` | `CHROXY_RESUME` | Resume existing session |
 | `noAuth` | boolean | `--no-auth` | `CHROXY_NO_AUTH` | Disable authentication (localhost only) |
+| `costBudget` | number | `--cost-budget <dollars>` | `CHROXY_COST_BUDGET` | Per-session cost budget in dollars. Applied independently to each session (not a shared pool across sessions). Warns at 80%, pauses the session at 100%. |
 
 ## Examples
 
