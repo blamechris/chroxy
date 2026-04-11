@@ -16,9 +16,10 @@ web-build/
 # Mock server PID file
 .maestro/scripts/.mock-server.pid
 
-# CNG native projects — generated locally by `expo run:android`/`run:ios`,
-# never commit. Leaving them in the working tree makes EAS Build upload them,
-# which collides with the `prebuildCommand` in eas.json and fails the PREBUILD
-# phase with "unknown or unexpected option: --platform".
+# Generated Android native project — `expo run:android` produces this locally
+# and leaving it in the working tree makes EAS Build upload it, which collides
+# with the `prebuildCommand` in eas.json and fails the PREBUILD phase with
+# "unknown or unexpected option: --platform". The iOS side is NOT CNG on this
+# project — `packages/app/ios/` contains committed LiveActivity Swift code
+# (added in #2278) and must stay tracked.
 android/
-ios/
