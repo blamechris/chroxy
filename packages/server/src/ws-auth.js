@@ -51,11 +51,21 @@ export function handleAuthMessage(ctx, ws, msg) {
   }
   const authData = authParsed.data
 
-  // Check rate limit before processing auth
-  const ip = client.socketIp
-  const failure = authFailures.get(ip)
+  // Check rate limit before processing auth.
+  //
+  // Must use client.rateLimitKey (CF-Connecting-IP when behind a Cloudflare
+  // tunnel, socketIp otherwise) — NOT client.socketIp. Cloudflare tunnels
+  // deliver every request with socketIp=127.0.0.1, so keying off socketIp
+  // would lump every real caller into one shared bucket and let a single
+  // unauthenticated attacker lock out every legitimate client by flooding
+  // failed-auth attempts.
+  //
+  // See 88f54dc39 for the equivalent fix in the main WS rate limiter; this
+  // call site was missed at the time.
+  const rateLimitKey = client.rateLimitKey || client.socketIp
+  const failure = authFailures.get(rateLimitKey)
   if (failure && failure.blockedUntil > Date.now()) {
-    log.warn(`Auth rate-limited for IP ${ip} (${failure.count} failures)`)
+    log.warn(`Auth rate-limited for ${rateLimitKey} (${failure.count} failures)`)
     send(ws, { type: 'auth_fail', reason: 'rate_limited' })
     ws.close()
     return true
@@ -64,7 +74,7 @@ export function handleAuthMessage(ctx, ws, msg) {
   if (!authRequired || isTokenValid(msg.token)) {
     client.authenticated = true
     client.authTime = Date.now()
-    authFailures.delete(ip)
+    authFailures.delete(rateLimitKey)
 
     const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)
     const clientVersion = hasVersion ? msg.protocolVersion : null
@@ -105,15 +115,16 @@ export function handleAuthMessage(ctx, ws, msg) {
     return true
   }
 
-  // Auth failure — track for rate limiting
+  // Auth failure — track for rate limiting, keyed by rateLimitKey (the
+  // trusted CF-Connecting-IP identity, not the TLS socket peer).
   const now = Date.now()
-  const existing = authFailures.get(ip) || { count: 0, firstFailure: now, blockedUntil: 0 }
-  if (!authFailures.has(ip)) evictOldestIfFull(authFailures)
+  const existing = authFailures.get(rateLimitKey) || { count: 0, firstFailure: now, blockedUntil: 0 }
+  if (!authFailures.has(rateLimitKey)) evictOldestIfFull(authFailures)
   existing.count++
   const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
   existing.blockedUntil = now + backoff
-  authFailures.set(ip, existing)
-  log.warn(`Auth failure from IP ${ip} (attempt ${existing.count}, blocked for ${backoff}ms)`)
+  authFailures.set(rateLimitKey, existing)
+  log.warn(`Auth failure from ${rateLimitKey} (attempt ${existing.count}, blocked for ${backoff}ms)`)
   send(ws, { type: 'auth_fail', reason: 'invalid_token' })
   ws.close()
   return true
@@ -247,14 +258,33 @@ export function handleKeyExchange(ctx, ws, msg) {
       ws.close(1008, 'Invalid key_exchange message')
       return true
     }
+    // Require a client-supplied salt. Without one, we would fall back to the
+    // raw DH shared key with nonce=0 on every reconnect — the exact
+    // nonce-reuse-on-reconnect vulnerability fixed in 1fa8eda5e, and the
+    // per-connection key derivation wired in 600612649 was never actually
+    // enforced: a downgraded or pre-600612649 client that omitted `salt`
+    // silently got the old broken behavior. Required unconditionally now;
+    // older clients fail with a clear error.
+    if (!msg.salt) {
+      log.warn(`key_exchange from ${client.id} missing required 'salt' field; client likely predates 600612649 (chroxy >= v0.6.8). Rejecting to avoid nonce reuse on reconnect.`)
+      try {
+        ws.send(JSON.stringify({
+          type: 'error',
+          code: 'KEY_EXCHANGE_SALT_REQUIRED',
+          details: 'key_exchange requires a client-supplied salt for per-connection key derivation. Please upgrade to a client build that includes commit 600612649 (Chroxy v0.6.8 or later).',
+        }))
+      } catch (err) {
+        log.error(`Failed to send salt-required error: ${err.message}`)
+      }
+      ws.close(1008, 'key_exchange salt required')
+      return true
+    }
     const serverKp = createKeyPair()
     const rawSharedKey = deriveSharedKey(msg.publicKey, serverKp.secretKey)
-    // If the client sent a salt, derive a per-connection sub-key so the nonce
-    // counter can safely restart at 0 on each reconnect.  Old clients that
-    // omit the salt fall back to the raw DH shared key (backward compat).
-    const encryptionKey = msg.salt
-      ? deriveConnectionKey(rawSharedKey, msg.salt)
-      : rawSharedKey
+    // Derive a per-connection sub-key so the nonce counter can safely restart
+    // at 0 on each reconnect without reusing (key, nonce) pairs from a prior
+    // session. This is the enforced path after the 2026-04-11 audit.
+    const encryptionKey = deriveConnectionKey(rawSharedKey, msg.salt)
     client.encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 }
     client.encryptionPending = false
     try {

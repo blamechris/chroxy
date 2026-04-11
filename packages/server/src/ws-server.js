@@ -795,9 +795,28 @@ export class WsServer {
         } catch {
           return // ignore non-JSON
         }
-        // Decrypt incoming encrypted messages
+        // Decrypt incoming encrypted messages, and enforce encryption once
+        // a key exchange has established it. Without this post-handshake
+        // rejection, a buggy or malicious client could unilaterally downgrade
+        // to plaintext after a successful key_exchange — the server would
+        // happily process the plaintext frame as a normal message. Discovered
+        // in the 2026-04-11 production readiness audit.
         const client = this.clients.get(ws)
-        if (msg.type === 'encrypted' && client?.encryptionState) {
+        if (client?.encryptionState) {
+          if (msg.type !== 'encrypted') {
+            log.error(`Plaintext frame from ${client.id} after encryption established (type=${msg?.type}); closing connection`)
+            try {
+              ws.send(JSON.stringify({
+                type: 'error',
+                code: 'ENCRYPTION_DOWNGRADE_BLOCKED',
+                details: 'All frames must be encrypted after a successful key_exchange. Plaintext downgrade is not permitted.',
+              }))
+            } catch {
+              // Best-effort — client may already be disconnected
+            }
+            ws.close(1008, 'encryption required')
+            return
+          }
           const envParsed = EncryptedEnvelopeSchema.safeParse(msg)
           if (!envParsed.success) {
             log.error(`Invalid encrypted message envelope from ${client.id}`)

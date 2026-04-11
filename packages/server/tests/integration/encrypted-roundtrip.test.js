@@ -326,4 +326,48 @@ describe('integration: encrypted WebSocket roundtrip', () => {
 
     ws.close()
   })
+
+  it('REJECTS plaintext frames after encryption is established (2026-04-11 audit blocker 2)', async () => {
+    // Pre-audit behavior: after a successful key_exchange, ws-server.js only
+    // decrypted frames where msg.type === 'encrypted' but never rejected other
+    // frames. A buggy or malicious client could unilaterally downgrade to
+    // plaintext on the next message and the server would happily process it
+    // as a normal application message. This test asserts that such a downgrade
+    // now terminates the connection.
+    const mockSession = createMockSession()
+    server = new EncryptedWsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await openRawClient(port)
+
+    // Complete the full handshake — encryption is now live on this connection.
+    await doKeyExchange(ws, messages)
+
+    // Now send a plaintext frame. Pre-fix, the server silently processed this
+    // as a regular 'input' message. Post-fix, it should close the connection
+    // with 1008 and an ENCRYPTION_DOWNGRADE_BLOCKED error code.
+    send(ws, { type: 'input', data: 'plaintext-after-handshake' })
+
+    // Wait for either the error frame or the close event
+    const closed = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ timeout: true }), 2000)
+      ws.once('close', (code, reason) => {
+        clearTimeout(timer)
+        resolve({ code, reason: reason?.toString() ?? '' })
+      })
+    })
+
+    assert.ok(!closed.timeout, 'server must close the connection when a plaintext frame arrives post-handshake')
+    assert.equal(closed.code, 1008, 'close code should be 1008 (policy violation)')
+
+    // If an error frame was sent before close, it should carry the documented code
+    const errMsg = messages.find(m => m.type === 'error' && m.code === 'ENCRYPTION_DOWNGRADE_BLOCKED')
+    if (errMsg) {
+      assert.equal(errMsg.code, 'ENCRYPTION_DOWNGRADE_BLOCKED')
+    }
+  })
 })

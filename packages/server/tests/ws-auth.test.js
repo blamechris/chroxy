@@ -46,11 +46,17 @@ function makeMockWs() {
 /**
  * Build a minimal mock client object as ws-server.js would put in `clients`.
  */
-function makeMockClient({ authenticated = false, ip = '127.0.0.1' } = {}) {
+function makeMockClient({ authenticated = false, ip = '127.0.0.1', rateLimitKey } = {}) {
   return {
     id: 'client-test-1',
     authenticated,
     socketIp: ip,
+    // rateLimitKey is the trusted CF-Connecting-IP identity that ws-server.js
+    // computes per-connection. In tests, default to the socket IP so
+    // pre-existing tests keep working unchanged; tests that exercise the
+    // rate-limit path specifically can override this to test CF-vs-socket
+    // behavior.
+    rateLimitKey: rateLimitKey ?? ip,
     authTime: null,
     protocolVersion: null,
     deviceInfo: null,
@@ -381,6 +387,52 @@ describe('handleAuthMessage', () => {
       handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token' })
       assert.equal(client.authenticated, true)
       assert.equal(onAuthSuccess.callCount, 1)
+    })
+
+    it('keys failures by client.rateLimitKey, not client.socketIp (2026-04-11 audit blocker 7)', () => {
+      // Scenario: client is behind a Cloudflare tunnel, so socketIp is
+      // 127.0.0.1 but the trusted rate-limit identity (from CF-Connecting-IP)
+      // is 203.0.113.42. A legitimate client from 198.51.100.7 should NOT be
+      // rate-limited just because a different real IP has failed 5 times —
+      // because keying off socketIp would lump them both into one bucket.
+      const authFailures = new Map([
+        // Attacker from 203.0.113.42 has been blocked
+        ['203.0.113.42', { count: 5, firstFailure: Date.now(), blockedUntil: Date.now() + 30_000 }],
+      ])
+      const legitClient = makeMockClient({
+        ip: '127.0.0.1',          // Cloudflare tunnel peer
+        rateLimitKey: '198.51.100.7',  // different real CF-Connecting-IP
+      })
+      const { ctx, ws, client, onAuthSuccess } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+        authFailures,
+        client: legitClient,
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token' })
+      assert.equal(client.authenticated, true, 'legit client should auth successfully — only the attacker IP is blocked')
+      assert.equal(onAuthSuccess.callCount, 1)
+    })
+
+    it('tracks failures against rateLimitKey, not socketIp (2026-04-11 audit blocker 7)', () => {
+      // After a failed auth, the failure count should be recorded under the
+      // CF-Connecting-IP, so attackers can only DoS themselves, not every
+      // other tunnel peer.
+      const authFailures = new Map()
+      const attacker = makeMockClient({
+        ip: '127.0.0.1',
+        rateLimitKey: '203.0.113.42',
+      })
+      const { ctx, ws } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => false,  // bad token
+        authFailures,
+        client: attacker,
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'bad' })
+      // Failure was recorded under the real CF-Connecting-IP, not the 127.0.0.1 socket peer
+      assert.ok(authFailures.has('203.0.113.42'), 'failure should be keyed by rateLimitKey')
+      assert.ok(!authFailures.has('127.0.0.1'), 'failure must NOT be keyed by socketIp')
     })
   })
 
@@ -872,12 +924,13 @@ describe('handleKeyExchange', () => {
       // Use a real nacl keypair so createKeyPair + deriveSharedKey work
       const clientKp = nacl.box.keyPair()
       const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
 
       const ws = makeMockWs()
       const { ctx, client, flushPostAuthQueue } = makeKeyExchangeCtx({ ws })
       client.postAuthQueue = [{ type: 'session_list' }]
 
-      const result = handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64 })
+      const result = handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
       assert.equal(result, true)
 
       // Encryption state should be set
@@ -929,7 +982,12 @@ describe('handleKeyExchange', () => {
         'server and client must derive the same per-connection sub-key')
     })
 
-    it('uses raw shared key when client does NOT send salt (backward compat)', () => {
+    it('REJECTS key_exchange without salt (2026-04-11 audit blocker 3)', () => {
+      // Pre-audit behavior silently fell back to the raw DH shared key when
+      // the client omitted `salt`, re-introducing the nonce-reuse-on-reconnect
+      // vulnerability (1fa8eda5e) that per-connection key derivation
+      // (600612649) was supposed to fix. The server must now reject the
+      // no-salt case with a clear error code.
       const clientKp = nacl.box.keyPair()
       const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
 
@@ -939,13 +997,18 @@ describe('handleKeyExchange', () => {
       const result = handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64 })
       assert.equal(result, true)
 
-      // Client side: derive raw shared key (no salt)
-      const keOk = ws.sent().find(m => m.type === 'key_exchange_ok')
-      const rawSharedKey = deriveSharedKey(keOk.publicKey, clientKp.secretKey)
+      // Server should have sent an error with the KEY_EXCHANGE_SALT_REQUIRED code
+      const sent = ws.sent()
+      const errMsg = sent.find(m => m.type === 'error')
+      assert.ok(errMsg, 'server should send an error when salt is missing')
+      assert.equal(errMsg.code, 'KEY_EXCHANGE_SALT_REQUIRED')
 
-      assert.ok(client.encryptionState)
-      assert.deepEqual(client.encryptionState.sharedKey, rawSharedKey,
-        'without salt, server must use the raw DH shared key')
+      // Connection should be closed with 1008 policy violation
+      assert.equal(ws.closed, true)
+      assert.equal(ws.closeCode, 1008)
+
+      // Encryption state must NOT be set — the server never got past the reject
+      assert.ok(!client.encryptionState, 'encryptionState must not leak when salt is missing')
     })
 
     it('produces different encryption keys for same DH pair with different salts', () => {
