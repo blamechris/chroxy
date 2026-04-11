@@ -285,16 +285,31 @@ jobs:
       # The "non-CNG project with native config" check is excluded — the project
       # intentionally commits packages/app/ios/ for LiveActivity custom targets
       # and is tracked as a P2 migration, not a P0 failure.
+      #
+      # expo-doctor is pinned to a specific version (not `@1`) so that a minor
+      # release can't silently change the human-readable title string this
+      # filter keys off. When bumping this pin, re-verify that the allowlisted
+      # warning string below still matches the exact output of the new
+      # expo-doctor release (or switch to a structured --json output if/when
+      # upstream adds one).
       - name: Run expo-doctor
         run: |
           set -euo pipefail
-          output=$(npx -y expo-doctor@1 2>&1) || status=$?
+          status=0
+          output=$(NO_COLOR=1 npx -y expo-doctor@1.18.18 2>&1) || status=$?
           echo "$output"
+          failures=$(printf '%s\n' "$output" | grep -E '^✖' || true)
           # Strip the known-acceptable "mixed CNG" warning before deciding to fail.
-          filtered=$(echo "$output" | grep -v "Check for app config fields that may not be synced in a non-CNG project" || true)
-          if echo "$filtered" | grep -qE '^✖'; then
+          filtered_failures=$(printf '%s\n' "$failures" | grep -v "Check for app config fields that may not be synced in a non-CNG project" || true)
+          if [ -n "$filtered_failures" ]; then
             echo "::error::expo-doctor reported check failures above. Fix them or extend the allowlist in .github/workflows/ci.yml if the warning is genuinely accepted."
             exit 1
+          fi
+          # If the tool itself exited non-zero but produced no recognizable '✖'
+          # failure line, fail loudly — that's a tool crash, not a clean pass.
+          if [ "$status" -ne 0 ] && [ -z "$failures" ]; then
+            echo "::error::expo-doctor failed to run successfully (exit $status) without reporting any doctor check failures above. This usually means the tool itself crashed (network, install failure, runtime error) — do NOT interpret as a clean pass."
+            exit "$status"
           fi
 
   protocol-tests:

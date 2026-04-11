@@ -172,10 +172,30 @@ if [ -f "$IOS_INFO_PLIST" ]; then
   # Replace the string immediately following CFBundleShortVersionString.
   # awk is chosen over plutil because plutil rewrites the whole file
   # (changing indentation and field order) and we only want a minimal diff.
+  # getline is guarded: if the key somehow lands on the last line (malformed
+  # file, unexpected reformatting), we don't silently no-op — the script
+  # fails loudly via the post-run verification grep below.
   awk -v new="$NEW_VERSION" '
-    /<key>CFBundleShortVersionString<\/key>/ { print; getline; sub(/>[^<]*</, ">" new "<"); print; next }
+    /<key>CFBundleShortVersionString<\/key>/ {
+      print
+      if ((getline next_line) > 0) {
+        sub(/>[^<]*</, ">" new "<", next_line)
+        print next_line
+      }
+      next
+    }
     { print }
   ' "$IOS_INFO_PLIST" > "$IOS_INFO_PLIST.tmp" && mv "$IOS_INFO_PLIST.tmp" "$IOS_INFO_PLIST"
+
+  # Verify the replacement actually landed — catches the "getline returned 0"
+  # case above, any regex mismatch (e.g., Info.plist reformatted to put the
+  # <string> on a non-adjacent line), and future schema drift.
+  if ! grep -q "<string>$NEW_VERSION</string>" "$IOS_INFO_PLIST"; then
+    echo "Error: Failed to update CFBundleShortVersionString in $IOS_INFO_PLIST to $NEW_VERSION" >&2
+    echo "Current CFBundleShortVersionString block:" >&2
+    grep -A 1 "CFBundleShortVersionString" "$IOS_INFO_PLIST" >&2 || true
+    exit 1
+  fi
 fi
 
 # Regenerate Cargo.lock
@@ -192,7 +212,7 @@ echo "  $STORE_CORE_PKG"
 echo "  $TAURI_CONF"
 echo "  $CARGO_TOML"
 echo "  $ROOT_LOCK (top-level + all workspace entries)"
-echo "  $SERVER_LOCK (top-level + all workspace entries)"
+echo "  $SERVER_LOCK (standalone server package lockfile — no workspace entries)"
 echo "  Cargo.lock"
 echo "  $IOS_INFO_PLIST"
 echo ""
