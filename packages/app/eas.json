@@ -9,12 +9,10 @@
       "distribution": "internal"
     },
     "preview": {
-      "distribution": "internal",
-      "prebuildCommand": "cd ../protocol && npx tsc && cd ../store-core && npm run build:crypto"
+      "distribution": "internal"
     },
     "production": {
-      "autoIncrement": true,
-      "prebuildCommand": "cd ../protocol && npx tsc && cd ../store-core && npm run build:crypto"
+      "autoIncrement": true
     }
   },
   "submit": {
