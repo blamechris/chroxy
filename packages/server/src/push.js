@@ -2,8 +2,9 @@
  * PushManager — sends push notifications via Expo Push API.
  *
  * Stores push tokens registered by connected clients and sends
- * notifications for permission prompts, idle alerts, and activity updates.
- * Rate-limited per category to avoid notification spam.
+ * notifications for permission prompts, user questions, session errors,
+ * and unattended query completions. Categories and their rate limits are
+ * declared in RATE_LIMITS below.
  *
  * No Expo account or additional infrastructure required — uses the
  * free Expo Push Service (HTTPS POST to exp.host).
@@ -194,6 +195,15 @@ export class PushManager {
 
   /**
    * Send a push notification to all registered tokens.
+   *
+   * Category names listed here are the only ones with explicit RATE_LIMITS
+   * entries. Any other string still works but falls through to the
+   * `?? 30_000` default inside send() — if you're adding a new category,
+   * declare its rate limit explicitly in RATE_LIMITS. Note that `'idle'`
+   * was intentionally removed during the 2026-04-11 notification audit
+   * (it was firing in duplicate with activity_update); resurrecting it
+   * should be a deliberate, documented decision.
+   *
    * @param {string} category - 'permission' | 'result' | 'activity_update' | 'activity_waiting' | 'activity_error'
    * @param {string} title - Notification title
    * @param {string} body - Notification body text

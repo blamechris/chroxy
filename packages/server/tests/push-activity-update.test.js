@@ -6,8 +6,9 @@ import { PushManager } from '../src/push.js'
  * Tests for the activity_update push notification category (#2085)
  *
  * Verifies:
- *   - activity_update category exists with correct rate limit
- *   - thinking/writing states are throttled (10s)
+ *   - activity_update category sends immediately with no rate limit
+ *     (the noActiveViewers gate in server-cli.js is the real dedupe
+ *     mechanism — see the 2026-04-11 notification audit fix)
  *   - waiting/error states send immediately (0ms)
  *   - Correct payload shape for activity updates
  */
