@@ -164,11 +164,18 @@ export function handlePairMessage(ctx, ws, msg) {
   }
   const pairData = pairParsed.data
 
-  // Check rate limit
-  const ip = client.socketIp
-  const failure = authFailures.get(ip)
+  // Check rate limit.
+  //
+  // Must use client.rateLimitKey (CF-Connecting-IP when behind a Cloudflare
+  // tunnel) — NOT client.socketIp. Behind cloudflared every client has
+  // socketIp=127.0.0.1, so keying pairing failures off socketIp lets one
+  // attacker lock out every legitimate pairing attempt via the shared
+  // bucket. Same pattern as handleAuthMessage above. 2026-04-11 audit
+  // blocker 7 follow-up — Copilot caught this second site on PR #2805.
+  const rateLimitKey = client.rateLimitKey || client.socketIp
+  const failure = authFailures.get(rateLimitKey)
   if (failure && failure.blockedUntil > Date.now()) {
-    log.warn(`Pair rate-limited for IP ${ip} (${failure.count} failures)`)
+    log.warn(`Pair rate-limited for ${rateLimitKey} (${failure.count} failures)`)
     send(ws, { type: 'pair_fail', reason: 'rate_limited' })
     ws.close()
     return true
@@ -190,7 +197,7 @@ export function handlePairMessage(ctx, ws, msg) {
     client.authenticated = true
     client.authTime = Date.now()
     client.pairedWith = msg.pairingId
-    authFailures.delete(ip)
+    authFailures.delete(rateLimitKey)
 
     client.protocolVersion = clientVersion !== null
       ? Math.min(clientVersion, serverProtocolVersion)
@@ -215,15 +222,16 @@ export function handlePairMessage(ctx, ws, msg) {
     return true
   }
 
-  // Pairing failure — track for rate limiting
+  // Pairing failure — track for rate limiting, keyed by the trusted
+  // rateLimitKey (CF-Connecting-IP) rather than the shared socket peer.
   const now = Date.now()
-  const existing = authFailures.get(ip) || { count: 0, firstFailure: now, blockedUntil: 0 }
-  if (!authFailures.has(ip)) evictOldestIfFull(authFailures)
+  const existing = authFailures.get(rateLimitKey) || { count: 0, firstFailure: now, blockedUntil: 0 }
+  if (!authFailures.has(rateLimitKey)) evictOldestIfFull(authFailures)
   existing.count++
   const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
   existing.blockedUntil = now + backoff
-  authFailures.set(ip, existing)
-  log.warn(`Pair failure from IP ${ip}: ${result.reason} (attempt ${existing.count})`)
+  authFailures.set(rateLimitKey, existing)
+  log.warn(`Pair failure from ${rateLimitKey}: ${result.reason} (attempt ${existing.count})`)
   send(ws, { type: 'pair_fail', reason: result.reason })
   ws.close()
   return true
@@ -246,37 +254,48 @@ export function handleKeyExchange(ctx, ws, msg) {
 
   if (msg.type === 'key_exchange') {
     clearTimeout(client._keyExchangeTimeout)
-    const keParsed = KeyExchangeSchema.safeParse(msg)
-    if (!keParsed.success) {
-      const details = keParsed.error.issues.map(i => i.message).join(', ')
-      log.warn(`Invalid key_exchange message from ${client.id}: ${details}`)
-      try {
-        ws.send(JSON.stringify({ type: 'error', code: 'INVALID_MESSAGE', details }))
-      } catch (err) {
-        log.error(`Failed to send key_exchange error: ${err.message}`)
-      }
-      ws.close(1008, 'Invalid key_exchange message')
-      return true
-    }
-    // Require a client-supplied salt. Without one, we would fall back to the
-    // raw DH shared key with nonce=0 on every reconnect — the exact
-    // nonce-reuse-on-reconnect vulnerability fixed in 1fa8eda5e, and the
-    // per-connection key derivation wired in 600612649 was never actually
-    // enforced: a downgraded or pre-600612649 client that omitted `salt`
-    // silently got the old broken behavior. Required unconditionally now;
-    // older clients fail with a clear error.
-    if (!msg.salt) {
+
+    // Check the salt requirement BEFORE schema validation. Since
+    // KeyExchangeSchema now requires salt, the safeParse below would reject
+    // old no-salt clients with a generic INVALID_MESSAGE. Hoisting the
+    // salt-specific check up here lets us give clients a precise and
+    // actionable KEY_EXCHANGE_SALT_REQUIRED error that names the exact
+    // upgrade path.
+    //
+    // We still do a minimum shape check (type and a string publicKey) before
+    // issuing the targeted error — if the payload isn't even a key_exchange,
+    // fall through to the schema validator for the generic error.
+    if (typeof msg.publicKey === 'string' && !msg.salt) {
       log.warn(`key_exchange from ${client.id} missing required 'salt' field; client likely predates 600612649 (chroxy >= v0.6.8). Rejecting to avoid nonce reuse on reconnect.`)
       try {
         ws.send(JSON.stringify({
           type: 'error',
           code: 'KEY_EXCHANGE_SALT_REQUIRED',
-          details: 'key_exchange requires a client-supplied salt for per-connection key derivation. Please upgrade to a client build that includes commit 600612649 (Chroxy v0.6.8 or later).',
+          message: 'key_exchange requires a client-supplied salt. Please upgrade your Chroxy client to v0.6.8 or later.',
+          details: 'key_exchange requires a client-supplied salt for per-connection key derivation. Older clients that omit salt would fall back to the raw DH shared key with nonce=0 on reconnect, re-introducing a nonce-reuse vulnerability. Upgrade the client to a build that includes commit 600612649 (Chroxy v0.6.8 or later).',
         }))
       } catch (err) {
         log.error(`Failed to send salt-required error: ${err.message}`)
       }
       ws.close(1008, 'key_exchange salt required')
+      return true
+    }
+
+    const keParsed = KeyExchangeSchema.safeParse(msg)
+    if (!keParsed.success) {
+      const details = keParsed.error.issues.map(i => i.message).join(', ')
+      log.warn(`Invalid key_exchange message from ${client.id}: ${details}`)
+      try {
+        ws.send(JSON.stringify({
+          type: 'error',
+          code: 'INVALID_MESSAGE',
+          message: 'Invalid key_exchange message.',
+          details,
+        }))
+      } catch (err) {
+        log.error(`Failed to send key_exchange error: ${err.message}`)
+      }
+      ws.close(1008, 'Invalid key_exchange message')
       return true
     }
     const serverKp = createKeyPair()

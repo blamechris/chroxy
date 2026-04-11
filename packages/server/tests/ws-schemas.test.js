@@ -250,7 +250,7 @@ describe('simple client schemas', () => {
     ['ListAgentsSchema', ListAgentsSchema, { type: 'list_agents' }],
     ['ListProvidersSchema', ListProvidersSchema, { type: 'list_providers' }],
     ['RequestFullHistorySchema', RequestFullHistorySchema, { type: 'request_full_history', sessionId: 'sess-1' }],
-    ['KeyExchangeSchema', KeyExchangeSchema, { type: 'key_exchange', publicKey: 'base64pubkey' }],
+    ['KeyExchangeSchema', KeyExchangeSchema, { type: 'key_exchange', publicKey: 'base64pubkey', salt: 'base64salt' }],
     ['PingSchema', PingSchema, { type: 'ping' }],
     ['RequestSessionContextSchema', RequestSessionContextSchema, { type: 'request_session_context', sessionId: 'sess-1' }],
     ['GetDiffSchema', GetDiffSchema, { type: 'get_diff' }],

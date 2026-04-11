@@ -399,7 +399,7 @@ describe('integration: encrypted WebSocket roundtrip', () => {
     // with 1008 and an ENCRYPTION_DOWNGRADE_BLOCKED error code.
     send(ws, { type: 'input', data: 'plaintext-after-handshake' })
 
-    // Wait for either the error frame or the close event
+    // Wait for the close event
     const closed = await new Promise((resolve) => {
       const timer = setTimeout(() => resolve({ timeout: true }), 2000)
       ws.once('close', (code, reason) => {
@@ -410,11 +410,13 @@ describe('integration: encrypted WebSocket roundtrip', () => {
 
     assert.ok(!closed.timeout, 'server must close the connection when a plaintext frame arrives post-handshake')
     assert.equal(closed.code, 1008, 'close code should be 1008 (policy violation)')
+    assert.equal(closed.reason, 'encryption required', 'close reason should clearly indicate the enforcement')
 
-    // If an error frame was sent before close, it should carry the documented code
-    const errMsg = messages.find(m => m.type === 'error' && m.code === 'ENCRYPTION_DOWNGRADE_BLOCKED')
-    if (errMsg) {
-      assert.equal(errMsg.code, 'ENCRYPTION_DOWNGRADE_BLOCKED')
-    }
+    // Critically: the server must NOT have sent any plaintext error frame
+    // back. Doing so would itself be a post-handshake plaintext leak — the
+    // whole point of this check is to enforce the no-plaintext invariant.
+    // No error frame from the server, period.
+    const plaintextErr = messages.find(m => m.type === 'error')
+    assert.equal(plaintextErr, undefined, 'server must NOT emit a plaintext error frame on downgrade attempt — doing so would break the invariant this check enforces')
   })
 })

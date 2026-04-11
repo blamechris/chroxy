@@ -812,19 +812,19 @@ export class WsServer {
         // to plaintext after a successful key_exchange — the server would
         // happily process the plaintext frame as a normal message. Discovered
         // in the 2026-04-11 production readiness audit.
+        //
+        // On a downgrade attempt, we log server-side (diagnostics for the
+        // operator) and close silently with 1008 + a policy-violation reason
+        // in the WebSocket close frame. We deliberately do NOT send a
+        // plaintext error envelope back — doing so would itself leak a
+        // plaintext frame after a successful handshake, contradicting the
+        // very invariant this check exists to enforce. The WebSocket close
+        // reason string ('encryption required') is diagnostic enough for a
+        // legitimate misconfigured client.
         const client = this.clients.get(ws)
         if (client?.encryptionState) {
           if (msg.type !== 'encrypted') {
             log.error(`Plaintext frame from ${client.id} after encryption established (type=${msg?.type}); closing connection`)
-            try {
-              ws.send(JSON.stringify({
-                type: 'error',
-                code: 'ENCRYPTION_DOWNGRADE_BLOCKED',
-                details: 'All frames must be encrypted after a successful key_exchange. Plaintext downgrade is not permitted.',
-              }))
-            } catch {
-              // Best-effort — client may already be disconnected
-            }
             ws.close(1008, 'encryption required')
             return
           }

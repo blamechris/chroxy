@@ -732,6 +732,39 @@ describe('handlePairMessage', () => {
       assert.equal(ws.lastSent().reason, 'rate_limited')
       assert.equal(ws.closed, true)
     })
+
+    it('keys pair failures by client.rateLimitKey, not client.socketIp (2026-04-11 audit blocker 7 — Copilot follow-up on PR #2805)', () => {
+      // Same scenario as the handleAuthMessage test: every Cloudflare tunnel
+      // peer has socketIp='127.0.0.1'. Seed authFailures with the shared
+      // 127.0.0.1 key. A legit client with its own CF-Connecting-IP should
+      // still be able to pair — but pre-fix would be rate-limited because
+      // the lookup read socketIp, hitting the shared seed.
+      const authFailures = new Map([
+        ['127.0.0.1', { count: 3, firstFailure: Date.now(), blockedUntil: Date.now() + 30_000 }],
+      ])
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'tok' })) }
+      const legitClient = makeMockClient({
+        ip: '127.0.0.1',          // Cloudflare tunnel peer (shared)
+        rateLimitKey: '198.51.100.7',  // real CF-Connecting-IP
+      })
+      const { ctx, ws, client, onAuthSuccess } = makePairCtx({ pairingManager, authFailures, client: legitClient })
+      handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'valid-id' })
+      assert.equal(client.authenticated, true, 'legit client must pair successfully — rate limit must key by rateLimitKey, not socketIp')
+      assert.equal(onAuthSuccess.callCount, 1)
+    })
+
+    it('tracks pair failures against rateLimitKey, not socketIp', () => {
+      const authFailures = new Map()
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: false, reason: 'invalid_pairing_id' })) }
+      const attacker = makeMockClient({
+        ip: '127.0.0.1',
+        rateLimitKey: '203.0.113.42',
+      })
+      const { ctx, ws } = makePairCtx({ pairingManager, authFailures, client: attacker })
+      handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'bad' })
+      assert.ok(authFailures.has('203.0.113.42'), 'pair failure must be keyed by rateLimitKey')
+      assert.ok(!authFailures.has('127.0.0.1'), 'pair failure must NOT be keyed by socketIp')
+    })
   })
 
   describe('successful pairing', () => {
