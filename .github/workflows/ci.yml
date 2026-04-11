@@ -252,6 +252,51 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+  app-expo-doctor:
+    name: App Expo Doctor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/app
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Build @chroxy/protocol
+        run: npm run build
+        working-directory: packages/protocol
+
+      # Run expo-doctor to catch app.json schema errors, native-module duplication,
+      # SDK-version drift, and other latent config bugs before they reach an EAS
+      # build. Added 2026-04-11 after a cascade of five failed EAS preview builds
+      # traced to bugs that expo-doctor would have flagged instantly. See
+      # docs/audit-results/eas-cng-config/ for the full post-mortem.
+      #
+      # The "non-CNG project with native config" check is excluded — the project
+      # intentionally commits packages/app/ios/ for LiveActivity custom targets
+      # and is tracked as a P2 migration, not a P0 failure.
+      - name: Run expo-doctor
+        run: |
+          set -euo pipefail
+          output=$(npx -y expo-doctor@1 2>&1) || status=$?
+          echo "$output"
+          # Strip the known-acceptable "mixed CNG" warning before deciding to fail.
+          filtered=$(echo "$output" | grep -v "Check for app config fields that may not be synced in a non-CNG project" || true)
+          if echo "$filtered" | grep -qE '^✖'; then
+            echo "::error::expo-doctor reported check failures above. Fix them or extend the allowlist in .github/workflows/ci.yml if the warning is genuinely accepted."
+            exit 1
+          fi
+
   protocol-tests:
     name: Protocol Tests
     runs-on: ubuntu-24.04
