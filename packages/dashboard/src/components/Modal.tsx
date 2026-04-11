@@ -48,25 +48,26 @@ export function Modal({ open, onClose, title, children, maxWidth }: ModalProps) 
       Array.from(content.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
 
     const initial = Array.from(content.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
-    if (initial.length > 0) {
-      initial[0].focus()
+    const firstInitial = initial[0]
+    if (firstInitial) {
+      firstInitial.focus()
     } else {
       content.setAttribute('tabindex', '-1')
       content.focus()
     }
 
-    function handleTrapKeyDown(e: KeyboardEvent) {
+    const handleTrapKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Tab') return
       // Only trap for the topmost modal
       const overlays = document.querySelectorAll('[data-modal-overlay]')
       if (overlays.length > 0 && overlays[overlays.length - 1] !== overlayRef.current) return
       const focusable = getFocusable()
-      if (focusable.length === 0) {
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (!first || !last) {
         e.preventDefault()
         return
       }
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
       const active = document.activeElement as HTMLElement | null
       if (e.shiftKey) {
         if (active === first || !content.contains(active)) {

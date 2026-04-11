@@ -20,6 +20,8 @@ STORE_CORE_PKG="$ROOT/packages/store-core/package.json"
 DASHBOARD_PKG="$ROOT/packages/dashboard/package.json"
 TAURI_CONF="$ROOT/packages/desktop/src-tauri/tauri.conf.json"
 CARGO_TOML="$ROOT/packages/desktop/src-tauri/Cargo.toml"
+ROOT_LOCK="$ROOT/package-lock.json"
+SERVER_LOCK="$ROOT/packages/server/package-lock.json"
 
 # Read current version from server package.json (single source of truth)
 CURRENT=$(node -e "console.log(require('$SERVER_PKG').version)")
@@ -129,6 +131,24 @@ if [ "$CARGO_VERIFY" -ne 1 ]; then
   exit 1
 fi
 
+# Update package-lock.json version fields (top-level + packages[""])
+# npm regenerates these lockfiles fully on `npm install`, but we update the version
+# fields explicitly so the committed lockfile metadata matches the bumped version and
+# doesn't drift across releases. Other lockfile fields are left untouched.
+for LOCK in "$ROOT_LOCK" "$SERVER_LOCK"; do
+  if [ -f "$LOCK" ]; then
+    node -e "
+      const fs = require('fs');
+      const lock = JSON.parse(fs.readFileSync('$LOCK', 'utf-8'));
+      lock.version = '$NEW_VERSION';
+      if (lock.packages && lock.packages['']) {
+        lock.packages[''].version = '$NEW_VERSION';
+      }
+      fs.writeFileSync('$LOCK', JSON.stringify(lock, null, 2) + '\n');
+    "
+  fi
+done
+
 # Regenerate Cargo.lock
 (cd "$ROOT/packages/desktop/src-tauri" && cargo generate-lockfile 2>/dev/null)
 
@@ -142,6 +162,8 @@ echo "  $PROTOCOL_PKG"
 echo "  $STORE_CORE_PKG"
 echo "  $TAURI_CONF"
 echo "  $CARGO_TOML"
+echo "  $ROOT_LOCK"
+echo "  $SERVER_LOCK"
 echo "  Cargo.lock"
 echo ""
 echo "New version: $NEW_VERSION"
