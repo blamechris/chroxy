@@ -207,13 +207,25 @@ describe('PushManager', () => {
       assert.equal(fetchMock.mock.calls.length, 2)
     })
 
-    it('blocks rapid sends for rate-limited categories (idle = 60s)', async () => {
+    it('blocks rapid sends for rate-limited categories (result = 30s)', async () => {
       manager.registerToken(VALID_TOKEN)
       const fetchMock = mockFetchOk()
       globalThis.fetch = fetchMock
 
+      await manager.send('result', 'T', 'B')
+      await manager.send('result', 'T', 'B')  // within 30s rate limit — blocked
+      assert.equal(fetchMock.mock.calls.length, 1)
+    })
+
+    it('applies the 30s default rate limit to unknown/unregistered categories', async () => {
+      manager.registerToken(VALID_TOKEN)
+      const fetchMock = mockFetchOk()
+      globalThis.fetch = fetchMock
+
+      // 'idle' was removed from the RATE_LIMITS map in the notification
+      // duplicate-fire fix; the ?? 30_000 fallback in send() now applies.
       await manager.send('idle', 'T', 'B')
-      await manager.send('idle', 'T', 'B')  // within 60s rate limit — blocked
+      await manager.send('idle', 'T', 'B')  // within 30s fallback — blocked
       assert.equal(fetchMock.mock.calls.length, 1)
     })
 

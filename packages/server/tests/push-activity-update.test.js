@@ -57,21 +57,19 @@ describe('PushManager — activity_update category (#2085)', () => {
     assert.equal(body[0].data.category, 'activity_update')
   })
 
-  it('throttles rapid activity_update sends (10s rate limit)', async () => {
+  it('sends activity_update immediately with no rate limit (notification audit 2026-04-11)', async () => {
+    // The 10s rate limit was originally added when activity_update fired on
+    // every stream_start / tool_start — those call sites were removed in
+    // PR #2621, leaving only the unattended-completion call site in
+    // server-cli.js, which is already structurally gated by the
+    // noActiveViewers check. The rate limit was silently dropping legitimate
+    // completions on fast back-to-back queries without preventing any real
+    // spam, so the notification audit removed it and standardized on the
+    // noActiveViewers gate as the sole dedupe mechanism.
     await manager.send('activity_update', 'T', 'thinking', { state: 'thinking' })
     await manager.send('activity_update', 'T', 'still thinking', { state: 'thinking' })
 
-    // Second send should be blocked by 10s rate limit
-    assert.equal(fetchMock.mock.calls.length, 1)
-  })
-
-  it('allows activity_update after rate limit window expires', async () => {
-    await manager.send('activity_update', 'T', 'thinking', { state: 'thinking' })
-
-    // Backdate by 11s to simulate expiry
-    manager._lastSent.set('activity_update', Date.now() - 11_000)
-
-    await manager.send('activity_update', 'T', 'writing', { state: 'writing' })
+    // Both must go through — no rate limit on this category anymore.
     assert.equal(fetchMock.mock.calls.length, 2)
   })
 

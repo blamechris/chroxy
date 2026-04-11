@@ -67,12 +67,22 @@ async function fetchWithRetry(url, options) {
   }
 }
 
-// Rate limits per category (ms) — prevents notification spam
+// Rate limits per category (ms) — prevents notification spam.
+//
+// History:
+// - PR #2621 removed stream_start / tool_start → activity_update pushes,
+//   so 'activity_update' now fires only on unattended 'result' events (the
+//   noActiveViewers gate in server-cli.js prevents spam structurally, not
+//   via this rate limit).
+// - The 'idle' category was removed from the server's event-handling in
+//   2026-04-11's notification audit after it was found to be firing in
+//   duplicate with 'activity_update' for the same unattended-completion
+//   case, producing two OS-level notifications per query. Left out of this
+//   map so a future resurrection has to be deliberate.
 const RATE_LIMITS = {
   permission: 0,       // Always send permission prompts immediately
-  idle: 60_000,        // At most once per minute for idle alerts
   result: 30_000,      // At most once per 30s for task completion
-  activity_update: 10_000,  // Throttled: thinking/writing state changes
+  activity_update: 0,       // Immediate: one push per unattended completion (noActiveViewers gate is the real dedupe)
   activity_waiting: 0,      // Immediate: permission/input waiting
   activity_error: 0,        // Immediate: session errors
   live_activity: 5_000,     // Live Activity updates: 5s throttle
@@ -184,7 +194,7 @@ export class PushManager {
 
   /**
    * Send a push notification to all registered tokens.
-   * @param {string} category - 'permission' | 'idle' | 'result' | 'activity_update' | 'activity_waiting' | 'activity_error'
+   * @param {string} category - 'permission' | 'result' | 'activity_update' | 'activity_waiting' | 'activity_error'
    * @param {string} title - Notification title
    * @param {string} body - Notification body text
    * @param {object} [data] - Extra data payload
