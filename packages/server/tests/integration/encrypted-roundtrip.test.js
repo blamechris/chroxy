@@ -326,4 +326,97 @@ describe('integration: encrypted WebSocket roundtrip', () => {
 
     ws.close()
   })
+
+  it('ignores non-object JSON payloads (regression: agent-review on Part A)', async () => {
+    // Before the Part A review-fix, the encryption-enforcement check read
+    // `msg.type !== 'encrypted'` without first verifying msg was an object.
+    // A client could send literal JSON `null` as a post-handshake plaintext
+    // frame and TypeError would escape past the gate into _handleMessage.
+    // The guard added in the review fix now rejects non-object payloads up
+    // front by returning silently; the connection should stay alive and
+    // subsequent legitimate encrypted traffic should still work.
+    const mockSession = createMockSession()
+    server = new EncryptedWsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await openRawClient(port)
+    const { sharedKey } = await doKeyExchange(ws, messages)
+
+    // Send literal JSON `null`, then `"string"`, then `42`, then `[]`.
+    // Each must be silently dropped — the server must NOT crash or advance
+    // the nonce counter, and the connection must stay open so a subsequent
+    // legitimate encrypted ping still works.
+    ws.send('null')
+    ws.send('"bare-string"')
+    ws.send('42')
+    ws.send('[]')
+
+    // Give the server 100ms to process all four — the handler returns
+    // synchronously for each drop, so this is a generous ceiling.
+    await new Promise(r => setTimeout(r, 100))
+    assert.equal(ws.readyState, 1 /* OPEN */, 'connection must stay open after non-object JSON')
+
+    // The connection still works: send a real encrypted ping and expect a reply.
+    const preCount = messages.filter(m => m.type === 'encrypted').length
+    const envelope = encrypt(JSON.stringify({ type: 'ping' }), sharedKey, 0, DIRECTION_CLIENT)
+    send(ws, envelope)
+    await waitFor(
+      () => messages.filter(m => m.type === 'encrypted').length > preCount
+        ? messages.filter(m => m.type === 'encrypted').slice(preCount)[0]
+        : null,
+      { timeoutMs: 3000, label: 'ping reply after non-object JSON drops' }
+    )
+
+    ws.close()
+  })
+
+  it('REJECTS plaintext frames after encryption is established (2026-04-11 audit blocker 2)', async () => {
+    // Pre-audit behavior: after a successful key_exchange, ws-server.js only
+    // decrypted frames where msg.type === 'encrypted' but never rejected other
+    // frames. A buggy or malicious client could unilaterally downgrade to
+    // plaintext on the next message and the server would happily process it
+    // as a normal application message. This test asserts that such a downgrade
+    // now terminates the connection.
+    const mockSession = createMockSession()
+    server = new EncryptedWsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await openRawClient(port)
+
+    // Complete the full handshake — encryption is now live on this connection.
+    await doKeyExchange(ws, messages)
+
+    // Now send a plaintext frame. Pre-fix, the server silently processed this
+    // as a regular 'input' message. Post-fix, it should close the connection
+    // with 1008 and an ENCRYPTION_DOWNGRADE_BLOCKED error code.
+    send(ws, { type: 'input', data: 'plaintext-after-handshake' })
+
+    // Wait for the close event
+    const closed = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ timeout: true }), 2000)
+      ws.once('close', (code, reason) => {
+        clearTimeout(timer)
+        resolve({ code, reason: reason?.toString() ?? '' })
+      })
+    })
+
+    assert.ok(!closed.timeout, 'server must close the connection when a plaintext frame arrives post-handshake')
+    assert.equal(closed.code, 1008, 'close code should be 1008 (policy violation)')
+    assert.equal(closed.reason, 'encryption required', 'close reason should clearly indicate the enforcement')
+
+    // Critically: the server must NOT have sent any plaintext error frame
+    // back. Doing so would itself be a post-handshake plaintext leak — the
+    // whole point of this check is to enforce the no-plaintext invariant.
+    // No error frame from the server, period.
+    const plaintextErr = messages.find(m => m.type === 'error')
+    assert.equal(plaintextErr, undefined, 'server must NOT emit a plaintext error frame on downgrade attempt — doing so would break the invariant this check enforces')
+  })
 })

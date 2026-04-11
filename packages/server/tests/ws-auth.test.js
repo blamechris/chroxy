@@ -46,11 +46,17 @@ function makeMockWs() {
 /**
  * Build a minimal mock client object as ws-server.js would put in `clients`.
  */
-function makeMockClient({ authenticated = false, ip = '127.0.0.1' } = {}) {
+function makeMockClient({ authenticated = false, ip = '127.0.0.1', rateLimitKey } = {}) {
   return {
     id: 'client-test-1',
     authenticated,
     socketIp: ip,
+    // rateLimitKey is the trusted CF-Connecting-IP identity that ws-server.js
+    // computes per-connection. In tests, default to the socket IP so
+    // pre-existing tests keep working unchanged; tests that exercise the
+    // rate-limit path specifically can override this to test CF-vs-socket
+    // behavior.
+    rateLimitKey: rateLimitKey ?? ip,
     authTime: null,
     protocolVersion: null,
     deviceInfo: null,
@@ -382,6 +388,54 @@ describe('handleAuthMessage', () => {
       assert.equal(client.authenticated, true)
       assert.equal(onAuthSuccess.callCount, 1)
     })
+
+    it('keys failures by client.rateLimitKey, not client.socketIp (2026-04-11 audit blocker 7)', () => {
+      // Scenario that FAILS against pre-fix code: every Cloudflare-tunnel
+      // peer has socketIp='127.0.0.1' (all traffic comes through cloudflared
+      // on loopback). Seed authFailures with the shared '127.0.0.1' key as
+      // a simulated prior attacker lockout. A legitimate client with its own
+      // CF-Connecting-IP of '198.51.100.7' should still succeed — but
+      // pre-fix would be rate-limited because the lookup happens against
+      // socketIp, hitting the '127.0.0.1' seed, which applies to every
+      // tunnel peer.
+      const authFailures = new Map([
+        ['127.0.0.1', { count: 5, firstFailure: Date.now(), blockedUntil: Date.now() + 30_000 }],
+      ])
+      const legitClient = makeMockClient({
+        ip: '127.0.0.1',          // Cloudflare tunnel peer (shared)
+        rateLimitKey: '198.51.100.7',  // real CF-Connecting-IP — unique per caller
+      })
+      const { ctx, ws, client, onAuthSuccess } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+        authFailures,
+        client: legitClient,
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token' })
+      assert.equal(client.authenticated, true, 'legit client must auth successfully even when the shared 127.0.0.1 socketIp is in the failure map — failure bucket must be keyed by rateLimitKey')
+      assert.equal(onAuthSuccess.callCount, 1)
+    })
+
+    it('tracks failures against rateLimitKey, not socketIp (2026-04-11 audit blocker 7)', () => {
+      // After a failed auth, the failure count should be recorded under the
+      // CF-Connecting-IP, so attackers can only DoS themselves, not every
+      // other tunnel peer.
+      const authFailures = new Map()
+      const attacker = makeMockClient({
+        ip: '127.0.0.1',
+        rateLimitKey: '203.0.113.42',
+      })
+      const { ctx, ws } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => false,  // bad token
+        authFailures,
+        client: attacker,
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'bad' })
+      // Failure was recorded under the real CF-Connecting-IP, not the 127.0.0.1 socket peer
+      assert.ok(authFailures.has('203.0.113.42'), 'failure should be keyed by rateLimitKey')
+      assert.ok(!authFailures.has('127.0.0.1'), 'failure must NOT be keyed by socketIp')
+    })
   })
 
   describe('protocol version negotiation', () => {
@@ -678,6 +732,39 @@ describe('handlePairMessage', () => {
       assert.equal(ws.lastSent().reason, 'rate_limited')
       assert.equal(ws.closed, true)
     })
+
+    it('keys pair failures by client.rateLimitKey, not client.socketIp (2026-04-11 audit blocker 7 — Copilot follow-up on PR #2805)', () => {
+      // Same scenario as the handleAuthMessage test: every Cloudflare tunnel
+      // peer has socketIp='127.0.0.1'. Seed authFailures with the shared
+      // 127.0.0.1 key. A legit client with its own CF-Connecting-IP should
+      // still be able to pair — but pre-fix would be rate-limited because
+      // the lookup read socketIp, hitting the shared seed.
+      const authFailures = new Map([
+        ['127.0.0.1', { count: 3, firstFailure: Date.now(), blockedUntil: Date.now() + 30_000 }],
+      ])
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'tok' })) }
+      const legitClient = makeMockClient({
+        ip: '127.0.0.1',          // Cloudflare tunnel peer (shared)
+        rateLimitKey: '198.51.100.7',  // real CF-Connecting-IP
+      })
+      const { ctx, ws, client, onAuthSuccess } = makePairCtx({ pairingManager, authFailures, client: legitClient })
+      handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'valid-id' })
+      assert.equal(client.authenticated, true, 'legit client must pair successfully — rate limit must key by rateLimitKey, not socketIp')
+      assert.equal(onAuthSuccess.callCount, 1)
+    })
+
+    it('tracks pair failures against rateLimitKey, not socketIp', () => {
+      const authFailures = new Map()
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: false, reason: 'invalid_pairing_id' })) }
+      const attacker = makeMockClient({
+        ip: '127.0.0.1',
+        rateLimitKey: '203.0.113.42',
+      })
+      const { ctx, ws } = makePairCtx({ pairingManager, authFailures, client: attacker })
+      handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'bad' })
+      assert.ok(authFailures.has('203.0.113.42'), 'pair failure must be keyed by rateLimitKey')
+      assert.ok(!authFailures.has('127.0.0.1'), 'pair failure must NOT be keyed by socketIp')
+    })
   })
 
   describe('successful pairing', () => {
@@ -872,12 +959,13 @@ describe('handleKeyExchange', () => {
       // Use a real nacl keypair so createKeyPair + deriveSharedKey work
       const clientKp = nacl.box.keyPair()
       const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
 
       const ws = makeMockWs()
       const { ctx, client, flushPostAuthQueue } = makeKeyExchangeCtx({ ws })
       client.postAuthQueue = [{ type: 'session_list' }]
 
-      const result = handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64 })
+      const result = handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
       assert.equal(result, true)
 
       // Encryption state should be set
@@ -929,7 +1017,12 @@ describe('handleKeyExchange', () => {
         'server and client must derive the same per-connection sub-key')
     })
 
-    it('uses raw shared key when client does NOT send salt (backward compat)', () => {
+    it('REJECTS key_exchange without salt (2026-04-11 audit blocker 3)', () => {
+      // Pre-audit behavior silently fell back to the raw DH shared key when
+      // the client omitted `salt`, re-introducing the nonce-reuse-on-reconnect
+      // vulnerability (1fa8eda5e) that per-connection key derivation
+      // (600612649) was supposed to fix. The server must now reject the
+      // no-salt case with a clear error code.
       const clientKp = nacl.box.keyPair()
       const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
 
@@ -939,13 +1032,18 @@ describe('handleKeyExchange', () => {
       const result = handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64 })
       assert.equal(result, true)
 
-      // Client side: derive raw shared key (no salt)
-      const keOk = ws.sent().find(m => m.type === 'key_exchange_ok')
-      const rawSharedKey = deriveSharedKey(keOk.publicKey, clientKp.secretKey)
+      // Server should have sent an error with the KEY_EXCHANGE_SALT_REQUIRED code
+      const sent = ws.sent()
+      const errMsg = sent.find(m => m.type === 'error')
+      assert.ok(errMsg, 'server should send an error when salt is missing')
+      assert.equal(errMsg.code, 'KEY_EXCHANGE_SALT_REQUIRED')
 
-      assert.ok(client.encryptionState)
-      assert.deepEqual(client.encryptionState.sharedKey, rawSharedKey,
-        'without salt, server must use the raw DH shared key')
+      // Connection should be closed with 1008 policy violation
+      assert.equal(ws.closed, true)
+      assert.equal(ws.closeCode, 1008)
+
+      // Encryption state must NOT be set — the server never got past the reject
+      assert.ok(!client.encryptionState, 'encryptionState must not leak when salt is missing')
     })
 
     it('produces different encryption keys for same DH pair with different salts', () => {

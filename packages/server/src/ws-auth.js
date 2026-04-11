@@ -51,11 +51,21 @@ export function handleAuthMessage(ctx, ws, msg) {
   }
   const authData = authParsed.data
 
-  // Check rate limit before processing auth
-  const ip = client.socketIp
-  const failure = authFailures.get(ip)
+  // Check rate limit before processing auth.
+  //
+  // Must use client.rateLimitKey (CF-Connecting-IP when behind a Cloudflare
+  // tunnel, socketIp otherwise) — NOT client.socketIp. Cloudflare tunnels
+  // deliver every request with socketIp=127.0.0.1, so keying off socketIp
+  // would lump every real caller into one shared bucket and let a single
+  // unauthenticated attacker lock out every legitimate client by flooding
+  // failed-auth attempts.
+  //
+  // See 88f54dc39 for the equivalent fix in the main WS rate limiter; this
+  // call site was missed at the time.
+  const rateLimitKey = client.rateLimitKey || client.socketIp
+  const failure = authFailures.get(rateLimitKey)
   if (failure && failure.blockedUntil > Date.now()) {
-    log.warn(`Auth rate-limited for IP ${ip} (${failure.count} failures)`)
+    log.warn(`Auth rate-limited for ${rateLimitKey} (${failure.count} failures)`)
     send(ws, { type: 'auth_fail', reason: 'rate_limited' })
     ws.close()
     return true
@@ -64,7 +74,7 @@ export function handleAuthMessage(ctx, ws, msg) {
   if (!authRequired || isTokenValid(msg.token)) {
     client.authenticated = true
     client.authTime = Date.now()
-    authFailures.delete(ip)
+    authFailures.delete(rateLimitKey)
 
     const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)
     const clientVersion = hasVersion ? msg.protocolVersion : null
@@ -105,15 +115,16 @@ export function handleAuthMessage(ctx, ws, msg) {
     return true
   }
 
-  // Auth failure — track for rate limiting
+  // Auth failure — track for rate limiting, keyed by rateLimitKey (the
+  // trusted CF-Connecting-IP identity, not the TLS socket peer).
   const now = Date.now()
-  const existing = authFailures.get(ip) || { count: 0, firstFailure: now, blockedUntil: 0 }
-  if (!authFailures.has(ip)) evictOldestIfFull(authFailures)
+  const existing = authFailures.get(rateLimitKey) || { count: 0, firstFailure: now, blockedUntil: 0 }
+  if (!authFailures.has(rateLimitKey)) evictOldestIfFull(authFailures)
   existing.count++
   const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
   existing.blockedUntil = now + backoff
-  authFailures.set(ip, existing)
-  log.warn(`Auth failure from IP ${ip} (attempt ${existing.count}, blocked for ${backoff}ms)`)
+  authFailures.set(rateLimitKey, existing)
+  log.warn(`Auth failure from ${rateLimitKey} (attempt ${existing.count}, blocked for ${backoff}ms)`)
   send(ws, { type: 'auth_fail', reason: 'invalid_token' })
   ws.close()
   return true
@@ -153,11 +164,18 @@ export function handlePairMessage(ctx, ws, msg) {
   }
   const pairData = pairParsed.data
 
-  // Check rate limit
-  const ip = client.socketIp
-  const failure = authFailures.get(ip)
+  // Check rate limit.
+  //
+  // Must use client.rateLimitKey (CF-Connecting-IP when behind a Cloudflare
+  // tunnel) — NOT client.socketIp. Behind cloudflared every client has
+  // socketIp=127.0.0.1, so keying pairing failures off socketIp lets one
+  // attacker lock out every legitimate pairing attempt via the shared
+  // bucket. Same pattern as handleAuthMessage above. 2026-04-11 audit
+  // blocker 7 follow-up — Copilot caught this second site on PR #2805.
+  const rateLimitKey = client.rateLimitKey || client.socketIp
+  const failure = authFailures.get(rateLimitKey)
   if (failure && failure.blockedUntil > Date.now()) {
-    log.warn(`Pair rate-limited for IP ${ip} (${failure.count} failures)`)
+    log.warn(`Pair rate-limited for ${rateLimitKey} (${failure.count} failures)`)
     send(ws, { type: 'pair_fail', reason: 'rate_limited' })
     ws.close()
     return true
@@ -179,7 +197,7 @@ export function handlePairMessage(ctx, ws, msg) {
     client.authenticated = true
     client.authTime = Date.now()
     client.pairedWith = msg.pairingId
-    authFailures.delete(ip)
+    authFailures.delete(rateLimitKey)
 
     client.protocolVersion = clientVersion !== null
       ? Math.min(clientVersion, serverProtocolVersion)
@@ -204,15 +222,16 @@ export function handlePairMessage(ctx, ws, msg) {
     return true
   }
 
-  // Pairing failure — track for rate limiting
+  // Pairing failure — track for rate limiting, keyed by the trusted
+  // rateLimitKey (CF-Connecting-IP) rather than the shared socket peer.
   const now = Date.now()
-  const existing = authFailures.get(ip) || { count: 0, firstFailure: now, blockedUntil: 0 }
-  if (!authFailures.has(ip)) evictOldestIfFull(authFailures)
+  const existing = authFailures.get(rateLimitKey) || { count: 0, firstFailure: now, blockedUntil: 0 }
+  if (!authFailures.has(rateLimitKey)) evictOldestIfFull(authFailures)
   existing.count++
   const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
   existing.blockedUntil = now + backoff
-  authFailures.set(ip, existing)
-  log.warn(`Pair failure from IP ${ip}: ${result.reason} (attempt ${existing.count})`)
+  authFailures.set(rateLimitKey, existing)
+  log.warn(`Pair failure from ${rateLimitKey}: ${result.reason} (attempt ${existing.count})`)
   send(ws, { type: 'pair_fail', reason: result.reason })
   ws.close()
   return true
@@ -235,12 +254,44 @@ export function handleKeyExchange(ctx, ws, msg) {
 
   if (msg.type === 'key_exchange') {
     clearTimeout(client._keyExchangeTimeout)
+
+    // Check the salt requirement BEFORE schema validation. Since
+    // KeyExchangeSchema now requires salt, the safeParse below would reject
+    // old no-salt clients with a generic INVALID_MESSAGE. Hoisting the
+    // salt-specific check up here lets us give clients a precise and
+    // actionable KEY_EXCHANGE_SALT_REQUIRED error that names the exact
+    // upgrade path.
+    //
+    // We still do a minimum shape check (type and a string publicKey) before
+    // issuing the targeted error — if the payload isn't even a key_exchange,
+    // fall through to the schema validator for the generic error.
+    if (typeof msg.publicKey === 'string' && !msg.salt) {
+      log.warn(`key_exchange from ${client.id} missing required 'salt' field; client likely predates 600612649 (chroxy >= v0.6.8). Rejecting to avoid nonce reuse on reconnect.`)
+      try {
+        ws.send(JSON.stringify({
+          type: 'error',
+          code: 'KEY_EXCHANGE_SALT_REQUIRED',
+          message: 'key_exchange requires a client-supplied salt. Please upgrade your Chroxy client to v0.6.8 or later.',
+          details: 'key_exchange requires a client-supplied salt for per-connection key derivation. Older clients that omit salt would fall back to the raw DH shared key with nonce=0 on reconnect, re-introducing a nonce-reuse vulnerability. Upgrade the client to a build that includes commit 600612649 (Chroxy v0.6.8 or later).',
+        }))
+      } catch (err) {
+        log.error(`Failed to send salt-required error: ${err.message}`)
+      }
+      ws.close(1008, 'key_exchange salt required')
+      return true
+    }
+
     const keParsed = KeyExchangeSchema.safeParse(msg)
     if (!keParsed.success) {
       const details = keParsed.error.issues.map(i => i.message).join(', ')
       log.warn(`Invalid key_exchange message from ${client.id}: ${details}`)
       try {
-        ws.send(JSON.stringify({ type: 'error', code: 'INVALID_MESSAGE', details }))
+        ws.send(JSON.stringify({
+          type: 'error',
+          code: 'INVALID_MESSAGE',
+          message: 'Invalid key_exchange message.',
+          details,
+        }))
       } catch (err) {
         log.error(`Failed to send key_exchange error: ${err.message}`)
       }
@@ -249,12 +300,10 @@ export function handleKeyExchange(ctx, ws, msg) {
     }
     const serverKp = createKeyPair()
     const rawSharedKey = deriveSharedKey(msg.publicKey, serverKp.secretKey)
-    // If the client sent a salt, derive a per-connection sub-key so the nonce
-    // counter can safely restart at 0 on each reconnect.  Old clients that
-    // omit the salt fall back to the raw DH shared key (backward compat).
-    const encryptionKey = msg.salt
-      ? deriveConnectionKey(rawSharedKey, msg.salt)
-      : rawSharedKey
+    // Derive a per-connection sub-key so the nonce counter can safely restart
+    // at 0 on each reconnect without reusing (key, nonce) pairs from a prior
+    // session. This is the enforced path after the 2026-04-11 audit.
+    const encryptionKey = deriveConnectionKey(rawSharedKey, msg.salt)
     client.encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 }
     client.encryptionPending = false
     try {

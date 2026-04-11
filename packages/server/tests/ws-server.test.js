@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
-import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
+import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnectionSalt, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { createMockSession, createMockSessionManager, waitFor, GIT } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
 
@@ -1873,9 +1873,12 @@ describe('encryption integration (end-to-end)', () => {
     const authOk = messages.find(m => m.type === 'auth_ok')
     assert.equal(authOk.encryption, 'required')
 
-    // Perform key exchange
+    // Perform key exchange. Salt is required since the 2026-04-11 audit
+    // blocker-3 fix — the server rejects salt-less key_exchange to avoid
+    // the nonce-reuse-on-reconnect vulnerability.
     const clientKp = createKeyPair()
-    ws.send(JSON.stringify({ type: 'key_exchange', publicKey: clientKp.publicKey }))
+    const salt = generateConnectionSalt()
+    ws.send(JSON.stringify({ type: 'key_exchange', publicKey: clientKp.publicKey, salt }))
 
     // Wait for key_exchange_ok (sent unencrypted)
     await waitForMessage(messages, 'key_exchange_ok')
@@ -1883,8 +1886,10 @@ describe('encryption integration (end-to-end)', () => {
     const kxOk = messages.find(m => m.type === 'key_exchange_ok')
     assert.ok(kxOk.publicKey, 'Server should send its public key')
 
-    // Derive shared key from server's public key and client's secret key
-    const sharedKey = deriveSharedKey(kxOk.publicKey, clientKp.secretKey)
+    // Derive shared key from server's public key and client's secret key,
+    // then derive per-connection sub-key using the salt (matches the server).
+    const rawSharedKey = deriveSharedKey(kxOk.publicKey, clientKp.secretKey)
+    const sharedKey = deriveConnectionKey(rawSharedKey, salt)
 
     return {
       ws,

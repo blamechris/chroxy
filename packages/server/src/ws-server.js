@@ -795,9 +795,39 @@ export class WsServer {
         } catch {
           return // ignore non-JSON
         }
-        // Decrypt incoming encrypted messages
+        // Reject non-object top-level JSON up front. JSON.parse accepts
+        // JSON "value" grammar, so `null`, `"string"`, `42`, `[]`, `true`
+        // are all valid parses but none carry a `.type` field. Without
+        // this guard, the downgrade check below would throw TypeError on
+        // `null.type` and (worse) could be bypassed by a client sending
+        // JSON `null` as a post-handshake plaintext frame — the
+        // type-check would throw, control would escape to the outer
+        // error handler, and _handleMessage would be called on the null.
+        if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+          return // ignore non-object payloads
+        }
+        // Decrypt incoming encrypted messages, and enforce encryption once
+        // a key exchange has established it. Without this post-handshake
+        // rejection, a buggy or malicious client could unilaterally downgrade
+        // to plaintext after a successful key_exchange — the server would
+        // happily process the plaintext frame as a normal message. Discovered
+        // in the 2026-04-11 production readiness audit.
+        //
+        // On a downgrade attempt, we log server-side (diagnostics for the
+        // operator) and close silently with 1008 + a policy-violation reason
+        // in the WebSocket close frame. We deliberately do NOT send a
+        // plaintext error envelope back — doing so would itself leak a
+        // plaintext frame after a successful handshake, contradicting the
+        // very invariant this check exists to enforce. The WebSocket close
+        // reason string ('encryption required') is diagnostic enough for a
+        // legitimate misconfigured client.
         const client = this.clients.get(ws)
-        if (msg.type === 'encrypted' && client?.encryptionState) {
+        if (client?.encryptionState) {
+          if (msg.type !== 'encrypted') {
+            log.error(`Plaintext frame from ${client.id} after encryption established (type=${msg?.type}); closing connection`)
+            ws.close(1008, 'encryption required')
+            return
+          }
           const envParsed = EncryptedEnvelopeSchema.safeParse(msg)
           if (!envParsed.success) {
             log.error(`Invalid encrypted message envelope from ${client.id}`)

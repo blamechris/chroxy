@@ -6,7 +6,7 @@
  */
 import WebSocket from "ws";
 import "dotenv/config";
-import { createKeyPair, deriveSharedKey, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from "@chroxy/store-core/crypto";
+import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnectionSalt, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from "@chroxy/store-core/crypto";
 
 const url = process.argv[2];
 const token = process.env.API_TOKEN;
@@ -22,6 +22,7 @@ const ws = new WebSocket(url);
 /** E2E encryption state */
 let encryptionState = null;
 let pendingKeyPair = null;
+let pendingSalt = null;
 
 /** Send a message, encrypting if E2E is active */
 function wsSend(payload) {
@@ -59,7 +60,10 @@ ws.on("message", (raw) => {
       console.log(`[authenticated] server v${msg.serverVersion} protocol v${msg.protocolVersion}`, msg.encryption === "required" ? "E2E encryption required" : "No encryption");
       if (msg.encryption === "required" && !noEncrypt) {
         pendingKeyPair = createKeyPair();
-        ws.send(JSON.stringify({ type: "key_exchange", publicKey: pendingKeyPair.publicKey }));
+        pendingSalt = generateConnectionSalt();
+        // salt is REQUIRED by the server as of the 2026-04-11 audit fix —
+        // see packages/server/src/ws-auth.js and KEY_EXCHANGE_SALT_REQUIRED.
+        ws.send(JSON.stringify({ type: "key_exchange", publicKey: pendingKeyPair.publicKey, salt: pendingSalt }));
         console.log("[crypto] Key exchange initiated...");
       } else {
         console.log("Switching to terminal mode. Type to interact.\n");
@@ -74,9 +78,14 @@ ws.on("message", (raw) => {
           ws.close();
           process.exit(1);
         }
-        const sharedKey = deriveSharedKey(msg.publicKey, pendingKeyPair.secretKey);
+        // Match the server: derive per-connection sub-key using the salt we
+        // generated for this connection. Without this, encrypt/decrypt on
+        // either end would use mismatched keys and fail.
+        const rawSharedKey = deriveSharedKey(msg.publicKey, pendingKeyPair.secretKey);
+        const sharedKey = deriveConnectionKey(rawSharedKey, pendingSalt);
         encryptionState = { sharedKey, sendNonce: 0, recvNonce: 0 };
         pendingKeyPair = null;
+        pendingSalt = null;
         console.log("[crypto] E2E encryption established");
         console.log("Switching to terminal mode. Type to interact.\n");
         wsSend({ type: "mode", mode: "terminal" });
