@@ -15,3 +15,10 @@ web-build/
 .maestro/**/*.png
 # Mock server PID file
 .maestro/scripts/.mock-server.pid
+
+# CNG native projects — generated locally by `expo run:android`/`run:ios`,
+# never commit. Leaving them in the working tree makes EAS Build upload them,
+# which collides with the `prebuildCommand` in eas.json and fails the PREBUILD
+# phase with "unknown or unexpected option: --platform".
+android/
+ios/
