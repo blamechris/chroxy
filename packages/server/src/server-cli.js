@@ -203,18 +203,14 @@ export async function startCliServer(config) {
       }
     } else if (event === 'result' && data.cost != null) {
       log.info(`Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
-      // Push notification for idle: fire when no clients connected OR when clients are
-      // connected but none viewing this session (background session completed)
-      if (pushManager.hasTokens && wsServer) {
-        const noClients = wsServer.authenticatedClientCount === 0
-        const noActiveViewers = !noClients && !wsServer.hasActiveViewersForSession(sessionId)
-        if (noClients || noActiveViewers) {
-          const body = noClients
-            ? 'A query completed while the app was disconnected.'
-            : 'A query completed on a background session.'
-          pushManager.send('idle', 'Claude is waiting', body, { sessionId })
-        }
-      }
+      // Note: this arm used to ALSO fire an 'idle' push here ("Claude is waiting")
+      // for the same unattended-completion case that the activity_update push below
+      // already covers. Because the two pushes used different rate-limit buckets
+      // (idle=60s, activity_update=10s) they never deduped each other, so every
+      // unattended completion produced two OS-level notifications on the phone.
+      // Removed in favor of the single activity_update fire below; see the
+      // notification audit note in docs/audit-results/eas-cng-config/ for the
+      // deeper post-mortem.
     } else if (event === 'result') {
       // result without cost (e.g. Gemini providers) — log duration if available
       if (data.duration != null) {
