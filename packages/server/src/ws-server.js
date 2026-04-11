@@ -795,6 +795,17 @@ export class WsServer {
         } catch {
           return // ignore non-JSON
         }
+        // Reject non-object top-level JSON up front. JSON.parse accepts
+        // JSON "value" grammar, so `null`, `"string"`, `42`, `[]`, `true`
+        // are all valid parses but none carry a `.type` field. Without
+        // this guard, the downgrade check below would throw TypeError on
+        // `null.type` and (worse) could be bypassed by a client sending
+        // JSON `null` as a post-handshake plaintext frame — the
+        // type-check would throw, control would escape to the outer
+        // error handler, and _handleMessage would be called on the null.
+        if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+          return // ignore non-object payloads
+        }
         // Decrypt incoming encrypted messages, and enforce encryption once
         // a key exchange has established it. Without this post-handshake
         // rejection, a buggy or malicious client could unilaterally downgrade

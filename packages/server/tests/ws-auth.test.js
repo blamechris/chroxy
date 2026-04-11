@@ -390,18 +390,20 @@ describe('handleAuthMessage', () => {
     })
 
     it('keys failures by client.rateLimitKey, not client.socketIp (2026-04-11 audit blocker 7)', () => {
-      // Scenario: client is behind a Cloudflare tunnel, so socketIp is
-      // 127.0.0.1 but the trusted rate-limit identity (from CF-Connecting-IP)
-      // is 203.0.113.42. A legitimate client from 198.51.100.7 should NOT be
-      // rate-limited just because a different real IP has failed 5 times —
-      // because keying off socketIp would lump them both into one bucket.
+      // Scenario that FAILS against pre-fix code: every Cloudflare-tunnel
+      // peer has socketIp='127.0.0.1' (all traffic comes through cloudflared
+      // on loopback). Seed authFailures with the shared '127.0.0.1' key as
+      // a simulated prior attacker lockout. A legitimate client with its own
+      // CF-Connecting-IP of '198.51.100.7' should still succeed — but
+      // pre-fix would be rate-limited because the lookup happens against
+      // socketIp, hitting the '127.0.0.1' seed, which applies to every
+      // tunnel peer.
       const authFailures = new Map([
-        // Attacker from 203.0.113.42 has been blocked
-        ['203.0.113.42', { count: 5, firstFailure: Date.now(), blockedUntil: Date.now() + 30_000 }],
+        ['127.0.0.1', { count: 5, firstFailure: Date.now(), blockedUntil: Date.now() + 30_000 }],
       ])
       const legitClient = makeMockClient({
-        ip: '127.0.0.1',          // Cloudflare tunnel peer
-        rateLimitKey: '198.51.100.7',  // different real CF-Connecting-IP
+        ip: '127.0.0.1',          // Cloudflare tunnel peer (shared)
+        rateLimitKey: '198.51.100.7',  // real CF-Connecting-IP — unique per caller
       })
       const { ctx, ws, client, onAuthSuccess } = makeAuthCtx({
         authRequired: true,
@@ -410,7 +412,7 @@ describe('handleAuthMessage', () => {
         client: legitClient,
       })
       handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token' })
-      assert.equal(client.authenticated, true, 'legit client should auth successfully — only the attacker IP is blocked')
+      assert.equal(client.authenticated, true, 'legit client must auth successfully even when the shared 127.0.0.1 socketIp is in the failure map — failure bucket must be keyed by rateLimitKey')
       assert.equal(onAuthSuccess.callCount, 1)
     })
 
