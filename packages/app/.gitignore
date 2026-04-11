@@ -21,5 +21,6 @@ web-build/
 # with the `prebuildCommand` in eas.json and fails the PREBUILD phase with
 # "unknown or unexpected option: --platform". The iOS side is NOT CNG on this
 # project — `packages/app/ios/` contains committed LiveActivity Swift code
-# (added in #2278) and must stay tracked.
-android/
+# (added in #2278) and must stay tracked. Anchor with a leading slash so the
+# rule only matches `packages/app/android/` and never a nested `**/android/`.
+/android/
