@@ -10,11 +10,11 @@
     },
     "preview": {
       "distribution": "internal",
-      "prebuildCommand": "cd ../protocol && npx tsc && cd ../store-core && npm run build:crypto"
+      "prebuildCommand": "bash -c 'cd ../protocol && npx tsc && cd ../store-core && npm run build:crypto'"
     },
     "production": {
       "autoIncrement": true,
-      "prebuildCommand": "cd ../protocol && npx tsc && cd ../store-core && npm run build:crypto"
+      "prebuildCommand": "bash -c 'cd ../protocol && npx tsc && cd ../store-core && npm run build:crypto'"
     }
   },
   "submit": {
