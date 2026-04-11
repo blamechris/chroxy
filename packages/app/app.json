@@ -30,7 +30,7 @@
         "backgroundColor": "#0f0f1a"
       },
       "package": "com.blamechris.chroxy",
-      "softwareKeyboardLayoutMode": "adjustResize",
+      "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"
