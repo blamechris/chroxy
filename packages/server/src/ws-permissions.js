@@ -49,9 +49,10 @@ function sanitizeToolInput(input) {
  * @param {Map} opts.pendingPermissions - requestId -> { resolve, timer } (owned by WsServer)
  * @param {Map} opts.permissionSessionMap - requestId -> sessionId (owned by WsServer)
  * @param {Function} opts.getSessionManager - () => sessionManager (late-bound for test compat)
+ * @param {Object|null} opts.pairingManager - PairingManager instance used to look up token→sessionId bindings for the HTTP permission-response fallback. Optional — when null, HTTP responses skip the binding check (single-token mode).
  * @returns {Object} Permission handler methods
  */
-export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager }) {
+export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager, pairingManager }) {
   let _permissionCounter = 0
 
   // Rate limiter for HTTP permission requests (per source IP)
@@ -182,6 +183,19 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       return
     }
 
+    // Look up whether the presented Bearer token is bound to a specific
+    // session via pairing. If it is, the caller may ONLY respond to
+    // permission requests belonging to that bound session. Without this,
+    // a session-bound pairing token could approve/deny permission
+    // requests from other sessions via the HTTP fallback — discovered
+    // in the 2026-04-11 production readiness audit (blocker 5). The
+    // 616aeaf62 / 2c0ac7d2d session-binding sweep missed the HTTP path.
+    const authHeader = (req.headers && req.headers['authorization']) || ''
+    const presentedToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+    const callerBoundSessionId = (pairingManager && presentedToken)
+      ? pairingManager.getSessionIdForToken(presentedToken)
+      : null
+
     const MAX_BODY = 4096
     let body = ''
     let oversized = false
@@ -222,6 +236,26 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
 
       // Try SDK-mode first (in-process permission via sessionManager)
       const originSessionId = permissionSessionMap.get(requestId)
+
+      // Session-binding enforcement: if the presenting token is bound to a
+      // specific session via pairing, reject cross-session permission
+      // responses. This applies to BOTH the SDK-mode and legacy branches
+      // below, so we check once here before either dispatches.
+      //
+      // For a bound caller, the requestId MUST have an explicit mapping in
+      // permissionSessionMap AND that mapping must match the token's bound
+      // session. If the mapping is missing, the caller could otherwise slip
+      // through to the legacy `pendingPermissions` resolver below — which
+      // has no session check. Found by agent-review on PR #2806.
+      if (callerBoundSessionId) {
+        if (!originSessionId || originSessionId !== callerBoundSessionId) {
+          log.warn(`HTTP /permission-response rejected: token bound to ${callerBoundSessionId} tried to respond to ${requestId} with mapped session ${originSessionId ?? 'unmapped'}`)
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'not authorized for this permission request', code: 'SESSION_TOKEN_MISMATCH' }))
+          return
+        }
+      }
+
       const sm = getSessionManager()
       if (originSessionId && sm) {
         const entry = sm.getSession(originSessionId)

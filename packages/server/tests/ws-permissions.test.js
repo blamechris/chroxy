@@ -26,9 +26,10 @@ function makeHandlerOpts(overrides = {}) {
   }
 }
 
-function makeReq(body) {
+function makeReq(body, headers = {}) {
   const emitter = new EventEmitter()
   emitter.method = 'POST'
+  emitter.headers = headers
   // Simulate streaming body
   process.nextTick(() => {
     emitter.emit('data', Buffer.from(body))
@@ -375,6 +376,130 @@ describe('createPermissionHandler', () => {
       assert.equal(respondToPermission.mock.calls.length, 1)
       assert.equal(respondToPermission.mock.calls[0].arguments[0], 'sdk-req')
       assert.equal(respondToPermission.mock.calls[0].arguments[1], 'allowAlways')
+    })
+
+    it('rejects cross-session response when Bearer token is bound to a different session (2026-04-11 audit blocker 5)', async () => {
+      // Scenario: attacker has a session-bound pairing token for session A
+      // and tries to approve a permission request belonging to session B via
+      // the HTTP fallback. Pre-fix, the HTTP path skipped the boundSessionId
+      // check entirely — only the WS path enforced it. Both must now match.
+      const permissionSessionMap = new Map([['victim-req', 'session-B']])
+      const respondToPermission = mock.fn()
+      const sm = {
+        getSession: mock.fn(() => ({ session: { respondToPermission } })),
+      }
+      const pairingManager = {
+        getSessionIdForToken: mock.fn((token) => token === 'attacker-token' ? 'session-A' : null),
+      }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => sm),
+        pairingManager,
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(
+        JSON.stringify({ requestId: 'victim-req', decision: 'allow' }),
+        { authorization: 'Bearer attacker-token' }
+      )
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 403, 'cross-session bound-token responses must be rejected')
+      assert.ok(res.body.includes('SESSION_TOKEN_MISMATCH'))
+      assert.equal(respondToPermission.mock.calls.length, 0, 'permission must NOT be resolved across sessions')
+      // The mapping must remain so the legitimate bound client can still respond
+      assert.ok(permissionSessionMap.has('victim-req'), 'permissionSessionMap entry must be preserved for the legit client')
+    })
+
+    it('allows response when bound token matches the target session', async () => {
+      const permissionSessionMap = new Map([['bound-req', 'session-A']])
+      const respondToPermission = mock.fn()
+      const sm = {
+        getSession: mock.fn(() => ({ session: { respondToPermission } })),
+      }
+      const pairingManager = {
+        getSessionIdForToken: mock.fn(() => 'session-A'),
+      }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => sm),
+        pairingManager,
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(
+        JSON.stringify({ requestId: 'bound-req', decision: 'allow' }),
+        { authorization: 'Bearer session-a-token' }
+      )
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.equal(respondToPermission.mock.calls.length, 1)
+    })
+
+    it('rejects bound-token response when requestId has no mapping entry (2026-04-11 audit blocker 5 — agent-review residual bypass)', async () => {
+      // HTTP counterpart of the same bypass: a bound token tries to resolve
+      // a requestId that isn't in permissionSessionMap (legacy or stale).
+      // Without the follow-up fix, the original check (originSessionId &&
+      // boundSessionId !== originSessionId) was skipped because
+      // originSessionId was undefined. The bound caller then fell through
+      // to the legacy pendingPermissions resolver with no session check.
+      const pendingPermissions = new Map()
+      const resolveCallback = mock.fn()
+      pendingPermissions.set('legacy-req', { resolve: resolveCallback, timer: null })
+      // NO permissionSessionMap entry for the requestId
+      const permissionSessionMap = new Map()
+      const pairingManager = {
+        getSessionIdForToken: mock.fn(() => 'session-A'),  // bound token
+      }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        pendingPermissions,
+        pairingManager,
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(
+        JSON.stringify({ requestId: 'legacy-req', decision: 'allow' }),
+        { authorization: 'Bearer bound-token' }
+      )
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 403, 'bound-token call must be rejected when request has no explicit session mapping')
+      assert.ok(res.body.includes('SESSION_TOKEN_MISMATCH'))
+      assert.equal(resolveCallback.mock.calls.length, 0,
+        'legacy resolver must not be invoked by bound-token fallthrough')
+      assert.ok(pendingPermissions.has('legacy-req'),
+        'pendingPermissions entry must survive so the legit caller can still respond')
+    })
+
+    it('allows response from an unbound (full-access) token', async () => {
+      // When no pairingManager is provided, or the token has no binding,
+      // the HTTP fallback should work as before — this is the single-token
+      // full-trust mode used by the dashboard and test-client.
+      const permissionSessionMap = new Map([['regular-req', 'session-X']])
+      const respondToPermission = mock.fn()
+      const sm = {
+        getSession: mock.fn(() => ({ session: { respondToPermission } })),
+      }
+      const pairingManager = {
+        getSessionIdForToken: mock.fn(() => null),  // unbound token
+      }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => sm),
+        pairingManager,
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(
+        JSON.stringify({ requestId: 'regular-req', decision: 'allow' }),
+        { authorization: 'Bearer primary-api-token' }
+      )
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.equal(respondToPermission.mock.calls.length, 1)
     })
   })
 })

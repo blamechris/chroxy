@@ -73,6 +73,29 @@ describe('PushManager', () => {
       assert.equal(manager.registerToken(42), false)
     })
 
+    it('rejects tokens shorter than 20 chars (2026-04-11 audit blocker 6)', () => {
+      // Short strings are almost certainly not real push tokens — Expo
+      // tokens are 50+ chars, FCM are typically 150+. Reject as a soft
+      // defense layer. The real protection is the client-binding +
+      // prune-on-disconnect in ws-server.js.
+      assert.equal(manager.registerToken('short'), false)
+      assert.equal(manager.registerToken('attacker'), false)
+      assert.equal(manager.registerToken('a'.repeat(19)), false)
+      // Length 20 exactly is the boundary
+      assert.equal(manager.registerToken('a'.repeat(20)), true)
+    })
+
+    it('rejects tokens with whitespace or JSON/URL punctuation (2026-04-11 audit blocker 6)', () => {
+      // These patterns signal the caller sent garbage (a JSON blob, an
+      // error message, a random English string) rather than a real push
+      // token. No real Expo/FCM token contains these characters.
+      assert.equal(manager.registerToken('has whitespace here and more'), false)
+      assert.equal(manager.registerToken('has\nnewline here tooxxxxxxx'), false)
+      assert.equal(manager.registerToken('{"type":"error","msg":"garbage"}'), false)
+      assert.equal(manager.registerToken('https://example.com/fake-token'), false)
+      assert.equal(manager.registerToken('<script>alert(1)</scriptxx>'), false)
+    })
+
     it('does not duplicate the same token', () => {
       manager.registerToken(VALID_TOKEN)
       manager.registerToken(VALID_TOKEN)
@@ -87,6 +110,49 @@ describe('PushManager', () => {
       manager.registerToken(VALID_TOKEN)
       manager.removeToken(VALID_TOKEN)
       assert.equal(manager.tokens.size, 0)
+    })
+  })
+
+  // -- releaseTokenOwner (ref-counted prune) --
+
+  describe('releaseTokenOwner (2026-04-11 audit blocker 6 — ref-counted via Copilot review on PR #2806)', () => {
+    it('prunes a token when its sole owner releases it', () => {
+      manager.registerToken(VALID_TOKEN, 'client-1')
+      assert.equal(manager.tokens.size, 1)
+      const pruned = manager.releaseTokenOwner(VALID_TOKEN, 'client-1')
+      assert.equal(pruned, true, 'last-owner release should return true (token pruned)')
+      assert.equal(manager.tokens.size, 0)
+    })
+
+    it('keeps a token alive when one of multiple owners releases it', () => {
+      manager.registerToken(VALID_TOKEN, 'client-1')
+      manager.registerToken(VALID_TOKEN, 'client-2')
+      assert.equal(manager.tokens.size, 1, 'two owners share one registry entry')
+
+      const prunedFirst = manager.releaseTokenOwner(VALID_TOKEN, 'client-1')
+      assert.equal(prunedFirst, false, 'non-last-owner release should return false (token still held)')
+      assert.ok(manager.tokens.has(VALID_TOKEN), 'token must still be in registry')
+
+      const prunedSecond = manager.releaseTokenOwner(VALID_TOKEN, 'client-2')
+      assert.equal(prunedSecond, true, 'final-owner release should return true')
+      assert.equal(manager.tokens.size, 0)
+    })
+
+    it('releases unknown owner gracefully (no-op)', () => {
+      manager.registerToken(VALID_TOKEN, 'client-1')
+      // client-2 tries to release a token it never registered
+      const pruned = manager.releaseTokenOwner(VALID_TOKEN, 'client-2')
+      assert.equal(pruned, false)
+      assert.ok(manager.tokens.has(VALID_TOKEN), 'token must still be held by client-1')
+    })
+
+    it('falls back to unconditional remove for legacy tokens with no owner tracking', () => {
+      // Register WITHOUT an ownerId (legacy path)
+      manager.registerToken(VALID_TOKEN)
+      assert.equal(manager.tokens.size, 1)
+      const pruned = manager.releaseTokenOwner(VALID_TOKEN, 'client-1')
+      assert.equal(pruned, true)
+      assert.equal(manager.tokens.size, 0, 'legacy untracked token is removed on first release')
     })
   })
 

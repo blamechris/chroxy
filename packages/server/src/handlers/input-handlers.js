@@ -103,12 +103,37 @@ function handleResumeBudget(ws, client, msg, ctx) {
 }
 
 function handleRegisterPushToken(ws, client, msg, ctx) {
-  if (ctx.pushManager && typeof msg.token === 'string') {
-    const ok = ctx.pushManager.registerToken(msg.token)
-    if (!ok) {
-      ctx.send(ws, { type: 'push_token_error', message: 'Push token rejected — must be a non-empty string' })
-    }
+  if (!ctx.pushManager || typeof msg.token !== 'string') return
+
+  // Pass the client's stable ID as the token owner so PushManager can
+  // ref-count ownership for multi-connection scenarios (2026-04-11
+  // audit blocker 6 + Copilot review on PR #2806): two clients that
+  // register the same token must both be released before the token
+  // is actually pruned from the registry. Without ref-counting, the
+  // first disconnect would strip the token from the second client's
+  // active session.
+  const ok = ctx.pushManager.registerToken(msg.token, client.id)
+  if (!ok) {
+    ctx.send(ws, {
+      type: 'push_token_error',
+      // Keep the wording close to the actual validator: minimum length
+      // plus a blacklist of obvious garbage characters. The check is a
+      // heuristic, not a true Expo/FCM format enforcement (found by
+      // Copilot review on PR #2806).
+      message: 'Push token rejected — token must be at least 20 characters and contain no whitespace, quotes, URL/shell/JSON punctuation',
+    })
+    return
   }
+
+  // Track which tokens this client registered so _handleClientDeparture
+  // can release ownership when they disconnect. Without this, an
+  // attacker who authenticated, registered their token, and
+  // disconnected would leave their token in the registry forever,
+  // continuing to receive every future permission prompt.
+  if (!client._ownedPushTokens) {
+    client._ownedPushTokens = new Set()
+  }
+  client._ownedPushTokens.add(msg.token)
 }
 
 function handleUserQuestionResponse(ws, client, msg, ctx) {

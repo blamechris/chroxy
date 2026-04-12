@@ -390,6 +390,9 @@ export class WsServer {
       pendingPermissions: this._pendingPermissions,
       permissionSessionMap: this._permissionSessionMap,
       getSessionManager: () => self.sessionManager,
+      // Pass pairingManager so the HTTP /permission-response fallback can
+      // enforce session binding — see 2026-04-11 audit blocker 5.
+      pairingManager: this._pairingManager,
     })
     // Handler context: late-bound via getters for test compat (tests may reassign properties)
     this._handlerCtx = {
@@ -1104,6 +1107,25 @@ export class WsServer {
           clientId: null,
         })
       }
+    }
+
+    // Release this client's ownership of any push tokens it registered.
+    // Uses ref-counted release so a token registered by multiple
+    // concurrent connections (multi-device or reconnect-race) isn't
+    // stripped from the registry until the last owner goes away.
+    //
+    // Prevents the long-lived-token-hijack pattern documented in the
+    // 2026-04-11 audit (blocker 6): an attacker who authenticates,
+    // registers their own ExponentPushToken, and disconnects would
+    // otherwise keep receiving future permission prompts indefinitely.
+    // Tokens are preserved across disconnect only if the client re-
+    // registers them on reconnect, or if another active client still
+    // owns them.
+    if (departingClient._ownedPushTokens && this.pushManager) {
+      for (const token of departingClient._ownedPushTokens) {
+        this.pushManager.releaseTokenOwner(token, departingClient.id)
+      }
+      departingClient._ownedPushTokens.clear()
     }
 
     // Broadcast client_left to remaining authenticated clients

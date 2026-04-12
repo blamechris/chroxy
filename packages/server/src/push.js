@@ -98,6 +98,16 @@ export class PushManager {
     this.tokens = new Set()
     this._liveActivityTokens = new Set()
     this._lastSent = new Map() // category -> timestamp
+    // Owner tracking for session-binding + prune-on-disconnect (audit
+    // blocker 6). `_tokenOwners` maps token -> Set<ownerId> so that when
+    // a client disconnects we can decrement its ownership and only
+    // actually prune the token from `this.tokens` when the last owner
+    // goes away. Without ref-counting, two connections registering the
+    // same token would cause the first disconnect to strip the token
+    // even though the second connection is still active (found by Copilot
+    // review on PR #2806). Owner IDs are client connection IDs in
+    // production; tests can use any unique string.
+    this._tokenOwners = new Map()
     this._loadFromDisk()
   }
 
@@ -140,45 +150,141 @@ export class PushManager {
 
   /**
    * Register a push token from a client.
-   * Accepts any non-empty string — Expo push tokens (ExponentPushToken[...])
-   * and FCM tokens (Firebase Cloud Messaging for Android) both work with
-   * the Expo Push API.
+   *
+   * Accepts Expo push tokens (`ExponentPushToken[...]`) and FCM tokens
+   * (Firebase Cloud Messaging for Android) — both work with the Expo
+   * Push API. Rejects obviously-malformed values.
+   *
+   * Per the 2026-04-11 production readiness audit (blocker 6), the old
+   * implementation accepted ANY non-empty string, which let an
+   * authenticated attacker register their own `ExponentPushToken[attacker]`
+   * and intercept every future permission-prompt push notification. This
+   * method now validates the format and (via the caller) binds each
+   * registered token to the connection that registered it, so tokens get
+   * pruned on client disconnect.
    */
-  registerToken(token) {
-    if (typeof token === 'string' && token.length > 0) {
-      if (!this.tokens.has(token)) {
-        this.tokens.add(token)
-        this._persistToDisk()
-      }
-      log.info(`Registered push credential ${token.slice(0, 30)}...`)
-      return true
+  registerToken(token, ownerId = null) {
+    if (typeof token !== 'string' || token.length === 0) {
+      log.warn(`Rejected invalid push credential: ${String(token).slice(0, 40)}`)
+      return false
     }
-    log.warn(`Rejected invalid push credential: ${String(token).slice(0, 40)}`)
+    if (!PushManager.isValidPushTokenFormat(token)) {
+      log.warn(`Rejected malformed push credential (unrecognized format): ${token.slice(0, 40)}`)
+      return false
+    }
+    if (!this.tokens.has(token)) {
+      this.tokens.add(token)
+      this._persistToDisk()
+    }
+    // Track ownership for ref-counted prune-on-disconnect (2026-04-11
+    // audit blocker 6 + Copilot review on PR #2806). Multiple clients
+    // may register the same token (reconnect race, multi-device); the
+    // token is only pruned when the last owner disconnects.
+    if (ownerId != null) {
+      let owners = this._tokenOwners.get(token)
+      if (!owners) {
+        owners = new Set()
+        this._tokenOwners.set(token, owners)
+      }
+      owners.add(ownerId)
+    }
+    log.info(`Registered push credential ${token.slice(0, 30)}...`)
+    return true
+  }
+
+  /**
+   * Release one owner's claim on a token. If the last owner goes away,
+   * the token is removed from the registry entirely. Returns true if
+   * the token was actually pruned (last owner), false if it's still
+   * held by someone else.
+   *
+   * Used by WsServer._handleClientDeparture to prune on disconnect
+   * without breaking legitimate multi-connection scenarios.
+   */
+  releaseTokenOwner(token, ownerId) {
+    const owners = this._tokenOwners.get(token)
+    if (!owners) {
+      // No owner tracking — legacy / test path. Remove unconditionally.
+      return this.removeToken(token)
+    }
+    owners.delete(ownerId)
+    if (owners.size === 0) {
+      this._tokenOwners.delete(token)
+      return this.removeToken(token)
+    }
     return false
   }
 
-  /** Remove a push token */
+  /**
+   * Validate a push-token string. This is a soft defense — it rejects
+   * obviously-malformed input (empty strings, whitespace, JSON
+   * punctuation, URLs) so typos and automated fuzzers don't land in
+   * the token set. The REAL defense against push-token hijack is the
+   * session-binding + prune-on-disconnect added in the same audit fix
+   * (blocker 6): any token registered by a client is tracked on that
+   * client's _ownedPushTokens and removed on disconnect.
+   *
+   * Policy: any non-empty string that is >= 20 characters, free of
+   * whitespace/control characters, and free of JSON/URL punctuation
+   * that would never appear in a real Expo or FCM token. Real tokens:
+   *
+   * - Expo: `ExponentPushToken[...]` (50+ chars)
+   * - FCM: base64url-ish, ~150 chars typically but as short as 40 in
+   *   some SDKs
+   * - Legacy device tokens via the Firebase-Expo passthrough: variable
+   */
+  static isValidPushTokenFormat(token) {
+    if (typeof token !== 'string') return false
+    if (token.length < 20) return false
+    // Reject whitespace (including tabs/newlines), quotes, braces,
+    // angle brackets, forward slashes, and shell metacharacters that
+    // signal the caller sent garbage (a URL, a JSON blob, an error
+    // message, a shell-injection attempt) rather than a real push
+    // token. Real Expo/FCM push tokens use only alphanumerics + a
+    // restricted set of punctuation ([_-.:~%]) — the characters in
+    // this reject list never appear in them.
+    if (/[\s"'`<>{}&|;/\\?#]/.test(token)) return false
+    return true
+  }
+
+  /**
+   * Remove a push token unconditionally. Most callers should use
+   * releaseTokenOwner() instead so multi-owner tokens aren't stripped
+   * when one connection drops.
+   */
   removeToken(token) {
     if (this.tokens.delete(token)) {
+      this._tokenOwners.delete(token)
       this._persistToDisk()
+      return true
     }
+    return false
   }
 
   /**
    * Register a Live Activity push token (iOS).
    * Stored separately from regular push tokens.
+   *
+   * Applies the same format check as registerToken so the Live Activity
+   * path can't be used as a bypass for the 2026-04-11 audit blocker 6
+   * hardening. No WS handler currently exposes this path (verified on
+   * PR #2806) but the check is cheap regression prevention.
    */
   registerLiveActivityToken(token) {
-    if (typeof token === 'string' && token.length > 0) {
-      if (!this._liveActivityTokens.has(token)) {
-        this._liveActivityTokens.add(token)
-        this._persistToDisk()
-      }
-      log.info(`Registered Live Activity credential ${token.slice(0, 30)}...`)
-      return true
+    if (typeof token !== 'string' || token.length === 0) {
+      log.warn(`Rejected invalid Live Activity credential: ${String(token).slice(0, 40)}`)
+      return false
     }
-    log.warn(`Rejected invalid Live Activity credential: ${String(token).slice(0, 40)}`)
-    return false
+    if (!PushManager.isValidPushTokenFormat(token)) {
+      log.warn(`Rejected malformed Live Activity credential (unrecognized format): ${token.slice(0, 40)}`)
+      return false
+    }
+    if (!this._liveActivityTokens.has(token)) {
+      this._liveActivityTokens.add(token)
+      this._persistToDisk()
+    }
+    log.info(`Registered Live Activity credential ${token.slice(0, 30)}...`)
+    return true
   }
 
   /** Remove a Live Activity push token */
