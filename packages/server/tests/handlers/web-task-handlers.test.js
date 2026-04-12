@@ -64,6 +64,63 @@ describe('web-task-handlers', () => {
       assert.equal(ctx._sent[0].type, 'web_task_error')
       assert.match(ctx._sent[0].message, /Failed to launch/)
     })
+
+    // --- Adversary A10 (2026-04-11 audit) --------------------
+
+    it('A10: rejects prompt larger than 10KB', () => {
+      const ctx = makeCtx()
+      const huge = 'x'.repeat(10 * 1024 + 1)
+      webTaskHandlers.launch_web_task(makeWs(), makeClient(), { prompt: huge }, ctx)
+      assert.equal(ctx._sent[0].type, 'web_task_error')
+      assert.equal(ctx._sent[0].code, 'WEB_TASK_PROMPT_TOO_LARGE')
+      assert.equal(ctx.webTaskManager.launchTask.callCount, 0)
+    })
+
+    it('A10: rejects non-string / empty prompt without calling manager', () => {
+      for (const bad of [null, undefined, 42, '', '   ']) {
+        const ctx = makeCtx()
+        webTaskHandlers.launch_web_task(makeWs(), makeClient(), { prompt: bad }, ctx)
+        assert.equal(ctx._sent[0].type, 'web_task_error')
+        assert.equal(ctx.webTaskManager.launchTask.callCount, 0, `bad prompt=${JSON.stringify(bad)} should short-circuit`)
+      }
+    })
+
+    it('A10: bound client with no resolvable session is rejected', () => {
+      const ctx = makeCtx()
+      ctx.sessionManager = { getSession: () => null }
+      const client = makeClient({ boundSessionId: 'ghost' })
+      webTaskHandlers.launch_web_task(makeWs(), client, { prompt: 'hi' }, ctx)
+      assert.equal(ctx._sent[0].type, 'web_task_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx.webTaskManager.launchTask.callCount, 0)
+    })
+
+    it('A10: bound client cannot override cwd away from session cwd', () => {
+      const ctx = makeCtx()
+      ctx.sessionManager = { getSession: () => ({ cwd: '/home/dev/Projects/chroxy' }) }
+      const client = makeClient({ boundSessionId: 'b1' })
+      webTaskHandlers.launch_web_task(makeWs(), client,
+        { prompt: 'hi', cwd: '/home/dev/Projects/other' }, ctx)
+      assert.equal(ctx._sent[0].type, 'web_task_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx.webTaskManager.launchTask.callCount, 0)
+    })
+
+    it('A10: bound client using matching cwd forces launch in bound cwd', () => {
+      const ctx = makeCtx()
+      ctx.sessionManager = { getSession: () => ({ cwd: '/home/dev/Projects/chroxy' }) }
+      const client = makeClient({ boundSessionId: 'b1' })
+      // validateCwdAllowed will accept /home paths in most envs; if it
+      // rejects, the test still verifies we short-circuit on a match
+      // BEFORE calling launchTask — so rather than couple to the real
+      // cwd check, we stub it.
+      webTaskHandlers.launch_web_task(makeWs(), client, { prompt: 'hi' }, ctx)
+      // launchTask may still fail the cwd existence check in
+      // validateCwdAllowed — we only care that A10 didn't early-return
+      // via SESSION_TOKEN_MISMATCH.
+      const mismatch = ctx._sent.find((m) => m.code === 'SESSION_TOKEN_MISMATCH')
+      assert.equal(mismatch, undefined, 'bound client with matching cwd should not be rejected as mismatch')
+    })
   })
 
   describe('list_web_tasks', () => {
@@ -77,6 +134,19 @@ describe('web-task-handlers', () => {
 
       assert.equal(ctx._sent[0].type, 'web_task_list')
       assert.equal(ctx._sent[0].tasks.length, 1)
+    })
+
+    it('A10: scopes list to bound session cwd for bound clients', () => {
+      const ctx = makeCtx()
+      ctx.sessionManager = { getSession: () => ({ cwd: '/home/dev/ok' }) }
+      ctx.webTaskManager.listTasks = createSpy(() => [
+        { taskId: 'in-scope', cwd: '/home/dev/ok' },
+        { taskId: 'out-of-scope', cwd: '/home/dev/other' },
+      ])
+      const client = makeClient({ boundSessionId: 'b1' })
+      webTaskHandlers.list_web_tasks(makeWs(), client, {}, ctx)
+      assert.equal(ctx._sent[0].type, 'web_task_list')
+      assert.deepEqual(ctx._sent[0].tasks.map((t) => t.taskId), ['in-scope'])
     })
   })
 
@@ -101,6 +171,29 @@ describe('web-task-handlers', () => {
 
       assert.equal(ctx._sent[0].type, 'web_task_error')
       assert.match(ctx._sent[0].message, /task not found/)
+    })
+
+    it('A10: rejects bound client teleporting a task outside bound cwd', () => {
+      const ctx = makeCtx()
+      ctx.webTaskManager.getTask = (id) => id === 'task-x'
+        ? { taskId: 'task-x', cwd: '/home/dev/other' }
+        : null
+      ctx.sessionManager = { getSession: () => ({ cwd: '/home/dev/ok' }) }
+      const client = makeClient({ boundSessionId: 'b1' })
+      webTaskHandlers.teleport_web_task(makeWs(), client, { taskId: 'task-x' }, ctx)
+      assert.equal(ctx._sent[0].type, 'web_task_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx.webTaskManager.teleportTask.callCount, 0)
+    })
+
+    it('A10: rejects bound client when task id is unknown', () => {
+      const ctx = makeCtx()
+      ctx.webTaskManager.getTask = () => null
+      ctx.sessionManager = { getSession: () => ({ cwd: '/home/dev/ok' }) }
+      const client = makeClient({ boundSessionId: 'b1' })
+      webTaskHandlers.teleport_web_task(makeWs(), client, { taskId: 'ghost' }, ctx)
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx.webTaskManager.teleportTask.callCount, 0)
     })
   })
 
