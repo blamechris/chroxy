@@ -184,10 +184,19 @@ export class SdkSession extends BaseSession {
       options.sandbox = this._sandbox
     }
 
-    // In-process permission handling (only when not bypassing)
+    // In-process permission handling (only when not bypassing).
+    // We forward the SDK-provided `suggestions` to the permission manager
+    // so the 'allow always' flow can echo them back via updatedPermissions.
+    // Without this, respondToPermission('allowAlways') had nothing to
+    // attach to the PermissionResult — and worse, the 2026-04-11 audit
+    // (Skeptic) found the old code passed behavior:'allowAlways' which
+    // isn't a valid PermissionResult.behavior (SDK only accepts
+    // 'allow'|'deny'). The correct shape per the SDK's "always allow"
+    // documentation is { behavior: 'allow', updatedPermissions:
+    // <suggestions from callback options> }.
     if (this.permissionMode !== 'auto') {
-      options.canUseTool = (toolName, input, { signal }) =>
-        this._handlePermission(toolName, input, signal)
+      options.canUseTool = (toolName, input, { signal, suggestions }) =>
+        this._handlePermission(toolName, input, signal, suggestions)
     }
 
     // Resume existing session if we have one
@@ -439,8 +448,8 @@ export class SdkSession extends BaseSession {
    * In-process permission handler for canUseTool callback.
    * Delegates to the PermissionManager.
    */
-  _handlePermission(toolName, input, signal) {
-    return this._permissions.handlePermission(toolName, input, signal, this.permissionMode)
+  _handlePermission(toolName, input, signal, suggestions) {
+    return this._permissions.handlePermission(toolName, input, signal, this.permissionMode, suggestions)
   }
 
   /**

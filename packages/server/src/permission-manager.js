@@ -122,9 +122,14 @@ export class PermissionManager extends EventEmitter {
    * @param {Object} input - The tool input
    * @param {AbortSignal|null} signal - Abort signal for cancellation
    * @param {string} permissionMode - Current permission mode
-   * @returns {Promise<{behavior: string, updatedInput?: Object, message?: string}>}
+   * @param {PermissionUpdate[]} [suggestions] - Suggestions from the SDK
+   *   canUseTool callback options — the pre-built permission rules to
+   *   echo back via `updatedPermissions` when the user picks "allow
+   *   always". Per the Agent SDK 'Always allow' flow, these are the
+   *   correct shape of rule to persist for this tool in this session.
+   * @returns {Promise<{behavior: string, updatedInput?: Object, message?: string, updatedPermissions?: Array}>}
    */
-  handlePermission(toolName, input, signal, permissionMode) {
+  handlePermission(toolName, input, signal, permissionMode, suggestions = undefined) {
     if (toolName === 'AskUserQuestion') {
       return this._handleAskUserQuestion(input, signal)
     }
@@ -146,7 +151,14 @@ export class PermissionManager extends EventEmitter {
 
     return new Promise((resolve) => {
       const requestId = `perm-${++this._permissionCounter}-${Date.now()}`
-      this._pendingPermissions.set(requestId, { resolve, input: input || {} })
+      this._pendingPermissions.set(requestId, {
+        resolve,
+        input: input || {},
+        // Stashed for the allowAlways branch of respondToPermission so
+        // we can echo them back as updatedPermissions per the SDK
+        // 'Always allow' flow.
+        suggestions: Array.isArray(suggestions) ? suggestions : [],
+      })
 
       const toolInput = input || {}
       const description = toolInput.description
@@ -260,7 +272,28 @@ export class PermissionManager extends EventEmitter {
     if (decision === 'allow') {
       pending.resolve({ behavior: 'allow', updatedInput: pending.input })
     } else if (decision === 'allowAlways') {
-      pending.resolve({ behavior: 'allowAlways', updatedInput: pending.input })
+      // Per the Agent SDK type contract (PermissionResult in
+      // @anthropic-ai/claude-agent-sdk coreTypes.d.ts), behavior is
+      // strictly 'allow' | 'deny' — there is NO 'allowAlways' variant.
+      // The "always allow" flow works by returning behavior='allow'
+      // AND attaching a list of permission rules to persist via
+      // updatedPermissions (which the SDK sources from the `suggestions`
+      // field of the canUseTool callback options, stashed on pending
+      // at capture time).
+      //
+      // Pre-audit, we passed behavior:'allowAlways' directly to the SDK
+      // callback, which the SDK silently coerced (or dropped) — the
+      // user-facing "Allow Always" button effectively did nothing more
+      // than a plain "Allow", and no persistent rule was added. Found
+      // by Skeptic in the 2026-04-11 production readiness audit.
+      const result = {
+        behavior: 'allow',
+        updatedInput: pending.input,
+      }
+      if (pending.suggestions && pending.suggestions.length > 0) {
+        result.updatedPermissions = pending.suggestions
+      }
+      pending.resolve(result)
     } else {
       pending.resolve({ behavior: 'deny', message: 'User denied' })
     }
