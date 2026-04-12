@@ -625,38 +625,48 @@ describe('validateCwdWithinHome', () => {
 // ============================================================
 
 describe('validateCwdAllowed — credential-directory deny-list (2026-04-11 audit blocker 1)', () => {
+  // Hermetic fake-$HOME used by every test in this block. Created once,
+  // torn down at the end. No test ever touches the real user home,
+  // which means these tests are deterministic across machines and
+  // don't silently skip when ~/.ssh / ~/.config don't exist.
+  //
+  // Pattern found by Copilot review on PR #2808: prior version of
+  // these tests created throwaway dirs under the user's real
+  // ~/.config, which is undesirable for local runs and flaky in CI.
+  let fakeHome
+  before(() => {
+    fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-fake-home-'))
+    // Pre-create the forbidden dirs so each test exercises the deny-list
+    // rather than the path-hygiene layer that would fire on nonexistence.
+    mkdirSync(join(fakeHome, '.ssh'))
+    mkdirSync(join(fakeHome, '.aws'))
+    mkdirSync(join(fakeHome, '.config'))
+    mkdirSync(join(fakeHome, '.config', 'gcloud'), { recursive: true })
+    mkdirSync(join(fakeHome, '.gnupg'))
+    mkdirSync(join(fakeHome, '.docker'))
+    mkdirSync(join(fakeHome, 'ordinary-project'))
+  })
+  after(() => {
+    if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
+  })
+
   it('rejects ~/.ssh — Adversary A1 attack scenario', () => {
-    // Only run if .ssh exists on the test machine; otherwise the
-    // pre-existence check would reject before the deny-list fires
-    const sshDir = join(homedir(), '.ssh')
-    try {
-      statSync(sshDir)
-    } catch {
-      // .ssh doesn't exist — test by creating a temp dir ALIAS, or skip
-      return
-    }
-    const err = validateCwdAllowed(sshDir)
-    assert.ok(err, 'must reject ~/.ssh')
+    const err = validateCwdAllowed(join(fakeHome, '.ssh'), { homeOverride: fakeHome })
+    assert.ok(err, 'must reject fake-home .ssh')
     assert.match(err, /credential.config directories/)
   })
 
   it('rejects a subdirectory of a forbidden entry (~/.config/gcloud)', () => {
-    // Simulate the attack without requiring the real dir to exist:
-    // create a fake subdir under a .chroxy-test-gcloud- path within home
-    // so the test is hermetic. We're asserting the deny-list CHECK,
-    // not that the directory literally exists.
-    const configRoot = join(homedir(), '.config')
-    if (!existsSync(configRoot)) return // best-effort hermetic skip
+    const err = validateCwdAllowed(join(fakeHome, '.config', 'gcloud'), { homeOverride: fakeHome })
+    assert.ok(err, 'must reject .config/gcloud subdirectory')
+    assert.match(err, /credential.config directories/)
+  })
 
-    // Create a throwaway subdir inside .config so we know the check
-    // fires on the .config entry rather than on nonexistence.
-    const fakeCredDir = mkdtempSync(join(configRoot, 'chroxy-test-deny-'))
-    try {
-      const err = validateCwdAllowed(fakeCredDir)
-      assert.ok(err, `expected reject for ${fakeCredDir}`)
+  it('rejects ~/.aws and ~/.docker and ~/.gnupg consistently', () => {
+    for (const name of ['.aws', '.docker', '.gnupg']) {
+      const err = validateCwdAllowed(join(fakeHome, name), { homeOverride: fakeHome })
+      assert.ok(err, `must reject ${name}`)
       assert.match(err, /credential.config directories/)
-    } finally {
-      rmSync(fakeCredDir, { recursive: true, force: true })
     }
   })
 
@@ -676,78 +686,66 @@ describe('validateCwdAllowed — credential-directory deny-list (2026-04-11 audi
     assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.rclone'), '~/.rclone must be denied')
   })
 
-  it('case-insensitive match rejects ~/.SSH / ~/.AWS on macOS-style filesystems (agent review on PR #2808)', () => {
+  it('case-insensitive match rejects mixed-case variants (agent review on PR #2808)', () => {
     // Critical bypass found by agent review: on macOS APFS (default
     // case-insensitive) and Windows NTFS, ~/.SSH resolves to the same
     // directory as ~/.ssh but a case-sensitive Set lookup would miss
-    // it. Attacker sends cwd: ~/.SSH, gets exactly the same access as
-    // the Adversary A1 attack the deny-list exists to close.
+    // it. Attacker sends cwd: ~/.SSH, gets the same access as Adversary
+    // A1. One-line fix: lowercase the first segment before the Set
+    // lookup in pathTouchesForbiddenSubdir.
     //
-    // Reproducing the exact bypass inside a test would need a real
-    // .SSH directory, which we can't reliably create hermetically.
-    // Instead create a mixed-case .chroxy-MiXeD-test-deny- throwaway
-    // dir that matches a forbidden-like prefix, and verify the
-    // lowercase compare still flags it.
+    // Hermetic test: create mixed-case forbidden directories directly
+    // in the fake home. On case-insensitive FS .SSH maps to the
+    // already-created .ssh and mkdirSync will throw EEXIST — we
+    // handle that by just querying the existing dir with the mixed
+    // casing. On case-sensitive FS the mixed-case dir is distinct
+    // and the lowercase compare still catches it.
+    // On case-insensitive FS, `.SSH` and `.AwS` are the same directories
+    // as `.ssh` and `.aws` already created in before(). We just validate
+    // the mixed-case path string and assert the lowercase compare fires.
+    // We do NOT delete anything — rmSync on a case-insensitive FS alias
+    // would clobber the real lowercase directory and break later tests.
     //
-    // Use '.CONFIG' because `.config` is the most commonly touched
-    // forbidden entry — if the fix works here it works for every
-    // entry on the list.
-    const configRoot = join(homedir(), '.CONFIG')
-    // Only run if we can either use the real case-insensitive dir or
-    // create a throwaway mixed-case variant. On case-sensitive FS the
-    // throwaway dir doesn't exist so we skip.
-    if (existsSync(configRoot)) {
-      // Case-insensitive FS: ~/.CONFIG IS ~/.config, should be denied
-      const err = validateCwdAllowed(configRoot)
-      assert.ok(err, 'case-insensitive filesystem bypass must be rejected')
-      assert.match(err, /credential.config directories/)
-      return
-    }
-    // Case-sensitive FS: create a real ~/.CoNfIg-NOT-real- subdir that
-    // matches when first-segment is lowercased. If the Set stored
-    // '.config', the lowercased first-segment of this path would also
-    // be '.config', so the match should fire regardless of the dir's
-    // actual on-disk case.
-    //
-    // Actually, mkdtempSync creates an exact-case dir, so matching on
-    // lowercased segment vs the literal Set entry still needs the
-    // segment to start with `.config` in some case variant. Easiest
-    // is to create `.Config-chroxy-test-` and verify it's rejected.
-    const mixed = mkdtempSync(join(homedir(), '.Config-chroxy-'))
-    try {
-      const err = validateCwdAllowed(mixed)
-      assert.ok(err, 'mixed-case variant of a forbidden entry must be rejected')
-      assert.match(err, /credential.config directories/)
-    } finally {
-      rmSync(mixed, { recursive: true, force: true })
+    // On case-sensitive FS, `.SSH` is a distinct directory. To test the
+    // lowercase fix we'd need to create one; but the before() block
+    // already created `.ssh` and mkdirSync('.SSH') would succeed on
+    // case-sensitive FS only. We try it, accept EEXIST on case-
+    // insensitive, and proceed either way.
+    for (const name of ['.SSH', '.AwS', '.CONFIG']) {
+      const mixedPath = join(fakeHome, name)
+      try {
+        mkdirSync(mixedPath)
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err
+        // Case-insensitive FS: the mixed path resolves to the
+        // lowercase dir from before(). Either way validateCwdAllowed
+        // should reject it — that's what we assert.
+      }
+      const result = validateCwdAllowed(mixedPath, { homeOverride: fakeHome })
+      assert.ok(result, `mixed-case ${name} must be rejected`)
+      assert.match(result, /credential.config directories/)
     }
   })
 
   it('allows an ordinary home subdir that does NOT touch any forbidden entry', () => {
-    const homeTemp = mkdtempSync(join(homedir(), '.chroxy-ordinary-'))
-    try {
-      const err = validateCwdAllowed(homeTemp)
-      assert.strictEqual(err, null,
-        `expected null for ordinary home subdir, got: ${err}`)
-    } finally {
-      rmSync(homeTemp, { recursive: true, force: true })
-    }
+    const err = validateCwdAllowed(
+      join(fakeHome, 'ordinary-project'),
+      { homeOverride: fakeHome }
+    )
+    assert.strictEqual(err, null, `expected null, got: ${err}`)
   })
 
   it('deny-list fires before the workspaceRoots allowlist check', () => {
     // Even if the user explicitly configured an allowlist that includes
     // a path under a forbidden entry, the deny-list wins. Defense in
     // depth — prevents a user from accidentally whitelisting ~/.ssh.
-    const configRoot = join(homedir(), '.config')
-    if (!existsSync(configRoot)) return
-    const fakeCredDir = mkdtempSync(join(configRoot, 'chroxy-test-explicit-'))
-    try {
-      const err = validateCwdAllowed(fakeCredDir, { workspaceRoots: [fakeCredDir] })
-      assert.ok(err, 'deny-list must override workspaceRoots allowlist')
-      assert.match(err, /credential.config directories/)
-    } finally {
-      rmSync(fakeCredDir, { recursive: true, force: true })
-    }
+    const credDir = join(fakeHome, '.config', 'gcloud')
+    const err = validateCwdAllowed(credDir, {
+      workspaceRoots: [credDir],
+      homeOverride: fakeHome,
+    })
+    assert.ok(err, 'deny-list must override workspaceRoots allowlist')
+    assert.match(err, /credential.config directories/)
   })
 })
 
