@@ -1,5 +1,5 @@
 import { realpath } from 'fs/promises'
-import { resolve } from 'path'
+import { resolve, dirname, basename, join } from 'path'
 
 /**
  * Shared utilities for file operations: CWD resolution, path validation, exec helpers.
@@ -21,8 +21,70 @@ export async function resolveSessionCwd(sessionCwd, cwdRealCache, cwdCacheTtl) {
 }
 
 /**
+ * Resolve the real path of a (possibly-nonexistent) target by walking up
+ * to the deepest existing ancestor, `realpath()`-ing that, and then
+ * re-appending the unresolved tail components.
+ *
+ * Why this exists: the naive "realpath the target, fall back to lexical
+ * on ENOENT" pattern has a symlink-escape bug on new-file paths. If
+ * `packages/app/.venv/bin/evil.sh` doesn't exist but `.venv` is a
+ * symlink to `/etc`, then:
+ *   - realpath('.venv/bin/evil.sh') → ENOENT (bin/evil.sh doesn't exist)
+ *   - fallback uses the lexical path → looks like it stays in workspace
+ *   - O_NOFOLLOW only checks the FINAL component → the kernel happily
+ *     follows the `.venv` symlink to `/etc` and writes there
+ *
+ * Walking up to the deepest existing ancestor closes the gap: realpath
+ * on `.venv/` yields `/etc`, we reconstruct the target as `/etc/bin/
+ * evil.sh`, and it's then obviously outside the workspace.
+ *
+ * Found in the 2026-04-11 production readiness audit (blocker 4) —
+ * defeats the otherwise-correct 04a2fbbb1 realpath-TOCTOU fix on the
+ * new-file code path.
+ *
+ * @param {string} absPath - Absolute path to resolve (may not exist)
+ * @returns {Promise<string>} Real path with all symlink ancestors resolved
+ */
+export async function realpathOfDeepestAncestor(absPath) {
+  const segments = []
+  let cursor = absPath
+  // Safety ceiling — absolute paths should never nest more than a few
+  // dozen components, but guard against pathological inputs.
+  const MAX_DEPTH = 256
+  for (let i = 0; i < MAX_DEPTH; i++) {
+    try {
+      const realAncestor = await realpath(cursor)
+      if (segments.length === 0) return realAncestor
+      // Rebuild: realAncestor + segments in the order they were stripped.
+      // `segments` was pushed leaf-first (cursor kept moving up), so
+      // reverse to get ancestor→leaf order for join().
+      return join(realAncestor, ...segments.slice().reverse())
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+      const parent = dirname(cursor)
+      if (parent === cursor) {
+        // Reached the filesystem root without finding any existing
+        // ancestor — treat as lexical. This should be unreachable on
+        // any real OS (root always exists).
+        return absPath
+      }
+      segments.push(basename(cursor))
+      cursor = parent
+    }
+  }
+  // Depth ceiling hit — bail with the lexical path; caller will still
+  // apply the cwdReal prefix check.
+  return absPath
+}
+
+/**
  * Validate that a resolved path is within the session CWD.
  * Follows symlinks to prevent symlink escape.
+ *
+ * For targets that don't exist yet (new-file writes), walks up to the
+ * deepest existing ancestor so symlinks in the parent chain still get
+ * resolved — see realpathOfDeepestAncestor above for the failure mode
+ * this closes.
  *
  * @param {string} absPath - Absolute path to validate
  * @param {string} sessionCwd - Session working directory
@@ -32,16 +94,7 @@ export async function resolveSessionCwd(sessionCwd, cwdRealCache, cwdCacheTtl) {
  */
 export async function validatePathWithinCwd(absPath, sessionCwd, cwdRealCache, cwdCacheTtl) {
   const cwdReal = await resolveSessionCwd(sessionCwd, cwdRealCache, cwdCacheTtl)
-  let realAbsPath
-  try {
-    realAbsPath = await realpath(absPath)
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      realAbsPath = absPath
-    } else {
-      throw err
-    }
-  }
+  const realAbsPath = await realpathOfDeepestAncestor(absPath)
   const valid = realAbsPath.startsWith(cwdReal + '/') || realAbsPath === cwdReal
   return { valid, realPath: realAbsPath, cwdReal }
 }
