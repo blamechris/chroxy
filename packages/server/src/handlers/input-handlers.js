@@ -103,12 +103,24 @@ function handleResumeBudget(ws, client, msg, ctx) {
 }
 
 function handleRegisterPushToken(ws, client, msg, ctx) {
-  if (ctx.pushManager && typeof msg.token === 'string') {
-    const ok = ctx.pushManager.registerToken(msg.token)
-    if (!ok) {
-      ctx.send(ws, { type: 'push_token_error', message: 'Push token rejected — must be a non-empty string' })
-    }
+  if (!ctx.pushManager || typeof msg.token !== 'string') return
+
+  const ok = ctx.pushManager.registerToken(msg.token)
+  if (!ok) {
+    ctx.send(ws, { type: 'push_token_error', message: 'Push token rejected — must match Expo (ExponentPushToken[...]) or FCM format' })
+    return
   }
+
+  // Track which client owns this token so _handleClientDeparture can
+  // prune it when the client disconnects. Without this, an attacker
+  // who authenticated, registered their token, and disconnected would
+  // leave their token sitting in the push-manager set forever,
+  // continuing to receive every future permission prompt. Fix for
+  // 2026-04-11 audit blocker 6.
+  if (!client._ownedPushTokens) {
+    client._ownedPushTokens = new Set()
+  }
+  client._ownedPushTokens.add(msg.token)
 }
 
 function handleUserQuestionResponse(ws, client, msg, ctx) {

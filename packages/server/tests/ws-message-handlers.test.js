@@ -250,6 +250,68 @@ describe('handleSessionMessage', () => {
       assert.equal(id, 'req-abc')
       assert.equal(decision, 'allow')
     })
+
+    it('rejects bound client trying to respond to cross-session permission (2026-04-11 audit blocker 5)', async () => {
+      // Pre-audit, handlePermissionResponse in settings-handlers.js skipped
+      // the boundSessionId check. A client bound to session A could approve
+      // or deny a permission request belonging to session B. Direct bypass
+      // of the 616aeaf62/2c0ac7d2d session-binding enforcement claim.
+      const ctx = makeCtx()
+      // Mapping says this request belongs to session-B
+      ctx.permissionSessionMap.set('cross-req', 'session-B')
+      const entryB = addSession(ctx, 'session-B')
+      // Client is bound to session-A
+      const boundClient = makeClient({
+        activeSessionId: 'session-A',
+        boundSessionId: 'session-A',
+      })
+      await handleSessionMessage(WS, boundClient, {
+        type: 'permission_response',
+        requestId: 'cross-req',
+        decision: 'allow',
+      }, ctx)
+      // Permission must NOT have been resolved on session-B
+      assert.equal(entryB.session.respondToPermission.callCount, 0,
+        'bound client must not be able to resolve cross-session permissions')
+      // Mapping must NOT have been consumed so the legit bound client can still respond
+      assert.ok(ctx.permissionSessionMap.has('cross-req'),
+        'permissionSessionMap entry must be preserved for the legit client')
+      // (We can't assert on the SESSION_TOKEN_MISMATCH error reaching the
+      // client here: sendError writes directly to ws.send, and the WS mock
+      // at the top of the file has no readyState=1 so the send is a no-op.
+      // The "no cross-session resolve" + "mapping preserved" assertions
+      // above are what actually prevent the attack.)
+    })
+
+    it('allows bound client to respond to permission for its own bound session', async () => {
+      const ctx = makeCtx()
+      ctx.permissionSessionMap.set('own-req', 'session-A')
+      const entryA = addSession(ctx, 'session-A')
+      const boundClient = makeClient({
+        activeSessionId: 'session-A',
+        boundSessionId: 'session-A',
+      })
+      await handleSessionMessage(WS, boundClient, {
+        type: 'permission_response',
+        requestId: 'own-req',
+        decision: 'allow',
+      }, ctx)
+      assert.equal(entryA.session.respondToPermission.callCount, 1,
+        'bound client must be able to resolve permissions for its own session')
+    })
+
+    it('allows unbound client to respond to any session (primary-token mode)', async () => {
+      const ctx = makeCtx()
+      ctx.permissionSessionMap.set('any-req', 'session-X')
+      const entryX = addSession(ctx, 'session-X')
+      const unboundClient = makeClient({ activeSessionId: 'session-X' })  // no boundSessionId
+      await handleSessionMessage(WS, unboundClient, {
+        type: 'permission_response',
+        requestId: 'any-req',
+        decision: 'allow',
+      }, ctx)
+      assert.equal(entryX.session.respondToPermission.callCount, 1)
+    })
   })
 
   describe('user_question_response', () => {

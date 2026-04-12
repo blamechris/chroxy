@@ -86,6 +86,23 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   if (!requestId || !decision) return
 
   const originSessionId = ctx.permissionSessionMap.get(requestId) || client.activeSessionId
+
+  // Enforce session binding: if this client authenticated with a
+  // pairing-issued session token that was bound to a specific session,
+  // prevent them from approving/denying a permission request belonging
+  // to any OTHER session. Without this check, a bound client could act
+  // on cross-session permission prompts — discovered in the 2026-04-11
+  // production readiness audit (blocker 5). The 616aeaf62 / 2c0ac7d2d
+  // commits claimed to enforce binding across all session-scoped
+  // handlers but missed this one + the HTTP fallback.
+  if (client.boundSessionId && originSessionId && client.boundSessionId !== originSessionId) {
+    log.warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to respond to permission ${requestId} for session ${originSessionId}`)
+    // Don't consume the permissionSessionMap entry — let the legitimate
+    // client still respond to it.
+    sendError(ws, requestId, 'SESSION_TOKEN_MISMATCH', 'Not authorized to respond to this permission request')
+    return
+  }
+
   ctx.permissionSessionMap.delete(requestId)
 
   let resolved = false

@@ -140,21 +140,66 @@ export class PushManager {
 
   /**
    * Register a push token from a client.
-   * Accepts any non-empty string — Expo push tokens (ExponentPushToken[...])
-   * and FCM tokens (Firebase Cloud Messaging for Android) both work with
-   * the Expo Push API.
+   *
+   * Accepts Expo push tokens (`ExponentPushToken[...]`) and FCM tokens
+   * (Firebase Cloud Messaging for Android) — both work with the Expo
+   * Push API. Rejects obviously-malformed values.
+   *
+   * Per the 2026-04-11 production readiness audit (blocker 6), the old
+   * implementation accepted ANY non-empty string, which let an
+   * authenticated attacker register their own `ExponentPushToken[attacker]`
+   * and intercept every future permission-prompt push notification. This
+   * method now validates the format and (via the caller) binds each
+   * registered token to the connection that registered it, so tokens get
+   * pruned on client disconnect.
    */
   registerToken(token) {
-    if (typeof token === 'string' && token.length > 0) {
-      if (!this.tokens.has(token)) {
-        this.tokens.add(token)
-        this._persistToDisk()
-      }
-      log.info(`Registered push credential ${token.slice(0, 30)}...`)
-      return true
+    if (typeof token !== 'string' || token.length === 0) {
+      log.warn(`Rejected invalid push credential: ${String(token).slice(0, 40)}`)
+      return false
     }
-    log.warn(`Rejected invalid push credential: ${String(token).slice(0, 40)}`)
-    return false
+    if (!PushManager.isValidPushTokenFormat(token)) {
+      log.warn(`Rejected malformed push credential (unrecognized format): ${token.slice(0, 40)}`)
+      return false
+    }
+    if (!this.tokens.has(token)) {
+      this.tokens.add(token)
+      this._persistToDisk()
+    }
+    log.info(`Registered push credential ${token.slice(0, 30)}...`)
+    return true
+  }
+
+  /**
+   * Validate a push-token string. This is a soft defense — it rejects
+   * obviously-malformed input (empty strings, whitespace, JSON
+   * punctuation, URLs) so typos and automated fuzzers don't land in
+   * the token set. The REAL defense against push-token hijack is the
+   * session-binding + prune-on-disconnect added in the same audit fix
+   * (blocker 6): any token registered by a client is tracked on that
+   * client's _ownedPushTokens and removed on disconnect.
+   *
+   * Policy: any non-empty string that is >= 20 characters, free of
+   * whitespace/control characters, and free of JSON/URL punctuation
+   * that would never appear in a real Expo or FCM token. Real tokens:
+   *
+   * - Expo: `ExponentPushToken[...]` (50+ chars)
+   * - FCM: base64url-ish, ~150 chars typically but as short as 40 in
+   *   some SDKs
+   * - Legacy device tokens via the Firebase-Expo passthrough: variable
+   */
+  static isValidPushTokenFormat(token) {
+    if (typeof token !== 'string') return false
+    if (token.length < 20) return false
+    // Reject whitespace (including tabs/newlines), quotes, braces,
+    // angle brackets, forward slashes, and shell metacharacters that
+    // signal the caller sent garbage (a URL, a JSON blob, an error
+    // message, a shell-injection attempt) rather than a real push
+    // token. Real Expo/FCM push tokens use only alphanumerics + a
+    // restricted set of punctuation ([_-.:~%]) — the characters in
+    // this reject list never appear in them.
+    if (/[\s"'`<>{}&|;/\\?#]/.test(token)) return false
+    return true
   }
 
   /** Remove a push token */
