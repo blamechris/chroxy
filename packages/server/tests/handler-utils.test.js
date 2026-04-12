@@ -644,6 +644,9 @@ describe('validateCwdAllowed — credential-directory deny-list (2026-04-11 audi
     mkdirSync(join(fakeHome, '.config', 'gcloud'), { recursive: true })
     mkdirSync(join(fakeHome, '.gnupg'))
     mkdirSync(join(fakeHome, '.docker'))
+    // Chroxy + Claude own-state dirs, added 2026-04-11 for Adversary A9
+    mkdirSync(join(fakeHome, '.chroxy'))
+    mkdirSync(join(fakeHome, '.claude'))
     mkdirSync(join(fakeHome, 'ordinary-project'))
   })
   after(() => {
@@ -684,6 +687,21 @@ describe('validateCwdAllowed — credential-directory deny-list (2026-04-11 audi
     assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.terraform.d'), '~/.terraform.d must be denied')
     assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.helm'), '~/.helm must be denied')
     assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.rclone'), '~/.rclone must be denied')
+    // Adversary A9 additions
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.chroxy'), '~/.chroxy must be denied (A9 known-good-ref poisoning)')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.claude'), '~/.claude must be denied (JSONL ring isolation)')
+  })
+
+  it('rejects ~/.chroxy — Adversary A9 known-good-ref poisoning scenario', () => {
+    const err = validateCwdAllowed(join(fakeHome, '.chroxy'), { homeOverride: fakeHome })
+    assert.ok(err, 'must reject fake-home .chroxy')
+    assert.match(err, /credential.config directories/)
+  })
+
+  it('rejects ~/.claude — Claude Code JSONL directory', () => {
+    const err = validateCwdAllowed(join(fakeHome, '.claude'), { homeOverride: fakeHome })
+    assert.ok(err, 'must reject fake-home .claude')
+    assert.match(err, /credential.config directories/)
   })
 
   it('case-insensitive match rejects mixed-case variants (agent review on PR #2808)', () => {

@@ -167,6 +167,17 @@ const FORBIDDEN_HOME_SUBDIRS = new Set([
   '.rclone',        // rclone remote configs with cloud-storage keys
   '.dbt',           // dbt profiles with warehouse passwords
   '.passage',       // passage password store
+  // Chroxy's own internal state: supervisor PID, known-good git ref,
+  // push tokens, config. Added 2026-04-11 (Adversary A9) — without
+  // this, an authenticated client could create a session in
+  // ~/.chroxy, write_file `known-good-ref`, and poison the
+  // supervisor's crash-rollback target.
+  '.chroxy',
+  // Claude Code's own internal state: conversation JSONLs, settings,
+  // hooks. Pairs with the A8 conversation-scope fix — prevents a
+  // bound client from creating a session that writes directly into
+  // the JSONL ring Claude Code is reading from.
+  '.claude',
 ])
 
 /**
