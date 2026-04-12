@@ -1,5 +1,5 @@
 import { realpath } from 'fs/promises'
-import { resolve, dirname, basename, join } from 'path'
+import { resolve, dirname, basename, join, isAbsolute } from 'path'
 
 /**
  * Shared utilities for file operations: CWD resolution, path validation, exec helpers.
@@ -46,6 +46,18 @@ export async function resolveSessionCwd(sessionCwd, cwdRealCache, cwdCacheTtl) {
  * @returns {Promise<string>} Real path with all symlink ancestors resolved
  */
 export async function realpathOfDeepestAncestor(absPath) {
+  // Defensive: require an absolute path. If a caller accidentally passes
+  // a relative path, node's realpath() would resolve it against
+  // process.cwd() — which is the SERVER process's cwd, not the session
+  // cwd — producing a path that has nothing to do with the intended
+  // workspace boundary. Fail loudly rather than silently resolving to
+  // a location the caller didn't ask for.
+  if (!isAbsolute(absPath)) {
+    throw Object.assign(
+      new Error(`realpathOfDeepestAncestor requires an absolute path, got: ${absPath}`),
+      { code: 'EINVAL' }
+    )
+  }
   const segments = []
   let cursor = absPath
   // Safety ceiling — absolute paths should never nest more than a few
@@ -120,16 +132,15 @@ export async function validateGitPath(repoPath, workspaceRoot) {
     resolvedRoot = await realpath(workspaceRoot)
     _workspaceRootCache.set(cacheKey, resolvedRoot)
   }
-  let resolvedRepo
-  try {
-    resolvedRepo = await realpath(repoPath)
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      resolvedRepo = resolve(repoPath)
-    } else {
-      throw err
-    }
-  }
+  // Resolve the repo path through realpathOfDeepestAncestor so parent
+  // symlinks are chased even when the leaf doesn't exist yet. Pre-audit,
+  // this function used a realpath-or-lexical fallback that had the same
+  // shape of bug as validatePathWithinCwd — a non-existent leaf inside
+  // a symlinked parent would fall back to the lexical path and escape
+  // the workspace-prefix check. Fixed alongside blocker 4 because the
+  // two functions share the exact same pattern 20 lines apart.
+  const absRepoPath = resolve(repoPath)
+  const resolvedRepo = await realpathOfDeepestAncestor(absRepoPath)
   if (!resolvedRepo.startsWith(resolvedRoot + '/') && resolvedRepo !== resolvedRoot) {
     throw Object.assign(
       new Error(`Access denied: git operations are restricted to the workspace directory`),

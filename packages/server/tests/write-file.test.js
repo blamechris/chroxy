@@ -186,10 +186,13 @@ describe('writeFile handler', () => {
     await rm(outsideDir, { recursive: true, force: true })
   })
 
-  it('blocks new-file write through a multi-level symlink chain escaping CWD', async () => {
-    // Harder variant: multiple levels of symlinks in the parent chain,
-    // with the escape at the top. Tests the recursive walk in
-    // realpathOfDeepestAncestor — must not stop at the first level.
+  it('blocks new-file write through a deep symlinked-parent path escaping CWD', async () => {
+    // Variant: real intermediate directories exist on the other side of
+    // the symlink, so the deepest-existing-ancestor walk resolves on the
+    // first iteration (through the `a` symlink) rather than recursing
+    // through multiple non-existent ancestors. Exercises the case where
+    // the full path up to the leaf already exists on disk on the other
+    // side of the escape link.
     responses.length = 0
     const outsideDir = await mkdtemp(join(tmpdir(), 'chroxy-outside-chain-'))
     const escapeLink = join(tmpDir, 'a')
@@ -211,6 +214,36 @@ describe('writeFile handler', () => {
       created = await readFile(join(outsideDir, 'b', 'c', 'evil.sh'), 'utf-8')
     } catch {}
     assert.equal(created, null, 'file must not have been created through the multi-level symlink chain')
+
+    await rm(outsideDir, { recursive: true, force: true })
+  })
+
+  it('exercises the recursive ancestor walk — leaf AND multiple tail dirs do not exist', async () => {
+    // Stronger multi-level test: pushing multiple tail segments onto
+    // the walker's `segments` array. `escape` is a symlink escaping
+    // the workspace. The walker must realpath `escape`, then
+    // reconstruct the target by appending the non-existent tail
+    // components `future1/future2/leaf.sh`. This exercises both the
+    // segment-push order and the reverse-and-join rebuild.
+    responses.length = 0
+    const outsideDir = await mkdtemp(join(tmpdir(), 'chroxy-outside-deepwalk-'))
+    const escapeLink = join(tmpDir, 'escape')
+    await symlink(outsideDir, escapeLink)
+    // Do NOT create future1/future2 — they must not exist, forcing
+    // the walker to push three ENOENT segments before reaching `escape`.
+
+    await fileOps.writeFile(mockWs, 'escape/future1/future2/leaf.sh', 'pwned', tmpDir)
+
+    assert.equal(responses.length, 1)
+    assert.ok(responses[0].error, 'deep non-existent tail through escape symlink must still be rejected')
+    assert.match(responses[0].error, /denied|restricted/i)
+
+    // Also verify the expected real target does not exist
+    let created = null
+    try {
+      created = await readFile(join(outsideDir, 'future1', 'future2', 'leaf.sh'), 'utf-8')
+    } catch {}
+    assert.equal(created, null)
 
     await rm(outsideDir, { recursive: true, force: true })
   })

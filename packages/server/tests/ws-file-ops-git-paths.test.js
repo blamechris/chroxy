@@ -175,6 +175,42 @@ describe('git ops workspace root validation (#2690)', () => {
     )
   })
 
+  it('gitStatus rejects a NON-EXISTING path whose parent is a symlink escaping workspace root (2026-04-11 audit blocker 4 sibling)', async (t) => {
+    // validateGitPath had the same bug pattern as validatePathWithinCwd:
+    // a realpath-or-lexical fallback on ENOENT that missed parent symlinks.
+    // Fixed in the same commit as the main blocker-4 fix by routing
+    // validateGitPath through realpathOfDeepestAncestor.
+    //
+    // Scenario: attacker creates an `escape` symlink inside the workspace
+    // pointing outside, then asks gitStatus to run on
+    // `escape/non-existent-subdir`. Pre-fix, the ENOENT branch returned
+    // the lexical path `/workspace/escape/non-existent-subdir`, which
+    // passes the `startsWith(workspaceRoot)` check. Post-fix, the walker
+    // realpath()s `escape` to the outside directory and the check rejects.
+    const escapeLink = join(workspaceDir, 'escape-git-parent')
+    try {
+      await symlink(outsideDir, escapeLink)
+    } catch (err) {
+      if (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'ENOTSUP') {
+        t.skip(`symlinks not supported in this environment: ${err.code}`)
+        return
+      }
+      if (err.code !== 'EEXIST') throw err
+    }
+    try {
+      lastMessage = null
+      await fileOps.gitStatus(ws, join(escapeLink, 'non-existent-subdir'))
+      assert.ok(lastMessage, 'should send a response')
+      assert.equal(lastMessage.type, 'git_status_result')
+      assert.ok(
+        lastMessage.error && lastMessage.error.includes('Access denied'),
+        `expected Access denied for non-existent path through parent symlink escape, got: ${lastMessage.error}`
+      )
+    } finally {
+      await rm(escapeLink, { force: true })
+    }
+  })
+
   it('gitStatus rejects a symlink pointing outside workspace root', async (t) => {
     // Create a symlink inside workspace that points outside
     const symlinkPath = join(workspaceDir, 'outside-link')
