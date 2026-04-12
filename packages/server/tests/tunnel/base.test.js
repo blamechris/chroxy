@@ -213,7 +213,13 @@ describe('BaseTunnelAdapter', () => {
       assert.equal(adapter._startCallCount, 0, 'Should not have spawned during recovery (shutdown during backoff)')
     })
 
-    it('emits tunnel_failed after max attempts', async () => {
+    it('emits tunnel_failed (recoveryOngoing) after max fast attempts but KEEPS RETRYING (2026-04-11 audit Task #2)', async () => {
+      // Pre-audit: the adapter bailed after maxRecoveryAttempts and
+      // left the process port-bound but unreachable forever. Post-fix:
+      // tunnel_failed still fires at the round boundary (back-compat)
+      // but carries recoveryOngoing:true, AND the loop keeps going
+      // with capped exponential backoff until stop() is called or
+      // recovery succeeds.
       let callCount = 0
       const adapter = new TestAdapter({
         port: 3000,
@@ -223,21 +229,41 @@ describe('BaseTunnelAdapter', () => {
         },
       })
       adapter.recoveryBackoffs = [10, 20, 30]
+      adapter.maxRetryBackoffMs = 50 // keep long-tail fast for tests
 
       const failedPromise = new Promise((resolve) => {
         adapter.once('tunnel_failed', resolve)
       })
+      const roundExhaustedPromise = new Promise((resolve) => {
+        adapter.once('tunnel_recovery_exhausted_round', resolve)
+      })
 
-      await adapter._handleUnexpectedExit(1, null)
+      // Kick off recovery; don't await — the loop is now infinite.
+      const recoveryPromise = adapter._handleUnexpectedExit(1, null)
 
-      const event = await failedPromise
-      assert.ok(event.message.includes('3 attempts'))
-      assert.equal(event.lastExitCode, 1)
-      assert.equal(event.lastSignal, null)
-      assert.equal(adapter.recoveryAttempt, 3)
+      // Wait for the round-exhausted signal + the back-compat tunnel_failed
+      const roundEvent = await roundExhaustedPromise
+      const failedEvent = await failedPromise
+
+      assert.equal(roundEvent.attempts, 3)
+      assert.equal(roundEvent.lastExitCode, 1)
+      assert.ok(typeof roundEvent.nextBackoffMs === 'number' && roundEvent.nextBackoffMs > 0,
+        'round-exhausted event must include the next retry delay')
+      assert.ok(failedEvent.message.includes('3 attempts'))
+      assert.equal(failedEvent.recoveryOngoing, true,
+        'tunnel_failed must signal recoveryOngoing:true (not a permanent giveup)')
+
+      // Let the loop run at least two more attempts — this is the proof
+      // it's not giving up. Then stop to break the infinite loop.
+      await new Promise((r) => setTimeout(r, 150))
+      assert.ok(callCount >= 5,
+        `adapter should keep retrying past the fast round; got callCount=${callCount}`)
+
+      adapter.intentionalShutdown = true
+      await recoveryPromise
     })
 
-    it('emits all tunnel_recovering events before tunnel_failed', async () => {
+    it('emits all tunnel_recovering events during the fast round', async () => {
       let callCount = 0
       const adapter = new TestAdapter({
         port: 3000,
@@ -247,21 +273,69 @@ describe('BaseTunnelAdapter', () => {
         },
       })
       adapter.recoveryBackoffs = [10, 20, 30]
+      adapter.maxRetryBackoffMs = 50
 
       const recoveringEvents = []
       adapter.on('tunnel_recovering', (info) => recoveringEvents.push(info))
 
-      const failedPromise = new Promise((resolve) => {
-        adapter.once('tunnel_failed', resolve)
-      })
+      const recoveryPromise = adapter._handleUnexpectedExit(1, null)
 
-      await adapter._handleUnexpectedExit(1, null)
-      await failedPromise
+      // Wait for the fast round to complete, then stop before the
+      // long-tail generates additional events.
+      await new Promise((r) => setTimeout(r, 80))
+      adapter.intentionalShutdown = true
+      await recoveryPromise
 
-      assert.equal(recoveringEvents.length, 3)
+      // We expect at LEAST 3 recovering events from the fast round.
+      // The long-tail may add 1-2 more before we observed the stop.
+      assert.ok(recoveringEvents.length >= 3,
+        `expected >=3 recovering events from fast round, got ${recoveringEvents.length}`)
       assert.equal(recoveringEvents[0].attempt, 1)
+      assert.equal(recoveringEvents[0].delayMs, 10)
       assert.equal(recoveringEvents[1].attempt, 2)
+      assert.equal(recoveringEvents[1].delayMs, 20)
       assert.equal(recoveringEvents[2].attempt, 3)
+      assert.equal(recoveringEvents[2].delayMs, 30)
+    })
+
+    it('_backoffForAttempt uses fast schedule then exponential capped at maxRetryBackoffMs', () => {
+      const adapter = new TestAdapter({ port: 3000 })
+      adapter.recoveryBackoffs = [3000, 6000, 12000]
+      adapter.maxRetryBackoffMs = 60000
+
+      // Fast schedule
+      assert.equal(adapter._backoffForAttempt(1), 3000)
+      assert.equal(adapter._backoffForAttempt(2), 6000)
+      assert.equal(adapter._backoffForAttempt(3), 12000)
+      // Long-tail: double from last fast value
+      assert.equal(adapter._backoffForAttempt(4), 24000) // 12000 * 2
+      assert.equal(adapter._backoffForAttempt(5), 48000) // 12000 * 4
+      assert.equal(adapter._backoffForAttempt(6), 60000) // 12000 * 8 = 96000 → capped
+      assert.equal(adapter._backoffForAttempt(7), 60000) // capped
+      assert.equal(adapter._backoffForAttempt(100), 60000) // still capped
+    })
+
+    it('recovery round emits tunnel_recovery_exhausted_round only ONCE per outage', async () => {
+      // Guards against notification spam — the consumer should see
+      // exactly one "round exhausted" event per outage, not one per
+      // retry after the fast round.
+      const adapter = new TestAdapter({
+        port: 3000,
+        startBehavior: () => { throw new Error('fail') },
+      })
+      adapter.recoveryBackoffs = [10, 20, 30]
+      adapter.maxRetryBackoffMs = 50
+
+      const roundEvents = []
+      adapter.on('tunnel_recovery_exhausted_round', (e) => roundEvents.push(e))
+
+      const recoveryPromise = adapter._handleUnexpectedExit(1, null)
+      await new Promise((r) => setTimeout(r, 200))
+      adapter.intentionalShutdown = true
+      await recoveryPromise
+
+      assert.equal(roundEvents.length, 1,
+        'tunnel_recovery_exhausted_round must be emitted exactly once per outage')
     })
   })
 

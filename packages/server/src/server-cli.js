@@ -52,11 +52,31 @@ function wireTunnelEvents(tunnel, wsServer) {
     wsServer.broadcastStatus('Tunnel recovering...')
   })
 
-  tunnel.on('tunnel_failed', ({ message, lastExitCode, lastSignal }) => {
-    log.error(message)
-    log.error(`Last exit: code=${lastExitCode} signal=${lastSignal}`)
-    log.error('Server will continue on localhost only. Remote connections will not work.')
-    wsServer.broadcastError('tunnel', 'Tunnel recovery failed. Remote connections will not work.', false)
+  tunnel.on('tunnel_failed', ({ message, lastExitCode, lastSignal, recoveryOngoing }) => {
+    log.warn(message)
+    log.warn(`Last exit: code=${lastExitCode} signal=${lastSignal}`)
+    if (recoveryOngoing) {
+      // 2026-04-11 audit (Skeptic Task #2): the tunnel adapter now
+      // retries indefinitely with capped exponential backoff, so this
+      // event means "fast round exhausted, still retrying" rather than
+      // "gave up permanently". Surface a recoverable warning to connected
+      // clients so they know something's wrong without panicking.
+      log.warn('Tunnel is still retrying with long-tail backoff. Remote connections may be temporarily unavailable.')
+      wsServer.broadcastError(
+        'tunnel',
+        'Tunnel connection unstable — retrying. Remote connections may be temporarily unavailable.',
+        true,
+      )
+    } else {
+      log.error('Server will continue on localhost only. Remote connections will not work.')
+      wsServer.broadcastError('tunnel', 'Tunnel recovery failed. Remote connections will not work.', false)
+    }
+  })
+
+  tunnel.on('tunnel_recovery_exhausted_round', ({ attempts, nextBackoffMs }) => {
+    log.warn(`Tunnel recovery round exhausted after ${attempts} fast attempts; next retry in ${nextBackoffMs}ms`)
+    // The tunnel_failed event above already surfaces a user-facing error.
+    // This is operator-facing diagnostic only.
   })
 }
 
