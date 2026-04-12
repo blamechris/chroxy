@@ -76,17 +76,29 @@ export async function realpathOfDeepestAncestor(absPath) {
       const parent = dirname(cursor)
       if (parent === cursor) {
         // Reached the filesystem root without finding any existing
-        // ancestor — treat as lexical. This should be unreachable on
-        // any real OS (root always exists).
-        return absPath
+        // ancestor. On any real OS this is unreachable because `/`
+        // always exists and realpath('/') succeeds. If we somehow
+        // get here, FAIL CLOSED — do NOT fall back to the lexical
+        // path because a lexical fallback re-opens the exact bypass
+        // this helper exists to close.
+        throw Object.assign(
+          new Error(`realpathOfDeepestAncestor: could not resolve any existing ancestor for ${absPath}`),
+          { code: 'ENOENT' }
+        )
       }
       segments.push(basename(cursor))
       cursor = parent
     }
   }
-  // Depth ceiling hit — bail with the lexical path; caller will still
-  // apply the cwdReal prefix check.
-  return absPath
+  // Depth ceiling hit — FAIL CLOSED. Returning the lexical path here
+  // would bypass the symlink-escape check for an attacker who crafted
+  // a path with MAX_DEPTH+ nonexistent tail components under a
+  // symlinked parent (Copilot review on PR #2807). Throwing forces the
+  // caller's error branch to reject the operation instead.
+  throw Object.assign(
+    new Error(`realpathOfDeepestAncestor: path depth exceeds ${MAX_DEPTH} (got ${absPath.split('/').length} components)`),
+    { code: 'ENAMETOOLONG' }
+  )
 }
 
 /**
