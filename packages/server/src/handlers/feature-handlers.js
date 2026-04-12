@@ -11,6 +11,7 @@
  */
 import { createLogger } from '../logger.js'
 import { validateCwdAllowed } from '../handler-utils.js'
+import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
 
 const log = createLogger('ws')
@@ -122,6 +123,17 @@ function handleCreateEnvironment(ws, _client, msg, ctx) {
   const cwdError = validateCwdAllowed(cwd, ctx.config)
   if (cwdError) {
     ctx.send(ws, { type: 'environment_error', error: cwdError })
+    return
+  }
+
+  // Validate the Docker image against the allowlist. Closes the
+  // 2026-04-11 audit Adversary A7 attack where an authenticated client
+  // could register any attacker-controlled image and run it inside the
+  // operator's Docker daemon. Default allowlist covers common base
+  // images; operators can override via config.allowedDockerImages.
+  const imageError = validateDockerImage(image, ctx.config)
+  if (imageError) {
+    ctx.send(ws, { type: 'environment_error', error: imageError, code: 'DOCKER_IMAGE_NOT_ALLOWED' })
     return
   }
 

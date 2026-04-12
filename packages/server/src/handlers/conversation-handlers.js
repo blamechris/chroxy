@@ -7,6 +7,7 @@
 import { scanConversations as defaultScanConversations } from '../conversation-scanner.js'
 import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
 import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients } from '../handler-utils.js'
+import { scopeConversationsToClient } from '../conversation-scope.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
@@ -15,7 +16,10 @@ async function handleListConversations(ws, client, msg, ctx) {
   // ctx.scanConversations override allows tests to inject a stub and skip real fs.
   const scan = ctx.scanConversations || defaultScanConversations
   try {
-    const conversations = await scan()
+    const all = await scan()
+    // Adversary A8: scope results so a bound pairing-issued client
+    // cannot enumerate conversations outside its session cwd.
+    const conversations = scopeConversationsToClient(all, client, ctx)
     ctx.send(ws, { type: 'conversations_list', conversations })
   } catch (err) {
     log.warn(`Failed to scan conversations: ${err.message}`)
@@ -27,7 +31,11 @@ async function handleSearchConversations(ws, client, msg, ctx) {
   const { query, maxResults } = msg
   const search = ctx.searchConversations || defaultSearchConversations
   try {
-    const results = await search(query, { maxResults })
+    const all = await search(query, { maxResults })
+    // Adversary A8: scope the search result set to the bound session's
+    // cwd. Without this, a mobile client could substring-grep every
+    // JSONL on disk for secrets-in-transcripts.
+    const results = scopeConversationsToClient(all, client, ctx)
     ctx.send(ws, { type: 'search_results', query, results })
   } catch (err) {
     log.warn(`Failed to search conversations: ${err.message}`)

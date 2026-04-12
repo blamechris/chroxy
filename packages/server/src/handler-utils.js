@@ -183,7 +183,7 @@ const FORBIDDEN_HOME_SUBDIRS = new Set([
  * trailing separator first to normalize. Found by Copilot review on
  * PR #2808.
  */
-function isPathWithin(absPath, baseDir) {
+export function isPathWithin(absPath, baseDir) {
   if (absPath === baseDir) return true
   // Normalize: strip a trailing separator so filesystem root and
   // drive roots work correctly. After this, baseDir is never

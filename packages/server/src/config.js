@@ -58,6 +58,24 @@ const CONFIG_SCHEMA = {
   // directory deny-list) is active in BOTH modes — see validateCwdAllowed
   // in handler-utils.js. Added in the 2026-04-11 audit blocker 1 fix.
   workspaceRoots: 'array',
+  // Gates the auto permission mode (bypass all permission checks). When
+  // not explicitly set to true, clients that attempt to flip to auto
+  // mode are rejected with AUTO_MODE_DISABLED_BY_CONFIG. Defaults to
+  // undefined/false so fresh installs are secure-by-default. Operators
+  // who want to run Claude unattended can opt in by editing their
+  // config file on the dev machine (physical-access proxy for real
+  // user confirmation). Added in the 2026-04-11 audit Adversary A5 fix.
+  allowAutoPermissionMode: 'boolean',
+  // Allowlist of Docker image patterns that create_environment may use.
+  // Each entry is either an exact image name or a prefix pattern like
+  // `mcr.microsoft.com/devcontainers/*`. When set, client-supplied
+  // images must match at least one entry; otherwise the request is
+  // rejected with DOCKER_IMAGE_NOT_ALLOWED. When unset, falls back to
+  // a built-in DEFAULT_ALLOWED_DOCKER_IMAGES list (see
+  // docker-image-allowlist.js) covering common base images. Added in
+  // the 2026-04-11 audit Adversary A7 fix to close the "register any
+  // attacker-controlled image and run it" attack path.
+  allowedDockerImages: 'array',
 }
 
 /**
