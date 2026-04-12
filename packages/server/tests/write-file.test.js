@@ -147,4 +147,123 @@ describe('writeFile handler', () => {
     const content = await readFile(join(tmpDir, 'overwrite-me.txt'), 'utf-8')
     assert.equal(content, 'new content')
   })
+
+  it('blocks new-file write through a PARENT directory symlink pointing outside CWD (2026-04-11 audit blocker 4)', async () => {
+    // Pre-audit: O_NOFOLLOW only checks the final path component.
+    // `validatePathWithinCwd` fell back to the lexical path on ENOENT for
+    // a non-existent target, so it never noticed that a PARENT of the new
+    // file was a symlink escaping the workspace. Creating a new file like
+    // `.venv/bin/evil.sh` where `.venv` → `/etc` would succeed: ENOENT on
+    // evil.sh, lexical path still starts with the workspace prefix, and
+    // the open() call follows the `.venv` symlink to `/etc`.
+    //
+    // The fix walks up to the deepest existing ancestor and realpath()s it
+    // (see realpathOfDeepestAncestor in ws-file-ops/common.js), which
+    // resolves the parent symlink and reveals the escape.
+    responses.length = 0
+    const outsideDir = await mkdtemp(join(tmpdir(), 'chroxy-outside-parent-'))
+    // Create a symlink INSIDE tmpDir that points to outsideDir (escaping)
+    const parentLink = join(tmpDir, 'escape-parent')
+    await symlink(outsideDir, parentLink)
+
+    // Try to create a NEW file THROUGH the parent symlink
+    await fileOps.writeFile(mockWs, 'escape-parent/new-evil.sh', '#!/bin/sh\necho pwned\n', tmpDir)
+
+    assert.equal(responses.length, 1)
+    assert.ok(responses[0].error, 'new-file write through symlinked parent must be rejected')
+    assert.match(responses[0].error, /denied|restricted/i)
+
+    // Verify the target file was NOT created outside the workspace
+    let createdOutside = null
+    try {
+      createdOutside = await readFile(join(outsideDir, 'new-evil.sh'), 'utf-8')
+    } catch {
+      // expected — the file should not exist
+    }
+    assert.equal(createdOutside, null,
+      'file must not have been created in the symlink-escape target directory')
+
+    await rm(outsideDir, { recursive: true, force: true })
+  })
+
+  it('blocks new-file write through a deep symlinked-parent path escaping CWD', async () => {
+    // Variant: real intermediate directories exist on the other side of
+    // the symlink, so the deepest-existing-ancestor walk resolves on the
+    // first iteration (through the `a` symlink) rather than recursing
+    // through multiple non-existent ancestors. Exercises the case where
+    // the full path up to the leaf already exists on disk on the other
+    // side of the escape link.
+    responses.length = 0
+    const outsideDir = await mkdtemp(join(tmpdir(), 'chroxy-outside-chain-'))
+    const escapeLink = join(tmpDir, 'a')
+    await symlink(outsideDir, escapeLink)
+    // Inside the (resolved) outside directory, create a real subdir so
+    // the middle of the lexical path exists on disk
+    await mkdir(join(outsideDir, 'b', 'c'), { recursive: true })
+
+    // Try to create a new file at `a/b/c/evil.sh` — lexical path looks
+    // like it's inside tmpDir, but `a` is actually a symlink to outsideDir
+    await fileOps.writeFile(mockWs, 'a/b/c/evil.sh', 'pwned', tmpDir)
+
+    assert.equal(responses.length, 1)
+    assert.ok(responses[0].error)
+    assert.match(responses[0].error, /denied|restricted/i)
+
+    let created = null
+    try {
+      created = await readFile(join(outsideDir, 'b', 'c', 'evil.sh'), 'utf-8')
+    } catch {}
+    assert.equal(created, null, 'file must not have been created through the multi-level symlink chain')
+
+    await rm(outsideDir, { recursive: true, force: true })
+  })
+
+  it('exercises the recursive ancestor walk — leaf AND multiple tail dirs do not exist', async () => {
+    // Stronger multi-level test: pushing multiple tail segments onto
+    // the walker's `segments` array. `escape` is a symlink escaping
+    // the workspace. The walker must realpath `escape`, then
+    // reconstruct the target by appending the non-existent tail
+    // components `future1/future2/leaf.sh`. This exercises both the
+    // segment-push order and the reverse-and-join rebuild.
+    responses.length = 0
+    const outsideDir = await mkdtemp(join(tmpdir(), 'chroxy-outside-deepwalk-'))
+    const escapeLink = join(tmpDir, 'escape')
+    await symlink(outsideDir, escapeLink)
+    // Do NOT create future1/future2 — they must not exist, forcing
+    // the walker to push three ENOENT segments before reaching `escape`.
+
+    await fileOps.writeFile(mockWs, 'escape/future1/future2/leaf.sh', 'pwned', tmpDir)
+
+    assert.equal(responses.length, 1)
+    assert.ok(responses[0].error, 'deep non-existent tail through escape symlink must still be rejected')
+    assert.match(responses[0].error, /denied|restricted/i)
+
+    // Also verify the expected real target does not exist
+    let created = null
+    try {
+      created = await readFile(join(outsideDir, 'future1', 'future2', 'leaf.sh'), 'utf-8')
+    } catch {}
+    assert.equal(created, null)
+
+    await rm(outsideDir, { recursive: true, force: true })
+  })
+
+  it('allows new-file write through a PARENT symlink that resolves within CWD', async () => {
+    // Positive case: internal symlink-as-parent pointing to another
+    // directory inside the workspace. The realpathOfDeepestAncestor walk
+    // resolves to a path inside cwdReal, so the write is permitted and
+    // lands at the real target (via the symlink).
+    responses.length = 0
+    const realDir = join(tmpDir, 'real-subdir')
+    await mkdir(realDir, { recursive: true })
+    const internalLink = join(tmpDir, 'link-to-subdir')
+    await symlink(realDir, internalLink)
+
+    await fileOps.writeFile(mockWs, 'link-to-subdir/legitimate.txt', 'ok content', tmpDir)
+
+    assert.equal(responses.length, 1)
+    assert.equal(responses[0].error, null, 'internal parent symlink must not be blocked')
+    const content = await readFile(join(realDir, 'legitimate.txt'), 'utf-8')
+    assert.equal(content, 'ok content')
+  })
 })
