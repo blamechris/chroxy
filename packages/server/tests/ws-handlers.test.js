@@ -405,7 +405,11 @@ describe('WS handler: register_push_token', () => {
     // Give it a moment to process
     await new Promise(r => setTimeout(r, 100))
     assert.equal(mockPushManager.registerToken.callCount, 1)
-    assert.deepEqual(mockPushManager.registerToken.lastCall, ['ExponentPushToken[abc123]'])
+    // registerToken now takes (token, ownerId) — the client's stable id
+    // is passed as the second argument for ref-counted prune-on-disconnect.
+    const [tokenArg, ownerIdArg] = mockPushManager.registerToken.lastCall
+    assert.equal(tokenArg, 'ExponentPushToken[abc123]')
+    assert.ok(typeof ownerIdArg === 'string' && ownerIdArg.length > 0, 'second argument must be the client ID string')
 
     ws.close()
   })
@@ -444,22 +448,23 @@ describe('WS handler: register_push_token', () => {
     ws.close()
   })
 
-  it('prunes the token from the push manager when the registering client disconnects (2026-04-11 audit blocker 6)', async () => {
+  it('releases the token from the push manager when the registering client disconnects (2026-04-11 audit blocker 6)', async () => {
     // Pre-audit: any authenticated client could register a push token and
     // then disconnect — the token stayed in the manager forever, continuing
     // to receive every future notification. An attacker who briefly had
     // credentials could exfiltrate all future permission prompts.
     //
     // After the fix, each registered token is tracked on
-    // client._ownedPushTokens and removed in _handleClientDeparture when
-    // the client disconnects.
+    // client._ownedPushTokens, and _handleClientDeparture calls
+    // releaseTokenOwner(token, clientId) so the token is pruned when the
+    // last owner disconnects (ref-counted per Copilot review on #2806).
     const { manager } = createMockSessionManager([
       { id: 'sess-1', name: 'Default', cwd: '/tmp' },
     ])
     const registered = new Set()
     const mockPushManager = {
       registerToken: createSpy((token) => { registered.add(token); return true }),
-      removeToken: createSpy((token) => { registered.delete(token) }),
+      releaseTokenOwner: createSpy((token) => { registered.delete(token); return true }),
     }
 
     server = new WsServer({
@@ -484,20 +489,22 @@ describe('WS handler: register_push_token', () => {
     // Wait for the disconnect handler + departure cleanup
     await new Promise(r => setTimeout(r, 100))
 
-    // The token must have been removed from the push manager
-    assert.equal(mockPushManager.removeToken.callCount, 1)
-    assert.deepEqual(mockPushManager.removeToken.lastCall, [VALID_TOKEN])
+    // The token must have been released (last owner, so actually removed)
+    assert.equal(mockPushManager.releaseTokenOwner.callCount, 1)
+    const [tok, ownerId] = mockPushManager.releaseTokenOwner.lastCall
+    assert.equal(tok, VALID_TOKEN)
+    assert.ok(typeof ownerId === 'string' && ownerId.length > 0)
     assert.ok(!registered.has(VALID_TOKEN), 'token must be pruned on disconnect')
   })
 
-  it('prunes multiple tokens when a client that registered several disconnects', async () => {
+  it('releases multiple tokens when a client that registered several disconnects', async () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-1', name: 'Default', cwd: '/tmp' },
     ])
     const registered = new Set()
     const mockPushManager = {
       registerToken: createSpy((token) => { registered.add(token); return true }),
-      removeToken: createSpy((token) => { registered.delete(token) }),
+      releaseTokenOwner: createSpy((token) => { registered.delete(token); return true }),
     }
 
     server = new WsServer({
@@ -522,6 +529,6 @@ describe('WS handler: register_push_token', () => {
     await new Promise(r => setTimeout(r, 100))
 
     assert.equal(registered.size, 0, 'all tokens registered by the client must be pruned on disconnect')
-    assert.equal(mockPushManager.removeToken.callCount, 3)
+    assert.equal(mockPushManager.releaseTokenOwner.callCount, 3)
   })
 })

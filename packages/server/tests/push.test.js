@@ -113,6 +113,49 @@ describe('PushManager', () => {
     })
   })
 
+  // -- releaseTokenOwner (ref-counted prune) --
+
+  describe('releaseTokenOwner (2026-04-11 audit blocker 6 — ref-counted via Copilot review on PR #2806)', () => {
+    it('prunes a token when its sole owner releases it', () => {
+      manager.registerToken(VALID_TOKEN, 'client-1')
+      assert.equal(manager.tokens.size, 1)
+      const pruned = manager.releaseTokenOwner(VALID_TOKEN, 'client-1')
+      assert.equal(pruned, true, 'last-owner release should return true (token pruned)')
+      assert.equal(manager.tokens.size, 0)
+    })
+
+    it('keeps a token alive when one of multiple owners releases it', () => {
+      manager.registerToken(VALID_TOKEN, 'client-1')
+      manager.registerToken(VALID_TOKEN, 'client-2')
+      assert.equal(manager.tokens.size, 1, 'two owners share one registry entry')
+
+      const prunedFirst = manager.releaseTokenOwner(VALID_TOKEN, 'client-1')
+      assert.equal(prunedFirst, false, 'non-last-owner release should return false (token still held)')
+      assert.ok(manager.tokens.has(VALID_TOKEN), 'token must still be in registry')
+
+      const prunedSecond = manager.releaseTokenOwner(VALID_TOKEN, 'client-2')
+      assert.equal(prunedSecond, true, 'final-owner release should return true')
+      assert.equal(manager.tokens.size, 0)
+    })
+
+    it('releases unknown owner gracefully (no-op)', () => {
+      manager.registerToken(VALID_TOKEN, 'client-1')
+      // client-2 tries to release a token it never registered
+      const pruned = manager.releaseTokenOwner(VALID_TOKEN, 'client-2')
+      assert.equal(pruned, false)
+      assert.ok(manager.tokens.has(VALID_TOKEN), 'token must still be held by client-1')
+    })
+
+    it('falls back to unconditional remove for legacy tokens with no owner tracking', () => {
+      // Register WITHOUT an ownerId (legacy path)
+      manager.registerToken(VALID_TOKEN)
+      assert.equal(manager.tokens.size, 1)
+      const pruned = manager.releaseTokenOwner(VALID_TOKEN, 'client-1')
+      assert.equal(pruned, true)
+      assert.equal(manager.tokens.size, 0, 'legacy untracked token is removed on first release')
+    })
+  })
+
   // -- hasTokens --
 
   describe('hasTokens', () => {

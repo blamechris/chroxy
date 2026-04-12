@@ -98,6 +98,16 @@ export class PushManager {
     this.tokens = new Set()
     this._liveActivityTokens = new Set()
     this._lastSent = new Map() // category -> timestamp
+    // Owner tracking for session-binding + prune-on-disconnect (audit
+    // blocker 6). `_tokenOwners` maps token -> Set<ownerId> so that when
+    // a client disconnects we can decrement its ownership and only
+    // actually prune the token from `this.tokens` when the last owner
+    // goes away. Without ref-counting, two connections registering the
+    // same token would cause the first disconnect to strip the token
+    // even though the second connection is still active (found by Copilot
+    // review on PR #2806). Owner IDs are client connection IDs in
+    // production; tests can use any unique string.
+    this._tokenOwners = new Map()
     this._loadFromDisk()
   }
 
@@ -153,7 +163,7 @@ export class PushManager {
    * registered token to the connection that registered it, so tokens get
    * pruned on client disconnect.
    */
-  registerToken(token) {
+  registerToken(token, ownerId = null) {
     if (typeof token !== 'string' || token.length === 0) {
       log.warn(`Rejected invalid push credential: ${String(token).slice(0, 40)}`)
       return false
@@ -166,8 +176,43 @@ export class PushManager {
       this.tokens.add(token)
       this._persistToDisk()
     }
+    // Track ownership for ref-counted prune-on-disconnect (2026-04-11
+    // audit blocker 6 + Copilot review on PR #2806). Multiple clients
+    // may register the same token (reconnect race, multi-device); the
+    // token is only pruned when the last owner disconnects.
+    if (ownerId != null) {
+      let owners = this._tokenOwners.get(token)
+      if (!owners) {
+        owners = new Set()
+        this._tokenOwners.set(token, owners)
+      }
+      owners.add(ownerId)
+    }
     log.info(`Registered push credential ${token.slice(0, 30)}...`)
     return true
+  }
+
+  /**
+   * Release one owner's claim on a token. If the last owner goes away,
+   * the token is removed from the registry entirely. Returns true if
+   * the token was actually pruned (last owner), false if it's still
+   * held by someone else.
+   *
+   * Used by WsServer._handleClientDeparture to prune on disconnect
+   * without breaking legitimate multi-connection scenarios.
+   */
+  releaseTokenOwner(token, ownerId) {
+    const owners = this._tokenOwners.get(token)
+    if (!owners) {
+      // No owner tracking — legacy / test path. Remove unconditionally.
+      return this.removeToken(token)
+    }
+    owners.delete(ownerId)
+    if (owners.size === 0) {
+      this._tokenOwners.delete(token)
+      return this.removeToken(token)
+    }
+    return false
   }
 
   /**
@@ -202,11 +247,18 @@ export class PushManager {
     return true
   }
 
-  /** Remove a push token */
+  /**
+   * Remove a push token unconditionally. Most callers should use
+   * releaseTokenOwner() instead so multi-owner tokens aren't stripped
+   * when one connection drops.
+   */
   removeToken(token) {
     if (this.tokens.delete(token)) {
+      this._tokenOwners.delete(token)
       this._persistToDisk()
+      return true
     }
+    return false
   }
 
   /**
