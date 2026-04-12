@@ -662,12 +662,65 @@ describe('validateCwdAllowed — credential-directory deny-list (2026-04-11 audi
 
   it('FORBIDDEN_HOME_SUBDIRS includes the highest-value credential paths', () => {
     // Sanity: the deny-list must cover the exact paths Adversary A1
-    // called out in the audit, plus the common companions.
+    // called out in the audit, plus the common companions + IaC
+    // tooling credentials added after agent review on PR #2808.
     assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.ssh'), '~/.ssh must be denied')
     assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.aws'), '~/.aws must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.azure'), '~/.azure must be denied')
     assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.config'), '~/.config must be denied (covers gcloud/gh/op)')
     assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.gnupg'), '~/.gnupg must be denied')
     assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.docker'), '~/.docker must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.kube'), '~/.kube must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.terraform.d'), '~/.terraform.d must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.helm'), '~/.helm must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.rclone'), '~/.rclone must be denied')
+  })
+
+  it('case-insensitive match rejects ~/.SSH / ~/.AWS on macOS-style filesystems (agent review on PR #2808)', () => {
+    // Critical bypass found by agent review: on macOS APFS (default
+    // case-insensitive) and Windows NTFS, ~/.SSH resolves to the same
+    // directory as ~/.ssh but a case-sensitive Set lookup would miss
+    // it. Attacker sends cwd: ~/.SSH, gets exactly the same access as
+    // the Adversary A1 attack the deny-list exists to close.
+    //
+    // Reproducing the exact bypass inside a test would need a real
+    // .SSH directory, which we can't reliably create hermetically.
+    // Instead create a mixed-case .chroxy-MiXeD-test-deny- throwaway
+    // dir that matches a forbidden-like prefix, and verify the
+    // lowercase compare still flags it.
+    //
+    // Use '.CONFIG' because `.config` is the most commonly touched
+    // forbidden entry — if the fix works here it works for every
+    // entry on the list.
+    const configRoot = join(homedir(), '.CONFIG')
+    // Only run if we can either use the real case-insensitive dir or
+    // create a throwaway mixed-case variant. On case-sensitive FS the
+    // throwaway dir doesn't exist so we skip.
+    if (existsSync(configRoot)) {
+      // Case-insensitive FS: ~/.CONFIG IS ~/.config, should be denied
+      const err = validateCwdAllowed(configRoot)
+      assert.ok(err, 'case-insensitive filesystem bypass must be rejected')
+      assert.match(err, /credential.config directories/)
+      return
+    }
+    // Case-sensitive FS: create a real ~/.CoNfIg-NOT-real- subdir that
+    // matches when first-segment is lowercased. If the Set stored
+    // '.config', the lowercased first-segment of this path would also
+    // be '.config', so the match should fire regardless of the dir's
+    // actual on-disk case.
+    //
+    // Actually, mkdtempSync creates an exact-case dir, so matching on
+    // lowercased segment vs the literal Set entry still needs the
+    // segment to start with `.config` in some case variant. Easiest
+    // is to create `.Config-chroxy-test-` and verify it's rejected.
+    const mixed = mkdtempSync(join(homedir(), '.Config-chroxy-'))
+    try {
+      const err = validateCwdAllowed(mixed)
+      assert.ok(err, 'mixed-case variant of a forbidden entry must be rejected')
+      assert.match(err, /credential.config directories/)
+    } finally {
+      rmSync(mixed, { recursive: true, force: true })
+    }
   })
 
   it('allows an ordinary home subdir that does NOT touch any forbidden entry', () => {

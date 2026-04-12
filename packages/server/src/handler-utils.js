@@ -142,6 +142,8 @@ export function resolveFileRefAttachments(attachments, cwd) {
 const FORBIDDEN_HOME_SUBDIRS = new Set([
   '.ssh',
   '.aws',
+  '.azure',         // `az login` tokens + service-principal secrets
+  '.gcloud',        // legacy path (GCP's newer tools use ~/.config/gcloud)
   '.gnupg',
   '.docker',
   '.kube',
@@ -154,6 +156,11 @@ const FORBIDDEN_HOME_SUBDIRS = new Set([
   '.yarnrc',
   '.pypirc',
   '.m2',            // Maven settings.xml frequently holds repo credentials
+  '.terraform.d',   // Terraform Cloud login tokens
+  '.helm',          // Helm repo credentials
+  '.rclone',        // rclone remote configs with cloud-storage keys
+  '.dbt',           // dbt profiles with warehouse passwords
+  '.passage',       // passage password store
 ])
 
 /**
@@ -172,12 +179,21 @@ function isPathWithin(absPath, baseDir) {
  * Returns true if `absPath` touches any FORBIDDEN_HOME_SUBDIRS entry
  * at any depth below $HOME. E.g. `/home/user/.ssh` and
  * `/home/user/.config/gcloud/credentials` both match.
+ *
+ * The match is CASE-INSENSITIVE on purpose: on case-insensitive
+ * filesystems (macOS APFS default, Windows NTFS default), `~/.SSH` is
+ * the same directory as `~/.ssh` but the raw Set lookup would miss it
+ * — trivially bypassing the deny-list with `cwd: ~/.SSH`. Doing a
+ * lowercase compare closes that bypass on every filesystem. On
+ * case-sensitive filesystems nobody sensibly creates two distinct
+ * `.ssh`/`.SSH` directories, so the broader match is safe.
+ * Found by agent review on PR #2808.
  */
 function pathTouchesForbiddenSubdir(absPath, home) {
   if (!isPathWithin(absPath, home)) return false
   const rel = relative(home, absPath)
   if (rel === '') return false
-  const firstSegment = rel.split(sep)[0]
+  const firstSegment = rel.split(sep)[0].toLowerCase()
   return FORBIDDEN_HOME_SUBDIRS.has(firstSegment)
 }
 
