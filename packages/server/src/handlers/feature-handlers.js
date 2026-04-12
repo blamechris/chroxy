@@ -10,7 +10,7 @@
  * reduce file fragmentation (each file had 1–4 small functions).
  */
 import { createLogger } from '../logger.js'
-import { validateCwdWithinHome } from '../handler-utils.js'
+import { validateCwdAllowed } from '../handler-utils.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
 
 const log = createLogger('ws')
@@ -56,7 +56,7 @@ function handleExtensionMessage(ws, client, msg, ctx) {
 
 function handleLaunchWebTask(ws, client, msg, ctx) {
   if (msg.cwd) {
-    const cwdError = validateCwdWithinHome(msg.cwd)
+    const cwdError = validateCwdAllowed(msg.cwd, ctx.config)
     if (cwdError) {
       ctx.send(ws, { type: 'web_task_error', taskId: null, message: cwdError })
       return
@@ -119,7 +119,7 @@ function handleCreateEnvironment(ws, _client, msg, ctx) {
     return
   }
 
-  const cwdError = validateCwdWithinHome(cwd)
+  const cwdError = validateCwdAllowed(cwd, ctx.config)
   if (cwdError) {
     ctx.send(ws, { type: 'environment_error', error: cwdError })
     return

@@ -339,11 +339,15 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager, config = null } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
     this._pairingManager = pairingManager || null
+    // Runtime config object — exposed to handler dispatch so validators
+    // can read settings (e.g. workspaceRoots for cwd allowlist) at
+    // message time. May be null in tests that don't pass it through.
+    this.config = config || null
     this._maxPayload = maxPayload || 10 * 1024 * 1024 // default 10MB (supports image/doc attachments)
     this.authRequired = authRequired
     this._encryptionEnabled = !noEncrypt
@@ -429,6 +433,11 @@ export class WsServer {
       replayHistory: (ws, sid) => self._replayHistory(ws, sid),
       get draining() { return self._draining },
       get environmentManager() { return self.environmentManager },
+      // Runtime config exposed to handlers so validators (e.g.
+      // validateCwdAllowed) can consult workspaceRoots, feature flags,
+      // etc. Late-bound so test harnesses that mutate this.config after
+      // construction still see the updated value.
+      get config() { return self.config },
     }
 
     // Context objects for extracted modules (ws-auth.js, ws-history.js)

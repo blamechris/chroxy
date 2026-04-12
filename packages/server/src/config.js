@@ -50,6 +50,14 @@ const CONFIG_SCHEMA = {
   logFormat: 'string',
   environments: 'object',
   sandbox: 'object',
+  // Optional allowlist of absolute directory paths that sessions may use
+  // as their working directory. When set (non-empty array), session
+  // cwds MUST be within one of these realpath-resolved roots;
+  // otherwise creation is rejected. When unset/empty, falls back to the
+  // legacy "must be inside $HOME" check. Defense-in-depth (credential
+  // directory deny-list) is active in BOTH modes — see validateCwdAllowed
+  // in handler-utils.js. Added in the 2026-04-11 audit blocker 1 fix.
+  workspaceRoots: 'array',
 }
 
 /**

@@ -9,7 +9,7 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   mkdtempSync, writeFileSync, mkdirSync, rmSync,
-  symlinkSync, realpathSync
+  symlinkSync, realpathSync, existsSync, statSync
 } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
@@ -17,6 +17,8 @@ import {
   validateAttachments,
   resolveFileRefAttachments,
   validateCwdWithinHome,
+  validateCwdAllowed,
+  FORBIDDEN_HOME_SUBDIRS,
   PERMISSION_MODES,
   ALLOWED_PERMISSION_MODE_IDS,
   MAX_ATTACHMENT_COUNT,
@@ -614,6 +616,190 @@ describe('validateCwdWithinHome', () => {
       assert.strictEqual(err, null, `expected null for home subdir, got: ${err}`)
     } finally {
       rmSync(homeTemp, { recursive: true, force: true })
+    }
+  })
+})
+
+// ============================================================
+// validateCwdAllowed — audit blocker 1 (2026-04-11)
+// ============================================================
+
+describe('validateCwdAllowed — credential-directory deny-list (2026-04-11 audit blocker 1)', () => {
+  it('rejects ~/.ssh — Adversary A1 attack scenario', () => {
+    // Only run if .ssh exists on the test machine; otherwise the
+    // pre-existence check would reject before the deny-list fires
+    const sshDir = join(homedir(), '.ssh')
+    try {
+      statSync(sshDir)
+    } catch {
+      // .ssh doesn't exist — test by creating a temp dir ALIAS, or skip
+      return
+    }
+    const err = validateCwdAllowed(sshDir)
+    assert.ok(err, 'must reject ~/.ssh')
+    assert.match(err, /credential.config directories/)
+  })
+
+  it('rejects a subdirectory of a forbidden entry (~/.config/gcloud)', () => {
+    // Simulate the attack without requiring the real dir to exist:
+    // create a fake subdir under a .chroxy-test-gcloud- path within home
+    // so the test is hermetic. We're asserting the deny-list CHECK,
+    // not that the directory literally exists.
+    const configRoot = join(homedir(), '.config')
+    if (!existsSync(configRoot)) return // best-effort hermetic skip
+
+    // Create a throwaway subdir inside .config so we know the check
+    // fires on the .config entry rather than on nonexistence.
+    const fakeCredDir = mkdtempSync(join(configRoot, 'chroxy-test-deny-'))
+    try {
+      const err = validateCwdAllowed(fakeCredDir)
+      assert.ok(err, `expected reject for ${fakeCredDir}`)
+      assert.match(err, /credential.config directories/)
+    } finally {
+      rmSync(fakeCredDir, { recursive: true, force: true })
+    }
+  })
+
+  it('FORBIDDEN_HOME_SUBDIRS includes the highest-value credential paths', () => {
+    // Sanity: the deny-list must cover the exact paths Adversary A1
+    // called out in the audit, plus the common companions.
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.ssh'), '~/.ssh must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.aws'), '~/.aws must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.config'), '~/.config must be denied (covers gcloud/gh/op)')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.gnupg'), '~/.gnupg must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.docker'), '~/.docker must be denied')
+  })
+
+  it('allows an ordinary home subdir that does NOT touch any forbidden entry', () => {
+    const homeTemp = mkdtempSync(join(homedir(), '.chroxy-ordinary-'))
+    try {
+      const err = validateCwdAllowed(homeTemp)
+      assert.strictEqual(err, null,
+        `expected null for ordinary home subdir, got: ${err}`)
+    } finally {
+      rmSync(homeTemp, { recursive: true, force: true })
+    }
+  })
+
+  it('deny-list fires before the workspaceRoots allowlist check', () => {
+    // Even if the user explicitly configured an allowlist that includes
+    // a path under a forbidden entry, the deny-list wins. Defense in
+    // depth — prevents a user from accidentally whitelisting ~/.ssh.
+    const configRoot = join(homedir(), '.config')
+    if (!existsSync(configRoot)) return
+    const fakeCredDir = mkdtempSync(join(configRoot, 'chroxy-test-explicit-'))
+    try {
+      const err = validateCwdAllowed(fakeCredDir, { workspaceRoots: [fakeCredDir] })
+      assert.ok(err, 'deny-list must override workspaceRoots allowlist')
+      assert.match(err, /credential.config directories/)
+    } finally {
+      rmSync(fakeCredDir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('validateCwdAllowed — workspaceRoots allowlist', () => {
+  it('rejects a path outside every configured root', () => {
+    const homeTemp = mkdtempSync(join(homedir(), '.chroxy-ws-outside-'))
+    const otherRoot = mkdtempSync(join(homedir(), '.chroxy-ws-root-'))
+    try {
+      const err = validateCwdAllowed(homeTemp, { workspaceRoots: [otherRoot] })
+      assert.ok(err, 'must reject path not under any configured root')
+      assert.match(err, /workspace root/)
+    } finally {
+      rmSync(homeTemp, { recursive: true, force: true })
+      rmSync(otherRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts a path that is the configured root itself', () => {
+    const root = mkdtempSync(join(homedir(), '.chroxy-ws-exact-'))
+    try {
+      const err = validateCwdAllowed(root, { workspaceRoots: [root] })
+      assert.strictEqual(err, null, `expected null, got: ${err}`)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts a path under one of several configured roots', () => {
+    const root1 = mkdtempSync(join(homedir(), '.chroxy-ws-multi-a-'))
+    const root2 = mkdtempSync(join(homedir(), '.chroxy-ws-multi-b-'))
+    const under2 = mkdtempSync(join(root2, 'nested-'))
+    try {
+      const err = validateCwdAllowed(under2, { workspaceRoots: [root1, root2] })
+      assert.strictEqual(err, null, `expected null, got: ${err}`)
+    } finally {
+      rmSync(under2, { recursive: true, force: true })
+      rmSync(root1, { recursive: true, force: true })
+      rmSync(root2, { recursive: true, force: true })
+    }
+  })
+
+  it('segment-aware matching rejects a sibling prefix ("/home/user/work-other" is not within "/home/user/work")', () => {
+    // The naive startsWith check without a separator would accept
+    // /home/user/work-other as being inside /home/user/work. The
+    // isPathWithin helper must use path separator boundaries.
+    const work = mkdtempSync(join(homedir(), '.chroxy-work-'))
+    const workOther = mkdtempSync(join(homedir(), '.chroxy-work-other-'))
+    try {
+      const err = validateCwdAllowed(workOther, { workspaceRoots: [work] })
+      assert.ok(err, 'sibling prefix path must be rejected')
+    } finally {
+      rmSync(work, { recursive: true, force: true })
+      rmSync(workOther, { recursive: true, force: true })
+    }
+  })
+
+  it('an empty workspaceRoots array falls back to the home-dir check', () => {
+    const homeTemp = mkdtempSync(join(homedir(), '.chroxy-empty-roots-'))
+    try {
+      const err = validateCwdAllowed(homeTemp, { workspaceRoots: [] })
+      assert.strictEqual(err, null, 'empty array should NOT activate strict allowlist')
+    } finally {
+      rmSync(homeTemp, { recursive: true, force: true })
+    }
+  })
+
+  it('silently ignores a configured root that does not exist on disk', () => {
+    // Don't fail the whole check just because a stale entry is in the
+    // user's config — fall through to other roots and layers.
+    const realRoot = mkdtempSync(join(homedir(), '.chroxy-real-root-'))
+    const subdir = mkdtempSync(join(realRoot, 'nested-'))
+    try {
+      const err = validateCwdAllowed(subdir, {
+        workspaceRoots: ['/this/path/does/not/exist', realRoot],
+      })
+      assert.strictEqual(err, null, `stale entry should be skipped; got: ${err}`)
+    } finally {
+      rmSync(subdir, { recursive: true, force: true })
+      rmSync(realRoot, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('validateCwdWithinHome — back-compat alias', () => {
+  it('delegates to validateCwdAllowed with no config', () => {
+    // The legacy function name should still work and still produce
+    // the same "within your home directory" errors as before.
+    const err = validateCwdWithinHome('/etc')
+    assert.ok(err)
+    assert.match(err, /within your home directory/)
+  })
+
+  it('inherits the new deny-list layer even from the legacy entry point', () => {
+    // Callers that haven't migrated to validateCwdAllowed still get
+    // the defense-in-depth check — this is the back-compat safety
+    // net for the 2026-04-11 audit blocker 1 fix.
+    const configRoot = join(homedir(), '.config')
+    if (!existsSync(configRoot)) return
+    const fakeCredDir = mkdtempSync(join(configRoot, 'chroxy-test-legacy-'))
+    try {
+      const err = validateCwdWithinHome(fakeCredDir)
+      assert.ok(err, 'legacy entry point must still apply the deny-list')
+      assert.match(err, /credential.config directories/)
+    } finally {
+      rmSync(fakeCredDir, { recursive: true, force: true })
     }
   })
 })

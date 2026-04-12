@@ -4,7 +4,7 @@
  * Handles: list_sessions, switch_session, create_session, destroy_session,
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
-import { validateCwdWithinHome, broadcastFocusChanged, autoSubscribeOtherClients } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
@@ -73,7 +73,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   }
 
   if (cwd) {
-    const cwdError = validateCwdWithinHome(cwd)
+    const cwdError = validateCwdAllowed(cwd, ctx.config)
     if (cwdError) {
       ctx.send(ws, { type: 'session_error', message: cwdError })
       return
