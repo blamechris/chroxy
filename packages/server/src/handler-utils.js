@@ -7,7 +7,7 @@
  */
 import { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { resolve, relative } from 'path'
+import { resolve, relative, sep } from 'path'
 
 // -- Permission modes --
 export const PERMISSION_MODES = [
@@ -126,30 +126,202 @@ export function resolveFileRefAttachments(attachments, cwd) {
 }
 
 /**
- * Validate that a cwd path exists, is a directory, and is within the user's home directory.
- * Returns null if valid, or an error string describing the problem.
- * @param {string} cwd - The directory path to validate
+ * Directories within $HOME that hold credentials or other sensitive
+ * material a session should NEVER use as a working directory. Found in
+ * the 2026-04-11 production readiness audit (Adversary A1 + Blocker 1):
+ * the old validateCwdWithinHome accepted any $HOME-relative path,
+ * letting an authenticated client set cwd to ~/.ssh / ~/.aws / etc. and
+ * read or write credentials via the normal file-op handlers.
+ *
+ * Match semantics: the FIRST path segment of the real-resolved cwd
+ * relative to $HOME must not match any entry. So `~/.ssh/keys` is
+ * rejected (first segment `.ssh`) but `~/projects/foo/.ssh/keys` is
+ * allowed (first segment `projects`). Project-local directories that
+ * happen to contain a `.ssh` subdir are NOT blocked — blocking them
+ * would be overly restrictive for legitimate tooling that scaffolds
+ * these directories inside project trees.
+ *
+ * The check is layered on top of the existing home-prefix check, so
+ * it's defense-in-depth — active whether or not the user has also set
+ * an explicit workspaceRoots allowlist.
+ */
+const FORBIDDEN_HOME_SUBDIRS = new Set([
+  '.ssh',
+  '.aws',
+  '.azure',         // `az login` tokens + service-principal secrets
+  '.gcloud',        // legacy path (GCP's newer tools use ~/.config/gcloud)
+  '.gnupg',
+  '.docker',
+  '.kube',
+  '.config',        // blocks ~/.config/gcloud, ~/.config/gh, ~/.config/op, etc.
+  '.netrc',         // file, but catch accidental dir usage
+  '.password-store',
+  '.pgpass',
+  '.git-credentials',
+  '.npmrc',
+  '.yarnrc',
+  '.pypirc',
+  '.m2',            // Maven settings.xml frequently holds repo credentials
+  '.terraform.d',   // Terraform Cloud login tokens
+  '.helm',          // Helm repo credentials
+  '.rclone',        // rclone remote configs with cloud-storage keys
+  '.dbt',           // dbt profiles with warehouse passwords
+  '.passage',       // passage password store
+])
+
+/**
+ * Returns true if `absPath` is underneath OR equal to `baseDir`,
+ * using segment-aware comparison so `/home/user/workspace` is NOT
+ * considered within `/home/user/work`.
+ *
+ * Both arguments must already be realpath-resolved and absolute.
+ *
+ * Edge case: when `baseDir` already ends with a path separator (e.g.
+ * POSIX `'/'` filesystem root, or Windows drive roots like `'C:\\'`),
+ * `baseDir + sep` would become `'//'` / `'C:\\\\'` and startsWith()
+ * would return false for paths that ARE inside the base. Strip the
+ * trailing separator first to normalize. Found by Copilot review on
+ * PR #2808.
+ */
+function isPathWithin(absPath, baseDir) {
+  if (absPath === baseDir) return true
+  // Normalize: strip a trailing separator so filesystem root and
+  // drive roots work correctly. After this, baseDir is never
+  // '/' or 'C:\\' — it's '' or 'C:'. We then append sep before the
+  // prefix match so we still require a separator boundary.
+  const normalized = baseDir.endsWith(sep) ? baseDir.slice(0, -1) : baseDir
+  // If the normalization drove baseDir to an empty string, the
+  // original was '/' (posix) — everything absolute is within it.
+  if (normalized === '') return true
+  return absPath.startsWith(normalized + sep)
+}
+
+/**
+ * Returns true if `absPath` touches any FORBIDDEN_HOME_SUBDIRS entry
+ * at any depth below $HOME. E.g. `/home/user/.ssh` and
+ * `/home/user/.config/gcloud/credentials` both match.
+ *
+ * The match is CASE-INSENSITIVE on purpose: on case-insensitive
+ * filesystems (macOS APFS default, Windows NTFS default), `~/.SSH` is
+ * the same directory as `~/.ssh` but the raw Set lookup would miss it
+ * — trivially bypassing the deny-list with `cwd: ~/.SSH`. Doing a
+ * lowercase compare closes that bypass on every filesystem. On
+ * case-sensitive filesystems nobody sensibly creates two distinct
+ * `.ssh`/`.SSH` directories, so the broader match is safe.
+ * Found by agent review on PR #2808.
+ */
+function pathTouchesForbiddenSubdir(absPath, home) {
+  if (!isPathWithin(absPath, home)) return false
+  const rel = relative(home, absPath)
+  if (rel === '') return false
+  const firstSegment = rel.split(sep)[0].toLowerCase()
+  return FORBIDDEN_HOME_SUBDIRS.has(firstSegment)
+}
+
+/**
+ * Validate that a cwd path is allowed as a session working directory.
+ *
+ * Layers (each must pass):
+ *
+ * 1. Path hygiene — must exist, be a directory, and be realpath-
+ *    resolvable. Catches broken or non-directory paths up front.
+ *
+ * 2. Credential-directory deny-list — regardless of any allowlist, the
+ *    cwd must NOT be inside any FORBIDDEN_HOME_SUBDIRS entry below
+ *    $HOME. Closes the 2026-04-11 audit Adversary A1 attack where an
+ *    authenticated client could set cwd to ~/.ssh to read credentials.
+ *
+ * 3. Workspace allowlist (opt-in) — if `config.workspaceRoots` is a
+ *    non-empty array, the cwd must be inside at least one of the
+ *    realpath-resolved entries. This is the strict mode audit blocker 1
+ *    recommends for security-conscious deployments.
+ *
+ * 4. Home fallback (default) — if no allowlist is configured, the cwd
+ *    must still be inside $HOME. Preserves backward compatibility for
+ *    existing deployments while the deny-list (layer 2) closes the
+ *    worst of the attack surface.
+ *
+ * @param {string} cwd - Directory path to validate
+ * @param {object} [config] - Optional runtime config. `config.workspaceRoots` is an array of absolute paths that form the allowlist. `config.homeOverride` is a test-only override for `os.homedir()`; setting it lets tests run hermetically against a throwaway directory without touching the real user home. Never use homeOverride in production code.
  * @returns {string|null} Error message or null if valid
  */
-export function validateCwdWithinHome(cwd) {
+export function validateCwdAllowed(cwd, config = null) {
+  // Layer 1: path hygiene
   try {
     const s = statSync(cwd)
     if (!s.isDirectory()) return `Not a directory: ${cwd}`
   } catch {
     return `Directory does not exist: ${cwd}`
   }
-  const home = homedir()
   let realCwd
   try {
     realCwd = realpathSync(cwd)
   } catch {
     return `Cannot resolve path: ${cwd}`
   }
-  if (!realCwd.startsWith(home + '/') && realCwd !== home) {
+
+  // Layer 2: credential-directory deny-list (always active).
+  // `homeOverride` exists so tests can use a hermetic fake home
+  // directory instead of creating throwaway dirs under the user's
+  // real ~/.config. Never used in production — config.js does not
+  // declare or forward homeOverride from user config.
+  const home = (config?.homeOverride && typeof config.homeOverride === 'string')
+    ? realpathSync(config.homeOverride)
+    : homedir()
+  if (pathTouchesForbiddenSubdir(realCwd, home)) {
+    return 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
+  }
+
+  // Layer 3: explicit allowlist (opt-in, strict)
+  const roots = Array.isArray(config?.workspaceRoots)
+    ? config.workspaceRoots.filter((r) => typeof r === 'string' && r.length > 0)
+    : []
+  if (roots.length > 0) {
+    let anyRootResolved = false
+    for (const root of roots) {
+      let realRoot
+      try {
+        realRoot = realpathSync(root)
+      } catch {
+        // Configured root that doesn't resolve is a config error — skip
+        // it rather than failing the whole check, but it can't match.
+        continue
+      }
+      anyRootResolved = true
+      if (isPathWithin(realCwd, realRoot)) return null
+    }
+    // If at least ONE root resolved, enforce strictly. Otherwise every
+    // configured root is stale (mount offline, typo, removed dir) and
+    // the user would be silently locked out of every session. Fall
+    // through to the home-fallback in that case rather than denying
+    // everything. Found by Copilot review on PR #2808.
+    if (anyRootResolved) {
+      return `Directory is not within any configured workspace root (${roots.length} configured)`
+    }
+    // else fall through to layer 4 home fallback
+  }
+
+  // Layer 4: home fallback (default)
+  if (!isPathWithin(realCwd, home)) {
     return 'Directory must be within your home directory'
   }
   return null
 }
+
+/**
+ * @deprecated Use validateCwdAllowed(cwd, config) instead.
+ *
+ * Kept as a back-compat alias that calls validateCwdAllowed with no
+ * config, so the deny-list layer is still active for callers that
+ * haven't been migrated yet. New code and tests should use the name
+ * that reflects the current behavior.
+ */
+export function validateCwdWithinHome(cwd) {
+  return validateCwdAllowed(cwd, null)
+}
+
+// Exported for tests
+export { FORBIDDEN_HOME_SUBDIRS }
 
 /**
  * Check whether a connected WS client declared a specific capability during auth.

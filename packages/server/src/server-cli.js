@@ -333,6 +333,10 @@ export async function startCliServer(config) {
     tokenManager,
     pairingManager,
     environmentManager,
+    // Full runtime config so handlers can consult settings at message
+    // time — e.g. validateCwdAllowed consults config.workspaceRoots to
+    // enforce the 2026-04-11 audit blocker 1 workspace allowlist.
+    config,
   })
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)

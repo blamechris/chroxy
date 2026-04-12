@@ -9,7 +9,7 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   mkdtempSync, writeFileSync, mkdirSync, rmSync,
-  symlinkSync, realpathSync
+  symlinkSync, realpathSync, existsSync, statSync
 } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
@@ -17,6 +17,8 @@ import {
   validateAttachments,
   resolveFileRefAttachments,
   validateCwdWithinHome,
+  validateCwdAllowed,
+  FORBIDDEN_HOME_SUBDIRS,
   PERMISSION_MODES,
   ALLOWED_PERMISSION_MODE_IDS,
   MAX_ATTACHMENT_COUNT,
@@ -614,6 +616,241 @@ describe('validateCwdWithinHome', () => {
       assert.strictEqual(err, null, `expected null for home subdir, got: ${err}`)
     } finally {
       rmSync(homeTemp, { recursive: true, force: true })
+    }
+  })
+})
+
+// ============================================================
+// validateCwdAllowed — audit blocker 1 (2026-04-11)
+// ============================================================
+
+describe('validateCwdAllowed — credential-directory deny-list (2026-04-11 audit blocker 1)', () => {
+  // Hermetic fake-$HOME used by every test in this block. Created once,
+  // torn down at the end. No test ever touches the real user home,
+  // which means these tests are deterministic across machines and
+  // don't silently skip when ~/.ssh / ~/.config don't exist.
+  //
+  // Pattern found by Copilot review on PR #2808: prior version of
+  // these tests created throwaway dirs under the user's real
+  // ~/.config, which is undesirable for local runs and flaky in CI.
+  let fakeHome
+  before(() => {
+    fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-fake-home-'))
+    // Pre-create the forbidden dirs so each test exercises the deny-list
+    // rather than the path-hygiene layer that would fire on nonexistence.
+    mkdirSync(join(fakeHome, '.ssh'))
+    mkdirSync(join(fakeHome, '.aws'))
+    mkdirSync(join(fakeHome, '.config'))
+    mkdirSync(join(fakeHome, '.config', 'gcloud'), { recursive: true })
+    mkdirSync(join(fakeHome, '.gnupg'))
+    mkdirSync(join(fakeHome, '.docker'))
+    mkdirSync(join(fakeHome, 'ordinary-project'))
+  })
+  after(() => {
+    if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
+  })
+
+  it('rejects ~/.ssh — Adversary A1 attack scenario', () => {
+    const err = validateCwdAllowed(join(fakeHome, '.ssh'), { homeOverride: fakeHome })
+    assert.ok(err, 'must reject fake-home .ssh')
+    assert.match(err, /credential.config directories/)
+  })
+
+  it('rejects a subdirectory of a forbidden entry (~/.config/gcloud)', () => {
+    const err = validateCwdAllowed(join(fakeHome, '.config', 'gcloud'), { homeOverride: fakeHome })
+    assert.ok(err, 'must reject .config/gcloud subdirectory')
+    assert.match(err, /credential.config directories/)
+  })
+
+  it('rejects ~/.aws and ~/.docker and ~/.gnupg consistently', () => {
+    for (const name of ['.aws', '.docker', '.gnupg']) {
+      const err = validateCwdAllowed(join(fakeHome, name), { homeOverride: fakeHome })
+      assert.ok(err, `must reject ${name}`)
+      assert.match(err, /credential.config directories/)
+    }
+  })
+
+  it('FORBIDDEN_HOME_SUBDIRS includes the highest-value credential paths', () => {
+    // Sanity: the deny-list must cover the exact paths Adversary A1
+    // called out in the audit, plus the common companions + IaC
+    // tooling credentials added after agent review on PR #2808.
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.ssh'), '~/.ssh must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.aws'), '~/.aws must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.azure'), '~/.azure must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.config'), '~/.config must be denied (covers gcloud/gh/op)')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.gnupg'), '~/.gnupg must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.docker'), '~/.docker must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.kube'), '~/.kube must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.terraform.d'), '~/.terraform.d must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.helm'), '~/.helm must be denied')
+    assert.ok(FORBIDDEN_HOME_SUBDIRS.has('.rclone'), '~/.rclone must be denied')
+  })
+
+  it('case-insensitive match rejects mixed-case variants (agent review on PR #2808)', () => {
+    // Critical bypass found by agent review: on macOS APFS (default
+    // case-insensitive) and Windows NTFS, ~/.SSH resolves to the same
+    // directory as ~/.ssh but a case-sensitive Set lookup would miss
+    // it. Attacker sends cwd: ~/.SSH, gets the same access as Adversary
+    // A1. One-line fix: lowercase the first segment before the Set
+    // lookup in pathTouchesForbiddenSubdir.
+    //
+    // Hermetic test: create mixed-case forbidden directories directly
+    // in the fake home. On case-insensitive FS .SSH maps to the
+    // already-created .ssh and mkdirSync will throw EEXIST — we
+    // handle that by just querying the existing dir with the mixed
+    // casing. On case-sensitive FS the mixed-case dir is distinct
+    // and the lowercase compare still catches it.
+    // On case-insensitive FS, `.SSH` and `.AwS` are the same directories
+    // as `.ssh` and `.aws` already created in before(). We just validate
+    // the mixed-case path string and assert the lowercase compare fires.
+    // We do NOT delete anything — rmSync on a case-insensitive FS alias
+    // would clobber the real lowercase directory and break later tests.
+    //
+    // On case-sensitive FS, `.SSH` is a distinct directory. To test the
+    // lowercase fix we'd need to create one; but the before() block
+    // already created `.ssh` and mkdirSync('.SSH') would succeed on
+    // case-sensitive FS only. We try it, accept EEXIST on case-
+    // insensitive, and proceed either way.
+    for (const name of ['.SSH', '.AwS', '.CONFIG']) {
+      const mixedPath = join(fakeHome, name)
+      try {
+        mkdirSync(mixedPath)
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err
+        // Case-insensitive FS: the mixed path resolves to the
+        // lowercase dir from before(). Either way validateCwdAllowed
+        // should reject it — that's what we assert.
+      }
+      const result = validateCwdAllowed(mixedPath, { homeOverride: fakeHome })
+      assert.ok(result, `mixed-case ${name} must be rejected`)
+      assert.match(result, /credential.config directories/)
+    }
+  })
+
+  it('allows an ordinary home subdir that does NOT touch any forbidden entry', () => {
+    const err = validateCwdAllowed(
+      join(fakeHome, 'ordinary-project'),
+      { homeOverride: fakeHome }
+    )
+    assert.strictEqual(err, null, `expected null, got: ${err}`)
+  })
+
+  it('deny-list fires before the workspaceRoots allowlist check', () => {
+    // Even if the user explicitly configured an allowlist that includes
+    // a path under a forbidden entry, the deny-list wins. Defense in
+    // depth — prevents a user from accidentally whitelisting ~/.ssh.
+    const credDir = join(fakeHome, '.config', 'gcloud')
+    const err = validateCwdAllowed(credDir, {
+      workspaceRoots: [credDir],
+      homeOverride: fakeHome,
+    })
+    assert.ok(err, 'deny-list must override workspaceRoots allowlist')
+    assert.match(err, /credential.config directories/)
+  })
+})
+
+describe('validateCwdAllowed — workspaceRoots allowlist', () => {
+  it('rejects a path outside every configured root', () => {
+    const homeTemp = mkdtempSync(join(homedir(), '.chroxy-ws-outside-'))
+    const otherRoot = mkdtempSync(join(homedir(), '.chroxy-ws-root-'))
+    try {
+      const err = validateCwdAllowed(homeTemp, { workspaceRoots: [otherRoot] })
+      assert.ok(err, 'must reject path not under any configured root')
+      assert.match(err, /workspace root/)
+    } finally {
+      rmSync(homeTemp, { recursive: true, force: true })
+      rmSync(otherRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts a path that is the configured root itself', () => {
+    const root = mkdtempSync(join(homedir(), '.chroxy-ws-exact-'))
+    try {
+      const err = validateCwdAllowed(root, { workspaceRoots: [root] })
+      assert.strictEqual(err, null, `expected null, got: ${err}`)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts a path under one of several configured roots', () => {
+    const root1 = mkdtempSync(join(homedir(), '.chroxy-ws-multi-a-'))
+    const root2 = mkdtempSync(join(homedir(), '.chroxy-ws-multi-b-'))
+    const under2 = mkdtempSync(join(root2, 'nested-'))
+    try {
+      const err = validateCwdAllowed(under2, { workspaceRoots: [root1, root2] })
+      assert.strictEqual(err, null, `expected null, got: ${err}`)
+    } finally {
+      rmSync(under2, { recursive: true, force: true })
+      rmSync(root1, { recursive: true, force: true })
+      rmSync(root2, { recursive: true, force: true })
+    }
+  })
+
+  it('segment-aware matching rejects a sibling prefix ("/home/user/work-other" is not within "/home/user/work")', () => {
+    // The naive startsWith check without a separator would accept
+    // /home/user/work-other as being inside /home/user/work. The
+    // isPathWithin helper must use path separator boundaries.
+    const work = mkdtempSync(join(homedir(), '.chroxy-work-'))
+    const workOther = mkdtempSync(join(homedir(), '.chroxy-work-other-'))
+    try {
+      const err = validateCwdAllowed(workOther, { workspaceRoots: [work] })
+      assert.ok(err, 'sibling prefix path must be rejected')
+    } finally {
+      rmSync(work, { recursive: true, force: true })
+      rmSync(workOther, { recursive: true, force: true })
+    }
+  })
+
+  it('an empty workspaceRoots array falls back to the home-dir check', () => {
+    const homeTemp = mkdtempSync(join(homedir(), '.chroxy-empty-roots-'))
+    try {
+      const err = validateCwdAllowed(homeTemp, { workspaceRoots: [] })
+      assert.strictEqual(err, null, 'empty array should NOT activate strict allowlist')
+    } finally {
+      rmSync(homeTemp, { recursive: true, force: true })
+    }
+  })
+
+  it('silently ignores a configured root that does not exist on disk', () => {
+    // Don't fail the whole check just because a stale entry is in the
+    // user's config — fall through to other roots and layers.
+    const realRoot = mkdtempSync(join(homedir(), '.chroxy-real-root-'))
+    const subdir = mkdtempSync(join(realRoot, 'nested-'))
+    try {
+      const err = validateCwdAllowed(subdir, {
+        workspaceRoots: ['/this/path/does/not/exist', realRoot],
+      })
+      assert.strictEqual(err, null, `stale entry should be skipped; got: ${err}`)
+    } finally {
+      rmSync(subdir, { recursive: true, force: true })
+      rmSync(realRoot, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('validateCwdWithinHome — back-compat alias', () => {
+  it('delegates to validateCwdAllowed with no config', () => {
+    // The legacy function name should still work and still produce
+    // the same "within your home directory" errors as before.
+    const err = validateCwdWithinHome('/etc')
+    assert.ok(err)
+    assert.match(err, /within your home directory/)
+  })
+
+  it('inherits the new deny-list layer even from the legacy entry point', () => {
+    // Callers that haven't migrated to validateCwdAllowed still get
+    // the defense-in-depth check — this is the back-compat safety
+    // net for the 2026-04-11 audit blocker 1 fix.
+    const configRoot = join(homedir(), '.config')
+    if (!existsSync(configRoot)) return
+    const fakeCredDir = mkdtempSync(join(configRoot, 'chroxy-test-legacy-'))
+    try {
+      const err = validateCwdWithinHome(fakeCredDir)
+      assert.ok(err, 'legacy entry point must still apply the deny-list')
+      assert.match(err, /credential.config directories/)
+    } finally {
+      rmSync(fakeCredDir, { recursive: true, force: true })
     }
   })
 })

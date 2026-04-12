@@ -6,7 +6,7 @@
  */
 import { scanConversations as defaultScanConversations } from '../conversation-scanner.js'
 import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
-import { validateCwdWithinHome, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
@@ -59,7 +59,7 @@ async function handleResumeConversation(ws, client, msg, ctx) {
     return
   }
   if (cwd) {
-    const cwdError = validateCwdWithinHome(cwd)
+    const cwdError = validateCwdAllowed(cwd, ctx.config)
     if (cwdError) {
       ctx.send(ws, { type: 'session_error', message: cwdError })
       return
