@@ -437,6 +437,42 @@ describe('createPermissionHandler', () => {
       assert.equal(respondToPermission.mock.calls.length, 1)
     })
 
+    it('rejects bound-token response when requestId has no mapping entry (2026-04-11 audit blocker 5 — agent-review residual bypass)', async () => {
+      // HTTP counterpart of the same bypass: a bound token tries to resolve
+      // a requestId that isn't in permissionSessionMap (legacy or stale).
+      // Without the follow-up fix, the original check (originSessionId &&
+      // boundSessionId !== originSessionId) was skipped because
+      // originSessionId was undefined. The bound caller then fell through
+      // to the legacy pendingPermissions resolver with no session check.
+      const pendingPermissions = new Map()
+      const resolveCallback = mock.fn()
+      pendingPermissions.set('legacy-req', { resolve: resolveCallback, timer: null })
+      // NO permissionSessionMap entry for the requestId
+      const permissionSessionMap = new Map()
+      const pairingManager = {
+        getSessionIdForToken: mock.fn(() => 'session-A'),  // bound token
+      }
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        pendingPermissions,
+        pairingManager,
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(
+        JSON.stringify({ requestId: 'legacy-req', decision: 'allow' }),
+        { authorization: 'Bearer bound-token' }
+      )
+      const res = makeRes()
+      handlePermissionResponseHttp(req, res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 403, 'bound-token call must be rejected when request has no explicit session mapping')
+      assert.ok(res.body.includes('SESSION_TOKEN_MISMATCH'))
+      assert.equal(resolveCallback.mock.calls.length, 0,
+        'legacy resolver must not be invoked by bound-token fallthrough')
+      assert.ok(pendingPermissions.has('legacy-req'),
+        'pendingPermissions entry must survive so the legit caller can still respond')
+    })
+
     it('allows response from an unbound (full-access) token', async () => {
       // When no pairingManager is provided, or the token has no binding,
       // the HTTP fallback should work as before — this is the single-token

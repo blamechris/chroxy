@@ -300,6 +300,35 @@ describe('handleSessionMessage', () => {
         'bound client must be able to resolve permissions for its own session')
     })
 
+    it('rejects bound client resolving a legacy pendingPermissions entry with no session mapping (2026-04-11 audit blocker 5 — agent-review residual bypass)', async () => {
+      // Before the follow-up fix: a bound client could send a permission_response
+      // with a requestId that was in the legacy ctx.pendingPermissions map but
+      // NOT in permissionSessionMap. In that case, originSessionId fell back to
+      // client.activeSessionId (which for a bound client equals boundSessionId),
+      // the binding check passed trivially, and execution fell through to the
+      // legacy resolver — which has no session check. The fix requires a bound
+      // client's requestId to have an explicit mapping.
+      const ctx = makeCtx()
+      // NO permissionSessionMap entry; legacy pendingPermissions has the id
+      const legacyResolve = mock.fn()
+      ctx.pendingPermissions.set('legacy-req', { resolve: legacyResolve, timer: null })
+      const boundClient = makeClient({
+        activeSessionId: 'session-A',
+        boundSessionId: 'session-A',
+      })
+      await handleSessionMessage(WS, boundClient, {
+        type: 'permission_response',
+        requestId: 'legacy-req',
+        decision: 'allow',
+      }, ctx)
+      assert.equal(ctx.permissions.resolvePermission.mock?.calls?.length ?? 0, 0,
+        'bound client must not resolve legacy permissions with no session mapping')
+      assert.equal(legacyResolve.mock.calls.length, 0,
+        'legacy resolve callback must not be invoked by bound client fallthrough')
+      assert.ok(ctx.pendingPermissions.has('legacy-req'),
+        'pendingPermissions entry must be preserved for a legitimate unbound client')
+    })
+
     it('allows unbound client to respond to any session (primary-token mode)', async () => {
       const ctx = makeCtx()
       ctx.permissionSessionMap.set('any-req', 'session-X')

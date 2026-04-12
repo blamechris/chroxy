@@ -241,11 +241,19 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // specific session via pairing, reject cross-session permission
       // responses. This applies to BOTH the SDK-mode and legacy branches
       // below, so we check once here before either dispatches.
-      if (callerBoundSessionId && originSessionId && callerBoundSessionId !== originSessionId) {
-        log.warn(`HTTP /permission-response rejected: token bound to ${callerBoundSessionId} tried to respond to ${requestId} belonging to ${originSessionId}`)
-        res.writeHead(403, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'not authorized for this permission request', code: 'SESSION_TOKEN_MISMATCH' }))
-        return
+      //
+      // For a bound caller, the requestId MUST have an explicit mapping in
+      // permissionSessionMap AND that mapping must match the token's bound
+      // session. If the mapping is missing, the caller could otherwise slip
+      // through to the legacy `pendingPermissions` resolver below — which
+      // has no session check. Found by agent-review on PR #2806.
+      if (callerBoundSessionId) {
+        if (!originSessionId || originSessionId !== callerBoundSessionId) {
+          log.warn(`HTTP /permission-response rejected: token bound to ${callerBoundSessionId} tried to respond to ${requestId} with mapped session ${originSessionId ?? 'unmapped'}`)
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'not authorized for this permission request', code: 'SESSION_TOKEN_MISMATCH' }))
+          return
+        }
       }
 
       const sm = getSessionManager()

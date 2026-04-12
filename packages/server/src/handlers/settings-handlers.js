@@ -85,22 +85,41 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   const { requestId, decision } = msg
   if (!requestId || !decision) return
 
-  const originSessionId = ctx.permissionSessionMap.get(requestId) || client.activeSessionId
+  // Resolve the origin session of this permission request. The
+  // authoritative source is permissionSessionMap (populated at request
+  // creation). The fallback to client.activeSessionId exists only for
+  // legacy code paths where the map wasn't populated; it must NOT be
+  // used to bypass the binding check for a bound client, because for a
+  // bound client `activeSessionId === boundSessionId`, which would
+  // short-circuit the check below.
+  const mappedSessionId = ctx.permissionSessionMap.get(requestId)
+  const originSessionId = mappedSessionId || client.activeSessionId
 
   // Enforce session binding: if this client authenticated with a
   // pairing-issued session token that was bound to a specific session,
   // prevent them from approving/denying a permission request belonging
-  // to any OTHER session. Without this check, a bound client could act
-  // on cross-session permission prompts — discovered in the 2026-04-11
-  // production readiness audit (blocker 5). The 616aeaf62 / 2c0ac7d2d
-  // commits claimed to enforce binding across all session-scoped
-  // handlers but missed this one + the HTTP fallback.
-  if (client.boundSessionId && originSessionId && client.boundSessionId !== originSessionId) {
-    log.warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to respond to permission ${requestId} for session ${originSessionId}`)
-    // Don't consume the permissionSessionMap entry — let the legitimate
-    // client still respond to it.
-    sendError(ws, requestId, 'SESSION_TOKEN_MISMATCH', 'Not authorized to respond to this permission request')
-    return
+  // to any OTHER session — including legacy pendingPermissions entries
+  // that have no mapping.
+  //
+  // For a BOUND client, the request MUST have an explicit mapping in
+  // permissionSessionMap AND that mapping must equal boundSessionId.
+  // Without this, agent-review on PR #2806 found a residual bypass:
+  // when the requestId was not in the map, originSessionId would fall
+  // back to client.activeSessionId, which equals boundSessionId, the
+  // check would pass, and execution would fall through to the legacy
+  // pendingPermissions resolver — which has no session check at all.
+  //
+  // Discovered in the 2026-04-11 production readiness audit (blocker 5).
+  // The 616aeaf62 / 2c0ac7d2d commits claimed to enforce binding across
+  // all session-scoped handlers but missed this one + the HTTP fallback.
+  if (client.boundSessionId) {
+    if (!mappedSessionId || mappedSessionId !== client.boundSessionId) {
+      log.warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to respond to permission ${requestId} with mapped session ${mappedSessionId ?? 'unmapped'}`)
+      // Don't consume the permissionSessionMap entry — let the legitimate
+      // client still respond to it.
+      sendError(ws, requestId, 'SESSION_TOKEN_MISMATCH', 'Not authorized to respond to this permission request')
+      return
+    }
   }
 
   ctx.permissionSessionMap.delete(requestId)

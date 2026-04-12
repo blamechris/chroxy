@@ -212,18 +212,27 @@ export class PushManager {
   /**
    * Register a Live Activity push token (iOS).
    * Stored separately from regular push tokens.
+   *
+   * Applies the same format check as registerToken so the Live Activity
+   * path can't be used as a bypass for the 2026-04-11 audit blocker 6
+   * hardening. No WS handler currently exposes this path (verified on
+   * PR #2806) but the check is cheap regression prevention.
    */
   registerLiveActivityToken(token) {
-    if (typeof token === 'string' && token.length > 0) {
-      if (!this._liveActivityTokens.has(token)) {
-        this._liveActivityTokens.add(token)
-        this._persistToDisk()
-      }
-      log.info(`Registered Live Activity credential ${token.slice(0, 30)}...`)
-      return true
+    if (typeof token !== 'string' || token.length === 0) {
+      log.warn(`Rejected invalid Live Activity credential: ${String(token).slice(0, 40)}`)
+      return false
     }
-    log.warn(`Rejected invalid Live Activity credential: ${String(token).slice(0, 40)}`)
-    return false
+    if (!PushManager.isValidPushTokenFormat(token)) {
+      log.warn(`Rejected malformed Live Activity credential (unrecognized format): ${token.slice(0, 40)}`)
+      return false
+    }
+    if (!this._liveActivityTokens.has(token)) {
+      this._liveActivityTokens.add(token)
+      this._persistToDisk()
+    }
+    log.info(`Registered Live Activity credential ${token.slice(0, 30)}...`)
+    return true
   }
 
   /** Remove a Live Activity push token */
