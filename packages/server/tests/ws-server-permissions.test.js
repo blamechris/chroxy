@@ -288,6 +288,7 @@ describe('auto permission mode confirmation handshake', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: true,
+      config: { allowAutoPermissionMode: true },
     })
     const port = await startServerAndGetPort(server)
 
@@ -328,6 +329,7 @@ describe('auto permission mode confirmation handshake', () => {
       apiToken: 'test-token',
       cliSession: mockSession,
       authRequired: true,
+      config: { allowAutoPermissionMode: true },
     })
     const port = await startServerAndGetPort(server)
 
@@ -449,6 +451,7 @@ describe('auto permission mode confirmation handshake', () => {
       apiToken: 'test-token',
       sessionManager: manager,
       authRequired: true,
+      config: { allowAutoPermissionMode: true },
     })
     const port = await startServerAndGetPort(server)
 
