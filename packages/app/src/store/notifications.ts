@@ -126,5 +126,10 @@ export const useNotificationStore = create<NotificationState>((set) => ({
     await AsyncStorage.removeItem(ACTIVITY_STORAGE_KEY).catch(() => {});
   },
 
-  reset: () => set(initialState),
+  reset: () => set((state) => ({
+    ...initialState,
+    // Preserve persistent activity history across disconnect/reset —
+    // it's AsyncStorage-backed and should survive session transitions.
+    activityHistory: state.activityHistory,
+  })),
 }));
