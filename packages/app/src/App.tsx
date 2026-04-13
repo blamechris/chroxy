@@ -128,11 +128,6 @@ export default function App() {
               }}
             />
             <Stack.Screen
-              name="Settings"
-              component={SettingsScreen}
-              options={{ title: 'Settings' }}
-            />
-            <Stack.Screen
               name="PermissionHistory"
               component={PermissionHistoryScreen}
               options={{ title: 'Permission History' }}
@@ -144,6 +139,14 @@ export default function App() {
             />
           </>
         )}
+        {/* UX landmine #2: Settings is always accessible — not gated
+            behind a successful connection. Connection-dependent sections
+            are conditionally hidden inside SettingsScreen itself. */}
+        <Stack.Screen
+          name="Settings"
+          component={SettingsScreen}
+          options={{ title: 'Settings' }}
+        />
       </Stack.Navigator>
       {isLocked && <LockScreen onUnlock={unlock} />}
     </NavigationContainer>
