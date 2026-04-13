@@ -535,6 +535,30 @@ export class Supervisor extends EventEmitter {
 
   /**
    * Rollback to the last known-good git commit.
+   *
+   * Hardened against Adversary A9 (2026-04-11 audit): an attacker who
+   * holds a session-capable WS token could previously create a
+   * session with cwd=~/.chroxy, call `write_file` on `known-good-ref`
+   * with an arbitrary git SHA, and wait for a crash-loop restart to
+   * trigger the rollback — at which point the supervisor would check
+   * out whatever commit the attacker chose (potentially an older,
+   * exploitable version of the server).
+   *
+   * Two layers of defense now close this:
+   *
+   * 1. `~/.chroxy` is in FORBIDDEN_HOME_SUBDIRS, so sessions can no
+   *    longer create a cwd inside it — the attacker can't reach
+   *    `known-good-ref` via `write_file`.
+   *
+   * 2. This function validates that the ref resolves to the SAME
+   *    commit as an existing `known-good-*` git tag. The tag is
+   *    written by `chroxy deploy` immediately after the ref file, is
+   *    never updated from the WS handlers, and lives in the git
+   *    object database (not the filesystem). Even if layer 1 were
+   *    bypassed, the attacker would need to also create a matching
+   *    git tag — which requires filesystem access to `.git/refs/tags`
+   *    or a local git invocation, both of which already imply full
+   *    machine compromise.
    */
   _rollbackToKnownGood() {
     if (!existsSync(this._knownGoodFile)) {
@@ -544,14 +568,52 @@ export class Supervisor extends EventEmitter {
 
     try {
       const ref = readFileSync(this._knownGoodFile, 'utf-8').trim()
-      if (!ref || ref.length < 7) {
-        this._log.error(`Invalid known-good ref: "${ref}"`)
+      // SHA-1 git commits are 40 hex chars; accept short SHAs
+      // ≥ 7 chars to match historical behavior but require
+      // hex-only content. Rejects arbitrary branch names, refspecs,
+      // option flags (-rf, --help), etc.
+      if (!/^[0-9a-f]{7,40}$/i.test(ref)) {
+        this._log.error(`Invalid known-good ref format: "${ref.slice(0, 64)}"`)
         return false
       }
 
       const repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf-8' }).trim()
       if (!repoRoot) {
         this._log.error('Failed to determine git repository root, cannot rollback')
+        return false
+      }
+
+      // A9 defense: require the ref to match a `known-good-*` tag's
+      // commit. This guarantees the ref was written by `chroxy deploy`
+      // and not by a compromised WS handler — deploy creates the tag
+      // immediately before/after writing the ref file.
+      let refFullSha
+      try {
+        refFullSha = execFileSync('git', ['rev-parse', '--verify', `${ref}^{commit}`], { encoding: 'utf-8', cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+      } catch {
+        this._log.error(`Known-good ref "${ref}" does not resolve to a git commit; refusing rollback`)
+        return false
+      }
+
+      let knownGoodTags = ''
+      try {
+        knownGoodTags = execFileSync('git', ['tag', '--list', 'known-good-*'], { encoding: 'utf-8', cwd: repoRoot }).trim()
+      } catch {}
+      const tags = knownGoodTags ? knownGoodTags.split('\n').filter(Boolean) : []
+      let matched = false
+      for (const tag of tags) {
+        try {
+          const tagSha = execFileSync('git', ['rev-parse', '--verify', `${tag}^{commit}`], { encoding: 'utf-8', cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+          if (tagSha === refFullSha) {
+            matched = true
+            break
+          }
+        } catch {
+          // Skip unresolvable tags — real known-good tags always resolve
+        }
+      }
+      if (!matched) {
+        this._log.error(`Known-good ref "${ref.slice(0, 8)}" does not match any known-good-* tag; refusing rollback (possible A9 poisoning attempt)`)
         return false
       }
 

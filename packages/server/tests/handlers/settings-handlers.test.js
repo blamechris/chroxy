@@ -99,7 +99,8 @@ describe('settings-handlers', () => {
       const sessions = new Map()
       const session = createMockSession()
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
-      const ctx = makeCtx(sessions)
+      // A5: auto mode requires config opt-in
+      const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
       const client = makeClient({ activeSessionId: 's1' })
 
       settingsHandlers.set_permission_mode(makeWs(), client, { mode: 'auto' }, ctx)
@@ -113,7 +114,8 @@ describe('settings-handlers', () => {
       const sessions = new Map()
       const session = createMockSession()
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
-      const ctx = makeCtx(sessions)
+      // A5: auto mode requires config opt-in
+      const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
       const client = makeClient({ activeSessionId: 's1' })
 
       settingsHandlers.set_permission_mode(makeWs(), client, { mode: 'auto', confirmed: true }, ctx)

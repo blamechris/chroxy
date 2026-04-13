@@ -62,6 +62,7 @@ export async function collectStatus(deps = {}) {
     uptimeSeconds: null,
     sessions: null,
     mode: null,
+    counters: null, // populated by --verbose via /metrics
   }
 
   const info = readConnectionInfo()
@@ -120,6 +121,9 @@ export async function collectStatus(deps = {}) {
         if (body?.uptime != null && out.uptimeSeconds == null) {
           out.uptimeSeconds = body.uptime
         }
+        if (body?.counters && typeof body.counters === 'object') {
+          out.counters = body.counters
+        }
       }
     } catch {
       // Ignore — sessions remains null
@@ -159,6 +163,18 @@ function printHuman(status) {
   }
   if (status.sessions != null) {
     lines.push(`Sessions: ${status.sessions} active`)
+  }
+  if (status.counters && typeof status.counters === 'object') {
+    const c = status.counters
+    // Only show non-zero counters — keeps default output clean
+    const entries = Object.entries(c).filter(([k, v]) => k !== '_uptimeSeconds' && v > 0)
+    if (entries.length > 0) {
+      lines.push('')
+      lines.push('Counters (this lifetime):')
+      for (const [k, v] of entries.sort(([a], [b]) => a.localeCompare(b))) {
+        lines.push(`  ${k}: ${v}`)
+      }
+    }
   }
   lines.push('')
   return lines.join('\n')

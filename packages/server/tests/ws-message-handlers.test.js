@@ -233,6 +233,79 @@ describe('handleSessionMessage', () => {
       await handleSessionMessage(WS, client, { type: 'set_permission_mode', mode: 'hack' }, ctx)
       assert.equal(entry.session.setPermissionMode.callCount, 0)
     })
+
+    it('rejects auto mode when config.allowAutoPermissionMode is NOT enabled (2026-04-11 audit Adversary A5)', async () => {
+      // Pre-audit: any authenticated client could flip to auto mode by
+      // sending { mode:'auto', confirmed:true }. The confirmed flag
+      // was server-side honor-system with no physical-user confirmation
+      // — a trivial step in the Adversary kill chain.
+      // Post-fix: auto mode requires an explicit operator opt-in in
+      // the server config file. Default is undefined/false, so fresh
+      // installs are secure by default.
+      const ctx = makeCtx()
+      // config is null / no allowAutoPermissionMode set → default deny
+      const client = makeClient({ activeSessionId: 'sess-1' })
+      const entry = addSession(ctx, 'sess-1')
+      await handleSessionMessage(WS, client, {
+        type: 'set_permission_mode',
+        mode: 'auto',
+        confirmed: true,  // attacker's flag — should no longer matter
+      }, ctx)
+      assert.equal(entry.session.setPermissionMode.callCount, 0,
+        'auto mode must not be applied when config does not explicitly enable it')
+    })
+
+    it('allows auto mode when config.allowAutoPermissionMode is true and confirmed', async () => {
+      const ctx = makeCtx({ config: { allowAutoPermissionMode: true } })
+      const client = makeClient({ activeSessionId: 'sess-1' })
+      const entry = addSession(ctx, 'sess-1')
+      await handleSessionMessage(WS, client, {
+        type: 'set_permission_mode',
+        mode: 'auto',
+        confirmed: true,
+      }, ctx)
+      assert.equal(entry.session.setPermissionMode.callCount, 1)
+      assert.equal(entry.session.setPermissionMode.lastCall[0], 'auto')
+    })
+
+    it('rejects auto mode for bound clients even when config allows it (defense in depth)', async () => {
+      // A pairing-issued session token should NEVER escalate to auto.
+      // Pairing scopes authority to an existing session — flipping to
+      // auto would break that boundary. Even operators who opt into
+      // allowAutoPermissionMode should only be able to flip via the
+      // primary API token.
+      const ctx = makeCtx({ config: { allowAutoPermissionMode: true } })
+      const boundClient = makeClient({
+        activeSessionId: 'sess-1',
+        boundSessionId: 'sess-1',
+      })
+      const entry = addSession(ctx, 'sess-1')
+      await handleSessionMessage(WS, boundClient, {
+        type: 'set_permission_mode',
+        mode: 'auto',
+        confirmed: true,
+      }, ctx)
+      assert.equal(entry.session.setPermissionMode.callCount, 0,
+        'bound (pairing-token) clients must never be able to flip to auto mode')
+    })
+
+    it('still allows bound clients to use non-auto permission modes', async () => {
+      // Sanity: the auto-mode rejection must not accidentally block
+      // other legitimate permission-mode changes from bound clients
+      // (approve / acceptEdits / plan are fine).
+      const ctx = makeCtx({ config: { allowAutoPermissionMode: true } })
+      const boundClient = makeClient({
+        activeSessionId: 'sess-1',
+        boundSessionId: 'sess-1',
+      })
+      const entry = addSession(ctx, 'sess-1')
+      await handleSessionMessage(WS, boundClient, {
+        type: 'set_permission_mode',
+        mode: 'approve',
+      }, ctx)
+      assert.equal(entry.session.setPermissionMode.callCount, 1)
+      assert.equal(entry.session.setPermissionMode.lastCall[0], 'approve')
+    })
   })
 
   describe('permission_response', () => {

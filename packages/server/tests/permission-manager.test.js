@@ -65,10 +65,24 @@ describe('PermissionManager', () => {
       assert.equal(result.message, 'User denied')
     })
 
-    it('resolves with allowAlways on respondToPermission', async () => {
+    it('resolves allowAlways as SDK-compliant behavior:allow (no suggestions — 2026-04-11 audit Skeptic finding)', async () => {
+      // Pre-audit bug: respondToPermission('allowAlways') resolved with
+      // { behavior: 'allowAlways' }, which is NOT a valid SDK
+      // PermissionResult.behavior — the Agent SDK type only accepts
+      // 'allow'|'deny'. The SDK silently coerced or dropped it, and the
+      // user-facing 'Allow Always' button effectively did nothing more
+      // than a plain 'Allow'.
+      //
+      // Post-fix: the result shape must be { behavior: 'allow',
+      // updatedInput, updatedPermissions?: [suggestions from canUseTool] }.
+      // When no suggestions were provided by the SDK callback, the
+      // result has no updatedPermissions field.
       const events = []
       pm.on('permission_request', (data) => events.push(data))
 
+      // No suggestions provided — `handlePermission` called WITHOUT the
+      // optional `suggestions` argument, simulating an older SDK release
+      // or a tool that doesn't produce allow-always suggestions.
       const promise = pm.handlePermission('Bash', { command: 'npm test' }, null, 'approve')
       const requestId = events[0].requestId
       assert.ok(pm._permissionTimers.has(requestId))
@@ -76,10 +90,41 @@ describe('PermissionManager', () => {
       pm.respondToPermission(requestId, 'allowAlways')
 
       const result = await promise
-      assert.equal(result.behavior, 'allowAlways')
+      assert.equal(result.behavior, 'allow', "behavior must be the SDK-valid 'allow', not 'allowAlways'")
       assert.deepEqual(result.updatedInput, { command: 'npm test' })
+      assert.equal(result.updatedPermissions, undefined,
+        'no updatedPermissions when the SDK did not provide suggestions')
       assert.ok(!pm._pendingPermissions.has(requestId))
       assert.ok(!pm._permissionTimers.has(requestId))
+    })
+
+    it('resolves allowAlways with updatedPermissions when suggestions are available', async () => {
+      // When the SDK canUseTool callback provides suggestions (e.g. the
+      // pre-built rule to persist 'always allow Read on /project'),
+      // respondToPermission('allowAlways') must echo them back via
+      // updatedPermissions so the rule becomes a session-wide permission.
+      // This is the 'Always allow' flow the SDK type actually supports.
+      const events = []
+      pm.on('permission_request', (data) => events.push(data))
+
+      const suggestions = [
+        {
+          type: 'addRules',
+          rules: [{ toolName: 'Read', ruleContent: '/project/**' }],
+          behavior: 'allow',
+          destination: 'session',
+        },
+      ]
+      const promise = pm.handlePermission('Read', { path: '/project/file.txt' }, null, 'approve', suggestions)
+      const requestId = events[0].requestId
+
+      pm.respondToPermission(requestId, 'allowAlways')
+
+      const result = await promise
+      assert.equal(result.behavior, 'allow')
+      assert.deepEqual(result.updatedInput, { path: '/project/file.txt' })
+      assert.deepEqual(result.updatedPermissions, suggestions,
+        "allowAlways must echo the SDK's suggestions via updatedPermissions")
     })
 
     it('cleans up pending map and timer on response', async () => {

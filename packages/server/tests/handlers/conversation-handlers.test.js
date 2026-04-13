@@ -70,6 +70,38 @@ describe('conversation-handlers', () => {
       assert.equal(ctx._sent[0].type, 'conversations_list')
       assert.deepEqual(ctx._sent[0].conversations, [])
     })
+
+    it('Adversary A8: scopes results to bound session cwd', async () => {
+      const fakeConvs = [
+        { conversationId: 'in-scope', cwd: '/home/dev/Projects/chroxy' },
+        { conversationId: 'in-scope-child', cwd: '/home/dev/Projects/chroxy/packages/server' },
+        { conversationId: 'other-repo', cwd: '/home/dev/Projects/secret' },
+        { conversationId: 'ssh', cwd: '/home/dev/.ssh' },
+      ]
+      const sessions = new Map()
+      sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
+      const ctx = makeCtx(sessions)
+      ctx.scanConversations = createSpy(async () => fakeConvs)
+      const client = makeClient({ boundSessionId: 'bound-1' })
+
+      await conversationHandlers.list_conversations(makeWs(), client, {}, ctx)
+
+      const ids = ctx._sent[0].conversations.map((c) => c.conversationId).sort()
+      assert.deepEqual(ids, ['in-scope', 'in-scope-child'],
+        'bound client must only see the chroxy repo and subdirs')
+    })
+
+    it('Adversary A8: returns empty list for bound client with missing session', async () => {
+      const fakeConvs = [{ conversationId: 'x', cwd: '/anywhere' }]
+      const ctx = makeCtx() // empty session map
+      ctx.scanConversations = createSpy(async () => fakeConvs)
+      const client = makeClient({ boundSessionId: 'ghost' })
+
+      await conversationHandlers.list_conversations(makeWs(), client, {}, ctx)
+
+      assert.deepEqual(ctx._sent[0].conversations, [],
+        'bound client with no resolvable session should see nothing (fail-closed)')
+    })
   })
 
   describe('search_conversations', () => {
@@ -96,6 +128,24 @@ describe('conversation-handlers', () => {
 
       assert.equal(ctx._sent[0].type, 'search_results')
       assert.deepEqual(ctx._sent[0].results, [])
+    })
+
+    it('Adversary A8: scopes search results to bound session cwd', async () => {
+      const fakeResults = [
+        { conversationId: 'a', cwd: '/home/dev/Projects/chroxy', snippet: 'AKIA...' },
+        { conversationId: 'b', cwd: '/home/dev/Projects/secret', snippet: 'password' },
+      ]
+      const sessions = new Map()
+      sessions.set('bound-1', { session: createMockSession(), name: 'S', cwd: '/home/dev/Projects/chroxy' })
+      const ctx = makeCtx(sessions)
+      ctx.searchConversations = createSpy(async () => fakeResults)
+      const client = makeClient({ boundSessionId: 'bound-1' })
+
+      await conversationHandlers.search_conversations(makeWs(), client, { query: 'password' }, ctx)
+
+      const ids = ctx._sent[0].results.map((r) => r.conversationId)
+      assert.deepEqual(ids, ['a'],
+        'bound client must not see search hits from other projects')
     })
   })
 

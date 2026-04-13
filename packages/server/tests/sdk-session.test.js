@@ -106,7 +106,12 @@ describe('SdkSession', () => {
       assert.equal(result.behavior, 'deny')
     })
 
-    it('resolves with allowAlways on respondToPermission (allowAlways)', async () => {
+    it('resolves allowAlways as SDK-compliant behavior:allow (2026-04-11 audit Skeptic finding)', async () => {
+      // Pre-audit bug: respondToPermission('allowAlways') resolved with
+      // { behavior: 'allowAlways' }, which is NOT a valid SDK
+      // PermissionResult.behavior — the Agent SDK only accepts
+      // 'allow'|'deny'. Post-fix: behavior must be 'allow' and any
+      // suggestions provided by canUseTool get echoed via updatedPermissions.
       const events = []
       session.on('permission_request', (data) => events.push(data))
 
@@ -117,7 +122,8 @@ describe('SdkSession', () => {
       session.respondToPermission(requestId, 'allowAlways')
 
       const result = await promise
-      assert.equal(result.behavior, 'allowAlways')
+      assert.equal(result.behavior, 'allow',
+        "behavior must be the SDK-valid 'allow', not 'allowAlways'")
       assert.deepEqual(result.updatedInput, { command: 'npm test' })
       assert.ok(!session._pendingPermissions.has(requestId))
       assert.ok(!session._permissions._permissionTimers.has(requestId))

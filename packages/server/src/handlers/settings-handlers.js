@@ -48,6 +48,46 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         ctx.send(ws, { type: 'session_error', message: 'This provider does not support plan mode' })
         return
       }
+      // Auto permission mode is the ultimate privilege escalation in
+      // the chroxy handler dispatch — it disables all permission
+      // checks, so every subsequent tool call auto-executes. The
+      // 2026-04-11 audit (Adversary A5) flagged this as a step in
+      // the kill chain: an authenticated attacker sends
+      // `{mode:'auto', confirmed:true}` and trivially flips the
+      // session to unrestricted execution. Pre-audit, the only
+      // protection was a `confirmed:true` flag that a malicious
+      // client can just send directly — it requires no actual
+      // physical user confirmation.
+      //
+      // Two defense-in-depth gates close the attack:
+      //
+      // 1. Config opt-in: config.allowAutoPermissionMode must be
+      //    explicitly set to true in the operator's config file.
+      //    Default is false, so fresh installs reject auto mode
+      //    entirely. The operator has to walk up to the dev machine
+      //    and edit the config to enable it — out-of-band
+      //    confirmation that no network-side flag can provide.
+      //
+      // 2. Bound-client rejection: clients that authenticated via a
+      //    pairing-issued session token (client.boundSessionId set)
+      //    are NEVER allowed to flip to auto mode, regardless of
+      //    config. Pairing tokens are scoped to a specific session
+      //    and should only be able to use existing permissions, not
+      //    escalate. Only the primary API token can flip to auto.
+      if (msg.mode === 'auto') {
+        if (client.boundSessionId) {
+          log.warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to flip to auto permission mode — rejected`)
+          sendError(ws, msg?.requestId, 'AUTO_MODE_FORBIDDEN_BOUND_CLIENT',
+            'Pairing-issued session tokens cannot enable auto permission mode. Use the primary API token from a device with physical access to this machine.')
+          return
+        }
+        if (ctx.config?.allowAutoPermissionMode !== true) {
+          log.warn(`Client ${client.id} attempted to flip to auto permission mode but allowAutoPermissionMode is not enabled in server config`)
+          sendError(ws, msg?.requestId, 'AUTO_MODE_DISABLED_BY_CONFIG',
+            'Auto permission mode is disabled on this server. To enable, set allowAutoPermissionMode:true in the server config file (requires local filesystem access). Default is disabled for security.')
+          return
+        }
+      }
       if (msg.mode === 'auto' && !msg.confirmed) {
         log.info(`Auto mode requested by ${client.id}, awaiting confirmation`)
         ctx.send(ws, {

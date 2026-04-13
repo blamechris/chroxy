@@ -172,7 +172,13 @@ export const RequestFullHistorySchema = z.object({
 export const KeyExchangeSchema = z.object({
     type: z.literal('key_exchange'),
     publicKey: z.string().max(512),
-    salt: z.string().max(512).optional(), // base64-encoded 32-byte connection salt for per-connection key derivation
+    // base64-encoded 32-byte connection salt for per-connection key derivation.
+    // REQUIRED as of the 2026-04-11 production readiness audit — without this
+    // field the server would fall back to the raw DH shared key with nonce=0,
+    // re-introducing the nonce-reuse-on-reconnect vulnerability fixed in
+    // 1fa8eda5e. The server now rejects key_exchange messages that omit salt
+    // with code KEY_EXCHANGE_SALT_REQUIRED.
+    salt: z.string().max(512),
 });
 export const PingSchema = z.object({
     type: z.literal('ping'),

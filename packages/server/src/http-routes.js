@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url'
 import QRCode from 'qrcode'
 import { readConnectionInfo } from './connection-info.js'
 import { createLogger } from './logger.js'
+import { metrics } from './metrics.js'
 
 const log = createLogger('ws')
 
@@ -101,7 +102,7 @@ export function createHttpHandler(server) {
       if (!server._validateBearerAuth(req, res)) return
       const mem = process.memoryUsage()
       const sessions = server.sessionManager?.listSessions() || []
-      const metrics = {
+      const payload = {
         uptime: Math.round((Date.now() - server._startedAt) / 1000),
         sessions: {
           active: sessions.length,
@@ -119,9 +120,10 @@ export function createHttpHandler(server) {
           pid: process.pid,
           nodeVersion: process.version,
         },
+        counters: metrics.snapshot(),
       }
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(metrics))
+      res.end(JSON.stringify(payload))
       return
     }
 

@@ -7,6 +7,7 @@
 import { createKeyPair, deriveSharedKey, deriveConnectionKey } from '@chroxy/store-core/crypto'
 import { AuthSchema, KeyExchangeSchema, PairSchema } from './ws-schemas.js'
 import { createLogger } from './logger.js'
+import { metrics } from './metrics.js'
 
 const log = createLogger('ws')
 
@@ -124,6 +125,7 @@ export function handleAuthMessage(ctx, ws, msg) {
   const backoff = Math.min(1000 * Math.pow(2, existing.count - 1), 60_000)
   existing.blockedUntil = now + backoff
   authFailures.set(rateLimitKey, existing)
+  metrics.inc('auth.failures')
   log.warn(`Auth failure from ${rateLimitKey} (attempt ${existing.count}, blocked for ${backoff}ms)`)
   send(ws, { type: 'auth_fail', reason: 'invalid_token' })
   ws.close()
