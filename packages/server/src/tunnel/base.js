@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events'
 import { createLogger } from '../logger.js'
+import { metrics } from '../metrics.js'
 
 const log = createLogger('tunnel')
 
@@ -151,6 +152,7 @@ export class BaseTunnelAdapter extends EventEmitter {
 
     const exitReason = signal ? `signal ${signal}` : `code ${code}`
     log.warn(`Process exited unexpectedly (${exitReason})`)
+    metrics.inc('tunnel.flaps')
     this.emit('tunnel_lost', { code, signal })
 
     const oldUrl = this.url

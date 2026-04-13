@@ -15,6 +15,7 @@ import { SessionStatePersistence } from './session-state-persistence.js'
 import { SessionTimeoutManager, formatIdleDuration } from './session-timeout-manager.js'
 import { SessionMessageHistory } from './session-message-history.js'
 import { createLogger } from './logger.js'
+import { metrics } from './metrics.js'
 
 const log = createLogger('session-manager')
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
@@ -369,6 +370,7 @@ export class SessionManager extends EventEmitter {
     }
 
     this._sessions.set(sessionId, entry)
+    metrics.inc('sessions.created')
     this._timeoutManager.touchActivity(sessionId)
     this._wireSessionEvents(sessionId, session)
 
@@ -564,6 +566,7 @@ export class SessionManager extends EventEmitter {
     }
     // Mark as destroying immediately — getSession() will return null from here on
     entry._destroying = true
+    metrics.inc('sessions.destroyed')
     // Detach listeners BEFORE destroy to prevent orphaned events (FM-04)
     entry.session.removeAllListeners()
     // Prevent unhandled 'error' throw if session emits error during destroy

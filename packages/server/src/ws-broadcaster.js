@@ -1,4 +1,5 @@
 import { createLogger } from './logger.js'
+import { metrics } from './metrics.js'
 
 const log = createLogger('ws')
 
@@ -40,9 +41,11 @@ export class WsBroadcaster {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
         if (ws.bufferedAmount > this._backpressureThreshold) {
           client._backpressureDrops = (client._backpressureDrops || 0) + 1
+          metrics.inc('backpressure.drops')
           log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
           if (client._backpressureDrops >= this._backpressureMaxDrops) {
             log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
+            metrics.inc('backpressure.disconnects')
             ws.close(4008, 'Backpressure: too many dropped messages')
           }
           continue

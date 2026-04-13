@@ -16,6 +16,7 @@ import { readFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
+import { metrics } from './metrics.js'
 
 const log = createLogger('push')
 
@@ -385,6 +386,7 @@ export class PushManager {
       })
 
       if (!res.ok) {
+        metrics.inc('push.failures')
         log.error(`Expo Push API returned ${res.status}`)
         return
       }
@@ -406,8 +408,10 @@ export class PushManager {
       }
       if (pruned) this._persistToDisk()
 
+      metrics.inc('push.sent')
       log.info(`Sent ${category} ${logLabel} to ${messages.length} device(s)`)
     } catch (err) {
+      metrics.inc('push.failures')
       log.error(`Failed to send ${logLabel}: ${err.message}`)
     }
   }
