@@ -358,7 +358,7 @@ describe('createPermissionHandler', () => {
 
     it('resolves via SDK path (respondToPermission) and returns ok:true', async () => {
       const permissionSessionMap = new Map([['sdk-req', 'sess-sdk']])
-      const respondToPermission = mock.fn()
+      const respondToPermission = mock.fn(() => true)
       const sm = {
         getSession: mock.fn(() => ({ session: { respondToPermission } })),
       }
@@ -413,7 +413,7 @@ describe('createPermissionHandler', () => {
 
     it('allows response when bound token matches the target session', async () => {
       const permissionSessionMap = new Map([['bound-req', 'session-A']])
-      const respondToPermission = mock.fn()
+      const respondToPermission = mock.fn(() => true)
       const sm = {
         getSession: mock.fn(() => ({ session: { respondToPermission } })),
       }
@@ -478,7 +478,7 @@ describe('createPermissionHandler', () => {
       // the HTTP fallback should work as before — this is the single-token
       // full-trust mode used by the dashboard and test-client.
       const permissionSessionMap = new Map([['regular-req', 'session-X']])
-      const respondToPermission = mock.fn()
+      const respondToPermission = mock.fn(() => true)
       const sm = {
         getSession: mock.fn(() => ({ session: { respondToPermission } })),
       }
