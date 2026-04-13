@@ -9,6 +9,7 @@ import {
   Alert,
   Modal,
   Pressable,
+  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
@@ -119,6 +120,7 @@ export function SettingsScreen() {
   const latestVersion = useConnectionLifecycleStore((s) => s.latestVersion);
   const serverMode = useConnectionLifecycleStore((s) => s.serverMode);
   const wsUrl = useConnectionLifecycleStore((s) => s.wsUrl);
+  const connectionPhase = useConnectionLifecycleStore((s) => s.connectionPhase);
 
   const conversationId = useConnectionStore((s) => {
     const id = s.activeSessionId;
@@ -358,6 +360,16 @@ export function SettingsScreen() {
             </TouchableOpacity>
           </>
         )}
+        <View style={styles.separator} />
+        <TouchableOpacity
+          style={styles.row}
+          onPress={() => navigation.navigate('Activity')}
+          accessibilityRole="button"
+          accessibilityLabel="View activity history"
+        >
+          <Text style={styles.rowLabel}>Activity History</Text>
+          <Text style={styles.rowValue}>View all</Text>
+        </TouchableOpacity>
       </View>
 
       {/* PORTABILITY */}
@@ -481,6 +493,59 @@ export function SettingsScreen() {
             </TouchableOpacity>
           </>
         )}
+      </View>
+
+      {/* DEBUG — UX landmine #9: Copy Diagnostics + #10: Re-show onboarding */}
+      <Text style={styles.sectionHeader}>DEBUG</Text>
+      <View style={styles.section}>
+        <TouchableOpacity
+          style={styles.row}
+          onPress={async () => {
+            const urlHost = wsUrl ? new URL(wsUrl).host : 'none';
+            const recentErrors = serverErrors.slice(-5).map((e: { message?: string; code?: string }) =>
+              `${e.code || 'ERR'}: ${e.message || 'unknown'}`
+            );
+            const diag = [
+              `app: ${APP_VERSION}`,
+              `server: ${serverVersion ?? 'unknown'}`,
+              `phase: ${connectionPhase}`,
+              `mode: ${serverMode ?? 'unknown'}`,
+              `host: ${urlHost}`,
+              `platform: ${Platform.OS} ${Platform.Version}`,
+              `sessions: ${sessions.length}`,
+              ...(recentErrors.length > 0 ? [`errors: ${recentErrors.join('; ')}`] : []),
+            ].join('\n');
+            try {
+              await Clipboard.setStringAsync(diag);
+              Alert.alert('Copied', 'Diagnostics copied to clipboard.');
+            } catch {
+              Alert.alert('Error', 'Failed to copy diagnostics.');
+            }
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Copy diagnostics to clipboard"
+        >
+          <Text style={styles.rowLabel}>Copy Diagnostics</Text>
+          <Text style={styles.rowValue}>Tap to copy</Text>
+        </TouchableOpacity>
+        <View style={styles.separator} />
+        <TouchableOpacity
+          style={styles.row}
+          onPress={async () => {
+            try {
+              const SecureStore = await import('expo-secure-store');
+              await SecureStore.deleteItemAsync('onboarding_complete');
+              Alert.alert('Tutorial Reset', 'The onboarding tutorial will show next time you open the app.');
+            } catch {
+              Alert.alert('Error', 'Failed to reset onboarding state.');
+            }
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Show tutorial again"
+        >
+          <Text style={styles.rowLabel}>Show Tutorial</Text>
+          <Text style={styles.rowValue}>Reset onboarding</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Speech language picker */}
