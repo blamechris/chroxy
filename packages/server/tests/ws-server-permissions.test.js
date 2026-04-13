@@ -1093,7 +1093,7 @@ describe('POST /permission-response HTTP endpoint', () => {
     const mockSession = createMockSession()
     mockSession.cwd = '/tmp/project'
     let resolvedWith = null
-    mockSession.respondToPermission = (reqId, decision) => { resolvedWith = { reqId, decision } }
+    mockSession.respondToPermission = (reqId, decision) => { resolvedWith = { reqId, decision }; return true }
     sessionsMap.set('sess-1', {
       session: mockSession,
       name: 'Session 1',

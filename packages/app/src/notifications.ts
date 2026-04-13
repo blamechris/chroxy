@@ -163,7 +163,19 @@ async function sendPermissionResponseHttp(
         return true;
       }
 
-      // 4xx errors (except 408/429) are not retryable
+      // 410 = permission expired (auto-denied before user responded).
+      // Surface a clear alert so the user knows their tap was too late.
+      if (res.status === 410) {
+        console.warn(`[push] Permission ${requestId} expired (server returned 410)`);
+        const { Alert } = require('react-native');
+        Alert.alert(
+          'Permission Expired',
+          'This permission request has already expired. Open the app to see the current session state.',
+        );
+        return false;
+      }
+
+      // Other 4xx errors (except 408/429) are not retryable
       if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
         console.warn(`[push] HTTP permission response rejected: ${res.status}`);
         return false;

@@ -5,6 +5,7 @@
  */
 import { addServerOptions, loadAndMergeConfig, parseExtraOverrides } from './shared.js'
 import { parseTunnelArg } from '../tunnel/index.js'
+import { runDoctorChecks } from '../doctor.js'
 
 export function registerServerCommands(program) {
   const startCmd = program
@@ -16,6 +17,7 @@ export function registerServerCommands(program) {
     .option('--no-encrypt', 'Disable end-to-end encryption (dev/testing only)')
     .option('--no-supervisor', 'Disable supervisor mode (direct server, no auto-restart)')
     .option('--show-token', 'Show full API token in terminal output (masked by default)')
+    .option('--skip-checks', 'Skip preflight dependency checks')
     .action(async (options) => {
       const extraOverrides = parseExtraOverrides(options)
       if (options.auth === false) extraOverrides.noAuth = true
@@ -25,6 +27,31 @@ export function registerServerCommands(program) {
       const config = loadAndMergeConfig(options, extraOverrides)
 
       const parsedTunnel = parseTunnelArg(config.tunnel || 'quick')
+
+      // UX landmine #3: run preflight checks before starting so the
+      // user discovers missing cloudflared in <1s instead of waiting
+      // 30s for the tunnel timeout. Skip when tunnel is disabled
+      // (--no-auth, externalUrl) since cloudflared isn't needed.
+      const needsTunnel = !!parsedTunnel && !config.noAuth && !config.externalUrl
+      if (!options.skipChecks) {
+        const port = config.port || 8765
+        const { checks } = await runDoctorChecks({ port })
+        const failures = checks.filter((c) => {
+          if (c.status !== 'fail') return false
+          // Only require cloudflared when a tunnel will actually be used
+          if (c.name === 'cloudflared' && !needsTunnel) return false
+          return true
+        })
+        if (failures.length > 0) {
+          console.error('\nPreflight checks failed:\n')
+          for (const f of failures) {
+            console.error(`  ✗ ${f.name}: ${f.message}`)
+          }
+          console.error('\nRun `npx chroxy doctor` for details, or `--skip-checks` to bypass.\n')
+          process.exitCode = 1
+          return
+        }
+      }
       const useSupervisor = !!parsedTunnel
         && !config.noAuth
         && !config.externalUrl

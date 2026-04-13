@@ -12,11 +12,13 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { PermissionHistoryScreen } from './screens/PermissionHistoryScreen';
 import { HistoryScreen } from './screens/HistoryScreen';
+import ActivityScreen from './screens/ActivityScreen';
 import { LockScreen } from './components/LockScreen';
 import { useConnectionStore } from './store/connection';
 import { useConnectionLifecycleStore } from './store/connection-lifecycle';
 import { setupNotificationResponseListener } from './notifications';
 import { useBiometricLock } from './hooks/useBiometricLock';
+import { useNotificationStore } from './store/notifications';
 
 // Enable LayoutAnimation on Android (must be called before any component uses it)
 if (Platform.OS === 'android') {
@@ -31,6 +33,7 @@ export type RootStackParamList = {
   Settings: undefined;
   PermissionHistory: undefined;
   History: undefined;
+  Activity: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -62,6 +65,8 @@ export default function App() {
 
   useEffect(() => {
     const sub = setupNotificationResponseListener();
+    // Load persistent activity history on mount
+    void useNotificationStore.getState().loadActivityHistory();
     return () => sub.remove();
   }, []);
 
@@ -128,11 +133,6 @@ export default function App() {
               }}
             />
             <Stack.Screen
-              name="Settings"
-              component={SettingsScreen}
-              options={{ title: 'Settings' }}
-            />
-            <Stack.Screen
               name="PermissionHistory"
               component={PermissionHistoryScreen}
               options={{ title: 'Permission History' }}
@@ -144,6 +144,19 @@ export default function App() {
             />
           </>
         )}
+        {/* UX landmine #2: Settings is always accessible — not gated
+            behind a successful connection. Connection-dependent sections
+            are conditionally hidden inside SettingsScreen itself. */}
+        <Stack.Screen
+          name="Settings"
+          component={SettingsScreen}
+          options={{ title: 'Settings' }}
+        />
+        <Stack.Screen
+          name="Activity"
+          component={ActivityScreen}
+          options={{ title: 'Activity' }}
+        />
       </Stack.Navigator>
       {isLocked && <LockScreen onUnlock={unlock} />}
     </NavigationContainer>

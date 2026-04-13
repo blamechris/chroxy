@@ -40,6 +40,15 @@ export async function waitForTunnel(httpUrl, { maxAttempts = 20, initialInterval
     }
   }
 
-  // Don't fail — the tunnel might still work, just warn
-  log.warn(`Could not verify tunnel after ${maxAttempts} attempts (${((Date.now() - startTime) / 1000).toFixed(0)}s), proceeding anyway`)
+  // UX landmine #4: throw instead of silently proceeding. A broken
+  // tunnel produces a QR that hangs the app — better to surface the
+  // error clearly than show a non-functional QR code.
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(0)
+  const err = new Error(
+    `Tunnel failed to become routable after ${maxAttempts} attempts (${elapsed}s). ` +
+    'This usually means your network is blocking Cloudflare, or DNS has not propagated yet. ' +
+    'Try a named tunnel (--tunnel named) or run `npx chroxy doctor` for diagnostics.'
+  )
+  err.code = 'TUNNEL_NOT_ROUTABLE'
+  throw err
 }

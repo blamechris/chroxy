@@ -19,7 +19,11 @@ describe('waitForTunnel logging', () => {
     mock.method(console, 'log', (msg) => logs.push(msg))
     mock.method(globalThis, 'fetch', async () => { throw new Error('ECONNREFUSED') })
 
-    await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 3, interval: 0 })
+    // waitForTunnel now throws on exhaustion (UX landmine #4)
+    await assert.rejects(
+      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 3, initialInterval: 0 }),
+      (err) => err.code === 'TUNNEL_NOT_ROUTABLE'
+    )
 
     const attemptLogs = logs.filter((l) => l.includes('Attempt'))
     assert.equal(attemptLogs.length, 3)
@@ -34,7 +38,10 @@ describe('waitForTunnel logging', () => {
     mock.method(console, 'log', (msg) => logs.push(msg))
     mock.method(globalThis, 'fetch', async () => ({ ok: false, status: 502 }))
 
-    await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, interval: 0 })
+    await assert.rejects(
+      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, initialInterval: 0 }),
+      (err) => err.code === 'TUNNEL_NOT_ROUTABLE'
+    )
 
     const attemptLogs = logs.filter((l) => l.includes('Attempt'))
     assert.equal(attemptLogs.length, 2)
@@ -51,24 +58,24 @@ describe('waitForTunnel logging', () => {
       return { ok: true }
     })
 
-    await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 5, interval: 0 })
+    await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 5, initialInterval: 0 })
 
     const successLog = logs.find((l) => l.includes('Tunnel verified'))
     assert.ok(successLog, 'should log verification success')
     assert.ok(successLog.includes('attempt 2/5'))
   })
 
-  it('logs total attempts in final "giving up" message', async () => {
-    const logs = []
-    mock.method(console, 'log', (msg) => logs.push(msg))
-    mock.method(console, 'warn', (msg) => logs.push(msg))
+  it('throws with attempt count in error message on exhaustion', async () => {
     mock.method(globalThis, 'fetch', async () => { throw new Error('Network error') })
 
-    await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 4, interval: 0 })
-
-    const finalLog = logs[logs.length - 1]
-    assert.ok(finalLog.includes('4 attempts'), `expected "4 attempts" in: ${finalLog}`)
-    assert.ok(finalLog.includes('proceeding anyway'))
+    await assert.rejects(
+      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 4, initialInterval: 0 }),
+      (err) => {
+        assert.ok(err.message.includes('4 attempts'), `expected "4 attempts" in: ${err.message}`)
+        assert.equal(err.code, 'TUNNEL_NOT_ROUTABLE')
+        return true
+      }
+    )
   })
 
   it('logs success on first attempt without prior failure logs', async () => {
@@ -76,7 +83,7 @@ describe('waitForTunnel logging', () => {
     mock.method(console, 'log', (msg) => logs.push(msg))
     mock.method(globalThis, 'fetch', async () => ({ ok: true }))
 
-    await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 3, interval: 0 })
+    await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 3, initialInterval: 0 })
 
     const failureLogs = logs.filter((l) => l.includes('failed'))
     assert.equal(failureLogs.length, 0, 'no failure logs expected')

@@ -477,12 +477,26 @@ export async function startCliServer(config) {
     })
 
     // 6. Wait for tunnel to be fully routable (DNS propagation)
+    // UX landmine #4: waitForTunnel now throws TUNNEL_NOT_ROUTABLE
+    // instead of silently proceeding with a broken QR.
     wsServer.broadcast({ type: 'server_status', phase: 'tunnel_verifying', tunnelMode: tunnelArg.mode, message: 'Verifying tunnel reachability...' })
-    await waitForTunnel(httpUrl, {
-      onAttempt: (attempt, maxAttempts) => {
-        wsServer.broadcast({ type: 'server_status', phase: 'tunnel_verifying', tunnelMode: tunnelArg.mode, attempt, maxAttempts, message: `Verifying tunnel reachability... (${attempt}/${maxAttempts})` })
-      },
-    })
+    try {
+      await waitForTunnel(httpUrl, {
+        onAttempt: (attempt, maxAttempts) => {
+          wsServer.broadcast({ type: 'server_status', phase: 'tunnel_verifying', tunnelMode: tunnelArg.mode, attempt, maxAttempts, message: `Verifying tunnel reachability... (${attempt}/${maxAttempts})` })
+        },
+      })
+    } catch (tunnelErr) {
+      log.error(tunnelErr.message)
+      wsServer.broadcastError(tunnelErr.message)
+      console.error(`\n  ✗ ${tunnelErr.message}\n`)
+      // Clean up the tunnel and server before exiting so we don't
+      // leave orphan processes holding the port.
+      try { await tunnel.stop() } catch {}
+      try { wsServer.close() } catch {}
+      process.exitCode = 1
+      return
+    }
     wsServer.broadcast({ type: 'server_status', phase: 'ready', tunnelUrl: httpUrl, message: 'Tunnel is ready' })
 
     // 7. Generate connection info

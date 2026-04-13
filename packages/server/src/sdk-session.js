@@ -457,7 +457,7 @@ export class SdkSession extends BaseSession {
    * the app sends permission_response).
    */
   respondToPermission(requestId, decision) {
-    this._permissions.respondToPermission(requestId, decision)
+    return this._permissions.respondToPermission(requestId, decision)
   }
 
   /**

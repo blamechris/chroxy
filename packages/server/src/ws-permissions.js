@@ -260,11 +260,21 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       if (originSessionId && sm) {
         const entry = sm.getSession(originSessionId)
         if (entry && typeof entry.session.respondToPermission === 'function') {
+          const resolved = entry.session.respondToPermission(requestId, decision)
           permissionSessionMap.delete(requestId)
-          entry.session.respondToPermission(requestId, decision)
-          log.info(`Permission ${requestId} resolved via HTTP: ${decision} (SDK)`)
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: true }))
+          if (resolved) {
+            log.info(`Permission ${requestId} resolved via HTTP: ${decision} (SDK)`)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: true }))
+          } else {
+            // UX landmine #5: the permission auto-denied (timed out)
+            // before the user tapped the lockscreen notification. Tell
+            // the app so it can surface "This permission request
+            // expired" instead of silently showing "approved".
+            log.info(`Permission ${requestId} already expired when HTTP response arrived (SDK)`)
+            res.writeHead(410, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'expired', message: 'This permission request has already expired or been resolved' }))
+          }
           return
         }
       }

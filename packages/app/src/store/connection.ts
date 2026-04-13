@@ -667,17 +667,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }
     };
 
-    socket.onerror = () => {
+    socket.onerror = (event: Event) => {
       // Stale socket from a previous connection attempt — ignore
       if (myAttemptId !== connectionAttemptId) return;
 
       set({ socket: null });
 
+      // UX landmine #8: extract whatever detail we can from the error
+      // event. React Native's WebSocket implementation exposes a
+      // `message` property on the error event in most cases.
+      const detail = (event as unknown as { message?: string })?.message;
+      const errorMsg = detail
+        ? `Connection error: ${detail}`
+        : 'Connection error — server may be unreachable';
+
       // Auto-reconnect on unexpected WS error
       if (disconnectedAttemptId !== myAttemptId) {
-        console.log('[ws] WebSocket error, reconnecting...');
+        console.log(`[ws] WebSocket error (${detail || 'no detail'}), reconnecting...`);
         useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
-        useConnectionLifecycleStore.getState().setConnectionError('Connection error', 0);
+        useConnectionLifecycleStore.getState().setConnectionError(errorMsg, 0);
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           get().connect(url, token);
@@ -754,7 +762,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     useConversationStore.getState().reset();
     useConnectionLifecycleStore.getState().reset();
     useConnectionLifecycleStore.getState().setUserDisconnected(true);
-    useConnectionLifecycleStore.getState().setSavedConnection(null);
+    // UX landmine #1: do NOT clear savedConnection here. disconnect()
+    // means "close the session for now" — the saved server should
+    // persist so ConnectScreen shows "Reconnect". Only forgetSession()
+    // (called from "Forget Server" in the alert and Settings) clears it.
   },
 
   forgetSession: () => {
@@ -1391,10 +1402,23 @@ if (global.__chroxy_appStateSub) {
 export const _appStateSub = AppState.addEventListener('change', (nextState) => {
   if (nextState === 'active') {
     const { socket } = useConnectionStore.getState();
-    const { connectionPhase, wsUrl, apiToken } = useConnectionLifecycleStore.getState();
+    const { connectionPhase, wsUrl, apiToken, userDisconnected, savedConnection } = useConnectionLifecycleStore.getState();
+
+    // Case 1: socket thinks it was connected but is actually stale
     if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
       console.log('[ws] App resumed, socket stale — reconnecting');
       useConnectionStore.getState().connect(wsUrl, apiToken);
+      return;
+    }
+
+    // UX landmine #6: when the phone was asleep long enough that the
+    // socket dropped and the phase went to 'disconnected', the old code
+    // did nothing — user had to tap Reconnect manually. Now we auto-
+    // reconnect if there's a saved connection and the user didn't
+    // explicitly disconnect.
+    if (connectionPhase === 'disconnected' && !userDisconnected && savedConnection?.url && savedConnection?.token) {
+      console.log('[ws] App resumed from disconnected state — auto-reconnecting to saved server');
+      useConnectionStore.getState().connect(savedConnection.url, savedConnection.token);
     }
   }
 });
