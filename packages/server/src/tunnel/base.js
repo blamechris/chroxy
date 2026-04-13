@@ -94,6 +94,12 @@ export class BaseTunnelAdapter extends EventEmitter {
   /** Stop the tunnel */
   async stop() {
     this.intentionalShutdown = true
+    // Cancel any in-flight recovery sleep so the loop exits immediately
+    // instead of waiting up to 60s for the backoff timer to fire.
+    if (this._recoveryAbort) {
+      this._recoveryAbort.abort()
+      this._recoveryAbort = null
+    }
     if (this.process) {
       this.process.kill()
       this.process = null
@@ -170,7 +176,23 @@ export class BaseTunnelAdapter extends EventEmitter {
         delayMs: backoff,
       })
 
-      await new Promise((r) => setTimeout(r, backoff))
+      // Cancellable sleep — stop() aborts this so we don't hold the
+      // event loop alive for up to 60s during shutdown.
+      this._recoveryAbort = new AbortController()
+      try {
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(resolve, backoff)
+          this._recoveryAbort.signal.addEventListener('abort', () => {
+            clearTimeout(timer)
+            reject(new Error('recovery aborted'))
+          }, { once: true })
+        })
+      } catch {
+        // Aborted by stop() — exit the loop
+        return
+      } finally {
+        this._recoveryAbort = null
+      }
 
       if (this.intentionalShutdown) return
 
