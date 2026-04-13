@@ -26,14 +26,22 @@ export function registerServerCommands(program) {
 
       const config = loadAndMergeConfig(options, extraOverrides)
 
+      const parsedTunnel = parseTunnelArg(config.tunnel || 'quick')
+
       // UX landmine #3: run preflight checks before starting so the
       // user discovers missing cloudflared in <1s instead of waiting
-      // 30s for the tunnel timeout. `chroxy doctor` already has these
-      // checks — we just surface them inline on start.
+      // 30s for the tunnel timeout. Skip when tunnel is disabled
+      // (--no-auth, externalUrl) since cloudflared isn't needed.
+      const needsTunnel = !!parsedTunnel && !config.noAuth && !config.externalUrl
       if (!options.skipChecks) {
         const port = config.port || 8765
         const { checks } = await runDoctorChecks({ port })
-        const failures = checks.filter((c) => c.status === 'fail')
+        const failures = checks.filter((c) => {
+          if (c.status !== 'fail') return false
+          // Only require cloudflared when a tunnel will actually be used
+          if (c.name === 'cloudflared' && !needsTunnel) return false
+          return true
+        })
         if (failures.length > 0) {
           console.error('\nPreflight checks failed:\n')
           for (const f of failures) {
@@ -44,8 +52,6 @@ export function registerServerCommands(program) {
           return
         }
       }
-
-      const parsedTunnel = parseTunnelArg(config.tunnel || 'quick')
       const useSupervisor = !!parsedTunnel
         && !config.noAuth
         && !config.externalUrl

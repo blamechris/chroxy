@@ -18,7 +18,7 @@ describe('waitForTunnel', () => {
   it('resolves immediately when fetch returns ok on first attempt', async () => {
     mock.method(globalThis, 'fetch', async () => ({ ok: true }))
     await assert.doesNotReject(() =>
-      waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 3, interval: 0 })
+      waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 3, initialInterval: 0 })
     )
     assert.equal(globalThis.fetch.mock.calls.length, 1)
   })
@@ -30,14 +30,14 @@ describe('waitForTunnel', () => {
       if (calls <= 2) throw new Error('ECONNREFUSED')
       return { ok: true }
     })
-    await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 5, interval: 0 })
+    await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 5, initialInterval: 0 })
     assert.equal(globalThis.fetch.mock.calls.length, 3)
   })
 
   it('throws TUNNEL_NOT_ROUTABLE after all attempts fail (UX landmine #4)', async () => {
     mock.method(globalThis, 'fetch', async () => { throw new Error('Network error') })
     await assert.rejects(
-      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, interval: 0 }),
+      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, initialInterval: 0 }),
       (err) => err.code === 'TUNNEL_NOT_ROUTABLE'
     )
     assert.equal(globalThis.fetch.mock.calls.length, 2)
@@ -46,7 +46,7 @@ describe('waitForTunnel', () => {
   it('throws TUNNEL_NOT_ROUTABLE when all responses are non-ok', async () => {
     mock.method(globalThis, 'fetch', async () => ({ ok: false }))
     await assert.rejects(
-      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, interval: 0 }),
+      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, initialInterval: 0 }),
       (err) => err.code === 'TUNNEL_NOT_ROUTABLE'
     )
     assert.equal(globalThis.fetch.mock.calls.length, 2)
@@ -55,7 +55,7 @@ describe('waitForTunnel', () => {
   it('uses the provided URL in every fetch call', async () => {
     const url = 'https://my-tunnel.trycloudflare.com'
     mock.method(globalThis, 'fetch', async () => ({ ok: true }))
-    await waitForTunnel(url, { maxAttempts: 1, interval: 0 })
+    await waitForTunnel(url, { maxAttempts: 1, initialInterval: 0 })
     assert.equal(globalThis.fetch.mock.calls[0].arguments[0], url)
   })
 
@@ -66,7 +66,7 @@ describe('waitForTunnel', () => {
       if (calls <= 1) throw new Error('ECONNREFUSED')
       return { ok: true }
     })
-    await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 10, interval: 0 })
+    await waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 10, initialInterval: 0 })
     // Fails on attempt 1, ok on attempt 2 — should stop there
     assert.equal(globalThis.fetch.mock.calls.length, 2)
   })

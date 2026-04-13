@@ -256,8 +256,6 @@ export class PermissionManager extends EventEmitter {
    *
    * @param {string} requestId - The permission request ID
    * @param {string} decision - 'allow', 'deny', or 'allowAlways'
-   */
-  /**
    * @returns {boolean} true if a pending permission was found and resolved,
    *   false if the requestId was unknown (already resolved or expired).
    */

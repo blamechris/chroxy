@@ -490,6 +490,10 @@ export async function startCliServer(config) {
       log.error(tunnelErr.message)
       wsServer.broadcastError(tunnelErr.message)
       console.error(`\n  ✗ ${tunnelErr.message}\n`)
+      // Clean up the tunnel and server before exiting so we don't
+      // leave orphan processes holding the port.
+      try { await tunnel.stop() } catch {}
+      try { wsServer.close() } catch {}
       process.exitCode = 1
       return
     }
