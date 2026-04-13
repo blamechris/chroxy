@@ -257,7 +257,10 @@ describe('BaseTunnelAdapter', () => {
       // wall-clock) — this is the proof the loop doesn't give up. Fixes #2811.
       await new Promise((resolve) => {
         const check = () => {
-          if (callCount >= 5) resolve()
+          if (callCount >= 5) {
+            adapter.removeListener('tunnel_recovering', check)
+            resolve()
+          }
         }
         adapter.on('tunnel_recovering', check)
         check() // in case we already passed 5
@@ -291,7 +294,10 @@ describe('BaseTunnelAdapter', () => {
       // the fast round instead of wall-clock sleep. Fixes #2811.
       await new Promise((resolve) => {
         const check = () => {
-          if (recoveringEvents.length >= 3) resolve()
+          if (recoveringEvents.length >= 3) {
+            adapter.removeListener('tunnel_recovering', check)
+            resolve()
+          }
         }
         adapter.on('tunnel_recovering', check)
         check()
