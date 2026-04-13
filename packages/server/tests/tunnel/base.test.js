@@ -253,13 +253,20 @@ describe('BaseTunnelAdapter', () => {
       assert.equal(failedEvent.recoveryOngoing, true,
         'tunnel_failed must signal recoveryOngoing:true (not a permanent giveup)')
 
-      // Let the loop run at least two more attempts — this is the proof
-      // it's not giving up. Then stop to break the infinite loop.
-      await new Promise((r) => setTimeout(r, 150))
+      // Wait for 2 more attempts past the fast round (event-driven, not
+      // wall-clock) — this is the proof the loop doesn't give up. Fixes #2811.
+      await new Promise((resolve) => {
+        const check = () => {
+          if (callCount >= 5) resolve()
+        }
+        adapter.on('tunnel_recovering', check)
+        check() // in case we already passed 5
+      })
       assert.ok(callCount >= 5,
         `adapter should keep retrying past the fast round; got callCount=${callCount}`)
 
       adapter.intentionalShutdown = true
+      await adapter.stop()
       await recoveryPromise
     })
 
@@ -280,14 +287,19 @@ describe('BaseTunnelAdapter', () => {
 
       const recoveryPromise = adapter._handleUnexpectedExit(1, null)
 
-      // Wait for the fast round to complete, then stop before the
-      // long-tail generates additional events.
-      await new Promise((r) => setTimeout(r, 80))
+      // Event-driven wait: wait for at least 3 recovering events from
+      // the fast round instead of wall-clock sleep. Fixes #2811.
+      await new Promise((resolve) => {
+        const check = () => {
+          if (recoveringEvents.length >= 3) resolve()
+        }
+        adapter.on('tunnel_recovering', check)
+        check()
+      })
       adapter.intentionalShutdown = true
+      await adapter.stop()
       await recoveryPromise
 
-      // We expect at LEAST 3 recovering events from the fast round.
-      // The long-tail may add 1-2 more before we observed the stop.
       assert.ok(recoveringEvents.length >= 3,
         `expected >=3 recovering events from fast round, got ${recoveringEvents.length}`)
       assert.equal(recoveringEvents[0].attempt, 1)
