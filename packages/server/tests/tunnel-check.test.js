@@ -34,18 +34,20 @@ describe('waitForTunnel', () => {
     assert.equal(globalThis.fetch.mock.calls.length, 3)
   })
 
-  it('resolves (no throw) after all attempts fail', async () => {
+  it('throws TUNNEL_NOT_ROUTABLE after all attempts fail (UX landmine #4)', async () => {
     mock.method(globalThis, 'fetch', async () => { throw new Error('Network error') })
-    await assert.doesNotReject(() =>
-      waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, interval: 0 })
+    await assert.rejects(
+      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, interval: 0 }),
+      (err) => err.code === 'TUNNEL_NOT_ROUTABLE'
     )
     assert.equal(globalThis.fetch.mock.calls.length, 2)
   })
 
-  it('resolves (no throw) when all responses are non-ok', async () => {
+  it('throws TUNNEL_NOT_ROUTABLE when all responses are non-ok', async () => {
     mock.method(globalThis, 'fetch', async () => ({ ok: false }))
-    await assert.doesNotReject(() =>
-      waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, interval: 0 })
+    await assert.rejects(
+      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, interval: 0 }),
+      (err) => err.code === 'TUNNEL_NOT_ROUTABLE'
     )
     assert.equal(globalThis.fetch.mock.calls.length, 2)
   })

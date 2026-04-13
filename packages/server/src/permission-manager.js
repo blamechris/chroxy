@@ -257,11 +257,15 @@ export class PermissionManager extends EventEmitter {
    * @param {string} requestId - The permission request ID
    * @param {string} decision - 'allow', 'deny', or 'allowAlways'
    */
+  /**
+   * @returns {boolean} true if a pending permission was found and resolved,
+   *   false if the requestId was unknown (already resolved or expired).
+   */
   respondToPermission(requestId, decision) {
     const pending = this._pendingPermissions.get(requestId)
     if (!pending) {
       this._logWarn(`No pending permission for ${requestId}`)
-      return
+      return false
     }
     this._pendingPermissions.delete(requestId)
     this._lastPermissionData.delete(requestId)
@@ -297,6 +301,7 @@ export class PermissionManager extends EventEmitter {
     } else {
       pending.resolve({ behavior: 'deny', message: 'User denied' })
     }
+    return true
   }
 
   /**
