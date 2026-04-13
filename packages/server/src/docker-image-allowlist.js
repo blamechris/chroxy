@@ -90,5 +90,10 @@ export function validateDockerImage(image, config = null) {
     : null
   const patterns = configured || DEFAULT_ALLOWED_DOCKER_IMAGES
   if (imageMatchesAllowlist(image, patterns)) return null
-  return `Docker image '${image}' is not in the allowlist. Allowed patterns: ${patterns.join(', ')}. To add this image, edit 'allowedDockerImages' in your chroxy config file.`
+  // Don't leak the full allowlist to the client — it helps attackers
+  // enumerate accepted prefixes. Log details server-side only.
+  if (patterns.length === 0) {
+    return "Docker image rejected: the allowedDockerImages list is empty (no client-supplied images permitted). To allow images, edit 'allowedDockerImages' in your chroxy config file."
+  }
+  return `Docker image '${image}' is not in the allowlist. To add this image, edit 'allowedDockerImages' in your chroxy config file.`
 }
