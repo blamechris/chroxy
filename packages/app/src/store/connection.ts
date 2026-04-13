@@ -1399,14 +1399,25 @@ useConnectionStore.subscribe((state) => {
 if (global.__chroxy_appStateSub) {
   global.__chroxy_appStateSub.remove();
 }
+// Rate-limit resume-triggered reconnects so rapid foreground/background
+// toggles (e.g., switching apps quickly) don't spam connect(). Fixes #2813.
+const RESUME_RECONNECT_COOLDOWN_MS = 5000;
+let _lastResumeReconnectAt = 0;
+
 export const _appStateSub = AppState.addEventListener('change', (nextState) => {
   if (nextState === 'active') {
+    const now = Date.now();
+    if (now - _lastResumeReconnectAt < RESUME_RECONNECT_COOLDOWN_MS) {
+      return;
+    }
+
     const { socket } = useConnectionStore.getState();
     const { connectionPhase, wsUrl, apiToken, userDisconnected, savedConnection } = useConnectionLifecycleStore.getState();
 
     // Case 1: socket thinks it was connected but is actually stale
     if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
       console.log('[ws] App resumed, socket stale — reconnecting');
+      _lastResumeReconnectAt = now;
       useConnectionStore.getState().connect(wsUrl, apiToken);
       return;
     }
@@ -1418,6 +1429,7 @@ export const _appStateSub = AppState.addEventListener('change', (nextState) => {
     // explicitly disconnect.
     if (connectionPhase === 'disconnected' && !userDisconnected && savedConnection?.url && savedConnection?.token) {
       console.log('[ws] App resumed from disconnected state — auto-reconnecting to saved server');
+      _lastResumeReconnectAt = now;
       useConnectionStore.getState().connect(savedConnection.url, savedConnection.token);
     }
   }
