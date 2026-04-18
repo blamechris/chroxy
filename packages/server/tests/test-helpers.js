@@ -171,7 +171,7 @@ export function createMockSessionManager(sessions = [], overrides = {}) {
 export function createMockSession(overrides = {}) {
   const session = new EventEmitter()
   session.isReady = true
-  session.model = 'claude-sonnet-4-20250514'
+  session.model = 'claude-sonnet-4-6'
   session.permissionMode = 'approve'
   session.sendMessage = createSpy()
   session.interrupt = createSpy()

@@ -60,7 +60,7 @@ describe('createMockSession', () => {
   it('has default properties', () => {
     const session = createMockSession()
     assert.equal(session.isReady, true)
-    assert.equal(session.model, 'claude-sonnet-4-20250514')
+    assert.equal(session.model, 'claude-sonnet-4-6')
     assert.equal(session.permissionMode, 'approve')
   })
 
@@ -84,10 +84,10 @@ describe('createMockSession', () => {
   it('accepts overrides', () => {
     const session = createMockSession({
       sendMessage: createSpy(() => 'custom'),
-      model: 'claude-opus-4-20250514',
+      model: 'claude-opus-4-7',
     })
     assert.equal(session.sendMessage('test'), 'custom')
-    assert.equal(session.model, 'claude-opus-4-20250514')
+    assert.equal(session.model, 'claude-opus-4-7')
   })
 
   it('includes respondToQuestion and respondToPermission spies', () => {

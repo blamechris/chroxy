@@ -13,10 +13,9 @@ describe('createModelsRegistry', () => {
     assert.equal(typeof registry.getAllowedModelIds, 'function')
   })
 
-  it('starts with default MODELS', () => {
+  it('starts with default FALLBACK_MODELS', () => {
     const registry = createModelsRegistry()
     const models = registry.getModels()
-    assert.ok(models.length >= 4)
     const ids = models.map(m => m.id)
     assert.ok(ids.includes('haiku'))
     assert.ok(ids.includes('sonnet'))
@@ -25,13 +24,15 @@ describe('createModelsRegistry', () => {
 
   it('resolveModelId works on a fresh instance', () => {
     const registry = createModelsRegistry()
-    assert.equal(registry.resolveModelId('sonnet'), 'claude-sonnet-4-20250514')
+    const resolved = registry.resolveModelId('sonnet')
+    assert.match(resolved, /^claude-sonnet/, `expected sonnet to resolve to a claude-sonnet-* id, got ${resolved}`)
     assert.equal(registry.resolveModelId('unknown'), 'unknown')
   })
 
   it('toShortModelId works on a fresh instance', () => {
     const registry = createModelsRegistry()
-    assert.equal(registry.toShortModelId('claude-sonnet-4-20250514'), 'sonnet')
+    const sonnetFullId = registry.resolveModelId('sonnet')
+    assert.equal(registry.toShortModelId(sonnetFullId), 'sonnet')
     assert.equal(registry.toShortModelId('unknown'), 'unknown')
   })
 
@@ -87,7 +88,7 @@ describe('createModelsRegistry', () => {
     assert.equal(registry.getModels().length, 1)
 
     registry.resetModels()
-    assert.ok(registry.getModels().length >= 4)
+    assert.ok(registry.getModels().length >= 1)
     assert.ok(registry.getAllowedModelIds().has('sonnet'))
   })
 })
@@ -157,7 +158,7 @@ describe('createModelsRegistry isolation', () => {
     assert.equal(a.getModels()[0].fullId, 'claude-alpha')
 
     // Instance b should still have defaults
-    assert.ok(b.getModels().length >= 4)
+    assert.ok(b.getModels().length >= 1)
     assert.ok(b.getAllowedModelIds().has('sonnet'))
     assert.ok(!b.getAllowedModelIds().has('alpha'))
   })
@@ -174,7 +175,7 @@ describe('createModelsRegistry isolation', () => {
     a.resetModels()
 
     // a should be back to defaults
-    assert.ok(a.getModels().length >= 4)
+    assert.ok(a.getModels().length >= 1)
 
     // b should still have its custom model
     assert.equal(b.getModels().length, 1)

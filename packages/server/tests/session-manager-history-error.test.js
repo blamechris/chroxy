@@ -14,7 +14,7 @@ import { SessionManager } from '../src/session-manager.js'
 function createFakeSession({ resumeSessionId = null } = {}) {
   const session = new EventEmitter()
   session.isRunning = false
-  session.model = 'claude-sonnet-4-20250514'
+  session.model = 'claude-sonnet-4-6'
   session.permissionMode = 'approve'
   session.destroy = () => {}
   Object.defineProperty(session, 'resumeSessionId', { get: () => resumeSessionId })

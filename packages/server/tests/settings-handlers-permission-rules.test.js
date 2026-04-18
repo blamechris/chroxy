@@ -22,7 +22,7 @@ function makeSession(overrides = {}) {
   let _rules = []
   const session = {
     isReady: true,
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-6',
     permissionMode: 'approve',
     setPermissionRules: mock.fn((r) => { _rules = r.slice() }),
     getPermissionRules: mock.fn(() => _rules),

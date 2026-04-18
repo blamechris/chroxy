@@ -8,7 +8,7 @@ function makeCtx(overrides = {}) {
     sessionId: 'sess-1',
     mode: 'multi',
     getSessionEntry: () => ({
-      session: { model: 'claude-sonnet-4-20250514', permissionMode: 'approve' },
+      session: { model: 'claude-sonnet-4-6', permissionMode: 'approve' },
       name: 'Test Session',
       cwd: '/tmp/test',
     }),

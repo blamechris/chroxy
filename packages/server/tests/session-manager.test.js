@@ -80,14 +80,14 @@ describe('SessionManager.serializeState', () => {
     const mgr = new SessionManager({ maxSessions: 5, stateFilePath: stateFile })
 
     const session1 = new EventEmitter()
-    session1.model = 'claude-sonnet-4-20250514'
+    session1.model = 'claude-sonnet-4-6'
     session1.permissionMode = 'approve'
     Object.defineProperty(session1, 'resumeSessionId', { get: () => 'sdk-abc-123' })
     session1.destroy = () => {}
     mgr._sessions.set('chroxy-1', { session: session1, type: 'cli', name: 'Project A', cwd: '/tmp/a' })
 
     const session2 = new EventEmitter()
-    session2.model = 'claude-opus-4-20250514'
+    session2.model = 'claude-opus-4-7'
     session2.permissionMode = 'auto'
     Object.defineProperty(session2, 'resumeSessionId', { get: () => null })
     session2.destroy = () => {}
@@ -100,7 +100,7 @@ describe('SessionManager.serializeState', () => {
     assert.equal(state.sessions[0].sdkSessionId, 'sdk-abc-123')
     assert.equal(state.sessions[0].name, 'Project A')
     assert.equal(state.sessions[0].cwd, '/tmp/a')
-    assert.equal(state.sessions[0].model, 'claude-sonnet-4-20250514')
+    assert.equal(state.sessions[0].model, 'claude-sonnet-4-6')
     assert.equal(state.sessions[1].sdkSessionId, null)
 
     assert.ok(existsSync(stateFile), 'State file should exist')
