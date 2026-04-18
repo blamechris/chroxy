@@ -216,3 +216,34 @@ describe('resetModels', () => {
     assert.ok(ALLOWED_MODEL_IDS.has('sonnet'))
   })
 })
+
+describe('short aliases survive updateModels', () => {
+  beforeEach(() => {
+    resetModels()
+  })
+
+  it('keeps sonnet/opus/haiku in ALLOWED_MODEL_IDS after SDK list replaces getModels()', () => {
+    updateModels([
+      { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: '' },
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-haiku-4-5', displayName: 'Haiku 4.5', description: '' },
+    ])
+
+    // Legacy clients sending `set_model: 'sonnet'` must still be accepted.
+    assert.ok(ALLOWED_MODEL_IDS.has('sonnet'))
+    assert.ok(ALLOWED_MODEL_IDS.has('opus'))
+    assert.ok(ALLOWED_MODEL_IDS.has('haiku'))
+    assert.equal(resolveModelId('sonnet'), 'claude-sonnet-4-6')
+    assert.equal(resolveModelId('opus'), 'claude-opus-4-7')
+    assert.equal(resolveModelId('haiku'), 'claude-haiku-4-5')
+  })
+
+  it('SDK entries still win — dynamic short id maps to the dated full id', () => {
+    updateModels([
+      { value: 'claude-sonnet-4-6-20260101', displayName: 'Sonnet 4.6', description: '' },
+    ])
+    assert.equal(resolveModelId('sonnet-4-6-20260101'), 'claude-sonnet-4-6-20260101')
+    // Fallback short alias still works (resolves to the undated fallback target)
+    assert.ok(ALLOWED_MODEL_IDS.has('sonnet'))
+  })
+})

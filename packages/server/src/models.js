@@ -1,6 +1,20 @@
-import { readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { readFileSync, renameSync, unlinkSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
+import { writeFileRestricted } from './platform.js'
+
+/** Default context window for unknown models */
+export const DEFAULT_CONTEXT_WINDOW = 200_000
+
+/**
+ * Resolve context window size for a model ID.
+ * Opus 4.6+ has 1M context; most other Claude models have 200k.
+ */
+function resolveContextWindow(fullId) {
+  if (fullId.includes('opus-4-6') || fullId.includes('opus-4.6')) return 1_000_000
+  if (fullId.includes('opus-4-7') || fullId.includes('opus-4.7')) return 1_000_000
+  return DEFAULT_CONTEXT_WINDOW
+}
 
 // Minimal fallback used only when the SDK has never responded and no disk
 // cache exists. Short aliases (sonnet/opus/haiku) resolve to the latest
@@ -8,16 +22,13 @@ import { dirname, join } from 'path'
 // Dated full IDs are intentionally avoided here — the SDK's supportedModels()
 // is the source of truth for concrete version identifiers.
 export const FALLBACK_MODELS = [
-  { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
-  { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7', contextWindow: 200_000 },
-  { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: 200_000 },
+  { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', contextWindow: resolveContextWindow('claude-sonnet-4-6') },
+  { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7', contextWindow: resolveContextWindow('claude-opus-4-7') },
+  { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: resolveContextWindow('claude-haiku-4-5') },
 ]
 
 // Back-compat export: some existing tests import `MODELS`.
 export const MODELS = FALLBACK_MODELS
-
-/** Default context window for unknown models */
-export const DEFAULT_CONTEXT_WINDOW = 200_000
 
 function getDefaultCachePath() {
   const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
@@ -38,38 +49,38 @@ function humanizeModelId(id) {
 }
 
 /**
- * Resolve context window size for a model ID.
- * Opus 4.6+ has 1M context; most other Claude models have 200k.
- */
-function resolveContextWindow(fullId) {
-  if (fullId.includes('opus-4-6') || fullId.includes('opus-4.6')) return 1_000_000
-  if (fullId.includes('opus-4-7') || fullId.includes('opus-4.7')) return 1_000_000
-  return DEFAULT_CONTEXT_WINDOW
-}
-
-/**
  * Factory function that creates an isolated models registry.
  * Each instance has its own mutable state, preventing test pollution.
  */
 export function createModelsRegistry() {
   let activeModels = FALLBACK_MODELS
   let defaultModelId = null
-  let allowedModelIds = new Set(FALLBACK_MODELS.flatMap(m => [m.id, m.fullId]))
-  let toFullIdMap = new Map(FALLBACK_MODELS.flatMap(m => [[m.id, m.fullId], [m.fullId, m.fullId]]))
-  let toShortIdMap = new Map(FALLBACK_MODELS.flatMap(m => [[m.fullId, m.id], [m.id, m.id]]))
+  let allowedModelIds = new Set()
+  let toFullIdMap = new Map()
+  let toShortIdMap = new Map()
 
+  // Seed lookups with FALLBACK_MODELS aliases so legacy short ids
+  // (`sonnet`/`opus`/`haiku`) remain valid even after the SDK returns a
+  // dynamic list whose derived short ids look different
+  // (e.g. `sonnet-4-6`). Dynamic entries override on collision.
   function rebuildLookups(models) {
     allowedModelIds = new Set()
     toFullIdMap = new Map()
     toShortIdMap = new Map()
-    for (const m of models) {
-      allowedModelIds.add(m.id)
-      allowedModelIds.add(m.fullId)
-      toFullIdMap.set(m.id, m.fullId)
-      toFullIdMap.set(m.fullId, m.fullId)
-      toShortIdMap.set(m.fullId, m.id)
-      toShortIdMap.set(m.id, m.id)
+
+    const seed = (list) => {
+      for (const m of list) {
+        allowedModelIds.add(m.id)
+        allowedModelIds.add(m.fullId)
+        toFullIdMap.set(m.id, m.fullId)
+        toFullIdMap.set(m.fullId, m.fullId)
+        toShortIdMap.set(m.fullId, m.id)
+        toShortIdMap.set(m.id, m.id)
+      }
     }
+
+    seed(FALLBACK_MODELS)
+    if (models !== FALLBACK_MODELS) seed(models)
   }
 
   function applyModels(models, nextDefault) {
@@ -77,6 +88,8 @@ export function createModelsRegistry() {
     defaultModelId = nextDefault
     rebuildLookups(models)
   }
+
+  rebuildLookups(FALLBACK_MODELS)
 
   return {
     getModels() {
@@ -134,13 +147,25 @@ export function createModelsRegistry() {
     /**
      * Load a previously cached model list from disk. Returns true on success.
      * Silently returns false if the cache is absent, malformed, or empty.
+     * Missing `label` and `contextWindow` fields are re-derived so that
+     * older or hand-edited cache files don't leave the picker with empty
+     * labels or a default context window.
      */
     loadCache(path = getDefaultCachePath()) {
       try {
         const raw = readFileSync(path, 'utf-8')
         const parsed = JSON.parse(raw)
         if (!Array.isArray(parsed?.models) || parsed.models.length === 0) return false
-        const models = parsed.models.filter(m => m && typeof m.id === 'string' && typeof m.fullId === 'string')
+        const models = parsed.models
+          .filter(m => m && typeof m.id === 'string' && typeof m.fullId === 'string')
+          .map(m => ({
+            id: m.id,
+            fullId: m.fullId,
+            label: typeof m.label === 'string' && m.label.length > 0 ? m.label : humanizeModelId(m.id),
+            contextWindow: typeof m.contextWindow === 'number' && m.contextWindow > 0
+              ? m.contextWindow
+              : resolveContextWindow(m.fullId),
+          }))
         if (models.length === 0) return false
         applyModels(models, parsed.defaultModelId || null)
         return true
@@ -151,18 +176,23 @@ export function createModelsRegistry() {
 
     /**
      * Persist the current model list to disk. Returns true on success.
-     * Failures are swallowed — caching is best-effort.
+     * Failures are swallowed — caching is best-effort. Writes go through a
+     * temp file + rename so a crash mid-write can't leave a truncated cache,
+     * and permissions are locked down via writeFileRestricted (0600).
      */
     saveCache(path = getDefaultCachePath()) {
+      const tmpPath = `${path}.tmp-${process.pid}`
       try {
         mkdirSync(dirname(path), { recursive: true })
-        writeFileSync(path, JSON.stringify({
+        writeFileRestricted(tmpPath, JSON.stringify({
           models: activeModels,
           defaultModelId,
           savedAt: Date.now(),
         }, null, 2))
+        renameSync(tmpPath, path)
         return true
       } catch {
+        try { unlinkSync(tmpPath) } catch {}
         return false
       }
     },
