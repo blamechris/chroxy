@@ -1,5 +1,8 @@
-import { describe, it } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createModelsRegistry } from '../src/models.js'
 
 describe('createModelsRegistry', () => {
@@ -180,5 +183,147 @@ describe('createModelsRegistry isolation', () => {
     // b should still have its custom model
     assert.equal(b.getModels().length, 1)
     assert.equal(b.getModels()[0].fullId, 'claude-y')
+  })
+})
+
+describe('disk cache (loadCache / saveCache)', () => {
+  let dir
+  let cachePath
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-models-cache-'))
+    cachePath = join(dir, 'models-cache.json')
+  })
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('saveCache → resetModels → loadCache round-trips models and defaultModelId', () => {
+    const r1 = createModelsRegistry()
+    r1.updateModels([
+      { value: 'claude-sonnet-4-6', displayName: 'Default (Sonnet 4.6)', description: '' },
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    assert.equal(r1.saveCache(cachePath), true)
+
+    const r2 = createModelsRegistry()
+    assert.equal(r2.loadCache(cachePath), true)
+    assert.equal(r2.getModels().length, 2)
+    assert.equal(r2.getModels()[0].fullId, 'claude-sonnet-4-6')
+    assert.equal(r2.getDefaultModelId(), 'sonnet-4-6')
+  })
+
+  it('loadCache returns false on missing file and leaves registry unchanged', () => {
+    const r = createModelsRegistry()
+    const before = r.getModels()
+    assert.equal(r.loadCache(join(dir, 'does-not-exist.json')), false)
+    assert.deepEqual(r.getModels(), before)
+  })
+
+  it('loadCache returns false on malformed JSON without throwing', () => {
+    writeFileSync(cachePath, 'not valid json {{{')
+    const r = createModelsRegistry()
+    assert.equal(r.loadCache(cachePath), false)
+  })
+
+  it('loadCache returns false when models field is missing / empty / non-array', () => {
+    const r = createModelsRegistry()
+    writeFileSync(cachePath, JSON.stringify({ foo: 'bar' }))
+    assert.equal(r.loadCache(cachePath), false)
+    writeFileSync(cachePath, JSON.stringify({ models: [] }))
+    assert.equal(r.loadCache(cachePath), false)
+    writeFileSync(cachePath, JSON.stringify({ models: 'not-an-array' }))
+    assert.equal(r.loadCache(cachePath), false)
+  })
+
+  it('loadCache filters entries missing required fields; returns false if all filtered', () => {
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'sonnet' }, // missing fullId
+        { fullId: 'claude-opus-4-7' }, // missing id
+        { id: 42, fullId: 'claude-x' }, // wrong type
+      ],
+    }))
+    const r = createModelsRegistry()
+    assert.equal(r.loadCache(cachePath), false)
+  })
+
+  it('loadCache re-hydrates missing label/contextWindow on valid entries', () => {
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'opus-4-7', fullId: 'claude-opus-4-7' }, // no label, no contextWindow
+      ],
+    }))
+    const r = createModelsRegistry()
+    assert.equal(r.loadCache(cachePath), true)
+    assert.equal(r.getModels()[0].label, 'Opus 4.7')
+    assert.equal(r.getModels()[0].contextWindow, 1_000_000)
+  })
+
+  it('saveCache creates the parent directory if absent', () => {
+    const nested = join(dir, 'a', 'b', 'c', 'cache.json')
+    const r = createModelsRegistry()
+    r.updateModels([{ value: 'claude-test', displayName: 'Test', description: '' }])
+    assert.equal(r.saveCache(nested), true)
+    assert.ok(existsSync(nested))
+  })
+
+  it('saveCache swallows write errors (returns false) on read-only parent', () => {
+    // POSIX-only: chmod bits don't map cleanly to Windows ACLs, where the
+    // invoking user often retains write permission regardless. Skip there.
+    if (process.platform === 'win32') return
+    chmodSync(dir, 0o500)
+    try {
+      const r = createModelsRegistry()
+      r.updateModels([{ value: 'claude-test', displayName: 'Test', description: '' }])
+      assert.equal(r.saveCache(cachePath), false)
+    } finally {
+      // Restore so afterEach can rm -rf
+      chmodSync(dir, 0o700)
+    }
+  })
+
+  it('saveCache writes with 0600 permissions via writeFileRestricted', () => {
+    if (process.platform === 'win32') return
+    const r = createModelsRegistry()
+    r.updateModels([{ value: 'claude-test', displayName: 'Test', description: '' }])
+    assert.equal(r.saveCache(cachePath), true)
+    const mode = statSync(cachePath).mode & 0o777
+    assert.equal(mode, 0o600)
+  })
+
+  it('saveCache skips disk write when snapshot is unchanged since last save', () => {
+    const r = createModelsRegistry()
+    r.updateModels([{ value: 'claude-test', displayName: 'Test', description: '' }])
+
+    assert.equal(r.saveCache(cachePath), true)
+    const mtimeFirst = statSync(cachePath).mtimeMs
+
+    // Second save with identical state should return true (success) but skip the write.
+    assert.equal(r.saveCache(cachePath), true)
+    const mtimeSecond = statSync(cachePath).mtimeMs
+    assert.equal(mtimeFirst, mtimeSecond, 'file should not have been rewritten')
+
+    // Mutating the registry should trigger a write on the next call.
+    r.updateModels([{ value: 'claude-different', displayName: 'X', description: '' }])
+    assert.equal(r.saveCache(cachePath), true)
+    const mtimeThird = statSync(cachePath).mtimeMs
+    assert.ok(mtimeThird >= mtimeFirst, 'file should have been rewritten after state change')
+  })
+
+  it('loadCache primes the dedupe snapshot so the first saveCache after load is a no-op', () => {
+    // Save a baseline
+    const r1 = createModelsRegistry()
+    r1.updateModels([{ value: 'claude-test', displayName: 'Test', description: '' }])
+    r1.saveCache(cachePath)
+
+    // Load into a fresh registry, then immediately try to save.
+    const r2 = createModelsRegistry()
+    assert.equal(r2.loadCache(cachePath), true)
+    const mtimeBeforeSave = statSync(cachePath).mtimeMs
+    assert.equal(r2.saveCache(cachePath), true)
+    const mtimeAfterSave = statSync(cachePath).mtimeMs
+    assert.equal(mtimeBeforeSave, mtimeAfterSave, 'loaded state should not trigger a redundant write')
   })
 })

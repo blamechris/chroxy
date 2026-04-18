@@ -1,5 +1,5 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
-import { updateModels, saveModelsCache } from './models.js'
+import { updateModels, saveModelsCache, updateContextWindow, getModels } from './models.js'
 import { BaseSession } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
@@ -353,6 +353,26 @@ export class SdkSession extends BaseSession {
             if (msg.session_id) {
               this._sdkSessionId = msg.session_id
               this._sessionId = msg.session_id
+            }
+
+            // Correct any static context-window guess using the SDK's
+            // authoritative per-model values. Only cache + broadcast when
+            // a value actually changed to avoid thrashy writes / UI churn.
+            let contextWindowChanged = false
+            if (msg.modelUsage && typeof msg.modelUsage === 'object') {
+              for (const [modelId, usage] of Object.entries(msg.modelUsage)) {
+                if (usage && typeof usage.contextWindow === 'number') {
+                  if (updateContextWindow(modelId, usage.contextWindow)) {
+                    contextWindowChanged = true
+                  }
+                }
+              }
+            }
+            if (contextWindowChanged) {
+              saveModelsCache()
+              // Notify connected clients so the picker / budget UI picks up
+              // the corrected window without waiting for the next refresh.
+              this.emit('models_updated', { models: getModels() })
             }
 
             this.emit('result', {

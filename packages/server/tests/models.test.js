@@ -1,10 +1,13 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { MODELS, FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, resetModels } from '../src/models.js'
+import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels } from '../src/models.js'
 
 describe('FALLBACK_MODELS (default registry)', () => {
-  it('exposes FALLBACK_MODELS and back-compat MODELS alias', () => {
-    assert.equal(MODELS, FALLBACK_MODELS)
+  it('is deep-frozen so getModels() callers cannot mutate the constant', () => {
+    assert.ok(Object.isFrozen(FALLBACK_MODELS))
+    for (const m of FALLBACK_MODELS) {
+      assert.ok(Object.isFrozen(m), `entry ${m.id} should be frozen`)
+    }
   })
 
   it('contains sonnet, opus, and haiku aliases only', () => {
@@ -245,5 +248,92 @@ describe('short aliases survive updateModels', () => {
     assert.equal(resolveModelId('sonnet-4-6-20260101'), 'claude-sonnet-4-6-20260101')
     // Fallback short alias still works (resolves to the undated fallback target)
     assert.ok(ALLOWED_MODEL_IDS.has('sonnet'))
+  })
+
+  it('passes through old dated full IDs after updateModels reports them', () => {
+    // Regression for #2824: a session-state file from before the 0.6.10
+    // upgrade might reference `claude-sonnet-4-20250514`. Once the SDK
+    // responds with that dated ID, it must be accepted by both the
+    // allowed-set validator and the resolver (round-trip).
+    updateModels([
+      { value: 'claude-sonnet-4-20250514', displayName: 'Sonnet 4', description: '' },
+    ])
+    assert.ok(ALLOWED_MODEL_IDS.has('claude-sonnet-4-20250514'))
+    assert.equal(resolveModelId('claude-sonnet-4-20250514'), 'claude-sonnet-4-20250514')
+    assert.equal(toShortModelId('claude-sonnet-4-20250514'), 'sonnet-4-20250514')
+  })
+})
+
+describe('updateContextWindow (self-correcting from SDK usage)', () => {
+  beforeEach(() => {
+    resetModels()
+  })
+
+  it('overwrites the static fallback guess when SDK reports a different value', () => {
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    // Static heuristic guesses 1M for opus-4-7; verify we can correct it.
+    assert.equal(getModels()[0].contextWindow, 1_000_000)
+    assert.equal(updateContextWindow('claude-opus-4-7', 200_000), true)
+    assert.equal(getModels()[0].contextWindow, 200_000)
+  })
+
+  it('returns false and no-ops when the value already matches', () => {
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    assert.equal(updateContextWindow('claude-opus-4-7', 1_000_000), false)
+  })
+
+  it('matches short id as well as full id', () => {
+    updateModels([
+      { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: '' },
+    ])
+    assert.equal(updateContextWindow('sonnet-4-6', 500_000), true)
+    assert.equal(getModels()[0].contextWindow, 500_000)
+  })
+
+  it('returns false for unknown model ids', () => {
+    assert.equal(updateContextWindow('not-a-model', 1_000_000), false)
+  })
+
+  it('rejects invalid context windows', () => {
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    assert.equal(updateContextWindow('claude-opus-4-7', 0), false)
+    assert.equal(updateContextWindow('claude-opus-4-7', -1), false)
+    assert.equal(updateContextWindow('claude-opus-4-7', 'big'), false)
+  })
+
+  it('override survives subsequent updateModels refreshes (regression for #2820)', () => {
+    // _fetchSupportedModels() fires on every SDK session init, so the first
+    // updateModels() rebuild cannot clobber a value we already learned from
+    // modelUsage — otherwise the self-correcting loop never converges.
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    assert.equal(getModels()[0].contextWindow, 1_000_000) // static heuristic
+    updateContextWindow('claude-opus-4-7', 500_000)       // SDK-reported override
+    assert.equal(getModels()[0].contextWindow, 500_000)
+
+    // Simulate the next supportedModels() refresh — same list.
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    assert.equal(getModels()[0].contextWindow, 500_000, 'override must persist across refreshes')
+  })
+
+  it('resetModels clears overrides so next updateModels uses the heuristic again', () => {
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    updateContextWindow('claude-opus-4-7', 500_000)
+    resetModels()
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    assert.equal(getModels()[0].contextWindow, 1_000_000)
   })
 })
