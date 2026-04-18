@@ -1,6 +1,6 @@
 {
   "name": "@chroxy/protocol",
-  "version": "0.6.9",
+  "version": "0.6.10",
   "private": true,
   "description": "Shared WebSocket protocol constants and types for Chroxy",
   "type": "module",
