@@ -7,8 +7,11 @@ import { writeFileRestricted } from './platform.js'
 export const DEFAULT_CONTEXT_WINDOW = 200_000
 
 /**
- * Resolve context window size for a model ID.
- * Opus 4.6+ has 1M context; most other Claude models have 200k.
+ * Static context-window heuristic used at cold start before the SDK reports.
+ * Opus 4.6+ has 1M; most other Claude models have 200k. The SDK sends
+ * authoritative values in `SDKResultSuccess.modelUsage[*].contextWindow`
+ * after each turn — registries opportunistically correct themselves via
+ * `updateContextWindow()` so wrong guesses only surface for the first turn.
  */
 function resolveContextWindow(fullId) {
   if (fullId.includes('opus-4-6') || fullId.includes('opus-4.6')) return 1_000_000
@@ -21,14 +24,14 @@ function resolveContextWindow(fullId) {
 // version in the claude CLI, so these entries stay valid across releases.
 // Dated full IDs are intentionally avoided here — the SDK's supportedModels()
 // is the source of truth for concrete version identifiers.
-export const FALLBACK_MODELS = [
-  { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', contextWindow: resolveContextWindow('claude-sonnet-4-6') },
-  { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7', contextWindow: resolveContextWindow('claude-opus-4-7') },
-  { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: resolveContextWindow('claude-haiku-4-5') },
-]
-
-// Back-compat export: some existing tests import `MODELS`.
-export const MODELS = FALLBACK_MODELS
+//
+// Deep-frozen so callers of getModels() can't mutate the module-level constant
+// via the returned array reference.
+export const FALLBACK_MODELS = Object.freeze([
+  Object.freeze({ id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', contextWindow: resolveContextWindow('claude-sonnet-4-6') }),
+  Object.freeze({ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7', contextWindow: resolveContextWindow('claude-opus-4-7') }),
+  Object.freeze({ id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: resolveContextWindow('claude-haiku-4-5') }),
+])
 
 function getDefaultCachePath() {
   const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
@@ -58,6 +61,9 @@ export function createModelsRegistry() {
   let allowedModelIds = new Set()
   let toFullIdMap = new Map()
   let toShortIdMap = new Map()
+  // Snapshot of the last saved cache payload so saveCache() can skip
+  // redundant writes. `null` forces the first save to always run.
+  let lastSavedSnapshot = null
 
   // Seed lookups with FALLBACK_MODELS aliases so legacy short ids
   // (`sonnet`/`opus`/`haiku`) remain valid even after the SDK returns a
@@ -87,6 +93,10 @@ export function createModelsRegistry() {
     activeModels = models
     defaultModelId = nextDefault
     rebuildLookups(models)
+  }
+
+  function snapshotString() {
+    return JSON.stringify({ models: activeModels, defaultModelId })
   }
 
   rebuildLookups(FALLBACK_MODELS)
@@ -124,8 +134,30 @@ export function createModelsRegistry() {
       return converted
     },
 
+    /**
+     * Replace the contextWindow for an existing entry when the SDK reports
+     * an authoritative value (via `SDKResultSuccess.modelUsage`). Matches
+     * on `fullId` or short `id`. No-op if the model isn't in the registry
+     * or the reported value already matches.
+     */
+    updateContextWindow(modelId, contextWindow) {
+      if (typeof modelId !== 'string' || typeof contextWindow !== 'number' || contextWindow <= 0) {
+        return false
+      }
+      let changed = false
+      activeModels = activeModels.map(m => {
+        if ((m.id === modelId || m.fullId === modelId) && m.contextWindow !== contextWindow) {
+          changed = true
+          return { ...m, contextWindow }
+        }
+        return m
+      })
+      return changed
+    },
+
     resetModels() {
       applyModels(FALLBACK_MODELS, null)
+      lastSavedSnapshot = null
     },
 
     getDefaultModelId() {
@@ -168,6 +200,9 @@ export function createModelsRegistry() {
           }))
         if (models.length === 0) return false
         applyModels(models, parsed.defaultModelId || null)
+        // Treat the loaded state as the last-saved baseline so subsequent
+        // saveCache() calls only hit disk when the registry actually drifts.
+        lastSavedSnapshot = snapshotString()
         return true
       } catch {
         return false
@@ -175,12 +210,21 @@ export function createModelsRegistry() {
     },
 
     /**
-     * Persist the current model list to disk. Returns true on success.
-     * Failures are swallowed — caching is best-effort. Writes go through a
-     * temp file + rename so a crash mid-write can't leave a truncated cache,
-     * and permissions are locked down via writeFileRestricted (0600).
+     * Persist the current model list to disk. Returns true on success,
+     * false if there was nothing to persist or the write failed.
+     *
+     * Skips disk IO when the (models, defaultModelId) snapshot matches the
+     * last successful save — `_fetchSupportedModels()` fires on every SDK
+     * session init, which would otherwise write ~2 KB on every user message.
+     *
+     * Writes go through a temp file + rename so a crash mid-write can't
+     * leave a truncated cache, and permissions are locked down via
+     * writeFileRestricted (0600).
      */
     saveCache(path = getDefaultCachePath()) {
+      const snapshot = snapshotString()
+      if (snapshot === lastSavedSnapshot) return true
+
       const tmpPath = `${path}.tmp-${process.pid}`
       try {
         mkdirSync(dirname(path), { recursive: true })
@@ -190,6 +234,7 @@ export function createModelsRegistry() {
           savedAt: Date.now(),
         }, null, 2))
         renameSync(tmpPath, path)
+        lastSavedSnapshot = snapshot
         return true
       } catch {
         try { unlinkSync(tmpPath) } catch {}
@@ -219,6 +264,10 @@ export function getModels() {
 
 export function updateModels(sdkModels) {
   return defaultRegistry.updateModels(sdkModels)
+}
+
+export function updateContextWindow(modelId, contextWindow) {
+  return defaultRegistry.updateContextWindow(modelId, contextWindow)
 }
 
 export function resetModels() {
