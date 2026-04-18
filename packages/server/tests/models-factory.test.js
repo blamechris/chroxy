@@ -270,7 +270,9 @@ describe('disk cache (loadCache / saveCache)', () => {
   })
 
   it('saveCache swallows write errors (returns false) on read-only parent', () => {
-    // Make the parent directory read-only; saveCache should fail gracefully.
+    // POSIX-only: chmod bits don't map cleanly to Windows ACLs, where the
+    // invoking user often retains write permission regardless. Skip there.
+    if (process.platform === 'win32') return
     chmodSync(dir, 0o500)
     try {
       const r = createModelsRegistry()

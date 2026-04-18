@@ -306,4 +306,34 @@ describe('updateContextWindow (self-correcting from SDK usage)', () => {
     assert.equal(updateContextWindow('claude-opus-4-7', -1), false)
     assert.equal(updateContextWindow('claude-opus-4-7', 'big'), false)
   })
+
+  it('override survives subsequent updateModels refreshes (regression for #2820)', () => {
+    // _fetchSupportedModels() fires on every SDK session init, so the first
+    // updateModels() rebuild cannot clobber a value we already learned from
+    // modelUsage — otherwise the self-correcting loop never converges.
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    assert.equal(getModels()[0].contextWindow, 1_000_000) // static heuristic
+    updateContextWindow('claude-opus-4-7', 500_000)       // SDK-reported override
+    assert.equal(getModels()[0].contextWindow, 500_000)
+
+    // Simulate the next supportedModels() refresh — same list.
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    assert.equal(getModels()[0].contextWindow, 500_000, 'override must persist across refreshes')
+  })
+
+  it('resetModels clears overrides so next updateModels uses the heuristic again', () => {
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    updateContextWindow('claude-opus-4-7', 500_000)
+    resetModels()
+    updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    assert.equal(getModels()[0].contextWindow, 1_000_000)
+  })
 })

@@ -64,6 +64,12 @@ export function createModelsRegistry() {
   // Snapshot of the last saved cache payload so saveCache() can skip
   // redundant writes. `null` forces the first save to always run.
   let lastSavedSnapshot = null
+  // Authoritative contextWindow values observed from SDK `modelUsage`,
+  // keyed by fullId. These override the static resolveContextWindow()
+  // heuristic and must survive subsequent updateModels() refreshes
+  // (which otherwise rebuild every entry from the heuristic on every
+  // SDK session init). Cleared on resetModels().
+  const contextWindowOverrides = new Map()
 
   // Seed lookups with FALLBACK_MODELS aliases so legacy short ids
   // (`sonnet`/`opus`/`haiku`) remain valid even after the SDK returns a
@@ -124,7 +130,10 @@ export function createModelsRegistry() {
           if (!label || /^recommended$/i.test(label)) {
             label = humanizeModelId(id)
           }
-          const contextWindow = resolveContextWindow(fullId)
+          // Prefer an authoritative value observed from SDK modelUsage
+          // over the static heuristic, so a learned contextWindow isn't
+          // lost when _fetchSupportedModels() fires on every init.
+          const contextWindow = contextWindowOverrides.get(fullId) ?? resolveContextWindow(fullId)
           return { id, label, fullId, contextWindow }
         })
 
@@ -148,6 +157,9 @@ export function createModelsRegistry() {
       activeModels = activeModels.map(m => {
         if ((m.id === modelId || m.fullId === modelId) && m.contextWindow !== contextWindow) {
           changed = true
+          // Persist the authoritative value so a later updateModels()
+          // refresh doesn't revert us to the static heuristic.
+          contextWindowOverrides.set(m.fullId, contextWindow)
           return { ...m, contextWindow }
         }
         return m
@@ -156,6 +168,7 @@ export function createModelsRegistry() {
     },
 
     resetModels() {
+      contextWindowOverrides.clear()
       applyModels(FALLBACK_MODELS, null)
       lastSavedSnapshot = null
     },
@@ -210,8 +223,9 @@ export function createModelsRegistry() {
     },
 
     /**
-     * Persist the current model list to disk. Returns true on success,
-     * false if there was nothing to persist or the write failed.
+     * Persist the current model list to disk. Returns true on success
+     * OR when there was nothing to persist (idempotent no-op); returns
+     * false only if the write was attempted and failed.
      *
      * Skips disk IO when the (models, defaultModelId) snapshot matches the
      * last successful save — `_fetchSupportedModels()` fires on every SDK
