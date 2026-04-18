@@ -42,7 +42,8 @@
     "createUpdaterArtifacts": true,
     "macOS": {
       "signingIdentity": "$APPLE_SIGNING_IDENTITY",
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "entitlements": "entitlements.plist"
     }
   },
   "plugins": {
