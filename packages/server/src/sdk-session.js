@@ -1,5 +1,5 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
-import { updateModels } from './models.js'
+import { updateModels, saveModelsCache } from './models.js'
 import { BaseSession } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
@@ -556,6 +556,7 @@ export class SdkSession extends BaseSession {
       const converted = updateModels(sdkModels)
       if (converted && converted.length > 0) {
         log.info(`Dynamic model list: ${converted.map(m => m.id).join(', ')}`)
+        saveModelsCache()
         this.emit('models_updated', { models: converted })
       }
     } catch (err) {

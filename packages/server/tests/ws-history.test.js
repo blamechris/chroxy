@@ -201,7 +201,7 @@ describe('sendPostAuthInfo — cliSession fallback', () => {
   })
 
   it('sends model_changed, available_models, permission_mode_changed in legacy mode', () => {
-    const cliSession = { cwd: '/tmp', isReady: false, model: 'claude-sonnet-4-20250514', permissionMode: 'auto' }
+    const cliSession = { cwd: '/tmp', isReady: false, model: 'claude-sonnet-4-6', permissionMode: 'auto' }
     const ws = makeFakeWs()
     const ctx = makeCtx({ cliSession })
     registerClient(ctx, ws)
@@ -438,7 +438,7 @@ describe('sendSessionInfo', () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
     ])
-    // createMockSession sets model to 'claude-sonnet-4-20250514'
+    // createMockSession sets model to 'claude-sonnet-4-6'
     const ws = makeFakeWs()
     const ctx = makeCtx({ sessionManager: manager })
     registerClient(ctx, ws)
@@ -447,7 +447,7 @@ describe('sendSessionInfo', () => {
     const modelMsg = ctx._sends.find(m => m.type === 'model_changed')
     assert.ok(modelMsg, 'model_changed was not sent')
     assert.equal(modelMsg.sessionId, 'sess-1')
-    // toShortModelId maps 'claude-sonnet-4-20250514' → 'sonnet'
+    // toShortModelId maps 'claude-sonnet-4-6' → 'sonnet'
     assert.equal(modelMsg.model, 'sonnet')
   })
 

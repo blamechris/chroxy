@@ -679,7 +679,7 @@ describe('_killAndRespawn behavioral tests (#1009)', () => {
   })
 
   it('setModel ignores change when model is the same', () => {
-    const session = createReadySession({ model: 'claude-sonnet-4-20250514' })
+    const session = createReadySession({ model: 'claude-sonnet-4-6' })
 
     let startCalled = false
     session.start = () => { startCalled = true }

@@ -71,7 +71,7 @@ function createSessionWithPermissionManager() {
   const session = new EventEmitter()
 
   session.isReady = true
-  session.model = 'claude-sonnet-4-20250514'
+  session.model = 'claude-sonnet-4-6'
   session.permissionMode = 'approve'
 
   // Wire PermissionManager events through the session EventEmitter

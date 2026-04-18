@@ -18,6 +18,7 @@ import { getLanIp } from './lan-ip.js'
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { registerDockerProvider } from './providers.js'
+import { loadModelsCache, getModels } from './models.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -157,6 +158,12 @@ export async function startCliServer(config) {
     console.error('    traffic over a public tunnel exposes all session data in transit.')
     console.error('    Remove --no-encrypt or disable the tunnel (--tunnel none).')
     process.exit(1)
+  }
+
+  // Warm the models registry from disk cache so the picker is populated
+  // before any SDK session fires supportedModels(). Silent miss on first boot.
+  if (loadModelsCache()) {
+    log.info(`Warmed models from cache: ${getModels().map(m => m.id).join(', ')}`)
   }
 
   // Register optional providers (e.g. docker) based on config

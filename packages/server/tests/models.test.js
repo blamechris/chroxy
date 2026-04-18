@@ -1,14 +1,19 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, resetModels } from '../src/models.js'
+import { MODELS, FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, resetModels } from '../src/models.js'
 
-describe('MODELS (default)', () => {
-  it('has at least 4 entries', () => {
-    assert.ok(MODELS.length >= 4)
+describe('FALLBACK_MODELS (default registry)', () => {
+  it('exposes FALLBACK_MODELS and back-compat MODELS alias', () => {
+    assert.equal(MODELS, FALLBACK_MODELS)
+  })
+
+  it('contains sonnet, opus, and haiku aliases only', () => {
+    const ids = FALLBACK_MODELS.map(m => m.id).sort()
+    assert.deepEqual(ids, ['haiku', 'opus', 'sonnet'])
   })
 
   it('each entry has id, label, fullId, and contextWindow', () => {
-    for (const m of MODELS) {
+    for (const m of FALLBACK_MODELS) {
       assert.ok(m.id, `Missing id on model ${JSON.stringify(m)}`)
       assert.ok(m.label, `Missing label on model ${JSON.stringify(m)}`)
       assert.ok(m.fullId, `Missing fullId on model ${JSON.stringify(m)}`)
@@ -16,52 +21,37 @@ describe('MODELS (default)', () => {
     }
   })
 
-  it('opus 4.6 has 1M context window', () => {
-    const opus46 = MODELS.find(m => m.id === 'opus46')
-    assert.equal(opus46.contextWindow, 1_000_000)
-  })
-
-  it('non-opus-4.6 models have 200k context window', () => {
-    const others = MODELS.filter(m => m.id !== 'opus46')
-    for (const m of others) {
-      assert.equal(m.contextWindow, 200_000, `${m.id} should have 200k context window`)
+  it('short aliases resolve to undated full IDs so they stay valid as models iterate', () => {
+    for (const m of FALLBACK_MODELS) {
+      assert.doesNotMatch(m.fullId, /-\d{8,}$/, `${m.id} fallback should not be a dated ID`)
     }
-  })
-
-  it('contains haiku, sonnet, opus, and opus46', () => {
-    const ids = MODELS.map(m => m.id)
-    assert.deepEqual(ids, ['haiku', 'sonnet', 'opus', 'opus46'])
   })
 })
 
 describe('ALLOWED_MODEL_IDS', () => {
-  it('contains all short and full IDs (8 entries)', () => {
-    assert.equal(ALLOWED_MODEL_IDS.size, 8)
-  })
+  beforeEach(() => resetModels())
 
-  it('includes every short id', () => {
-    for (const m of MODELS) {
+  it('contains every short and full id from the fallback', () => {
+    assert.equal(ALLOWED_MODEL_IDS.size, FALLBACK_MODELS.length * 2)
+    for (const m of FALLBACK_MODELS) {
       assert.ok(ALLOWED_MODEL_IDS.has(m.id), `Missing short id: ${m.id}`)
-    }
-  })
-
-  it('includes every full id', () => {
-    for (const m of MODELS) {
       assert.ok(ALLOWED_MODEL_IDS.has(m.fullId), `Missing full id: ${m.fullId}`)
     }
   })
 })
 
 describe('resolveModelId', () => {
-  it('resolves short id to full id', () => {
-    assert.equal(resolveModelId('sonnet'), 'claude-sonnet-4-20250514')
-    assert.equal(resolveModelId('haiku'), 'claude-haiku-4-5-20251001')
-    assert.equal(resolveModelId('opus'), 'claude-opus-4-20250514')
-    assert.equal(resolveModelId('opus46'), 'claude-opus-4-6')
+  beforeEach(() => resetModels())
+
+  it('resolves every fallback short id to its full id', () => {
+    for (const m of FALLBACK_MODELS) {
+      assert.equal(resolveModelId(m.id), m.fullId)
+    }
   })
 
   it('resolves full id to itself', () => {
-    assert.equal(resolveModelId('claude-sonnet-4-20250514'), 'claude-sonnet-4-20250514')
+    const sonnet = FALLBACK_MODELS.find(m => m.id === 'sonnet')
+    assert.equal(resolveModelId(sonnet.fullId), sonnet.fullId)
   })
 
   it('passes through unknown identifiers', () => {
@@ -71,11 +61,12 @@ describe('resolveModelId', () => {
 })
 
 describe('toShortModelId', () => {
-  it('resolves full id to short id', () => {
-    assert.equal(toShortModelId('claude-sonnet-4-20250514'), 'sonnet')
-    assert.equal(toShortModelId('claude-haiku-4-5-20251001'), 'haiku')
-    assert.equal(toShortModelId('claude-opus-4-20250514'), 'opus')
-    assert.equal(toShortModelId('claude-opus-4-6'), 'opus46')
+  beforeEach(() => resetModels())
+
+  it('maps every fallback full id back to its short id', () => {
+    for (const m of FALLBACK_MODELS) {
+      assert.equal(toShortModelId(m.fullId), m.id)
+    }
   })
 
   it('resolves short id to itself', () => {
@@ -94,9 +85,9 @@ describe('getModels', () => {
     resetModels()
   })
 
-  it('returns MODELS by default', () => {
+  it('returns FALLBACK_MODELS by default', () => {
     const models = getModels()
-    assert.deepEqual(models, MODELS)
+    assert.deepEqual(models, FALLBACK_MODELS)
   })
 })
 
@@ -125,6 +116,13 @@ describe('updateModels', () => {
 
     const models = getModels()
     assert.deepEqual(models, result)
+  })
+
+  it('opus 4.7 gets a 1M context window', () => {
+    const result = updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    assert.equal(result[0].contextWindow, 1_000_000)
   })
 
   it('updates ALLOWED_MODEL_IDS to include new models', () => {
@@ -214,7 +212,7 @@ describe('resetModels', () => {
     assert.equal(getModels().length, 1)
 
     resetModels()
-    assert.deepEqual(getModels(), MODELS)
+    assert.deepEqual(getModels(), FALLBACK_MODELS)
     assert.ok(ALLOWED_MODEL_IDS.has('sonnet'))
   })
 })

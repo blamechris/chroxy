@@ -390,7 +390,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
 
     // Send non-input messages that should be silently dropped
     send(ws, { type: 'list_sessions' })
-    send(ws, { type: 'set_model', model: 'claude-sonnet-4-20250514' })
+    send(ws, { type: 'set_model', model: 'claude-sonnet-4-6' })
 
     // Wait long enough for any message processing, then verify silence
     await new Promise(r => setTimeout(r, 500))
@@ -3518,7 +3518,7 @@ describe('provider capability gates', () => {
     constructor() {
       super()
       this.isReady = true
-      this.model = 'claude-sonnet-4-20250514'
+      this.model = 'claude-sonnet-4-6'
       this.permissionMode = 'approve'
     }
     sendMessage() {}
