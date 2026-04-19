@@ -17,7 +17,7 @@ import { CliSession } from '../src/cli-session.js'
 
 function createMockChild() {
   const child = new EventEmitter()
-  child.stdin = new Writable({ write(chunk, enc, cb) { cb() } })
+  child.stdin = new Writable({ write(_chunk, _enc, cb) { cb() } })
   child.stdout = new Readable({ read() {} })
   child.stderr = new Readable({ read() {} })
   child.pid = 12345

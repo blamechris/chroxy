@@ -17,46 +17,6 @@ function createSession(opts = {}) {
   return new SdkSession({ cwd: '/tmp', ...opts })
 }
 
-/**
- * Drive sendMessage() with an async generator whose yield sequence we
- * control via a `queue` array. Each entry is either an SDK message to
- * yield, or the string 'HOLD' to pause the generator until release()
- * is called. Returns { release, whenBlocked, done }.
- */
-function drive(session, queue) {
-  let resolveBlock
-  let blockedPromise = new Promise((r) => { resolveBlock = r })
-  let resumeGate
-  let gatePromise = new Promise((r) => { resumeGate = r })
-  let finished = false
-  let donePromise = null
-
-  session._callQuery = () => {
-    return (async function* () {
-      for (const item of queue) {
-        if (item === 'HOLD') {
-          resolveBlock?.()
-          await gatePromise
-        } else {
-          yield item
-        }
-      }
-      finished = true
-    })()
-  }
-
-  return {
-    start(prompt = 'hello') {
-      donePromise = session.sendMessage(prompt)
-      return donePromise
-    },
-    whenBlocked: () => blockedPromise,
-    release: () => resumeGate?.(),
-    isFinished: () => finished,
-    done: () => donePromise,
-  }
-}
-
 describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
   let session
 
