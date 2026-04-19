@@ -515,7 +515,7 @@ describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#
   })
 
   describe('handlePermissionRequest (HTTP /permission — [session-binding-create])', () => {
-    it('emits [session-binding-create] with requestId and sourceIp=none sessionId for the legacy HTTP path', async () => {
+    it('emits [session-binding-create] with requestId, sessionId=none, and the sourceIp for the legacy HTTP path', async () => {
       const entries = []
       currentListener = (e) => entries.push(e)
       addLogListener(currentListener)
