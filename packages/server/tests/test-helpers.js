@@ -31,6 +31,39 @@ export async function waitFor(predicate, { timeoutMs = 2000, intervalMs = 10, la
 }
 
 /**
+ * Wait for an EventEmitter to emit `event`, then return the emitted value.
+ * Rejects with a helpful message if `timeoutMs` elapses first — prevents
+ * tests from hanging until the global test timeout when an event never fires.
+ *
+ * Usage:
+ *   const lostEvent = await waitForEvent(adapter, 'tunnel_lost')
+ *   const recovered = await waitForEvent(adapter, 'tunnel_recovered', 2000)
+ *
+ * @param {import('events').EventEmitter} emitter - The emitter to listen on.
+ * @param {string} event - Event name to wait for.
+ * @param {number} [timeoutMs=5000] - Reject after this many ms.
+ * @returns {Promise<any>} resolves with the first arg passed to the listener
+ */
+export function waitForEvent(emitter, event, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const onEvent = (value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      emitter.removeListener(event, onEvent)
+      reject(new Error(`Expected '${event}' event within ${timeoutMs}ms but it never fired`))
+    }, timeoutMs)
+    emitter.once(event, onEvent)
+  })
+}
+
+/**
  * Wait until a message of the given `type` appears in `messages`, then return it.
  * Thin wrapper around waitFor for the common WS integration pattern.
  *

@@ -2,6 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { CloudflareTunnelAdapter } from '../../src/tunnel/cloudflare.js'
+import { waitForEvent } from '../test-helpers.js'
 
 /**
  * Test helper: Create a mock child process that simulates cloudflared behavior
@@ -106,9 +107,7 @@ describe('CloudflareTunnelAdapter', () => {
       await tunnel.start()
       const proc = tunnel.process
 
-      const lostPromise = new Promise((resolve) => {
-        tunnel.once('tunnel_lost', resolve)
-      })
+      const lostPromise = waitForEvent(tunnel, 'tunnel_lost')
 
       proc.emit('close', 1, null)
 
@@ -136,9 +135,7 @@ describe('CloudflareTunnelAdapter', () => {
       await tunnel.start()
       const firstProcess = tunnel.process
 
-      const recoveredPromise = new Promise((resolve) => {
-        tunnel.once('tunnel_recovered', resolve)
-      })
+      const recoveredPromise = waitForEvent(tunnel, 'tunnel_recovered')
 
       firstProcess.emit('close', 1, null)
 
@@ -168,9 +165,7 @@ describe('CloudflareTunnelAdapter', () => {
 
       await tunnel.start()
 
-      const urlChangedPromise = new Promise((resolve) => {
-        tunnel.once('tunnel_url_changed', resolve)
-      })
+      const urlChangedPromise = waitForEvent(tunnel, 'tunnel_url_changed')
 
       tunnel.process.emit('close', 1, null)
 
@@ -201,9 +196,7 @@ describe('CloudflareTunnelAdapter', () => {
 
       await tunnel.start()
 
-      const failedPromise = new Promise((resolve) => {
-        tunnel.once('tunnel_failed', resolve)
-      })
+      const failedPromise = waitForEvent(tunnel, 'tunnel_failed')
 
       tunnel.process.emit('close', 1, null)
 
