@@ -869,6 +869,8 @@ export function App() {
     { keys: 'Cmd+Shift+]', description: 'Next tab', section: 'Session' },
     { keys: 'Cmd+W', description: 'Close tab (desktop)', section: 'Session' },
     { keys: 'Shift+Tab', description: 'Toggle plan mode', section: 'Session' },
+    { keys: 'Cmd+Y', description: 'Allow current permission prompt', section: 'Session' },
+    { keys: 'Cmd+Shift+Y', description: 'Allow current permission prompt for this session (rule-eligible tools)', section: 'Session' },
     { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
     { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
   ], [])

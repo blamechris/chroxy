@@ -147,6 +147,21 @@ describe('App', () => {
     expect(screen.getByText('Keyboard Shortcuts')).toBeInTheDocument()
   })
 
+  it('lists the Cmd/Ctrl+Y permission shortcuts in the help modal (#2872)', () => {
+    render(<App />)
+    fireEvent.keyDown(window, { key: '?' })
+
+    // Both permission shortcut rows are present
+    expect(screen.getByText('Cmd+Y')).toBeInTheDocument()
+    expect(screen.getByText('Allow current permission prompt')).toBeInTheDocument()
+    expect(screen.getByText('Cmd+Shift+Y')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Allow current permission prompt for this session (rule-eligible tools)',
+      ),
+    ).toBeInTheDocument()
+  })
+
   it('does not open shortcut help when ? is typed in an input', () => {
     stateOverrides = {
       connectionPhase: 'connected',
