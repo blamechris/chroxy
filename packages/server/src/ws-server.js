@@ -397,6 +397,10 @@ export class WsServer {
       // Pass pairingManager so the HTTP /permission-response fallback can
       // enforce session binding — see 2026-04-11 audit blocker 5.
       pairingManager: this._pairingManager,
+      // #2831: let the permission handler tell a CliSession that a hook
+      // permission belonging to it is outstanding so the session's
+      // 5-min inactivity timer can pause until the user responds.
+      findSessionByHookSecret: (secret) => self._findSessionByHookSecret(secret),
     })
     // Handler context: late-bound via getters for test compat (tests may reassign properties)
     this._handlerCtx = {
@@ -699,6 +703,27 @@ export class WsServer {
    */
   registerHookSecret(secret) {
     if (secret) this._hookSecrets.add(secret)
+  }
+
+  /**
+   * Find the CliSession whose hookSecret matches `secret`. Returns null
+   * if no match. Used by the permission handler to pause a session's
+   * inactivity timer while a hook permission is outstanding (#2831).
+   */
+  _findSessionByHookSecret(secret) {
+    if (!secret) return null
+    // Scan _sessionHookSecrets — Map<sessionId, secret>
+    for (const [sessionId, storedSecret] of this._sessionHookSecrets) {
+      if (storedSecret === secret) {
+        const entry = this.sessionManager?.getSession(sessionId)
+        return entry?.session || null
+      }
+    }
+    // Legacy single-session mode
+    if (this.cliSession && this.cliSession._hookSecret === secret) {
+      return this.cliSession
+    }
+    return null
   }
 
   /**

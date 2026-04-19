@@ -82,6 +82,14 @@ export class CliSession extends BaseSession {
 
     // Hook manager (shared module)
     this._hookManager = (this._port) ? createPermissionHookManager(this, { settingsPath }) : null
+
+    // Pending-permission bookkeeping for the inactivity timer (#2831).
+    // WsServer calls notifyPermissionPending/Resolved when a hook
+    // permission belonging to this session is broadcast/resolved.
+    this._pendingPermissionIds = new Set()
+    this._resultTimeoutPaused = false
+    this._resultTimeoutMessageId = null
+    this._resultTimeoutStreamStarted = null
   }
 
   get sessionId() {
@@ -320,18 +328,86 @@ export class CliSession extends BaseSession {
       return
     }
 
-    // Safety timeout: force-clear if result never arrives (5 min)
-    this._resultTimeout = setTimeout(() => {
-      if (this._isBusy) {
-        log.warn('Result timeout (5 min) — force-clearing busy state')
-        const messageId = this._currentMessageId
-        if (this._currentCtx?.hasStreamStarted) {
-          this.emit('stream_end', { messageId })
-        }
-        this._clearMessageState()
-        this.emit('error', { message: 'Response timed out after 5 minutes' })
+    // Safety timeout: force-clear if result never arrives (5 min).
+    // Paused while permission prompts are outstanding (#2831): awaiting
+    // user input on a permission is NOT "inactivity".
+    this._resultTimeoutMessageId = this._currentMessageId
+    this._armResultTimeout()
+  }
+
+  /**
+   * Arm the 5-minute inactivity timer. No-op if paused because of a
+   * pending permission prompt (#2831).
+   */
+  _armResultTimeout() {
+    if (this._resultTimeout) clearTimeout(this._resultTimeout)
+    this._resultTimeout = null
+    if (this._resultTimeoutPaused) return
+    this._resultTimeout = setTimeout(() => this._handleResultTimeout(), 300_000)
+  }
+
+  /**
+   * Handle a true inactivity timeout. Before clearing state, emit
+   * permission_expired for any registered pending permissions so the
+   * client UI clears stale prompts (#2831). Without this, late user
+   * approvals would resolve into a dead message context and no
+   * response ever streams.
+   */
+  _handleResultTimeout() {
+    if (!this._isBusy) return
+    log.warn('Result timeout (5 min) — force-clearing busy state')
+    const messageId = this._currentMessageId
+    if (this._currentCtx?.hasStreamStarted) {
+      this.emit('stream_end', { messageId })
+    }
+    // Fire permission_expired for every pending permission we know about
+    // so the client clears the stale prompt.
+    for (const requestId of this._pendingPermissionIds) {
+      this.emit('permission_expired', {
+        requestId,
+        message: 'Permission request expired (session timeout)',
+      })
+    }
+    this._pendingPermissionIds.clear()
+    this._clearMessageState()
+    this.emit('error', { message: 'Response timed out after 5 minutes' })
+  }
+
+  /**
+   * Notify the session that a permission request belonging to it is
+   * outstanding — pauses the inactivity timer so the session doesn't
+   * time out while waiting on user input. #2831.
+   *
+   * @param {string} requestId
+   */
+  notifyPermissionPending(requestId) {
+    if (!requestId || this._pendingPermissionIds.has(requestId)) return
+    this._pendingPermissionIds.add(requestId)
+    if (this._pendingPermissionIds.size === 1) {
+      this._resultTimeoutPaused = true
+      if (this._resultTimeout) {
+        clearTimeout(this._resultTimeout)
+        this._resultTimeout = null
       }
-    }, 300_000)
+    }
+  }
+
+  /**
+   * Notify the session that a permission request has been resolved
+   * (allow/deny/expired). When the last outstanding permission clears,
+   * the inactivity timer re-arms for a fresh window. #2831.
+   *
+   * @param {string} requestId
+   */
+  notifyPermissionResolved(requestId) {
+    if (!requestId || !this._pendingPermissionIds.has(requestId)) return
+    this._pendingPermissionIds.delete(requestId)
+    if (this._pendingPermissionIds.size === 0) {
+      this._resultTimeoutPaused = false
+      if (this._isBusy) {
+        this._armResultTimeout()
+      }
+    }
   }
 
   /**
@@ -582,6 +658,10 @@ export class CliSession extends BaseSession {
     super._clearMessageState()
     this._waitingForAnswer = false
     this._currentCtx = null
+    // Reset permission pause bookkeeping — the next message starts fresh.
+    this._pendingPermissionIds.clear()
+    this._resultTimeoutPaused = false
+    this._resultTimeoutMessageId = null
     // If plan mode is active but ExitPlanMode never arrived (interrupt/crash),
     // the flag is stale — reset it. In normal flow, _planAllowedPrompts is
     // non-null (set by ExitPlanMode) and plan_ready has already been emitted

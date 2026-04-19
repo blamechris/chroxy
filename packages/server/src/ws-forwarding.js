@@ -124,6 +124,7 @@ function setupCliForwarding(normalizer, ctx) {
     'message', 'tool_start', 'tool_result', 'result', 'error',
     'user_question', 'agent_spawned', 'agent_completed',
     'plan_started', 'plan_ready', 'mcp_servers',
+    'permission_expired',
   ]
   for (const event of FORWARDED_EVENTS) {
     cliSession.on(event, (data) => {

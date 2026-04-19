@@ -95,12 +95,31 @@ export class SdkSession extends BaseSession {
 
     // Permission handling — delegated to PermissionManager
     this._permissions = new PermissionManager({ log })
-    this._permissions.on('permission_request', (data) => this.emit('permission_request', data))
-    this._permissions.on('user_question', (data) => this.emit('user_question', data))
+    this._permissions.on('permission_request', (data) => {
+      // Pause the inactivity timer: waiting on user input is NOT inactivity.
+      // Without this, sessions with pending permissions silently go
+      // unresponsive after 5 min (#2831). Pause/resume uses a reference
+      // count so concurrent prompts correctly keep the timer suspended
+      // until the last one is resolved.
+      this._pauseResultTimeoutForPermission()
+      this.emit('permission_request', data)
+    })
+    this._permissions.on('user_question', (data) => {
+      this._pauseResultTimeoutForPermission()
+      this.emit('user_question', data)
+    })
+    this._permissions.on('permission_resolved', () => {
+      this._resumeResultTimeoutForPermission()
+    })
 
     // Backward-compatible accessors (used by ws-permissions.js, settings-handlers.js)
     this._pendingPermissions = this._permissions._pendingPermissions
     this._lastPermissionData = this._permissions._lastPermissionData
+
+    // Permission pause bookkeeping for _resultTimeout (#2831)
+    this._permissionPauseCount = 0
+    this._resultTimeoutPaused = false
+    this._resetResultTimeout = null
   }
 
   get sessionId() {
@@ -151,7 +170,10 @@ export class SdkSession extends BaseSession {
     this._messageCounter++
     const messageId = `msg-${this._messageCounter}`
     this._currentMessageId = messageId
-    let hasStreamStarted = false
+    // Shared ref so _handleResultTimeout can observe the latest value
+    // when it fires (the timer was armed when hasStreamStarted was still
+    // false, but the turn may have streamed before the timeout landed).
+    const streamState = { hasStreamStarted: false }
     let didStreamText = false
 
     const sdkPermMode = this._sdkPermissionMode()
@@ -207,20 +229,18 @@ export class SdkSession extends BaseSession {
     // Safety timeout: force-clear if result never arrives.
     // Resets on every SDK event (tool calls, streaming, etc.) so long-running
     // agent tasks with many tool calls don't get falsely timed out.
+    // Paused while permission prompts are outstanding (#2831): awaiting
+    // user input on a permission is NOT "inactivity".
     const RESULT_TIMEOUT_MS = 300_000 // 5 min of inactivity
     const resetResultTimeout = () => {
       if (this._resultTimeout) clearTimeout(this._resultTimeout)
+      this._resultTimeout = null
+      if (this._resultTimeoutPaused) return
       this._resultTimeout = setTimeout(() => {
-        if (this._isBusy) {
-          log.warn('Result timeout (5 min inactivity) — force-clearing busy state')
-          if (hasStreamStarted) {
-            this.emit('stream_end', { messageId })
-          }
-          this._clearMessageState()
-          this.emit('error', { message: 'Response timed out after 5 minutes of inactivity' })
-        }
+        this._handleResultTimeout(messageId, streamState.hasStreamStarted)
       }, RESULT_TIMEOUT_MS)
     }
+    this._resetResultTimeout = resetResultTimeout
     resetResultTimeout()
 
     try {
@@ -282,8 +302,8 @@ export class SdkSession extends BaseSession {
               case 'content_block_start': {
                 const blockType = event.content_block?.type
                 if (blockType === 'text') {
-                  if (!hasStreamStarted) {
-                    hasStreamStarted = true
+                  if (!streamState.hasStreamStarted) {
+                    streamState.hasStreamStarted = true
                     this.emit('stream_start', { messageId })
                   }
                 } else if (blockType === 'tool_use') {
@@ -304,8 +324,8 @@ export class SdkSession extends BaseSession {
                 const delta = event.delta
                 if (!delta) break
                 if (delta.type === 'text_delta') {
-                  if (!hasStreamStarted) {
-                    hasStreamStarted = true
+                  if (!streamState.hasStreamStarted) {
+                    streamState.hasStreamStarted = true
                     this.emit('stream_start', { messageId })
                   }
                   didStreamText = true
@@ -323,7 +343,7 @@ export class SdkSession extends BaseSession {
             if (!Array.isArray(content)) break
 
             for (const block of content) {
-              if (block.type === 'text' && block.text && !didStreamText && !hasStreamStarted) {
+              if (block.type === 'text' && block.text && !didStreamText && !streamState.hasStreamStarted) {
                 // Fallback for non-streamed text
                 this.emit('message', {
                   type: 'response',
@@ -346,7 +366,7 @@ export class SdkSession extends BaseSession {
           }
 
           case 'result': {
-            if (hasStreamStarted) {
+            if (streamState.hasStreamStarted) {
               this.emit('stream_end', { messageId })
             }
 
@@ -388,7 +408,7 @@ export class SdkSession extends BaseSession {
         }
       }
     } catch (err) {
-      if (hasStreamStarted) {
+      if (streamState.hasStreamStarted) {
         this.emit('stream_end', { messageId })
       }
       if (!this._destroying) {
@@ -599,11 +619,117 @@ export class SdkSession extends BaseSession {
   }
 
   /**
+   * Handle a true inactivity timeout — the 5-min result timer fired
+   * while the session was still busy. Emits stream_end (if streaming),
+   * auto-denies any pending permissions, emits `permission_expired` for
+   * each so the client UI clears stale prompts, then clears state and
+   * emits an error. Issue #2831 added the permission cleanup so late
+   * user approvals don't resolve into an abandoned SDK turn.
+   */
+  _handleResultTimeout(messageId, hasStreamStarted) {
+    if (!this._isBusy) return
+    log.warn('Result timeout (5 min inactivity) — force-clearing busy state')
+    if (hasStreamStarted) {
+      this.emit('stream_end', { messageId })
+    }
+    // Fire permission_expired for every outstanding permission BEFORE
+    // clearing state — the underlying Map is cleared by _clearMessageState
+    // → PermissionManager.clearAll() below.
+    if (this._pendingPermissions && this._pendingPermissions.size > 0) {
+      for (const [requestId] of this._pendingPermissions) {
+        this.emit('permission_expired', { requestId, message: 'Permission request expired (session timeout)' })
+      }
+    }
+    // Attempt to abort the SDK query generator so no further events land
+    // into a cleared message. Best-effort — the SDK's generator may not
+    // support .return()/.throw() uniformly.
+    this._abortActiveQuery()
+    this._clearMessageState()
+    this.emit('error', { message: 'Response timed out after 5 minutes of inactivity' })
+  }
+
+  /**
+   * Best-effort abort of the active SDK query generator. Used when the
+   * session times out mid-turn so tool results don't stream into a
+   * cleared message context (#2831).
+   */
+  _abortActiveQuery() {
+    const q = this._query
+    if (!q) return
+    try {
+      if (typeof q.interrupt === 'function') {
+        const p = q.interrupt()
+        if (p && typeof p.catch === 'function') {
+          p.catch((err) => log.warn(`Query interrupt (timeout) failed: ${err.message}`))
+        }
+      } else if (typeof q.return === 'function') {
+        q.return()
+      }
+    } catch (err) {
+      log.warn(`Query abort (timeout) failed: ${err.message}`)
+    }
+  }
+
+  /**
+   * Pause the inactivity timer because a permission prompt is
+   * outstanding. Ref-counted so concurrent prompts all have to resolve
+   * before the timer re-arms. #2831.
+   */
+  _pauseResultTimeoutForPermission() {
+    this._permissionPauseCount++
+    if (this._permissionPauseCount === 1) {
+      this._resultTimeoutPaused = true
+      if (this._resultTimeout) {
+        clearTimeout(this._resultTimeout)
+        this._resultTimeout = null
+      }
+    }
+  }
+
+  /**
+   * Resume the inactivity timer when a permission prompt is resolved.
+   * Only re-arms once the last concurrent prompt clears. #2831.
+   */
+  _resumeResultTimeoutForPermission() {
+    if (this._permissionPauseCount === 0) return
+    this._permissionPauseCount--
+    if (this._permissionPauseCount === 0) {
+      this._resultTimeoutPaused = false
+      if (this._isBusy && typeof this._resetResultTimeout === 'function') {
+        this._resetResultTimeout()
+      }
+    }
+  }
+
+  /**
+   * Test helper: arm a result timeout without going through sendMessage.
+   * Lets unit tests exercise the timeout path in isolation.
+   * @private
+   */
+  _armResultTimeoutForTest(messageId, hasStreamStarted = false) {
+    const reset = () => {
+      if (this._resultTimeout) clearTimeout(this._resultTimeout)
+      this._resultTimeout = null
+      if (this._resultTimeoutPaused) return
+      this._resultTimeout = setTimeout(() => {
+        this._handleResultTimeout(messageId, hasStreamStarted)
+      }, 300_000)
+    }
+    this._resetResultTimeout = reset
+    reset()
+  }
+
+  /**
    * Clear per-message state, marking us as ready for the next message.
    */
   _clearMessageState() {
     super._clearMessageState()
     this._permissions.clearAll()
+    // Pause counter is tied to the previous message — reset so the next
+    // message starts with a fresh counter.
+    this._permissionPauseCount = 0
+    this._resultTimeoutPaused = false
+    this._resetResultTimeout = null
   }
 
   /**

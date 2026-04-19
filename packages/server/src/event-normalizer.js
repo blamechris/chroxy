@@ -187,6 +187,17 @@ Object.assign(EVENT_MAP, {
     }],
   }),
 
+  permission_expired: (data, ctx) => ({
+    messages: [{
+      msg: {
+        type: 'permission_expired',
+        requestId: data.requestId,
+        sessionId: ctx.sessionId,
+        message: data.message,
+      },
+    }],
+  }),
+
   error: (data) => {
     const msg = {
       type: 'message',
