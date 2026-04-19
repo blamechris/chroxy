@@ -905,10 +905,15 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
     }
   }
   const permRequestId = msg.requestId as string;
+  // #2853: PermissionPrompt hardcodes its own buttons (Allow / Allow for Session
+  // / Deny) and never reads this array; `sendPermissionResponse` only accepts
+  // 'allow' | 'deny' | 'allowSession'. Keep only the wire-level allow/deny
+  // options in the stored payload for history/debug inspection, without
+  // advertising dashboard-only decisions ('allowSession') or unreachable ones
+  // ('allowAlways') here.
   const newOptions = [
     { label: 'Allow', value: 'allow' },
     { label: 'Deny', value: 'deny' },
-    { label: 'Always Allow', value: 'allowAlways' },
   ];
   const newExpiresAt = typeof msg.remainingMs === 'number' ? Date.now() + msg.remainingMs : undefined;
   const permTargetId = (msg.sessionId as string) || get().activeSessionId;

@@ -987,6 +987,68 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     });
   });
 
+  it('markPermissionResolved caps the map size and evicts oldest entry (#2838)', async () => {
+    const { useConnectionStore, RESOLVED_PERMISSIONS_CAP } = await import('./connection');
+
+    for (let i = 0; i < RESOLVED_PERMISSIONS_CAP; i++) {
+      useConnectionStore.getState().markPermissionResolved(`req-${i}`, 'allow');
+    }
+    let state = useConnectionStore.getState().resolvedPermissions;
+    expect(Object.keys(state).length).toBe(RESOLVED_PERMISSIONS_CAP);
+    expect(state['req-0']).toBe('allow');
+
+    // Adding one more beyond the cap should evict req-0 (oldest).
+    useConnectionStore.getState().markPermissionResolved('req-overflow', 'deny');
+    state = useConnectionStore.getState().resolvedPermissions;
+    expect(Object.keys(state).length).toBe(RESOLVED_PERMISSIONS_CAP);
+    expect(state['req-0']).toBeUndefined();
+    expect(state['req-overflow']).toBe('deny');
+    expect(state['req-1']).toBe('allow');
+
+    // Adding several more in a row evicts in insertion order.
+    for (let i = 0; i < 5; i++) {
+      useConnectionStore.getState().markPermissionResolved(`req-extra-${i}`, 'allow');
+    }
+    state = useConnectionStore.getState().resolvedPermissions;
+    expect(Object.keys(state).length).toBe(RESOLVED_PERMISSIONS_CAP);
+    for (let i = 1; i <= 5; i++) {
+      expect(state[`req-${i}`]).toBeUndefined();
+    }
+    expect(state['req-6']).toBe('allow');
+  });
+
+  it('markPermissionResolved re-resolving an entry bumps it to most-recent (#2838)', async () => {
+    const { useConnectionStore, RESOLVED_PERMISSIONS_CAP } = await import('./connection');
+
+    // Fill the map.
+    useConnectionStore.getState().markPermissionResolved('req-sticky', 'allow');
+    for (let i = 0; i < RESOLVED_PERMISSIONS_CAP - 1; i++) {
+      useConnectionStore.getState().markPermissionResolved(`req-${i}`, 'allow');
+    }
+    // Re-resolve the sticky entry — should bump it to the tail.
+    useConnectionStore.getState().markPermissionResolved('req-sticky', 'deny');
+
+    // Fill beyond the cap — req-sticky must survive because it was just bumped.
+    useConnectionStore.getState().markPermissionResolved('req-new-1', 'allow');
+    useConnectionStore.getState().markPermissionResolved('req-new-2', 'allow');
+
+    const state = useConnectionStore.getState().resolvedPermissions;
+    expect(state['req-sticky']).toBe('deny');
+    // Oldest (req-0) should be evicted now that two new entries were added.
+    expect(state['req-0']).toBeUndefined();
+    expect(Object.keys(state).length).toBe(RESOLVED_PERMISSIONS_CAP);
+  });
+
+  it('capResolvedPermissions pure helper evicts without mutating input (#2838)', async () => {
+    const { capResolvedPermissions } = await import('./connection');
+
+    const input = { a: 'allow' as const, b: 'deny' as const, c: 'allow' as const };
+    const out = capResolvedPermissions(input, 'd', 'deny', 3);
+    expect(out).toEqual({ b: 'deny', c: 'allow', d: 'deny' });
+    // Input was not mutated.
+    expect(input).toEqual({ a: 'allow', b: 'deny', c: 'allow' });
+  });
+
   it('sendPermissionResponse marks the requestId resolved in the store', async () => {
     const { useConnectionStore } = await import('./connection');
     const { createEmptySessionState } = await import('./utils');
