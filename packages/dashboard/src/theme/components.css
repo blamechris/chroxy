@@ -1278,6 +1278,21 @@
 
 .btn-allow:hover { background: #16a34a; }
 
+/* Allow for Session (#2834) — visually distinct from plain Allow so users
+   notice the wider-scope action (auto-approves future uses of this tool
+   for the session). */
+.btn-allow-session {
+  background: var(--accent-green);
+  color: #fff;
+  opacity: 0.85;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.btn-allow-session:hover {
+  opacity: 1;
+  background: #16a34a;
+}
+
 .btn-deny {
   background: var(--accent-red);
   color: #fff;
@@ -1286,6 +1301,7 @@
 .btn-deny:hover { background: #dc2626; }
 
 .btn-allow:focus-visible,
+.btn-allow-session:focus-visible,
 .btn-deny:focus-visible {
   outline: 2px solid #fff;
   outline-offset: 2px;

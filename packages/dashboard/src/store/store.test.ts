@@ -954,6 +954,261 @@ describe('permission response auto-switch', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Resolved-permission persistence + Allow for Session (#2833, #2834)
+// ---------------------------------------------------------------------------
+describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
+  beforeEach(async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({
+      sessions: [],
+      activeSessionId: null,
+      sessionStates: {},
+      socket: null,
+      resolvedPermissions: {},
+      sessionNotifications: [],
+    });
+  });
+
+  it('initial state has an empty resolvedPermissions map', async () => {
+    const { useConnectionStore } = await import('./connection');
+    expect(useConnectionStore.getState().resolvedPermissions).toEqual({});
+  });
+
+  it('markPermissionResolved records the decision keyed by requestId', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.getState().markPermissionResolved('req-1', 'allow');
+    expect(useConnectionStore.getState().resolvedPermissions).toEqual({ 'req-1': 'allow' });
+    useConnectionStore.getState().markPermissionResolved('req-2', 'deny');
+    useConnectionStore.getState().markPermissionResolved('req-3', 'allowSession');
+    expect(useConnectionStore.getState().resolvedPermissions).toEqual({
+      'req-1': 'allow',
+      'req-2': 'deny',
+      'req-3': 'allowSession',
+    });
+  });
+
+  it('sendPermissionResponse marks the requestId resolved in the store', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    const sent: { type: string; decision?: string; rules?: unknown[] }[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: [{
+            id: 'm1', type: 'prompt', content: 'Allow?', timestamp: 1,
+            requestId: 'req-a', tool: 'Write',
+          }],
+        },
+      },
+      socket: mockSocket as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().sendPermissionResponse('req-a', 'allow');
+    expect(useConnectionStore.getState().resolvedPermissions['req-a']).toBe('allow');
+
+    useConnectionStore.getState().sendPermissionResponse('req-a', 'deny');
+    expect(useConnectionStore.getState().resolvedPermissions['req-a']).toBe('deny');
+  });
+
+  it('sendPermissionResponse with allowSession sends wire "allow" + set_permission_rules', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    const sent: Array<Record<string, unknown>> = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          sessionRules: [{ tool: 'Glob', decision: 'allow' }],
+          messages: [{
+            id: 'm1', type: 'prompt', content: 'Read /etc/hosts', timestamp: 1,
+            requestId: 'req-read', tool: 'Read',
+          }],
+        },
+      },
+      socket: mockSocket as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().sendPermissionResponse('req-read', 'allowSession');
+
+    // Wire decision is 'allow', not 'allowSession' (server schema rejects the latter).
+    const permMsg = sent.find((m) => m.type === 'permission_response');
+    expect(permMsg).toBeDefined();
+    expect(permMsg!.decision).toBe('allow');
+
+    const rulesMsg = sent.find((m) => m.type === 'set_permission_rules');
+    expect(rulesMsg).toBeDefined();
+    expect(rulesMsg!.sessionId).toBe('s1');
+    // Existing rule preserved, new rule appended for the resolved tool.
+    expect(rulesMsg!.rules).toEqual([
+      { tool: 'Glob', decision: 'allow' },
+      { tool: 'Read', decision: 'allow' },
+    ]);
+
+    // Resolved decision records 'allowSession' for UI state.
+    expect(useConnectionStore.getState().resolvedPermissions['req-read']).toBe('allowSession');
+  });
+
+  it('sendPermissionResponse with allowSession does NOT send set_permission_rules for ineligible tools', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+
+    const sent: Array<Record<string, unknown>> = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: [{
+            id: 'm1', type: 'prompt', content: 'Run foo', timestamp: 1,
+            requestId: 'req-bash', tool: 'Bash',
+          }],
+        },
+      },
+      socket: mockSocket as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().sendPermissionResponse('req-bash', 'allowSession');
+
+    expect(sent.some((m) => m.type === 'permission_response')).toBe(true);
+    expect(sent.some((m) => m.type === 'set_permission_rules')).toBe(false);
+  });
+
+  it('permission_expired for an already-resolved requestId does not mutate the prompt message', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    const originalContent = 'Allow write?';
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: [{
+            id: 'm1', type: 'prompt', content: originalContent, timestamp: 1,
+            requestId: 'req-resolved', tool: 'Write',
+          }],
+        },
+      },
+      resolvedPermissions: { 'req-resolved': 'allow' },
+      sessionNotifications: [{
+        id: 'n1', sessionId: 's1', sessionName: 's1', eventType: 'permission',
+        message: 'Write', timestamp: 1, requestId: 'req-resolved',
+      }],
+    });
+
+    _testMessageHandler.setContext({
+      url: 'ws://x', token: 't', isReconnect: false, silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+    _testMessageHandler.handle({ type: 'permission_expired', requestId: 'req-resolved', message: 'timeout' });
+
+    const state = useConnectionStore.getState();
+    // The prompt message content must NOT have "(Expired …)" appended —
+    // user already answered, so the late expiry is a no-op (#2833).
+    const promptMsg = state.sessionStates.s1!.messages[0]!;
+    expect(promptMsg.content).toBe(originalContent);
+    // Banner is still cleaned up so nothing dangles in the UI.
+    expect(state.sessionNotifications.find((n) => n.requestId === 'req-resolved')).toBeUndefined();
+
+    _testMessageHandler.clearContext();
+  });
+
+  it('permission_expired for an UN-resolved requestId still appends the expiry note', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: [{
+            id: 'm1', type: 'prompt', content: 'Allow write?', timestamp: 1,
+            requestId: 'req-open', tool: 'Write',
+          }],
+        },
+      },
+      resolvedPermissions: {},
+    });
+
+    _testMessageHandler.setContext({
+      url: 'ws://x', token: 't', isReconnect: false, silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+    _testMessageHandler.handle({ type: 'permission_expired', requestId: 'req-open', message: 'timeout' });
+
+    const promptMsg = useConnectionStore.getState().sessionStates.s1!.messages[0]!;
+    expect(promptMsg.content).toMatch(/Expired/);
+
+    _testMessageHandler.clearContext();
+  });
+
+  it('permission_rules_updated stores the rules on the target session', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { createEmptySessionState } = await import('./utils');
+    const { _testMessageHandler } = await import('./message-handler');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: createEmptySessionState() },
+    });
+
+    _testMessageHandler.setContext({
+      url: 'ws://x', token: 't', isReconnect: false, silent: false,
+      socket: { send: () => {}, readyState: 1 } as unknown as WebSocket,
+    });
+    _testMessageHandler.handle({
+      type: 'permission_rules_updated',
+      sessionId: 's1',
+      rules: [
+        { tool: 'Read', decision: 'allow' },
+        { tool: 'Write', decision: 'allow' },
+      ],
+    });
+
+    const state = useConnectionStore.getState();
+    expect(state.sessionStates.s1!.sessionRules).toEqual([
+      { tool: 'Read', decision: 'allow' },
+      { tool: 'Write', decision: 'allow' },
+    ]);
+
+    _testMessageHandler.clearContext();
+  });
+
+  it('isRuleEligibleTool covers the same set as the mobile app pattern', async () => {
+    const { isRuleEligibleTool } = await import('./connection');
+    for (const tool of ['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']) {
+      expect(isRuleEligibleTool(tool)).toBe(true);
+    }
+    for (const tool of ['Bash', 'WebFetch', 'WebSearch', 'Task', 'SomethingNew']) {
+      expect(isRuleEligibleTool(tool)).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // PTY dead code removal (#1759)
 // ---------------------------------------------------------------------------
 describe('PTY dead code removal', () => {

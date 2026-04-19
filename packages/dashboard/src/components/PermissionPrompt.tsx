@@ -3,15 +3,27 @@
  *
  * Ports addPermissionPrompt() from dashboard-app.js (lines 685-753).
  * Countdown, urgent styling at <=30s, expired state, allow/deny buttons.
+ *
+ * #2833: the resolved decision is read from the dashboard store
+ * (`resolvedPermissions[requestId]`) so tab switches that unmount/remount
+ * the component preserve the answered state instead of re-rendering as
+ * an unanswered prompt.
+ *
+ * #2834: adds a third "Allow for Session" button for rule-eligible tools
+ * (Read, Write, Edit, NotebookEdit, Glob, Grep) that mirrors the mobile
+ * app's pattern — sends wire decision 'allow' plus a follow-up
+ * set_permission_rules message (handled in sendPermissionResponse).
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useConnectionStore, isRuleEligibleTool } from '../store/connection'
+import type { PermissionDecision } from '../store/types'
 
 export interface PermissionPromptProps {
   requestId: string
   tool: string
   description: string
   remainingMs: number
-  onRespond: (requestId: string, decision: 'allow' | 'deny') => void
+  onRespond: (requestId: string, decision: PermissionDecision) => void
 }
 
 function formatCountdown(ms: number): string {
@@ -23,9 +35,13 @@ function formatCountdown(ms: number): string {
 
 export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond }: PermissionPromptProps) {
   const [remaining, setRemaining] = useState(remainingMs)
-  const [answered, setAnswered] = useState<'allow' | 'deny' | null>(null)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const expiresAtRef = useRef(Date.now() + remainingMs)
+
+  // Read the answered state from the store (#2833). Falls back to null when
+  // no resolution is recorded yet. Selecting by requestId keeps this a
+  // primitive subscription — useShallow / stable refs not needed.
+  const answered = useConnectionStore((s) => s.resolvedPermissions?.[requestId] ?? null)
 
   useEffect(() => {
     if (intervalRef.current) clearInterval(intervalRef.current)
@@ -49,14 +65,22 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     }
   }, [remainingMs])
 
-  const respond = useCallback((decision: 'allow' | 'deny') => {
+  const respond = useCallback((decision: PermissionDecision) => {
     if (answered || remaining <= 0) return
+    // 'allowSession' is only meaningful for rule-eligible tools; for other
+    // tools the server would reject the follow-up set_permission_rules.
+    // Silently coerce to a plain 'allow' so keyboard shortcut users on an
+    // ineligible prompt still get an Allow-equivalent decision.
+    const effective: PermissionDecision =
+      decision === 'allowSession' && !isRuleEligibleTool(tool) ? 'allow' : decision
     if (intervalRef.current) clearInterval(intervalRef.current)
-    setAnswered(decision)
-    onRespond(requestId, decision)
-  }, [requestId, onRespond, answered, remaining])
+    onRespond(requestId, effective)
+  }, [requestId, onRespond, answered, remaining, tool])
 
-  // Keyboard shortcuts: Cmd/Ctrl+Y -> allow, Escape -> deny (#1190)
+  // Keyboard shortcuts:
+  //   Cmd/Ctrl+Y         -> allow
+  //   Cmd/Ctrl+Shift+Y   -> allowSession (rule-eligible tools only, #2834)
+  //   Escape             -> deny (skipped when a Modal overlay is open, #1230)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Skip when focus is in an input, textarea, or select
@@ -65,7 +89,14 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
 
       if (e.key.toLowerCase() === 'y' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault()
-        respond('allow')
+        if (e.shiftKey) {
+          // Allow for Session — no-op when the tool is not rule-eligible (#2834).
+          if (isRuleEligibleTool(tool)) {
+            respond('allowSession')
+          }
+        } else {
+          respond('allow')
+        }
       } else if (e.key === 'Escape') {
         // Skip if a modal overlay is open — let Modal handle Escape (#1230)
         if (document.querySelector('[data-modal-overlay]')) return
@@ -74,11 +105,12 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [respond])
+  }, [respond, tool])
 
   const isExpired = remaining <= 0
   const isUrgent = remaining > 0 && remaining <= 30000
   const showButtons = !answered && !isExpired
+  const showAllowSession = showButtons && isRuleEligibleTool(tool)
   const [dismissed, setDismissed] = useState(false)
 
   if (dismissed) return null
@@ -103,6 +135,17 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
           <button className="btn-allow" onClick={() => respond('allow')} type="button" aria-label={`Allow ${tool}`}>
             Allow
           </button>
+          {showAllowSession && (
+            <button
+              className="btn-allow-session"
+              onClick={() => respond('allowSession')}
+              type="button"
+              aria-label={`Allow ${tool} for this session`}
+              data-testid="btn-allow-session"
+            >
+              Allow for Session
+            </button>
+          )}
           <button className="btn-deny" onClick={() => respond('deny')} type="button" aria-label={`Deny ${tool}`}>
             Deny
           </button>
@@ -119,8 +162,8 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
       )}
 
       {answered && (
-        <div className="perm-answer">
-          {answered === 'allow' ? 'Allowed' : 'Denied'}
+        <div className="perm-answer" data-testid="perm-answer">
+          {answered === 'deny' ? 'Denied' : answered === 'allowSession' ? 'Allowed for session' : 'Allowed'}
         </div>
       )}
     </div>
