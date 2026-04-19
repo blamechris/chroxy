@@ -958,14 +958,6 @@ export function App() {
           data-testid="tunnel-warming-banner"
           role="status"
           aria-live="polite"
-          style={{
-            padding: '0.5rem 1rem',
-            background: '#1a1a2e',
-            color: '#fbbf24',
-            borderBottom: '1px solid #252540',
-            fontSize: '0.85rem',
-            textAlign: 'center',
-          }}
         >
           Tunnel warming up
           {tunnelProgress

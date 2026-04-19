@@ -1519,6 +1519,16 @@
 
 .btn-retry:hover { opacity: 0.85; }
 
+/* ---- Tunnel Warming Banner (#2836) ---- */
+.tunnel-warming-banner {
+  padding: 0.5rem 1rem;
+  background: #1a1a2e;
+  color: #fbbf24;
+  border-bottom: 1px solid #252540;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
 /* Directory Browser (#1434) */
 .directory-browser {
   display: flex;
