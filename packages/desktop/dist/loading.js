@@ -45,19 +45,35 @@
   // When a startup error fires, fetch the last ~30 server log lines and
   // render them in a collapsible details panel with a copy button so the
   // user (or a bug reporter) can see WHY the server failed to start.
+  //
+  // On repeated `server_error` events (issue #2848), we refresh the panel
+  // rather than no-op: the buffer usually grew between fires (new health-
+  // poll attempts, more stderr, updated timestamps), and the user needs
+  // to see the latest picture. We preserve the `open` state of the
+  // <details> element across refreshes so the user's interaction isn't
+  // clobbered when they've already expanded the panel.
   function renderStartupLogs() {
-    // Avoid duplicating if already rendered.
-    if (document.getElementById('startup-logs')) return;
-
     invoke('get_startup_logs', { limit: 30 }).then(function(lines) {
       if (!lines || lines.length === 0) return;
 
       var container = document.getElementById('loading');
       if (!container) return;
 
+      // If a panel was rendered by a previous `server_error`, remember
+      // whether the user had expanded it, then drop the stale DOM node
+      // before rebuilding. This re-triggers the animation and shows a
+      // refreshed line count / log snapshot.
+      var prev = document.getElementById('startup-logs');
+      var wasOpen = false;
+      if (prev) {
+        wasOpen = prev.hasAttribute('open');
+        prev.parentNode.removeChild(prev);
+      }
+
       var details = document.createElement('details');
       details.id = 'startup-logs';
       details.style.cssText = 'margin-top:1.25rem;text-align:left;font-size:0.75rem;';
+      if (wasOpen) details.setAttribute('open', '');
 
       var summary = document.createElement('summary');
       summary.textContent = 'Show server logs (' + lines.length + ' lines)';
