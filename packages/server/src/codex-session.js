@@ -29,7 +29,7 @@ const log = createLogger('codex')
  *   error        { message }
  */
 
-const DEFAULT_MODEL = 'o4-mini'
+const DEFAULT_MODEL = 'gpt-5.4'
 
 const CODEX = resolveBinary('codex', [
   '/opt/homebrew/bin/codex',
