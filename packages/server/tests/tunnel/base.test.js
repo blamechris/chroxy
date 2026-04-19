@@ -2,6 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { BaseTunnelAdapter } from '../../src/tunnel/base.js'
+import { waitForEvent } from '../test-helpers.js'
 
 /**
  * Concrete test adapter with configurable _startTunnel behavior.
@@ -86,9 +87,7 @@ describe('BaseTunnelAdapter', () => {
       const adapter = new TestAdapter({ port: 3000 })
       adapter.recoveryBackoffs = [10, 20, 30]
 
-      const lostPromise = new Promise((resolve) => {
-        adapter.once('tunnel_lost', resolve)
-      })
+      const lostPromise = waitForEvent(adapter, 'tunnel_lost')
 
       // Don't await — let recovery run
       const recoveryPromise = adapter._handleUnexpectedExit(1, null)
@@ -106,9 +105,7 @@ describe('BaseTunnelAdapter', () => {
       const adapter = new TestAdapter({ port: 3000 })
       adapter.recoveryBackoffs = [10, 20, 30]
 
-      const recoveringPromise = new Promise((resolve) => {
-        adapter.once('tunnel_recovering', resolve)
-      })
+      const recoveringPromise = waitForEvent(adapter, 'tunnel_recovering')
 
       const recoveryPromise = adapter._handleUnexpectedExit(1, null)
 
@@ -124,9 +121,7 @@ describe('BaseTunnelAdapter', () => {
       const adapter = new TestAdapter({ port: 3000 })
       adapter.recoveryBackoffs = [10, 20, 30]
 
-      const recoveredPromise = new Promise((resolve) => {
-        adapter.once('tunnel_recovered', resolve)
-      })
+      const recoveredPromise = waitForEvent(adapter, 'tunnel_recovered')
 
       const recovery = adapter._handleUnexpectedExit(1, null)
 
@@ -156,9 +151,7 @@ describe('BaseTunnelAdapter', () => {
       await adapter.start()
       assert.equal(adapter.url, 'https://old.example.com')
 
-      const urlChangedPromise = new Promise((resolve) => {
-        adapter.once('tunnel_url_changed', resolve)
-      })
+      const urlChangedPromise = waitForEvent(adapter, 'tunnel_url_changed')
 
       const recovery = adapter._handleUnexpectedExit(1, null)
 
@@ -179,9 +172,7 @@ describe('BaseTunnelAdapter', () => {
       let urlChangedFired = false
       adapter.on('tunnel_url_changed', () => { urlChangedFired = true })
 
-      const recoveredPromise = new Promise((resolve) => {
-        adapter.once('tunnel_recovered', resolve)
-      })
+      const recoveredPromise = waitForEvent(adapter, 'tunnel_recovered')
 
       const recovery = adapter._handleUnexpectedExit(1, null)
       await recoveredPromise
@@ -197,9 +188,7 @@ describe('BaseTunnelAdapter', () => {
       const adapter = new TestAdapter({ port: 3000 })
       adapter.recoveryBackoffs = [200, 400, 600]
 
-      const recoveringPromise = new Promise((resolve) => {
-        adapter.once('tunnel_recovering', resolve)
-      })
+      const recoveringPromise = waitForEvent(adapter, 'tunnel_recovering')
 
       const recovery = adapter._handleUnexpectedExit(1, null)
       await recoveringPromise
@@ -231,12 +220,8 @@ describe('BaseTunnelAdapter', () => {
       adapter.recoveryBackoffs = [10, 20, 30]
       adapter.maxRetryBackoffMs = 50 // keep long-tail fast for tests
 
-      const failedPromise = new Promise((resolve) => {
-        adapter.once('tunnel_failed', resolve)
-      })
-      const roundExhaustedPromise = new Promise((resolve) => {
-        adapter.once('tunnel_recovery_exhausted_round', resolve)
-      })
+      const failedPromise = waitForEvent(adapter, 'tunnel_failed')
+      const roundExhaustedPromise = waitForEvent(adapter, 'tunnel_recovery_exhausted_round')
 
       // Kick off recovery; don't await — the loop is now infinite.
       const recoveryPromise = adapter._handleUnexpectedExit(1, null)
