@@ -37,10 +37,13 @@ function createMockChild() {
 }
 
 function createReadyCliSession(opts = {}) {
-  // Port must be set so CHROXY_HOOK_SECRET is exported; the integration
-  // code path only looks up a session by hookSecret when the hook has a
-  // secret to present, which mirrors the real runtime.
-  const session = new CliSession({ cwd: '/tmp', port: 8787, ...opts })
+  // Construct without `port` so no permission-hook manager is created.
+  // `_hookSecret` is set unconditionally in the constructor, which is
+  // all this test needs to simulate the ws-permissions lookup path.
+  // Setting `port` would wire a hookManager whose destroy() path reads
+  // and potentially writes the real ~/.claude/settings.json (see Issue
+  // #429 / P1 test-contamination lesson).
+  const session = new CliSession({ cwd: '/tmp', ...opts })
   session._processReady = true
   session._child = createMockChild()
   return session
@@ -220,8 +223,10 @@ describe('Integration: POST /permission pauses CliSession inactivity timer (#284
     assert.equal(session._pendingPermissionIds.size, 2)
     assert.equal(session._resultTimeoutPaused, true)
 
-    // Advance 4 minutes while both are pending — no error.
-    mock.timers.tick(4 * 60_000)
+    // Advance 2 minutes while both are pending — no error.
+    // Stay well under ws-permissions' own 5-min auto-deny TTL so we
+    // exercise the explicit resolvePermission() path, not TTL cleanup.
+    mock.timers.tick(2 * 60_000)
     assert.equal(errors.length, 0)
 
     // Resolve the first — one still pending, timer must stay paused.
@@ -229,10 +234,14 @@ describe('Integration: POST /permission pauses CliSession inactivity timer (#284
     assert.equal(session._pendingPermissionIds.size, 1)
     assert.equal(session._resultTimeoutPaused, true, 'still paused: one permission remains')
 
-    mock.timers.tick(4 * 60_000)
+    // Advance another 2 minutes (total 4 min, still below the 5-min
+    // HTTP TTL so id2 has not auto-denied).
+    mock.timers.tick(2 * 60_000)
     assert.equal(errors.length, 0)
+    assert.equal(session._pendingPermissionIds.has(id2), true, 'id2 still pending (under TTL)')
+    assert.equal(session._resultTimeoutPaused, true, 'still paused before explicit resolve')
 
-    // Resolve the second — timer resumes.
+    // Resolve the second — timer resumes via the explicit resolve path.
     handler.resolvePermission(id2, 'deny')
     assert.equal(session._pendingPermissionIds.size, 0)
     assert.equal(session._resultTimeoutPaused, false)
