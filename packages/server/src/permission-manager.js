@@ -189,6 +189,7 @@ export class PermissionManager extends EventEmitter {
             this._lastPermissionData.delete(requestId)
             this._clearPermissionTimer(requestId)
             resolve({ behavior: 'deny', message: 'Request cancelled' })
+            this.emit('permission_resolved', { requestId, reason: 'aborted' })
           }
         }, { once: true })
       }
@@ -201,6 +202,7 @@ export class PermissionManager extends EventEmitter {
           this._pendingPermissions.delete(requestId)
           this._lastPermissionData.delete(requestId)
           resolve({ behavior: 'deny', message: 'Permission timed out' })
+          this.emit('permission_resolved', { requestId, reason: 'timeout' })
         }
       }, this._timeoutMs)
       this._permissionTimers.set(requestId, timer)
@@ -234,6 +236,7 @@ export class PermissionManager extends EventEmitter {
             this._pendingUserAnswer = null
             this._waitingForAnswer = false
             resolve({ behavior: 'deny', message: 'Cancelled' })
+            this.emit('permission_resolved', { toolUseId, reason: 'aborted' })
           }
         }, { once: true })
       }
@@ -246,6 +249,7 @@ export class PermissionManager extends EventEmitter {
           this._pendingUserAnswer = null
           this._waitingForAnswer = false
           resolve({ behavior: 'deny', message: 'Question timed out' })
+          this.emit('permission_resolved', { toolUseId, reason: 'timeout' })
         }
       }, this._timeoutMs)
     })
@@ -270,6 +274,10 @@ export class PermissionManager extends EventEmitter {
     this._clearPermissionTimer(requestId)
 
     this._logInfo(`Permission ${requestId} resolved: ${decision}`)
+
+    // Emit before resolve() so listeners see the pending-count drop
+    // before any follow-on work runs synchronously.
+    this.emit('permission_resolved', { requestId, reason: decision })
 
     if (decision === 'allow') {
       pending.resolve({ behavior: 'allow', updatedInput: pending.input })
@@ -316,6 +324,11 @@ export class PermissionManager extends EventEmitter {
     this._waitingForAnswer = false
 
     this._logInfo(`Question response received: "${text.slice(0, 60)}"`)
+
+    // Emit before resolve() so listeners (e.g. the SdkSession
+    // inactivity-timer resumer, #2831) see the state flip before any
+    // downstream synchronous work runs.
+    this.emit('permission_resolved', { reason: 'answered' })
 
     // Build structured answers map: SDK expects { [questionText]: selectedLabel }
     const answers = {}
@@ -370,6 +383,12 @@ export class PermissionManager extends EventEmitter {
    * completion or session destruction.
    */
   clearAll() {
+    // Collect requestIds first so we can emit permission_resolved AFTER
+    // the maps are cleared — the SdkSession timeout-pause listener decrements
+    // its counter on each event and should see a consistent final state.
+    const pendingIds = Array.from(this._pendingPermissions.keys())
+    const hadUserAnswer = !!this._pendingUserAnswer
+
     // Auto-deny pending permissions and clear timers
     for (const [requestId, pending] of this._pendingPermissions) {
       this._clearPermissionTimer(requestId)
@@ -385,6 +404,14 @@ export class PermissionManager extends EventEmitter {
       this._pendingUserAnswer = null
     }
     this._waitingForAnswer = false
+
+    // Emit resolved events so listeners reset any paused state (#2831).
+    for (const requestId of pendingIds) {
+      this.emit('permission_resolved', { requestId, reason: 'cleared' })
+    }
+    if (hadUserAnswer) {
+      this.emit('permission_resolved', { reason: 'cleared' })
+    }
   }
 
   /**

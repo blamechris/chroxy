@@ -52,7 +52,7 @@ function sanitizeToolInput(input) {
  * @param {Object|null} opts.pairingManager - PairingManager instance used to look up token→sessionId bindings for the HTTP permission-response fallback. Optional — when null, HTTP responses skip the binding check (single-token mode).
  * @returns {Object} Permission handler methods
  */
-export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager, pairingManager }) {
+export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager, pairingManager, findSessionByHookSecret }) {
   let _permissionCounter = 0
 
   // Rate limiter for HTTP permission requests (per source IP)
@@ -121,6 +121,18 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         || toolInput.query
         || JSON.stringify(toolInput).slice(0, 200)
 
+      // #2831: find the CliSession this hook permission belongs to (via
+      // the per-session hook secret from the Authorization header) so we
+      // can pause its inactivity timer while the user decides.
+      const authHeader = (req.headers && req.headers['authorization']) || ''
+      const hookToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+      const ownerSession = (hookToken && typeof findSessionByHookSecret === 'function')
+        ? findSessionByHookSecret(hookToken)
+        : null
+      if (ownerSession && typeof ownerSession.notifyPermissionPending === 'function') {
+        ownerSession.notifyPermissionPending(requestId)
+      }
+
       broadcastFn({
         type: 'permission_request',
         requestId,
@@ -140,6 +152,11 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         if (timer) clearTimeout(timer)
         pendingPermissions.delete(requestId)
         permissionSessionMap.delete(requestId)
+        // #2831: release the inactivity-timer pause, regardless of
+        // whether we're cleaning up from a resolve, timeout, or abort.
+        if (ownerSession && typeof ownerSession.notifyPermissionResolved === 'function') {
+          ownerSession.notifyPermissionResolved(requestId)
+        }
       }
 
       const onClose = () => {
