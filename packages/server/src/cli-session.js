@@ -88,8 +88,6 @@ export class CliSession extends BaseSession {
     // permission belonging to this session is broadcast/resolved.
     this._pendingPermissionIds = new Set()
     this._resultTimeoutPaused = false
-    this._resultTimeoutMessageId = null
-    this._resultTimeoutStreamStarted = null
   }
 
   get sessionId() {
@@ -331,7 +329,6 @@ export class CliSession extends BaseSession {
     // Safety timeout: force-clear if result never arrives (5 min).
     // Paused while permission prompts are outstanding (#2831): awaiting
     // user input on a permission is NOT "inactivity".
-    this._resultTimeoutMessageId = this._currentMessageId
     this._armResultTimeout()
   }
 
@@ -661,7 +658,6 @@ export class CliSession extends BaseSession {
     // Reset permission pause bookkeeping — the next message starts fresh.
     this._pendingPermissionIds.clear()
     this._resultTimeoutPaused = false
-    this._resultTimeoutMessageId = null
     // If plan mode is active but ExitPlanMode never arrived (interrupt/crash),
     // the flag is stale — reset it. In normal flow, _planAllowedPrompts is
     // non-null (set by ExitPlanMode) and plan_ready has already been emitted

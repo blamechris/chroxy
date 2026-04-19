@@ -702,24 +702,6 @@ export class SdkSession extends BaseSession {
   }
 
   /**
-   * Test helper: arm a result timeout without going through sendMessage.
-   * Lets unit tests exercise the timeout path in isolation.
-   * @private
-   */
-  _armResultTimeoutForTest(messageId, hasStreamStarted = false) {
-    const reset = () => {
-      if (this._resultTimeout) clearTimeout(this._resultTimeout)
-      this._resultTimeout = null
-      if (this._resultTimeoutPaused) return
-      this._resultTimeout = setTimeout(() => {
-        this._handleResultTimeout(messageId, hasStreamStarted)
-      }, 300_000)
-    }
-    this._resetResultTimeout = reset
-    reset()
-  }
-
-  /**
    * Clear per-message state, marking us as ready for the next message.
    */
   _clearMessageState() {
@@ -761,4 +743,27 @@ export class SdkSession extends BaseSession {
     this._processReady = false
     this.removeAllListeners()
   }
+}
+
+/**
+ * Test helper: arm a result timeout on an SdkSession without going through
+ * sendMessage(). Lets unit tests exercise the 5-minute inactivity-timeout
+ * path in isolation. Lives as a module-level export rather than a class
+ * method so production code paths never touch test scaffolding.
+ *
+ * @param {SdkSession} session
+ * @param {string} messageId
+ * @param {boolean} [hasStreamStarted=false]
+ */
+export function armResultTimeoutForTest(session, messageId, hasStreamStarted = false) {
+  const reset = () => {
+    if (session._resultTimeout) clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+    if (session._resultTimeoutPaused) return
+    session._resultTimeout = setTimeout(() => {
+      session._handleResultTimeout(messageId, hasStreamStarted)
+    }, 300_000)
+  }
+  session._resetResultTimeout = reset
+  reset()
 }
