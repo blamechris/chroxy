@@ -42,6 +42,30 @@ function getDefaultCachePath() {
 }
 
 /**
+ * Canonical JSON stringifier — sorts object keys recursively so equivalent
+ * data produces an identical string regardless of construction order.
+ *
+ * Used by the registry's snapshotString() to dedupe saveCache() writes. The
+ * JS spec guarantees insertion-order key iteration, but relying on that to
+ * compare payloads is fragile: any future refactor that builds model objects
+ * via `{...m, contextWindow}` spreads or object-rest patterns could silently
+ * shuffle keys and defeat the snapshot equality check. Sorting keys makes
+ * the snapshot invariant to construction order.
+ *
+ * Exported for tests.
+ */
+export function canonicalStringify(value) {
+  if (Array.isArray(value)) {
+    return '[' + value.map(canonicalStringify).join(',') + ']'
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort()
+    return '{' + keys.map(k => JSON.stringify(k) + ':' + canonicalStringify(value[k])).join(',') + '}'
+  }
+  return JSON.stringify(value)
+}
+
+/**
  * Derive a human-readable label from a stripped model ID.
  * E.g. "opus-4-5-20251101" → "Opus 4.5", "sonnet-4-20250514" → "Sonnet 4"
  */
@@ -105,7 +129,7 @@ export function createModelsRegistry() {
   }
 
   function snapshotString() {
-    return JSON.stringify({ models: activeModels, defaultModelId })
+    return canonicalStringify({ models: activeModels, defaultModelId })
   }
 
   rebuildLookups(FALLBACK_MODELS)
