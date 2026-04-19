@@ -148,11 +148,17 @@ impl ServerManager {
     /// Maximum auto-restart attempts before giving up.
     pub const MAX_RESTART_ATTEMPTS: u32 = 3;
 
+    /// Ring-buffer ceiling for captured server/health logs. Shared by the
+    /// child-stdout drain, child-stderr drain, and health-poll thread so
+    /// any source can push up to this many lines before the oldest is
+    /// evicted.
+    pub const MAX_LOG_LINES: usize = 100;
+
     pub fn new() -> Self {
         Self {
             status: Arc::new(Mutex::new(ServerStatus::Stopped)),
             child: None,
-            log_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(100))),
+            log_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(Self::MAX_LOG_LINES))),
             node_path: None,
             config: ChroxyConfig::default(),
             tunnel_mode: "quick".to_string(),
@@ -205,13 +211,13 @@ impl ServerManager {
     }
 
     /// Append a single log line to the shared buffer, enforcing the
-    /// 100-line ring-buffer ceiling. Used by the health-poll thread so
-    /// that timeouts, connect-refused errors, and non-200 responses
-    /// surface in `get_startup_logs` alongside child stdout/stderr
+    /// `MAX_LOG_LINES` ring-buffer ceiling. Shared by the child stdout
+    /// drain, child stderr drain, and the health-poll thread so all three
+    /// sources surface in `get_startup_logs` with one consistent cap
     /// (issue #2846).
     fn push_log_line(buf: &Arc<Mutex<VecDeque<String>>>, line: String) {
         let mut logs = lock_or_recover(buf);
-        if logs.len() >= 100 {
+        if logs.len() >= Self::MAX_LOG_LINES {
             logs.pop_front();
         }
         logs.push_back(line);
@@ -540,33 +546,27 @@ impl ServerManager {
             .spawn()
             .map_err(|e| format!("Failed to spawn server: {}", e))?;
 
-        // Capture stdout in background thread
+        // Capture stdout in background thread. Unprefixed — stdout is the
+        // default source; stderr and health-poll lines are source-tagged.
         let log_buf = self.log_buffer.clone();
         if let Some(stdout) = child.stdout.take() {
             let buf = log_buf.clone();
             thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().map_while(Result::ok) {
-                    let mut logs = lock_or_recover(&buf);
-                    if logs.len() >= 100 {
-                        logs.pop_front();
-                    }
-                    logs.push_back(line);
+                    Self::push_log_line(&buf, line);
                 }
             });
         }
 
-        // Capture stderr in background thread
+        // Capture stderr in background thread, prefixed so operators can
+        // distinguish normal stdout from error output in the log panel.
         if let Some(stderr) = child.stderr.take() {
             let buf = log_buf;
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
-                    let mut logs = lock_or_recover(&buf);
-                    if logs.len() >= 100 {
-                        logs.pop_front();
-                    }
-                    logs.push_back(format!("[stderr] {}", line));
+                    Self::push_log_line(&buf, format!("[stderr] {}", line));
                 }
             });
         }
@@ -1075,14 +1075,16 @@ mod tests {
     #[test]
     fn push_log_line_enforces_100_line_ceiling() {
         let mgr = ServerManager::new();
-        for i in 0..150 {
+        let cap = ServerManager::MAX_LOG_LINES;
+        let overflow = 50usize;
+        for i in 0..(cap + overflow) {
             ServerManager::push_log_line(&mgr.log_buffer, format!("line {}", i));
         }
         let logs = mgr.get_logs();
-        assert_eq!(logs.len(), 100, "buffer must cap at 100 lines");
-        // Oldest 50 lines dropped; buffer should start at "line 50".
-        assert_eq!(logs.first().unwrap(), "line 50");
-        assert_eq!(logs.last().unwrap(), "line 149");
+        assert_eq!(logs.len(), cap, "buffer must cap at MAX_LOG_LINES");
+        // Oldest `overflow` lines dropped; buffer should start at "line {overflow}".
+        assert_eq!(logs.first().unwrap(), &format!("line {}", overflow));
+        assert_eq!(logs.last().unwrap(), &format!("line {}", cap + overflow - 1));
     }
 
     #[test]
@@ -1090,9 +1092,11 @@ mod tests {
         // Simulate what the `get_startup_logs` command does: take the last N
         // lines of the buffer after health-poll lines have been pushed.
         let mgr = ServerManager::new();
-        // Simulate a stdout line (as the drain thread would push)
-        ServerManager::push_log_line(&mgr.log_buffer, "[stdout] server starting".to_string());
-        // Simulate health-poll lines landing in the same buffer
+        // Simulate a stdout line (as the drain thread would push — unprefixed).
+        ServerManager::push_log_line(&mgr.log_buffer, "server starting".to_string());
+        // Simulate a stderr line (as the drain thread would push — [stderr] prefixed).
+        ServerManager::push_log_line(&mgr.log_buffer, "[stderr] warning: bind".to_string());
+        // Simulate health-poll lines landing in the same buffer.
         ServerManager::push_log_line(
             &mgr.log_buffer,
             "[health] attempt #1 GET http://127.0.0.1:8765/ -> Err(connection refused) (2ms)"
@@ -1110,8 +1114,9 @@ mod tests {
         let start = all.len().saturating_sub(n);
         let tail: Vec<String> = all[start..].to_vec();
 
-        assert_eq!(tail.len(), 3);
-        assert!(tail.iter().any(|l| l.starts_with("[stdout]")));
+        assert_eq!(tail.len(), 4);
+        assert!(tail.iter().any(|l| l == "server starting"));
+        assert!(tail.iter().any(|l| l.starts_with("[stderr]")));
         assert!(tail.iter().any(|l| l.contains("connection refused")));
         assert!(tail.iter().any(|l| l.contains("TIMEOUT after 60s")));
     }
