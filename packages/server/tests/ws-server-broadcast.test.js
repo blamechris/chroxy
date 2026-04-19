@@ -893,6 +893,58 @@ describe('public broadcast method', () => {
 
     ws.close()
   })
+
+  // #2849: gate messages whose shape would confuse old clients.
+  // Old (v1) dashboards render `server_status { phase: 'tunnel_warming' }`
+  // as a chat message because they only read `msg.message`. The server
+  // must only deliver the structured form to clients that negotiated a
+  // protocolVersion >= 2.
+  it('broadcastMinProtocolVersion() skips clients below the minimum', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    // Old client: authenticates without advertising protocolVersion →
+    // server pins client to MIN_PROTOCOL_VERSION (1).
+    const oldClient = await createClient(port, false)
+    send(oldClient.ws, { type: 'auth', token: 'test-token' })
+    await waitForMessage(oldClient.messages, 'auth_ok', 2000)
+
+    // New client: advertises v2.
+    const newClient = await createClient(port, false)
+    send(newClient.ws, { type: 'auth', token: 'test-token', protocolVersion: 2 })
+    await waitForMessage(newClient.messages, 'auth_ok', 2000)
+
+    server.broadcastMinProtocolVersion(2, {
+      type: 'server_status',
+      phase: 'tunnel_warming',
+      tunnelMode: 'quick',
+      tunnelUrl: 'https://example.trycloudflare.com',
+      message: 'Tunnel warming up…',
+    })
+
+    // Give the server a moment to deliver.
+    await new Promise((r) => setTimeout(r, 100))
+
+    const oldGotWarming = oldClient.messages.find(
+      (m) => m.type === 'server_status' && m.phase === 'tunnel_warming',
+    )
+    const newGotWarming = newClient.messages.find(
+      (m) => m.type === 'server_status' && m.phase === 'tunnel_warming',
+    )
+
+    assert.equal(oldGotWarming, undefined, 'v1 client should NOT receive tunnel_warming — would be mis-rendered as chat')
+    assert.ok(newGotWarming, 'v2 client should receive tunnel_warming')
+    assert.equal(newGotWarming.phase, 'tunnel_warming')
+
+    oldClient.ws.close()
+    newClient.ws.close()
+  })
 })
 
 // ---------------------------------------------------------------------------

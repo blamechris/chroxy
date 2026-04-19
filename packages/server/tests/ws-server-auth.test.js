@@ -460,11 +460,11 @@ describe('WsServer with authRequired: true (default behavior)', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token', protocolVersion: 1 })
+    send(ws, { type: 'auth', token: 'test-token', protocolVersion: SERVER_PROTOCOL_VERSION })
 
     const authOk = await waitForMessage(messages, 'auth_ok', 2000)
     assert.ok(authOk, 'Should receive auth_ok')
-    assert.equal(authOk.protocolVersion, 1, 'auth_ok should include server protocolVersion')
+    assert.equal(authOk.protocolVersion, SERVER_PROTOCOL_VERSION, 'auth_ok should include server protocolVersion')
     assert.equal(typeof authOk.minProtocolVersion, 'number', 'auth_ok should include minProtocolVersion')
     assert.equal(typeof authOk.maxProtocolVersion, 'number', 'auth_ok should include maxProtocolVersion')
     assert.ok(authOk.minProtocolVersion <= authOk.protocolVersion, 'min <= server version')
@@ -489,10 +489,12 @@ describe('WsServer with authRequired: true (default behavior)', () => {
 
     const authOk = await waitForMessage(messages, 'auth_ok', 2000)
     assert.ok(authOk, 'Should receive auth_ok')
-    // Should default to version 1 for backward compatibility
-    assert.equal(authOk.protocolVersion, 1, 'Should default to v1 for old clients')
-    assert.equal(authOk.minProtocolVersion, 1)
-    assert.equal(authOk.maxProtocolVersion, 1)
+    // auth_ok always echoes the server's own version; the client is
+    // separately pinned to MIN_PROTOCOL_VERSION when it omits the field
+    // (see "stores client protocol version" below).
+    assert.equal(authOk.protocolVersion, SERVER_PROTOCOL_VERSION, 'Server advertises its own protocolVersion')
+    assert.equal(authOk.minProtocolVersion, MIN_PROTOCOL_VERSION)
+    assert.equal(authOk.maxProtocolVersion, SERVER_PROTOCOL_VERSION)
 
     ws.close()
   })
@@ -508,11 +510,11 @@ describe('WsServer with authRequired: true (default behavior)', () => {
     const port = await startServerAndGetPort(server)
 
     const { ws, messages } = await createClient(port, false)
-    send(ws, { type: 'auth', token: 'test-token', protocolVersion: 1 })
+    send(ws, { type: 'auth', token: 'test-token', protocolVersion: MIN_PROTOCOL_VERSION })
 
     await waitForMessage(messages, 'auth_ok', 2000)
     const client = Array.from(server.clients.values())[0]
-    assert.equal(client.protocolVersion, 1, 'Client protocolVersion should be stored')
+    assert.equal(client.protocolVersion, MIN_PROTOCOL_VERSION, 'Client protocolVersion should be stored')
 
     ws.close()
   })

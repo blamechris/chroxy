@@ -538,11 +538,17 @@ export async function startCliServer(config) {
     // #2836: phase 'tunnel_warming' is the current wire name. The
     // previous name 'tunnel_verifying' is still accepted by the dashboard
     // handler for backward compatibility with in-flight clients.
-    wsServer.broadcast(buildTunnelWarmingStatus({ tunnelMode: tunnelArg.mode, tunnelUrl: httpUrl }))
+    //
+    // #2849: gate on protocolVersion >= 2. v1 dashboards render unknown
+    // `server_status` payloads as chat messages because they only read
+    // `msg.message` (falls through to the legacy plain-status branch).
+    // The structured phase field is a v2 addition.
+    wsServer.broadcastMinProtocolVersion(2, buildTunnelWarmingStatus({ tunnelMode: tunnelArg.mode, tunnelUrl: httpUrl }))
     try {
       await waitForTunnel(httpUrl, {
         onAttempt: (attempt, maxAttempts) => {
-          wsServer.broadcast(
+          wsServer.broadcastMinProtocolVersion(
+            2,
             buildTunnelWarmingStatus({
               tunnelMode: tunnelArg.mode,
               tunnelUrl: httpUrl,
@@ -563,7 +569,7 @@ export async function startCliServer(config) {
       process.exitCode = 1
       return
     }
-    wsServer.broadcast(buildTunnelReadyStatus({ tunnelUrl: httpUrl }))
+    wsServer.broadcastMinProtocolVersion(2, buildTunnelReadyStatus({ tunnelUrl: httpUrl }))
 
     // 7. Generate connection info
     const modeLabel = `cloudflare:${tunnelArg.mode}`

@@ -69,7 +69,7 @@ const log = createLogger('ws')
  *
  * See also: #1058 (enforce MIN_PROTOCOL_VERSION during auth)
  */
-export const SERVER_PROTOCOL_VERSION = 1
+export const SERVER_PROTOCOL_VERSION = 2
 /** Minimum protocol version this server can speak */
 export const MIN_PROTOCOL_VERSION = 1
 
@@ -81,6 +81,13 @@ export const MIN_PROTOCOL_VERSION = 1
  *   All subsequent additive message types (e.g. plan_started, plan_ready,
  *   models_updated, client_focus_changed) do NOT bump the version per the
  *   breaking-changes-only policy above.
+ *
+ * v2 (#2849) — `server_status` gained a structured `phase` field
+ *   ('tunnel_warming' | 'ready') that v1 dashboards don't know how to
+ *   render. The server still emits plain (phase-less) `server_status`
+ *   text to v1 clients, and only emits the structured phase form to
+ *   v2+ clients. Gating happens at the broadcast site in server-cli.js
+ *   via the minProtocolVersion filter on WsBroadcaster.
  */
 
 /** Cached latest version from npm registry (null if unavailable) */
@@ -1097,6 +1104,14 @@ export class WsServer {
   /** Public broadcast: send a message to all authenticated clients */
   broadcast(message) {
     this._broadcaster.broadcast(message)
+  }
+
+  /**
+   * Broadcast a message only to authenticated clients that advertised at
+   * least `minProtocolVersion` during auth. See WsBroadcaster for details.
+   */
+  broadcastMinProtocolVersion(minProtocolVersion, message) {
+    this._broadcaster.broadcastMinProtocolVersion(minProtocolVersion, message)
   }
 
   /** Broadcast a message to all authenticated clients matching a filter */
