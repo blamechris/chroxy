@@ -33,6 +33,16 @@ function formatCountdown(ms: number): string {
   return `${mins}:${secs < 10 ? '0' : ''}${secs}`
 }
 
+/**
+ * #2840: detect Mac vs non-Mac for keyboard hint rendering. Falls back to
+ * non-Mac shortcut label when `navigator` is unavailable (SSR / tests).
+ */
+function isMacPlatform(): boolean {
+  if (typeof navigator === 'undefined') return false
+  const ua = navigator.userAgent || ''
+  return /Mac|iPod|iPhone|iPad/.test(ua)
+}
+
 export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond }: PermissionPromptProps) {
   const [remaining, setRemaining] = useState(remainingMs)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -113,6 +123,12 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   const showAllowSession = showButtons && isRuleEligibleTool(tool)
   const [dismissed, setDismissed] = useState(false)
 
+  // #2840: keyboard hint labels near the Allow / Allow-for-Session buttons
+  // so the Cmd/Ctrl+Y and Cmd/Ctrl+Shift+Y shortcuts are discoverable.
+  const isMac = isMacPlatform()
+  const allowHint = isMac ? '\u2318Y' : 'Ctrl+Y'
+  const allowSessionHint = isMac ? '\u2318\u21E7Y' : 'Ctrl+Shift+Y'
+
   if (dismissed) return null
 
   return (
@@ -131,25 +147,46 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
       )}
 
       {showButtons && (
-        <div className="perm-buttons">
-          <button className="btn-allow" onClick={() => respond('allow')} type="button" aria-label={`Allow ${tool}`}>
-            Allow
-          </button>
-          {showAllowSession && (
+        <>
+          <div className="perm-buttons">
             <button
-              className="btn-allow-session"
-              onClick={() => respond('allowSession')}
+              className="btn-allow"
+              onClick={() => respond('allow')}
               type="button"
-              aria-label={`Allow ${tool} for this session`}
-              data-testid="btn-allow-session"
+              aria-label={`Allow ${tool}`}
+              title={`Allow (${allowHint})`}
             >
-              Allow for Session
+              Allow
             </button>
-          )}
-          <button className="btn-deny" onClick={() => respond('deny')} type="button" aria-label={`Deny ${tool}`}>
-            Deny
-          </button>
-        </div>
+            {showAllowSession && (
+              <button
+                className="btn-allow-session"
+                onClick={() => respond('allowSession')}
+                type="button"
+                aria-label={`Allow ${tool} for this session`}
+                data-testid="btn-allow-session"
+                title={`Allow for Session (${allowSessionHint})`}
+              >
+                Allow for Session
+              </button>
+            )}
+            <button className="btn-deny" onClick={() => respond('deny')} type="button" aria-label={`Deny ${tool}`}>
+              Deny
+            </button>
+          </div>
+          <div className="perm-shortcut-hints" data-testid="perm-shortcut-hints" aria-hidden="true">
+            <span className="perm-shortcut">
+              <kbd className="perm-kbd">{allowHint}</kbd>
+              <span className="perm-shortcut-label">allow</span>
+            </span>
+            {showAllowSession && (
+              <span className="perm-shortcut">
+                <kbd className="perm-kbd">{allowSessionHint}</kbd>
+                <span className="perm-shortcut-label">session</span>
+              </span>
+            )}
+          </div>
+        </>
       )}
 
       {isExpired && !answered && (

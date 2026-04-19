@@ -775,3 +775,132 @@ describe('PermissionPrompt — Allow for Session button (#2834)', () => {
     expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Keyboard shortcut hints (#2840)
+// ---------------------------------------------------------------------------
+describe('PermissionPrompt — keyboard shortcut hints (#2840)', () => {
+  const originalUA = Object.getOwnPropertyDescriptor(window.navigator, 'userAgent')
+
+  function setUserAgent(ua: string) {
+    Object.defineProperty(window.navigator, 'userAgent', {
+      value: ua,
+      configurable: true,
+    })
+  }
+
+  afterEach(() => {
+    if (originalUA) {
+      Object.defineProperty(window.navigator, 'userAgent', originalUA)
+    }
+  })
+
+  it('renders Mac shortcut hint (\u2318Y) on Mac platforms', () => {
+    setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description="run command"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    const hints = screen.getByTestId('perm-shortcut-hints')
+    expect(hints).toBeInTheDocument()
+    expect(hints.textContent).toContain('\u2318Y')
+  })
+
+  it('renders non-Mac shortcut hint (Ctrl+Y) on Windows/Linux platforms', () => {
+    setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description="run command"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    const hints = screen.getByTestId('perm-shortcut-hints')
+    expect(hints).toBeInTheDocument()
+    expect(hints.textContent).toContain('Ctrl+Y')
+    expect(hints.textContent).not.toContain('\u2318')
+  })
+
+  it('renders allowSession hint (\u2318\u21E7Y) on Mac for rule-eligible tools', () => {
+    setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="read"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    const hints = screen.getByTestId('perm-shortcut-hints')
+    expect(hints.textContent).toContain('\u2318\u21E7Y')
+  })
+
+  it('renders allowSession hint (Ctrl+Shift+Y) on non-Mac for rule-eligible tools', () => {
+    setUserAgent('Mozilla/5.0 (X11; Linux x86_64)')
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="read"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    const hints = screen.getByTestId('perm-shortcut-hints')
+    expect(hints.textContent).toContain('Ctrl+Shift+Y')
+  })
+
+  it('omits allowSession hint for tools that are not rule-eligible', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description="run"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    const hints = screen.getByTestId('perm-shortcut-hints')
+    // Only "allow" hint should be present, no "session" sibling.
+    expect(hints.textContent).toContain('allow')
+    expect(hints.textContent).not.toContain('session')
+  })
+
+  it('hides shortcut hints once the prompt is resolved', () => {
+    mockStoreState.resolvedPermissions = { 'req-1': 'allow' }
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="t"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('perm-shortcut-hints')).not.toBeInTheDocument()
+  })
+
+  it('hides shortcut hints once the prompt is expired', () => {
+    vi.useFakeTimers()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="t"
+        remainingMs={2000}
+        onRespond={vi.fn()}
+      />
+    )
+    act(() => { vi.advanceTimersByTime(3000) })
+    expect(screen.queryByTestId('perm-shortcut-hints')).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+})

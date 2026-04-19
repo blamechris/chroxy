@@ -1721,6 +1721,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
               (n) => n.requestId !== expiredRequestId
             ),
           }));
+          // #2839: surface a user-centric info toast confirming the
+          // response was already recorded, without exposing the underlying
+          // server-side expiration race as an error-like message.
+          get().addInfoNotification('Already answered — your response was already recorded');
           break;
         }
         console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);

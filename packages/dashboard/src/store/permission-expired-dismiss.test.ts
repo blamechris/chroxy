@@ -1,7 +1,7 @@
 /**
  * Tests that permission_expired messages auto-dismiss matching notification banners (#1580)
  */
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setStore, handleMessage, setConnectionContext } from './message-handler'
 import type { ConnectionState, SessionNotification } from './types'
 
@@ -96,5 +96,89 @@ describe('permission_expired auto-dismisses notification banner (#1580)', () => 
 
     const remaining = store.getState().sessionNotifications
     expect(remaining).toHaveLength(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #2839: surface an info toast when permission_expired arrives for a
+// requestId that the user already resolved locally (race condition with
+// server-side expiry).
+// ---------------------------------------------------------------------------
+describe('permission_expired info toast for resolved requests (#2839)', () => {
+  it('fires addInfoNotification when the requestId is in resolvedPermissions', () => {
+    const addInfoNotification = vi.fn()
+    const store = createMockStore({
+      activeSessionId: 'sess-1',
+      sessionNotifications: [],
+      resolvedPermissions: { 'req-abc': 'allow' },
+      addInfoNotification,
+      sessionStates: {
+        'sess-1': { messages: [] },
+      } as unknown as ConnectionState['sessionStates'],
+    })
+    setStore(store)
+    setConnectionContext(mockCtx)
+
+    handleMessage({
+      type: 'permission_expired',
+      requestId: 'req-abc',
+      message: 'Permission timed out',
+    }, mockCtx)
+
+    expect(addInfoNotification).toHaveBeenCalledTimes(1)
+    expect(addInfoNotification.mock.calls[0]![0]).toMatch(/already answered/i)
+  })
+
+  it('does NOT fire the info toast for unresolved requestIds', () => {
+    const addInfoNotification = vi.fn()
+    const store = createMockStore({
+      activeSessionId: 'sess-1',
+      sessionNotifications: [],
+      resolvedPermissions: {},
+      addInfoNotification,
+      sessionStates: {
+        'sess-1': {
+          messages: [
+            { type: 'prompt', content: 'Allow write?', requestId: 'req-abc', options: ['allow', 'deny'] },
+          ],
+        },
+      } as unknown as ConnectionState['sessionStates'],
+    })
+    setStore(store)
+    setConnectionContext(mockCtx)
+
+    handleMessage({
+      type: 'permission_expired',
+      requestId: 'req-abc',
+      message: 'Permission timed out',
+    }, mockCtx)
+
+    expect(addInfoNotification).not.toHaveBeenCalled()
+  })
+
+  it('still dismisses the matching session notification banner for resolved ids', () => {
+    const addInfoNotification = vi.fn()
+    const store = createMockStore({
+      activeSessionId: 'sess-1',
+      sessionNotifications: [
+        makeNotification({ id: 'n-1', requestId: 'req-abc' }),
+      ],
+      resolvedPermissions: { 'req-abc': 'allow' },
+      addInfoNotification,
+      sessionStates: {
+        'sess-1': { messages: [] },
+      } as unknown as ConnectionState['sessionStates'],
+    })
+    setStore(store)
+    setConnectionContext(mockCtx)
+
+    handleMessage({
+      type: 'permission_expired',
+      requestId: 'req-abc',
+      message: 'Permission timed out',
+    }, mockCtx)
+
+    expect(store.getState().sessionNotifications).toHaveLength(0)
+    expect(addInfoNotification).toHaveBeenCalled()
   })
 })
