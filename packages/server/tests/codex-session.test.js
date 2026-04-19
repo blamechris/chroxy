@@ -195,7 +195,7 @@ describe('CodexSession', () => {
   describe('constructor', () => {
     it('uses default model when none supplied', () => {
       const session = new CodexSession({ cwd: '/tmp' })
-      assert.equal(session.model, 'o4-mini')
+      assert.equal(session.model, 'gpt-5.4')
     })
 
     it('accepts a model override', () => {
@@ -303,7 +303,7 @@ describe('CodexSession', () => {
       session._isBusy = true
       session.setModel('o3')
       // Model should remain unchanged because base class guards on _isBusy
-      assert.equal(session.model, 'o4-mini')
+      assert.equal(session.model, 'gpt-5.4')
     })
 
     it('model remains the same when setting the same value', () => {
