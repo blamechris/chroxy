@@ -1,8 +1,9 @@
-import { describe, it, mock } from 'node:test'
+import { describe, it, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 /**
  * ws-forwarding.js unit tests (#1732, #2376)
@@ -620,5 +621,106 @@ describe('executeRegistrations (via setupCliForwarding)', () => {
 
     assert.equal(ctx.permissionSessionMap.size, 0)
     assert.equal(ctx.questionSessionMap.size, 0)
+  })
+})
+
+describe('[session-binding-create] diagnostic log (#2832, #2855)', () => {
+  let currentListener = null
+  afterEach(() => {
+    if (currentListener) {
+      removeLogListener(currentListener)
+      currentListener = null
+    }
+  })
+
+  it('emits [session-binding-create] when SDK permission_request is registered with the event sessionId', () => {
+    const entries = []
+    currentListener = (e) => entries.push(e)
+    addLogListener(currentListener)
+
+    const ctx = makeCtx()
+    setupForwarding(ctx)
+
+    ctx.sessionManager.emit('session_event', {
+      sessionId: 'sess-create-1',
+      event: 'permission_request',
+      data: {
+        requestId: 'req-create-1',
+        tool: 'Write',
+        description: '/tmp/foo',
+        input: {},
+        remainingMs: 300_000,
+      },
+    })
+
+    const createLog = entries.find((e) =>
+      e.level === 'info' && e.message.includes('[session-binding-create]'),
+    )
+    assert.ok(createLog, 'expected a [session-binding-create] info log entry')
+    // Correlation key (requestId) and origin session must both be present for
+    // grep-based triage of #2832 SESSION_TOKEN_MISMATCH rejections.
+    assert.match(createLog.message, /permission req-create-1 created/)
+    assert.match(createLog.message, /sessionId=sess-create-1/)
+    // The map must also reflect the registration so downstream
+    // [session-binding-resend] uses the same origin session id.
+    assert.equal(ctx.permissionSessionMap.get('req-create-1'), 'sess-create-1')
+  })
+
+  it('emits [session-binding-create] with registration-provided value when the normalizer overrides sessionId', () => {
+    const entries = []
+    currentListener = (e) => entries.push(e)
+    addLogListener(currentListener)
+
+    const ctx = makeCtx()
+    setupForwarding(ctx)
+
+    // Register a custom event type whose registration carries an explicit
+    // sessionId value — the create log must honour that override, because
+    // the permission actually belongs to that nested session.
+    ctx.normalizer.registerEventType('nested_perm', (data) => ({
+      messages: [{ msg: { type: 'permission_request', requestId: data.requestId } }],
+      registrations: [{ map: 'permission', key: data.requestId, value: data.originSessionId }],
+    }))
+
+    ctx.sessionManager.emit('session_event', {
+      sessionId: 'sess-outer',
+      event: 'nested_perm',
+      data: { requestId: 'req-nested-1', originSessionId: 'sess-inner' },
+    })
+
+    const createLog = entries.find((e) =>
+      e.level === 'info' && e.message.includes('[session-binding-create]'),
+    )
+    assert.ok(createLog, 'expected a [session-binding-create] info log entry for nested registration')
+    assert.match(createLog.message, /sessionId=sess-inner/)
+    assert.equal(ctx.permissionSessionMap.get('req-nested-1'), 'sess-inner')
+
+    ctx.normalizer.destroy()
+  })
+
+  it('does not emit [session-binding-create] for question registrations', () => {
+    const entries = []
+    currentListener = (e) => entries.push(e)
+    addLogListener(currentListener)
+
+    const ctx = makeCtx()
+    setupForwarding(ctx)
+
+    ctx.sessionManager.emit('session_event', {
+      sessionId: 'sess-q-1',
+      event: 'user_question',
+      data: {
+        toolUseId: 'tool-q-1',
+        questions: ['Go ahead?'],
+      },
+    })
+
+    const createLog = entries.find((e) =>
+      e.level === 'info' && e.message.includes('[session-binding-create]'),
+    )
+    assert.equal(createLog, undefined,
+      'question registrations must not emit the permission-scoped diagnostic log')
+    // Sanity: the question registration itself still happened
+    assert.equal(ctx.questionSessionMap.get('tool-q-1'), 'sess-q-1')
   })
 })
