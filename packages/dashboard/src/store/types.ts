@@ -311,7 +311,10 @@ export interface ConnectionState {
   webTasks: WebTask[];
 
   // Server startup phase (from server_status events)
-  serverPhase: 'tunnel_verifying' | 'ready' | null;
+  // #2836: 'tunnel_warming' is the current name for the DNS-propagation
+  // window; 'tunnel_verifying' is retained as a legacy alias that
+  // message-handler normalizes to 'tunnel_warming'.
+  serverPhase: 'tunnel_warming' | 'tunnel_verifying' | 'ready' | null;
   tunnelProgress: { attempt: number; maxAttempts: number } | null;
 
   // Shutdown state (reason + ETA for restarting banner countdown)

@@ -486,11 +486,22 @@ export async function startCliServer(config) {
     // 6. Wait for tunnel to be fully routable (DNS propagation)
     // UX landmine #4: waitForTunnel now throws TUNNEL_NOT_ROUTABLE
     // instead of silently proceeding with a broken QR.
-    wsServer.broadcast({ type: 'server_status', phase: 'tunnel_verifying', tunnelMode: tunnelArg.mode, message: 'Verifying tunnel reachability...' })
+    // #2836: phase 'tunnel_warming' is the current wire name. The
+    // previous name 'tunnel_verifying' is still accepted by the dashboard
+    // handler for backward compatibility with in-flight clients.
+    wsServer.broadcast({ type: 'server_status', phase: 'tunnel_warming', tunnelMode: tunnelArg.mode, tunnelUrl: httpUrl, message: 'Tunnel warming up…' })
     try {
       await waitForTunnel(httpUrl, {
         onAttempt: (attempt, maxAttempts) => {
-          wsServer.broadcast({ type: 'server_status', phase: 'tunnel_verifying', tunnelMode: tunnelArg.mode, attempt, maxAttempts, message: `Verifying tunnel reachability... (${attempt}/${maxAttempts})` })
+          wsServer.broadcast({
+            type: 'server_status',
+            phase: 'tunnel_warming',
+            tunnelMode: tunnelArg.mode,
+            tunnelUrl: httpUrl,
+            attempt,
+            maxAttempts,
+            message: `Tunnel warming up… (${attempt}/${maxAttempts})`,
+          })
         },
       })
     } catch (tunnelErr) {

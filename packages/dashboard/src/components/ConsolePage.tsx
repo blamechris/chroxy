@@ -26,7 +26,10 @@ export function ConsolePage() {
   const tunnelProgress = useConnectionStore((s) => s.tunnelProgress)
 
   // WS-driven tunnel setup takes priority over polling-based state
-  const isTunnelVerifying = serverPhase === 'tunnel_verifying'
+  // #2836: 'tunnel_warming' is the current phase; 'tunnel_verifying'
+  // is a retained legacy name.
+  const isTunnelVerifying =
+    serverPhase === 'tunnel_warming' || serverPhase === 'tunnel_verifying'
 
   // Fetch connection info on mount, retry while tunnel is being set up
   useEffect(() => {
@@ -186,8 +189,8 @@ export function ConsolePage() {
     // Show tunnel setup status from WS events (preferred) or polling fallback
     const showTunnelSetup = isTunnelVerifying || settingUpTunnel
     const progressLabel = tunnelProgress
-      ? `Setting up Cloudflare tunnel... (attempt ${tunnelProgress.attempt}/${tunnelProgress.maxAttempts})`
-      : 'Setting up Cloudflare tunnel...'
+      ? `Tunnel warming up… (attempt ${tunnelProgress.attempt}/${tunnelProgress.maxAttempts}) — QR will appear shortly`
+      : 'Tunnel warming up… — QR will appear shortly'
 
     return (
       <div className="console-page">

@@ -1768,11 +1768,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'server_status': {
       // Handle structured startup phase events (phase field present)
       const phase = msg.phase as string | undefined;
-      if (phase === 'tunnel_verifying') {
+      // #2836: 'tunnel_warming' is the current phase name. 'tunnel_verifying'
+      // is accepted as a legacy alias — older servers may still emit it.
+      if (phase === 'tunnel_warming' || phase === 'tunnel_verifying') {
         const attempt = typeof msg.attempt === 'number' ? msg.attempt : null;
         const maxAttempts = typeof msg.maxAttempts === 'number' ? msg.maxAttempts : null;
         set({
-          serverPhase: 'tunnel_verifying',
+          serverPhase: 'tunnel_warming',
           tunnelProgress: attempt != null && maxAttempts != null ? { attempt, maxAttempts } : null,
         } as Partial<ConnectionState>);
         break;

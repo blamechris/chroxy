@@ -934,6 +934,11 @@ export function App() {
     [conversationHistory],
   )
 
+  // #2836: show a soft banner during the Cloudflare DNS-propagation
+  // window so the user knows why the QR isn't up yet.
+  const isTunnelWarming =
+    serverPhase === 'tunnel_warming' || serverPhase === 'tunnel_verifying'
+
   return (
     <div id="app" className={sidebarRepos.length > 0 ? 'with-sidebar' : ''}>
       {/* Reconnect banner */}
@@ -946,12 +951,36 @@ export function App() {
         onStartServer={isTauri() ? handleStartServer : undefined}
       />
 
+      {/* Tunnel warming banner — shown during Cloudflare DNS propagation (#2836) */}
+      {isTunnelWarming && (
+        <div
+          className="tunnel-warming-banner"
+          data-testid="tunnel-warming-banner"
+          role="status"
+          aria-live="polite"
+          style={{
+            padding: '0.5rem 1rem',
+            background: '#1a1a2e',
+            color: '#fbbf24',
+            borderBottom: '1px solid #252540',
+            fontSize: '0.85rem',
+            textAlign: 'center',
+          }}
+        >
+          Tunnel warming up
+          {tunnelProgress
+            ? `… attempt ${tunnelProgress.attempt}/${tunnelProgress.maxAttempts}`
+            : '…'}{' '}
+          (QR will appear shortly)
+        </div>
+      )}
+
       {/* Header */}
       <header id="header">
         <div className="header-left">
           <span className="logo">Chroxy</span>
           <span className="version-badge">v{serverVersion ?? __APP_VERSION__}</span>
-          <span className={`status-dot ${serverPhase === 'tunnel_verifying' || (isConnected && !tunnelReady && serverPhase == null) ? 'connecting' : connectionPhase}`} />
+          <span className={`status-dot ${serverPhase === 'tunnel_warming' || serverPhase === 'tunnel_verifying' || (isConnected && !tunnelReady && serverPhase == null) ? 'connecting' : connectionPhase}`} />
         </div>
         <div className="header-center">
           <ChatSettingsDropdown

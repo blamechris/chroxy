@@ -20,14 +20,15 @@ pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 use tauri::{
-    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder},
+    menu::{
+        CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder,
+    },
     tray::TrayIconBuilder,
-    Emitter,
-    Manager,
+    Emitter, Manager,
 };
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 #[cfg(desktop)]
 use tauri_plugin_single_instance::init as single_instance_init;
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 /// Tracks whether this is a first-run (config was just created).
 static IS_FIRST_RUN: AtomicBool = AtomicBool::new(false);
@@ -48,11 +49,12 @@ struct TrayMenuItems {
     tunnel_none: CheckMenuItem<tauri::Wry>,
 }
 
-
 // ── Tauri IPC commands ──────────────────────────────────────────────
 
 #[tauri::command]
-fn get_server_info(state: tauri::State<'_, Mutex<ServerManager>>) -> Result<serde_json::Value, String> {
+fn get_server_info(
+    state: tauri::State<'_, Mutex<ServerManager>>,
+) -> Result<serde_json::Value, String> {
     let mgr = lock_or_recover(&state);
     Ok(serde_json::json!({
         "port": mgr.port(),
@@ -84,8 +86,25 @@ fn get_server_logs(state: tauri::State<'_, Mutex<ServerManager>>) -> Vec<String>
     mgr.get_logs()
 }
 
+/// Return the last `limit` buffered server log lines (stdout + stderr).
+/// Used by the loading page / error UI to let the user inspect what the
+/// server printed when startup fails (issue #2835 sub-fix C).
 #[tauri::command]
-fn get_qr_code_svg(state: tauri::State<'_, Mutex<ServerManager>>) -> Result<serde_json::Value, String> {
+fn get_startup_logs(
+    state: tauri::State<'_, Mutex<ServerManager>>,
+    limit: Option<usize>,
+) -> Vec<String> {
+    let mgr = lock_or_recover(&state);
+    let all = mgr.get_logs();
+    let n = limit.unwrap_or(30).min(all.len());
+    let start = all.len().saturating_sub(n);
+    all[start..].to_vec()
+}
+
+#[tauri::command]
+fn get_qr_code_svg(
+    state: tauri::State<'_, Mutex<ServerManager>>,
+) -> Result<serde_json::Value, String> {
     let mgr = lock_or_recover(&state);
     if !mgr.is_running() {
         return Err("Server is not running".to_string());
@@ -125,9 +144,7 @@ fn check_dependencies() -> serde_json::Value {
     let which_cmd = "which";
     #[cfg(windows)]
     let which_cmd = "where";
-    let claude_result = std::process::Command::new(which_cmd)
-        .arg("claude")
-        .output();
+    let claude_result = std::process::Command::new(which_cmd).arg("claude").output();
     let (claude_found, claude_version) = match claude_result {
         Ok(output) if output.status.success() => {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -174,16 +191,14 @@ fn get_setup_state(
 }
 
 #[tauri::command]
-fn save_setup_config(
-    app: tauri::AppHandle,
-    port: u16,
-    tunnel_mode: String,
-) -> Result<(), String> {
+fn save_setup_config(app: tauri::AppHandle, port: u16, tunnel_mode: String) -> Result<(), String> {
     // Update settings
     if let Some(settings_state) = app.try_state::<Mutex<DesktopSettings>>() {
         let mut settings = lock_or_recover(&settings_state);
         settings.tunnel_mode = tunnel_mode.clone();
-        settings.save().map_err(|e| format!("Failed to save settings: {}", e))?;
+        settings
+            .save()
+            .map_err(|e| format!("Failed to save settings: {}", e))?;
     }
 
     // Update port in config.json
@@ -212,9 +227,7 @@ fn save_setup_config(
 }
 
 #[tauri::command]
-fn get_tunnel_mode(
-    settings_state: tauri::State<'_, Mutex<DesktopSettings>>,
-) -> String {
+fn get_tunnel_mode(settings_state: tauri::State<'_, Mutex<DesktopSettings>>) -> String {
     let settings = lock_or_recover(&settings_state);
     match settings.tunnel_mode.as_str() {
         "none" | "quick" | "named" => settings.tunnel_mode.clone(),
@@ -223,13 +236,13 @@ fn get_tunnel_mode(
 }
 
 #[tauri::command]
-fn set_tunnel_mode(
-    app: tauri::AppHandle,
-    mode: String,
-) -> Result<(), String> {
+fn set_tunnel_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
     // Validate mode
     if !["none", "quick", "named"].contains(&mode.as_str()) {
-        return Err(format!("Invalid tunnel mode: {}. Must be none, quick, or named.", mode));
+        return Err(format!(
+            "Invalid tunnel mode: {}. Must be none, quick, or named.",
+            mode
+        ));
     }
 
     // Validate cloudflared for tunnel modes
@@ -241,7 +254,9 @@ fn set_tunnel_mode(
     if let Some(settings_state) = app.try_state::<Mutex<DesktopSettings>>() {
         let mut settings = lock_or_recover(&settings_state);
         settings.tunnel_mode = mode.clone();
-        settings.save().map_err(|e| format!("Failed to save settings: {}", e))?;
+        settings
+            .save()
+            .map_err(|e| format!("Failed to save settings: {}", e))?;
     }
 
     // Update ServerManager so next restart uses the new mode
@@ -262,7 +277,10 @@ fn set_tunnel_mode(
 }
 
 #[tauri::command]
-async fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> Result<Option<String>, String> {
+async fn pick_directory(
+    app: tauri::AppHandle,
+    default_path: Option<String>,
+) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let mut builder = app.dialog().file();
@@ -281,7 +299,8 @@ async fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> 
 /// can process them as system tiling shortcuts (fn+ctrl+arrow).
 #[tauri::command]
 fn tile_window(window: tauri::Window, direction: String) -> Result<(), String> {
-    let monitor = window.current_monitor()
+    let monitor = window
+        .current_monitor()
         .map_err(|e| e.to_string())?
         .ok_or("No monitor found")?;
     let screen = monitor.size();
@@ -295,16 +314,31 @@ fn tile_window(window: tauri::Window, direction: String) -> Result<(), String> {
 
     match direction.as_str() {
         "left" => {
-            window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y + menu_bar_height)).map_err(|e| e.to_string())?;
-            window.set_size(tauri::PhysicalSize::new(half_width, usable_height as u32)).map_err(|e| e.to_string())?;
+            window
+                .set_position(tauri::PhysicalPosition::new(pos.x, pos.y + menu_bar_height))
+                .map_err(|e| e.to_string())?;
+            window
+                .set_size(tauri::PhysicalSize::new(half_width, usable_height as u32))
+                .map_err(|e| e.to_string())?;
         }
         "right" => {
-            window.set_position(tauri::PhysicalPosition::new(pos.x + half_width as i32, pos.y + menu_bar_height)).map_err(|e| e.to_string())?;
-            window.set_size(tauri::PhysicalSize::new(half_width, usable_height as u32)).map_err(|e| e.to_string())?;
+            window
+                .set_position(tauri::PhysicalPosition::new(
+                    pos.x + half_width as i32,
+                    pos.y + menu_bar_height,
+                ))
+                .map_err(|e| e.to_string())?;
+            window
+                .set_size(tauri::PhysicalSize::new(half_width, usable_height as u32))
+                .map_err(|e| e.to_string())?;
         }
         "maximize" => {
-            window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y + menu_bar_height)).map_err(|e| e.to_string())?;
-            window.set_size(tauri::PhysicalSize::new(screen.width, usable_height as u32)).map_err(|e| e.to_string())?;
+            window
+                .set_position(tauri::PhysicalPosition::new(pos.x, pos.y + menu_bar_height))
+                .map_err(|e| e.to_string())?;
+            window
+                .set_size(tauri::PhysicalSize::new(screen.width, usable_height as u32))
+                .map_err(|e| e.to_string())?;
         }
         _ => return Err(format!("Unknown direction: {}", direction)),
     }
@@ -360,14 +394,16 @@ pub fn run() {
 
     #[cfg(desktop)]
     {
-        builder = builder.plugin(single_instance_init(|app: &tauri::AppHandle, _args, _cwd| {
-            // Second instance launched: focus the existing main window.
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.unminimize();
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-        }));
+        builder = builder.plugin(single_instance_init(
+            |app: &tauri::AppHandle, _args, _cwd| {
+                // Second instance launched: focus the existing main window.
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            },
+        ));
     }
 
     builder
@@ -385,6 +421,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_server_info,
             get_server_logs,
+            get_startup_logs,
             start_server,
             stop_server,
             restart_server,
@@ -613,14 +650,10 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .build(app)?;
 
     // Settings toggles
-    let autostart_enabled = app
-        .autolaunch()
-        .is_enabled()
-        .unwrap_or(false);
-    let auto_start_login =
-        CheckMenuItemBuilder::with_id("auto_start_login", "Start at Login")
-            .checked(autostart_enabled)
-            .build(app)?;
+    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+    let auto_start_login = CheckMenuItemBuilder::with_id("auto_start_login", "Start at Login")
+        .checked(autostart_enabled)
+        .build(app)?;
 
     let settings = app.state::<Mutex<DesktopSettings>>();
     let settings_guard = lock_or_recover(&settings);
@@ -628,24 +661,20 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let current_tunnel = settings_guard.tunnel_mode.clone();
     drop(settings_guard);
 
-    let auto_start_server =
-        CheckMenuItemBuilder::with_id("auto_start_server", "Auto-start Server")
-            .checked(auto_start_server_checked)
-            .build(app)?;
+    let auto_start_server = CheckMenuItemBuilder::with_id("auto_start_server", "Auto-start Server")
+        .checked(auto_start_server_checked)
+        .build(app)?;
 
     // Tunnel mode submenu
-    let tunnel_quick =
-        CheckMenuItemBuilder::with_id("tunnel_quick", "Quick Tunnel")
-            .checked(current_tunnel == "quick")
-            .build(app)?;
-    let tunnel_named =
-        CheckMenuItemBuilder::with_id("tunnel_named", "Named Tunnel")
-            .checked(current_tunnel == "named")
-            .build(app)?;
-    let tunnel_none =
-        CheckMenuItemBuilder::with_id("tunnel_none", "Local Only")
-            .checked(current_tunnel == "none")
-            .build(app)?;
+    let tunnel_quick = CheckMenuItemBuilder::with_id("tunnel_quick", "Quick Tunnel")
+        .checked(current_tunnel == "quick")
+        .build(app)?;
+    let tunnel_named = CheckMenuItemBuilder::with_id("tunnel_named", "Named Tunnel")
+        .checked(current_tunnel == "named")
+        .build(app)?;
+    let tunnel_none = CheckMenuItemBuilder::with_id("tunnel_none", "Local Only")
+        .checked(current_tunnel == "none")
+        .build(app)?;
 
     let tunnel_submenu = SubmenuBuilder::with_id(app, "tunnel_mode", "Tunnel Mode")
         .item(&tunnel_quick)
@@ -653,7 +682,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .item(&tunnel_none)
         .build()?;
 
-    let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates").build(app)?;
+    let check_updates =
+        MenuItemBuilder::with_id("check_updates", "Check for Updates").build(app)?;
 
     let quit = MenuItemBuilder::with_id("quit", "Quit Chroxy").build(app)?;
 
@@ -688,7 +718,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load tray icon from embedded PNG (not from config — avoids dual tray icon conflict)
     let icon_bytes = include_bytes!("../icons/tray-icon.png");
-    let img = image::load_from_memory(icon_bytes).expect("decode tray icon").to_rgba8();
+    let img = image::load_from_memory(icon_bytes)
+        .expect("decode tray icon")
+        .to_rgba8();
     let (w, h) = img.dimensions();
     let icon = tauri::image::Image::new_owned(img.into_raw(), w, h);
 
@@ -790,10 +822,7 @@ fn monitor_startup(app: &tauri::AppHandle, context: StartupContext) -> bool {
         StartupContext::Start => ("Server Error", "Server Timeout", "start"),
         StartupContext::Restart => ("Restart Failed", "Restart Timeout", "restart"),
     };
-    let timeout_msg = format!(
-        "Server failed to {} within 60 seconds.",
-        action
-    );
+    let timeout_msg = format!("Server failed to {} within 60 seconds.", action);
 
     for _ in 0..60 {
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -934,7 +963,8 @@ fn handle_start(app: &tauri::AppHandle) {
                                 Ok(()) => {
                                     drop(mgr);
                                     // Wait for server to reach Running again
-                                    let recovered = monitor_startup(&app_handle, StartupContext::Restart);
+                                    let recovered =
+                                        monitor_startup(&app_handle, StartupContext::Restart);
                                     if recovered {
                                         send_notification(
                                             &app_handle,
@@ -947,11 +977,9 @@ fn handle_start(app: &tauri::AppHandle) {
                                         // If recovery failed but we haven't hit max
                                         // attempts, re-signal pending so the outer loop
                                         // retries instead of exiting at Error(_).
-                                        let state =
-                                            app_handle.state::<Mutex<ServerManager>>();
+                                        let state = app_handle.state::<Mutex<ServerManager>>();
                                         let mgr = lock_or_recover(&state);
-                                        if mgr.restart_count()
-                                            < ServerManager::MAX_RESTART_ATTEMPTS
+                                        if mgr.restart_count() < ServerManager::MAX_RESTART_ATTEMPTS
                                         {
                                             mgr.signal_auto_restart();
                                         }
@@ -961,7 +989,10 @@ fn handle_start(app: &tauri::AppHandle) {
                                 Err(_) => {
                                     drop(mgr);
                                     update_menu_state(&app_handle, MenuState::Stopped);
-                                    window::emit_server_error(&app_handle, "Auto-restart failed. Use tray menu to restart manually.");
+                                    window::emit_server_error(
+                                        &app_handle,
+                                        "Auto-restart failed. Use tray menu to restart manually.",
+                                    );
                                     send_notification(
                                         &app_handle,
                                         "Server Unrecoverable",
@@ -1095,7 +1126,11 @@ fn handle_show_qr(app: &tauri::AppHandle) {
     let webview_url = match data_uri.parse::<tauri::Url>() {
         Ok(parsed) => tauri::WebviewUrl::External(parsed),
         Err(e) => {
-            send_notification(app, "QR Code Error", &format!("Failed to encode popup HTML: {}", e));
+            send_notification(
+                app,
+                "QR Code Error",
+                &format!("Failed to encode popup HTML: {}", e),
+            );
             return;
         }
     };
@@ -1108,7 +1143,11 @@ fn handle_show_qr(app: &tauri::AppHandle) {
         .build()
     {
         eprintln!("[tray] Failed to create QR popup: {}", e);
-        send_notification(app, "QR Code Error", &format!("Failed to open popup: {}", e));
+        send_notification(
+            app,
+            "QR Code Error",
+            &format!("Failed to open popup: {}", e),
+        );
     }
 }
 
@@ -1125,9 +1164,7 @@ fn handle_toggle_login(app: &tauri::AppHandle) {
     // Update the checkbox
     if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
         let items = lock_or_recover(&items);
-        let _ = items
-            .auto_start_login
-            .set_checked(!currently_enabled);
+        let _ = items.auto_start_login.set_checked(!currently_enabled);
     }
 }
 
@@ -1186,12 +1223,15 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
     send_notification(
         app,
         "Tunnel Mode Changed",
-        &format!("Restart server for {} mode to take effect.", match mode {
-            "quick" => "Quick Tunnel",
-            "named" => "Named Tunnel",
-            "none" => "Local Only",
-            _ => mode,
-        }),
+        &format!(
+            "Restart server for {} mode to take effect.",
+            match mode {
+                "quick" => "Quick Tunnel",
+                "named" => "Named Tunnel",
+                "none" => "Local Only",
+                _ => mode,
+            }
+        ),
     );
 }
 
@@ -1200,7 +1240,10 @@ fn handle_check_updates(app: &tauri::AppHandle) {
     static UPDATE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
     // Atomically set the flag; bail if already in flight.
-    if UPDATE_IN_FLIGHT.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if UPDATE_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return;
     }
 
@@ -1263,7 +1306,11 @@ fn handle_check_updates(app: &tauri::AppHandle) {
                 }
             }
             Ok(None) => {
-                send_notification(&app_handle, "No Updates", "You're running the latest version.");
+                send_notification(
+                    &app_handle,
+                    "No Updates",
+                    "You're running the latest version.",
+                );
             }
             Err(e) => {
                 send_notification(
@@ -1284,10 +1331,5 @@ fn send_notification(app: &tauri::AppHandle, title: &str, body: &str) {
     }
 
     use tauri_plugin_notification::NotificationExt;
-    let _ = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show();
+    let _ = app.notification().builder().title(title).body(body).show();
 }
