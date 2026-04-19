@@ -103,7 +103,6 @@
 
   // -- Wizard state --
   var tunnelMode = 'quick';
-  var depResults = null;
   var dots = [document.getElementById('dot-1'), document.getElementById('dot-2'), document.getElementById('dot-3')];
 
   function showStep(n) {
@@ -120,7 +119,6 @@
     list.innerHTML = '<li class="dep-item"><div class="dep-icon">...</div><div class="dep-info"><div class="dep-name">Checking dependencies...</div></div></li>';
 
     invoke('check_dependencies').then(function(deps) {
-      depResults = deps;
       list.innerHTML = '';
 
       // Node 22
