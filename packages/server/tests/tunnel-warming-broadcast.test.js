@@ -1,41 +1,98 @@
 import { describe, it, mock, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { waitForTunnel } from '../src/tunnel-check.js'
+import {
+  buildTunnelWarmingStatus,
+  buildTunnelReadyStatus,
+} from '../src/server-cli.js'
 
 /**
- * Tests for the `tunnel_warming` server_status broadcast sequence (#2836).
+ * Tests for the `tunnel_warming` server_status broadcast contract (#2836).
  *
- * These tests exercise the `onAttempt` callback that server-cli.js wires
- * into `waitForTunnel` to broadcast per-attempt progress. They pin the
- * shape of the broadcast payload so the dashboard banner ("Tunnel warming
- * up… N/20") always has the fields it expects.
+ * Two things are asserted here:
  *
- * The `onAttempt` callback is the extension point — server-cli constructs
- * the broadcast message from it. We simulate that wiring here with a
- * capture function and verify the inputs/outputs match.
+ * 1. `buildTunnelWarmingStatus` / `buildTunnelReadyStatus` — the exact
+ *    same helpers server-cli.js uses at the broadcast site. Asserting
+ *    them directly pins the wire shape (no duplicate local helper that
+ *    could drift from production). Refactoring the broadcast call site
+ *    will therefore fail these tests.
+ *
+ * 2. The loop semantics: `waitForTunnel` invokes `onAttempt` once per
+ *    attempt until the tunnel is routable or maxAttempts is exhausted.
+ *    Wiring `buildTunnelWarmingStatus` into onAttempt produces the
+ *    per-attempt progress broadcasts the dashboard consumes.
  */
 
 afterEach(() => {
   mock.restoreAll()
 })
 
-// Mirror of the broadcast construction in server-cli.js. Kept in-test so
-// that a future refactor of server-cli doesn't accidentally drop the
-// contract without a test failure.
-function buildTunnelWarmingBroadcast({ attempt, maxAttempts, tunnelMode, tunnelUrl }) {
-  return {
-    type: 'server_status',
-    phase: 'tunnel_warming',
-    tunnelMode,
-    tunnelUrl,
-    attempt,
-    maxAttempts,
-    message: `Tunnel warming up… (${attempt}/${maxAttempts})`,
-  }
-}
+describe('buildTunnelWarmingStatus (production helper)', () => {
+  it('returns the attempt-progress payload shape when counters are present', () => {
+    const msg = buildTunnelWarmingStatus({
+      tunnelMode: 'quick',
+      tunnelUrl: 'https://example.trycloudflare.com',
+      attempt: 3,
+      maxAttempts: 20,
+    })
+    assert.equal(msg.type, 'server_status')
+    assert.equal(msg.phase, 'tunnel_warming')
+    assert.equal(msg.tunnelMode, 'quick')
+    assert.equal(msg.tunnelUrl, 'https://example.trycloudflare.com')
+    assert.equal(msg.attempt, 3)
+    assert.equal(msg.maxAttempts, 20)
+    assert.match(msg.message, /warming/i)
+    assert.match(msg.message, /3\/20/)
+  })
 
-describe('tunnel_warming broadcast', () => {
-  it('emits a broadcast for every attempt via onAttempt', async () => {
+  it('omits attempt counters in the initial pre-poll broadcast', () => {
+    const msg = buildTunnelWarmingStatus({
+      tunnelMode: 'quick',
+      tunnelUrl: 'https://example.trycloudflare.com',
+    })
+    assert.equal(msg.phase, 'tunnel_warming')
+    assert.equal(msg.attempt, undefined)
+    assert.equal(msg.maxAttempts, undefined)
+    assert.match(msg.message, /warming/i)
+    // No (N/M) suffix when there's no counter.
+    assert.doesNotMatch(msg.message, /\d+\/\d+/)
+  })
+
+  it('does not leak stray fields beyond the documented contract', () => {
+    const msg = buildTunnelWarmingStatus({
+      tunnelMode: 'named',
+      tunnelUrl: 'https://stable.example.com',
+      attempt: 1,
+      maxAttempts: 20,
+    })
+    // Whitelist the exact field set the dashboard handler & banner consume.
+    const allowed = new Set([
+      'type',
+      'phase',
+      'tunnelMode',
+      'tunnelUrl',
+      'attempt',
+      'maxAttempts',
+      'message',
+    ])
+    for (const key of Object.keys(msg)) {
+      assert.ok(allowed.has(key), `unexpected field on broadcast: ${key}`)
+    }
+  })
+})
+
+describe('buildTunnelReadyStatus (production helper)', () => {
+  it('produces the terminal ready payload', () => {
+    const msg = buildTunnelReadyStatus({ tunnelUrl: 'https://example.trycloudflare.com' })
+    assert.equal(msg.type, 'server_status')
+    assert.equal(msg.phase, 'ready')
+    assert.equal(msg.tunnelUrl, 'https://example.trycloudflare.com')
+    assert.match(msg.message, /ready/i)
+  })
+})
+
+describe('tunnel_warming broadcast sequencing via waitForTunnel.onAttempt', () => {
+  it('builds one warming broadcast per attempt until the tunnel routes', async () => {
     const broadcasts = []
     let calls = 0
     mock.method(globalThis, 'fetch', async () => {
@@ -49,11 +106,11 @@ describe('tunnel_warming broadcast', () => {
       initialInterval: 0,
       onAttempt: (attempt, maxAttempts) => {
         broadcasts.push(
-          buildTunnelWarmingBroadcast({
-            attempt,
-            maxAttempts,
+          buildTunnelWarmingStatus({
             tunnelMode: 'quick',
             tunnelUrl: 'https://example.trycloudflare.com',
+            attempt,
+            maxAttempts,
           }),
         )
       },
@@ -61,37 +118,10 @@ describe('tunnel_warming broadcast', () => {
 
     assert.equal(broadcasts.length, 3, 'one broadcast per attempt until ok')
     assert.deepEqual(broadcasts.map((b) => b.attempt), [1, 2, 3])
-  })
-
-  it('broadcast payload carries phase=tunnel_warming with attempt count', async () => {
-    const broadcasts = []
-    mock.method(globalThis, 'fetch', async () => ({ ok: true }))
-
-    await waitForTunnel('https://example.trycloudflare.com', {
-      maxAttempts: 20,
-      initialInterval: 0,
-      onAttempt: (attempt, maxAttempts) => {
-        broadcasts.push(
-          buildTunnelWarmingBroadcast({
-            attempt,
-            maxAttempts,
-            tunnelMode: 'quick',
-            tunnelUrl: 'https://example.trycloudflare.com',
-          }),
-        )
-      },
-    })
-
-    assert.equal(broadcasts.length, 1)
-    const b = broadcasts[0]
-    assert.equal(b.type, 'server_status')
-    assert.equal(b.phase, 'tunnel_warming')
-    assert.equal(b.attempt, 1)
-    assert.equal(b.maxAttempts, 20)
-    assert.equal(b.tunnelMode, 'quick')
-    assert.equal(b.tunnelUrl, 'https://example.trycloudflare.com')
-    assert.match(b.message, /warming/i)
-    assert.match(b.message, /1\/20/)
+    for (const b of broadcasts) {
+      assert.equal(b.type, 'server_status')
+      assert.equal(b.phase, 'tunnel_warming')
+    }
   })
 
   it('does not emit after the tunnel becomes routable', async () => {

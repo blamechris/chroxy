@@ -13,7 +13,9 @@ use crate::node;
 
 /// Pure filter: given an iterator of (pid, full_command_line) pairs, return
 /// the pids whose command line matches a `cloudflared tunnel --url
-/// http(s)://{localhost|127.0.0.1}:{port}` invocation.
+/// http://{localhost|127.0.0.1}:{port}` invocation. (Cloudflare tunnels
+/// always point at the local server over plain HTTP — there's no https
+/// variant on this code path.)
 ///
 /// Exposed for unit testing — the impl inside `kill_orphan_cloudflared`
 /// delegates here so the filter logic can be exercised against synthetic
@@ -23,6 +25,12 @@ use crate::node;
 /// even though "876" is a substring. We require the literal `:{port}`
 /// to be followed by either a non-digit, a path separator, or end of
 /// token.
+///
+/// Binary detection is cross-platform: the basename is taken by
+/// splitting on both `/` and `\`, surrounding quotes are trimmed, the
+/// match is case-insensitive, and a trailing `.exe` suffix is stripped
+/// so Windows command lines like `"C:\\Program Files\\cloudflared\\cloudflared.exe"`
+/// match the same `cloudflared` token as their Unix counterparts.
 pub(crate) fn cloudflared_pids_to_kill(procs: &[(u32, String)], port: u16) -> Vec<u32> {
     let needles = [
         format!("http://localhost:{}", port),
@@ -31,11 +39,28 @@ pub(crate) fn cloudflared_pids_to_kill(procs: &[(u32, String)], port: u16) -> Ve
     let mut out = Vec::new();
     for (pid, cmd) in procs {
         // Require the cloudflared binary name as a whole word. We match
-        // on both bare "cloudflared" and full-path invocations like
-        // "/opt/homebrew/bin/cloudflared".
+        // on bare "cloudflared", Unix full paths ("/opt/homebrew/bin/cloudflared"),
+        // and Windows invocations ("C:\\Program Files\\cloudflared\\cloudflared.exe"
+        // with or without surrounding quotes).
         let has_cloudflared_binary = cmd.split_whitespace().any(|tok| {
-            let base = tok.rsplit('/').next().unwrap_or(tok);
-            base == "cloudflared"
+            // Strip surrounding single/double quotes.
+            let trimmed = tok
+                .trim_matches(|c: char| c == '"' || c == '\'');
+            // Take basename across both Unix (/) and Windows (\) separators.
+            let base = trimmed
+                .rsplit(|c: char| c == '/' || c == '\\')
+                .next()
+                .unwrap_or(trimmed);
+            // Drop a case-insensitive ".exe" suffix before the compare so
+            // bare "cloudflared" and "CLOUDFLARED.EXE" both match.
+            let without_exe = if base.len() >= 4
+                && base[base.len() - 4..].eq_ignore_ascii_case(".exe")
+            {
+                &base[..base.len() - 4]
+            } else {
+                base
+            };
+            without_exe.eq_ignore_ascii_case("cloudflared")
         });
         if !has_cloudflared_binary {
             continue;
@@ -1163,6 +1188,51 @@ mod tests {
             555u32,
             "cloudflared tunnel --url tcp://localhost:8765".to_string(),
         )];
+        let pids = cloudflared_pids_to_kill(&procs, 8765);
+        assert!(pids.is_empty());
+    }
+
+    // -- Windows-style binary detection (#2845 review follow-up) --
+
+    #[test]
+    fn cloudflared_filter_matches_windows_exe() {
+        // Windows command lines commonly include .exe and backslash paths.
+        let procs = vec![(
+            666u32,
+            r"C:\Program Files\cloudflared\cloudflared.exe tunnel --url http://localhost:8765"
+                .to_string(),
+        )];
+        let pids = cloudflared_pids_to_kill(&procs, 8765);
+        assert_eq!(pids, vec![666]);
+    }
+
+    #[test]
+    fn cloudflared_filter_matches_quoted_windows_path() {
+        // Processes spawned via shell often have the exe path quoted.
+        let procs = vec![(
+            777u32,
+            r#""C:\Program Files\cloudflared\cloudflared.exe" tunnel --url http://localhost:8765"#
+                .to_string(),
+        )];
+        let pids = cloudflared_pids_to_kill(&procs, 8765);
+        assert_eq!(pids, vec![777]);
+    }
+
+    #[test]
+    fn cloudflared_filter_is_case_insensitive_for_binary() {
+        // Some Windows setups preserve case differently (CLOUDFLARED.EXE / Cloudflared.exe).
+        let procs = vec![(
+            888u32,
+            r"C:\tools\CLOUDFLARED.EXE tunnel --url http://localhost:8765".to_string(),
+        )];
+        let pids = cloudflared_pids_to_kill(&procs, 8765);
+        assert_eq!(pids, vec![888]);
+    }
+
+    #[test]
+    fn cloudflared_filter_rejects_non_cloudflared_exe() {
+        // e.g. "someapp.exe --url http://localhost:8765" must NOT match just because of the URL.
+        let procs = vec![(999u32, "someapp.exe --url http://localhost:8765".to_string())];
         let pids = cloudflared_pids_to_kill(&procs, 8765);
         assert!(pids.is_empty());
     }

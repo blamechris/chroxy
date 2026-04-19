@@ -27,6 +27,55 @@ const SERVER_VERSION = packageJson.version
 
 // Tools that indicate a "writing" activity state for push notifications (#2085)
 
+/**
+ * Build a `server_status` broadcast payload for the tunnel_warming phase.
+ *
+ * Factored out of the broadcast site so tests can import and assert the
+ * exact object shape that ships to clients — previously tests duplicated
+ * the construction and silently drifted if the production code changed.
+ *
+ * Pass `attempt`/`maxAttempts` for per-attempt progress updates; omit
+ * them for the initial pre-poll broadcast ("Tunnel warming up…" with no
+ * counter).
+ *
+ * @param {{ tunnelMode: string, tunnelUrl: string, attempt?: number, maxAttempts?: number }} args
+ * @returns {object} WS message envelope
+ */
+export function buildTunnelWarmingStatus({ tunnelMode, tunnelUrl, attempt, maxAttempts }) {
+  const base = {
+    type: 'server_status',
+    phase: 'tunnel_warming',
+    tunnelMode,
+    tunnelUrl,
+  }
+  if (typeof attempt === 'number' && typeof maxAttempts === 'number') {
+    return {
+      ...base,
+      attempt,
+      maxAttempts,
+      message: `Tunnel warming up… (${attempt}/${maxAttempts})`,
+    }
+  }
+  return { ...base, message: 'Tunnel warming up…' }
+}
+
+/**
+ * Build a `server_status` broadcast for the terminal `ready` phase —
+ * signals the dashboard banner to disappear and the tunnel URL to be
+ * considered routable.
+ *
+ * @param {{ tunnelUrl: string }} args
+ * @returns {object} WS message envelope
+ */
+export function buildTunnelReadyStatus({ tunnelUrl }) {
+  return {
+    type: 'server_status',
+    phase: 'ready',
+    tunnelUrl,
+    message: 'Tunnel is ready',
+  }
+}
+
 function checkNoAuthWarnings({ authRequired, tunnel }) {
   if (authRequired) return
   log.warn('--no-auth disables all authentication. Only safe on isolated networks!')
@@ -489,19 +538,18 @@ export async function startCliServer(config) {
     // #2836: phase 'tunnel_warming' is the current wire name. The
     // previous name 'tunnel_verifying' is still accepted by the dashboard
     // handler for backward compatibility with in-flight clients.
-    wsServer.broadcast({ type: 'server_status', phase: 'tunnel_warming', tunnelMode: tunnelArg.mode, tunnelUrl: httpUrl, message: 'Tunnel warming up…' })
+    wsServer.broadcast(buildTunnelWarmingStatus({ tunnelMode: tunnelArg.mode, tunnelUrl: httpUrl }))
     try {
       await waitForTunnel(httpUrl, {
         onAttempt: (attempt, maxAttempts) => {
-          wsServer.broadcast({
-            type: 'server_status',
-            phase: 'tunnel_warming',
-            tunnelMode: tunnelArg.mode,
-            tunnelUrl: httpUrl,
-            attempt,
-            maxAttempts,
-            message: `Tunnel warming up… (${attempt}/${maxAttempts})`,
-          })
+          wsServer.broadcast(
+            buildTunnelWarmingStatus({
+              tunnelMode: tunnelArg.mode,
+              tunnelUrl: httpUrl,
+              attempt,
+              maxAttempts,
+            }),
+          )
         },
       })
     } catch (tunnelErr) {
@@ -515,7 +563,7 @@ export async function startCliServer(config) {
       process.exitCode = 1
       return
     }
-    wsServer.broadcast({ type: 'server_status', phase: 'ready', tunnelUrl: httpUrl, message: 'Tunnel is ready' })
+    wsServer.broadcast(buildTunnelReadyStatus({ tunnelUrl: httpUrl }))
 
     // 7. Generate connection info
     const modeLabel = `cloudflare:${tunnelArg.mode}`
