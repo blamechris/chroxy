@@ -292,6 +292,11 @@ impl ServerManager {
     /// embedding in a log line. Trims whitespace, collapses newlines to
     /// spaces, and caps the length so one noisy command can't blow past
     /// the per-line log budget (issue #2868).
+    ///
+    /// When the collapsed text exceeds `MAX_LEN` chars, it is truncated
+    /// to `MAX_LEN` and "..." is appended — so the returned string may
+    /// be up to `MAX_LEN + 3` chars (the cap applies to the payload, not
+    /// including the ellipsis).
     fn stderr_snippet(stderr: &[u8]) -> String {
         const MAX_LEN: usize = 200;
         let text = String::from_utf8_lossy(stderr);
@@ -532,10 +537,21 @@ impl ServerManager {
                 }
             }
             Err(err) => {
-                let msg = format!(
-                    "[cloudflared-cleanup] wmic not present ({}), falling back to powershell",
-                    err
-                );
+                // Distinguish "binary genuinely missing" from other spawn
+                // failures (permission denial, policy blocks, etc.) so the
+                // diagnostic isn't misleading on systems where wmic exists
+                // but can't be launched.
+                let msg = if err.kind() == std::io::ErrorKind::NotFound {
+                    format!(
+                        "[cloudflared-cleanup] wmic not present ({}), falling back to powershell",
+                        err
+                    )
+                } else {
+                    format!(
+                        "[cloudflared-cleanup] wmic spawn failed ({}), falling back to powershell",
+                        err
+                    )
+                };
                 eprintln!("{}", msg);
                 Self::push_log_line(log_buf, msg);
             }
