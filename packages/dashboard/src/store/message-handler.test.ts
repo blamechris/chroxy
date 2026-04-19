@@ -184,6 +184,78 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('server_status dispatch (#2836)', () => {
+    it('sets serverPhase to tunnel_warming with attempt count for phase=tunnel_warming', () => {
+      handleMessage(
+        {
+          type: 'server_status',
+          phase: 'tunnel_warming',
+          attempt: 3,
+          maxAttempts: 20,
+          tunnelMode: 'quick',
+          tunnelUrl: 'https://abc.trycloudflare.com',
+          message: 'Tunnel warming up… (3/20)',
+        },
+        ctx() as any,
+      )
+      const state = store.getState()
+      expect(state.serverPhase).toBe('tunnel_warming')
+      expect(state.tunnelProgress).toEqual({ attempt: 3, maxAttempts: 20 })
+    })
+
+    it('still recognizes legacy phase=tunnel_verifying', () => {
+      handleMessage(
+        {
+          type: 'server_status',
+          phase: 'tunnel_verifying',
+          attempt: 1,
+          maxAttempts: 20,
+        },
+        ctx() as any,
+      )
+      const state = store.getState()
+      expect(state.serverPhase).toBe('tunnel_warming')
+      expect(state.tunnelProgress).toEqual({ attempt: 1, maxAttempts: 20 })
+    })
+
+    it('transitions to ready on phase=ready and clears tunnelProgress', () => {
+      // First warm up
+      handleMessage(
+        {
+          type: 'server_status',
+          phase: 'tunnel_warming',
+          attempt: 5,
+          maxAttempts: 20,
+        },
+        ctx() as any,
+      )
+      expect(store.getState().serverPhase).toBe('tunnel_warming')
+      // Then transition to ready
+      handleMessage(
+        { type: 'server_status', phase: 'ready', tunnelUrl: 'https://abc.trycloudflare.com' },
+        ctx() as any,
+      )
+      expect(store.getState().serverPhase).toBe('ready')
+      expect(store.getState().tunnelProgress).toBeNull()
+    })
+
+    it('handles tunnel_warming without attempt count (initial broadcast)', () => {
+      handleMessage(
+        {
+          type: 'server_status',
+          phase: 'tunnel_warming',
+          tunnelMode: 'quick',
+          tunnelUrl: 'https://abc.trycloudflare.com',
+          message: 'Tunnel warming up…',
+        },
+        ctx() as any,
+      )
+      const state = store.getState()
+      expect(state.serverPhase).toBe('tunnel_warming')
+      expect(state.tunnelProgress).toBeNull()
+    })
+  })
+
   describe('unknown message types', () => {
     it('does not throw on unknown types', () => {
       expect(() =>

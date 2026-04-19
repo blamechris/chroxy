@@ -376,4 +376,61 @@ describe('App', () => {
       expect(systemTab.querySelector('.system-badge')).toBeInTheDocument()
     })
   })
+
+  describe('tunnel warming banner (#2836)', () => {
+    it('shows the banner when serverPhase is tunnel_warming', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        serverPhase: 'tunnel_warming',
+        tunnelProgress: { attempt: 3, maxAttempts: 20 },
+      }
+      render(<App />)
+      const banner = screen.getByTestId('tunnel-warming-banner')
+      expect(banner).toBeInTheDocument()
+      expect(banner.textContent).toMatch(/warming/i)
+      expect(banner.textContent).toMatch(/3\/20/)
+      expect(banner.textContent).toMatch(/QR will appear shortly/i)
+    })
+
+    it('shows the banner (no progress) when phase is set without attempt count', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        serverPhase: 'tunnel_warming',
+        tunnelProgress: null,
+      }
+      render(<App />)
+      const banner = screen.getByTestId('tunnel-warming-banner')
+      expect(banner).toBeInTheDocument()
+      expect(banner.textContent).toMatch(/warming/i)
+      expect(banner.textContent).toMatch(/QR will appear shortly/i)
+    })
+
+    it('also shows the banner for the legacy tunnel_verifying phase', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        serverPhase: 'tunnel_verifying',
+        tunnelProgress: { attempt: 1, maxAttempts: 20 },
+      }
+      render(<App />)
+      expect(screen.getByTestId('tunnel-warming-banner')).toBeInTheDocument()
+    })
+
+    it('does not show the banner when serverPhase is ready', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        serverPhase: 'ready',
+      }
+      render(<App />)
+      expect(screen.queryByTestId('tunnel-warming-banner')).not.toBeInTheDocument()
+    })
+
+    it('does not show the banner when serverPhase is null', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        serverPhase: null,
+      }
+      render(<App />)
+      expect(screen.queryByTestId('tunnel-warming-banner')).not.toBeInTheDocument()
+    })
+  })
 })

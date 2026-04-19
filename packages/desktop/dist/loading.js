@@ -18,6 +18,7 @@
       spinner.style.display = 'none';
       status.textContent = event.payload.message || 'Server error';
       status.className = 'status error';
+      renderStartupLogs();
     });
 
     window.__TAURI__.event.listen('server_restarting', function(event) {
@@ -40,6 +41,57 @@
   if (!window.__TAURI__ || !window.__TAURI__.core) return;
   var invoke = window.__TAURI__.core.invoke;
 
+  // -- Startup log inspection (issue #2835 sub-fix C) --
+  // When a startup error fires, fetch the last ~30 server log lines and
+  // render them in a collapsible details panel with a copy button so the
+  // user (or a bug reporter) can see WHY the server failed to start.
+  function renderStartupLogs() {
+    // Avoid duplicating if already rendered.
+    if (document.getElementById('startup-logs')) return;
+
+    invoke('get_startup_logs', { limit: 30 }).then(function(lines) {
+      if (!lines || lines.length === 0) return;
+
+      var container = document.getElementById('loading');
+      if (!container) return;
+
+      var details = document.createElement('details');
+      details.id = 'startup-logs';
+      details.style.cssText = 'margin-top:1.25rem;text-align:left;font-size:0.75rem;';
+
+      var summary = document.createElement('summary');
+      summary.textContent = 'Show server logs (' + lines.length + ' lines)';
+      summary.style.cssText = 'cursor:pointer;color:#888;user-select:none;margin-bottom:0.5rem;';
+      details.appendChild(summary);
+
+      var pre = document.createElement('pre');
+      pre.style.cssText = 'background:#1a1a2e;border-radius:8px;padding:0.75rem;color:#c0c0c0;overflow:auto;max-height:220px;white-space:pre-wrap;word-break:break-word;font-family:SF Mono,Monaco,monospace;font-size:0.7rem;line-height:1.35;';
+      pre.textContent = lines.join('\n');
+      details.appendChild(pre);
+
+      var copyBtn = document.createElement('button');
+      copyBtn.textContent = 'Copy logs';
+      copyBtn.className = 'btn btn-secondary';
+      copyBtn.style.cssText = 'margin-top:0.5rem;padding:0.35rem 0.75rem;font-size:0.75rem;';
+      copyBtn.addEventListener('click', function() {
+        var text = lines.join('\n');
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function() {
+            copyBtn.textContent = 'Copied!';
+            setTimeout(function() { copyBtn.textContent = 'Copy logs'; }, 2000);
+          }).catch(function() {
+            copyBtn.textContent = 'Copy failed';
+          });
+        }
+      });
+      details.appendChild(copyBtn);
+
+      container.appendChild(details);
+    }).catch(function() {
+      // Command unavailable — silently skip.
+    });
+  }
+
   invoke('get_setup_state').then(function(state) {
     if (state.isFirstRun) {
       loading.style.display = 'none';
@@ -51,7 +103,6 @@
 
   // -- Wizard state --
   var tunnelMode = 'quick';
-  var depResults = null;
   var dots = [document.getElementById('dot-1'), document.getElementById('dot-2'), document.getElementById('dot-3')];
 
   function showStep(n) {
@@ -68,7 +119,6 @@
     list.innerHTML = '<li class="dep-item"><div class="dep-icon">...</div><div class="dep-info"><div class="dep-name">Checking dependencies...</div></div></li>';
 
     invoke('check_dependencies').then(function(deps) {
-      depResults = deps;
       list.innerHTML = '';
 
       // Node 22
