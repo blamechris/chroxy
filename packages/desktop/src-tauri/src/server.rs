@@ -199,9 +199,22 @@ impl ServerManager {
             .filter(|p| p.exists());
     }
 
-    /// Return buffered server log lines (stdout + stderr).
+    /// Return buffered server log lines (stdout + stderr + health-poll).
     pub fn get_logs(&self) -> Vec<String> {
         lock_or_recover(&self.log_buffer).iter().cloned().collect()
+    }
+
+    /// Append a single log line to the shared buffer, enforcing the
+    /// 100-line ring-buffer ceiling. Used by the health-poll thread so
+    /// that timeouts, connect-refused errors, and non-200 responses
+    /// surface in `get_startup_logs` alongside child stdout/stderr
+    /// (issue #2846).
+    fn push_log_line(buf: &Arc<Mutex<VecDeque<String>>>, line: String) {
+        let mut logs = lock_or_recover(buf);
+        if logs.len() >= 100 {
+            logs.pop_front();
+        }
+        logs.push_back(line);
     }
 
     /// Whether auto-restart has been requested by the health poll.
@@ -689,6 +702,10 @@ impl ServerManager {
         let generation = self.health_generation.clone();
         let user_stopped = self.user_stopped.clone();
         let auto_restart_pending = self.auto_restart_pending.clone();
+        // Clone the shared log buffer so the health thread can surface
+        // its own events (attempt counts, timeouts, connect errors) to
+        // the dashboard via get_startup_logs (issue #2846).
+        let log_buf = self.log_buffer.clone();
 
         // Advance generation so any existing poll thread sees a mismatch and exits
         let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -712,10 +729,12 @@ impl ServerManager {
                 if start.elapsed() > Duration::from_secs(60) {
                     let mut s = lock_or_recover(&status);
                     if *s == ServerStatus::Starting {
-                        eprintln!(
-                            "[health_poll] TIMEOUT after 60s: {} attempt(s) total, {} non-200, {} network errors",
+                        let msg = format!(
+                            "[health] TIMEOUT after 60s: {} attempt(s) total, {} non-200, {} network errors",
                             attempts, non200, network_errors
                         );
+                        eprintln!("{}", msg);
+                        Self::push_log_line(&log_buf, msg);
                         *s = ServerStatus::Error(format!(
                             "Health check timeout after 60s ({} attempts: {} non-200, {} errors)",
                             attempts, non200, network_errors
@@ -730,10 +749,12 @@ impl ServerManager {
                     Ok(resp) => {
                         let code = resp.status();
                         let elapsed_ms = attempt_start.elapsed().as_millis();
-                        eprintln!(
-                            "[health_poll] attempt #{} GET {} -> {} ({}ms)",
+                        let msg = format!(
+                            "[health] attempt #{} GET {} -> {} ({}ms)",
                             attempts, url, code, elapsed_ms
                         );
+                        eprintln!("{}", msg);
+                        Self::push_log_line(&log_buf, msg);
                         if code == 200 {
                             *lock_or_recover(&status) = ServerStatus::Running;
                             break;
@@ -746,10 +767,12 @@ impl ServerManager {
                         let elapsed_ms = attempt_start.elapsed().as_millis();
                         // ureq::Error prints like "Transport(...)" / "Status(...)"
                         // which is short enough to include verbatim.
-                        eprintln!(
-                            "[health_poll] attempt #{} GET {} -> Err({}) ({}ms)",
+                        let msg = format!(
+                            "[health] attempt #{} GET {} -> Err({}) ({}ms)",
                             attempts, url, err, elapsed_ms
                         );
+                        eprintln!("{}", msg);
+                        Self::push_log_line(&log_buf, msg);
                     }
                 }
 
@@ -774,9 +797,15 @@ impl ServerManager {
                             *lock_or_recover(&status) = ServerStatus::Running;
                         }
                     }
-                    Err(_) => {
+                    Err(err) => {
                         let mut s = lock_or_recover(&status);
                         if *s == ServerStatus::Running {
+                            let msg = format!(
+                                "[health] monitor GET {} -> Err({}): server stopped responding",
+                                url, err
+                            );
+                            eprintln!("{}", msg);
+                            Self::push_log_line(&log_buf, msg);
                             *s = ServerStatus::Error("Server stopped responding".to_string());
                             // Signal auto-restart unless user explicitly stopped
                             if !user_stopped.load(Ordering::Relaxed) {
@@ -1027,6 +1056,64 @@ mod tests {
     fn get_logs_returns_empty_vec_when_no_logs() {
         let mgr = ServerManager::new();
         assert!(mgr.get_logs().is_empty());
+    }
+
+    // -- push_log_line: shared helper used by health-poll (#2846) --
+
+    #[test]
+    fn push_log_line_appends_to_buffer() {
+        let mgr = ServerManager::new();
+        ServerManager::push_log_line(&mgr.log_buffer, "[health] attempt #1".to_string());
+        ServerManager::push_log_line(&mgr.log_buffer, "[health] attempt #2".to_string());
+        let logs = mgr.get_logs();
+        assert_eq!(
+            logs,
+            vec!["[health] attempt #1".to_string(), "[health] attempt #2".to_string()]
+        );
+    }
+
+    #[test]
+    fn push_log_line_enforces_100_line_ceiling() {
+        let mgr = ServerManager::new();
+        for i in 0..150 {
+            ServerManager::push_log_line(&mgr.log_buffer, format!("line {}", i));
+        }
+        let logs = mgr.get_logs();
+        assert_eq!(logs.len(), 100, "buffer must cap at 100 lines");
+        // Oldest 50 lines dropped; buffer should start at "line 50".
+        assert_eq!(logs.first().unwrap(), "line 50");
+        assert_eq!(logs.last().unwrap(), "line 149");
+    }
+
+    #[test]
+    fn push_log_line_surfaces_through_get_startup_logs_style_tail() {
+        // Simulate what the `get_startup_logs` command does: take the last N
+        // lines of the buffer after health-poll lines have been pushed.
+        let mgr = ServerManager::new();
+        // Simulate a stdout line (as the drain thread would push)
+        ServerManager::push_log_line(&mgr.log_buffer, "[stdout] server starting".to_string());
+        // Simulate health-poll lines landing in the same buffer
+        ServerManager::push_log_line(
+            &mgr.log_buffer,
+            "[health] attempt #1 GET http://127.0.0.1:8765/ -> Err(connection refused) (2ms)"
+                .to_string(),
+        );
+        ServerManager::push_log_line(
+            &mgr.log_buffer,
+            "[health] TIMEOUT after 60s: 30 attempt(s) total, 0 non-200, 30 network errors"
+                .to_string(),
+        );
+
+        let all = mgr.get_logs();
+        // Mirror the logic in lib.rs::get_startup_logs with limit=30.
+        let n = 30usize.min(all.len());
+        let start = all.len().saturating_sub(n);
+        let tail: Vec<String> = all[start..].to_vec();
+
+        assert_eq!(tail.len(), 3);
+        assert!(tail.iter().any(|l| l.starts_with("[stdout]")));
+        assert!(tail.iter().any(|l| l.contains("connection refused")));
+        assert!(tail.iter().any(|l| l.contains("TIMEOUT after 60s")));
     }
 
     #[test]
