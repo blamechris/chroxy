@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
-import { addLogListener, removeLogListener } from '../src/logger.js'
+import { addLogListener, removeLogListener, setLogLevel } from '../src/logger.js'
 
 /**
  * ws-forwarding.js unit tests (#1732, #2376)
@@ -624,16 +624,20 @@ describe('executeRegistrations (via setupCliForwarding)', () => {
   })
 })
 
-describe('[session-binding-create] diagnostic log (#2832, #2855)', () => {
+describe('[session-binding-create] diagnostic log (#2832, #2855, #2854)', () => {
   let currentListener = null
   afterEach(() => {
     if (currentListener) {
       removeLogListener(currentListener)
       currentListener = null
     }
+    // Restore default level so unrelated suites are unaffected.
+    setLogLevel('info')
   })
 
   it('emits [session-binding-create] when SDK permission_request is registered with the event sessionId', () => {
+    // #2854: gated at debug level — enable for this assertion.
+    setLogLevel('debug')
     const entries = []
     currentListener = (e) => entries.push(e)
     addLogListener(currentListener)
@@ -654,9 +658,9 @@ describe('[session-binding-create] diagnostic log (#2832, #2855)', () => {
     })
 
     const createLog = entries.find((e) =>
-      e.level === 'info' && e.message.includes('[session-binding-create]'),
+      e.level === 'debug' && e.message.includes('[session-binding-create]'),
     )
-    assert.ok(createLog, 'expected a [session-binding-create] info log entry')
+    assert.ok(createLog, 'expected a [session-binding-create] debug log entry')
     // Correlation key (requestId) and origin session must both be present for
     // grep-based triage of #2832 SESSION_TOKEN_MISMATCH rejections.
     assert.match(createLog.message, /permission req-create-1 created/)
@@ -667,6 +671,7 @@ describe('[session-binding-create] diagnostic log (#2832, #2855)', () => {
   })
 
   it('emits [session-binding-create] with registration-provided value when the normalizer overrides sessionId', () => {
+    setLogLevel('debug')
     const entries = []
     currentListener = (e) => entries.push(e)
     addLogListener(currentListener)
@@ -689,9 +694,9 @@ describe('[session-binding-create] diagnostic log (#2832, #2855)', () => {
     })
 
     const createLog = entries.find((e) =>
-      e.level === 'info' && e.message.includes('[session-binding-create]'),
+      e.level === 'debug' && e.message.includes('[session-binding-create]'),
     )
-    assert.ok(createLog, 'expected a [session-binding-create] info log entry for nested registration')
+    assert.ok(createLog, 'expected a [session-binding-create] debug log entry for nested registration')
     assert.match(createLog.message, /sessionId=sess-inner/)
     assert.equal(ctx.permissionSessionMap.get('req-nested-1'), 'sess-inner')
 
@@ -699,6 +704,7 @@ describe('[session-binding-create] diagnostic log (#2832, #2855)', () => {
   })
 
   it('does not emit [session-binding-create] for question registrations', () => {
+    setLogLevel('debug')
     const entries = []
     currentListener = (e) => entries.push(e)
     addLogListener(currentListener)
@@ -716,11 +722,42 @@ describe('[session-binding-create] diagnostic log (#2832, #2855)', () => {
     })
 
     const createLog = entries.find((e) =>
-      e.level === 'info' && e.message.includes('[session-binding-create]'),
+      e.level === 'debug' && e.message.includes('[session-binding-create]'),
     )
     assert.equal(createLog, undefined,
       'question registrations must not emit the permission-scoped diagnostic log')
     // Sanity: the question registration itself still happened
     assert.equal(ctx.questionSessionMap.get('tool-q-1'), 'sess-q-1')
+  })
+
+  it('does NOT emit [session-binding-create] at default (info) log level (#2854)', () => {
+    // Default log level is 'info' — debug-gated diagnostic log must be silent.
+    // This is the whole point of #2854: high-volume permission traffic in
+    // auto/accept-all sessions must not spam prod logs.
+    setLogLevel('info')
+    const entries = []
+    currentListener = (e) => entries.push(e)
+    addLogListener(currentListener)
+
+    const ctx = makeCtx()
+    setupForwarding(ctx)
+
+    ctx.sessionManager.emit('session_event', {
+      sessionId: 'sess-silent',
+      event: 'permission_request',
+      data: {
+        requestId: 'req-silent',
+        tool: 'Bash',
+        description: 'ls',
+        input: {},
+        remainingMs: 300_000,
+      },
+    })
+
+    const createLog = entries.find((e) => e.message.includes('[session-binding-create]'))
+    assert.equal(createLog, undefined,
+      '[session-binding-create] must be silent at info level to avoid spamming prod logs')
+    // Sanity: the registration itself still happened — only the log is gated.
+    assert.equal(ctx.permissionSessionMap.get('req-silent'), 'sess-silent')
   })
 })

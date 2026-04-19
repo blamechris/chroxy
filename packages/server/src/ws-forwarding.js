@@ -240,8 +240,10 @@ function executeRegistrations(registrations, sessionId, ctx) {
       // Diagnostic correlation log for #2832 — paired with
       // [session-binding-resend] and [session-binding-reject]. Allows
       // grepping the origin session for any requestId that later gets
-      // rejected as SESSION_TOKEN_MISMATCH.
-      log.info(`[session-binding-create] permission ${reg.key} created (sessionId=${mappedSessionId})`)
+      // rejected as SESSION_TOKEN_MISMATCH. Gated at debug level (#2854)
+      // to avoid spamming prod logs for sessions with heavy permission
+      // traffic (auto/accept-all). Enable with `LOG_LEVEL=debug`.
+      log.debug(`[session-binding-create] permission ${reg.key} created (sessionId=${mappedSessionId})`)
     } else if (reg.map === 'question') {
       questionSessionMap.set(reg.key, reg.value ?? sessionId)
     }

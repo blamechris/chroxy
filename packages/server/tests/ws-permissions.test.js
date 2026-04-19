@@ -2,7 +2,7 @@ import { describe, it, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { createPermissionHandler, sanitizeToolInput } from '../src/ws-permissions.js'
-import { addLogListener, removeLogListener } from '../src/logger.js'
+import { addLogListener, removeLogListener, setLogLevel } from '../src/logger.js'
 
 /**
  * ws-permissions.js unit tests (#1730)
@@ -505,17 +505,21 @@ describe('createPermissionHandler', () => {
   })
 })
 
-describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#2832, #2855)', () => {
+describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#2832, #2855, #2854)', () => {
   let currentListener = null
   afterEach(() => {
     if (currentListener) {
       removeLogListener(currentListener)
       currentListener = null
     }
+    // Restore the default level so other suites are not affected.
+    setLogLevel('info')
   })
 
   describe('handlePermissionRequest (HTTP /permission — [session-binding-create])', () => {
     it('emits [session-binding-create] with requestId, sessionId=none, and the sourceIp for the legacy HTTP path', async () => {
+      // #2854: gated at debug level — enable for this assertion.
+      setLogLevel('debug')
       const entries = []
       currentListener = (e) => entries.push(e)
       addLogListener(currentListener)
@@ -531,9 +535,9 @@ describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#
       await new Promise(r => setImmediate(r))
 
       const createLog = entries.find((e) =>
-        e.level === 'info' && e.message.includes('[session-binding-create]'),
+        e.level === 'debug' && e.message.includes('[session-binding-create]'),
       )
-      assert.ok(createLog, 'expected a [session-binding-create] info log entry on HTTP permission path')
+      assert.ok(createLog, 'expected a [session-binding-create] debug log entry on HTTP permission path')
       // The HTTP (non-SDK) path has no origin sessionId — the hook is the
       // caller — so the log must record sessionId=none, alongside the
       // sourceIp as the only available correlation signal.
@@ -545,10 +549,35 @@ describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#
 
       destroy()
     })
+
+    it('does NOT emit [session-binding-create] at default (info) log level (#2854)', async () => {
+      // Default log level is 'info' — debug-gated diagnostic log must be silent.
+      setLogLevel('info')
+      const entries = []
+      currentListener = (e) => entries.push(e)
+      addLogListener(currentListener)
+
+      const opts = makeHandlerOpts()
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      const body = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+      const req = makeReq(body)
+      req.socket = { remoteAddress: '203.0.113.42' }
+      const res = makeRes()
+      handlePermissionRequest(req, res)
+      await new Promise(r => setImmediate(r))
+
+      const createLog = entries.find((e) => e.message.includes('[session-binding-create]'))
+      assert.equal(createLog, undefined,
+        '[session-binding-create] must be silent at info level to avoid spamming prod logs')
+
+      destroy()
+    })
   })
 
   describe('resendPendingPermissions ([session-binding-resend])', () => {
     it('emits [session-binding-resend] for SDK-mode permission with full client binding diagnostics', () => {
+      // #2854: gated at debug level — enable for this assertion.
+      setLogLevel('debug')
       const entries = []
       currentListener = (e) => entries.push(e)
       addLogListener(currentListener)
@@ -578,11 +607,11 @@ describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#
       resendPendingPermissions({}, client)
 
       const resendLog = entries.find((e) =>
-        e.level === 'info'
+        e.level === 'debug'
           && e.message.includes('[session-binding-resend]')
           && e.message.includes('sdk-req-resend'),
       )
-      assert.ok(resendLog, 'expected a [session-binding-resend] info log entry for SDK-mode')
+      assert.ok(resendLog, 'expected a [session-binding-resend] debug log entry for SDK-mode')
       // All four correlation fields required by #2832 triage must be present:
       // requestId (key), the target client, the origin session, and both
       // activeSession/boundSession so we can tell the two apart.
@@ -593,6 +622,7 @@ describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#
     })
 
     it('emits [session-binding-resend] with client=unknown when no client descriptor is passed', () => {
+      setLogLevel('debug')
       const entries = []
       currentListener = (e) => entries.push(e)
       addLogListener(currentListener)
@@ -619,16 +649,17 @@ describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#
       resendPendingPermissions({})
 
       const resendLog = entries.find((e) =>
-        e.level === 'info'
+        e.level === 'debug'
           && e.message.includes('[session-binding-resend]')
           && e.message.includes('sdk-req-anon'),
       )
-      assert.ok(resendLog, 'expected a [session-binding-resend] info log entry in the no-client branch')
+      assert.ok(resendLog, 'expected a [session-binding-resend] debug log entry in the no-client branch')
       assert.match(resendLog.message, /sessionId=sess-anon/)
       assert.match(resendLog.message, /client=unknown/)
     })
 
     it('emits [session-binding-resend] legacy for HTTP-held pending permission with client descriptor', () => {
+      setLogLevel('debug')
       const entries = []
       currentListener = (e) => entries.push(e)
       addLogListener(currentListener)
@@ -656,17 +687,18 @@ describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#
       resendPendingPermissions({}, client)
 
       const resendLog = entries.find((e) =>
-        e.level === 'info'
+        e.level === 'debug'
           && e.message.includes('[session-binding-resend]')
           && e.message.includes('legacy permission leg-req-resend'),
       )
-      assert.ok(resendLog, 'expected a [session-binding-resend] legacy info log entry')
+      assert.ok(resendLog, 'expected a [session-binding-resend] legacy debug log entry')
       assert.match(resendLog.message, /resent to client client-ios/)
       assert.match(resendLog.message, /activeSession=sess-active/)
       assert.match(resendLog.message, /boundSession=none/)
     })
 
     it('emits [session-binding-resend] legacy with client=unknown when no client descriptor is passed', () => {
+      setLogLevel('debug')
       const entries = []
       currentListener = (e) => entries.push(e)
       addLogListener(currentListener)
@@ -689,15 +721,16 @@ describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#
       resendPendingPermissions({})
 
       const resendLog = entries.find((e) =>
-        e.level === 'info'
+        e.level === 'debug'
           && e.message.includes('[session-binding-resend]')
           && e.message.includes('legacy permission leg-req-anon'),
       )
-      assert.ok(resendLog, 'expected a [session-binding-resend] legacy log in the no-client branch')
+      assert.ok(resendLog, 'expected a [session-binding-resend] legacy debug log in the no-client branch')
       assert.match(resendLog.message, /client=unknown/)
     })
 
     it('does NOT emit [session-binding-resend] for expired permissions', () => {
+      setLogLevel('debug')
       const entries = []
       currentListener = (e) => entries.push(e)
       addLogListener(currentListener)
@@ -723,10 +756,46 @@ describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#
       resendPendingPermissions({}, client)
 
       const resendLog = entries.find((e) =>
-        e.level === 'info' && e.message.includes('[session-binding-resend]'),
+        e.level === 'debug' && e.message.includes('[session-binding-resend]'),
       )
       assert.equal(resendLog, undefined,
         'expired permissions must be skipped before the [session-binding-resend] log fires')
+    })
+
+    it('does NOT emit [session-binding-resend] at default (info) log level (#2854)', () => {
+      // Default log level is 'info' — debug-gated diagnostic log must be silent
+      // even when a client reconnects with pending permissions to resend.
+      setLogLevel('info')
+      const entries = []
+      currentListener = (e) => entries.push(e)
+      addLogListener(currentListener)
+
+      const session = {
+        _pendingPermissions: new Map([['sdk-req-silent', {}]]),
+        _lastPermissionData: new Map([
+          ['sdk-req-silent', {
+            requestId: 'sdk-req-silent',
+            tool: 'Write',
+            description: '/tmp/out',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: Date.now(),
+          }],
+        ]),
+      }
+      const sm = { _sessions: new Map([['sess-silent', { session }]]) }
+      const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+
+      resendPendingPermissions({}, {
+        id: 'client-quiet',
+        activeSessionId: 'sess-silent',
+        boundSessionId: 'sess-silent',
+      })
+
+      const resendLog = entries.find((e) => e.message.includes('[session-binding-resend]'))
+      assert.equal(resendLog, undefined,
+        '[session-binding-resend] must be silent at info level to avoid spamming prod logs on reconnects')
     })
   })
 })
