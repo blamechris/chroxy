@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { SdkSession } from '../src/sdk-session.js'
+import { SdkSession, armResultTimeoutForTest } from '../src/sdk-session.js'
 
 /**
  * Tests for SdkSession inactivity-timer pause/resume during pending
@@ -38,7 +38,7 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
 
       session._isBusy = true
       session._currentMessageId = 'msg-1'
-      session._armResultTimeoutForTest('msg-1', false)
+      armResultTimeoutForTest(session, 'msg-1', false)
 
       // Request permission — PermissionManager emits permission_request,
       // SdkSession listener pauses the inactivity timer.
@@ -66,7 +66,7 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
       // Simulate an in-flight message
       session._isBusy = true
       session._currentMessageId = 'msg-1'
-      session._armResultTimeoutForTest('msg-1', false)
+      armResultTimeoutForTest(session, 'msg-1', false)
 
       // Pending permission — PermissionManager emits permission_request,
       // session listener pauses the inactivity timer.
@@ -94,7 +94,7 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
       session.on('error', (d) => errors.push(d))
       session._isBusy = true
       session._currentMessageId = 'msg-multi'
-      session._armResultTimeoutForTest('msg-multi', false)
+      armResultTimeoutForTest(session, 'msg-multi', false)
 
       // Two concurrent permission requests — each pauses via the
       // PermissionManager listener, so the ref-counted pause count hits 2.
@@ -138,7 +138,7 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
       // handler must still clean up). Bump the PermissionManager timeout
       // so its own auto-deny doesn't fire first.
       session._permissions._timeoutMs = 60 * 60_000
-      session._armResultTimeoutForTest('msg-2', false)
+      armResultTimeoutForTest(session, 'msg-2', false)
       const permPromise = session._handlePermission('Bash', { command: 'rm -rf /' }, null)
       session._permissionPauseCount = 0
       session._resultTimeoutPaused = false
@@ -161,7 +161,7 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
 
       session._isBusy = true
       session._currentMessageId = 'msg-3'
-      session._armResultTimeoutForTest('msg-3', false)
+      armResultTimeoutForTest(session, 'msg-3', false)
       session._handlePermission('Bash', { command: 'ls' }, null)
       session._permissionPauseCount = 0
       session._resultTimeoutPaused = false
@@ -181,7 +181,7 @@ describe('SdkSession — inactivity timer pause/resume (#2831)', () => {
       session.on('error', (d) => errors.push(d))
       session._isBusy = true
       session._currentMessageId = 'msg-q'
-      session._armResultTimeoutForTest('msg-q', false)
+      armResultTimeoutForTest(session, 'msg-q', false)
 
       // Bump the permission-manager timeout so its own auto-deny
       // doesn't fire during the test window.
