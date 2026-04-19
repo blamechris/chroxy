@@ -75,6 +75,12 @@
   --border-permission: #4a3a7a;
   --border-question: #2a5a7a;
 
+  /* ---- Banner borders (subtle dividers for status/warning banners) ---- */
+  --banner-border-subtle: #252540;
+
+  /* ---- Warning (amber-yellow, distinct from --accent-orange) ---- */
+  --warning-fg: #fbbf24;
+
   /* ---- Status indicators ---- */
   --status-connected: #22c55e;
   --status-disconnected: #ef4444;

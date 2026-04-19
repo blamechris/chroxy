@@ -39,6 +39,8 @@ const categories = {
   text: { group: 'colors', sub: 'text' },
   accent: { group: 'colors', sub: 'accent' },
   border: { group: 'colors', sub: 'border' },
+  banner: { group: 'colors', sub: 'banner' },
+  warning: { group: 'colors', sub: 'warning' },
   status: { group: 'colors', sub: 'status' },
   syntax: { group: 'colors', sub: 'syntax' },
   diff: { group: 'colors', sub: 'diff' },
