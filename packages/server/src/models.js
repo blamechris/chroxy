@@ -122,11 +122,18 @@ export function createModelsRegistry() {
       }
 
       let nextDefault = null
-      const dropped = []
+      // Track total dropped count separately from the key-sample buffer so
+      // the log reports "dropped N/M" correctly when more than 3 entries
+      // are invalid (the sample is capped to avoid log bloat).
+      let droppedCount = 0
+      const droppedSample = []
       const converted = sdkModels
         .filter(m => {
           const ok = m && typeof m.value === 'string' && m.value.length > 0
-          if (!ok && dropped.length < 3) dropped.push(m)
+          if (!ok) {
+            droppedCount++
+            if (droppedSample.length < 3) droppedSample.push(m)
+          }
           return ok
         })
         .map(m => {
@@ -148,16 +155,17 @@ export function createModelsRegistry() {
           return { id, label, fullId, contextWindow }
         })
 
-      if (dropped.length > 0) {
-        // Contract drift: SDK returned entries missing the expected `value` key.
-        // Log a small sample (keys only — entries may carry provider metadata
-        // we don't want to leak to disk logs).
-        const sample = dropped.map(m => {
+      if (droppedCount > 0) {
+        // Contract drift: SDK returned entries whose `value` was missing,
+        // non-string, or empty. Log the accurate total count, plus a
+        // keys-only sample of the first N offenders — entries may carry
+        // provider metadata we don't want to leak to disk logs.
+        const sample = droppedSample.map(m => {
           if (m === null) return 'null'
           if (typeof m !== 'object') return typeof m
           return `{${Object.keys(m).join(',')}}`
         }).join(', ')
-        log.warn(`updateModels: dropped ${dropped.length}/${sdkModels.length} SDK entries missing 'value' key (sample: ${sample})`)
+        log.warn(`updateModels: dropped ${droppedCount}/${sdkModels.length} SDK entries with missing or invalid 'value' key (sample: ${sample})`)
       }
 
       if (converted.length === 0) {

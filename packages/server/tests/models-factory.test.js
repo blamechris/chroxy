@@ -397,4 +397,30 @@ describe('silent failure logging (#2830)', () => {
     const drop = entries.find(e => e.level === 'warn' && e.message.includes('dropped 1/2'))
     assert.ok(drop, `expected a warn about 1/2 dropped, got: ${JSON.stringify(entries.map(e => e.message))}`)
   })
+
+  it('updateModels reports the accurate total when more than 3 entries are dropped', () => {
+    // Regression guard: the sample buffer is capped at 3 for log-size
+    // hygiene, but the reported count must be the real total (5 here).
+    const r = createModelsRegistry()
+    r.updateModels([
+      { id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }, { id: 'e' },
+    ])
+    const drop = entries.find(e => e.level === 'warn' && e.message.includes('dropped'))
+    assert.ok(drop, 'expected a warn about dropped entries')
+    assert.ok(drop.message.includes('5/5'),
+      `expected "dropped 5/5 ..." not capped sample length, got: ${drop.message}`)
+  })
+
+  it('updateModels warns on non-string/empty-string value (wording: "missing or invalid")', () => {
+    const r = createModelsRegistry()
+    r.updateModels([
+      { value: '', displayName: 'Empty' },               // empty string
+      { value: 42, displayName: 'Number' },              // non-string
+      { value: null, displayName: 'Null' },              // null
+    ])
+    const drop = entries.find(e => e.level === 'warn' && e.message.includes('dropped'))
+    assert.ok(drop, 'expected a warn about dropped entries')
+    assert.ok(drop.message.includes("missing or invalid 'value'"),
+      `log wording should cover both missing and invalid cases: ${drop.message}`)
+  })
 })
