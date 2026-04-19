@@ -1519,6 +1519,20 @@
 
 .btn-retry:hover { opacity: 0.85; }
 
+/* ---- Tunnel Warming Banner (#2836) ---- */
+.tunnel-warming-banner {
+  padding: 0.5rem 1rem;
+  /* #1a1a2e matches --bg-secondary exactly; use token with fallback.
+     #fbbf24 (warning yellow) and #252540 (subtle border) don't have
+     exact token matches — leaving hex to preserve appearance until
+     a --warning-fg / --border-banner token is added. */
+  background: var(--bg-secondary, #1a1a2e);
+  color: #fbbf24;
+  border-bottom: 1px solid #252540;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
 /* Directory Browser (#1434) */
 .directory-browser {
   display: flex;
