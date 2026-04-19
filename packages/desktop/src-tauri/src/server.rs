@@ -105,6 +105,71 @@ fn parse_ps_line(line: &str) -> Option<(u32, String)> {
     Some((pid, cmd))
 }
 
+/// Parse `wmic process get ProcessId,CommandLine /format:csv` stdout into
+/// (pid, full_command) pairs. Pure: exposed for unit testing.
+///
+/// CSV format is `Node,CommandLine,ProcessId` — skips header + empty lines,
+/// splits on the rightmost comma so commas inside command lines don't
+/// break parsing.
+#[cfg(any(windows, test))]
+pub(crate) fn parse_wmic_csv(stdout: &str) -> Vec<(u32, String)> {
+    let mut procs: Vec<(u32, String)> = Vec::new();
+    for line in stdout.lines().skip(1) {
+        let parts: Vec<&str> = line.rsplitn(2, ',').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let pid = match parts[0].trim().parse::<u32>() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let rest = parts[1];
+        // Drop the leading "Node," segment to get just CommandLine.
+        let cmd = rest.splitn(2, ',').nth(1).unwrap_or("").to_string();
+        procs.push((pid, cmd));
+    }
+    procs
+}
+
+/// Parse `Get-CimInstance Win32_Process | ConvertTo-Json` stdout into
+/// (pid, full_command) pairs. Pure: exposed for unit testing.
+///
+/// PowerShell `ConvertTo-Json` emits a JSON object when there's a single
+/// result and a JSON array when there are multiple. Both shapes are
+/// handled. Each element has `ProcessId` (number) and `CommandLine`
+/// (string or null). Entries with null/missing CommandLine are skipped —
+/// they can't match the cloudflared filter anyway.
+#[cfg(any(windows, test))]
+pub(crate) fn parse_powershell_json(stdout: &str) -> Vec<(u32, String)> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return Vec::new();
+    };
+    // Normalize single-object output to an array of one.
+    let items: Vec<&serde_json::Value> = match &value {
+        serde_json::Value::Array(arr) => arr.iter().collect(),
+        obj @ serde_json::Value::Object(_) => vec![obj],
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let Some(pid) = item.get("ProcessId").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        let Some(cmd) = item.get("CommandLine").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if cmd.is_empty() {
+            continue;
+        }
+        out.push((pid as u32, cmd.to_string()));
+    }
+    out
+}
+
 /// Current state of the server process.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerStatus {
@@ -298,10 +363,11 @@ impl ServerManager {
 
     /// Kill orphan `cloudflared` processes still tunneling the given port
     /// from a previous run (e.g. a crashed server left its tunnel child
-    /// orphaned). Uses `ps -eo pid,command` on unix and `wmic` on
-    /// windows to enumerate processes, filters with the pure
-    /// `cloudflared_pids_to_kill()` function, then sends SIGTERM /
-    /// terminates. Waits briefly for them to exit.
+    /// orphaned). Uses `ps -eo pid,command` on unix and `wmic` (with a
+    /// PowerShell `Get-CimInstance` fallback for Windows 11 22H2+ where
+    /// wmic is deprecated/removed) on windows to enumerate processes,
+    /// filters with the pure `cloudflared_pids_to_kill()` function, then
+    /// sends SIGTERM / terminates. Waits briefly for them to exit.
     #[cfg(unix)]
     fn kill_orphan_cloudflared(port: u16) {
         let Ok(output) = Command::new("ps").args(["-eo", "pid=,command="]).output() else {
@@ -340,31 +406,11 @@ impl ServerManager {
 
     #[cfg(windows)]
     fn kill_orphan_cloudflared(port: u16) {
-        // Enumerate processes with `wmic process get ProcessId,CommandLine`.
-        let Ok(output) = Command::new("wmic")
-            .args(["process", "get", "ProcessId,CommandLine", "/format:csv"])
-            .output()
-        else {
-            return;
-        };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // CSV format: Node,CommandLine,ProcessId — skip header and empty lines.
-        let mut procs: Vec<(u32, String)> = Vec::new();
-        for line in stdout.lines().skip(1) {
-            let parts: Vec<&str> = line.rsplitn(2, ',').collect();
-            // parts[0] is ProcessId (rightmost), parts[1] is the rest (Node,CommandLine).
-            if parts.len() != 2 {
-                continue;
-            }
-            let pid = match parts[0].trim().parse::<u32>() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let rest = parts[1];
-            // Drop the leading "Node," segment to get just CommandLine.
-            let cmd = rest.splitn(2, ',').nth(1).unwrap_or("").to_string();
-            procs.push((pid, cmd));
-        }
+        // Try `wmic` first — still present on older Windows (pre-11 22H2)
+        // and cheaper than spinning up PowerShell. Fall back to
+        // `Get-CimInstance` via PowerShell when wmic is absent (newer
+        // Windows has it removed) or returns a non-success exit.
+        let procs = Self::enumerate_windows_processes();
 
         let pids = cloudflared_pids_to_kill(&procs, port);
         if pids.is_empty() {
@@ -383,6 +429,51 @@ impl ServerManager {
                 .output();
         }
         thread::sleep(Duration::from_millis(500));
+    }
+
+    /// Enumerate (pid, command_line) pairs on Windows.
+    ///
+    /// Primary: `wmic process get ProcessId,CommandLine /format:csv`
+    /// (still present on Windows 10 and Windows 11 pre-22H2).
+    ///
+    /// Fallback: `powershell -NoProfile -Command
+    /// "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine
+    /// | ConvertTo-Json -Compress"` (Windows 11 22H2+ where wmic is
+    /// deprecated and eventually removed). The `-NoProfile` flag skips
+    /// user profile loading for faster startup; `-Compress` keeps the
+    /// JSON on a single line.
+    #[cfg(windows)]
+    fn enumerate_windows_processes() -> Vec<(u32, String)> {
+        if let Ok(output) = Command::new("wmic")
+            .args(["process", "get", "ProcessId,CommandLine", "/format:csv"])
+            .output()
+        {
+            if output.status.success() && !output.stdout.is_empty() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let procs = parse_wmic_csv(&stdout);
+                if !procs.is_empty() {
+                    return procs;
+                }
+            }
+        }
+
+        // wmic absent or returned nothing — fall back to PowerShell.
+        let Ok(output) = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
+            ])
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_powershell_json(&stdout)
     }
 
     /// Check whether `cloudflared` is available on PATH.
@@ -1235,5 +1326,97 @@ mod tests {
         let procs = vec![(999u32, "someapp.exe --url http://localhost:8765".to_string())];
         let pids = cloudflared_pids_to_kill(&procs, 8765);
         assert!(pids.is_empty());
+    }
+
+    // -- Windows process enumeration parsers (#2850) --
+
+    #[test]
+    fn parse_wmic_csv_extracts_pid_and_command() {
+        // wmic /format:csv emits "Node,CommandLine,ProcessId" header.
+        let stdout = "Node,CommandLine,ProcessId\r\n\
+            MYHOST,\"C:\\cloudflared\\cloudflared.exe tunnel --url http://localhost:8765\",4242\r\n\
+            MYHOST,notepad.exe,1234\r\n";
+        let procs = parse_wmic_csv(stdout);
+        assert_eq!(procs.len(), 2);
+        assert_eq!(procs[0].0, 4242);
+        assert!(procs[0].1.contains("cloudflared.exe"));
+        assert!(procs[0].1.contains("http://localhost:8765"));
+        assert_eq!(procs[1].0, 1234);
+    }
+
+    #[test]
+    fn parse_wmic_csv_skips_malformed_lines() {
+        let stdout = "Node,CommandLine,ProcessId\r\n\
+            garbage-no-commas\r\n\
+            MYHOST,cmd.exe,not-a-number\r\n\
+            MYHOST,cmd.exe,777\r\n";
+        let procs = parse_wmic_csv(stdout);
+        assert_eq!(procs.len(), 1);
+        assert_eq!(procs[0].0, 777);
+    }
+
+    #[test]
+    fn parse_powershell_json_single_object() {
+        // PowerShell ConvertTo-Json emits an object (not array) when there's
+        // exactly one result.
+        let stdout = r#"{"ProcessId":4242,"CommandLine":"C:\\cloudflared\\cloudflared.exe tunnel --url http://localhost:8765"}"#;
+        let procs = parse_powershell_json(stdout);
+        assert_eq!(procs.len(), 1);
+        assert_eq!(procs[0].0, 4242);
+        assert!(procs[0].1.contains("cloudflared.exe"));
+        assert!(procs[0].1.contains("http://localhost:8765"));
+    }
+
+    #[test]
+    fn parse_powershell_json_array() {
+        let stdout = r#"[
+            {"ProcessId":4242,"CommandLine":"C:\\cloudflared\\cloudflared.exe tunnel --url http://localhost:8765"},
+            {"ProcessId":1234,"CommandLine":"notepad.exe"},
+            {"ProcessId":5678,"CommandLine":"C:\\Windows\\System32\\svchost.exe -k netsvcs"}
+        ]"#;
+        let procs = parse_powershell_json(stdout);
+        assert_eq!(procs.len(), 3);
+        assert_eq!(procs[0].0, 4242);
+        assert_eq!(procs[1].0, 1234);
+        assert_eq!(procs[2].0, 5678);
+    }
+
+    #[test]
+    fn parse_powershell_json_skips_null_commandline() {
+        // Kernel/system processes often have null CommandLine — those can
+        // never match the cloudflared filter, so skipping is fine.
+        let stdout = r#"[
+            {"ProcessId":4,"CommandLine":null},
+            {"ProcessId":4242,"CommandLine":"cloudflared tunnel --url http://localhost:8765"}
+        ]"#;
+        let procs = parse_powershell_json(stdout);
+        assert_eq!(procs.len(), 1);
+        assert_eq!(procs[0].0, 4242);
+    }
+
+    #[test]
+    fn parse_powershell_json_empty_input() {
+        assert!(parse_powershell_json("").is_empty());
+        assert!(parse_powershell_json("   \n  ").is_empty());
+    }
+
+    #[test]
+    fn parse_powershell_json_malformed() {
+        // Garbage input must not panic — returns empty.
+        assert!(parse_powershell_json("not json at all").is_empty());
+        assert!(parse_powershell_json("{\"ProcessId\":").is_empty());
+    }
+
+    #[test]
+    fn parse_powershell_json_feeds_cloudflared_filter() {
+        // End-to-end sanity check: PowerShell JSON → filter → expected pid.
+        let stdout = r#"[
+            {"ProcessId":4242,"CommandLine":"\"C:\\Program Files\\cloudflared\\cloudflared.exe\" tunnel --url http://localhost:8765"},
+            {"ProcessId":1234,"CommandLine":"notepad.exe"},
+            {"ProcessId":9999,"CommandLine":"cloudflared tunnel --url http://localhost:9999"}
+        ]"#;
+        let procs = parse_powershell_json(stdout);
+        let pids = cloudflared_pids_to_kill(&procs, 8765);
+        assert_eq!(pids, vec![4242]);
     }
 }
