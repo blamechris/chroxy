@@ -2,6 +2,9 @@ import { readFileSync, renameSync, unlinkSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { writeFileRestricted } from './platform.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('models')
 
 /** Default context window for unknown models */
 export const DEFAULT_CONTEXT_WINDOW = 200_000
@@ -113,11 +116,26 @@ export function createModelsRegistry() {
     },
 
     updateModels(sdkModels) {
-      if (!Array.isArray(sdkModels)) return null
+      if (!Array.isArray(sdkModels)) {
+        log.debug(`updateModels: ignoring non-array input (got ${sdkModels === null ? 'null' : typeof sdkModels})`)
+        return null
+      }
 
       let nextDefault = null
+      // Track total dropped count separately from the key-sample buffer so
+      // the log reports "dropped N/M" correctly when more than 3 entries
+      // are invalid (the sample is capped to avoid log bloat).
+      let droppedCount = 0
+      const droppedSample = []
       const converted = sdkModels
-        .filter(m => m && typeof m.value === 'string' && m.value.length > 0)
+        .filter(m => {
+          const ok = m && typeof m.value === 'string' && m.value.length > 0
+          if (!ok) {
+            droppedCount++
+            if (droppedSample.length < 3) droppedSample.push(m)
+          }
+          return ok
+        })
         .map(m => {
           const fullId = m.value
           const id = fullId.startsWith('claude-') ? fullId.slice(7) : fullId
@@ -137,7 +155,25 @@ export function createModelsRegistry() {
           return { id, label, fullId, contextWindow }
         })
 
-      if (converted.length === 0) return converted
+      if (droppedCount > 0) {
+        // Contract drift: SDK returned entries whose `value` was missing,
+        // non-string, or empty. Log the accurate total count, plus a
+        // keys-only sample of the first N offenders — entries may carry
+        // provider metadata we don't want to leak to disk logs.
+        const sample = droppedSample.map(m => {
+          if (m === null) return 'null'
+          if (typeof m !== 'object') return typeof m
+          return `{${Object.keys(m).join(',')}}`
+        }).join(', ')
+        log.warn(`updateModels: dropped ${droppedCount}/${sdkModels.length} SDK entries with missing or invalid 'value' key (sample: ${sample})`)
+      }
+
+      if (converted.length === 0) {
+        if (sdkModels.length > 0) {
+          log.warn(`updateModels: SDK returned ${sdkModels.length} entries but none matched the expected {value,displayName,description} shape — keeping existing models`)
+        }
+        return converted
+      }
 
       applyModels(converted, nextDefault)
       return converted
@@ -250,7 +286,12 @@ export function createModelsRegistry() {
         renameSync(tmpPath, path)
         lastSavedSnapshot = snapshot
         return true
-      } catch {
+      } catch (err) {
+        // Persisting the cache failed (permission denied, disk full, read-only
+        // parent). The in-memory list stays live for this process, but will be
+        // lost on restart — surface at warn level so operators can diagnose
+        // from ~/.chroxy/logs/chroxy.log.
+        log.warn(`saveCache: failed to persist models cache to ${path}: ${err?.code || ''} ${err?.message || err}`.trim())
         try { unlinkSync(tmpPath) } catch {}
         return false
       }

@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, existsSync } f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createModelsRegistry } from '../src/models.js'
+import { addLogListener, removeLogListener, setLogLevel } from '../src/logger.js'
 
 describe('createModelsRegistry', () => {
   it('returns an object with all registry methods', () => {
@@ -325,5 +326,101 @@ describe('disk cache (loadCache / saveCache)', () => {
     assert.equal(r2.saveCache(cachePath), true)
     const mtimeAfterSave = statSync(cachePath).mtimeMs
     assert.equal(mtimeBeforeSave, mtimeAfterSave, 'loaded state should not trigger a redundant write')
+  })
+})
+
+describe('silent failure logging (#2830)', () => {
+  let dir
+  let cachePath
+  let entries
+  let listener
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-models-log-'))
+    cachePath = join(dir, 'models-cache.json')
+    entries = []
+    listener = (entry) => entries.push(entry)
+    setLogLevel('debug')
+    addLogListener(listener)
+  })
+
+  afterEach(() => {
+    removeLogListener(listener)
+    setLogLevel('info')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('saveCache failure logs a warn with the path and error', () => {
+    if (process.platform === 'win32') return
+    chmodSync(dir, 0o500)
+    try {
+      const r = createModelsRegistry()
+      r.updateModels([{ value: 'claude-test', displayName: 'Test', description: '' }])
+      assert.equal(r.saveCache(cachePath), false)
+
+      const warn = entries.find(e => e.component === 'models' && e.level === 'warn' && e.message.includes('saveCache'))
+      assert.ok(warn, `expected a models/warn log line mentioning saveCache, got: ${JSON.stringify(entries)}`)
+      assert.ok(warn.message.includes(cachePath), 'log should include the target path')
+    } finally {
+      chmodSync(dir, 0o700)
+    }
+  })
+
+  it('updateModels logs a debug line when input is not an array', () => {
+    const r = createModelsRegistry()
+    r.updateModels(null)
+    const debug = entries.find(e => e.component === 'models' && e.level === 'debug' && e.message.includes('non-array'))
+    assert.ok(debug, 'expected a debug log for null input')
+  })
+
+  it('updateModels warns when every SDK entry is dropped (contract drift)', () => {
+    const r = createModelsRegistry()
+    // Shape drift — no `value` key
+    r.updateModels([
+      { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6' },
+      { id: 'claude-opus-4-7', name: 'Opus 4.7' },
+    ])
+    const drop = entries.find(e => e.level === 'warn' && e.message.includes('dropped'))
+    const none = entries.find(e => e.level === 'warn' && e.message.includes('none matched'))
+    assert.ok(drop, 'expected a warn about dropped entries')
+    assert.ok(none, 'expected a warn about zero matches')
+    // Sample should include field names so operators can see what the SDK sent
+    assert.ok(drop.message.includes('id') && drop.message.includes('name'), `sample should list keys: ${drop.message}`)
+  })
+
+  it('updateModels warns for partial contract drift (some entries dropped)', () => {
+    const r = createModelsRegistry()
+    r.updateModels([
+      { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: '' },
+      { id: 'claude-opus-4-7', name: 'Opus 4.7' }, // missing `value`
+    ])
+    const drop = entries.find(e => e.level === 'warn' && e.message.includes('dropped 1/2'))
+    assert.ok(drop, `expected a warn about 1/2 dropped, got: ${JSON.stringify(entries.map(e => e.message))}`)
+  })
+
+  it('updateModels reports the accurate total when more than 3 entries are dropped', () => {
+    // Regression guard: the sample buffer is capped at 3 for log-size
+    // hygiene, but the reported count must be the real total (5 here).
+    const r = createModelsRegistry()
+    r.updateModels([
+      { id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }, { id: 'e' },
+    ])
+    const drop = entries.find(e => e.level === 'warn' && e.message.includes('dropped'))
+    assert.ok(drop, 'expected a warn about dropped entries')
+    assert.ok(drop.message.includes('5/5'),
+      `expected "dropped 5/5 ..." not capped sample length, got: ${drop.message}`)
+  })
+
+  it('updateModels warns on non-string/empty-string value (wording: "missing or invalid")', () => {
+    const r = createModelsRegistry()
+    r.updateModels([
+      { value: '', displayName: 'Empty' },               // empty string
+      { value: 42, displayName: 'Number' },              // non-string
+      { value: null, displayName: 'Null' },              // null
+    ])
+    const drop = entries.find(e => e.level === 'warn' && e.message.includes('dropped'))
+    assert.ok(drop, 'expected a warn about dropped entries')
+    assert.ok(drop.message.includes("missing or invalid 'value'"),
+      `log wording should cover both missing and invalid cases: ${drop.message}`)
   })
 })
