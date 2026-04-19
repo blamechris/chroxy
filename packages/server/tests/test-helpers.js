@@ -39,7 +39,7 @@ export async function waitFor(predicate, { timeoutMs = 2000, intervalMs = 10, la
  *   const lostEvent = await waitForEvent(adapter, 'tunnel_lost')
  *   const recovered = await waitForEvent(adapter, 'tunnel_recovered', 2000)
  *
- * @param {import('events').EventEmitter} emitter - The emitter to listen on.
+ * @param {import('node:events').EventEmitter} emitter - The emitter to listen on.
  * @param {string} event - Event name to wait for.
  * @param {number} [timeoutMs=5000] - Reject after this many ms.
  * @returns {Promise<any>} resolves with the first arg passed to the listener
