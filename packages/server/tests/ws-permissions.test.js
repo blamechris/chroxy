@@ -2,6 +2,7 @@ import { describe, it, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { createPermissionHandler, sanitizeToolInput } from '../src/ws-permissions.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 /**
  * ws-permissions.js unit tests (#1730)
@@ -500,6 +501,232 @@ describe('createPermissionHandler', () => {
       await new Promise(r => setImmediate(r))
       assert.equal(res.statusCode, 200)
       assert.equal(respondToPermission.mock.calls.length, 1)
+    })
+  })
+})
+
+describe('[session-binding-create] / [session-binding-resend] diagnostic logs (#2832, #2855)', () => {
+  let currentListener = null
+  afterEach(() => {
+    if (currentListener) {
+      removeLogListener(currentListener)
+      currentListener = null
+    }
+  })
+
+  describe('handlePermissionRequest (HTTP /permission — [session-binding-create])', () => {
+    it('emits [session-binding-create] with requestId, sessionId=none, and the sourceIp for the legacy HTTP path', async () => {
+      const entries = []
+      currentListener = (e) => entries.push(e)
+      addLogListener(currentListener)
+
+      const opts = makeHandlerOpts()
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      const body = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+      const req = makeReq(body)
+      // Provide a deterministic sourceIp so the log assertion is stable
+      req.socket = { remoteAddress: '203.0.113.42' }
+      const res = makeRes()
+      handlePermissionRequest(req, res)
+      await new Promise(r => setImmediate(r))
+
+      const createLog = entries.find((e) =>
+        e.level === 'info' && e.message.includes('[session-binding-create]'),
+      )
+      assert.ok(createLog, 'expected a [session-binding-create] info log entry on HTTP permission path')
+      // The HTTP (non-SDK) path has no origin sessionId — the hook is the
+      // caller — so the log must record sessionId=none, alongside the
+      // sourceIp as the only available correlation signal.
+      assert.match(createLog.message, /created via HTTP/)
+      assert.match(createLog.message, /sessionId=none/)
+      assert.match(createLog.message, /sourceIp=203\.0\.113\.42/)
+      // And must contain the requestId (perm-<uuid>) as the stable key.
+      assert.match(createLog.message, /permission perm-[0-9a-f-]+ created/)
+
+      destroy()
+    })
+  })
+
+  describe('resendPendingPermissions ([session-binding-resend])', () => {
+    it('emits [session-binding-resend] for SDK-mode permission with full client binding diagnostics', () => {
+      const entries = []
+      currentListener = (e) => entries.push(e)
+      addLogListener(currentListener)
+
+      const session = {
+        _pendingPermissions: new Map([['sdk-req-resend', {}]]),
+        _lastPermissionData: new Map([
+          ['sdk-req-resend', {
+            requestId: 'sdk-req-resend',
+            tool: 'Write',
+            description: '/tmp/out',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: Date.now(),
+          }],
+        ]),
+      }
+      const sm = { _sessions: new Map([['sess-resend', { session }]]) }
+      const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+
+      const client = {
+        id: 'client-android',
+        activeSessionId: 'sess-resend',
+        boundSessionId: 'sess-resend',
+      }
+      resendPendingPermissions({}, client)
+
+      const resendLog = entries.find((e) =>
+        e.level === 'info'
+          && e.message.includes('[session-binding-resend]')
+          && e.message.includes('sdk-req-resend'),
+      )
+      assert.ok(resendLog, 'expected a [session-binding-resend] info log entry for SDK-mode')
+      // All four correlation fields required by #2832 triage must be present:
+      // requestId (key), the target client, the origin session, and both
+      // activeSession/boundSession so we can tell the two apart.
+      assert.match(resendLog.message, /permission sdk-req-resend resent to client client-android/)
+      assert.match(resendLog.message, /sessionId=sess-resend/)
+      assert.match(resendLog.message, /activeSession=sess-resend/)
+      assert.match(resendLog.message, /boundSession=sess-resend/)
+    })
+
+    it('emits [session-binding-resend] with client=unknown when no client descriptor is passed', () => {
+      const entries = []
+      currentListener = (e) => entries.push(e)
+      addLogListener(currentListener)
+
+      const session = {
+        _pendingPermissions: new Map([['sdk-req-anon', {}]]),
+        _lastPermissionData: new Map([
+          ['sdk-req-anon', {
+            requestId: 'sdk-req-anon',
+            tool: 'Read',
+            description: '/tmp/in',
+            input: {},
+            remainingMs: 60_000,
+            createdAt: Date.now(),
+          }],
+        ]),
+      }
+      const sm = { _sessions: new Map([['sess-anon', { session }]]) }
+      const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+
+      // No client argument — simulates the pre-#2851 call sites that don't
+      // yet pass the client descriptor.
+      resendPendingPermissions({})
+
+      const resendLog = entries.find((e) =>
+        e.level === 'info'
+          && e.message.includes('[session-binding-resend]')
+          && e.message.includes('sdk-req-anon'),
+      )
+      assert.ok(resendLog, 'expected a [session-binding-resend] info log entry in the no-client branch')
+      assert.match(resendLog.message, /sessionId=sess-anon/)
+      assert.match(resendLog.message, /client=unknown/)
+    })
+
+    it('emits [session-binding-resend] legacy for HTTP-held pending permission with client descriptor', () => {
+      const entries = []
+      currentListener = (e) => entries.push(e)
+      addLogListener(currentListener)
+
+      const opts = makeHandlerOpts()
+      opts.pendingPermissions.set('leg-req-resend', {
+        resolve: () => {},
+        timer: null,
+        data: {
+          requestId: 'leg-req-resend',
+          tool: 'Write',
+          description: '/tmp/legacy',
+          input: {},
+          remainingMs: 300_000,
+          createdAt: Date.now(),
+        },
+      })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+
+      const client = {
+        id: 'client-ios',
+        activeSessionId: 'sess-active',
+        boundSessionId: null,
+      }
+      resendPendingPermissions({}, client)
+
+      const resendLog = entries.find((e) =>
+        e.level === 'info'
+          && e.message.includes('[session-binding-resend]')
+          && e.message.includes('legacy permission leg-req-resend'),
+      )
+      assert.ok(resendLog, 'expected a [session-binding-resend] legacy info log entry')
+      assert.match(resendLog.message, /resent to client client-ios/)
+      assert.match(resendLog.message, /activeSession=sess-active/)
+      assert.match(resendLog.message, /boundSession=none/)
+    })
+
+    it('emits [session-binding-resend] legacy with client=unknown when no client descriptor is passed', () => {
+      const entries = []
+      currentListener = (e) => entries.push(e)
+      addLogListener(currentListener)
+
+      const opts = makeHandlerOpts()
+      opts.pendingPermissions.set('leg-req-anon', {
+        resolve: () => {},
+        timer: null,
+        data: {
+          requestId: 'leg-req-anon',
+          tool: 'Read',
+          description: '/tmp/legacy-anon',
+          input: {},
+          remainingMs: 120_000,
+          createdAt: Date.now(),
+        },
+      })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+
+      resendPendingPermissions({})
+
+      const resendLog = entries.find((e) =>
+        e.level === 'info'
+          && e.message.includes('[session-binding-resend]')
+          && e.message.includes('legacy permission leg-req-anon'),
+      )
+      assert.ok(resendLog, 'expected a [session-binding-resend] legacy log in the no-client branch')
+      assert.match(resendLog.message, /client=unknown/)
+    })
+
+    it('does NOT emit [session-binding-resend] for expired permissions', () => {
+      const entries = []
+      currentListener = (e) => entries.push(e)
+      addLogListener(currentListener)
+
+      const session = {
+        _pendingPermissions: new Map([['sdk-req-expired', {}]]),
+        _lastPermissionData: new Map([
+          ['sdk-req-expired', {
+            requestId: 'sdk-req-expired',
+            tool: 'Write',
+            description: '/tmp/expired',
+            input: {},
+            remainingMs: 1,
+            createdAt: Date.now() - 60_000,
+          }],
+        ]),
+      }
+      const sm = { _sessions: new Map([['sess-expired', { session }]]) }
+      const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+
+      const client = { id: 'client-x', activeSessionId: 'sess-expired', boundSessionId: 'sess-expired' }
+      resendPendingPermissions({}, client)
+
+      const resendLog = entries.find((e) =>
+        e.level === 'info' && e.message.includes('[session-binding-resend]'),
+      )
+      assert.equal(resendLog, undefined,
+        'expired permissions must be skipped before the [session-binding-resend] log fires')
     })
   })
 })
