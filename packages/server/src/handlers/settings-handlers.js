@@ -154,7 +154,31 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   // all session-scoped handlers but missed this one + the HTTP fallback.
   if (client.boundSessionId) {
     if (!mappedSessionId || mappedSessionId !== client.boundSessionId) {
-      log.warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to respond to permission ${requestId} with mapped session ${mappedSessionId ?? 'unmapped'}`)
+      // Correlate with the [session-binding-create] log at the same
+      // requestId to recover the original creating client's bound session
+      // and createdAt. Reproduction steps: see issue #2832.
+      const permData = (mappedSessionId && ctx.sessionManager)
+        ? ctx.sessionManager.getSession(mappedSessionId)?.session?._lastPermissionData?.get(requestId)
+        : ctx.pendingPermissions?.get(requestId)?.data
+      const createdAt = permData?.createdAt ?? null
+      const ageMs = createdAt ? Date.now() - createdAt : null
+      const clientConnectedAt = client.authTime ?? null
+      const likelyPostReconnect = Boolean(
+        (ageMs !== null && ageMs > 30_000) ||
+        (createdAt && clientConnectedAt && clientConnectedAt > createdAt)
+      )
+      log.warn(`[session-binding-reject] permission_response rejected ${JSON.stringify({
+        requestId,
+        decision,
+        clientId: client.id,
+        activeSessionId: client.activeSessionId ?? null,
+        boundSessionId: client.boundSessionId ?? null,
+        mappedSessionId: mappedSessionId ?? null,
+        requestCreatedAt: createdAt,
+        clientConnectedAt,
+        requestAgeMs: ageMs,
+        likelyPostReconnect,
+      })}`)
       // Don't consume the permissionSessionMap entry — let the legitimate
       // client still respond to it.
       sendError(ws, requestId, 'SESSION_TOKEN_MISMATCH', 'Not authorized to respond to this permission request')

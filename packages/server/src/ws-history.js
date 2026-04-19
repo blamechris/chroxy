@@ -154,7 +154,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
 
     send(ws, { type: 'available_models', models: getModels(), defaultModel: getDefaultModelId() })
     send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
-    permissions.resendPendingPermissions(ws)
+    permissions.resendPendingPermissions(ws, client)
     return
   }
 

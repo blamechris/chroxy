@@ -110,6 +110,11 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       const requestId = `perm-${randomUUID()}`
 
       log.info(`Permission request ${requestId}: ${hookData.tool_name || 'unknown tool'}`)
+      // Diagnostic correlation log for #2832 — paired with
+      // [session-binding-resend] and [session-binding-reject]. The HTTP
+      // /permission path is the legacy (non-SDK) case; the requestId acts
+      // as a stable correlation key across the permission lifecycle.
+      log.info(`[session-binding-create] permission ${requestId} created via HTTP (sessionId=none, sourceIp=${clientIp})`)
 
       const tool = hookData.tool_name || 'Unknown tool'
       const toolInput = hookData.tool_input || {}
@@ -294,8 +299,12 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     })
   }
 
-  /** Re-send any pending permission requests to a newly connected/reconnected client */
-  function resendPendingPermissions(ws) {
+  /**
+   * Re-send any pending permission requests to a newly connected/reconnected client.
+   * @param {WebSocket} ws
+   * @param {Object} [client] - Optional client descriptor for diagnostic logging (#2832)
+   */
+  function resendPendingPermissions(ws, client) {
     // SDK-mode: check all sessions for pending permissions
     const sm = getSessionManager()
     if (sm?._sessions instanceof Map) {
@@ -312,6 +321,14 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
                 continue
               }
               log.info(`Re-sending pending permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
+              // Diagnostic correlation log for #2832 — grep by requestId
+              // to see whether the recipient's boundSessionId matches the
+              // origin session recorded at [session-binding-create].
+              if (client) {
+                log.info(`[session-binding-resend] permission ${requestId} resent to client ${client.id} (sessionId=${sessionId}, activeSession=${client.activeSessionId ?? 'none'}, boundSession=${client.boundSessionId ?? 'none'})`)
+              } else {
+                log.info(`[session-binding-resend] permission ${requestId} resent (sessionId=${sessionId}, client=unknown)`)
+              }
               permissionSessionMap.set(requestId, sessionId)
               const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = permData
               sendFn(ws, { type: 'permission_request', ...clientPayload, remainingMs, sessionId })
@@ -332,6 +349,11 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           continue
         }
         log.info(`Re-sending pending legacy permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
+        if (client) {
+          log.info(`[session-binding-resend] legacy permission ${requestId} resent to client ${client.id} (activeSession=${client.activeSessionId ?? 'none'}, boundSession=${client.boundSessionId ?? 'none'})`)
+        } else {
+          log.info(`[session-binding-resend] legacy permission ${requestId} resent (client=unknown)`)
+        }
         const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = pending.data
         sendFn(ws, { type: 'permission_request', ...clientPayload, remainingMs })
       }

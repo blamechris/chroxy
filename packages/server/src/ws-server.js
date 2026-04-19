@@ -1065,7 +1065,8 @@ export class WsServer {
 
   /** Delegate: re-send pending permissions (test compat) */
   _resendPendingPermissions(ws) {
-    this._permissions.resendPendingPermissions(ws)
+    const client = this.clients.get(ws)
+    this._permissions.resendPendingPermissions(ws, client)
   }
 
   /** Public broadcast: send a message to all authenticated clients */

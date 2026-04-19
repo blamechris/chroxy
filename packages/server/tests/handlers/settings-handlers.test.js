@@ -1,6 +1,7 @@
-import { describe, it } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
+import { setLogListener } from '../../src/logger.js'
 import { createSpy, createMockSession } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
@@ -197,6 +198,95 @@ describe('settings-handlers', () => {
 
       assert.equal(session.respondToPermission.callCount, 1)
       assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow'])
+    })
+
+    describe('session-binding reject diagnostic log (#2832)', () => {
+      afterEach(() => { setLogListener(null) })
+
+      it('emits a structured [session-binding-reject] log with all diagnostic fields', () => {
+        const entries = []
+        setLogListener((e) => entries.push(e))
+
+        // Simulate Android "post-reconnect" approval:
+        // - client is bound to session 's-bound'
+        // - the permission is mapped to a DIFFERENT session 's-other'
+        // - the permission was created well before the client connected
+        const sessions = new Map()
+        const session = createMockSession()
+        session._pendingPermissions = new Map([['req-mismatch', true]])
+        session._lastPermissionData = new Map([
+          ['req-mismatch', { createdAt: Date.now() - 120_000 }],
+        ])
+        sessions.set('s-other', { session, name: 'O', cwd: '/tmp' })
+
+        const ctx = makeCtx(sessions)
+        ctx.permissionSessionMap.set('req-mismatch', 's-other')
+
+        const client = makeClient({
+          id: 'client-android',
+          activeSessionId: 's-bound',
+          boundSessionId: 's-bound',
+          authTime: Date.now() - 5_000, // reconnected recently, AFTER the permission was created
+        })
+
+        const ws = makeWs()
+        settingsHandlers.permission_response(
+          ws,
+          client,
+          { requestId: 'req-mismatch', decision: 'allow' },
+          ctx,
+        )
+
+        // The session-bound client should be rejected, no resolve attempt
+        assert.equal(session.respondToPermission.callCount, 0)
+
+        // Find the diagnostic log entry
+        const rejectLog = entries.find((e) =>
+          e.level === 'warn' && e.message.includes('[session-binding-reject]'),
+        )
+        assert.ok(rejectLog, 'expected a [session-binding-reject] warn log entry')
+
+        // The log message must be grep-able and must carry every field the
+        // follow-up fix needs to triangulate the bug: the requestId as
+        // correlation key, both session ids, the decision, and whether the
+        // response looked post-reconnect.
+        const m = rejectLog.message
+        assert.match(m, /\[session-binding-reject\]/)
+        assert.match(m, /"requestId":"req-mismatch"/)
+        assert.match(m, /"decision":"allow"/)
+        assert.match(m, /"clientId":"client-android"/)
+        assert.match(m, /"activeSessionId":"s-bound"/)
+        assert.match(m, /"boundSessionId":"s-bound"/)
+        assert.match(m, /"mappedSessionId":"s-other"/)
+        assert.match(m, /"likelyPostReconnect":true/)
+      })
+
+      it('logs mappedSessionId:null and likelyPostReconnect:false when no mapping and no timing signal', () => {
+        const entries = []
+        setLogListener((e) => entries.push(e))
+
+        const ctx = makeCtx()
+        const client = makeClient({
+          id: 'client-ios',
+          activeSessionId: 's-bound',
+          boundSessionId: 's-bound',
+        })
+
+        settingsHandlers.permission_response(
+          makeWs(),
+          client,
+          { requestId: 'req-unmapped', decision: 'deny' },
+          ctx,
+        )
+
+        const rejectLog = entries.find((e) =>
+          e.level === 'warn' && e.message.includes('[session-binding-reject]'),
+        )
+        assert.ok(rejectLog, 'expected a [session-binding-reject] warn log entry')
+        assert.match(rejectLog.message, /"mappedSessionId":null/)
+        assert.match(rejectLog.message, /"likelyPostReconnect":false/)
+        assert.match(rejectLog.message, /"decision":"deny"/)
+      })
     })
   })
 

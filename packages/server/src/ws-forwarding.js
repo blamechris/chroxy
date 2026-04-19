@@ -234,7 +234,13 @@ function executeRegistrations(registrations, sessionId, ctx) {
   const { permissionSessionMap, questionSessionMap } = ctx
   for (const reg of registrations) {
     if (reg.map === 'permission') {
-      permissionSessionMap.set(reg.key, reg.value ?? sessionId)
+      const mappedSessionId = reg.value ?? sessionId
+      permissionSessionMap.set(reg.key, mappedSessionId)
+      // Diagnostic correlation log for #2832 — paired with
+      // [session-binding-resend] and [session-binding-reject]. Allows
+      // grepping the origin session for any requestId that later gets
+      // rejected as SESSION_TOKEN_MISMATCH.
+      log.info(`[session-binding-create] permission ${reg.key} created (sessionId=${mappedSessionId})`)
     } else if (reg.map === 'question') {
       questionSessionMap.set(reg.key, reg.value ?? sessionId)
     }
