@@ -744,26 +744,3 @@ export class SdkSession extends BaseSession {
     this.removeAllListeners()
   }
 }
-
-/**
- * Test helper: arm a result timeout on an SdkSession without going through
- * sendMessage(). Lets unit tests exercise the 5-minute inactivity-timeout
- * path in isolation. Lives as a module-level export rather than a class
- * method so production code paths never touch test scaffolding.
- *
- * @param {SdkSession} session
- * @param {string} messageId
- * @param {boolean} [hasStreamStarted=false]
- */
-export function armResultTimeoutForTest(session, messageId, hasStreamStarted = false) {
-  const reset = () => {
-    if (session._resultTimeout) clearTimeout(session._resultTimeout)
-    session._resultTimeout = null
-    if (session._resultTimeoutPaused) return
-    session._resultTimeout = setTimeout(() => {
-      session._handleResultTimeout(messageId, hasStreamStarted)
-    }, 300_000)
-  }
-  session._resetResultTimeout = reset
-  reset()
-}

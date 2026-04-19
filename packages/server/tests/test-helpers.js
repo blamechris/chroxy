@@ -215,3 +215,26 @@ export function createMockSession(overrides = {}) {
   Object.assign(session, overrides)
   return session
 }
+
+/**
+ * Test helper: arm the SdkSession result-inactivity timeout without going
+ * through sendMessage(). Lets unit tests exercise the 5-minute pause/resume
+ * path in isolation. Lives in test-helpers so production module exports
+ * only production API (#2870).
+ *
+ * @param {import('../src/sdk-session.js').SdkSession} session
+ * @param {string} messageId
+ * @param {boolean} [hasStreamStarted=false]
+ */
+export function armResultTimeoutForTest(session, messageId, hasStreamStarted = false) {
+  const reset = () => {
+    if (session._resultTimeout) clearTimeout(session._resultTimeout)
+    session._resultTimeout = null
+    if (session._resultTimeoutPaused) return
+    session._resultTimeout = setTimeout(() => {
+      session._handleResultTimeout(messageId, hasStreamStarted)
+    }, 300_000)
+  }
+  session._resetResultTimeout = reset
+  reset()
+}
