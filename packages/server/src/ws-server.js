@@ -72,6 +72,14 @@ const log = createLogger('ws')
 export const SERVER_PROTOCOL_VERSION = 2
 /** Minimum protocol version this server can speak */
 export const MIN_PROTOCOL_VERSION = 1
+/**
+ * Minimum protocol version for structured tunnel-warming/ready status
+ * broadcasts (#2849). v1 clients don't know how to render the `phase`
+ * field and would mis-render it as a chat message — they are simply
+ * excluded from these broadcasts rather than served a phase-less
+ * fallback (which would reintroduce the mis-render).
+ */
+export const TUNNEL_STATUS_MIN_PROTOCOL_VERSION = 2
 
 /**
  * PROTOCOL_CHANGELOG
@@ -84,10 +92,13 @@ export const MIN_PROTOCOL_VERSION = 1
  *
  * v2 (#2849) — `server_status` gained a structured `phase` field
  *   ('tunnel_warming' | 'ready') that v1 dashboards don't know how to
- *   render. The server still emits plain (phase-less) `server_status`
- *   text to v1 clients, and only emits the structured phase form to
- *   v2+ clients. Gating happens at the broadcast site in server-cli.js
- *   via the minProtocolVersion filter on WsBroadcaster.
+ *   render (they only read `msg.message` and push the payload as a
+ *   chat system message). The structured broadcasts are gated to
+ *   clients that advertised v2+ at auth time; v1 clients no longer
+ *   receive tunnel warming / ready status at all. Gating happens at
+ *   the broadcast site in server-cli.js via
+ *   WsServer.broadcastMinProtocolVersion (see
+ *   TUNNEL_STATUS_MIN_PROTOCOL_VERSION).
  */
 
 /** Cached latest version from npm registry (null if unavailable) */
