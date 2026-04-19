@@ -42,6 +42,72 @@ function getDefaultCachePath() {
 }
 
 /**
+ * Canonical JSON stringifier — sorts object keys recursively so equivalent
+ * data produces an identical string regardless of construction order.
+ *
+ * Used by the registry's snapshotString() to dedupe saveCache() writes. The
+ * JS spec guarantees insertion-order key iteration, but relying on that to
+ * compare payloads is fragile: any future refactor that builds model objects
+ * via `{...m, contextWindow}` spreads or object-rest patterns could silently
+ * shuffle keys and defeat the snapshot equality check. Sorting keys makes
+ * the snapshot invariant to construction order.
+ *
+ * Semantics match `JSON.stringify` for the cases that matter:
+ *   - undefined / function / symbol values: dropped from objects,
+ *     coerced to null inside arrays (same as JSON.stringify)
+ *   - sparse array holes: serialized as null (same as JSON.stringify)
+ *   - `toJSON()`: honored on any object that defines it
+ *   - circular structures: throw (same as JSON.stringify)
+ *
+ * Implementation: normalize to a key-sorted plain-object/array tree first,
+ * then hand to `JSON.stringify`. This avoids emitting invalid JSON like
+ * `{"k":undefined}` while still guaranteeing canonical ordering.
+ *
+ * Exported for tests.
+ */
+export function canonicalStringify(value) {
+  const seen = new Set()
+
+  function normalize(current, key, inArray) {
+    if (current && typeof current === 'object' && typeof current.toJSON === 'function') {
+      current = current.toJSON(key)
+    }
+    if (current === undefined || typeof current === 'function' || typeof current === 'symbol') {
+      return inArray ? null : undefined
+    }
+    if (!current || typeof current !== 'object') {
+      return current
+    }
+    if (seen.has(current)) {
+      throw new TypeError('Converting circular structure to JSON')
+    }
+    seen.add(current)
+    try {
+      if (Array.isArray(current)) {
+        const out = new Array(current.length)
+        for (let i = 0; i < current.length; i += 1) {
+          out[i] = normalize(current[i], String(i), true)
+        }
+        return out
+      }
+      const out = {}
+      const keys = Object.keys(current).sort()
+      for (const childKey of keys) {
+        const childValue = normalize(current[childKey], childKey, false)
+        if (childValue !== undefined) {
+          out[childKey] = childValue
+        }
+      }
+      return out
+    } finally {
+      seen.delete(current)
+    }
+  }
+
+  return JSON.stringify(normalize(value, '', false))
+}
+
+/**
  * Derive a human-readable label from a stripped model ID.
  * E.g. "opus-4-5-20251101" → "Opus 4.5", "sonnet-4-20250514" → "Sonnet 4"
  */
@@ -105,7 +171,7 @@ export function createModelsRegistry() {
   }
 
   function snapshotString() {
-    return JSON.stringify({ models: activeModels, defaultModelId })
+    return canonicalStringify({ models: activeModels, defaultModelId })
   }
 
   rebuildLookups(FALLBACK_MODELS)

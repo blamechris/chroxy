@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createModelsRegistry } from '../src/models.js'
+import { createModelsRegistry, canonicalStringify } from '../src/models.js'
 import { addLogListener, removeLogListener, setLogLevel } from '../src/logger.js'
 
 describe('createModelsRegistry', () => {
@@ -422,5 +422,57 @@ describe('silent failure logging (#2830)', () => {
     assert.ok(drop, 'expected a warn about dropped entries')
     assert.ok(drop.message.includes("missing or invalid 'value'"),
       `log wording should cover both missing and invalid cases: ${drop.message}`)
+  })
+})
+
+describe('canonicalStringify', () => {
+  it('produces identical output for objects whose keys differ only in insertion order', () => {
+    const a = { models: [{ id: 'test', fullId: 'claude-test', label: 'Test', contextWindow: 200000 }], defaultModelId: null }
+    const b = { defaultModelId: null, models: [{ contextWindow: 200000, label: 'Test', fullId: 'claude-test', id: 'test' }] }
+    assert.equal(canonicalStringify(a), canonicalStringify(b))
+  })
+
+  it('still distinguishes snapshots that actually differ', () => {
+    const a = { models: [{ id: 'test', fullId: 'claude-test', contextWindow: 200000 }], defaultModelId: null }
+    const b = { models: [{ id: 'test', fullId: 'claude-test', contextWindow: 1_000_000 }], defaultModelId: null }
+    assert.notEqual(canonicalStringify(a), canonicalStringify(b))
+  })
+
+  it('preserves array order (order is semantically meaningful for model lists)', () => {
+    const a = { models: [{ id: 'a' }, { id: 'b' }] }
+    const b = { models: [{ id: 'b' }, { id: 'a' }] }
+    assert.notEqual(canonicalStringify(a), canonicalStringify(b))
+  })
+
+  it('matches JSON.stringify semantics for undefined/function values and sparse arrays', () => {
+    const input = {
+      keep: 1,
+      omitUndefined: undefined,
+      omitFunction: () => 'ignored',
+      nested: {
+        keep: true,
+        omitUndefined: undefined,
+        omitFunction: () => 'ignored',
+      },
+      // eslint-disable-next-line no-sparse-arrays
+      list: [1, undefined, () => 'ignored', , 5],
+    }
+
+    const canonical = canonicalStringify(input)
+    const parsed = JSON.parse(canonical)
+
+    assert.deepEqual(parsed, {
+      keep: 1,
+      nested: { keep: true },
+      list: [1, null, null, null, 5],
+    })
+    // Emitted string must itself be valid canonical JSON of the parsed tree.
+    assert.equal(canonical, JSON.stringify(parsed))
+  })
+
+  it('throws on circular structures (matches JSON.stringify behaviour)', () => {
+    const obj = { a: 1 }
+    obj.self = obj
+    assert.throws(() => canonicalStringify(obj), /circular/i)
   })
 })
