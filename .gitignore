@@ -58,6 +58,9 @@ coverage/
 .cache/
 tmp/
 
+# repo-memory MCP local cache (SQLite db + WAL/SHM)
+.repo-memory/
+
 # Local docs (never commit)
 ROADMAP.local.md
 tests/screenshots/
