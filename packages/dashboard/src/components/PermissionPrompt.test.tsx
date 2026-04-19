@@ -402,6 +402,81 @@ describe('PermissionPrompt', () => {
     fireEvent.keyDown(document, { key: 'y', metaKey: true })
     expect(onRespond).not.toHaveBeenCalled()
   })
+
+  // #2852: double-click / key-repeat race
+  it('ignores a second Allow click while first is in flight (#2852)', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    const allow = screen.getByText('Allow')
+    fireEvent.click(allow)
+    fireEvent.click(allow)
+    fireEvent.click(allow)
+    expect(onRespond).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores Deny click after Allow click fires (#2852)', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.click(screen.getByText('Allow'))
+    fireEvent.click(screen.getByText('Deny'))
+    expect(onRespond).toHaveBeenCalledTimes(1)
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
+  })
+
+  it('ignores repeated Cmd+Y shortcuts while respond is in flight (#2852)', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    expect(onRespond).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables all action buttons after first click (#2852)', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.click(screen.getByText('Allow'))
+    // Before the store re-renders with an 'answered' state, the buttons are
+    // still rendered — they should be disabled to block further input.
+    const allow = screen.queryByText('Allow') as HTMLButtonElement | null
+    const deny = screen.queryByText('Deny') as HTMLButtonElement | null
+    const allowSession = screen.queryByText('Allow for Session') as HTMLButtonElement | null
+    if (allow) expect(allow.disabled).toBe(true)
+    if (deny) expect(deny.disabled).toBe(true)
+    if (allowSession) expect(allowSession.disabled).toBe(true)
+  })
 })
 
 // ---------------------------------------------------------------------------

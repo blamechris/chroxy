@@ -13,6 +13,10 @@
  * (Read, Write, Edit, NotebookEdit, Glob, Grep) that mirrors the mobile
  * app's pattern — sends wire decision 'allow' plus a follow-up
  * set_permission_rules message (handled in sendPermissionResponse).
+ *
+ * #2852: guards Allow / Deny / Allow for Session and the keyboard shortcuts
+ * behind a local `submitting` flag so double-click and key-repeat cannot
+ * fire onRespond twice before the store's answered state catches up.
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useConnectionStore, isRuleEligibleTool } from '../store/connection'
@@ -47,6 +51,13 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   const [remaining, setRemaining] = useState(remainingMs)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const expiresAtRef = useRef(Date.now() + remainingMs)
+  // #2852: guard against double-click / key-repeat races. The store-backed
+  // `answered` flag only flips after sendPermissionResponse -> markPermissionResolved
+  // completes a React render cycle, so rapid clicks or held-Enter can fire
+  // onRespond twice before the store state updates. Synchronous ref flips
+  // immediately on the first click and blocks subsequent invocations.
+  const submittingRef = useRef(false)
+  const [submitting, setSubmitting] = useState(false)
 
   // Read the answered state from the store (#2833). Falls back to null when
   // no resolution is recorded yet. Selecting by requestId keeps this a
@@ -76,7 +87,12 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   }, [remainingMs])
 
   const respond = useCallback((decision: PermissionDecision) => {
-    if (answered || remaining <= 0) return
+    // #2852: submittingRef short-circuits duplicate invocations from
+    // double-click or keyboard auto-repeat before React re-renders with the
+    // store's answered state.
+    if (submittingRef.current || answered || remaining <= 0) return
+    submittingRef.current = true
+    setSubmitting(true)
     // 'allowSession' is only meaningful for rule-eligible tools; for other
     // tools the server would reject the follow-up set_permission_rules.
     // Silently coerce to a plain 'allow' so keyboard shortcut users on an
@@ -155,6 +171,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
               type="button"
               aria-label={`Allow ${tool}`}
               title={`Allow (${allowHint})`}
+              disabled={submitting}
             >
               Allow
             </button>
@@ -166,11 +183,18 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
                 aria-label={`Allow ${tool} for this session`}
                 data-testid="btn-allow-session"
                 title={`Allow for Session (${allowSessionHint})`}
+                disabled={submitting}
               >
                 Allow for Session
               </button>
             )}
-            <button className="btn-deny" onClick={() => respond('deny')} type="button" aria-label={`Deny ${tool}`}>
+            <button
+              className="btn-deny"
+              onClick={() => respond('deny')}
+              type="button"
+              aria-label={`Deny ${tool}`}
+              disabled={submitting}
+            >
               Deny
             </button>
           </div>

@@ -133,6 +133,40 @@ export function isRuleEligibleTool(tool: string): boolean {
   return RULE_ELIGIBLE_TOOLS.has(tool);
 }
 
+/**
+ * Cap for `resolvedPermissions` to prevent unbounded growth over long sessions (#2838).
+ * Exported for tests. LRU eviction: oldest insertion-order entry is dropped when
+ * the map exceeds the cap. Re-resolving a requestId bumps it to the most-recent
+ * position so repeated resolutions don't thrash eviction.
+ */
+export const RESOLVED_PERMISSIONS_CAP = 1000;
+
+/**
+ * Append `requestId -> decision` to `map`, honouring the cap.
+ * Inputs are treated as immutable — a new object is returned. If the requestId
+ * is already present we delete-then-reinsert so it becomes the newest entry
+ * (recency-ordered, which is what `Object.keys` iteration preserves in modern JS).
+ */
+export function capResolvedPermissions<T>(
+  map: Record<string, T>,
+  requestId: string,
+  decision: T,
+  cap: number = RESOLVED_PERMISSIONS_CAP,
+): Record<string, T> {
+  const next: Record<string, T> = { ...map };
+  // Drop existing entry so re-insertion moves it to the tail (recency bump).
+  if (requestId in next) delete next[requestId];
+  next[requestId] = decision;
+  const keys = Object.keys(next);
+  if (keys.length > cap) {
+    const excess = keys.length - cap;
+    for (let i = 0; i < excess; i++) {
+      delete next[keys[i]!];
+    }
+  }
+  return next;
+}
+
 /** Read a simple string setting from localStorage with fallback */
 function loadPersistedSetting(key: string, fallback: string): string {
   try {
@@ -991,7 +1025,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   markPermissionResolved: (requestId: string, decision: 'allow' | 'deny' | 'allowSession') => {
     set((state) => ({
-      resolvedPermissions: { ...state.resolvedPermissions, [requestId]: decision },
+      // #2838: cap map size to prevent unbounded growth across long sessions.
+      resolvedPermissions: capResolvedPermissions(state.resolvedPermissions, requestId, decision),
     }));
   },
 
