@@ -1307,6 +1307,38 @@
   outline-offset: 2px;
 }
 
+/* #2840: subtle keyboard-shortcut hints near Allow / Allow-for-Session */
+.perm-shortcut-hints {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: var(--text-xs, 11px);
+  color: var(--text-muted);
+  line-height: 1.2;
+}
+
+.perm-shortcut {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.perm-shortcut-label {
+  opacity: 0.8;
+}
+
+.perm-kbd {
+  display: inline-block;
+  padding: 0 4px;
+  border: 1px solid var(--border-primary);
+  border-radius: 3px;
+  background: var(--bg-primary);
+  color: var(--text-muted);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .permission-prompt.answered {
   opacity: 0.5;
 }

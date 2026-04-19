@@ -1721,6 +1721,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
               (n) => n.requestId !== expiredRequestId
             ),
           }));
+          // #2839: surface a small info toast confirming the server noticed
+          // the expiration even though we already answered locally. Keeps
+          // the user informed without re-appending "Expired — already
+          // handled" to the prompt bubble.
+          get().addInfoNotification('Already answered — permission expired server-side');
           break;
         }
         console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);
