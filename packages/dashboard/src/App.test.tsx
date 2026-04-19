@@ -147,7 +147,7 @@ describe('App', () => {
     expect(screen.getByText('Keyboard Shortcuts')).toBeInTheDocument()
   })
 
-  it('lists the Cmd/Ctrl+Y permission shortcuts in the help modal (#2872)', () => {
+  it('lists the Cmd+Y permission shortcuts in the help modal (#2872)', () => {
     render(<App />)
     fireEvent.keyDown(window, { key: '?' })
 
