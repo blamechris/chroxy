@@ -443,4 +443,36 @@ describe('canonicalStringify', () => {
     const b = { models: [{ id: 'b' }, { id: 'a' }] }
     assert.notEqual(canonicalStringify(a), canonicalStringify(b))
   })
+
+  it('matches JSON.stringify semantics for undefined/function values and sparse arrays', () => {
+    const input = {
+      keep: 1,
+      omitUndefined: undefined,
+      omitFunction: () => 'ignored',
+      nested: {
+        keep: true,
+        omitUndefined: undefined,
+        omitFunction: () => 'ignored',
+      },
+      // eslint-disable-next-line no-sparse-arrays
+      list: [1, undefined, () => 'ignored', , 5],
+    }
+
+    const canonical = canonicalStringify(input)
+    const parsed = JSON.parse(canonical)
+
+    assert.deepEqual(parsed, {
+      keep: 1,
+      nested: { keep: true },
+      list: [1, null, null, null, 5],
+    })
+    // Emitted string must itself be valid canonical JSON of the parsed tree.
+    assert.equal(canonical, JSON.stringify(parsed))
+  })
+
+  it('throws on circular structures (matches JSON.stringify behaviour)', () => {
+    const obj = { a: 1 }
+    obj.self = obj
+    assert.throws(() => canonicalStringify(obj), /circular/i)
+  })
 })

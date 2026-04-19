@@ -52,17 +52,59 @@ function getDefaultCachePath() {
  * shuffle keys and defeat the snapshot equality check. Sorting keys makes
  * the snapshot invariant to construction order.
  *
+ * Semantics match `JSON.stringify` for the cases that matter:
+ *   - undefined / function / symbol values: dropped from objects,
+ *     coerced to null inside arrays (same as JSON.stringify)
+ *   - sparse array holes: serialized as null (same as JSON.stringify)
+ *   - `toJSON()`: honored on any object that defines it
+ *   - circular structures: throw (same as JSON.stringify)
+ *
+ * Implementation: normalize to a key-sorted plain-object/array tree first,
+ * then hand to `JSON.stringify`. This avoids emitting invalid JSON like
+ * `{"k":undefined}` while still guaranteeing canonical ordering.
+ *
  * Exported for tests.
  */
 export function canonicalStringify(value) {
-  if (Array.isArray(value)) {
-    return '[' + value.map(canonicalStringify).join(',') + ']'
+  const seen = new Set()
+
+  function normalize(current, key, inArray) {
+    if (current && typeof current === 'object' && typeof current.toJSON === 'function') {
+      current = current.toJSON(key)
+    }
+    if (current === undefined || typeof current === 'function' || typeof current === 'symbol') {
+      return inArray ? null : undefined
+    }
+    if (!current || typeof current !== 'object') {
+      return current
+    }
+    if (seen.has(current)) {
+      throw new TypeError('Converting circular structure to JSON')
+    }
+    seen.add(current)
+    try {
+      if (Array.isArray(current)) {
+        const out = new Array(current.length)
+        for (let i = 0; i < current.length; i += 1) {
+          out[i] = normalize(current[i], String(i), true)
+        }
+        return out
+      }
+      const out = {}
+      const keys = Object.keys(current).sort()
+      for (const childKey of keys) {
+        const childValue = normalize(current[childKey], childKey, false)
+        if (childValue !== undefined) {
+          out[childKey] = childValue
+        }
+      }
+      return out
+    } finally {
+      seen.delete(current)
+    }
   }
-  if (value && typeof value === 'object') {
-    const keys = Object.keys(value).sort()
-    return '{' + keys.map(k => JSON.stringify(k) + ':' + canonicalStringify(value[k])).join(',') + '}'
-  }
-  return JSON.stringify(value)
+
+  return JSON.stringify(normalize(value, '', false))
 }
 
 /**
