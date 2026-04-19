@@ -1,7 +1,7 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
-import { setLogListener } from '../../src/logger.js'
+import { addLogListener, removeLogListener } from '../../src/logger.js'
 import { createSpy, createMockSession } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
@@ -10,7 +10,7 @@ function makeCtx(sessions = new Map(), overrides = {}) {
   const sessionBroadcasts = []
 
   return {
-    send: createSpy((ws, msg) => { sent.push(msg) }),
+    send: createSpy((_ws, msg) => { sent.push(msg) }),
     broadcast: createSpy((msg) => { broadcasts.push(msg) }),
     broadcastToSession: createSpy((sessionId, msg) => { sessionBroadcasts.push({ sessionId, msg }) }),
     sessionManager: {
@@ -201,11 +201,18 @@ describe('settings-handlers', () => {
     })
 
     describe('session-binding reject diagnostic log (#2832)', () => {
-      afterEach(() => { setLogListener(null) })
+      let currentListener = null
+      afterEach(() => {
+        if (currentListener) {
+          removeLogListener(currentListener)
+          currentListener = null
+        }
+      })
 
       it('emits a structured [session-binding-reject] log with all diagnostic fields', () => {
         const entries = []
-        setLogListener((e) => entries.push(e))
+        currentListener = (e) => entries.push(e)
+        addLogListener(currentListener)
 
         // Simulate Android "post-reconnect" approval:
         // - client is bound to session 's-bound'
@@ -263,7 +270,8 @@ describe('settings-handlers', () => {
 
       it('logs mappedSessionId:null and likelyPostReconnect:false when no mapping and no timing signal', () => {
         const entries = []
-        setLogListener((e) => entries.push(e))
+        currentListener = (e) => entries.push(e)
+        addLogListener(currentListener)
 
         const ctx = makeCtx()
         const client = makeClient({
