@@ -149,7 +149,13 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
       {showButtons && (
         <>
           <div className="perm-buttons">
-            <button className="btn-allow" onClick={() => respond('allow')} type="button" aria-label={`Allow ${tool}`}>
+            <button
+              className="btn-allow"
+              onClick={() => respond('allow')}
+              type="button"
+              aria-label={`Allow ${tool}`}
+              title={`Allow (${allowHint})`}
+            >
               Allow
             </button>
             {showAllowSession && (
@@ -159,6 +165,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
                 type="button"
                 aria-label={`Allow ${tool} for this session`}
                 data-testid="btn-allow-session"
+                title={`Allow for Session (${allowSessionHint})`}
               >
                 Allow for Session
               </button>
