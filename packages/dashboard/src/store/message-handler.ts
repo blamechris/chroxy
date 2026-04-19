@@ -1709,6 +1709,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'permission_expired': {
       const expiredRequestId = msg.requestId as string;
       if (expiredRequestId) {
+        // If the user already resolved this request (via Allow/Deny/AllowSession),
+        // this is the race condition from #2833 — the server expired the prompt
+        // after we answered. Suppress the "Expired — already handled" message
+        // append so the UI does not surface this as an error to the user.
+        const alreadyResolved = Boolean(get().resolvedPermissions?.[expiredRequestId]);
+        if (alreadyResolved) {
+          // Still dismiss any lingering notification banner for this request.
+          set((s) => ({
+            sessionNotifications: s.sessionNotifications.filter(
+              (n) => n.requestId !== expiredRequestId
+            ),
+          }));
+          break;
+        }
         console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);
         const expTargetId = (msg.sessionId as string) || get().activeSessionId;
         if (expTargetId && get().sessionStates[expTargetId]) {
@@ -1726,6 +1740,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             (n) => n.requestId !== expiredRequestId
           ),
         }));
+      }
+      break;
+    }
+
+    case 'permission_rules_updated': {
+      // Server broadcasts the full rule set for a session after a successful
+      // set_permission_rules call. Store it on the session so "Allow for
+      // Session" (#2834) can append new rules without clobbering existing ones.
+      const rulesSessionId = (msg.sessionId as string) || get().activeSessionId;
+      const rules = Array.isArray(msg.rules)
+        ? (msg.rules as { tool: string; decision: 'allow' | 'deny'; pattern?: string }[])
+        : [];
+      if (rulesSessionId && get().sessionStates[rulesSessionId]) {
+        updateSession(rulesSessionId, () => ({ sessionRules: rules }));
       }
       break;
     }

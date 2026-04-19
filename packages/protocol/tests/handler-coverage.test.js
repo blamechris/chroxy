@@ -61,7 +61,6 @@ const PLATFORM_SPECIFIC = {
   'git_stage_result': 'app',    // app git UI
   'git_unstage_result': 'app',  // app git UI
   'git_commit_result': 'app',   // app git UI
-  'permission_rules_updated': 'app', // app session rules UI
 
   // Dashboard only
   'log_entry': 'dashboard',          // console page is dashboard-only

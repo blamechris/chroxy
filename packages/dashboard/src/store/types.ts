@@ -162,6 +162,27 @@ export interface DiffResult {
 
 export type ThinkingLevel = 'default' | 'high' | 'max';
 
+/**
+ * Session-scoped auto-approval rule. Mirrors the app-side shape so the
+ * "Allow for Session" flow can register auto-approval for a tool.
+ */
+export interface PermissionRule {
+  tool: string;
+  decision: 'allow' | 'deny';
+  pattern?: string;
+}
+
+/**
+ * Decision stored when the user resolves a permission prompt. Persists
+ * across tab switches (fixes #2833) so the prompt component does not
+ * re-render with Allow/Deny buttons after the user already answered.
+ *
+ * `'allowSession'` means the user clicked "Allow for Session" — the wire
+ * decision sent to the server is `'allow'`, and a follow-up
+ * `set_permission_rules` message registers a rule for the tool.
+ */
+export type PermissionDecision = 'allow' | 'deny' | 'allowSession';
+
 export interface LogEntry {
   id: string;
   component: string;
@@ -215,6 +236,11 @@ export interface SessionState extends BaseSessionState {
   // Files tab: selected file path (persists across tab switches)
   selectedFilePath: string | null;
   thinkingLevel: ThinkingLevel;
+  // Per-session auto-approval rules (mirrors server-side sessionRules, updated
+  // via permission_rules_updated). Used by the "Allow for Session" flow to
+  // append new rules without losing existing ones. Optional: undefined until
+  // the server confirms rules for this session.
+  sessionRules?: PermissionRule[];
 }
 
 export interface ConnectionState {
@@ -306,6 +332,12 @@ export interface ConnectionState {
   // Background session notifications (permission, question, completed, error)
   sessionNotifications: SessionNotification[];
 
+  // Resolved permission decisions keyed by requestId. Persists the
+  // user's Allow/Deny/AllowSession choice across component remounts
+  // (tab switches), fixing #2833 where the prompt re-rendered as
+  // unanswered after the session/output tabs were toggled.
+  resolvedPermissions: Record<string, PermissionDecision>;
+
   // Claude Code Web (cloud task delegation)
   webFeatures: WebFeatureStatus;
   webTasks: WebTask[];
@@ -391,7 +423,12 @@ export interface ConnectionState {
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   sendInput: (input: string, wireAttachments?: { type: string; name: string; [key: string]: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
-  sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
+  sendPermissionResponse: (requestId: string, decision: PermissionDecision) => 'sent' | 'queued' | false;
+  /** Mark a permission request as resolved in the store (separate from the
+   * wire-level response). Used by PermissionPrompt to render its answered
+   * state across remounts (#2833). Safe to call for an already-resolved
+   * requestId — last write wins. */
+  markPermissionResolved: (requestId: string, decision: PermissionDecision) => void;
   sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;

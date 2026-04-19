@@ -120,6 +120,19 @@ import {
 
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
+/**
+ * Tools eligible for session-scoped auto-approval via the "Allow for Session"
+ * button (#2834). Mirrors packages/app/src/store/connection.ts:924 — kept in
+ * sync intentionally; bash/exec/network tools intentionally excluded because
+ * the server may reject blanket auto-allow rules for them.
+ */
+const RULE_ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']);
+
+/** Exported for tests and the PermissionPrompt component (#2834). */
+export function isRuleEligibleTool(tool: string): boolean {
+  return RULE_ELIGIBLE_TOOLS.has(tool);
+}
+
 /** Read a simple string setting from localStorage with fallback */
 function loadPersistedSetting(key: string, fallback: string): string {
   try {
@@ -229,6 +242,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   serverErrors: [],
   infoNotifications: [],
   sessionNotifications: [],
+  resolvedPermissions: {},
   serverPhase: null,
   tunnelProgress: null,
   shutdownReason: null,
@@ -694,6 +708,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       logEntries: [],
       serverErrors: [],
       sessionNotifications: [],
+      resolvedPermissions: {},
       serverPhase: null,
       tunnelProgress: null,
       shutdownReason: null,
@@ -926,9 +941,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return enqueueMessage('interrupt', payload);
   },
 
-  sendPermissionResponse: (requestId: string, decision: string) => {
+  sendPermissionResponse: (requestId: string, decision: 'allow' | 'deny' | 'allowSession') => {
     const { socket } = get();
-    const payload = { type: 'permission_response', requestId, decision };
+    // allowSession: wire decision is still 'allow' — session-scoped behaviour
+    // is implemented client-side via a follow-up set_permission_rules message
+    // (the schema only accepts 'allow' | 'allowAlways' | 'deny').
+    const wireDecision = decision === 'allowSession' ? 'allow' : decision;
+    const payload = { type: 'permission_response', requestId, decision: wireDecision };
     let result: 'sent' | 'queued' | false;
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);
@@ -936,6 +955,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     } else {
       result = enqueueMessage('permission_response', payload);
     }
+    // Persist the decision in the store so PermissionPrompt renders its
+    // answered state across remounts (#2833 — tab switch regression).
+    get().markPermissionResolved(requestId, decision);
     // Auto-switch to the session that owns this prompt (if different from active).
     // Prefer sessionNotifications lookup (covers prompts stored before sessionStates[sid] existed),
     // fall back to scanning sessionStates messages.
@@ -944,7 +966,33 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const targetSid = notifMatch?.sessionId
       ?? Object.entries(sessionStates).find(([, ss]) => ss.messages.some((m) => m.requestId === requestId))?.[0];
     if (targetSid && targetSid !== activeSessionId) get().switchSession(targetSid);
+    // For allowSession: send a follow-up set_permission_rules to register
+    // auto-approval for this tool. Skip tools the server won't accept as
+    // auto-allow rules (execution/network tools). Mirrors the mobile app
+    // pattern at packages/app/src/store/connection.ts:924 (#2834).
+    if (decision === 'allowSession' && socket && socket.readyState === WebSocket.OPEN) {
+      const sessionId = targetSid ?? activeSessionId;
+      if (sessionId) {
+        const ss = get().sessionStates[sessionId];
+        const permMsg = ss?.messages.find((m) => m.requestId === requestId && m.type === 'prompt');
+        const permissionTool = permMsg?.tool;
+        if (permissionTool && RULE_ELIGIBLE_TOOLS.has(permissionTool)) {
+          const currentRules = ss?.sessionRules ?? [];
+          wsSend(socket, {
+            type: 'set_permission_rules',
+            sessionId,
+            rules: [...currentRules, { tool: permissionTool, decision: 'allow' }],
+          });
+        }
+      }
+    }
     return result;
+  },
+
+  markPermissionResolved: (requestId: string, decision: 'allow' | 'deny' | 'allowSession') => {
+    set((state) => ({
+      resolvedPermissions: { ...state.resolvedPermissions, [requestId]: decision },
+    }));
   },
 
   sendUserQuestionResponse: (answer: string, toolUseId?: string) => {

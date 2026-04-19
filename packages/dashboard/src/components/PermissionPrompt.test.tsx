@@ -1,13 +1,36 @@
 /**
  * PermissionPrompt + PlanApproval tests (#1157)
+ *
+ * Resolved-decision persistence (#2833) and Allow-for-Session (#2834)
+ * coverage lives at the bottom of this file.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import { PermissionPrompt } from './PermissionPrompt'
 import { PlanApproval } from './PlanApproval'
 import { Modal } from './Modal'
+import type { PermissionDecision } from '../store/types'
 
-afterEach(cleanup)
+// Mock the store so the component can read `resolvedPermissions[requestId]`
+// (#2833) and the exported `isRuleEligibleTool` helper (#2834) without
+// booting the full Zustand store in a unit test.
+type MockStore = {
+  resolvedPermissions: Record<string, PermissionDecision>
+}
+let mockStoreState: MockStore = { resolvedPermissions: {} }
+function resetMockStore() {
+  mockStoreState = { resolvedPermissions: {} }
+}
+vi.mock('../store/connection', () => ({
+  useConnectionStore: <T,>(selector: (s: MockStore) => T): T => selector(mockStoreState),
+  isRuleEligibleTool: (tool: string) =>
+    new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']).has(tool),
+}))
+
+afterEach(() => {
+  cleanup()
+  resetMockStore()
+})
 
 describe('PermissionPrompt', () => {
   beforeEach(() => {
@@ -166,9 +189,15 @@ describe('PermissionPrompt', () => {
     expect(onRespond).toHaveBeenCalledWith('req-1', 'deny')
   })
 
-  it('shows answered state after response', () => {
-    const onRespond = vi.fn()
-    render(
+  it('shows answered state after response (#2833 — driven by store)', () => {
+    // After the parent writes the decision to `resolvedPermissions`, the
+    // component re-renders with the answered UI. We simulate that by
+    // mutating the mock store inside onRespond — in production this is
+    // handled by `sendPermissionResponse -> markPermissionResolved`.
+    const onRespond = vi.fn((reqId: string, decision: PermissionDecision) => {
+      mockStoreState.resolvedPermissions = { ...mockStoreState.resolvedPermissions, [reqId]: decision }
+    })
+    const { rerender } = render(
       <PermissionPrompt
         requestId="req-1"
         tool="Write"
@@ -178,6 +207,17 @@ describe('PermissionPrompt', () => {
       />
     )
     fireEvent.click(screen.getByText('Allow'))
+    // Force re-render to pick up the store mutation (vitest mock doesn't
+    // trigger Zustand's subscribe).
+    rerender(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
     expect(screen.getByText('Allowed')).toBeInTheDocument()
   })
 
@@ -282,8 +322,12 @@ describe('PermissionPrompt', () => {
   })
 
   it('does not fire shortcut after already answered (#1190)', () => {
-    const onRespond = vi.fn()
-    render(
+    // The resolved state now lives in the store (#2833), so simulate the
+    // store update that the parent would normally perform.
+    const onRespond = vi.fn((reqId: string, decision: PermissionDecision) => {
+      mockStoreState.resolvedPermissions = { ...mockStoreState.resolvedPermissions, [reqId]: decision }
+    })
+    const { rerender } = render(
       <PermissionPrompt
         requestId="req-1"
         tool="Write"
@@ -293,6 +337,15 @@ describe('PermissionPrompt', () => {
       />
     )
     fireEvent.click(screen.getByText('Allow'))
+    rerender(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
     onRespond.mockClear()
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onRespond).not.toHaveBeenCalled()
@@ -475,5 +528,250 @@ describe('PlanApproval', () => {
       />
     )
     expect(container.querySelector('[data-testid="plan-approval"]')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Resolved-decision persistence across remounts (#2833)
+// ---------------------------------------------------------------------------
+describe('PermissionPrompt — resolved state from store (#2833)', () => {
+  beforeEach(() => {
+    resetMockStore()
+  })
+
+  it('shows answered state when resolvedPermissions has the requestId', () => {
+    mockStoreState.resolvedPermissions = { 'req-remount': 'allow' }
+    render(
+      <PermissionPrompt
+        requestId="req-remount"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('perm-answer')).toHaveTextContent('Allowed')
+    expect(screen.queryByText('Allow')).not.toBeInTheDocument()
+    expect(screen.queryByText('Deny')).not.toBeInTheDocument()
+  })
+
+  it('shows "Denied" when the store records a deny decision', () => {
+    mockStoreState.resolvedPermissions = { 'req-remount': 'deny' }
+    render(
+      <PermissionPrompt
+        requestId="req-remount"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('perm-answer')).toHaveTextContent('Denied')
+  })
+
+  it('shows "Allowed for session" when the store records allowSession', () => {
+    mockStoreState.resolvedPermissions = { 'req-remount': 'allowSession' }
+    render(
+      <PermissionPrompt
+        requestId="req-remount"
+        tool="Read"
+        description="test"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('perm-answer')).toHaveTextContent('Allowed for session')
+  })
+
+  it('ignores clicks once resolved in the store (prevents double-send)', () => {
+    mockStoreState.resolvedPermissions = { 'req-1': 'allow' }
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    // Buttons are not rendered — nothing to click, onRespond never fires.
+    expect(screen.queryByText('Allow')).not.toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    expect(onRespond).not.toHaveBeenCalled()
+  })
+
+  it('remount with resolved state keeps buttons hidden (tab-switch scenario)', () => {
+    // Initial mount: unresolved, buttons visible.
+    const first = render(
+      <PermissionPrompt
+        requestId="req-tab"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Allow')).toBeInTheDocument()
+    // Simulate tab switch: unmount, record resolution in store, remount fresh.
+    first.unmount()
+    mockStoreState.resolvedPermissions = { 'req-tab': 'allow' }
+    render(
+      <PermissionPrompt
+        requestId="req-tab"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.queryByText('Allow')).not.toBeInTheDocument()
+    expect(screen.getByTestId('perm-answer')).toHaveTextContent('Allowed')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Allow for Session — third button (#2834)
+// ---------------------------------------------------------------------------
+describe('PermissionPrompt — Allow for Session button (#2834)', () => {
+  beforeEach(() => {
+    resetMockStore()
+  })
+
+  it('renders the Allow for Session button for rule-eligible tools', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="Read /etc/hosts"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('btn-allow-session')).toHaveTextContent('Allow for Session')
+  })
+
+  it.each(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])(
+    'renders the button for %s',
+    (tool) => {
+      render(
+        <PermissionPrompt
+          requestId={`req-${tool}`}
+          tool={tool}
+          description="t"
+          remainingMs={60000}
+          onRespond={vi.fn()}
+        />
+      )
+      expect(screen.getByTestId('btn-allow-session')).toBeInTheDocument()
+    }
+  )
+
+  it.each(['Bash', 'WebFetch', 'WebSearch', 'Task', 'UnknownTool'])(
+    'does NOT render the button for %s (not rule-eligible)',
+    (tool) => {
+      render(
+        <PermissionPrompt
+          requestId={`req-${tool}`}
+          tool={tool}
+          description="t"
+          remainingMs={60000}
+          onRespond={vi.fn()}
+        />
+      )
+      expect(screen.queryByTestId('btn-allow-session')).not.toBeInTheDocument()
+      // The regular Allow/Deny buttons are still present.
+      expect(screen.getByText('Allow')).toBeInTheDocument()
+      expect(screen.getByText('Deny')).toBeInTheDocument()
+    }
+  )
+
+  it('calls onRespond with allowSession when clicked', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Edit"
+        description="Edit file"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.click(screen.getByTestId('btn-allow-session'))
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allowSession')
+  })
+
+  it('hides the button once the prompt is resolved', () => {
+    mockStoreState.resolvedPermissions = { 'req-1': 'allow' }
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="t"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('btn-allow-session')).not.toBeInTheDocument()
+  })
+
+  it('Cmd+Shift+Y triggers allowSession for rule-eligible tools', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="t"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true, shiftKey: true })
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allowSession')
+  })
+
+  it('Ctrl+Shift+Y triggers allowSession for rule-eligible tools', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="t"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', ctrlKey: true, shiftKey: true })
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allowSession')
+  })
+
+  it('Cmd+Shift+Y is a no-op for tools that are not rule-eligible', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description="t"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true, shiftKey: true })
+    expect(onRespond).not.toHaveBeenCalled()
+  })
+
+  it('Cmd+Y (no shift) still triggers allow on rule-eligible tools', () => {
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Read"
+        description="t"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
   })
 })
