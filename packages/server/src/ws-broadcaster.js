@@ -45,7 +45,9 @@ export class WsBroadcaster {
    * only reads `msg.message`.
    *
    * Clients that omit `protocolVersion` during auth are pinned to
-   * MIN_PROTOCOL_VERSION (see ws-auth.js), so this check is safe.
+   * MIN_PROTOCOL_VERSION (see ws-auth.js). Clients that auto-authenticate
+   * under `--no-auth` are pinned to SERVER_PROTOCOL_VERSION (dev mode
+   * trusts itself — see ws-server.js). So this check is safe.
    *
    * @param {number} minProtocolVersion
    * @param {object} message
