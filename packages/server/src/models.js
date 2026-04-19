@@ -2,6 +2,9 @@ import { readFileSync, renameSync, unlinkSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { writeFileRestricted } from './platform.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('models')
 
 /** Default context window for unknown models */
 export const DEFAULT_CONTEXT_WINDOW = 200_000
@@ -113,11 +116,19 @@ export function createModelsRegistry() {
     },
 
     updateModels(sdkModels) {
-      if (!Array.isArray(sdkModels)) return null
+      if (!Array.isArray(sdkModels)) {
+        log.debug(`updateModels: ignoring non-array input (got ${sdkModels === null ? 'null' : typeof sdkModels})`)
+        return null
+      }
 
       let nextDefault = null
+      const dropped = []
       const converted = sdkModels
-        .filter(m => m && typeof m.value === 'string' && m.value.length > 0)
+        .filter(m => {
+          const ok = m && typeof m.value === 'string' && m.value.length > 0
+          if (!ok && dropped.length < 3) dropped.push(m)
+          return ok
+        })
         .map(m => {
           const fullId = m.value
           const id = fullId.startsWith('claude-') ? fullId.slice(7) : fullId
@@ -137,7 +148,24 @@ export function createModelsRegistry() {
           return { id, label, fullId, contextWindow }
         })
 
-      if (converted.length === 0) return converted
+      if (dropped.length > 0) {
+        // Contract drift: SDK returned entries missing the expected `value` key.
+        // Log a small sample (keys only — entries may carry provider metadata
+        // we don't want to leak to disk logs).
+        const sample = dropped.map(m => {
+          if (m === null) return 'null'
+          if (typeof m !== 'object') return typeof m
+          return `{${Object.keys(m).join(',')}}`
+        }).join(', ')
+        log.warn(`updateModels: dropped ${dropped.length}/${sdkModels.length} SDK entries missing 'value' key (sample: ${sample})`)
+      }
+
+      if (converted.length === 0) {
+        if (sdkModels.length > 0) {
+          log.warn(`updateModels: SDK returned ${sdkModels.length} entries but none matched the expected {value,displayName,description} shape — keeping existing models`)
+        }
+        return converted
+      }
 
       applyModels(converted, nextDefault)
       return converted
@@ -250,7 +278,12 @@ export function createModelsRegistry() {
         renameSync(tmpPath, path)
         lastSavedSnapshot = snapshot
         return true
-      } catch {
+      } catch (err) {
+        // Persisting the cache failed (permission denied, disk full, read-only
+        // parent). The in-memory list stays live for this process, but will be
+        // lost on restart — surface at warn level so operators can diagnose
+        // from ~/.chroxy/logs/chroxy.log.
+        log.warn(`saveCache: failed to persist models cache to ${path}: ${err?.code || ''} ${err?.message || err}`.trim())
         try { unlinkSync(tmpPath) } catch {}
         return false
       }
