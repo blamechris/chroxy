@@ -68,7 +68,10 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     if (intervalRef.current) clearInterval(intervalRef.current)
     setRemaining(remainingMs)
 
-    if (remainingMs <= 0) {
+    // #2852: if the prompt is already resolved at mount (tab-switch remount
+    // of an answered prompt), skip the 1s interval entirely — the countdown
+    // won't render and the ticks would just cause wasted re-renders.
+    if (remainingMs <= 0 || answered) {
       return
     }
     expiresAtRef.current = Date.now() + remainingMs
@@ -84,7 +87,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [remainingMs])
+  }, [remainingMs, answered])
 
   const respond = useCallback((decision: PermissionDecision) => {
     // #2852: submittingRef short-circuits duplicate invocations from

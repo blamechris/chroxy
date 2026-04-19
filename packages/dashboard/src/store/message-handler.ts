@@ -905,11 +905,12 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
     }
   }
   const permRequestId = msg.requestId as string;
-  // #2853: `allowAlways` is dead on the dashboard — PermissionPrompt renders its
-  // own buttons (Allow / Allow for Session / Deny) and never reads these options,
-  // and `sendPermissionResponse` only accepts 'allow' | 'deny' | 'allowSession'.
-  // Keep the two options PermissionPrompt uses for history/debug inspection
-  // without advertising a third choice no code path can fulfill.
+  // #2853: PermissionPrompt hardcodes its own buttons (Allow / Allow for Session
+  // / Deny) and never reads this array; `sendPermissionResponse` only accepts
+  // 'allow' | 'deny' | 'allowSession'. Keep only the wire-level allow/deny
+  // options in the stored payload for history/debug inspection, without
+  // advertising dashboard-only decisions ('allowSession') or unreachable ones
+  // ('allowAlways') here.
   const newOptions = [
     { label: 'Allow', value: 'allow' },
     { label: 'Deny', value: 'deny' },
