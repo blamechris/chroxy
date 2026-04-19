@@ -69,9 +69,17 @@ const log = createLogger('ws')
  *
  * See also: #1058 (enforce MIN_PROTOCOL_VERSION during auth)
  */
-export const SERVER_PROTOCOL_VERSION = 1
+export const SERVER_PROTOCOL_VERSION = 2
 /** Minimum protocol version this server can speak */
 export const MIN_PROTOCOL_VERSION = 1
+/**
+ * Minimum protocol version for structured tunnel-warming/ready status
+ * broadcasts (#2849). v1 clients don't know how to render the `phase`
+ * field and would mis-render it as a chat message — they are simply
+ * excluded from these broadcasts rather than served a phase-less
+ * fallback (which would reintroduce the mis-render).
+ */
+export const TUNNEL_STATUS_MIN_PROTOCOL_VERSION = 2
 
 /**
  * PROTOCOL_CHANGELOG
@@ -81,6 +89,16 @@ export const MIN_PROTOCOL_VERSION = 1
  *   All subsequent additive message types (e.g. plan_started, plan_ready,
  *   models_updated, client_focus_changed) do NOT bump the version per the
  *   breaking-changes-only policy above.
+ *
+ * v2 (#2849) — `server_status` gained a structured `phase` field
+ *   ('tunnel_warming' | 'ready') that v1 dashboards don't know how to
+ *   render (they only read `msg.message` and push the payload as a
+ *   chat system message). The structured broadcasts are gated to
+ *   clients that advertised v2+ at auth time; v1 clients no longer
+ *   receive tunnel warming / ready status at all. Gating happens at
+ *   the broadcast site in server-cli.js via
+ *   WsServer.broadcastMinProtocolVersion (see
+ *   TUNNEL_STATUS_MIN_PROTOCOL_VERSION).
  */
 
 /** Cached latest version from npm registry (null if unavailable) */
@@ -1097,6 +1115,14 @@ export class WsServer {
   /** Public broadcast: send a message to all authenticated clients */
   broadcast(message) {
     this._broadcaster.broadcast(message)
+  }
+
+  /**
+   * Broadcast a message only to authenticated clients that advertised at
+   * least `minProtocolVersion` during auth. See WsBroadcaster for details.
+   */
+  broadcastMinProtocolVersion(minProtocolVersion, message) {
+    this._broadcaster.broadcastMinProtocolVersion(minProtocolVersion, message)
   }
 
   /** Broadcast a message to all authenticated clients matching a filter */

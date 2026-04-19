@@ -20,13 +20,14 @@ function createFakeWs({ readyState = 1, bufferedAmount = 0 } = {}) {
 }
 
 /** Create a fake client object */
-function createFakeClient({ id = 'c1', authenticated = true, activeSessionId = null, subscribedSessionIds = new Set(), deviceInfo = null } = {}) {
+function createFakeClient({ id = 'c1', authenticated = true, activeSessionId = null, subscribedSessionIds = new Set(), deviceInfo = null, protocolVersion = null } = {}) {
   return {
     id,
     authenticated,
     activeSessionId,
     subscribedSessionIds,
     deviceInfo,
+    protocolVersion,
     _backpressureDrops: 0,
   }
 }
@@ -80,6 +81,56 @@ describe('WsBroadcaster', () => {
 
       assert.equal(sent.length, 1)
       assert.equal(sent[0].ws, ws1)
+    })
+  })
+
+  describe('broadcastMinProtocolVersion()', () => {
+    it('delivers to clients at or above the minimum', () => {
+      const wsOld = createFakeWs()
+      const wsNew1 = createFakeWs()
+      const wsNew2 = createFakeWs()
+      clients.set(wsOld, createFakeClient({ id: 'old', protocolVersion: 1 }))
+      clients.set(wsNew1, createFakeClient({ id: 'new1', protocolVersion: 2 }))
+      clients.set(wsNew2, createFakeClient({ id: 'new2', protocolVersion: 3 }))
+
+      broadcaster.broadcastMinProtocolVersion(2, { type: 'server_status', phase: 'tunnel_warming' })
+
+      assert.equal(sent.length, 2, 'only v2+ clients receive the message')
+      const ids = sent.map((e) => clients.get(e.ws).id).sort()
+      assert.deepEqual(ids, ['new1', 'new2'])
+    })
+
+    it('excludes clients that never advertised a protocol version', () => {
+      // A pre-negotiation-aware client leaves protocolVersion null/undefined
+      // on the server-side. Treat this as unsafe and skip — the gated
+      // message is gated exactly because old clients can't handle it.
+      const wsUnset = createFakeWs()
+      const wsV2 = createFakeWs()
+      clients.set(wsUnset, createFakeClient({ id: 'unset', protocolVersion: null }))
+      clients.set(wsV2, createFakeClient({ id: 'v2', protocolVersion: 2 }))
+
+      broadcaster.broadcastMinProtocolVersion(2, { type: 'server_status' })
+
+      assert.equal(sent.length, 1)
+      assert.equal(clients.get(sent[0].ws).id, 'v2')
+    })
+
+    it('excludes unauthenticated clients even if protocolVersion is advertised', () => {
+      const ws = createFakeWs()
+      clients.set(ws, createFakeClient({ id: 'pending', authenticated: false, protocolVersion: 5 }))
+
+      broadcaster.broadcastMinProtocolVersion(1, { type: 'anything' })
+
+      assert.equal(sent.length, 0)
+    })
+
+    it('sends nothing when no client meets the minimum', () => {
+      const ws = createFakeWs()
+      clients.set(ws, createFakeClient({ id: 'v1', protocolVersion: 1 }))
+
+      broadcaster.broadcastMinProtocolVersion(2, { type: 'server_status', phase: 'tunnel_warming' })
+
+      assert.equal(sent.length, 0)
     })
   })
 

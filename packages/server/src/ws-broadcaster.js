@@ -35,6 +35,26 @@ export class WsBroadcaster {
     this._broadcast(message)
   }
 
+  /**
+   * Broadcast a message only to authenticated clients that advertised at
+   * least `minProtocolVersion` in their auth handshake.
+   *
+   * Used for messages whose wire shape would confuse older clients — e.g.
+   * #2849: `server_status { phase: 'tunnel_warming' }` is a v2 addition;
+   * a cached v1 dashboard would render it as a chat message because it
+   * only reads `msg.message`.
+   *
+   * Clients that omit `protocolVersion` during auth are pinned to
+   * MIN_PROTOCOL_VERSION (see ws-auth.js), so this check is safe.
+   *
+   * @param {number} minProtocolVersion
+   * @param {object} message
+   */
+  broadcastMinProtocolVersion(minProtocolVersion, message) {
+    log.info(`Broadcasting ${message.type || 'unknown'} to clients with protocolVersion >= ${minProtocolVersion}`)
+    this._broadcast(message, (client) => (client.protocolVersion ?? 0) >= minProtocolVersion)
+  }
+
   /** Broadcast a message to all authenticated clients matching a filter */
   _broadcast(message, filter = () => true) {
     for (const [ws, client] of this._clients) {
