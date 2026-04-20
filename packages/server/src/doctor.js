@@ -4,6 +4,7 @@ import { join } from 'path'
 import { homedir, platform } from 'os'
 import { createServer } from 'net'
 import { validateConfig } from './config.js'
+import { resolveBinary } from './utils/resolve-binary.js'
 
 const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
 
@@ -32,15 +33,30 @@ export async function runDoctorChecks({ port, verbose: _verbose } = {}) {
   checks.push(checkBinary('cloudflared', ['--version'], {
     parseVersion: (out) => out.trim().split('\n')[0],
     required: true,
+    candidates: [
+      '/opt/homebrew/bin/cloudflared',
+      '/usr/local/bin/cloudflared',
+      join(homedir(), '.local/bin/cloudflared'),
+    ],
     installHint: isMac ? 'brew install cloudflared'
       : isLinux ? 'see https://pkg.cloudflare.com/ for installation'
       : 'see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/',
   }))
 
   // 3. claude CLI
+  // GUI-launched processes on macOS inherit a minimal PATH that omits
+  // user-local install dirs. Check known install locations directly so
+  // the preflight doesn't falsely fail when chroxy is spawned by Tauri.
   checks.push(checkBinary('claude', ['--version'], {
     parseVersion: (out) => out.trim().split('\n')[0],
     required: true,
+    candidates: [
+      join(homedir(), '.local/bin/claude'),
+      '/opt/homebrew/bin/claude',
+      '/usr/local/bin/claude',
+      join(homedir(), '.claude/local/node_modules/.bin/claude'),
+      join(homedir(), '.npm-global/bin/claude'),
+    ],
     installHint: 'install Claude Code CLI',
   }))
 
@@ -89,10 +105,15 @@ export async function runDoctorChecks({ port, verbose: _verbose } = {}) {
 /**
  * Check if a binary is available and return its version.
  * Differentiates between not-found and timeout errors.
+ *
+ * `candidates` gives fallback absolute paths to try when the binary is not
+ * on PATH — important for GUI-launched processes (e.g. Tauri) whose
+ * inherited PATH excludes user-local install dirs.
  */
-function checkBinary(name, args, { parseVersion, required, installHint }) {
+function checkBinary(name, args, { parseVersion, required, installHint, candidates = [] }) {
+  const resolved = resolveBinary(name, candidates)
   try {
-    const output = execFileSync(name, args, {
+    const output = execFileSync(resolved, args, {
       encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
     })
     return { name, status: 'pass', message: parseVersion(output) }
