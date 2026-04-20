@@ -1531,12 +1531,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'message': {
       const msgType = (msg.messageType || msg.type) as string;
-      // Skip server-echoed user_input — we already show it instantly client-side
-      // But allow user_input during full history sync (messages came from terminal)
-      if (msgType === 'user_input' && !(_receivingHistoryReplay && _isSessionSwitchReplay)) break;
+      // Live echoes from other clients arrive as top-level `type: 'user_input'`
+      // and are handled above. Anything reaching here with
+      // messageType === 'user_input' is a history-replay entry and must be
+      // rendered so the prompts that triggered past responses are visible.
+      if (msgType === 'user_input' && !_receivingHistoryReplay) break;
       const targetId = (msg.sessionId as string) || get().activeSessionId;
-      // During reconnect replay, skip if app already has messages (cache is fresh)
-      if (_receivingHistoryReplay && !_isSessionSwitchReplay && get().messages.length > 0) break;
       // During any history replay, skip if an equivalent message is already in cache (dedup).
       // This prevents duplicates when the client already received messages via real-time
       // subscription before switching to the session (which triggers history replay).

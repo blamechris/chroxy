@@ -1453,6 +1453,43 @@ describe('reconnect replay dedup', () => {
     expect(msgs).toHaveLength(2);
     expect(msgs[1].id).toBe('tool-2');
   });
+
+  // Regression: server replays historical user prompts as
+  // { type: 'message', messageType: 'user_input' }. On plain reconnect replay
+  // (not a session switch) they were silently dropped, so assistant responses
+  // appeared without the prompts that triggered them.
+  it('message handler: rehydrates user_input entries during reconnect replay', () => {
+    const store = setupReconnectReplay([]);
+
+    _testMessageHandler.handle({
+      type: 'message', messageType: 'user_input', content: 'scan the repo',
+      sessionId: 's1', timestamp: 100,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].type).toBe('user_input');
+    expect(msgs[0].content).toBe('scan the repo');
+  });
+
+  it('message handler: still skips top-level user_input echo when not replaying', () => {
+    resetReplayFlags();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'message', messageType: 'user_input', content: 'live echo',
+      sessionId: 's1', timestamp: 200,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(0);
+  });
 });
 
 describe('stream_delta handler', () => {
