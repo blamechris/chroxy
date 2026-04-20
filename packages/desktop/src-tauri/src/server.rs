@@ -52,10 +52,17 @@ pub(crate) fn cloudflared_pids_to_kill(procs: &[(u32, String)], port: u16) -> Ve
                 .next()
                 .unwrap_or(trimmed);
             // Drop a case-insensitive ".exe" suffix before the compare so
-            // bare "cloudflared" and "CLOUDFLARED.EXE" both match.
-            let without_exe = if base.len() >= 4
-                && base[base.len() - 4..].eq_ignore_ascii_case(".exe")
+            // bare "cloudflared" and "CLOUDFLARED.EXE" both match. Compare
+            // the last 4 bytes directly to avoid panicking when `base` is
+            // longer than 4 bytes but its length minus 4 lands inside a
+            // multi-byte UTF-8 character (e.g. a process whose command
+            // line contains non-ASCII glyphs).
+            let bytes = base.as_bytes();
+            let without_exe = if bytes.len() >= 4
+                && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".exe")
             {
+                // Last 4 bytes are ASCII (.exe), so the char boundary
+                // guarantee holds and `&base[..base.len() - 4]` is safe.
                 &base[..base.len() - 4]
             } else {
                 base
@@ -1515,6 +1522,25 @@ mod tests {
         let procs = vec![(999u32, "someapp.exe --url http://localhost:8765".to_string())];
         let pids = cloudflared_pids_to_kill(&procs, 8765);
         assert!(pids.is_empty());
+    }
+
+    #[test]
+    fn cloudflared_filter_tolerates_non_ascii_command_lines() {
+        // Regression: the .exe suffix check previously sliced `base` as a
+        // &str at byte offset `len - 4`, which panics when that offset
+        // lands inside a multi-byte UTF-8 codepoint. Any process with
+        // non-ASCII glyphs in its command (common on localized systems,
+        // or bash wrappers using Unicode math symbols like ×) would
+        // crash startup before the real Chroxy server was spawned.
+        let procs = vec![
+            (10u32, "bash -c 'echo t=2×5s'".to_string()),
+            (11u32, "python3 résumé.py".to_string()),
+            (12u32, "/usr/bin/日本語-app --foo".to_string()),
+            (13u32, "cloudflared tunnel --url http://localhost:8765".to_string()),
+        ];
+        // Must not panic and must still find the real cloudflared process.
+        let pids = cloudflared_pids_to_kill(&procs, 8765);
+        assert_eq!(pids, vec![13]);
     }
 
     // -- Windows process enumeration parsers (#2850) --
