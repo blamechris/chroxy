@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { parse as parsePath } from 'node:path'
 import { runDoctorChecks } from '../src/doctor.js'
 
 /**
@@ -104,8 +105,11 @@ describe('runDoctorChecks', () => {
     // failed this check and blocked server startup. The fix resolves
     // node_modules relative to the server package itself.
     const originalCwd = process.cwd()
+    // Use the filesystem root from the CURRENT cwd so the chdir works on
+    // any platform (POSIX root '/' or a Windows drive root like 'C:\\').
+    const fsRoot = parsePath(originalCwd).root
     try {
-      process.chdir('/')
+      process.chdir(fsRoot)
       const { checks } = await runDoctorChecks()
       const depsCheck = checks.find(c => c.name === 'Dependencies')
       assert.ok(depsCheck)

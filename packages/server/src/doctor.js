@@ -10,7 +10,8 @@ import { resolveBinary } from './utils/resolve-binary.js'
 // Resolve the server package root (the directory containing package.json
 // and node_modules) so dependency checks work regardless of where the
 // server process was launched. `import.meta.url` points to this file at
-// src/doctor.js — one level up is the package root.
+// src/doctor.js — two `dirname` calls walk from the file up through
+// src/ to the package root.
 const __filename = fileURLToPath(import.meta.url)
 const SERVER_PKG_DIR = dirname(dirname(__filename))
 
