@@ -827,6 +827,11 @@ export class WsServer {
         const client = this.clients.get(ws)
         client.authenticated = true
         client.authTime = Date.now()
+        // --no-auth is dev-only and trusts itself — pin to the server's own
+        // protocol version so version-gated broadcasts (e.g. #2849 tunnel
+        // warming / ready via broadcastMinProtocolVersion) reach dev clients
+        // instead of being silently filtered out.
+        client.protocolVersion = SERVER_PROTOCOL_VERSION
         this._sendPostAuthInfo(ws)
         this._broadcastClientJoined(client, ws)
         log.info(`Client ${clientId} auto-authenticated (--no-auth)`)

@@ -928,13 +928,28 @@ describe('public broadcast method', () => {
       message: 'Tunnel warming up…',
     })
 
-    // Give the server a moment to deliver.
-    await new Promise((r) => setTimeout(r, 100))
+    // Follow the gated broadcast with an UN-gated marker. Both broadcasts
+    // iterate the same clients map synchronously, so the marker is queued
+    // after the (maybe-delivered) tunnel_warming on each WebSocket. Per-
+    // connection message order is preserved by WebSocket, so once a client
+    // sees the marker we know any earlier tunnel_warming for that client
+    // has already arrived — or was correctly suppressed.
+    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: '__marker__' }] })
+
+    await waitForMessageMatch(
+      oldClient.messages,
+      (m) => m.type === 'discovered_sessions' && m.tmux?.[0]?.sessionName === '__marker__',
+      2000,
+      'marker on v1 client',
+    )
+    const newGotWarming = await waitForMessageMatch(
+      newClient.messages,
+      (m) => m.type === 'server_status' && m.phase === 'tunnel_warming',
+      2000,
+      'tunnel_warming on v2 client',
+    )
 
     const oldGotWarming = oldClient.messages.find(
-      (m) => m.type === 'server_status' && m.phase === 'tunnel_warming',
-    )
-    const newGotWarming = newClient.messages.find(
       (m) => m.type === 'server_status' && m.phase === 'tunnel_warming',
     )
 
@@ -944,6 +959,43 @@ describe('public broadcast method', () => {
 
     oldClient.ws.close()
     newClient.ws.close()
+  })
+
+  // #2869: --no-auth clients auto-authenticate in ws-server.js without going
+  // through handleAuthMessage, so client.protocolVersion was never set. That
+  // caused broadcastMinProtocolVersion to filter them out and dev-only mode
+  // never saw the tunnel warming / ready banner. Auto-auth now pins the
+  // client to SERVER_PROTOCOL_VERSION (dev mode trusts itself).
+  it('broadcastMinProtocolVersion() delivers to auto-authenticated --no-auth clients', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const client = await createClient(port, true)
+
+    server.broadcastMinProtocolVersion(2, {
+      type: 'server_status',
+      phase: 'tunnel_warming',
+      tunnelMode: 'quick',
+      tunnelUrl: 'https://example.trycloudflare.com',
+      message: 'Tunnel warming up…',
+    })
+
+    const warming = await waitForMessageMatch(
+      client.messages,
+      (m) => m.type === 'server_status' && m.phase === 'tunnel_warming',
+      2000,
+      'tunnel_warming on --no-auth client',
+    )
+    assert.ok(warming, '--no-auth client should receive v2-gated broadcasts')
+    assert.equal(warming.phase, 'tunnel_warming')
+
+    client.ws.close()
   })
 })
 
