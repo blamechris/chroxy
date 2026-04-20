@@ -814,6 +814,106 @@ describe('SdkSession', () => {
     })
   })
 
+  // -- modelUsage contract drift --
+
+  describe('modelUsage contract drift', () => {
+    afterEach(() => {
+      resetModels()
+    })
+
+    async function runWithModelUsage(modelUsage) {
+      const s = createSession()
+      s._processReady = true
+      s._callQuery = () => {
+        return (async function* () {
+          yield {
+            type: 'result',
+            session_id: 'drift-test',
+            total_cost_usd: 0,
+            duration_ms: 0,
+            usage: {},
+            modelUsage,
+          }
+        })()
+      }
+      await s.sendMessage('hello')
+      s.destroy()
+    }
+
+    it('logs debug message when modelUsage entries lack contextWindow', async () => {
+      const { addLogListener, removeLogListener, setLogLevel } = await import(
+        '../src/logger.js'
+      )
+      setLogLevel('debug')
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        await runWithModelUsage({
+          'claude-sonnet-4-6': { inputTokens: 100, outputTokens: 50 },
+        })
+      } finally {
+        removeLogListener(listener)
+        setLogLevel('info')
+      }
+
+      const drift = entries.find(
+        (e) => e.component === 'sdk' && e.message.startsWith('modelUsage contract drift')
+      )
+      assert.ok(drift, 'expected a drift debug log')
+      assert.equal(drift.level, 'debug')
+      assert.ok(drift.message.includes('claude-sonnet-4-6'))
+      assert.ok(drift.message.includes('inputTokens'))
+    })
+
+    it('does not log drift when contextWindow is present', async () => {
+      const { addLogListener, removeLogListener, setLogLevel } = await import(
+        '../src/logger.js'
+      )
+      setLogLevel('debug')
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        await runWithModelUsage({
+          'claude-sonnet-4-6': { contextWindow: 200000 },
+        })
+      } finally {
+        removeLogListener(listener)
+        setLogLevel('info')
+      }
+
+      const drift = entries.find(
+        (e) => e.component === 'sdk' && e.message.startsWith('modelUsage contract drift')
+      )
+      assert.equal(drift, undefined)
+    })
+
+    it('does not log drift when modelUsage is empty', async () => {
+      const { addLogListener, removeLogListener, setLogLevel } = await import(
+        '../src/logger.js'
+      )
+      setLogLevel('debug')
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        await runWithModelUsage({})
+      } finally {
+        removeLogListener(listener)
+        setLogLevel('info')
+      }
+
+      const drift = entries.find(
+        (e) => e.component === 'sdk' && e.message.startsWith('modelUsage contract drift')
+      )
+      assert.equal(drift, undefined)
+    })
+  })
+
   describe('getters', () => {
     it('isRunning reflects _isBusy', () => {
       assert.equal(session.isRunning, false)

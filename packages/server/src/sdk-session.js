@@ -380,12 +380,26 @@ export class SdkSession extends BaseSession {
             // a value actually changed to avoid thrashy writes / UI churn.
             let contextWindowChanged = false
             if (msg.modelUsage && typeof msg.modelUsage === 'object') {
+              let sawContextWindow = false
+              const modelIds = Object.keys(msg.modelUsage)
               for (const [modelId, usage] of Object.entries(msg.modelUsage)) {
                 if (usage && typeof usage.contextWindow === 'number') {
+                  sawContextWindow = true
                   if (updateContextWindow(modelId, usage.contextWindow)) {
                     contextWindowChanged = true
                   }
                 }
+              }
+              // Drift signal: SDK emitted modelUsage entries but none carried a
+              // numeric contextWindow. Likely means the field was renamed or
+              // removed upstream. Log a redacted sample so a future regression
+              // is diagnosable without flooding info-level output.
+              if (!sawContextWindow && modelIds.length > 0) {
+                const sampleId = modelIds[0]
+                const sampleKeys = Object.keys(msg.modelUsage[sampleId] || {})
+                log.debug(
+                  `modelUsage contract drift: expected numeric contextWindow; received modelIds=${JSON.stringify(modelIds)} sampleKeys=${JSON.stringify(sampleKeys)}`
+                )
               }
             }
             if (contextWindowChanged) {
