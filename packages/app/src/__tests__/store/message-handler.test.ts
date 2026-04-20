@@ -1472,7 +1472,7 @@ describe('reconnect replay dedup', () => {
     expect(msgs[0].content).toBe('scan the repo');
   });
 
-  it('message handler: still skips top-level user_input echo when not replaying', () => {
+  it('message handler: skips messageType=user_input entries outside replay', () => {
     resetReplayFlags();
     const store = createMockStore({
       activeSessionId: 's1',

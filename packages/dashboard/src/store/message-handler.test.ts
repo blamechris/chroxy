@@ -318,7 +318,7 @@ describe('dashboard message-handler dispatch', () => {
       expect(msgs[0].content).toBe('new response')
     })
 
-    it('still skips top-level user_input echo when not replaying', () => {
+    it('skips messageType=user_input entries outside replay', () => {
       seed()
       handleMessage(
         {
