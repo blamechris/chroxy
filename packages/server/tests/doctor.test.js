@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { parse as parsePath } from 'node:path'
 import { runDoctorChecks } from '../src/doctor.js'
 
 /**
@@ -96,6 +97,28 @@ describe('runDoctorChecks', () => {
     ]
     const passed = mockChecks.every(c => c.status !== 'fail')
     assert.equal(passed, false)
+  })
+
+  it('dependencies check resolves relative to server package, not process.cwd()', async () => {
+    // Regression: previously the check used join(process.cwd(), 'node_modules').
+    // Tauri launches the server with cwd='/' under launchd, which always
+    // failed this check and blocked server startup. The fix resolves
+    // node_modules relative to the server package itself.
+    const originalCwd = process.cwd()
+    // Use the filesystem root from the CURRENT cwd so the chdir works on
+    // any platform (POSIX root '/' or a Windows drive root like 'C:\\').
+    const fsRoot = parsePath(originalCwd).root
+    try {
+      process.chdir(fsRoot)
+      const { checks } = await runDoctorChecks()
+      const depsCheck = checks.find(c => c.name === 'Dependencies')
+      assert.ok(depsCheck)
+      // With node_modules installed in packages/server/, this must pass
+      // even when process.cwd() is a directory with no node_modules.
+      assert.equal(depsCheck.status, 'pass', `expected pass, got ${depsCheck.status}: ${depsCheck.message}`)
+    } finally {
+      process.chdir(originalCwd)
+    }
   })
 
   it('finds claude via candidate paths when PATH omits the install dir', async () => {

@@ -1,10 +1,19 @@
 import { execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
+import { fileURLToPath } from 'url'
 import { homedir, platform } from 'os'
 import { createServer } from 'net'
 import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
+
+// Resolve the server package root (the directory containing package.json
+// and node_modules) so dependency checks work regardless of where the
+// server process was launched. `import.meta.url` points to this file at
+// src/doctor.js — two `dirname` calls walk from the file up through
+// src/ to the package root.
+const __filename = fileURLToPath(import.meta.url)
+const SERVER_PKG_DIR = dirname(dirname(__filename))
 
 const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
 
@@ -82,11 +91,14 @@ export async function runDoctorChecks({ port, verbose: _verbose } = {}) {
   }
 
   // 6. node_modules
-  const nodeModulesPath = join(process.cwd(), 'node_modules')
+  // Resolve relative to the server package, not process.cwd() — Tauri
+  // launches the server with cwd='/' under launchd, which would always
+  // fail a `${process.cwd()}/node_modules` check.
+  const nodeModulesPath = join(SERVER_PKG_DIR, 'node_modules')
   if (existsSync(nodeModulesPath)) {
     checks.push({ name: 'Dependencies', status: 'pass', message: 'node_modules found' })
   } else {
-    checks.push({ name: 'Dependencies', status: 'fail', message: 'node_modules not found — run npm install' })
+    checks.push({ name: 'Dependencies', status: 'fail', message: `node_modules not found at ${nodeModulesPath} — run npm install` })
   }
 
   // 7. Port availability
