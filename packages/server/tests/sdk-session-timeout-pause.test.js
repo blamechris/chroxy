@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { SdkSession, armResultTimeoutForTest } from '../src/sdk-session.js'
+import { SdkSession } from '../src/sdk-session.js'
+import { armResultTimeoutForTest } from './test-helpers.js'
 
 /**
  * Tests for SdkSession inactivity-timer pause/resume during pending
