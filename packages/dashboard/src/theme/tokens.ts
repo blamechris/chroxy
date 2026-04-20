@@ -73,6 +73,12 @@ export const colors = {
     permission: '#4a3a7a',
     question: '#2a5a7a',
   },
+  banner: {
+    borderSubtle: '#252540',
+  },
+  warning: {
+    fg: '#fbbf24',
+  },
   status: {
     connected: '#22c55e',
     disconnected: '#ef4444',
