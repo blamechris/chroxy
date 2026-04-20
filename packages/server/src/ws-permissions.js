@@ -114,7 +114,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // [session-binding-resend] and [session-binding-reject]. The HTTP
       // /permission path is the legacy (non-SDK) case; the requestId acts
       // as a stable correlation key across the permission lifecycle.
-      log.info(`[session-binding-create] permission ${requestId} created via HTTP (sessionId=none, sourceIp=${clientIp})`)
+      // Gated at debug level (#2854) to avoid spamming prod logs — enable
+      // with `LOG_LEVEL=debug` when triangulating SESSION_TOKEN_MISMATCH.
+      log.debug(`[session-binding-create] permission ${requestId} created via HTTP (sessionId=none, sourceIp=${clientIp})`)
 
       const tool = hookData.tool_name || 'Unknown tool'
       const toolInput = hookData.tool_input || {}
@@ -340,11 +342,13 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               log.info(`Re-sending pending permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
               // Diagnostic correlation log for #2832 — grep by requestId
               // to see whether the recipient's boundSessionId matches the
-              // origin session recorded at [session-binding-create].
+              // origin session recorded at [session-binding-create]. Gated
+              // at debug level (#2854) to avoid spamming prod logs on every
+              // post-auth reconnection — enable with `LOG_LEVEL=debug`.
               if (client) {
-                log.info(`[session-binding-resend] permission ${requestId} resent to client ${client.id} (sessionId=${sessionId}, activeSession=${client.activeSessionId ?? 'none'}, boundSession=${client.boundSessionId ?? 'none'})`)
+                log.debug(`[session-binding-resend] permission ${requestId} resent to client ${client.id} (sessionId=${sessionId}, activeSession=${client.activeSessionId ?? 'none'}, boundSession=${client.boundSessionId ?? 'none'})`)
               } else {
-                log.info(`[session-binding-resend] permission ${requestId} resent (sessionId=${sessionId}, client=unknown)`)
+                log.debug(`[session-binding-resend] permission ${requestId} resent (sessionId=${sessionId}, client=unknown)`)
               }
               permissionSessionMap.set(requestId, sessionId)
               const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = permData
@@ -366,10 +370,11 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           continue
         }
         log.info(`Re-sending pending legacy permission ${requestId} to reconnected client (${Math.round(remainingMs / 1000)}s remaining)`)
+        // Gated at debug level (#2854) — see comment above.
         if (client) {
-          log.info(`[session-binding-resend] legacy permission ${requestId} resent to client ${client.id} (activeSession=${client.activeSessionId ?? 'none'}, boundSession=${client.boundSessionId ?? 'none'})`)
+          log.debug(`[session-binding-resend] legacy permission ${requestId} resent to client ${client.id} (activeSession=${client.activeSessionId ?? 'none'}, boundSession=${client.boundSessionId ?? 'none'})`)
         } else {
-          log.info(`[session-binding-resend] legacy permission ${requestId} resent (client=unknown)`)
+          log.debug(`[session-binding-resend] legacy permission ${requestId} resent (client=unknown)`)
         }
         const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = pending.data
         sendFn(ws, { type: 'permission_request', ...clientPayload, remainingMs })
