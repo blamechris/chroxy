@@ -98,6 +98,25 @@ describe('runDoctorChecks', () => {
     assert.equal(passed, false)
   })
 
+  it('dependencies check resolves relative to server package, not process.cwd()', async () => {
+    // Regression: previously the check used join(process.cwd(), 'node_modules').
+    // Tauri launches the server with cwd='/' under launchd, which always
+    // failed this check and blocked server startup. The fix resolves
+    // node_modules relative to the server package itself.
+    const originalCwd = process.cwd()
+    try {
+      process.chdir('/')
+      const { checks } = await runDoctorChecks()
+      const depsCheck = checks.find(c => c.name === 'Dependencies')
+      assert.ok(depsCheck)
+      // With node_modules installed in packages/server/, this must pass
+      // even when process.cwd() is a directory with no node_modules.
+      assert.equal(depsCheck.status, 'pass', `expected pass, got ${depsCheck.status}: ${depsCheck.message}`)
+    } finally {
+      process.chdir(originalCwd)
+    }
+  })
+
   it('finds claude via candidate paths when PATH omits the install dir', async () => {
     // Simulates a GUI-launched process (e.g. Tauri on macOS) whose
     // inherited PATH excludes the dir where claude is actually installed.
