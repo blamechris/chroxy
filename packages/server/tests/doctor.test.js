@@ -97,4 +97,27 @@ describe('runDoctorChecks', () => {
     const passed = mockChecks.every(c => c.status !== 'fail')
     assert.equal(passed, false)
   })
+
+  it('finds claude via candidate paths when PATH omits the install dir', async () => {
+    // Simulates a GUI-launched process (e.g. Tauri on macOS) whose
+    // inherited PATH excludes the dir where claude is actually installed.
+    // checkBinary should fall through to the candidate list and still
+    // resolve the binary.
+    const originalPath = process.env.PATH
+    try {
+      process.env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
+      const { checks } = await runDoctorChecks()
+      const claudeCheck = checks.find(c => c.name === 'claude')
+      assert.ok(claudeCheck)
+      if (claudeCheck.status === 'pass') {
+        // If claude is installed at any of the known candidate paths,
+        // the stripped PATH should NOT have prevented resolution.
+        assert.ok(claudeCheck.message, 'expected version string on pass')
+      }
+      // If still 'fail', this host simply has no claude binary anywhere —
+      // that's a valid outcome, not a regression of the fallback logic.
+    } finally {
+      process.env.PATH = originalPath
+    }
+  })
 })

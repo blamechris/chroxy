@@ -1,6 +1,8 @@
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
 import { randomBytes } from 'crypto'
+import { homedir } from 'os'
+import { join } from 'path'
 import { createPermissionHookManager } from './permission-hook.js'
 import { BaseSession } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
@@ -8,9 +10,21 @@ import { forceKill } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { parseMcpToolName } from './mcp-tools.js'
+import { resolveBinary } from './utils/resolve-binary.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('cli-session')
+
+// Resolve the claude binary once at module load. Under a GUI launch
+// (e.g. Tauri on macOS) PATH is minimal and may exclude the user's
+// install dir — fall through to known locations so `spawn()` succeeds.
+const CLAUDE = resolveBinary('claude', [
+  join(homedir(), '.local/bin/claude'),
+  '/opt/homebrew/bin/claude',
+  '/usr/local/bin/claude',
+  join(homedir(), '.claude/local/node_modules/.bin/claude'),
+  join(homedir(), '.npm-global/bin/claude'),
+])
 
 // Default max accumulated size for tool_use input_json_delta chunks (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
@@ -153,7 +167,7 @@ export class CliSession extends BaseSession {
     this._cleanupReadlines()
     this._processReady = false
 
-    const child = spawn('claude', args, {
+    const child = spawn(CLAUDE, args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: this._buildChildEnv(),
