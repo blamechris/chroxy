@@ -28,7 +28,9 @@ import {
   setStore,
   clearDeltaBuffers,
   stopHeartbeat,
+  resetReplayFlags,
 } from './message-handler'
+import { createEmptySessionState } from './utils'
 import type { ConnectionState } from './types'
 
 function createMockStore(initial: Partial<ConnectionState>) {
@@ -99,6 +101,7 @@ describe('dashboard message-handler dispatch', () => {
   afterEach(() => {
     stopHeartbeat()
     clearDeltaBuffers()
+    resetReplayFlags()
   })
 
   describe('auth_ok dispatch', () => {
@@ -253,6 +256,82 @@ describe('dashboard message-handler dispatch', () => {
       const state = store.getState()
       expect(state.serverPhase).toBe('tunnel_warming')
       expect(state.tunnelProgress).toBeNull()
+    })
+  })
+
+  describe('history replay: user_input rehydration', () => {
+    function seed() {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: createEmptySessionState() },
+        }),
+      )
+      setStore(store)
+    }
+
+    // Regression: server replays historical user prompts as
+    // { type: 'message', messageType: 'user_input' }. On plain reconnect replay
+    // (no session switch) the dashboard dropped them, leaving the chat empty
+    // or showing orphaned assistant responses.
+    it('rehydrates user_input entries during reconnect replay', () => {
+      seed()
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        {
+          type: 'message',
+          messageType: 'user_input',
+          content: 'scan the repo',
+          sessionId: 's1',
+          timestamp: 100,
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].type).toBe('user_input')
+      expect(msgs[0].content).toBe('scan the repo')
+    })
+
+    // Previously a "cache is fresh" guard skipped ALL replay entries once the
+    // legacy flat messages array had anything. Per-entry dedup at the same
+    // handler already prevents duplicates, so the blanket guard was removed.
+    it('does not blanket-skip replay when legacy messages list is non-empty', () => {
+      seed()
+      ;(store.getState() as any).messages = [{ id: 'legacy', type: 'system', content: 'x', timestamp: 1 }]
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        {
+          type: 'message',
+          messageType: 'response',
+          content: 'new response',
+          messageId: 'resp-1',
+          sessionId: 's1',
+          timestamp: 500,
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].type).toBe('response')
+      expect(msgs[0].content).toBe('new response')
+    })
+
+    it('skips messageType=user_input entries outside replay', () => {
+      seed()
+      handleMessage(
+        {
+          type: 'message',
+          messageType: 'user_input',
+          content: 'live echo',
+          sessionId: 's1',
+          timestamp: 200,
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs).toHaveLength(0)
     })
   })
 
