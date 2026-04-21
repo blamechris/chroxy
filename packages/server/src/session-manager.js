@@ -404,7 +404,9 @@ export class SessionManager extends EventEmitter {
 
     log.info(`Created session ${sessionId} "${sessionName}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_created', { sessionId, name: sessionName, cwd: resolvedCwd })
-    this._schedulePersist()
+    // Flush synchronously — a new session must survive an abrupt shutdown,
+    // otherwise rebuilds / crashes during the 2s debounce window lose it.
+    this._flushPersist()
     return sessionId
   }
 
@@ -549,6 +551,9 @@ export class SessionManager extends EventEmitter {
     entry._autoLabeled = true // prevent auto-label from overwriting manual rename
     log.info(`Renamed session ${sessionId} to "${name}"`)
     this.emit('session_updated', { sessionId, name })
+    // Flush synchronously — before this, renames were never persisted at all,
+    // so a restart would show the pre-rename label.
+    this._flushPersist()
     return true
   }
 
@@ -587,7 +592,8 @@ export class SessionManager extends EventEmitter {
     }
     log.info(`Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_destroyed', { sessionId })
-    this._schedulePersist()
+    // Flush synchronously so the deletion survives an abrupt shutdown.
+    this._flushPersist()
     return true
   }
 
@@ -838,6 +844,16 @@ export class SessionManager extends EventEmitter {
    */
   _schedulePersist() {
     this._persistence.schedulePersist(() => this.serializeState())
+  }
+
+  /**
+   * Flush persist synchronously, bypassing the debounce. Use for session-list
+   * mutations (create/rename/destroy) where losing the write on abrupt
+   * shutdown erases a user's session. History/budget updates should keep
+   * using the debounced path to avoid write amplification.
+   */
+  _flushPersist() {
+    this._persistence.flushPersist(() => this.serializeState())
   }
 
   /**

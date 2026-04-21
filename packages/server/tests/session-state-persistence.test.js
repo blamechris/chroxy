@@ -294,6 +294,124 @@ describe('SessionStatePersistence.destroy', () => {
   })
 })
 
+describe('SessionStatePersistence.flushPersist (regression: #2906)', () => {
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-flush-test-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('writes synchronously without waiting for the debounce', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile, persistDebounceMs: 10_000 })
+    let called = 0
+    p.flushPersist(() => {
+      called++
+      p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 's1', name: 'Flushed', cwd: '/tmp' }] })
+    })
+    assert.equal(called, 1, 'serializeFn must run immediately')
+    assert.ok(existsSync(stateFile), 'state file exists after flush')
+    const contents = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(contents.sessions[0].name, 'Flushed')
+  })
+
+  it('cancels any pending debounce before flushing', () => {
+    mock.timers.enable()
+    try {
+      const p = new SessionStatePersistence({ stateFilePath: stateFile, persistDebounceMs: 100 })
+      let debouncedCalls = 0
+      p.schedulePersist(() => { debouncedCalls++ })
+      assert.ok(p._persistTimer !== null, 'debounced write is pending')
+
+      let flushedCalls = 0
+      p.flushPersist(() => { flushedCalls++ })
+      assert.equal(flushedCalls, 1, 'flushPersist runs immediately')
+      assert.equal(p._persistTimer, null, 'pending timer was cancelled')
+
+      mock.timers.tick(500)
+      assert.equal(debouncedCalls, 0, 'debounced write no longer fires')
+      p.destroy()
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('catches errors from serializeFn', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    assert.doesNotThrow(() => {
+      p.flushPersist(() => { throw new Error('boom') })
+    })
+  })
+})
+
+describe('SessionStatePersistence backup rotation (regression: #2906)', () => {
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-bak-test-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('rotates the previous state file to .bak on each write', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 's1', name: 'First', cwd: '/tmp' }] })
+    p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 's2', name: 'Second', cwd: '/tmp' }] })
+
+    assert.ok(existsSync(stateFile + '.bak'), '.bak file should exist')
+    const bak = JSON.parse(readFileSync(stateFile + '.bak', 'utf-8'))
+    assert.equal(bak.sessions[0].name, 'First', '.bak should hold the prior generation')
+    const main = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(main.sessions[0].name, 'Second')
+  })
+
+  it('does not fail on the first write (no prior file to rotate)', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    assert.doesNotThrow(() => {
+      p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 's1', name: 'Fresh', cwd: '/tmp' }] })
+    })
+    assert.ok(existsSync(stateFile))
+    assert.equal(existsSync(stateFile + '.bak'), false, 'no .bak before any rotation')
+  })
+
+  it('recovers from .bak when main file is missing', () => {
+    writeFileSync(stateFile + '.bak', JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [{ id: 's1', name: 'FromBak', cwd: '/tmp' }],
+    }))
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const restored = p.restoreState()
+    assert.ok(restored, 'restoreState should succeed from .bak')
+    assert.equal(restored.sessions[0].name, 'FromBak')
+  })
+
+  it('recovers from .bak when main file is corrupt JSON', () => {
+    writeFileSync(stateFile, 'not valid json')
+    writeFileSync(stateFile + '.bak', JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [{ id: 's1', name: 'FromBak', cwd: '/tmp' }],
+    }))
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const restored = p.restoreState()
+    assert.ok(restored, 'restoreState falls back to .bak when main is corrupt')
+    assert.equal(restored.sessions[0].name, 'FromBak')
+    // Main file should be removed (it was unparseable), .bak preserved as a last-resort copy
+    assert.equal(existsSync(stateFile), false)
+    assert.ok(existsSync(stateFile + '.bak'), '.bak preserved for future recovery')
+  })
+})
+
 describe('SessionStatePersistence defaults', () => {
   it('defaults to 2000ms persist debounce', () => {
     const p = new SessionStatePersistence({ stateFilePath: '/tmp/test.json' })

@@ -876,11 +876,12 @@ describe('#987 — dead code removal in session-manager (behavioral)', () => {
       'getFullHistoryAsync should still exist')
   })
 
-  it('destroySession calls _schedulePersist exactly once', () => {
+  it('destroySession flushes persist synchronously (regression: #2906)', () => {
     const tmpDir = mkdtempSync(join(tmpdir(), 'sm-persist-'))
     const mgr = new SessionManager({
       maxSessions: 5,
       stateFilePath: join(tmpDir, 'state.json'),
+      persistDebounceMs: 10_000, // large — proves we're not waiting for the debounce
     })
 
     // Insert a mock session
@@ -890,15 +891,21 @@ describe('#987 — dead code removal in session-manager (behavioral)', () => {
     mgr._sessions.set('s1', { session, type: 'cli', name: 'S1', cwd: '/tmp' })
     mgr.touchActivity('s1')
 
-    // Spy on _schedulePersist
-    let persistCallCount = 0
-    const original = mgr._schedulePersist.bind(mgr)
-    mgr._schedulePersist = () => { persistCallCount++; original() }
+    // Spy on _flushPersist
+    let flushCallCount = 0
+    const original = mgr._flushPersist.bind(mgr)
+    mgr._flushPersist = () => { flushCallCount++; original() }
 
     mgr.destroySession('s1')
 
-    assert.equal(persistCallCount, 1,
-      `destroySession should call _schedulePersist once, got ${persistCallCount}`)
+    assert.equal(flushCallCount, 1,
+      `destroySession should call _flushPersist once, got ${flushCallCount}`)
+
+    // State file must exist immediately — no debounce — because the session
+    // removal has to survive an abrupt shutdown (SIGKILL, power loss, pkill).
+    const stateFile = join(tmpDir, 'state.json')
+    assert.ok(existsSync(stateFile),
+      `destroySession should write state file synchronously (not wait for debounce)`)
 
     // Clean up timer and temp dir
     clearTimeout(mgr._persistTimer)
