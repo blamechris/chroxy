@@ -121,6 +121,56 @@ describe('input-handlers', () => {
       assert.equal(ctx._sent.length, 0)
       assert.equal(session.sendMessage.callCount, 0)
     })
+
+    // Issue #2902: client-sent messageId must be adopted verbatim so sender's
+    // optimistic UI entry shares an id with the server's history record.
+    it('adopts a well-formed clientMessageId for recordUserInput + broadcast', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      inputHandlers.input(makeWs(), client, { data: 'hi', clientMessageId: 'user-42-1700000000000' }, ctx)
+
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1)
+      const [sid, text, id] = ctx.sessionManager.recordUserInput.lastCall
+      assert.equal(sid, 's1')
+      assert.equal(text, 'hi')
+      assert.equal(id, 'user-42-1700000000000', 'recordUserInput must receive the client id')
+      assert.equal(ctx._broadcasts.length, 1)
+      assert.equal(ctx._broadcasts[0].messageId, 'user-42-1700000000000',
+        'echo broadcast must include the same messageId for other clients')
+    })
+
+    it('generates a server-side messageId when clientMessageId is missing or invalid', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      // Case 1: missing entirely
+      inputHandlers.input(makeWs(), client, { data: 'one' }, ctx)
+      // Case 2: non-string
+      inputHandlers.input(makeWs(), client, { data: 'two', clientMessageId: 42 }, ctx)
+      // Case 3: wrong charset (e.g. contains space / HTML)
+      inputHandlers.input(makeWs(), client, { data: 'three', clientMessageId: '<script>' }, ctx)
+      // Case 4: too long
+      inputHandlers.input(makeWs(), client, { data: 'four', clientMessageId: 'x'.repeat(200) }, ctx)
+
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 4)
+      for (let i = 0; i < 4; i++) {
+        const [,, id] = ctx.sessionManager.recordUserInput.lastCall // covers only last; check all:
+        // fallback to inspecting broadcasts for every call
+        const msgId = ctx._broadcasts[i].messageId
+        assert.ok(typeof msgId === 'string' && msgId.length > 0,
+          `broadcast #${i} should carry a server-generated messageId`)
+        assert.match(msgId, /^uin-\d+-\d+$/,
+          `server-side id should follow the uin-<ts>-<counter> format (got ${msgId})`)
+        void id // quiet unused
+      }
+    })
   })
 
   describe('interrupt', () => {

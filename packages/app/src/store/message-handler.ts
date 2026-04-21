@@ -1076,7 +1076,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const parsed = parseUserInputMessage(msg, get().myClientId, get().activeSessionId);
       if (!parsed) break;
       const { sessionId: parsedSessionId, ...parsedMsg } = parsed;
-      const uiMsg: ChatMessage = { id: nextMessageId('user_input'), ...parsedMsg };
+      // Adopt the server's stable messageId (issue #2902) so a later replay
+      // of the same entry dedups by id against this live-echo copy.
+      const stableId = typeof msg.messageId === 'string' ? msg.messageId : undefined;
+      const uiMsg: ChatMessage = { id: stableId || nextMessageId('user_input'), ...parsedMsg };
       updateSession(parsedSessionId, (ss) => ({
         messages: [...ss.messages, uiMsg],
       }));
@@ -1093,6 +1096,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // rendered so the prompts that triggered past responses are visible.
       if (msgType === 'user_input' && !_ctx.receivingHistoryReplay) break;
       const targetId = (msg.sessionId as string) || get().activeSessionId;
+      const stableMessageId = typeof msg.messageId === 'string' ? (msg.messageId as string) : undefined;
       // During any history replay, skip if an equivalent message is already in cache (dedup).
       // This prevents duplicates when the app already received messages via real-time
       // subscription before switching to the session (which triggers history replay).
@@ -1100,9 +1104,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const cached = getSessionMessages(targetId);
         // For response messages with a stable server messageId, use ID-based dedup
         // (timestamps differ between client stream_start and server stream_end)
-        const serverId = msg.messageId as string | undefined;
-        if (serverId && msgType === 'response') {
-          if (cached.some((m) => (m.id === serverId && m.type === 'response') || m.id === `${serverId}-response`)) break;
+        if (stableMessageId && msgType === 'response') {
+          if (cached.some((m) => (m.id === stableMessageId && m.type === 'response') || m.id === `${stableMessageId}-response`)) break;
+        } else if (stableMessageId && msgType === 'user_input') {
+          // Issue #2902: server now stamps a stable messageId on user_input
+          // entries that matches the sender's optimistic ChatMessage.id.
+          if (cached.some((m) => m.id === stableMessageId)) break;
         } else {
           const isDuplicate = cached.some((m) => {
             if (m.type !== msgType || m.content !== msg.content) return false;
@@ -1114,7 +1121,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }
       }
       const newMsg: ChatMessage = {
-        id: nextMessageId(msgType),
+        // Preserve the server-assigned messageId so future replays can still dedup by id.
+        id: (stableMessageId && msgType === 'user_input') ? stableMessageId : nextMessageId(msgType),
         type: msgType as ChatMessage['type'],
         content: msg.content as string,
         tool: msg.tool as string | undefined,

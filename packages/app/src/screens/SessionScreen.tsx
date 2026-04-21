@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview, stripAnsi } from '../store/connection';
+import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview, stripAnsi, nextMessageId } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
@@ -514,8 +514,13 @@ export function SessionScreen() {
       ? pendingAttachments.map(({ id, type, uri, name, mediaType, size }) => ({ id, type, uri, name, mediaType, size }))
       : undefined;
 
+    // Shared messageId: same ID on the optimistic entry, the wire payload,
+    // and (via server adoption) the history record. Lets reconnect replay
+    // dedup by id against the existing optimistic copy (issue #2902).
+    const clientMessageId = nextMessageId('user');
+
     if (viewMode === 'chat' || viewMode === 'files') {
-      addUserMessage(text || `[${pendingAttachments.length} file(s) attached]`, msgAttachments);
+      addUserMessage(text || `[${pendingAttachments.length} file(s) attached]`, msgAttachments, { clientMessageId });
     }
 
     // Clear plan approval card — user has responded (whether approving or giving feedback)
@@ -531,7 +536,7 @@ export function SessionScreen() {
     // CLI sessions: the server handles the full message directly (no CR needed).
     const isVoice = usedVoiceRef.current;
     usedVoiceRef.current = false;
-    const result = sendInput(hasTerminal ? (text || '') + '\r' : (text || ''), wire, { isVoice });
+    const result = sendInput(hasTerminal ? (text || '') + '\r' : (text || ''), wire, { isVoice, clientMessageId });
     if (result === 'queued') {
       const { addMessage } = useConnectionStore.getState();
       addMessage({
@@ -612,8 +617,9 @@ export function SessionScreen() {
   const clearPlanState = useConnectionStore((s) => s.clearPlanState);
 
   const handleApprovePlan = useCallback(() => {
-    addUserMessage(PLAN_APPROVAL_MESSAGE);
-    sendInput(PLAN_APPROVAL_MESSAGE);
+    const clientMessageId = nextMessageId('user');
+    addUserMessage(PLAN_APPROVAL_MESSAGE, undefined, { clientMessageId });
+    sendInput(PLAN_APPROVAL_MESSAGE, undefined, { clientMessageId });
     clearPlanState();
   }, [addUserMessage, sendInput, clearPlanState]);
 

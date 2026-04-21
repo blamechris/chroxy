@@ -323,12 +323,12 @@ export interface ConnectionState {
   clearSavedConnection: () => Promise<void>;
   setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'system') => void;
   addMessage: (message: ChatMessage) => void;
-  addUserMessage: (text: string, attachments?: MessageAttachment[]) => void;
+  addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string }) => void;
   appendTerminalData: (data: string) => void;
   clearTerminalBuffer: () => void;
   setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
-  sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
+  sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[], options?: { isVoice?: boolean; clientMessageId?: string }) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
   sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;

@@ -1472,6 +1472,47 @@ describe('reconnect replay dedup', () => {
     expect(msgs[0].content).toBe('scan the repo');
   });
 
+  // Issue #2902: sender's optimistic user_input carries the same id the
+  // server stamped. On reconnect, replay must dedup by that id even when
+  // content differs (server may append attachment markers) and timestamps
+  // differ (client Date.now vs server Date.now).
+  it('message handler: dedups replayed user_input against optimistic entry with matching id', () => {
+    const sharedId = 'user-5-1700000000000';
+    const store = setupReconnectReplay([
+      { id: sharedId, type: 'user_input', content: 'hello', timestamp: 1 },
+    ]);
+
+    _testMessageHandler.handle({
+      type: 'message',
+      messageType: 'user_input',
+      content: 'hello [1 file(s) attached]', // server may suffix attachment markers
+      messageId: sharedId,
+      sessionId: 's1',
+      timestamp: 2, // differs from optimistic
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe(sharedId);
+  });
+
+  it('message handler: preserves server messageId as ChatMessage.id on replay', () => {
+    const store = setupReconnectReplay([]);
+
+    _testMessageHandler.handle({
+      type: 'message',
+      messageType: 'user_input',
+      content: 'preserved id',
+      messageId: 'uin-9999-1',
+      sessionId: 's1',
+      timestamp: 42,
+    });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('uin-9999-1');
+  });
+
   it('message handler: skips messageType=user_input entries outside replay', () => {
     resetReplayFlags();
     const store = createMockStore({

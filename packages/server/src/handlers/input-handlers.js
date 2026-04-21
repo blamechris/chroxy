@@ -8,6 +8,25 @@ import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
 
+// Stable user-input message IDs (issue #2902). A client that sends its own
+// `clientMessageId` gets it adopted verbatim — that lets the sender dedup its
+// optimistic entry against the rehydrated history after a reconnect. Only
+// loose format validation: we don't trust client input beyond size/charset,
+// but collisions inside one session's ring buffer are the client's problem.
+const USER_INPUT_ID_RE = /^[A-Za-z0-9_-]+$/
+const MAX_CLIENT_MESSAGE_ID_LEN = 128
+let _userInputIdCounter = 0
+function generateUserInputId() {
+  _userInputIdCounter = (_userInputIdCounter + 1) % Number.MAX_SAFE_INTEGER
+  return `uin-${Date.now()}-${_userInputIdCounter}`
+}
+function resolveUserInputId(candidate) {
+  if (typeof candidate !== 'string') return generateUserInputId()
+  if (candidate.length === 0 || candidate.length > MAX_CLIENT_MESSAGE_ID_LEN) return generateUserInputId()
+  if (!USER_INPUT_ID_RE.test(candidate)) return generateUserInputId()
+  return candidate
+}
+
 function handleInput(ws, client, msg, ctx) {
   const text = msg.data
   let attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
@@ -67,7 +86,12 @@ function handleInput(ws, client, msg, ctx) {
     }).catch((err) => log.warn(`Auto-checkpoint failed: ${err.message}`))
   }
   const historyText = attCount ? `${trimmed}${trimmed ? ' ' : ''}[${attCount} file(s) attached]` : trimmed
-  ctx.sessionManager.recordUserInput(targetSessionId, historyText)
+  // Adopt the sender's clientMessageId if present and well-formed; otherwise
+  // generate one. Same ID is stored in history and emitted in the live-echo
+  // broadcast so any reconnecting client can match rehydrated entries
+  // against their optimistic/echo copies (issue #2902).
+  const messageId = resolveUserInputId(msg.clientMessageId)
+  ctx.sessionManager.recordUserInput(targetSessionId, historyText, messageId)
   ctx.sessionManager.touchActivity(targetSessionId)
   entry.session.sendMessage(trimmed, attachments, { isVoice: !!msg.isVoice })
 
@@ -75,7 +99,7 @@ function handleInput(ws, client, msg, ctx) {
 
   // Echo user_input to other clients so they see what was sent (#1119)
   ctx.broadcast(
-    { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, timestamp: Date.now() },
+    { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, messageId, timestamp: Date.now() },
     (c) => c.id !== client.id
   )
 }

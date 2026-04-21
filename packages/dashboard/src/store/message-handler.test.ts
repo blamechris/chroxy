@@ -318,6 +318,50 @@ describe('dashboard message-handler dispatch', () => {
       expect(msgs[0].content).toBe('new response')
     })
 
+    // Issue #2902: the sender's optimistic user_input carries the same id the
+    // server stamped (via clientMessageId). On reconnect, replay must dedup by
+    // that id — otherwise sender sees their own prompt twice.
+    it('dedups replayed user_input against optimistic entry sharing the same id', () => {
+      seed()
+      const sharedId = 'user-7-1700000000000'
+      ;(store.getState() as any).sessionStates.s1.messages = [
+        { id: sharedId, type: 'user_input', content: 'hi there', timestamp: 1 },
+      ]
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        {
+          type: 'message',
+          messageType: 'user_input',
+          content: 'hi there [1 file(s) attached]', // server may suffix attachment marker
+          messageId: sharedId,
+          sessionId: 's1',
+          timestamp: 2, // differs from optimistic timestamp
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs).toHaveLength(1)
+    })
+
+    it('preserves server-assigned messageId on rehydrated user_input (for future dedup)', () => {
+      seed()
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any)
+      handleMessage(
+        {
+          type: 'message',
+          messageType: 'user_input',
+          content: 'replayed prompt',
+          messageId: 'uin-123-9',
+          sessionId: 's1',
+          timestamp: 100,
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].id).toBe('uin-123-9')
+    })
+
     it('skips messageType=user_input entries outside replay', () => {
       seed()
       handleMessage(
