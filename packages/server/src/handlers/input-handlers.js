@@ -15,6 +15,11 @@ const log = createLogger('ws')
 // but collisions inside one session's ring buffer are the client's problem.
 const USER_INPUT_ID_RE = /^[A-Za-z0-9_-]+$/
 const MAX_CLIENT_MESSAGE_ID_LEN = 128
+// IDs the clients treat specially in their stores (e.g. the "thinking"
+// placeholder shown while waiting for the first stream_delta). Never let a
+// client-supplied id collide with these — it would clobber the placeholder
+// or cause the indicator to leak.
+const RESERVED_USER_INPUT_IDS = new Set(['thinking', 'pending', 'queued'])
 let _userInputIdCounter = 0
 function generateUserInputId() {
   _userInputIdCounter = (_userInputIdCounter + 1) % Number.MAX_SAFE_INTEGER
@@ -24,6 +29,7 @@ function resolveUserInputId(candidate) {
   if (typeof candidate !== 'string') return generateUserInputId()
   if (candidate.length === 0 || candidate.length > MAX_CLIENT_MESSAGE_ID_LEN) return generateUserInputId()
   if (!USER_INPUT_ID_RE.test(candidate)) return generateUserInputId()
+  if (RESERVED_USER_INPUT_IDS.has(candidate)) return generateUserInputId()
   return candidate
 }
 

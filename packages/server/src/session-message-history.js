@@ -116,9 +116,12 @@ export class SessionMessageHistory extends EventEmitter {
    * @param {string} sessionId
    * @param {string} text
    * @param {object} [sessionEntry] - Session entry from SessionManager (for auto-label check)
-   * @param {string} [messageId] - Stable ID so clients can dedup rehydrated
-   *   entries against optimistic/live-echo copies on the sender. If omitted,
-   *   one is generated server-side. See issue #2902.
+   * @param {string} [messageId] - Optional stable ID so clients can dedup
+   *   rehydrated entries against optimistic/live-echo copies on the sender.
+   *   Only attached when a non-empty string is provided; the ws-layer (see
+   *   `handlers/input-handlers.js::resolveUserInputId`) always resolves one
+   *   before calling in, so replayed entries always carry an id in practice.
+   *   See issue #2902.
    */
   recordUserInput(sessionId, text, sessionEntry, messageId) {
     if (sessionEntry) {

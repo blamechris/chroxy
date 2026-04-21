@@ -160,15 +160,40 @@ describe('input-handlers', () => {
       inputHandlers.input(makeWs(), client, { data: 'four', clientMessageId: 'x'.repeat(200) }, ctx)
 
       assert.equal(ctx.sessionManager.recordUserInput.callCount, 4)
+      assert.equal(ctx._broadcasts.length, 4)
       for (let i = 0; i < 4; i++) {
-        const [,, id] = ctx.sessionManager.recordUserInput.lastCall // covers only last; check all:
-        // fallback to inspecting broadcasts for every call
+        const [,, id] = ctx.sessionManager.recordUserInput.calls[i]
+        assert.ok(typeof id === 'string' && id.length > 0,
+          `recordUserInput call #${i} should receive a server-generated messageId`)
+        assert.match(id, /^uin-\d+-\d+$/,
+          `server-side id should follow the uin-<ts>-<counter> format (got ${id})`)
+
         const msgId = ctx._broadcasts[i].messageId
-        assert.ok(typeof msgId === 'string' && msgId.length > 0,
-          `broadcast #${i} should carry a server-generated messageId`)
+        assert.equal(msgId, id,
+          `broadcast #${i} should reuse the same generated messageId as recordUserInput`)
+      }
+    })
+
+    // Issue #2910 Copilot review: ids that collide with client-reserved
+    // placeholders (e.g. the "thinking" message id) must never be adopted —
+    // otherwise a malicious/buggy client can clobber another client's
+    // streaming-indicator message.
+    it('rejects reserved client-reserved ids and falls back to a generated one', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      for (const reserved of ['thinking', 'pending', 'queued']) {
+        inputHandlers.input(makeWs(), client, { data: reserved, clientMessageId: reserved }, ctx)
+      }
+
+      assert.equal(ctx._broadcasts.length, 3)
+      for (let i = 0; i < 3; i++) {
+        const msgId = ctx._broadcasts[i].messageId
         assert.match(msgId, /^uin-\d+-\d+$/,
-          `server-side id should follow the uin-<ts>-<counter> format (got ${msgId})`)
-        void id // quiet unused
+          `reserved id must be rejected and replaced by a server-generated uin-… (got ${msgId})`)
       }
     })
   })
