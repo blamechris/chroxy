@@ -337,6 +337,45 @@ describe('SessionManager.restoreState', () => {
     mgr.destroyAll()
   })
 
+  // Regression for #2906 / PR #2907 Copilot finding: createSession() flushes
+  // synchronously on session-list mutations, but restoreState() calls it in a
+  // loop and seeds history/budget AFTER the loop. Without skipPersist, each
+  // createSession flush would rewrite the on-disk state with empty history,
+  // permanently discarding the data being restored (and .bak wouldn't help
+  // because main stays valid JSON).
+  it('preserves on-disk history through restoreState + serializeState cycle', () => {
+    const history = [
+      { type: 'message', messageType: 'user_input', content: 'question one', timestamp: 1000 },
+      { type: 'message', messageType: 'response', content: 'answer one', timestamp: 2000 },
+    ]
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'A', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history },
+        { name: 'B', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history: [{ type: 'message', messageType: 'user_input', content: 'B prompt', timestamp: 500 }] },
+      ],
+    }))
+
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    const firstId = mgr.restoreState()
+    assert.ok(firstId)
+
+    // restoreState flushes once at the end. The written file MUST still
+    // contain the full history for every session, not the empty history
+    // that createSession-alone would produce per session.
+    const onDisk = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(onDisk.sessions.length, 2)
+    const bySavedName = Object.fromEntries(onDisk.sessions.map(s => [s.name, s]))
+    assert.equal(bySavedName.A.history.length, 2, `A history lost on disk — got ${bySavedName.A.history?.length}`)
+    assert.equal(bySavedName.A.history[0].content, 'question one')
+    assert.equal(bySavedName.A.history[1].content, 'answer one')
+    assert.equal(bySavedName.B.history.length, 1, `B history lost on disk — got ${bySavedName.B.history?.length}`)
+    assert.equal(bySavedName.B.history[0].content, 'B prompt')
+
+    mgr.destroyAll()
+  })
+
   it('handles legacy state without version (skips history)', () => {
     writeFileSync(stateFile, JSON.stringify({
       timestamp: Date.now(),
