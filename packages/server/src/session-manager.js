@@ -267,9 +267,13 @@ export class SessionManager extends EventEmitter {
    * @param {string} [options.provider]
    * @param {boolean} [options.worktree] - When true, creates a git worktree for isolation
    * @param {object} [options.sandbox] - SDK sandbox settings for lightweight isolation
+   * @param {boolean} [options.skipPersist] - Internal: skip the sync persist flush. Used by
+   *   `restoreState()`, which must seed history and budget after createSession before the
+   *   state file is rewritten; otherwise each flush would overwrite the on-disk file with
+   *   empty history and destroy the very data we're restoring.
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, skipPersist = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -404,7 +408,12 @@ export class SessionManager extends EventEmitter {
 
     log.info(`Created session ${sessionId} "${sessionName}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_created', { sessionId, name: sessionName, cwd: resolvedCwd })
-    this._schedulePersist()
+    // Flush synchronously — a new session must survive an abrupt shutdown,
+    // otherwise rebuilds / crashes during the 2s debounce window lose it.
+    // Exception: restoreState calls us in a loop and seeds history/budget
+    // AFTER this returns; flushing here would write empty history to disk
+    // and permanently discard the data being restored.
+    if (!skipPersist) this._flushPersist()
     return sessionId
   }
 
@@ -549,6 +558,9 @@ export class SessionManager extends EventEmitter {
     entry._autoLabeled = true // prevent auto-label from overwriting manual rename
     log.info(`Renamed session ${sessionId} to "${name}"`)
     this.emit('session_updated', { sessionId, name })
+    // Flush synchronously — before this, renames were never persisted at all,
+    // so a restart would show the pre-rename label.
+    this._flushPersist()
     return true
   }
 
@@ -587,7 +599,8 @@ export class SessionManager extends EventEmitter {
     }
     log.info(`Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_destroyed', { sessionId })
-    this._schedulePersist()
+    // Flush synchronously so the deletion survives an abrupt shutdown.
+    this._flushPersist()
     return true
   }
 
@@ -692,6 +705,11 @@ export class SessionManager extends EventEmitter {
     const oldToNew = new Map() // old serialized session ID → new session ID
     for (const saved of state.sessions) {
       try {
+        // skipPersist: we rewrite the state file once at the end of
+        // restoreState, after history and cost budget have been reseeded.
+        // Flushing per-session here would overwrite the on-disk file with
+        // empty history for all not-yet-processed sessions, erasing the
+        // data we're trying to restore.
         const sessionId = this.createSession({
           name: saved.name,
           cwd: saved.cwd,
@@ -699,6 +717,7 @@ export class SessionManager extends EventEmitter {
           permissionMode: saved.permissionMode,
           resumeSessionId: saved.sdkSessionId,
           provider: saved.provider || undefined,
+          skipPersist: true,
         })
         if (saved.id) oldToNew.set(saved.id, sessionId)
         // Keep _sessionCounter ahead of any restored "Session N" names so the
@@ -723,6 +742,11 @@ export class SessionManager extends EventEmitter {
 
     // Restore cost tracking data (v1+), remapping old IDs to new IDs.
     this._costBudget.restore(state, oldToNew.size > 0 ? oldToNew : null)
+
+    // Now that history and budget are reseeded, flush once so the on-disk
+    // state reflects the restored state (and so any subsequent abrupt
+    // shutdown preserves it). Only flush if we actually restored something.
+    if (firstId) this._flushPersist()
 
     return firstId
   }
@@ -838,6 +862,16 @@ export class SessionManager extends EventEmitter {
    */
   _schedulePersist() {
     this._persistence.schedulePersist(() => this.serializeState())
+  }
+
+  /**
+   * Flush persist synchronously, bypassing the debounce. Use for session-list
+   * mutations (create/rename/destroy) where losing the write on abrupt
+   * shutdown erases a user's session. History/budget updates should keep
+   * using the debounced path to avoid write amplification.
+   */
+  _flushPersist() {
+    this._persistence.flushPersist(() => this.serializeState())
   }
 
   /**

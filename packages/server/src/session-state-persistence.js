@@ -32,7 +32,16 @@ export class SessionStatePersistence {
     const dir = dirname(this._stateFilePath)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
     const tmpPath = this._stateFilePath + '.tmp'
+    const bakPath = this._stateFilePath + '.bak'
     writeFileRestricted(tmpPath, JSON.stringify(state, null, 2))
+    // Rotate the current file to .bak so one generation survives a crash
+    // or partial write during the rename below. Best-effort — a missing
+    // source file (first write) or rename failure must not block the new write.
+    if (existsSync(this._stateFilePath)) {
+      try { renameSync(this._stateFilePath, bakPath) } catch (err) {
+        log.warn(`Failed to rotate state file to .bak: ${err?.message || err}`)
+      }
+    }
     if (isWindows) {
       try { unlinkSync(this._stateFilePath) } catch (err) {
         if (err && err.code !== 'ENOENT') {
@@ -50,15 +59,36 @@ export class SessionStatePersistence {
    * @returns {object|null} The parsed state object, or null if unavailable/stale/invalid
    */
   restoreState() {
-    if (!existsSync(this._stateFilePath)) return null
+    const mainPath = this._stateFilePath
+    const bakPath = this._stateFilePath + '.bak'
+    // If the main file is missing or unreadable, fall back to the rotated
+    // .bak copy (written by serializeState before every successful write).
+    const sourcePath = existsSync(mainPath) ? mainPath : (existsSync(bakPath) ? bakPath : null)
+    if (!sourcePath) return null
 
     let state
     try {
-      state = JSON.parse(readFileSync(this._stateFilePath, 'utf-8'))
+      state = JSON.parse(readFileSync(sourcePath, 'utf-8'))
     } catch (err) {
-      log.error(`Failed to parse session state: ${err.message}`)
-      try { unlinkSync(this._stateFilePath) } catch {}
-      return null
+      log.error(`Failed to parse session state at ${sourcePath}: ${err.message}`)
+      // Only unlink the main file; preserve .bak as last-resort recovery
+      if (sourcePath === mainPath) {
+        try { unlinkSync(mainPath) } catch {}
+        // Try the backup before giving up
+        if (existsSync(bakPath)) {
+          try {
+            state = JSON.parse(readFileSync(bakPath, 'utf-8'))
+            log.info(`Recovered session state from ${bakPath}`)
+          } catch (bakErr) {
+            log.error(`Failed to parse backup state: ${bakErr.message}`)
+            return null
+          }
+        } else {
+          return null
+        }
+      } else {
+        return null
+      }
     }
 
     if (!Array.isArray(state.sessions) || state.sessions.length === 0) {
@@ -97,6 +127,22 @@ export class SessionStatePersistence {
   cancelPersist() {
     clearTimeout(this._persistTimer)
     this._persistTimer = null
+  }
+
+  /**
+   * Persist immediately, bypassing (and cancelling) any pending debounce.
+   * Used for session-list mutations that must survive an abrupt shutdown —
+   * callers include createSession / destroySession / renameSession, where
+   * losing the write would erase a user's session from the sidebar.
+   * @param {() => void} serializeFn
+   */
+  flushPersist(serializeFn) {
+    this.cancelPersist()
+    try {
+      serializeFn()
+    } catch (err) {
+      log.error(`Failed to flush session state: ${err?.stack || err}`)
+    }
   }
 
   /**

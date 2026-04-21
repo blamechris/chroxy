@@ -337,6 +337,45 @@ describe('SessionManager.restoreState', () => {
     mgr.destroyAll()
   })
 
+  // Regression for #2906 / PR #2907 Copilot finding: createSession() flushes
+  // synchronously on session-list mutations, but restoreState() calls it in a
+  // loop and seeds history/budget AFTER the loop. Without skipPersist, each
+  // createSession flush would rewrite the on-disk state with empty history,
+  // permanently discarding the data being restored (and .bak wouldn't help
+  // because main stays valid JSON).
+  it('preserves on-disk history through restoreState + serializeState cycle', () => {
+    const history = [
+      { type: 'message', messageType: 'user_input', content: 'question one', timestamp: 1000 },
+      { type: 'message', messageType: 'response', content: 'answer one', timestamp: 2000 },
+    ]
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'A', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history },
+        { name: 'B', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history: [{ type: 'message', messageType: 'user_input', content: 'B prompt', timestamp: 500 }] },
+      ],
+    }))
+
+    const mgr = new SessionManager({ maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    const firstId = mgr.restoreState()
+    assert.ok(firstId)
+
+    // restoreState flushes once at the end. The written file MUST still
+    // contain the full history for every session, not the empty history
+    // that createSession-alone would produce per session.
+    const onDisk = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(onDisk.sessions.length, 2)
+    const bySavedName = Object.fromEntries(onDisk.sessions.map(s => [s.name, s]))
+    assert.equal(bySavedName.A.history.length, 2, `A history lost on disk — got ${bySavedName.A.history?.length}`)
+    assert.equal(bySavedName.A.history[0].content, 'question one')
+    assert.equal(bySavedName.A.history[1].content, 'answer one')
+    assert.equal(bySavedName.B.history.length, 1, `B history lost on disk — got ${bySavedName.B.history?.length}`)
+    assert.equal(bySavedName.B.history[0].content, 'B prompt')
+
+    mgr.destroyAll()
+  })
+
   it('handles legacy state without version (skips history)', () => {
     writeFileSync(stateFile, JSON.stringify({
       timestamp: Date.now(),
@@ -876,11 +915,12 @@ describe('#987 — dead code removal in session-manager (behavioral)', () => {
       'getFullHistoryAsync should still exist')
   })
 
-  it('destroySession calls _schedulePersist exactly once', () => {
+  it('destroySession flushes persist synchronously (regression: #2906)', () => {
     const tmpDir = mkdtempSync(join(tmpdir(), 'sm-persist-'))
     const mgr = new SessionManager({
       maxSessions: 5,
       stateFilePath: join(tmpDir, 'state.json'),
+      persistDebounceMs: 10_000, // large — proves we're not waiting for the debounce
     })
 
     // Insert a mock session
@@ -890,15 +930,21 @@ describe('#987 — dead code removal in session-manager (behavioral)', () => {
     mgr._sessions.set('s1', { session, type: 'cli', name: 'S1', cwd: '/tmp' })
     mgr.touchActivity('s1')
 
-    // Spy on _schedulePersist
-    let persistCallCount = 0
-    const original = mgr._schedulePersist.bind(mgr)
-    mgr._schedulePersist = () => { persistCallCount++; original() }
+    // Spy on _flushPersist
+    let flushCallCount = 0
+    const original = mgr._flushPersist.bind(mgr)
+    mgr._flushPersist = () => { flushCallCount++; original() }
 
     mgr.destroySession('s1')
 
-    assert.equal(persistCallCount, 1,
-      `destroySession should call _schedulePersist once, got ${persistCallCount}`)
+    assert.equal(flushCallCount, 1,
+      `destroySession should call _flushPersist once, got ${flushCallCount}`)
+
+    // State file must exist immediately — no debounce — because the session
+    // removal has to survive an abrupt shutdown (SIGKILL, power loss, pkill).
+    const stateFile = join(tmpDir, 'state.json')
+    assert.ok(existsSync(stateFile),
+      `destroySession should write state file synchronously (not wait for debounce)`)
 
     // Clean up timer and temp dir
     clearTimeout(mgr._persistTimer)
