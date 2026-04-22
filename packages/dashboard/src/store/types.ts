@@ -419,7 +419,7 @@ export interface ConnectionState {
   clearSavedConnection: () => void;
   setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments') => void;
   addMessage: (message: ChatMessage) => void;
-  addUserMessage: (text: string, attachments?: MessageAttachment[]) => void;
+  addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string }) => void;
   appendTerminalData: (data: string) => void;
   clearTerminalBuffer: () => void;
   setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;

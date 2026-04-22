@@ -833,9 +833,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
 
-  addUserMessage: (text, attachments) => {
+  addUserMessage: (text, attachments, opts) => {
+    // Use the client-generated messageId as the ChatMessage id when provided
+    // so the same id is shared between the optimistic entry, the server's
+    // history record, and any live-echo broadcast. Reconnect replay can
+    // then dedup by id instead of by (content, timestamp) equality.
     const userMsg: ChatMessage = {
-      id: nextMessageId('user'),
+      id: opts?.clientMessageId || nextMessageId('user'),
       type: 'user_input',
       content: text,
       timestamp: Date.now(),
@@ -945,11 +949,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   sendInput: (input, wireAttachments, options) => {
     const { socket, activeSessionId } = get();
 
+    // Generate a stable messageId once and use it for both the optimistic
+    // UI entry and the wire payload. The server adopts it verbatim as the
+    // history entry's messageId, which lets reconnect-replay dedup by id
+    // instead of (content, timestamp) equality (issue #2902).
+    const clientMessageId = nextMessageId('user');
+
     // Show user message immediately (optimistic update + thinking indicator).
     // Wire attachments use a different shape than MessageAttachment — pass text only for now.
-    get().addUserMessage(input);
+    get().addUserMessage(input, undefined, { clientMessageId });
 
-    const payload: Record<string, unknown> = { type: 'input', data: input };
+    const payload: Record<string, unknown> = { type: 'input', data: input, clientMessageId };
     if (activeSessionId) payload.sessionId = activeSessionId;
     if (wireAttachments?.length) {
       payload.attachments = wireAttachments;

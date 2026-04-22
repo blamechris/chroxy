@@ -829,10 +829,16 @@ export class SessionManager extends EventEmitter {
    *
    * On the first non-empty input, auto-labels sessions with default names
    * ("Session N" or "New Session") to a truncation of the input text.
+   *
+   * @param {string} sessionId
+   * @param {string} text
+   * @param {string} [messageId] - Stable ID propagated to replay and the
+   *   live-echo broadcast so clients can dedup their optimistic copy against
+   *   rehydrated history on reconnect (issue #2902).
    */
-  recordUserInput(sessionId, text) {
+  recordUserInput(sessionId, text, messageId) {
     const entry = this._sessions.get(sessionId)
-    this._history.recordUserInput(sessionId, text, entry || undefined)
+    this._history.recordUserInput(sessionId, text, entry || undefined, messageId)
   }
 
   /**

@@ -808,9 +808,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
 
-  addUserMessage: (text, attachments) => {
+  addUserMessage: (text, attachments, opts) => {
+    // Use the client-generated messageId as the ChatMessage id when provided
+    // so the same id is shared between the optimistic entry, the server's
+    // history record, and any live-echo broadcast. Reconnect replay can
+    // then dedup by id instead of by (content, timestamp) equality (#2902).
     const userMsg: ChatMessage = {
-      id: nextMessageId('user'),
+      id: opts?.clientMessageId || nextMessageId('user'),
       type: 'user_input',
       content: text,
       timestamp: Date.now(),
@@ -877,6 +881,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     if (options?.isVoice) {
       payload.isVoice = true;
+    }
+    // When the caller pre-generated a client-side messageId for the
+    // optimistic UI (via addUserMessage), include it in the wire so the
+    // server adopts the same id in its history record. Enables id-based
+    // dedup on reconnect replay (issue #2902).
+    if (options?.clientMessageId) {
+      payload.clientMessageId = options.clientMessageId;
     }
     if (socket && socket.readyState === WebSocket.OPEN) {
       hapticLight();

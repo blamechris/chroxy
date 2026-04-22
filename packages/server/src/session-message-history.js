@@ -116,16 +116,26 @@ export class SessionMessageHistory extends EventEmitter {
    * @param {string} sessionId
    * @param {string} text
    * @param {object} [sessionEntry] - Session entry from SessionManager (for auto-label check)
+   * @param {string} [messageId] - Optional stable ID so clients can dedup
+   *   rehydrated entries against optimistic/live-echo copies on the sender.
+   *   Only attached when a non-empty string is provided; the ws-layer (see
+   *   `handlers/input-handlers.js::resolveUserInputId`) always resolves one
+   *   before calling in, so replayed entries always carry an id in practice.
+   *   See issue #2902.
    */
-  recordUserInput(sessionId, text, sessionEntry) {
+  recordUserInput(sessionId, text, sessionEntry, messageId) {
     if (sessionEntry) {
       this._autoLabelSession(sessionId, text, sessionEntry)
     }
-    this.recordHistory(sessionId, 'message', {
+    const entry = {
       type: 'user_input',
       content: text,
       timestamp: Date.now(),
-    })
+    }
+    if (typeof messageId === 'string' && messageId.length > 0) {
+      entry.messageId = messageId
+    }
+    this.recordHistory(sessionId, 'message', entry)
   }
 
   /**
@@ -186,6 +196,10 @@ export class SessionMessageHistory extends EventEmitter {
           content: data.content,
           tool: data.tool,
           options: data.options,
+          // Carry through the stable messageId for user_input entries so
+          // clients can dedup rehydrated prompts against their own
+          // optimistic/live-echo copies (issue #2902).
+          ...(data.messageId ? { messageId: data.messageId } : {}),
           timestamp: data.timestamp,
         }, sessionId)
         persistNeeded = true

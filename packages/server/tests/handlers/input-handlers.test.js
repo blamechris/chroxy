@@ -121,6 +121,81 @@ describe('input-handlers', () => {
       assert.equal(ctx._sent.length, 0)
       assert.equal(session.sendMessage.callCount, 0)
     })
+
+    // Issue #2902: client-sent messageId must be adopted verbatim so sender's
+    // optimistic UI entry shares an id with the server's history record.
+    it('adopts a well-formed clientMessageId for recordUserInput + broadcast', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      inputHandlers.input(makeWs(), client, { data: 'hi', clientMessageId: 'user-42-1700000000000' }, ctx)
+
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1)
+      const [sid, text, id] = ctx.sessionManager.recordUserInput.lastCall
+      assert.equal(sid, 's1')
+      assert.equal(text, 'hi')
+      assert.equal(id, 'user-42-1700000000000', 'recordUserInput must receive the client id')
+      assert.equal(ctx._broadcasts.length, 1)
+      assert.equal(ctx._broadcasts[0].messageId, 'user-42-1700000000000',
+        'echo broadcast must include the same messageId for other clients')
+    })
+
+    it('generates a server-side messageId when clientMessageId is missing or invalid', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      // Case 1: missing entirely
+      inputHandlers.input(makeWs(), client, { data: 'one' }, ctx)
+      // Case 2: non-string
+      inputHandlers.input(makeWs(), client, { data: 'two', clientMessageId: 42 }, ctx)
+      // Case 3: wrong charset (e.g. contains space / HTML)
+      inputHandlers.input(makeWs(), client, { data: 'three', clientMessageId: '<script>' }, ctx)
+      // Case 4: too long
+      inputHandlers.input(makeWs(), client, { data: 'four', clientMessageId: 'x'.repeat(200) }, ctx)
+
+      assert.equal(ctx.sessionManager.recordUserInput.callCount, 4)
+      assert.equal(ctx._broadcasts.length, 4)
+      for (let i = 0; i < 4; i++) {
+        const [,, id] = ctx.sessionManager.recordUserInput.calls[i]
+        assert.ok(typeof id === 'string' && id.length > 0,
+          `recordUserInput call #${i} should receive a server-generated messageId`)
+        assert.match(id, /^uin-\d+-\d+$/,
+          `server-side id should follow the uin-<ts>-<counter> format (got ${id})`)
+
+        const msgId = ctx._broadcasts[i].messageId
+        assert.equal(msgId, id,
+          `broadcast #${i} should reuse the same generated messageId as recordUserInput`)
+      }
+    })
+
+    // Issue #2910 Copilot review: ids that collide with client-reserved
+    // placeholders (e.g. the "thinking" message id) must never be adopted —
+    // otherwise a malicious/buggy client can clobber another client's
+    // streaming-indicator message.
+    it('rejects reserved client-reserved ids and falls back to a generated one', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      for (const reserved of ['thinking', 'pending', 'queued']) {
+        inputHandlers.input(makeWs(), client, { data: reserved, clientMessageId: reserved }, ctx)
+      }
+
+      assert.equal(ctx._broadcasts.length, 3)
+      for (let i = 0; i < 3; i++) {
+        const msgId = ctx._broadcasts[i].messageId
+        assert.match(msgId, /^uin-\d+-\d+$/,
+          `reserved id must be rejected and replaced by a server-generated uin-… (got ${msgId})`)
+      }
+    })
   })
 
   describe('interrupt', () => {

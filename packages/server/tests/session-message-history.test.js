@@ -166,6 +166,24 @@ describe('SessionMessageHistory', () => {
       history.recordUserInput('s1', 'test message')
       assert.equal(history.getHistoryCount('s1'), 1)
     })
+
+    it('stores messageId when provided and omits it when absent (issue #2902)', () => {
+      history.recordUserInput('s1', 'with id', undefined, 'uin-abc123')
+      history.recordUserInput('s1', 'without id')
+      const entries = history.getHistory('s1')
+      assert.equal(entries[0].messageId, 'uin-abc123',
+        `expected stable messageId preserved for id-based dedup on reconnect`)
+      assert.equal(entries[1].messageId, undefined,
+        `expected no messageId when caller did not supply one`)
+    })
+
+    it('ignores empty or non-string messageId values', () => {
+      history.recordUserInput('s1', 'empty string', undefined, '')
+      history.recordUserInput('s1', 'not-a-string', undefined, 123)
+      const entries = history.getHistory('s1')
+      assert.equal(entries[0].messageId, undefined)
+      assert.equal(entries[1].messageId, undefined)
+    })
   })
 
   describe('auto-labeling', () => {
