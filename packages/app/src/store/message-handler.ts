@@ -1020,7 +1020,34 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         pushSessionNotification(errorSessionId, 'error', 'Session crashed');
       }
       if (msg.category !== 'crash') {
-        Alert.alert('Session Error', (msg.message as string) || 'Unknown error');
+        // Special-case the bound-token error — the generic "Not authorized"
+        // gives the user no idea why or how to fix it (#2904). If the server
+        // included a bound session name, surface it and offer a Disconnect
+        // shortcut so the user can re-pair with an unbound token.
+        if (
+          msg.code === 'SESSION_TOKEN_MISMATCH' &&
+          typeof msg.boundSessionName === 'string' &&
+          msg.boundSessionName.length > 0
+        ) {
+          Alert.alert(
+            'Device paired to one session',
+            `This device is paired to session "${msg.boundSessionName}" and can only talk to that session. To create or open other sessions, disconnect and scan a fresh QR code from the desktop.`,
+            [
+              { text: 'OK', style: 'cancel' },
+              {
+                text: 'Disconnect',
+                style: 'destructive',
+                onPress: () => {
+                  // Leave the session, return to ConnectScreen so a fresh
+                  // QR scan can issue an unbound token.
+                  clearConnection().catch(() => {});
+                },
+              },
+            ],
+          );
+        } else {
+          Alert.alert('Session Error', (msg.message as string) || 'Unknown error');
+        }
       }
       break;
     }

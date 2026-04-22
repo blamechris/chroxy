@@ -50,7 +50,17 @@ function handleSwitchSession(ws, client, msg, ctx) {
 
 function handleCreateSession(ws, client, msg, ctx) {
   if (client.boundSessionId) {
-    ctx.send(ws, { type: 'session_error', message: 'Not authorized: client is bound to a specific session', code: 'SESSION_TOKEN_MISMATCH' })
+    // Enrich the error with the bound session's name so the client can render
+    // a remediation hint ("This device is paired to session X — disconnect to
+    // create new sessions.") rather than an opaque "Not authorized". See #2904.
+    const boundEntry = ctx.sessionManager?.getSession?.(client.boundSessionId)
+    ctx.send(ws, {
+      type: 'session_error',
+      message: 'Not authorized: client is bound to a specific session',
+      code: 'SESSION_TOKEN_MISMATCH',
+      boundSessionId: client.boundSessionId,
+      boundSessionName: boundEntry?.name ?? null,
+    })
     return
   }
 

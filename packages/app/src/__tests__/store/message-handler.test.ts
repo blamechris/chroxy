@@ -66,6 +66,58 @@ beforeEach(() => {
   clearAllCallbacks();
 });
 
+// Issue #2904: bound-token errors should be rewritten into actionable prose
+// that names the bound session and offers a disconnect shortcut.
+describe('session_error SESSION_TOKEN_MISMATCH UX', () => {
+  it('surfaces bound session name and a Disconnect action when boundSessionName is present', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'session_error',
+      code: 'SESSION_TOKEN_MISMATCH',
+      message: 'Not authorized: client is bound to a specific session',
+      boundSessionId: 'sess-xyz',
+      boundSessionName: 'MarchBorne',
+    });
+
+    expect(alertSpy).toHaveBeenCalled();
+    const [title, body, buttons] = alertSpy.mock.calls[0];
+    expect(String(body)).toContain('MarchBorne');
+    expect(String(title).toLowerCase()).not.toBe('session error'); // title should be specific, not generic
+    expect(Array.isArray(buttons)).toBe(true);
+    expect((buttons as { text: string }[]).some((b) => /disconnect/i.test(b.text))).toBe(true);
+  });
+
+  it('falls back to generic alert when boundSessionName is missing', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'session_error',
+      code: 'SESSION_TOKEN_MISMATCH',
+      message: 'Not authorized: client is bound to a specific session',
+      // no boundSessionName — old server
+    });
+
+    expect(alertSpy).toHaveBeenCalledWith('Session Error', 'Not authorized: client is bound to a specific session');
+  });
+});
+
 describe('session_timeout handler', () => {
   it('removes timed-out session from sessionStates and sessions list', () => {
     const store = createMockStore({

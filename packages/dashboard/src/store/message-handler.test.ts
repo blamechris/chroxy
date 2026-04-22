@@ -155,6 +155,42 @@ describe('dashboard message-handler dispatch', () => {
       const state = store.getState() as any
       expect(state.serverErrors).toEqual(['session failed'])
     })
+
+    // Issue #2904: bound-token error should be rewritten to something
+    // actionable that names the session instead of the raw "Not authorized".
+    it('rewrites SESSION_TOKEN_MISMATCH with bound session name into an actionable hint', () => {
+      handleMessage(
+        {
+          type: 'session_error',
+          code: 'SESSION_TOKEN_MISMATCH',
+          message: 'Not authorized: client is bound to a specific session',
+          boundSessionId: 'sess-xyz',
+          boundSessionName: 'MarchBorne',
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.serverErrors).toHaveLength(1)
+      const err = state.serverErrors[0]
+      expect(err).toContain('MarchBorne')
+      expect(err).toMatch(/disconnect/i)
+    })
+
+    it('falls back to the raw message when boundSessionName is missing', () => {
+      handleMessage(
+        {
+          type: 'session_error',
+          code: 'SESSION_TOKEN_MISMATCH',
+          message: 'Not authorized: client is bound to a specific session',
+          // no boundSessionName — old server OR name lookup failed
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.serverErrors).toEqual([
+        'Not authorized: client is bound to a specific session',
+      ])
+    })
   })
 
   describe('stream_delta dispatch', () => {

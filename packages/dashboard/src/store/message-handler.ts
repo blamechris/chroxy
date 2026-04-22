@@ -1456,7 +1456,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         pushSessionNotification(errorSessionId, 'error', 'Session crashed');
       }
       if (msg.category !== 'crash') {
-        const errorMsg = (msg.message as string) || 'Unknown error';
+        // Rewrite the bound-token error into something actionable (#2904).
+        // The raw server message ("Not authorized: client is bound to a
+        // specific session") tells the user nothing — replace with a note
+        // that names the bound session and hints at the remediation.
+        let errorMsg: string;
+        if (
+          msg.code === 'SESSION_TOKEN_MISMATCH' &&
+          typeof msg.boundSessionName === 'string' &&
+          msg.boundSessionName.length > 0
+        ) {
+          errorMsg = `This device is paired to session "${msg.boundSessionName}" and can only talk to that session. Disconnect and scan a fresh QR code to create new sessions.`;
+        } else {
+          errorMsg = (msg.message as string) || 'Unknown error';
+        }
         _adapters.alert.alert('Session Error', errorMsg);
         get().addServerError(errorMsg);
       }
