@@ -46,7 +46,16 @@ async function handleSearchConversations(ws, client, msg, ctx) {
 async function handleResumeConversation(ws, client, msg, ctx) {
   // Bound clients cannot create new sessions via resume
   if (client.boundSessionId) {
-    ctx.send(ws, { type: 'session_error', message: 'Not authorized: client is bound to a specific session', code: 'SESSION_TOKEN_MISMATCH' })
+    // See #2904 — include bound session name so the client can show an
+    // actionable message instead of an opaque "Not authorized".
+    const boundEntry = ctx.sessionManager?.getSession?.(client.boundSessionId)
+    ctx.send(ws, {
+      type: 'session_error',
+      message: 'Not authorized: client is bound to a specific session',
+      code: 'SESSION_TOKEN_MISMATCH',
+      boundSessionId: client.boundSessionId,
+      boundSessionName: boundEntry?.name ?? null,
+    })
     return
   }
 

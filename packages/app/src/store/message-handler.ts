@@ -1020,7 +1020,44 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         pushSessionNotification(errorSessionId, 'error', 'Session crashed');
       }
       if (msg.category !== 'crash') {
-        Alert.alert('Session Error', (msg.message as string) || 'Unknown error');
+        // Special-case the bound-token error — the generic "Not authorized"
+        // gives the user no idea why or how to fix it (#2904). If the server
+        // included a bound session name, surface it and offer a Disconnect
+        // shortcut so the user can re-pair with an unbound token.
+        if (
+          msg.code === 'SESSION_TOKEN_MISMATCH' &&
+          typeof msg.boundSessionName === 'string' &&
+          msg.boundSessionName.length > 0
+        ) {
+          Alert.alert(
+            'Device paired to one session',
+            `This device is paired to session "${msg.boundSessionName}" and can only talk to that session. To create or open other sessions, disconnect and scan a fresh QR code from the desktop.`,
+            [
+              { text: 'OK', style: 'cancel' },
+              {
+                text: 'Disconnect',
+                style: 'destructive',
+                onPress: () => {
+                  // Close the active socket, reset in-memory state AND
+                  // forget the stored credentials — otherwise ConnectScreen
+                  // auto-reconnects with the same bound token and the user
+                  // is stuck. `clearConnection` alone is a SecureStore wipe;
+                  // it doesn't touch the live socket. `disconnect()` handles
+                  // the socket + in-memory state; `clearSavedConnection()`
+                  // wipes storage.
+                  const s = getStore().getState();
+                  try { s.disconnect(); } catch { /* best-effort */ }
+                  const clearSaved = (s as unknown as { clearSavedConnection?: () => Promise<void> }).clearSavedConnection;
+                  if (typeof clearSaved === 'function') {
+                    clearSaved.call(s).catch(() => {});
+                  }
+                },
+              },
+            ],
+          );
+        } else {
+          Alert.alert('Session Error', (msg.message as string) || 'Unknown error');
+        }
       }
       break;
     }

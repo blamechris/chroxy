@@ -255,6 +255,35 @@ describe('session-handlers', () => {
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(ctx.sessionManager.createSession.callCount, 0)
     })
+
+    // Issue #2904: include the bound session id + name so clients can render
+    // a specific "paired to session X — disconnect to create new" message
+    // instead of the opaque "Not authorized".
+    it('includes boundSessionId and boundSessionName in the error payload', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sess-a', { session: createMockSession(), name: 'MarchBorne', cwd: '/tmp' })
+      const client = makeClient({ boundSessionId: 'sess-a' })
+
+      sessionHandlers.create_session(makeWs(), client, { name: 'New' }, ctx)
+
+      const [, sent] = ctx.send.lastCall
+      assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(sent.boundSessionId, 'sess-a')
+      assert.equal(sent.boundSessionName, 'MarchBorne')
+    })
+
+    it('returns null boundSessionName when bound session no longer exists', () => {
+      const ctx = makeCtx()
+      // No session with this id in ctx._sessions — simulates a stale bound id
+      const client = makeClient({ boundSessionId: 'sess-gone' })
+
+      sessionHandlers.create_session(makeWs(), client, { name: 'New' }, ctx)
+
+      const [, sent] = ctx.send.lastCall
+      assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(sent.boundSessionId, 'sess-gone')
+      assert.equal(sent.boundSessionName, null)
+    })
   })
 
   describe('subscribe_sessions — boundSessionId enforcement', () => {
