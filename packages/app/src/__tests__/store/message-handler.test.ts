@@ -96,6 +96,41 @@ describe('session_error SESSION_TOKEN_MISMATCH UX', () => {
     expect((buttons as { text: string }[]).some((b) => /disconnect/i.test(b.text))).toBe(true);
   });
 
+  // Regression for the Copilot/agent-review finding on PR #2911:
+  // the Disconnect button's onPress must actually close the active socket
+  // and forget the saved connection — otherwise the UX promise is empty.
+  it('Disconnect button actually calls disconnect() and clearSavedConnection()', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const disconnect = jest.fn();
+    const clearSavedConnection = jest.fn(() => Promise.resolve());
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+      disconnect,
+      clearSavedConnection,
+    } as any);
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'session_error',
+      code: 'SESSION_TOKEN_MISMATCH',
+      boundSessionId: 'sess-xyz',
+      boundSessionName: 'MarchBorne',
+    });
+
+    const [, , buttons] = alertSpy.mock.calls[0];
+    const disconnectBtn = (buttons as { text: string; onPress?: () => void }[]).find(
+      (b) => /disconnect/i.test(b.text),
+    );
+    expect(disconnectBtn).toBeDefined();
+    disconnectBtn!.onPress!();
+    expect(disconnect).toHaveBeenCalled();
+    expect(clearSavedConnection).toHaveBeenCalled();
+  });
+
   it('falls back to generic alert when boundSessionName is missing', () => {
     const alertSpy = Alert.alert as jest.Mock;
     alertSpy.mockClear();

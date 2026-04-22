@@ -1038,9 +1038,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
                 text: 'Disconnect',
                 style: 'destructive',
                 onPress: () => {
-                  // Leave the session, return to ConnectScreen so a fresh
-                  // QR scan can issue an unbound token.
-                  clearConnection().catch(() => {});
+                  // Close the active socket, reset in-memory state AND
+                  // forget the stored credentials — otherwise ConnectScreen
+                  // auto-reconnects with the same bound token and the user
+                  // is stuck. `clearConnection` alone is a SecureStore wipe;
+                  // it doesn't touch the live socket. `disconnect()` handles
+                  // the socket + in-memory state; `clearSavedConnection()`
+                  // wipes storage.
+                  const s = getStore().getState();
+                  try { s.disconnect(); } catch { /* best-effort */ }
+                  const clearSaved = (s as unknown as { clearSavedConnection?: () => Promise<void> }).clearSavedConnection;
+                  if (typeof clearSaved === 'function') {
+                    clearSaved.call(s).catch(() => {});
+                  }
                 },
               },
             ],
