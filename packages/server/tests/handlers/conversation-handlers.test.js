@@ -181,6 +181,42 @@ describe('conversation-handlers', () => {
       const switched = ctx._sent.find(m => m.type === 'session_switched')
       assert.ok(switched, 'session_switched not sent')
     })
+
+    // Issue #2904: bound-token clients get SESSION_TOKEN_MISMATCH when they
+    // try to resume a conversation (which creates a new session). The error
+    // payload must include the bound session's id + name so the client can
+    // render an actionable remediation message, matching the create_session
+    // coverage in session-handlers.test.js.
+    it('rejects bound client with boundSessionId + boundSessionName in payload', async () => {
+      const sessions = new Map()
+      sessions.set('bound-1', { session: createMockSession(), name: 'MarchBorne', cwd: '/home/dev' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ boundSessionId: 'bound-1' })
+
+      await conversationHandlers.resume_conversation(makeWs(), client, {
+        conversationId: '00000000-0000-0000-0000-000000000042',
+      }, ctx)
+
+      const [sent] = ctx._sent
+      assert.equal(sent.type, 'session_error')
+      assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(sent.boundSessionId, 'bound-1')
+      assert.equal(sent.boundSessionName, 'MarchBorne')
+    })
+
+    it('returns null boundSessionName when the bound session is stale', async () => {
+      const ctx = makeCtx() // empty sessions map
+      const client = makeClient({ boundSessionId: 'sess-gone' })
+
+      await conversationHandlers.resume_conversation(makeWs(), client, {
+        conversationId: '00000000-0000-0000-0000-000000000042',
+      }, ctx)
+
+      const [sent] = ctx._sent
+      assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(sent.boundSessionId, 'sess-gone')
+      assert.equal(sent.boundSessionName, null)
+    })
   })
 
   describe('request_full_history', () => {
