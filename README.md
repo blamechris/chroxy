@@ -1,31 +1,33 @@
 # Chroxy
 
-> Remote terminal for Claude Code — from your phone or desktop.
+> Remote terminal for Claude Code, Gemini, and Codex — from your phone or desktop.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
-Run a lightweight daemon on your dev machine, connect from your phone or desktop via a secure tunnel. Get both a full terminal view and a clean chat-like UI that parses Claude Code's output into readable messages.
+Run a lightweight daemon on your dev machine, connect from your phone or desktop via a secure tunnel. Get both a full terminal view and a clean chat-like UI that parses the AI CLI's output into readable messages. Pluggable session providers let you swap between Claude Code (Agent SDK or legacy CLI), Google Gemini, and OpenAI Codex.
 
 ```
-┌─────────────┐                        ┌──────────────────┐
-│  Phone /    │◄───── secure tunnel ──►│  Your Machine    │
-│  Desktop    │                        │                  │
-│ ┌─────────┐ │                        │ ┌──────────────┐ │
-│ │Chat View│ │◄── parsed messages ────│ │ Chroxy Server│ │
-│ └─────────┘ │                        │ └──────┬───────┘ │
-│ ┌─────────┐ │                        │ ┌──────┴───────┐ │
-│ │Terminal │ │◄── raw stream ─────────│ │  Claude Code  │ │
-│ └─────────┘ │                        │ └──────────────┘ │
-└─────────────┘                        └──────────────────┘
+┌─────────────┐                        ┌──────────────────────┐
+│  Phone /    │◄───── secure tunnel ──►│  Your Machine        │
+│  Desktop    │                        │                      │
+│ ┌─────────┐ │                        │ ┌──────────────────┐ │
+│ │Chat View│ │◄── parsed messages ────│ │  Chroxy Server   │ │
+│ └─────────┘ │                        │ └────────┬─────────┘ │
+│ ┌─────────┐ │                        │ ┌────────┴─────────┐ │
+│ │Terminal │ │◄── raw stream ─────────│ │ Provider: Claude │ │
+│ └─────────┘ │                        │ │   / Gemini /     │ │
+│             │                        │ │   Codex          │ │
+│             │                        │ └──────────────────┘ │
+└─────────────┘                        └──────────────────────┘
 ```
 
 ## Why Chroxy?
 
-- **No tmux required** — CLI headless mode wraps Claude Code directly via the Agent SDK. Just start and connect.
+- **Works with Claude Code, Gemini, and Codex** — Pluggable providers let you pick `claude-sdk` (default), `claude-cli`, `gemini`, or `codex` per session. See [docs/providers.md](docs/providers.md).
+- **No tmux required** — CLI headless mode wraps your AI CLI directly (via the Agent SDK for Claude, or `gemini -p` / `codex exec` for the others). Just start and connect.
 - **Two views, one session** — Switch between a clean chat UI (markdown-rendered) and a full xterm.js terminal emulator.
-- **Multi-session** — Run multiple Claude sessions from one server. Create, switch, and destroy from any client.
-- **Multi-provider** — Claude (SDK + CLI), Codex, or Gemini — pick per-session. See [docs/providers.md](docs/providers.md).
+- **Multi-session** — Run multiple AI sessions from one server. Create, switch, and destroy from any client.
 - **Phone + Desktop** — React Native mobile app and a Tauri desktop tray app with a web dashboard.
 - **Encrypted** — End-to-end encryption over Cloudflare tunnel. Your machine, your tunnel, no cloud middleman.
 - **Resilient** — Auto-reconnect on network drops, supervisor auto-restart on crash, push notifications for permission prompts.
@@ -36,7 +38,7 @@ Run a lightweight daemon on your dev machine, connect from your phone or desktop
 ## Features
 
 **Server:**
-CLI headless mode, Claude Agent SDK integration, WebSocket protocol with auth, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, multi-session management, model switching, plan mode detection, background agent tracking, web dashboard, persistent container environments (Docker Compose, DevContainer, snapshot/restore), Docker session providers, git worktree isolation, permission rule engine, extensible provider/handler system
+CLI headless mode, multi-provider support (Claude Agent SDK, legacy `claude -p`, Gemini, Codex — see [docs/providers.md](docs/providers.md)), WebSocket protocol with auth, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, multi-session management, model switching, plan mode detection, background agent tracking, web dashboard, persistent container environments (Docker Compose, DevContainer, snapshot/restore), Docker session providers, git worktree isolation, permission rule engine, extensible provider/handler system
 
 **Desktop (Tauri):**
 System tray app, web dashboard with syntax highlighting (15+ languages), xterm.js terminal, session tabs, desktop notifications, voice-to-text (macOS SFSpeechRecognizer), command palette with keyboard shortcuts
@@ -141,10 +143,10 @@ chroxy/
 ## Architecture
 
 ```
-Mobile App / Desktop ◄──► Cloudflare Tunnel ◄──► WebSocket Server ◄──► Session Provider ◄──► Claude Code
+Mobile App / Desktop ◄──► Cloudflare Tunnel ◄──► WebSocket Server ◄──► Session Provider ◄──► AI CLI (Claude / Gemini / Codex)
 ```
 
-- **Server:** `server-cli.js` starts a WebSocket server and creates sessions via pluggable providers (`sdk-session.js` for the Agent SDK, `cli-session.js` for legacy `claude -p`, `gemini-session.js`, `codex-session.js`, `docker-session.js` for container isolation). See [docs/providers.md](docs/providers.md) for setup, env vars, and capabilities per provider.
+- **Server:** `server-cli.js` starts a WebSocket server and creates sessions via pluggable providers (`sdk-session.js` for the Claude Agent SDK, `cli-session.js` for legacy `claude -p`, `gemini-session.js` for Google Gemini, `codex-session.js` for OpenAI Codex, `docker-session.js` for container isolation). Select a provider with `--provider` or `CHROXY_PROVIDER`; see [docs/providers.md](docs/providers.md) for per-provider setup, env vars, and capabilities.
 - **WebSocket layer:** Auth, E2E encryption (TweetNaCl), message routing, session management, permission handling
 - **Tunnel:** Cloudflare Quick or Named tunnel for secure remote access without port forwarding
 - **Supervisor:** When using a tunnel (quick or named), owns the tunnel and auto-restarts the server on crash with exponential backoff

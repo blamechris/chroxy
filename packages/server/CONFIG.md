@@ -17,15 +17,29 @@ Configuration values are resolved in the following order (highest priority first
 |-----|------|----------|---------------------|-------------|
 | `apiToken` | string | - | `API_TOKEN` | Authentication token for clients |
 | `port` | number | - | `PORT` | Local WebSocket port (default: 8765) |
-| `tmuxSession` | string | - | `TMUX_SESSION` | tmux session name (PTY mode only) |
+| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-sdk` (default), `claude-cli`, `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. See [../../docs/providers.md](../../docs/providers.md) for per-provider setup and env var requirements. |
 | `shell` | string | - | `SHELL_CMD` | Shell to use (default: `$SHELL` or `/bin/zsh`) |
 | `cwd` | string | `--cwd <path>` | `CHROXY_CWD` | Working directory (CLI mode) |
-| `model` | string | `--model <name>` | `CHROXY_MODEL` | Claude model to use (CLI mode) |
+| `model` | string | `--model <name>` | `CHROXY_MODEL` | Model to use. Provider-specific — e.g. `claude-sonnet-4`/`haiku` for Claude, `gemini-2.5-pro` for Gemini, `gpt-5.4` for Codex. |
 | `allowedTools` | array | `--allowed-tools <list>` | `CHROXY_ALLOWED_TOOLS` | Auto-approved tools (CLI mode) |
 | `resume` | boolean | `--resume` / `-r` | `CHROXY_RESUME` | Resume existing session |
 | `noAuth` | boolean | `--no-auth` | `CHROXY_NO_AUTH` | Disable authentication (localhost only) |
 | `costBudget` | number | `--cost-budget <dollars>` | `CHROXY_COST_BUDGET` | Per-session cost budget in dollars. Applied independently to each session (not a shared pool across sessions). Warns at 80%, pauses the session at 100%. |
 | `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Session provider (default `claude-sdk`). Built-in: `claude-sdk`, `claude-cli`, `codex`, `gemini`. See [docs/providers.md](../../docs/providers.md) for setup, env vars (e.g., `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), and capability matrix. |
+
+### Provider selection
+
+The `provider` key picks which AI CLI backs a session by default:
+
+| Value | Backing binary / SDK | Required env |
+|-------|----------------------|--------------|
+| `claude-sdk` (default) | `@anthropic-ai/claude-agent-sdk` | Claude Code login or `ANTHROPIC_API_KEY` |
+| `claude-cli` | `claude -p` (Claude Code CLI) | Claude Code login (CLI intentionally strips `ANTHROPIC_API_KEY` from its environment) |
+| `gemini` | `gemini -p` CLI | `GEMINI_API_KEY` |
+| `codex` | `codex exec` CLI | `OPENAI_API_KEY` |
+| `docker-sdk` / `docker-cli` | Claude SDK/CLI inside a Docker container | Requires `environments.enabled=true` + Docker |
+
+Clients can override the default per-session by passing `provider` in a `create_session` WebSocket message. See [../../docs/providers.md](../../docs/providers.md) for capability differences (plan mode, permission handling, resume, attachments) and troubleshooting.
 
 ## Examples
 
