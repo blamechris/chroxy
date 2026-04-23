@@ -1,7 +1,9 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parse as parsePath } from 'node:path'
-import { runDoctorChecks } from '../src/doctor.js'
+import { parse as parsePath, join } from 'node:path'
+import { mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { runDoctorChecks, checkBinary } from '../src/doctor.js'
 
 /**
  * Integration tests for doctor.js.
@@ -121,26 +123,46 @@ describe('runDoctorChecks', () => {
     }
   })
 
-  it('finds claude via candidate paths when PATH omits the install dir', async () => {
+  it('finds binary via candidate paths when PATH omits the install dir', async () => {
     // Simulates a GUI-launched process (e.g. Tauri on macOS) whose
-    // inherited PATH excludes the dir where claude is actually installed.
-    // checkBinary should fall through to the candidate list and still
-    // resolve the binary.
+    // inherited PATH excludes the dir where the binary is actually
+    // installed. checkBinary should fall through to the candidate list
+    // and still resolve the binary.
+    //
+    // This test is self-contained: it creates a temp stub executable
+    // and passes its path via `candidates`, so it asserts the fallback
+    // logic regardless of what (if anything) is installed on the host.
+    // (Self-contained because `node --test-name-pattern` skips parent
+    // hooks, so setup/teardown live inside the `it` body.)
     const originalPath = process.env.PATH
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-stub-'))
+    const stubPath = join(dir, 'fake-claude')
+    const stubVersion = 'fake-claude 9.9.9-stub'
     try {
+      writeFileSync(stubPath, `#!/bin/sh\necho "${stubVersion}"\n`)
+      chmodSync(stubPath, 0o755)
+
+      // Strip PATH so `which` in resolveBinary cannot find the stub and
+      // the resolver must fall through to the candidate list.
       process.env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
-      const { checks } = await runDoctorChecks()
-      const claudeCheck = checks.find(c => c.name === 'claude')
-      assert.ok(claudeCheck)
-      if (claudeCheck.status === 'pass') {
-        // If claude is installed at any of the known candidate paths,
-        // the stripped PATH should NOT have prevented resolution.
-        assert.ok(claudeCheck.message, 'expected version string on pass')
-      }
-      // If still 'fail', this host simply has no claude binary anywhere —
-      // that's a valid outcome, not a regression of the fallback logic.
+
+      const result = checkBinary('fake-claude', ['--version'], {
+        parseVersion: (out) => out.trim().split('\n')[0],
+        required: true,
+        candidates: [stubPath],
+        installHint: 'install fake-claude',
+      })
+
+      assert.equal(result.name, 'fake-claude')
+      assert.equal(
+        result.status,
+        'pass',
+        `expected pass via candidate fallback, got ${result.status}: ${result.message}`,
+      )
+      assert.equal(result.message, stubVersion)
     } finally {
       process.env.PATH = originalPath
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })
