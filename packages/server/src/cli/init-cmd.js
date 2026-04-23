@@ -62,8 +62,12 @@ export function parseProviderSelection(input, choices = PROVIDER_CHOICES) {
 
   const ids = []
   for (const token of raw.split(',')) {
-    const n = parseInt(token.trim(), 10)
-    if (Number.isNaN(n)) continue
+    const trimmed = token.trim()
+    // Require the entire token to be digits — `parseInt('2abc', 10)`
+    // would otherwise silently accept `2`, which contradicts the
+    // "invalid tokens are dropped" contract documented above.
+    if (!/^\d+$/.test(trimmed)) continue
+    const n = parseInt(trimmed, 10)
     const idx = n - 1
     if (idx < 0 || idx >= choices.length) continue
     const id = choices[idx].id

@@ -281,6 +281,7 @@ function envKeyForConfig(key) {
     tunnelConfig: 'CHROXY_TUNNEL_CONFIG',
     legacyCli: 'CHROXY_LEGACY_CLI',
     provider: 'CHROXY_PROVIDER',
+    providers: 'CHROXY_PROVIDERS',
     maxPayload: 'CHROXY_MAX_PAYLOAD',
     maxToolInput: 'CHROXY_MAX_TOOL_INPUT',
     noEncrypt: 'CHROXY_NO_ENCRYPT',

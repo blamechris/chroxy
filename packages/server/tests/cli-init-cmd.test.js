@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { runInitCmd } from '../src/cli/init-cmd.js'
+import { runInitCmd, parseProviderSelection } from '../src/cli/init-cmd.js'
 
 /**
  * Build a prompt function that returns the provided answers in order.
@@ -216,6 +216,14 @@ describe('chroxy init provider picker', () => {
 
     const parsed = JSON.parse(env.getWritten().contents)
     assert.deepEqual(parsed.providers.sort(), ['claude-sdk', 'gemini'].sort())
+  })
+
+  it('drops tokens that mix digits and letters (e.g. "2abc")', () => {
+    // "2abc" must be treated as invalid, not silently parsed as 2.
+    // Mixed-digit result should fall back to the default.
+    assert.deepEqual(parseProviderSelection('2abc'), ['claude-sdk'])
+    // Mixed with a valid token, only the valid one survives.
+    assert.deepEqual(parseProviderSelection('1,2abc,3'), ['claude-sdk', 'gemini'])
   })
 
   it('writes the port provided by the user', async () => {
