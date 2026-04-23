@@ -55,7 +55,19 @@ export class SessionStatePersistence {
         }
       }
     }
-    fs.renameSync(tmpPath, this._stateFilePath)
+    try {
+      fs.renameSync(tmpPath, this._stateFilePath)
+    } catch (err) {
+      // Clean up the orphaned .tmp file so it doesn't leak on disk across
+      // retries. Suppress ENOENT (nothing to clean up) and any secondary
+      // unlink error (we must re-throw the original rename failure).
+      try { fs.unlinkSync(tmpPath) } catch (cleanupErr) {
+        if (cleanupErr && cleanupErr.code !== 'ENOENT') {
+          log.warn(`Failed to remove orphaned ${tmpPath}: ${cleanupErr.message}`)
+        }
+      }
+      throw err
+    }
     log.info(`Serialized ${state.sessions?.length ?? 0} session(s) to ${this._stateFilePath}`)
     return state
   }
