@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-Common issues and solutions for Chroxy server, app, and tunnel connectivity.
+Common issues and solutions for Chroxy server, app, and tunnel connectivity. For provider-specific setup (installation, model lists, env vars) see [docs/providers.md](providers.md); the Gemini and Codex sections below cover only runtime errors.
 
 ## 1. "No API token configured" on server start
 
@@ -117,7 +117,45 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 - Disable timeout: don't set `--session-timeout` or `CHROXY_SESSION_TIMEOUT`
 - The app sends keep-alive pings, but only while it's in the foreground
 
-## 10. Expo dev build issues (app development)
+## 10. Gemini provider errors (`--provider gemini`)
+
+See [docs/providers.md](providers.md) for Gemini CLI installation and supported models.
+
+**Symptom:** `GEMINI_API_KEY environment variable is not set`
+- The `gemini` provider refuses to start without an API key. Export it before launching Chroxy:
+  ```bash
+  export GEMINI_API_KEY=your-key-here
+  npx chroxy start --provider gemini
+  ```
+
+**Symptom:** `gemini: command not found` / `ENOENT`
+- The Gemini CLI binary is not installed or not on PATH. Chroxy probes `/opt/homebrew/bin/gemini`, `/usr/local/bin/gemini`, and `/usr/bin/gemini`.
+- Install via npm: `npm install -g @google/gemini-cli` (or the distribution for your platform), then verify `gemini --version`.
+
+**Symptom:** Model errors or empty responses
+- Gemini's default model is `gemini-2.5-pro`. Switch with `--model gemini-2.5-flash` (or any model your API key has access to).
+- The Gemini provider does **not** support attachments, plan mode, permission handling, or conversation resume — these are no-ops. See the [Providers section](feature-matrix.md#providers) in the feature matrix.
+
+## 11. Codex provider errors (`--provider codex`)
+
+See [docs/providers.md](providers.md) for Codex CLI installation and supported models.
+
+**Symptom:** `OPENAI_API_KEY environment variable is not set`
+- The `codex` provider refuses to start without an API key. Export it before launching Chroxy:
+  ```bash
+  export OPENAI_API_KEY=your-key-here
+  npx chroxy start --provider codex
+  ```
+
+**Symptom:** `codex: command not found` / `ENOENT`
+- The Codex CLI binary is not installed or not on PATH. Chroxy probes `/opt/homebrew/bin/codex`, `/usr/local/bin/codex`, and `/usr/bin/codex`.
+- Install the OpenAI Codex CLI per the upstream instructions, then verify `codex --version`.
+
+**Symptom:** Model not supported / invocation fails
+- Codex's default model is `gpt-5.4`. Switch with `--model <name>` using a model your API key has access to.
+- The Codex provider does **not** support attachments, plan mode, permission handling, or conversation resume — these are no-ops. See the [Providers section](feature-matrix.md#providers) in the feature matrix.
+
+## 12. Expo dev build issues (app development)
 
 **Symptom:** `expo-speech-recognition` or other native modules cause build failures.
 
