@@ -109,7 +109,7 @@ import {
   updateSession,
   updateActiveSession,
   saveConnection,
-  clearConnection,
+  clearSavedCredentials,
   loadConnection,
   drainMessageQueue,
   CLIENT_PROTOCOL_VERSION,
@@ -420,7 +420,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   clearSavedConnection: async () => {
-    await clearConnection();
+    await clearSavedCredentials();
     useConnectionLifecycleStore.getState().setSavedConnection(null);
   },
 
