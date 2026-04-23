@@ -17,14 +17,16 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 
 | Provider | Binary / SDK | Env vars | Default model | Auth | Notes |
 |----------|--------------|----------|---------------|------|-------|
-| `claude-sdk` *(default)* | `@anthropic-ai/claude-agent-sdk` (npm) | `ANTHROPIC_API_KEY` (or inherits `claude` CLI login) | `claude-sonnet-4-6` | Anthropic API key or subscription login | In-process, fastest startup, live model/mode switching, resume support |
-| `claude-cli` | `claude` (Claude Code CLI) | `ANTHROPIC_API_KEY` (or `claude` CLI login) | `claude-sonnet-4-6` | Anthropic API key or subscription login | Subprocess, required for plan mode; permission hook via HTTP |
+| `claude-sdk` *(default)* | `@anthropic-ai/claude-agent-sdk` (npm) | `ANTHROPIC_API_KEY` (or inherits `claude` CLI login) | Deferred to SDK | Anthropic API key or subscription login | In-process, fastest startup, live model/mode switching, resume support |
+| `claude-cli` | `claude` (Claude Code CLI) | `ANTHROPIC_API_KEY` (or `claude` CLI login) | Deferred to `claude` CLI | Anthropic API key or subscription login | Subprocess, required for plan mode; permission hook via HTTP |
 | `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` | `gemini-2.5-pro` | Google AI Studio API key | No permissions, no plan mode, no resume, no attachments |
 | `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY` | `gpt-5.4` | OpenAI API key | No permissions, no plan mode, no resume, no attachments |
 | `docker-cli` | Docker image + `claude` inside | Inherits Claude env from container | Inherits `claude-cli` | Same as `claude-cli` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 | `docker-sdk` | Docker image + SDK inside | Inherits Claude env from container | Inherits `claude-sdk` | Same as `claude-sdk` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 
-> The default model value is the provider's own internal default — it's what you get if neither `--model` nor `model` in config is set. Mobile/desktop clients can switch models live on providers that report `modelSwitch: true` (everyone except `docker-*` which inherits from the parent class).
+> **Default model behaviour differs by provider.** Codex and Gemini have a `DEFAULT_MODEL` constant inside their session class (`gpt-5.4`, `gemini-2.5-pro`) — that's the value the provider actually passes when nothing is set. The Claude providers do NOT define an internal default: when `--model` / `CHROXY_MODEL` / `config.model` is unset, Chroxy passes `null` through `BaseSession` to the SDK or `claude` CLI, which then picks its own default (typically whatever the current Claude Code / SDK release ships with — often Sonnet, but subject to change upstream). The `claude-sonnet-4-6` string you'll see elsewhere in the code is the full ID the `sonnet` alias resolves to in `models.js`, not a hardcoded default.
+>
+> Mobile/desktop clients can switch models live on providers that report `modelSwitch: true`. Docker providers inherit `modelSwitch` from their underlying Claude provider (`DockerSession` spreads `CliSession.capabilities`, `DockerSdkSession` spreads `SdkSession.capabilities`), so they behave the same as `claude-cli` / `claude-sdk` for model switching.
 
 ## Claude (SDK + CLI)
 
@@ -82,7 +84,7 @@ Use `claude-cli` if you rely on plan mode. Use `claude-sdk` (the default) for ev
 ### Common pitfalls
 
 - **GUI launch on macOS**: Tauri-spawned servers start with `cwd=/` and a minimal PATH. Chroxy probes absolute paths, but custom install locations need `ANTHROPIC_API_KEY` or a working `claude login` — don't rely on shell rc files.
-- **Model names**: pass short aliases (`sonnet`, `opus`, `haiku`) or full IDs (`claude-sonnet-4-6`). Both resolve via `resolveModelId()` in `models.js`.
+- **Model names**: pass short aliases (`sonnet`, `opus`, `haiku`) or full IDs (`claude-sonnet-4-6`). Aliases are resolved to their full ID by `resolveModelId()` in `models.js` — but note this only runs in `BaseSession.setModel()` (i.e. live `set_model` messages from the mobile app / dashboard). On initial session creation, whatever string you set via `--model` / config is forwarded to the provider verbatim. Both the SDK and the `claude` CLI accept aliases directly, so this is fine in practice — but if you're writing a custom provider that doesn't accept aliases, canonicalize in the constructor.
 - **Permission prompts never arrive (claude-cli only)**: the PreToolUse hook requires `CHROXY_PORT` and the per-session hook secret injected via `~/.claude/settings.json`. Restarting the server re-registers it.
 
 ## Codex
@@ -195,25 +197,25 @@ Older configs use `legacyCli: true` to force the `claude-cli` provider. This sti
 
 ## Capability matrix
 
-Sourced from each session class's `static get capabilities()`.
+Rows marked **(capability)** come directly from each session class's `static get capabilities()` object — those are the keys the provider registry inspects at runtime. The remaining rows are **(behavioural)** — derived from reading the session class's implementation (attachment handling, agent-tracking events, cost parsing, continuity across `sendMessage` calls). Behavioural rows are not currently part of the `capabilities` contract and may change if the class is refactored.
 
 | Capability | `claude-sdk` | `claude-cli` | `codex` | `gemini` |
 |------------|:-:|:-:|:-:|:-:|
-| Permissions (`canUseTool` / hook) | Yes | Yes | — | — |
-| In-process permissions | Yes | — | — | — |
-| Live model switch | Yes | Yes | Yes | Yes |
-| Live permission-mode switch | Yes | Yes | — | — |
-| Plan mode | — | **Yes** | — | — |
-| Resume (`resumeSessionId`) | Yes | — | — | — |
-| Terminal (raw PTY) | — | — | — | — |
-| Thinking level control | Yes | — | — | — |
-| Attachments (images, files) | Yes | Yes | — | — |
-| Agent tracking (spawned/completed) | Yes | Yes | — | — |
-| Cost reporting (`result.cost`) | Yes | Yes | — | — |
-| Multi-session (SessionManager) | Yes | Yes | Yes | Yes |
-| Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | **No** | **No** |
+| **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | — | — |
+| **(capability)** In-process permissions | Yes | — | — | — |
+| **(capability)** Live model switch | Yes | Yes | Yes | Yes |
+| **(capability)** Live permission-mode switch | Yes | Yes | — | — |
+| **(capability)** Plan mode | — | **Yes** | — | — |
+| **(capability)** Resume (`resumeSessionId`) | Yes | — | — | — |
+| **(capability)** Terminal (raw PTY) | — | — | — | — |
+| **(capability)** Thinking level control | Yes | — | — | — |
+| **(behavioural)** Attachments (images, files) | Yes | Yes | — | — |
+| **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — |
+| **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — |
+| **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes |
+| **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | **No** | **No** |
 
-"—" means the provider's `capabilities` object reports `false` or the feature is unimplemented. Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
+For capability rows, "—" means the provider's `capabilities` object reports `false`. For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
 
 ## Known limits
 
