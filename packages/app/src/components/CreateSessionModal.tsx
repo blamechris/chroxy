@@ -14,17 +14,15 @@ import {
 import { useConnectionStore } from '../store/connection';
 import { FolderBrowser } from './FolderBrowser';
 import { COLORS } from '../constants/colors';
+import { PROVIDER_LABELS } from '../constants/providers';
 
 interface CreateSessionModalProps {
   visible: boolean;
   onClose: () => void;
 }
 
-const PROVIDERS = [
-  { id: '', label: 'Default (SDK)' },
-  { id: 'claude-sdk', label: 'Claude SDK' },
-  { id: 'claude-cli', label: 'Claude CLI' },
-];
+// '' means "use server default provider"; always shown as the first chip.
+const DEFAULT_PROVIDER_CHIP = { id: '', label: 'Default' };
 
 export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps) {
   const [name, setName] = useState('');
@@ -33,16 +31,27 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const [provider, setProvider] = useState('');
   const createSession = useConnectionStore((s) => s.createSession);
   const sessions = useConnectionStore((s) => s.sessions);
+  const availableProviders = useConnectionStore((s) => s.availableProviders);
+  const fetchProviders = useConnectionStore((s) => s.fetchProviders);
   const [showBrowser, setShowBrowser] = useState(false);
 
-  // Reset state when modal opens
+  // Reset state when modal opens and refresh provider list from server.
   useEffect(() => {
     if (visible) {
       setShowBrowser(false);
       setWorktree(false);
       setProvider('');
+      fetchProviders();
     }
-  }, [visible]);
+  }, [visible, fetchProviders]);
+
+  const providerChips = [
+    DEFAULT_PROVIDER_CHIP,
+    ...availableProviders.map((p) => ({
+      id: p.name,
+      label: PROVIDER_LABELS[p.name] || p.name,
+    })),
+  ];
 
   const handleCreate = () => {
     const sessionName = name.trim() || `Session ${sessions.length + 1}`;
@@ -143,17 +152,23 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
 
             <Text style={styles.label}>Provider</Text>
             <View style={styles.providerRow}>
-              {PROVIDERS.map((p) => (
+              {providerChips.map((p) => (
                 <TouchableOpacity
-                  key={p.id}
+                  key={p.id || '__default__'}
                   style={[styles.providerChip, provider === p.id && styles.providerChipActive]}
                   onPress={() => setProvider(p.id)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Provider: ${p.label}`}
+                  accessibilityState={{ selected: provider === p.id }}
                 >
                   <Text style={[styles.providerChipText, provider === p.id && styles.providerChipTextActive]}>
                     {p.label}
                   </Text>
                 </TouchableOpacity>
               ))}
+              {availableProviders.length === 0 && (
+                <Text style={styles.providerHint}>Loading providers…</Text>
+              )}
             </View>
 
             <View style={styles.buttons}>
@@ -303,6 +318,11 @@ const styles = StyleSheet.create({
   },
   providerChipTextActive: {
     color: COLORS.textPrimary,
+  },
+  providerHint: {
+    color: COLORS.textDisabled,
+    fontSize: 12,
+    paddingVertical: 8,
   },
   createButton: {
     flex: 1,
