@@ -217,6 +217,62 @@ export function createMockSession(overrides = {}) {
 }
 
 /**
+ * Snapshot the listed `process.env` keys, apply `overrides` (use undefined
+ * to delete), invoke `fn()`, then restore. Supports both sync and async
+ * callbacks — if `fn()` returns a Promise, env restoration happens after it
+ * resolves so async tests don't race on cleanup.
+ *
+ * Usage (sync):
+ *   withEnv({ FOO: 'bar' }, () => {
+ *     assert.equal(process.env.FOO, 'bar')
+ *   })
+ *
+ * Usage (async):
+ *   await withEnv({ FOO: 'bar' }, async () => {
+ *     await someAsyncWork()
+ *   })
+ *
+ * @param {Record<string, string | undefined>} overrides - key/value env mutations; undefined deletes.
+ * @param {() => any | Promise<any>} fn - callback to run with the mutated env.
+ * @returns {any | Promise<any>} whatever `fn()` returns, Promise if `fn` is async.
+ */
+export function withEnv(overrides, fn) {
+  const saved = {}
+  for (const key of Object.keys(overrides)) {
+    saved[key] = process.env[key]
+    if (overrides[key] === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = overrides[key]
+    }
+  }
+  const restore = () => {
+    for (const key of Object.keys(saved)) {
+      if (saved[key] === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = saved[key]
+      }
+    }
+  }
+  let result
+  try {
+    result = fn()
+  } catch (err) {
+    restore()
+    throw err
+  }
+  if (result && typeof result.then === 'function') {
+    return result.then(
+      (value) => { restore(); return value },
+      (err) => { restore(); throw err },
+    )
+  }
+  restore()
+  return result
+}
+
+/**
  * Test helper: arm the SdkSession result-inactivity timeout without going
  * through sendMessage(). Lets unit tests exercise the 5-minute pause/resume
  * path in isolation. Lives in test-helpers so production module exports
