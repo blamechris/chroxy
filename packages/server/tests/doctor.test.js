@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { runDoctorChecks } from '../src/doctor.js'
 
 /**
@@ -60,7 +60,10 @@ describe('runDoctorChecks', () => {
     const { checks } = await runDoctorChecks()
     const depsCheck = checks.find(c => c.name === 'Dependencies')
     assert.ok(depsCheck)
-    // Status depends on whether node_modules exists in cwd (may vary in CI)
+    // In the normal test environment, the server package's own node_modules
+    // installation should make this pass independent of the caller's cwd.
+    // We still allow 'fail' here as a soft assertion — some packaging
+    // contexts (e.g. a pruned bundle) may legitimately lack node_modules.
     assert.ok(['pass', 'fail'].includes(depsCheck.status))
   })
 
@@ -131,6 +134,37 @@ describe('runDoctorChecks', () => {
     } finally {
       rmSync(emptyDir, { recursive: true, force: true })
     }
+  })
+
+  it('relative pkgDir is resolved to absolute, not reinterpreted against cwd later', async () => {
+    // A relative `pkgDir` must be normalized to an absolute path at call
+    // time. Otherwise, a caller that passes something like './foo' would
+    // reintroduce cwd-coupling (the very thing this API exists to avoid).
+    // We verify by pointing at an empty temp dir via a relative path and
+    // confirming the failure message references the *absolute* resolved
+    // path — proving normalization happened before `join('node_modules')`.
+    const emptyDir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-rel-'))
+    try {
+      // Build a relative path from cwd to emptyDir so this exercises the
+      // `resolve()` code path regardless of where the test runs from.
+      const relativePkgDir = relative(process.cwd(), emptyDir) || '.'
+      const { checks } = await runDoctorChecks({ pkgDir: relativePkgDir })
+      const depsCheck = checks.find(c => c.name === 'Dependencies')
+      assert.ok(depsCheck)
+      assert.equal(depsCheck.status, 'fail', `expected fail, got ${depsCheck.status}: ${depsCheck.message}`)
+      // Message must contain the ABSOLUTE path, not the relative one we passed.
+      assert.ok(depsCheck.message.includes(emptyDir), `message should reference absolute temp dir: ${depsCheck.message}`)
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true })
+    }
+  })
+
+  it('throws TypeError when pkgDir is not a non-empty string', async () => {
+    // Defensive: an invalid pkgDir should fail loudly rather than silently
+    // falling back to process.cwd() via join() quirks.
+    await assert.rejects(() => runDoctorChecks({ pkgDir: null }), TypeError)
+    await assert.rejects(() => runDoctorChecks({ pkgDir: 123 }), TypeError)
+    await assert.rejects(() => runDoctorChecks({ pkgDir: '' }), TypeError)
   })
 
   it('finds claude via candidate paths when PATH omits the install dir', async () => {

@@ -1,6 +1,6 @@
 import { execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
-import { dirname, join } from 'path'
+import { dirname, isAbsolute, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { homedir, platform } from 'os'
 import { createServer } from 'net'
@@ -21,8 +21,10 @@ const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
  * Run all preflight dependency checks and return results.
  * @param {{ port?: number, verbose?: boolean, pkgDir?: string }} options
  *   `pkgDir` overrides the directory used to locate `node_modules` for the
- *   Dependencies check. Defaults to the server package root. Exposed so tests
- *   can point the check at a temp directory without mutating `process.cwd()`.
+ *   Dependencies check. Defaults to the server package root. Must be a
+ *   non-empty string; relative paths are resolved to absolute via `resolve()`
+ *   to keep the check decoupled from `process.cwd()`. Exposed so tests can
+ *   point the check at a temp directory without mutating `process.cwd()`.
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string }>, passed: boolean }}
  */
 export async function runDoctorChecks({ port, verbose: _verbose, pkgDir = SERVER_PKG_DIR } = {}) {
@@ -97,8 +99,13 @@ export async function runDoctorChecks({ port, verbose: _verbose, pkgDir = SERVER
   // Resolve relative to the server package, not process.cwd() — Tauri
   // launches the server with cwd='/' under launchd, which would always
   // fail a `${process.cwd()}/node_modules` check. Tests may override
-  // `pkgDir` to point at a temp directory.
-  const nodeModulesPath = join(pkgDir, 'node_modules')
+  // `pkgDir` to point at a temp directory. Normalize to an absolute
+  // path so a relative `pkgDir` can't reintroduce cwd coupling.
+  if (typeof pkgDir !== 'string' || pkgDir.length === 0) {
+    throw new TypeError(`pkgDir must be a non-empty string, got ${typeof pkgDir}`)
+  }
+  const absPkgDir = isAbsolute(pkgDir) ? pkgDir : resolve(pkgDir)
+  const nodeModulesPath = join(absPkgDir, 'node_modules')
   if (existsSync(nodeModulesPath)) {
     checks.push({ name: 'Dependencies', status: 'pass', message: 'node_modules found' })
   } else {
