@@ -832,8 +832,9 @@ export class WsServer {
         // warming / ready via broadcastMinProtocolVersion) reach dev clients
         // instead of being silently filtered out.
         //
-        // Assumption: a client connecting to a --no-auth dev server is at or
-        // below the server's protocol version (same checkout, loopback bind).
+        // Assumption: a client connecting to a --no-auth dev server is built
+        // from the same checkout as the server and therefore speaks
+        // SERVER_PROTOCOL_VERSION (loopback bind enforces this in practice).
         // Stale-build clients on a newer --no-auth server may receive v2-shape
         // messages they can't parse — acceptable for dev, revisit if --no-auth
         // ever broadens beyond loopback. See packages/server/CONFIG.md#--no-auth-trust-model.

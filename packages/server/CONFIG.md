@@ -87,7 +87,7 @@ Output example:
 ## `--no-auth` Trust Model
 
 `--no-auth` is a **dev-only** mode. It is intended for running Chroxy against
-loopback / trusted LAN while iterating locally. When enabled:
+loopback while iterating locally. When enabled:
 
 - The server binds to `127.0.0.1` only — tunnel startup is skipped (any
   `--tunnel` flag is ignored, with an error logged if one was passed) and
@@ -106,10 +106,11 @@ example the `server_status` tunnel-warming / ready events that require the
 `TUNNEL_STATUS_MIN_PROTOCOL_VERSION` floor) reach dev clients instead of being
 silently filtered out.
 
-**The assumption is: a client connecting to a `--no-auth` dev server is at or
-below the server's protocol version.** The server trusts itself and its local
-clients. This is correct for the intended use — a freshly-built dashboard,
-app, or `test-client.js` on the same developer machine.
+**The assumption is: a client connecting to a `--no-auth` dev server is built
+from the same commit as the server and therefore speaks
+`SERVER_PROTOCOL_VERSION`.** The server trusts itself and its local clients.
+This is correct for the intended use — a freshly-built dashboard, app, or
+`test-client.js` on the same developer machine.
 
 **Known limitation:** if a stale-build client (shipped before a protocol
 version bump) connects to a newer `--no-auth` dev server, it will receive
