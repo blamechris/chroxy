@@ -493,8 +493,12 @@ impl ServerManager {
     /// non-success `Output` to exercise the failure-path diagnostics
     /// added in #2868 (issue #2887).
     ///
-    /// Available on all platforms so tests can run on dev machines without
-    /// `ps` in PATH; the production call path is still `#[cfg(unix)]`.
+    /// Available on unix (production) and in tests on any platform so the
+    /// failure paths can be exercised deterministically on dev hosts. The
+    /// `#[cfg(any(unix, test))]` gate matches `parse_ps_line` — both symbols
+    /// must be available together, and neither needs to exist in a Windows
+    /// release build where `kill_orphan_cloudflared` takes a different path.
+    #[cfg(any(unix, test))]
     fn enumerate_unix_processes_with_runner(
         port: u16,
         log_buf: &Arc<Mutex<VecDeque<String>>>,
