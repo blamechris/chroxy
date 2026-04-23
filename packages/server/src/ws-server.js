@@ -831,6 +831,12 @@ export class WsServer {
         // protocol version so version-gated broadcasts (e.g. #2849 tunnel
         // warming / ready via broadcastMinProtocolVersion) reach dev clients
         // instead of being silently filtered out.
+        //
+        // Assumption: a client connecting to a --no-auth dev server is at or
+        // below the server's protocol version (same checkout, loopback bind).
+        // Stale-build clients on a newer --no-auth server may receive v2-shape
+        // messages they can't parse — acceptable for dev, revisit if --no-auth
+        // ever broadens beyond loopback. See packages/server/CONFIG.md#--no-auth-trust-model.
         client.protocolVersion = SERVER_PROTOCOL_VERSION
         this._sendPostAuthInfo(ws)
         this._broadcastClientJoined(client, ws)

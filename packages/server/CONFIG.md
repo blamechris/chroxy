@@ -84,12 +84,58 @@ Output example:
   cwd              = "/Users/me/project" (default)
 ```
 
+## `--no-auth` Trust Model
+
+`--no-auth` is a **dev-only** mode. It is intended for running Chroxy against
+loopback / trusted LAN while iterating locally. When enabled:
+
+- The server binds to `127.0.0.1` only — tunnel startup is skipped (any
+  `--tunnel` flag is ignored, with an error logged if one was passed) and
+  mDNS/Bonjour advertisement is disabled.
+- Connecting clients are auto-authenticated immediately on WebSocket upgrade,
+  without presenting an API token or going through the pairing flow.
+- The token manager, pairing manager, and periodic token rotation are all
+  disabled.
+
+### Protocol-version assumption
+
+Because `--no-auth` skips the auth handshake, the client never advertises its
+protocol version. In that case the server pins the client's effective version
+to its own `SERVER_PROTOCOL_VERSION` so that version-gated broadcasts (for
+example the `server_status` tunnel-warming / ready events that require the
+`TUNNEL_STATUS_MIN_PROTOCOL_VERSION` floor) reach dev clients instead of being
+silently filtered out.
+
+**The assumption is: a client connecting to a `--no-auth` dev server is at or
+below the server's protocol version.** The server trusts itself and its local
+clients. This is correct for the intended use — a freshly-built dashboard,
+app, or `test-client.js` on the same developer machine.
+
+**Known limitation:** if a stale-build client (shipped before a protocol
+version bump) connects to a newer `--no-auth` dev server, it will receive
+message shapes it cannot parse and may mis-render them. Rebuild the client
+against the same commit as the server when you hit this. This is why
+`--no-auth` is gated to loopback and why it must **not** be broadened to
+remote fleets (CI runners, containerised test rigs reachable off-host, shared
+dev hosts) without first reintroducing a protocol-version negotiation step
+for un-authenticated clients.
+
+### Operational guardrails
+
+- `--no-auth` forces loopback-only binding and skips tunnel startup, so the
+  server cannot be accidentally exposed to the public internet while auth is
+  off. A warning is logged at startup, and an additional error is logged if
+  a `--tunnel` flag was also passed.
+- `chroxy dev` refuses to start with `noAuth: true` — the supervised dev
+  workflow always requires a token.
+
 ## Best Practices
 
 1. **Keep secrets in config file or environment variables** - Don't pass `--api-token` as a CLI flag (it would be visible in process lists)
 2. **Use environment variables for deployment-specific values** - port, working directory, model selection
 3. **Use CLI flags for one-off overrides** - testing different models, changing working directory temporarily
 4. **Run `npx chroxy config`** to see your current config file contents
+5. **Treat `--no-auth` as dev-only** - see the [`--no-auth` Trust Model](#--no-auth-trust-model) section above. Never pair `--no-auth` with a tunnel or a non-loopback bind.
 
 ## Troubleshooting
 
