@@ -473,8 +473,7 @@ describe('App', () => {
       }
       const { rerender } = render(<App />)
       const warmingBanner = screen.getByTestId('tunnel-warming-banner')
-      const warmingClasses = Array.from(warmingBanner.classList).sort()
-      const warmingTagName = warmingBanner.tagName
+      const warmingClasses = new Set(warmingBanner.classList)
 
       // Transition to connected/ready state
       stateOverrides = {
@@ -483,13 +482,21 @@ describe('App', () => {
       }
       rerender(<App />)
       const readyBanner = screen.getByTestId('tunnel-warming-banner')
+      const readyClasses = new Set(readyBanner.classList)
 
-      // Same element type and present in the same position in the DOM tree,
-      // only differing by the --hidden modifier class. No insertion/removal
-      // means no layout shift in surrounding content.
-      expect(readyBanner.tagName).toBe(warmingTagName)
-      expect(warmingClasses).not.toContain('tunnel-warming-banner--hidden')
-      expect(readyBanner).toHaveClass('tunnel-warming-banner--hidden')
+      // DOM node identity: React must reuse the exact same element across the
+      // transition (not unmount/remount). A replaced node — even one with the
+      // same tagName and class — could still cause layout shift via CSS
+      // transitions or micro reflow.
+      expect(readyBanner).toBe(warmingBanner)
+      expect(readyBanner.isSameNode(warmingBanner)).toBe(true)
+
+      // Exact classList delta: only the --hidden modifier toggles. No other
+      // classes appear or disappear, which would indicate extra styling churn.
+      const added = [...readyClasses].filter((c) => !warmingClasses.has(c))
+      const removed = [...warmingClasses].filter((c) => !readyClasses.has(c))
+      expect(added).toEqual(['tunnel-warming-banner--hidden'])
+      expect(removed).toEqual([])
       expect(readyBanner).toHaveClass('tunnel-warming-banner')
     })
   })
