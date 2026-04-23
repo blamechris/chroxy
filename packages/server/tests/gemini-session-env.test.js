@@ -1,29 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { GeminiSession } from '../src/gemini-session.js'
-
-function withEnv(overrides, fn) {
-  const saved = {}
-  for (const key of Object.keys(overrides)) {
-    saved[key] = process.env[key]
-    if (overrides[key] === undefined) {
-      delete process.env[key]
-    } else {
-      process.env[key] = overrides[key]
-    }
-  }
-  try {
-    return fn()
-  } finally {
-    for (const key of Object.keys(saved)) {
-      if (saved[key] === undefined) {
-        delete process.env[key]
-      } else {
-        process.env[key] = saved[key]
-      }
-    }
-  }
-}
+import { withEnv } from './test-helpers.js'
 
 describe('GeminiSession._buildChildEnv', () => {
   it('strips ANTHROPIC_API_KEY from child env', () => {

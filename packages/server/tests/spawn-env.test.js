@@ -1,32 +1,7 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { buildSpawnEnv } from '../src/utils/spawn-env.js'
-
-/**
- * Snapshot and restore a set of process.env keys so tests don't leak state.
- */
-function withEnv(overrides, fn) {
-  const saved = {}
-  for (const key of Object.keys(overrides)) {
-    saved[key] = process.env[key]
-    if (overrides[key] === undefined) {
-      delete process.env[key]
-    } else {
-      process.env[key] = overrides[key]
-    }
-  }
-  try {
-    return fn()
-  } finally {
-    for (const key of Object.keys(saved)) {
-      if (saved[key] === undefined) {
-        delete process.env[key]
-      } else {
-        process.env[key] = saved[key]
-      }
-    }
-  }
-}
+import { withEnv } from './test-helpers.js'
 
 describe('buildSpawnEnv', () => {
   describe('codex provider (allowlist)', () => {
